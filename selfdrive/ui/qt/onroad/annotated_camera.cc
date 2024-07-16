@@ -39,8 +39,6 @@ AnnotatedCameraWidget::AnnotatedCameraWidget(VisionStreamType type, QWidget* par
   map_settings_btn = new MapSettingsButton(this);
   main_layout->addWidget(map_settings_btn, 0, Qt::AlignBottom | Qt::AlignRight);
 
-  dm_img = loadPixmap("../assets/img_driver_face.png", {img_size + 5, img_size + 5});
-
   // Initialize FrogPilot widgets
   initializeFrogPilotWidgets();
 }
@@ -85,13 +83,6 @@ void AnnotatedCameraWidget::updateState(const UIState &s) {
 
   // update engageability/experimental mode button
   experimental_btn->updateState(s, leadInfo);
-
-  // update DM icon
-  auto dm_state = sm["driverMonitoringState"].getDriverMonitoringState();
-  dmActive = dm_state.getIsActiveMode();
-  rightHandDM = dm_state.getIsRHD();
-  // DM icon transition
-  dm_fade_state = std::clamp(dm_fade_state+0.2*(0.5-dmActive), 0.0, 1.0);
 
   // hide map settings button for alerts and flip for right hand DM
   if (map_settings_btn->isEnabled()) {
@@ -509,53 +500,6 @@ void AnnotatedCameraWidget::drawLaneLines(QPainter &painter, const UIState *s) {
   painter.restore();
 }
 
-void AnnotatedCameraWidget::drawDriverState(QPainter &painter, const UIState *s) {
-  const UIScene &scene = s->scene;
-
-  painter.save();
-
-  // base icon
-  int offset = UI_BORDER_SIZE + btn_size / 2;
-  int x = rightHandDM ? width() - offset : offset;
-  if (rightHandDM && map_settings_btn->isEnabled() && !hideMapIcon) {
-    x -= 250;
-  } else if (onroadDistanceButton) {
-    x += 250;
-  }
-  offset += showAlwaysOnLateralStatusBar || showConditionalExperimentalStatusBar || roadNameUI ? 25 : 0;
-  int y = height() - offset;
-  float opacity = dmActive ? 0.65 : 0.2;
-  drawIcon(painter, QPoint(x, y), dm_img, blackColor(70), opacity);
-
-  // face
-  QPointF face_kpts_draw[std::size(default_face_kpts_3d)];
-  float kp;
-  for (int i = 0; i < std::size(default_face_kpts_3d); ++i) {
-    kp = (scene.face_kpts_draw[i].v[2] - 8) / 120 + 1.0;
-    face_kpts_draw[i] = QPointF(scene.face_kpts_draw[i].v[0] * kp + x, scene.face_kpts_draw[i].v[1] * kp + y);
-  }
-
-  painter.setPen(QPen(QColor::fromRgbF(1.0, 1.0, 1.0, opacity), 5.2, Qt::SolidLine, Qt::RoundCap));
-  painter.drawPolyline(face_kpts_draw, std::size(default_face_kpts_3d));
-
-  // tracking arcs
-  const int arc_l = 133;
-  const float arc_t_default = 6.7;
-  const float arc_t_extend = 12.0;
-  QColor arc_color = QColor::fromRgbF(0.545 - 0.445 * s->engaged(),
-                                      0.545 + 0.4 * s->engaged(),
-                                      0.545 - 0.285 * s->engaged(),
-                                      0.4 * (1.0 - dm_fade_state));
-  float delta_x = -scene.driver_pose_sins[1] * arc_l / 2;
-  float delta_y = -scene.driver_pose_sins[0] * arc_l / 2;
-  painter.setPen(QPen(arc_color, arc_t_default+arc_t_extend*fmin(1.0, scene.driver_pose_diff[1] * 5.0), Qt::SolidLine, Qt::RoundCap));
-  painter.drawArc(QRectF(std::fmin(x + delta_x, x), y - arc_l / 2, fabs(delta_x), arc_l), (scene.driver_pose_sins[1]>0 ? 90 : -90) * 16, 180 * 16);
-  painter.setPen(QPen(arc_color, arc_t_default+arc_t_extend*fmin(1.0, scene.driver_pose_diff[0] * 5.0), Qt::SolidLine, Qt::RoundCap));
-  painter.drawArc(QRectF(x - arc_l / 2, std::fmin(y + delta_y, y), arc_l, fabs(delta_y)), (scene.driver_pose_sins[0]>0 ? 0 : 180) * 16, 180 * 16);
-
-  painter.restore();
-}
-
 void AnnotatedCameraWidget::drawLead(QPainter &painter, const cereal::ModelDataV2::LeadDataV3::Reader &lead_data, const QPointF &vd, const float v_ego, const QColor lead_marker_color) {
   painter.save();
 
@@ -695,12 +639,6 @@ void AnnotatedCameraWidget::paintEvent(QPaintEvent *event) {
         prev_drel = lead_drel;
       }
     }
-  }
-
-  // DMoji
-  if (!hideBottomIcons && (sm.rcv_frame("driverStateV2") > s->scene.started_frame)) {
-    update_dmonitoring(s, sm["driverStateV2"].getDriverStateV2(), dm_fade_state, rightHandDM);
-    drawDriverState(painter, s);
   }
 
   drawHud(painter);

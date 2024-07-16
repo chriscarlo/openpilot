@@ -342,10 +342,20 @@ class Controls:
         self.events.add(EventName.radarFault)
     if not self.sm.valid['pandaStates']:
       self.events.add(EventName.usbError)
-    if CS.canTimeout:
-      self.events.add(EventName.canBusMissing)
-    elif not CS.canValid:
-      self.events.add(EventName.canError)
+
+    self.can_error_counter = getattr(self, 'can_error_counter', 0)
+    CAN_ERROR_THRESHOLD = 20
+
+    if CS.canTimeout or not CS.canValid:
+      self.can_error_counter += 1
+    else:
+      self.can_error_counter = 0
+
+    if self.can_error_counter >= CAN_ERROR_THRESHOLD:
+      if CS.canTimeout:
+        self.events.add(EventName.canBusMissing)
+      elif not CS.canValid:
+        self.events.add(EventName.canError)
 
     # generic catch-all. ideally, a more specific event should be added above instead
     has_disable_events = self.events.contains(ET.NO_ENTRY) and (self.events.contains(ET.SOFT_DISABLE) or self.events.contains(ET.IMMEDIATE_DISABLE))
@@ -655,7 +665,7 @@ class Controls:
     # Send a "steering required alert" if saturation count has reached the limit
     if lac_log.active and not recent_steer_pressed and not self.CP.notCar:
       if self.CP.lateralTuning.which() == 'torque' and not self.joystick_mode:
-        undershooting = abs(lac_log.desiredLateralAccel) / abs(1e-3 + lac_log.actualLateralAccel) > 1.2
+        undershooting = abs(lac_log.desiredLateralAccel) / abs(1e-3 + lac_log.actualLateralAccel) > 2.2
         turning = abs(lac_log.desiredLateralAccel) > 1.0
         good_speed = CS.vEgo > 5
         max_torque = abs(self.sm['carOutput'].actuatorsOutput.steer) > 0.99

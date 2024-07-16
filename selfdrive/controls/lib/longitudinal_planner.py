@@ -17,14 +17,14 @@ from openpilot.selfdrive.controls.lib.drive_helpers import V_CRUISE_MAX, CONTROL
 from openpilot.common.swaglog import cloudlog
 
 LON_MPC_STEP = 0.2  # first step is 0.2s
-A_CRUISE_MIN = -1.2
-A_CRUISE_MAX_VALS = [1.6, 1.2, 0.8, 0.6]
-A_CRUISE_MAX_BP = [0., 10.0, 25., 40.]
+A_CRUISE_MIN = -5.5
+A_CRUISE_MAX_VALS = [4.2, 3.5, 2.8, 1.6, 0.8]
+A_CRUISE_MAX_BP = [0., 10.0, 25., 40., 50.]
 CONTROL_N_T_IDX = ModelConstants.T_IDXS[:CONTROL_N]
 
 # Lookup table for turns
-_A_TOTAL_MAX_V = [1.7, 3.2]
-_A_TOTAL_MAX_BP = [20., 40.]
+# _A_TOTAL_MAX_V = [1.7, 3.2]
+# _A_TOTAL_MAX_BP = [20., 40.]
 
 # Kalman filter states enum
 LEAD_KALMAN_SPEED, LEAD_KALMAN_ACCEL = 0, 1
@@ -32,12 +32,10 @@ LEAD_KALMAN_SPEED, LEAD_KALMAN_ACCEL = 0, 1
 def get_max_accel(v_ego):
   return interp(v_ego, A_CRUISE_MAX_BP, A_CRUISE_MAX_VALS)
 
-
+"""
 def limit_accel_in_turns(v_ego, angle_steers, a_target, CP):
-  """
-  This function returns a limited long acceleration allowed, depending on the existing lateral acceleration
-  this should avoid accelerating when losing the target in turns
-  """
+  #This function returns a limited long acceleration allowed, depending on the existing lateral acceleration
+  #this should avoid accelerating when losing the target in turns
   # FIXME: This function to calculate lateral accel is incorrect and should use the VehicleModel
   # The lookup table for turns should also be updated if we do this
   a_total_max = interp(v_ego, _A_TOTAL_MAX_BP, _A_TOTAL_MAX_V)
@@ -45,7 +43,7 @@ def limit_accel_in_turns(v_ego, angle_steers, a_target, CP):
   a_x_allowed = math.sqrt(max(a_total_max ** 2 - a_y ** 2, 0.))
 
   return [a_target[0], min(a_target[1], a_x_allowed)]
-
+"""
 
 def get_accel_from_plan(CP, speeds, accels):
     if len(speeds) == CONTROL_N:
@@ -167,9 +165,9 @@ class LongitudinalPlanner:
       j = np.zeros(len(T_IDXS_MPC))
 
     if taco_tune:
-      max_lat_accel = interp(v_ego, [5, 10, 20], [1.5, 2.0, 3.0])
+      max_lat_accel = interp(v_ego, [5, 10, 20, 30, 40, 50, 60, 70], [10.0, 10.0, 10.0, 10.0, 9.0, 9.0, 8.0, 8.0])
       curvatures = np.interp(T_IDXS_MPC, ModelConstants.T_IDXS, model_msg.orientationRate.z) / np.clip(v, 0.3, 100.0)
-      max_v = np.sqrt(max_lat_accel / (np.abs(curvatures) + 1e-3)) - 2.0
+      max_v = np.sqrt(max_lat_accel / (np.abs(curvatures) + 1e-3)) - 0.8
       v = np.minimum(max_v, v)
 
     return x, v, a, j
@@ -191,10 +189,10 @@ class LongitudinalPlanner:
     prev_accel_constraint = not (reset_state or sm['carState'].standstill)
 
     accel_limits = [sm['frogpilotPlan'].minAcceleration, sm['frogpilotPlan'].maxAcceleration]
-    if self.mpc.mode == 'acc':
-      accel_limits_turns = limit_accel_in_turns(v_ego, sm['carState'].steeringAngleDeg, accel_limits, self.CP)
-    else:
-      accel_limits_turns = [ACCEL_MIN, ACCEL_MAX]
+    # if self.mpc.mode == 'acc':
+      # accel_limits_turns = limit_accel_in_turns(v_ego, sm['carState'].steeringAngleDeg, accel_limits, self.CP)
+    # else:
+    accel_limits_turns = [ACCEL_MIN, ACCEL_MAX]
 
     if reset_state:
       self.v_desired_filter.x = v_ego

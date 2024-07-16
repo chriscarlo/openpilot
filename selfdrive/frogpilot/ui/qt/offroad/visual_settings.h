@@ -34,7 +34,7 @@ private:
   std::set<QString> alertVolumeControlKeys = {"DisengageVolume", "EngageVolume", "PromptDistractedVolume", "PromptVolume", "RefuseVolume", "WarningImmediateVolume", "WarningSoftVolume"};
   std::set<QString> bonusContentKeys = {"GoatScream", "HolidayThemes", "PersonalizeOpenpilot", "RandomEvents"};
   std::set<QString> customAlertsKeys = {"GreenLightAlert", "LeadDepartingAlert", "LoudBlindspotAlert"};
-  std::set<QString> customOnroadUIKeys = {"Compass", "CustomPaths", "PedalsOnUI", "RoadNameUI", "RotatingWheel", "ShowStoppingPoint"};
+  std::set<QString> customOnroadUIKeys = {"Compass", "ShowDMIcon", "CustomPaths", "PedalsOnUI", "RoadNameUI", "RotatingWheel", "ShowStoppingPoint"};
   std::set<QString> developerUIKeys = {"BorderMetrics", "FPSCounter", "LateralMetrics", "LongitudinalMetrics", "NumericalTemp", "SidebarMetrics", "UseSI"};
   std::set<QString> modelUIKeys = {"DynamicPathWidth", "HideLeadMarker", "LaneLinesWidth", "PathEdgeWidth", "PathWidth", "RoadEdgesWidth", "UnlimitedLength"};
   std::set<QString> personalizeOpenpilotKeys = {"CustomColors", "CustomIcons", "CustomSignals", "CustomSounds", "DownloadStatusLabel", "StartupAlert", "WheelIcon"};

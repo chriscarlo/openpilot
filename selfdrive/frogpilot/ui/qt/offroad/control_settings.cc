@@ -473,13 +473,13 @@ FrogPilotControlsPanel::FrogPilotControlsPanel(SettingsWindow *parent) : FrogPil
           if (hasAutoTune || params.getBool("LateralTune") && params.getBool("NNFF")) {
             modifiedLateralTuneKeys.erase("ForceAutoTune");
           }
-
+          /*
           if (hasCommaNNFFSupport || !hasNNFFLog) {
             modifiedLateralTuneKeys.erase("NNFF");
           } else {
             modifiedLateralTuneKeys.erase("NNFFLite");
           }
-
+          */
           toggle->setVisible(modifiedLateralTuneKeys.find(key.c_str()) != modifiedLateralTuneKeys.end());
         }
         openParentToggle();

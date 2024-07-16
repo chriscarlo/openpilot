@@ -13,25 +13,25 @@ Ecu = car.CarParams.Ecu
 
 
 class CarControllerParams:
-  ACCEL_MIN = -3.5 # m/s
-  ACCEL_MAX = 2.0 # m/s
+  ACCEL_MIN = -5.5 # m/s
+  ACCEL_MAX = 5.0 # m/s
 
   def __init__(self, CP):
-    self.STEER_DELTA_UP = 3
-    self.STEER_DELTA_DOWN = 7
-    self.STEER_DRIVER_ALLOWANCE = 50
+    self.STEER_DELTA_UP = 8
+    self.STEER_DELTA_DOWN = 10
+    self.STEER_DRIVER_ALLOWANCE = 450
     self.STEER_DRIVER_MULTIPLIER = 2
     self.STEER_DRIVER_FACTOR = 1
-    self.STEER_THRESHOLD = 150
+    self.STEER_THRESHOLD = 350
     self.STEER_STEP = 1  # 100 Hz
 
     if CP.carFingerprint in CANFD_CAR:
-      self.STEER_MAX = 270
-      self.STEER_DRIVER_ALLOWANCE = 250
+      self.STEER_MAX = 409
+      self.STEER_DRIVER_ALLOWANCE = 450
       self.STEER_DRIVER_MULTIPLIER = 2
-      self.STEER_THRESHOLD = 250
-      self.STEER_DELTA_UP = 2
-      self.STEER_DELTA_DOWN = 3
+      self.STEER_THRESHOLD = 350
+      self.STEER_DELTA_UP = 8
+      self.STEER_DELTA_DOWN = 10
 
     # To determine the limit for your car, find the maximum value that the stock LKAS will request.
     # If the max stock LKAS request is <384, add your car to this list.
@@ -48,7 +48,7 @@ class CarControllerParams:
 
     # Default for most HKG
     else:
-      self.STEER_MAX = 384
+      self.STEER_MAX = 409
 
 
 class HyundaiFlags(IntFlag):

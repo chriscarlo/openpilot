@@ -102,6 +102,10 @@ private:
   // FrogPilot variables
   Params paramsMemory{"/dev/shm/params"};
 
+  //CC
+  Params params;
+  bool ShowDMIcon = params.getBool("ShowDMIcon");
+
   Compass *compass_img;
   DistanceButton *distance_btn;
   PedalIcons *pedal_icons;
