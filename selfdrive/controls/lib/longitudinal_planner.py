@@ -17,9 +17,9 @@ from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import T_IDX
 from openpilot.selfdrive.controls.lib.drive_helpers import V_CRUISE_MAX, CONTROL_N, get_speed_error
 
 LON_MPC_STEP = 0.2  # first step is 0.2s
-A_CRUISE_MIN = -1.2
-A_CRUISE_MAX_VALS = [1.6, 1.2, 0.8, 0.6]
-A_CRUISE_MAX_BP = [0., 10.0, 25., 40.]
+A_CRUISE_MIN = -3.2
+A_CRUISE_MAX_VALS = [3.6, 2.8, 2.2, 1.6, 1.2]
+A_CRUISE_MAX_BP = [0., 10.0, 25., 40., 50.]
 
 # Lookup table for turns
 _A_TOTAL_MAX_V = [1.7, 3.2]
@@ -32,12 +32,12 @@ LEAD_KALMAN_SPEED, LEAD_KALMAN_ACCEL = 0, 1
 def get_max_accel(v_ego):
   return interp(v_ego, A_CRUISE_MAX_BP, A_CRUISE_MAX_VALS)
 
-
+"""
 def limit_accel_in_turns(v_ego, angle_steers, a_target, CP):
-  """
-  This function returns a limited long acceleration allowed, depending on the existing lateral acceleration
-  this should avoid accelerating when losing the target in turns
-  """
+  
+  # This function returns a limited long acceleration allowed, depending on the existing lateral acceleration
+  # this should avoid accelerating when losing the target in turns
+
 
   # FIXME: This function to calculate lateral accel is incorrect and should use the VehicleModel
   # The lookup table for turns should also be updated if we do this
@@ -46,7 +46,7 @@ def limit_accel_in_turns(v_ego, angle_steers, a_target, CP):
   a_x_allowed = math.sqrt(max(a_total_max ** 2 - a_y ** 2, 0.))
 
   return [a_target[0], min(a_target[1], a_x_allowed)]
-
+"""
 
 def lead_kf(v_lead: float, dt: float = 0.05):
   # Lead Kalman Filter params, calculating K from A, C, Q, R requires the control library.
