@@ -91,13 +91,14 @@ private:
 
   // FrogPilot widgets
   void initializeFrogPilotWidgets();
+  void paintFrogPilotWidgets(QPainter &painter);
   void updateFrogPilotWidgets(int alert_height, const UIScene &scene);
   void updateSignals();
 
   void drawLeadInfo(QPainter &p);
   void drawSLCConfirmation(QPainter &p);
   void drawStatusBar(QPainter &p);
-  void drawTurnSignals(int alert_height, QPainter &p);
+  void drawTurnSignals(QPainter &p);
 
   // FrogPilot variables
   Params paramsMemory{"/dev/shm/params"};
@@ -154,6 +155,7 @@ private:
   float speedConversion;
   float unconfirmedSpeedLimit;
 
+  int alertHeight;
   int animationFrameIndex;
   int cameraView;
   int conditionalSpeed;
