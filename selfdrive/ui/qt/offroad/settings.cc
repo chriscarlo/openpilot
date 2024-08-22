@@ -1,5 +1,6 @@
 #include <cassert>
 #include <cmath>
+#include <filesystem>
 #include <iomanip>
 #include <iostream>
 #include <string>
@@ -376,6 +377,7 @@ DevicePanel::DevicePanel(SettingsWindow *parent) : ListWidget(parent) {
   connect(frogpilotBackupBtn, &FrogPilotButtonsControl::buttonClicked, [=](int id) {
     QDir backupDir("/data/backups");
     QStringList backupNames = backupDir.entryList(QDir::Dirs | QDir::Files | QDir::NoDotAndDotDot, QDir::Name);
+    backupNames = backupNames.filter(QRegularExpression("^(?!.*_in_progress$).*$"));
 
     if (id == 0) {
       QString nameSelection = InputDialog::getText(tr("Name your backup"), this, "", false, 1);
@@ -386,21 +388,48 @@ DevicePanel::DevicePanel(SettingsWindow *parent) : ListWidget(parent) {
           frogpilotBackupBtn->setValue(tr("Backing up..."));
 
           std::string fullBackupPath = backupDir.absolutePath().toStdString() + "/" + nameSelection.toStdString();
-          std::string command = "mkdir -p " + fullBackupPath + " && rsync -av /data/openpilot/ " + fullBackupPath + "/";
+          std::string inProgressBackupPath = fullBackupPath + "_in_progress";
+          std::string command = "mkdir -p " + inProgressBackupPath + " && rsync -av /data/openpilot/ " + inProgressBackupPath + "/";
 
           int result = std::system(command.c_str());
 
           if (result == 0) {
             if (compressed) {
               frogpilotBackupBtn->setValue(tr("Compressing backup..."));
-              std::string tarFilePath = fullBackupPath + ".tar.gz";
-              command = "tar -czf " + tarFilePath + " -C " + fullBackupPath + " . && rm -rf " + fullBackupPath;
+              std::string tarFilePathInProgress = fullBackupPath + "_in_progress.tar.gz";
+              command = "tar -czf " + tarFilePathInProgress + " -C " + inProgressBackupPath + " . && rm -rf " + inProgressBackupPath;
               result = std::system(command.c_str());
+
+              if (result == 0) {
+                std::string tarFilePath = fullBackupPath + ".tar.gz";
+                command = "mv " + tarFilePathInProgress + " " + tarFilePath;
+                result = std::system(command.c_str());
+
+                if (result == 0) {
+                  frogpilotBackupBtn->setValue(tr("Success!"));
+                } else {
+                  frogpilotBackupBtn->setValue(tr("Failed..."));
+                  std::system(("rm -f " + tarFilePathInProgress).c_str());
+                }
+              } else {
+                frogpilotBackupBtn->setValue(tr("Failed..."));
+                std::system(("rm -f " + tarFilePathInProgress).c_str());
+                std::system(("rm -rf " + inProgressBackupPath).c_str());
+              }
             } else {
-              frogpilotBackupBtn->setValue(tr("Success!"));
+              command = "mv " + inProgressBackupPath + " " + fullBackupPath;
+              result = std::system(command.c_str());
+
+              if (result == 0) {
+                frogpilotBackupBtn->setValue(tr("Success!"));
+              } else {
+                frogpilotBackupBtn->setValue(tr("Failed..."));
+                std::system(("rm -rf " + inProgressBackupPath).c_str());
+              }
             }
           } else {
             frogpilotBackupBtn->setValue(tr("Failed..."));
+            std::system(("rm -rf " + inProgressBackupPath).c_str());
           }
 
           util::sleep_for(2000);
@@ -442,13 +471,21 @@ DevicePanel::DevicePanel(SettingsWindow *parent) : ListWidget(parent) {
             std::string sourcePath = backupDir.absolutePath().toStdString() + "/" + selection.toStdString();
             std::string targetPath = "/data/safe_staging/finalized";
             std::string consistentFilePath = targetPath + "/.overlay_consistent";
-            std::string extractDirectory = "/tmp/restore_temp";
+            std::string extractDirectory = "/data/restore_temp";
 
             if (selection.endsWith(".tar.gz")) {
-              frogpilotBackupBtn->setValue(tr("Extracting backup..."));
+              frogpilotBackupBtn->setValue(tr("Extracting..."));
 
-              if (std::system(("mkdir -p " + extractDirectory + " && tar -xzf " + sourcePath + " -C " + extractDirectory).c_str()) != 0) {
-                frogpilotBackupBtn->setValue(tr("Failed to extract backup..."));
+              if (std::system(("mkdir -p " + extractDirectory).c_str()) != 0) {
+                frogpilotBackupBtn->setValue(tr("Failed..."));
+                util::sleep_for(2000);
+                frogpilotBackupBtn->setValue("");
+                frogpilotBackupBtn->setEnabled(true);
+                return;
+              }
+
+              if (std::system(("tar --strip-components=1 -xzf " + sourcePath + " -C " + extractDirectory).c_str()) != 0) {
+                frogpilotBackupBtn->setValue(tr("Failed..."));
                 util::sleep_for(2000);
                 frogpilotBackupBtn->setValue("");
                 frogpilotBackupBtn->setEnabled(true);
@@ -456,33 +493,34 @@ DevicePanel::DevicePanel(SettingsWindow *parent) : ListWidget(parent) {
               }
 
               sourcePath = extractDirectory;
+              frogpilotBackupBtn->setValue(tr("Restoring..."));
             }
 
-            int result = std::system(("rsync -av --delete -l --exclude='.overlay_consistent' " + sourcePath + "/ " + targetPath + "/").c_str());
-
-            if (result == 0) {
+            if (std::system(("rsync -av --delete -l --exclude='.overlay_consistent' " + sourcePath + "/ " + targetPath + "/").c_str()) == 0) {
               std::ofstream consistentFile(consistentFilePath);
               if (consistentFile) {
                 frogpilotBackupBtn->setValue(tr("Restored!"));
+                params.putBool("AutomaticUpdates", false);
                 util::sleep_for(2000);
+
                 frogpilotBackupBtn->setValue(tr("Rebooting..."));
-                util::sleep_for(2000);
                 consistentFile.close();
+                std::filesystem::remove_all(extractDirectory);
+                util::sleep_for(2000);
+
                 Hardware::reboot();
               } else {
                 frogpilotBackupBtn->setValue(tr("Failed..."));
+                util::sleep_for(2000);
+                frogpilotBackupBtn->setValue("");
+                frogpilotBackupBtn->setEnabled(true);
               }
             } else {
               frogpilotBackupBtn->setValue(tr("Failed..."));
+              util::sleep_for(2000);
+              frogpilotBackupBtn->setValue("");
+              frogpilotBackupBtn->setEnabled(true);
             }
-
-            if (selection.endsWith(".tar.gz")) {
-              std::system(("rm -rf " + extractDirectory).c_str());
-            }
-
-            util::sleep_for(2000);
-            frogpilotBackupBtn->setValue("");
-            frogpilotBackupBtn->setEnabled(true);
           }).detach();
         }
       }
@@ -814,6 +852,7 @@ SettingsWindow::SettingsWindow(QWidget *parent) : QFrame(parent) {
 
   FrogPilotVisualsPanel *frogpilotVisuals = new FrogPilotVisualsPanel(this);
   QObject::connect(frogpilotVisuals, &FrogPilotVisualsPanel::openParentToggle, this, [this]() {parentToggleOpen=true;});
+  QObject::connect(frogpilotVisuals, &FrogPilotVisualsPanel::openSubParentToggle, this, [this]() {subParentToggleOpen=true;});
 
   QList<QPair<QString, QWidget *>> panels = {
     {tr("Device"), device},

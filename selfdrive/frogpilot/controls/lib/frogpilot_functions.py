@@ -1,4 +1,5 @@
 import datetime
+import errno
 import filecmp
 import glob
 import http.client
@@ -45,22 +46,29 @@ def cleanup_backups(directory, limit, minimum_backup_size=0, compressed=False):
     run_cmd(["sudo", "rm", "-rf", old_backup], f"Deleted oldest backup: {os.path.basename(old_backup)}", f"Failed to delete backup: {os.path.basename(old_backup)}")
 
 def backup_directory(backup, destination, success_message, fail_message, minimum_backup_size=0, params=None, compressed=False):
+  compressed_backup = f"{destination}.tar.gz"
+  in_progress_compressed_backup = f"{compressed_backup}_in_progress"
+  in_progress_destination = f"{destination}_in_progress"
+
   try:
     if not compressed:
-      os.makedirs(destination, exist_ok=False)
-      run_cmd(["sudo", "rsync", "-avq", os.path.join(backup, "."), destination], success_message, fail_message)
+      os.makedirs(in_progress_destination, exist_ok=False)
+      run_cmd(["sudo", "rsync", "-avq", os.path.join(backup, "."), in_progress_destination], success_message, fail_message)
+      os.rename(in_progress_destination, destination)
+      print(f"Backup successfully created at {destination}.")
     else:
-      compressed_backup = f"{destination}.tar.gz"
-      if os.path.exists(compressed_backup):
+      if os.path.exists(compressed_backup) or os.path.exists(in_progress_compressed_backup):
+        print("Backup already exists. Aborting.")
         return
 
-      os.makedirs(destination, exist_ok=True)
-      run_cmd(["sudo", "rsync", "-avq", os.path.join(backup, "."), destination], success_message, fail_message)
+      os.makedirs(in_progress_destination, exist_ok=True)
+      run_cmd(["sudo", "rsync", "-avq", os.path.join(backup, "."), in_progress_destination], success_message, fail_message)
 
-      with tarfile.open(compressed_backup, "w:gz") as tar:
-        tar.add(destination, arcname=os.path.basename(destination))
+      with tarfile.open(in_progress_compressed_backup, "w:gz") as tar:
+        tar.add(in_progress_destination, arcname=os.path.basename(destination))
 
-      shutil.rmtree(destination)
+      shutil.rmtree(in_progress_destination)
+      os.rename(in_progress_compressed_backup, compressed_backup)
       print(f"Backup successfully compressed to {compressed_backup}.")
 
       compressed_backup_size = os.path.getsize(compressed_backup)
@@ -71,11 +79,21 @@ def backup_directory(backup, destination, success_message, fail_message, minimum
     print(f"Destination '{destination}' already exists. Backup aborted.")
   except subprocess.CalledProcessError:
     print(fail_message)
+    cleanup_backup(in_progress_destination, in_progress_compressed_backup)
   except OSError as e:
     if e.errno == errno.ENOSPC:
       print("Not enough space to perform the backup.")
     else:
       print(f"Failed to backup due to unexpected error: {e}")
+    cleanup_backup(in_progress_destination, in_progress_compressed_backup)
+  finally:
+    cleanup_backup(in_progress_destination, in_progress_compressed_backup)
+
+def cleanup_backup(in_progress_destination, in_progress_compressed_backup):
+  if os.path.exists(in_progress_destination):
+    shutil.rmtree(in_progress_destination)
+  if os.path.exists(in_progress_compressed_backup):
+    os.remove(in_progress_compressed_backup)
 
 def backup_frogpilot(build_metadata, params):
   minimum_backup_size = params.get_int("MinimumBackupSize")
@@ -124,15 +142,23 @@ def calculate_road_curvature(modelData, v_ego):
 def convert_params(params, params_storage):
   print("Starting to convert params")
 
+  required_type = str
+
   def remove_param(key):
     try:
       value = params_storage.get(key)
       value = value.decode('utf-8') if isinstance(value, bytes) else value
+
       if isinstance(value, str) and value.replace('.', '', 1).isdigit():
         value = float(value) if '.' in value else int(value)
-        if isinstance(value, int):
-          params.remove(key)
-          params_storage.remove(key)
+
+      if (required_type == int and not isinstance(value, int)) or (required_type == str and isinstance(value, int)):
+        params.remove(key)
+        params_storage.remove(key)
+      elif key == "CustomIcons" and value == "frog_(animated)":
+        params.remove(key)
+        params_storage.remove(key)
+
     except (UnknownKeyName, ValueError):
       pass
 
