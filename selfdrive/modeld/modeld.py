@@ -34,6 +34,7 @@ PROCESS_NAME = "selfdrive.modeld.modeld"
 SEND_RAW_PRED = os.getenv('SEND_RAW_PRED')
 
 MODEL_NAME = frogpilot_toggles.model
+print(f"MODEL_NAME: {MODEL_NAME}")
 
 CLAIRVOYANT_MODEL = frogpilot_toggles.clairvoyant_model
 DISABLE_NAV = frogpilot_toggles.navigationless_model

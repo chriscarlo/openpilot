@@ -103,6 +103,7 @@ class TorqueEstimator(ParameterEstimator):
     params_cache = params.get("CarParamsPrevRoute")
     self.torque_key = frogpilot_toggles.part_model_param + "LiveTorqueParameters"
     torque_cache = params.get(self.torque_key)
+    print(f"torque_cache: {self.torque_key}")
     if params_cache is not None and torque_cache is not None:
       try:
         with log.Event.from_bytes(torque_cache) as log_evt:
@@ -239,7 +240,7 @@ def main(demo=False):
   sm = messaging.SubMaster(['carControl', 'carOutput', 'carState', 'liveLocationKalman'], poll='liveLocationKalman')
 
   params = Params()
-  with car.CarParams.from_bytes(params.get("CarParams", block=True)) as CP:
+  with car.CarParams.from_bytes(params.get("CarParamsPersistent", block=True)) as CP:
     estimator = TorqueEstimator(CP)
 
   # FrogPilot variables

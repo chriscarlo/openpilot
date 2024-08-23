@@ -65,7 +65,7 @@ void AnnotatedCameraWidget::updateState(int alert_height, const UIState &s) {
   v_ego_cluster_seen = v_ego_cluster_seen || car_state.getVEgoCluster() != 0.0;
   float v_ego = v_ego_cluster_seen && !s.scene.wheel_speed ? car_state.getVEgoCluster() : car_state.getVEgo();
   speed = cs_alive ? std::max<float>(0.0, v_ego) : 0.0;
-  speed *= s.scene.is_metric ? MS_TO_KPH : MS_TO_MPH;
+  speed = 69;
 
   auto speed_limit_sign = nav_instruction.getSpeedLimitSign();
   speedLimit = slcOverridden ? s.scene.speed_limit_overridden_speed : speedLimitController ? s.scene.speed_limit : nav_alive ? nav_instruction.getSpeedLimit() : 0.0;
@@ -827,7 +827,7 @@ void AnnotatedCameraWidget::updateFrogPilotWidgets(int alert_height, const UISce
 
   trafficModeActive = scene.traffic_mode_active;
 
-  turnSignalLeft = scene.turn_signal_left;
+  turnSignalLeft = true;
   turnSignalRight = scene.turn_signal_right;
 
   useSI = scene.use_si;
