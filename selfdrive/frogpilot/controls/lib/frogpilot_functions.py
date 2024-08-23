@@ -162,7 +162,7 @@ def convert_params(params, params_storage):
     except (UnknownKeyName, ValueError):
       pass
 
-  for key in ["CustomColors", "CustomIcons", "CustomSignals", "CustomSounds", "WheelIcon"]:
+  for key in ["CustomColors", "CustomDistanceIcons", "CustomIcons", "CustomSignals", "CustomSounds", "WheelIcon"]:
     remove_param(key)
 
   print("Param conversion completed")

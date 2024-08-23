@@ -181,6 +181,7 @@ class Controls:
 
     # FrogPilot variables
     self.frogpilot_toggles = FrogPilotVariables.toggles
+    FrogPilotVariables.update_frogpilot_params()
 
     self.params_memory = Params("/dev/shm/params")
 
@@ -192,7 +193,8 @@ class Controls:
     self.resume_previously_pressed = False
     self.steer_saturated_event_triggered = False
     self.update_toggles = False
-    self.use_old_long = self.CP.carName in {"gm", "hyundai"} and not self.params.get_bool("NewLongAPI")
+    self.use_old_long = self.CP.carName == "hyundai" and not self.params.get_bool("NewLongAPI")
+    self.use_old_long |= self.CP.carName == "gm" and not self.params.get_bool("NewLongAPIGM")
 
     self.display_timer = 0
 

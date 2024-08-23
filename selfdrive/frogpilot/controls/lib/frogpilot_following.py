@@ -13,8 +13,13 @@ class FrogPilotFollowing:
     self.slower_lead = False
 
     self.acceleration_jerk = 0
+    self.base_acceleration_jerk = 0
+    self.base_speed_jerk = 0
     self.danger_jerk = 0
+    self.safe_obstacle_distance = 0
+    self.safe_obstacle_distance_stock = 0
     self.speed_jerk = 0
+    self.stopped_equivalence_factor = 0
     self.t_follow = 0
 
   def update(self, controlsState, frogpilotCarState, lead_distance, stopping_distance, v_ego, v_lead, frogpilot_toggles):

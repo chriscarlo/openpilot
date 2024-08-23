@@ -66,6 +66,7 @@ class RouteEngine:
 
     # FrogPilot variables
     self.frogpilot_toggles = FrogPilotVariables.toggles
+    FrogPilotVariables.update_frogpilot_params()
 
     self.stop_coord = []
     self.stop_signal = []

@@ -129,6 +129,7 @@ def frogpilot_thread():
   config_realtime_process(5, Priority.CTRL_LOW)
 
   frogpilot_toggles = FrogPilotVariables.toggles
+  FrogPilotVariables.update_frogpilot_params()
 
   params = Params()
   params_memory = Params("/dev/shm/params")
