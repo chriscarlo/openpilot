@@ -9,7 +9,7 @@ from openpilot.common.numpy_fast import interp
 from openpilot.common.params import Params, UnknownKeyName
 from openpilot.selfdrive.controls.lib.desire_helper import LANE_CHANGE_SPEED_MIN
 from openpilot.selfdrive.modeld.constants import ModelConstants
-from openpilot.system.version import get_build_metadata
+from openpilot.system.hardware.power_monitoring import VBATT_PAUSE_CHARGING
 
 from openpilot.selfdrive.frogpilot.controls.lib.frogpilot_functions import MODELS_PATH
 from openpilot.selfdrive.frogpilot.controls.lib.model_manager import DEFAULT_MODEL, DEFAULT_MODEL_NAME, process_model_name
@@ -31,7 +31,6 @@ class FrogPilotVariables:
     self.params_memory = Params("/dev/shm/params")
 
     self.has_prime = self.params.get_int("PrimeType") > 0
-    self.release = get_build_metadata().release_channel
 
     self.update_frogpilot_params(False)
 
@@ -124,7 +123,7 @@ class FrogPilotVariables:
     device_shutdown_setting = self.params.get_int("DeviceShutdown") if toggle.device_management else 33
     toggle.device_shutdown_time = (device_shutdown_setting - 3) * 3600 if device_shutdown_setting >= 4 else device_shutdown_setting * (60 * 15)
     toggle.increase_thermal_limits = toggle.device_management and self.params.get_bool("IncreaseThermalLimits")
-    toggle.low_voltage_shutdown = self.params.get_float("LowVoltageShutdown") if toggle.device_management else 11.8
+    toggle.low_voltage_shutdown = self.params.get_float("LowVoltageShutdown") if toggle.device_management else VBATT_PAUSE_CHARGING
     toggle.offline_mode = toggle.device_management and self.params.get_bool("OfflineMode")
 
     driving_personalities = toggle.openpilot_longitudinal and self.params.get_bool("DrivingPersonalities")
@@ -194,7 +193,7 @@ class FrogPilotVariables:
     available_model_names = self.params.get("AvailableModelsNames", block=toggle.model_manager, encoding='utf-8')
     current_model = self.params_memory.get("CurrentModel", encoding='utf-8')
     current_model_name = self.params_memory.get("CurrentModelName", encoding='utf-8')
-    if toggle.model_manager and available_models and current_model is None:
+    if toggle.model_manager and available_models and (current_model is None or not started):
       toggle.model_randomizer = self.params.get_bool("ModelRandomizer")
       if toggle.model_randomizer:
         blacklisted_models = (self.params.get("BlacklistedModels", encoding='utf-8') or '').split(',')
@@ -204,11 +203,8 @@ class FrogPilotVariables:
         toggle.model = self.params.get("Model", block=True, encoding='utf-8')
     else:
       toggle.model = current_model
-    if not os.path.exists(os.path.join(MODELS_PATH, f"{toggle.model}.thneed")):
+    if not os.path.exists(os.path.join(MODELS_PATH, f"{toggle.model}.thneed")) or available_model_names is None:
       toggle.model = DEFAULT_MODEL
-      current_model_name = DEFAULT_MODEL_NAME
-      toggle.part_model_param = ""
-    elif available_model_names is None:
       current_model_name = DEFAULT_MODEL_NAME
       toggle.part_model_param = ""
     else:
@@ -218,16 +214,10 @@ class FrogPilotVariables:
         self.params.check_key(toggle.part_model_param + "CalibrationParams")
       except UnknownKeyName:
         toggle.part_model_param = ""
-    navigation_models = self.params.get("NavigationModels", encoding='utf-8')
-    if navigation_models is not None:
-      toggle.navigationless_model = toggle.model not in navigation_models.split(',')
-    else:
-      toggle.navigationless_model = False
-    radarless_model = self.params.get("RadarlessModels", encoding='utf-8')
-    if radarless_model is not None:
-      toggle.radarless_model = toggle.model in radarless_model.split(',')
-    else:
-      toggle.radarless_model = False
+    navigation_models = (self.params.get("NavigationModels", encoding='utf-8') or '')
+    toggle.navigationless_model = navigation_models and toggle.model not in navigation_models.split(',')
+    radarless_models = (self.params.get("RadarlessModels", encoding='utf-8') or '')
+    toggle.radarless_model = radarless_models and toggle.model in radarless_models.split(',')
     toggle.clairvoyant_model = toggle.model == "clairvoyant-driver"
     toggle.secretgoodopenpilot_model = toggle.model == "secret-good-openpilot"
     if frogpilot_process:
