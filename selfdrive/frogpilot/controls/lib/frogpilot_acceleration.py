@@ -29,8 +29,17 @@ class FrogPilotAcceleration:
   def __init__(self, FrogPilotPlanner):
     self.frogpilot_planner = FrogPilotPlanner
 
+    self.acceleration_jerk = 0
+    self.base_acceleration_jerk = 0
+    self.base_speed_jerk = 0
+    self.danger_jerk = 0
     self.max_accel = 0
     self.min_accel = 0
+    self.safe_obstacle_distance = 0
+    self.safe_obstacle_distance_stock = 0
+    self.speed_jerk = 0
+    self.stopped_equivalence_factor = 0
+    self.t_follow = 0
 
   def update(self, controlsState, frogpilotCarState, v_cruise, v_ego, frogpilot_toggles):
     eco_gear = frogpilotCarState.ecoGear

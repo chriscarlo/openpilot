@@ -258,6 +258,8 @@ void AnnotatedCameraWidget::drawHud(QPainter &p) {
       drawText(p, rect().center().x(), 290, QString("%1 seconds").arg(seconds));
     } else {
       p.setFont(InterFont(176, QFont::Bold));
+      QFontMetrics metrics(p.font());
+      speedTextWidth = metrics.boundingRect(speedStr).width();
       drawText(p, rect().center().x(), 210, speedStr);
       p.setFont(InterFont(66));
       drawText(p, rect().center().x(), 290, speedUnit, 200);

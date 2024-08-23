@@ -213,11 +213,12 @@ class Soundd:
         if FrogPilotVariables.toggles_updated:
           self.update_toggles = True
         elif self.update_toggles:
-          FrogPilotVariables.update_frogpilot_params()
           self.update_frogpilot_sounds()
           self.update_toggles = False
 
   def update_frogpilot_sounds(self):
+    FrogPilotVariables.update_frogpilot_params()
+
     self.volume_map = {
       AudibleAlert.engage: self.frogpilot_toggles.engage_volume,
       AudibleAlert.disengage: self.frogpilot_toggles.disengage_volume,

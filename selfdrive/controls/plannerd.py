@@ -35,6 +35,7 @@ def plannerd_thread():
 
   # FrogPilot variables
   frogpilot_toggles = FrogPilotVariables.toggles
+  FrogPilotVariables.update_frogpilot_params()
 
   clairvoyant_model = frogpilot_toggles.clairvoyant_model
   e2e_longitudinal_model = clairvoyant_model or frogpilot_toggles.secretgoodopenpilot_model

@@ -214,6 +214,7 @@ class RadarD:
 
     # FrogPilot variables
     self.frogpilot_toggles = FrogPilotVariables.toggles
+    FrogPilotVariables.update_frogpilot_params()
 
     self.e2e_longitudinal_model = self.frogpilot_toggles.clairvoyant_model or self.frogpilot_toggles.secretgoodopenpilot_model
     self.update_toggles = False
