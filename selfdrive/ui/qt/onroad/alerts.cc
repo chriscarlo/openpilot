@@ -64,10 +64,12 @@ OnroadAlerts::Alert OnroadAlerts::getAlert(const SubMaster &sm, uint64_t started
 
 void OnroadAlerts::paintEvent(QPaintEvent *event) {
   if (alert.size == cereal::ControlsState::AlertSize::NONE) {
+    alert_height = 0;
     return;
   }
 
   if (hide_alerts && alert.status == cereal::ControlsState::AlertStatus::NORMAL) {
+    alert_height = 0;
     return;
   }
 

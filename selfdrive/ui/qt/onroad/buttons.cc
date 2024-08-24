@@ -123,7 +123,7 @@ void ExperimentalButton::updateBackgroundColor() {
 
 void ExperimentalButton::updateIcon() {
   if (use_gif) {
-    if (gif) {
+    if (gif != nullptr) {
       gif->stop();
       delete gif;
       gif = nullptr;
@@ -144,7 +144,7 @@ void ExperimentalButton::updateIcon() {
     use_gif = true;
     image_empty = false;
   } else if (QFile::exists(wheel_png_path)) {
-    img = loadPixmap(wheel_png_path, {img_size, img_size});
+    img = loadPixmap(wheel_png_path, QSize(img_size, img_size));
     image_empty = false;
     use_gif = false;
   } else {
@@ -242,17 +242,19 @@ void DistanceButton::updateIcon() {
     "../frogpilot/assets/active_theme/distance_icons/relaxed"
   };
 
-  for (const QString &file_name : file_names) {
+  for (int i = 0; i < file_names.size(); ++i) {
+    const QString &file_name = file_names[i];
     QString gif_file = file_name + ".gif";
     QString png_file = file_name + ".png";
     QString fallback_file = QString("../frogpilot/assets/other_images/%1.png").arg(QFileInfo(file_name).baseName().toLower());
 
     if (QFile::exists(gif_file)) {
-      profile_data_gif.push_back(new QMovie(gif_file));
+      QMovie *movie = new QMovie(gif_file);
+      profile_data_gif.push_back(movie);
       profile_data_png.push_back(QPixmap());
     } else {
       int pixmap_size = btn_size * 1.25;
-      QPixmap pixmap = loadPixmap((QFile::exists(png_file) ? png_file : fallback_file), {pixmap_size, pixmap_size});
+      QPixmap pixmap = loadPixmap(QFile::exists(png_file) ? png_file : fallback_file, QSize(pixmap_size, pixmap_size));
       profile_data_gif.push_back(nullptr);
       profile_data_png.push_back(pixmap);
     }

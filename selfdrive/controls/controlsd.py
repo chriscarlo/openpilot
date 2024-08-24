@@ -721,7 +721,8 @@ class Controls:
 
   def update_frogpilot_variables(self, CS):
     self.always_on_lateral_active = self.sm['frogpilotPlan'].alwaysOnLateralActive and self.sm.all_checks(['frogpilotPlan'])
-    self.experimental_mode = self.sm['frogpilotPlan'].experimentalMode
+    if self.frogpilot_toggles.conditional_experimental_mode:
+      self.experimental_mode = self.sm['frogpilotPlan'].experimentalMode
 
     if any(be.pressed and be.type == FrogPilotButtonType.lkas for be in CS.buttonEvents):
       if self.frogpilot_toggles.experimental_mode_via_lkas and self.enabled:

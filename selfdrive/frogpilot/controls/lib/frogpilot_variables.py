@@ -203,17 +203,17 @@ class FrogPilotVariables:
         toggle.model = self.params.get("Model", block=True, encoding='utf-8')
     else:
       toggle.model = current_model
-    if not os.path.exists(os.path.join(MODELS_PATH, f"{toggle.model}.thneed")) or available_model_names is None:
-      toggle.model = DEFAULT_MODEL
-      current_model_name = DEFAULT_MODEL_NAME
-      toggle.part_model_param = ""
-    else:
+    if toggle.model in available_models.split(',') and os.path.exists(os.path.join(MODELS_PATH, f"{toggle.model}.thneed")):
       current_model_name = available_model_names.split(',')[available_models.split(',').index(toggle.model)]
       toggle.part_model_param = process_model_name(current_model_name)
       try:
         self.params.check_key(toggle.part_model_param + "CalibrationParams")
       except UnknownKeyName:
         toggle.part_model_param = ""
+    else:
+      toggle.model = DEFAULT_MODEL
+      current_model_name = DEFAULT_MODEL_NAME
+      toggle.part_model_param = ""
     navigation_models = (self.params.get("NavigationModels", encoding='utf-8') or '')
     toggle.navigationless_model = navigation_models and toggle.model not in navigation_models.split(',')
     radarless_models = (self.params.get("RadarlessModels", encoding='utf-8') or '')

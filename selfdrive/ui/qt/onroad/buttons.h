@@ -36,17 +36,6 @@ private:
   // FrogPilot variables
   Params params_memory{"/dev/shm/params"};
 
-  QColor background_color;
-
-  QLabel *gif_label;
-
-  QMovie *gif;
-
-  QPixmap img;
-
-  QString wheel_gif_path;
-  QString wheel_png_path;
-
   bool always_on_lateral_active;
   bool big_map;
   bool conditional_experimental;
@@ -61,6 +50,17 @@ private:
   int conditional_status;
   int steering_angle_deg;
   int y_offset;
+
+  QColor background_color;
+
+  QLabel *gif_label;
+
+  QMovie *gif;
+
+  QPixmap img;
+
+  QString wheel_gif_path;
+  QString wheel_png_path;
 };
 
 

@@ -59,7 +59,7 @@ void Sidebar::updateIcon(QLabel *&label, QMovie *&gif, const QString &gifPath, c
     selectedGifPath = randomEventGifPath;
   }
 
-  if (gif) {
+  if (gif != nullptr) {
     delete gif;
     gif = nullptr;
     label->hide();

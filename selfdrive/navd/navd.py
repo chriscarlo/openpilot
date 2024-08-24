@@ -58,7 +58,7 @@ class RouteEngine:
       self.mapbox_token = os.environ["MAPBOX_TOKEN"]
       self.mapbox_host = "https://api.mapbox.com"
     elif not FrogPilotVariables.has_prime:
-      self.mapbox_token = self.params.get("MapboxPublicKey", encoding='utf8')
+      self.mapbox_token = self.params.get("MapboxSecretKey", encoding='utf8')
       self.mapbox_host = "https://api.mapbox.com"
     else:
       self.api = Api(self.params.get("DongleId", encoding='utf8'))
