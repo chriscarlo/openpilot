@@ -173,6 +173,7 @@ FrogPilotControlsPanel::FrogPilotControlsPanel(SettingsWindow *parent) : FrogPil
         for (auto &[key, toggle] : toggles) {
           toggle->setVisible(aolKeys.find(key.c_str()) != aolKeys.end());
         }
+
         openParentToggle();
       });
       controlToggle = aolToggle;
@@ -185,6 +186,7 @@ FrogPilotControlsPanel::FrogPilotControlsPanel(SettingsWindow *parent) : FrogPil
         for (auto &[key, toggle] : toggles) {
           toggle->setVisible(conditionalExperimentalKeys.find(key.c_str()) != conditionalExperimentalKeys.end());
         }
+
         openParentToggle();
       });
       controlToggle = conditionalExperimentalToggle;
@@ -214,6 +216,7 @@ FrogPilotControlsPanel::FrogPilotControlsPanel(SettingsWindow *parent) : FrogPil
         for (auto &[key, toggle] : toggles) {
           toggle->setVisible(deviceManagementKeys.find(key.c_str()) != deviceManagementKeys.end());
         }
+
         openParentToggle();
       });
       controlToggle = deviceManagementToggle;
@@ -234,11 +237,14 @@ FrogPilotControlsPanel::FrogPilotControlsPanel(SettingsWindow *parent) : FrogPil
       FrogPilotParamManageControl *drivingPersonalitiesToggle = new FrogPilotParamManageControl(param, title, desc, icon, this);
       QObject::connect(drivingPersonalitiesToggle, &FrogPilotParamManageControl::manageButtonClicked, this, [this]() {
         drivingPersonalitiesOpen = true;
+
         for (auto &[key, toggle] : toggles) {
           toggle->setVisible(drivingPersonalityKeys.find(key.c_str()) != drivingPersonalityKeys.end());
         }
+
         downloadStatusLabel->setVisible(onroadDistanceButton);
         manageDistanceIconsBtn->setVisible(onroadDistanceButton);
+
         openParentToggle();
       });
       controlToggle = drivingPersonalitiesToggle;
@@ -246,11 +252,11 @@ FrogPilotControlsPanel::FrogPilotControlsPanel(SettingsWindow *parent) : FrogPil
       FrogPilotParamManageControl *customPersonalitiesToggle = new FrogPilotParamManageControl(param, title, desc, icon, this);
       QObject::connect(customPersonalitiesToggle, &FrogPilotParamManageControl::manageButtonClicked, this, [this]() {
         customPersonalitiesOpen = true;
+
         for (auto &[key, toggle] : toggles) {
           toggle->setVisible(customdrivingPersonalityKeys.find(key.c_str()) != customdrivingPersonalityKeys.end());
         }
-        downloadStatusLabel->setVisible(false);
-        manageDistanceIconsBtn->setVisible(false);
+
         openSubParentToggle();
       });
       controlToggle = customPersonalitiesToggle;
@@ -271,6 +277,7 @@ FrogPilotControlsPanel::FrogPilotControlsPanel(SettingsWindow *parent) : FrogPil
         for (auto &[key, toggle] : toggles) {
           toggle->setVisible(trafficPersonalityKeys.find(key.c_str()) != trafficPersonalityKeys.end());
         }
+
         openSubSubParentToggle();
       });
       controlToggle = trafficPersonalityToggle;
@@ -280,6 +287,7 @@ FrogPilotControlsPanel::FrogPilotControlsPanel(SettingsWindow *parent) : FrogPil
         for (auto &[key, toggle] : toggles) {
           toggle->setVisible(aggressivePersonalityKeys.find(key.c_str()) != aggressivePersonalityKeys.end());
         }
+
         openSubSubParentToggle();
       });
       controlToggle = aggressivePersonalityToggle;
@@ -289,6 +297,7 @@ FrogPilotControlsPanel::FrogPilotControlsPanel(SettingsWindow *parent) : FrogPil
         for (auto &[key, toggle] : toggles) {
           toggle->setVisible(standardPersonalityKeys.find(key.c_str()) != standardPersonalityKeys.end());
         }
+
         openSubSubParentToggle();
       });
       controlToggle = standardPersonalityToggle;
@@ -298,6 +307,7 @@ FrogPilotControlsPanel::FrogPilotControlsPanel(SettingsWindow *parent) : FrogPil
         for (auto &[key, toggle] : toggles) {
           toggle->setVisible(relaxedPersonalityKeys.find(key.c_str()) != relaxedPersonalityKeys.end());
         }
+
         openSubSubParentToggle();
       });
       controlToggle = relaxedPersonalityToggle;
@@ -460,6 +470,7 @@ FrogPilotControlsPanel::FrogPilotControlsPanel(SettingsWindow *parent) : FrogPil
 
           toggle->setVisible(modifiedExperimentalModeActivationKeys.find(key.c_str()) != modifiedExperimentalModeActivationKeys.end());
         }
+
         openParentToggle();
       });
       controlToggle = experimentalModeActivationToggle;
@@ -482,6 +493,7 @@ FrogPilotControlsPanel::FrogPilotControlsPanel(SettingsWindow *parent) : FrogPil
           */
           toggle->setVisible(modifiedLateralTuneKeys.find(key.c_str()) != modifiedLateralTuneKeys.end());
         }
+
         openParentToggle();
       });
       controlToggle = lateralTuneToggle;
@@ -502,6 +514,7 @@ FrogPilotControlsPanel::FrogPilotControlsPanel(SettingsWindow *parent) : FrogPil
 
           toggle->setVisible(modifiedLongitudinalTuneKeys.find(key.c_str()) != modifiedLongitudinalTuneKeys.end());
         }
+
         openParentToggle();
       });
       controlToggle = longitudinalTuneToggle;
@@ -524,6 +537,7 @@ FrogPilotControlsPanel::FrogPilotControlsPanel(SettingsWindow *parent) : FrogPil
         for (auto &[key, toggle] : toggles) {
           toggle->setVisible(mtscKeys.find(key.c_str()) != mtscKeys.end());
         }
+
         openParentToggle();
       });
       controlToggle = mtscToggle;
@@ -558,6 +572,7 @@ FrogPilotControlsPanel::FrogPilotControlsPanel(SettingsWindow *parent) : FrogPil
         for (auto &[key, toggle] : toggles) {
           toggle->setVisible(modelRandomizerKeys.find(key.c_str()) != modelRandomizerKeys.end());
         }
+
         openSubParentToggle();
       });
       controlToggle = modelRandomizerToggle;
@@ -629,9 +644,11 @@ FrogPilotControlsPanel::FrogPilotControlsPanel(SettingsWindow *parent) : FrogPil
         for (LabelControl *label : labelControls) {
           label->setVisible(true);
         }
+
         for (auto &[key, toggle] : toggles) {
           toggle->setVisible(false);
         }
+
         openSubSubParentToggle();
       });
       controlToggle = reinterpret_cast<AbstractControl*>(reviewScoresBtn);
@@ -872,6 +889,7 @@ FrogPilotControlsPanel::FrogPilotControlsPanel(SettingsWindow *parent) : FrogPil
 
           toggle->setVisible(modifiedQolKeys.find(key.c_str()) != modifiedQolKeys.end());
         }
+
         openParentToggle();
       });
       controlToggle = qolToggle;
@@ -906,6 +924,7 @@ FrogPilotControlsPanel::FrogPilotControlsPanel(SettingsWindow *parent) : FrogPil
         for (auto &[key, toggle] : toggles) {
           toggle->setVisible(laneChangeKeys.find(key.c_str()) != laneChangeKeys.end());
         }
+
         openParentToggle();
       });
       controlToggle = laneChangeToggle;
@@ -927,6 +946,7 @@ FrogPilotControlsPanel::FrogPilotControlsPanel(SettingsWindow *parent) : FrogPil
         for (auto &[key, toggle] : toggles) {
           toggle->setVisible(speedLimitControllerKeys.find(key.c_str()) != speedLimitControllerKeys.end());
         }
+
         openParentToggle();
       });
       controlToggle = speedLimitControllerToggle;
@@ -936,6 +956,7 @@ FrogPilotControlsPanel::FrogPilotControlsPanel(SettingsWindow *parent) : FrogPil
         for (auto &[key, toggle] : toggles) {
           toggle->setVisible(speedLimitControllerControlsKeys.find(key.c_str()) != speedLimitControllerControlsKeys.end());
         }
+
         openSubParentToggle();
       });
       controlToggle = manageSLCControlsToggle;
@@ -955,6 +976,7 @@ FrogPilotControlsPanel::FrogPilotControlsPanel(SettingsWindow *parent) : FrogPil
 
           toggle->setVisible(modifiedSpeedLimitControllerQOLKeys.find(key.c_str()) != modifiedSpeedLimitControllerQOLKeys.end());
         }
+
         openSubParentToggle();
       });
       controlToggle = manageSLCQOLToggle;
@@ -970,6 +992,7 @@ FrogPilotControlsPanel::FrogPilotControlsPanel(SettingsWindow *parent) : FrogPil
         for (auto &[key, toggle] : toggles) {
           toggle->setVisible(speedLimitControllerVisualsKeys.find(key.c_str()) != speedLimitControllerVisualsKeys.end());
         }
+
         openSubParentToggle();
       });
       controlToggle = manageSLCVisualsToggle;
@@ -1046,6 +1069,7 @@ FrogPilotControlsPanel::FrogPilotControlsPanel(SettingsWindow *parent) : FrogPil
         for (auto &[key, toggle] : toggles) {
           toggle->setVisible(visionTurnControlKeys.find(key.c_str()) != visionTurnControlKeys.end());
         }
+
         openParentToggle();
       });
       controlToggle = visionTurnControlToggle;
@@ -1600,6 +1624,9 @@ void FrogPilotControlsPanel::hideSubToggles() {
       bool isVisible = drivingPersonalityKeys.find(key.c_str()) != drivingPersonalityKeys.end();
       toggle->setVisible(isVisible);
     }
+
+    downloadStatusLabel->setVisible(onroadDistanceButton);
+    manageDistanceIconsBtn->setVisible(onroadDistanceButton);
   } else if (slcOpen) {
     for (auto &[key, toggle] : toggles) {
       bool isVisible = speedLimitControllerKeys.find(key.c_str()) != speedLimitControllerKeys.end();

@@ -908,7 +908,7 @@ void AnnotatedCameraWidget::paintFrogPilotWidgets(QPainter &painter) {
     drawSLCConfirmation(painter);
   }
 
-  if (turnSignalAnimation && (turnSignalLeft || turnSignalRight) && !bigMapOpen) {
+  if (turnSignalAnimation && (turnSignalLeft || turnSignalRight) && !bigMapOpen && (standstillDuration == 0 || signalStyle != "static")) {
     if (!animationTimer->isActive()) {
       animationTimer->start(signalAnimationLength);
     }
@@ -1212,8 +1212,8 @@ void AnnotatedCameraWidget::drawStatusBar(QPainter &p) {
     {12, tr("Experimental Mode activated for curve")},
     {13, tr("Experimental Mode activated for stopped lead")},
     {14, tr("Experimental Mode activated for slower lead")},
-    {15, tr("Experimental Mode activated for %1").arg(mapOpen || modelStopTime < 1 ? tr("model requesting stop") : QString("the model wanting to stop in %1 seconds").arg(modelStopTime))},
-    {16, tr("Experimental Mode forced on %1").arg(mapOpen || modelStopTime < 1 ? tr("to stop") : QString("for the model wanting to stop in %1 seconds").arg(modelStopTime))},
+    {15, tr("Experimental Mode activated %1").arg(mapOpen || modelStopTime < 1 || speed < 1 ? tr("to stop") : QString("for the model wanting to stop in %1 seconds").arg(modelStopTime))},
+    {16, tr("Experimental Mode forced on %1").arg(mapOpen || modelStopTime < 1 || speed < 1 ? tr("to stop") : QString("for the model wanting to stop in %1 seconds").arg(modelStopTime))},
     {17, tr("Experimental Mode activated due to no speed limit")},
   };
 
@@ -1282,7 +1282,7 @@ void AnnotatedCameraWidget::drawTurnSignals(QPainter &p) {
   bool blindspotActive = turnSignalLeft ? blindSpotLeft : blindSpotRight;
 
   if (signalStyle == "static") {
-    int signalXPosition = turnSignalLeft ? rect().center().x() - (speedTextWidth / (mapOpen ? 2 : 1)) - signalWidth : rect().center().x() + signalWidth;
+    int signalXPosition = turnSignalLeft ? rect().center().x() - speedTextWidth - signalWidth : rect().center().x() + signalWidth;
     int signalYPosition = signalHeight / 2;
 
     if (blindspotActive && !blindspotImages.empty()) {

@@ -257,6 +257,8 @@ void DistanceButton::updateIcon() {
       profile_data_png.push_back(pixmap);
     }
   }
+
+  personality = 0;
 }
 
 void DistanceButton::paintEvent(QPaintEvent *event) {
