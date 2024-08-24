@@ -7,6 +7,8 @@ from openpilot.selfdrive.car import dbc_dict, PlatformConfig, DbcDict, Platforms
 from openpilot.selfdrive.car.docs_definitions import CarHarness, CarDocs, CarParts
 from openpilot.selfdrive.car.fw_query_definitions import FwQueryConfig, Request, StdQueries
 
+from openpilot.selfdrive.frogpilot.controls.lib.frogpilot_variables import get_max_allowed_accel
+
 Ecu = car.CarParams.Ecu
 
 
@@ -81,6 +83,7 @@ class CarControllerParams:
   def update_ev_gas_brake_threshold(self, v_ego):
     gas_brake_threshold = interp(v_ego, self.EV_GAS_BRAKE_THRESHOLD_BP, self.EV_GAS_BRAKE_THRESHOLD_V)
     self.EV_GAS_LOOKUP_BP = [gas_brake_threshold, max(0., gas_brake_threshold), self.ACCEL_MAX]
+    self.EV_GAS_LOOKUP_BP_PLUS = [gas_brake_threshold, max(0., gas_brake_threshold), get_max_allowed_accel(v_ego)]
     self.EV_BRAKE_LOOKUP_BP = [self.ACCEL_MIN, gas_brake_threshold]
 
 
