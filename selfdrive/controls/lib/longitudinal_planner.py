@@ -173,7 +173,7 @@ class LongitudinalPlanner:
     return x, v, a, j
 
   def update(self, clairvoyant_model, e2e_longitudinal_model, sm, frogpilot_toggles):
-    self.mpc.mode = 'blended' if sm['controlsState'].experimentalMode or clairvoyant_model else 'acc'
+    self.mpc.mode = 'blended' if sm['controlsState'].experimentalMode and not clairvoyant_model else 'acc'
 
     v_ego = sm['carState'].vEgo
     v_cruise_kph = min(sm['controlsState'].vCruise, V_CRUISE_MAX)
