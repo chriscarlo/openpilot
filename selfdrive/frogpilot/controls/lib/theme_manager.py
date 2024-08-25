@@ -1,8 +1,10 @@
 import datetime
+import glob
 import os
 import re
 import requests
 import shutil
+import time
 import zipfile
 
 from openpilot.common.basedir import BASEDIR
@@ -17,7 +19,7 @@ def copy_theme_asset(asset_type, theme, holiday_theme, params):
   if holiday_theme:
     source_location = os.path.join(BASEDIR, "selfdrive", "frogpilot", "assets", "holiday_themes", holiday_theme, asset_type)
   else:
-    source_location = os.path.join(THEME_SAVE_PATH, theme, asset_type)
+    source_location = os.path.join(THEME_SAVE_PATH, "theme_packs", theme, asset_type)
 
   if not os.path.exists(source_location):
     if asset_type == "colors":
@@ -251,7 +253,7 @@ class ThemeManager:
       extentions = [".gif", ".png"]
     else:
       download_link = f"{repo_url}Themes/{theme_name}/{theme_component}"
-      download_path = os.path.join(THEME_SAVE_PATH, theme_name, theme_component)
+      download_path = os.path.join(THEME_SAVE_PATH, "theme_packs", theme_name, theme_component)
       extentions = [".zip"]
 
     for ext in extentions:
@@ -291,8 +293,8 @@ class ThemeManager:
     def filter_existing_assets(assets, subfolder):
       existing_themes = {
         theme.replace('_', ' ').title()
-        for theme in os.listdir(THEME_SAVE_PATH)
-        if os.path.isdir(os.path.join(THEME_SAVE_PATH, theme, subfolder))
+        for theme in os.listdir(os.path.join(THEME_SAVE_PATH, "theme_packs"))
+        if os.path.isdir(os.path.join(THEME_SAVE_PATH, "theme_packs", theme, subfolder))
       }
       return sorted(set(assets) - existing_themes)
 
@@ -322,12 +324,54 @@ class ThemeManager:
       }))
     )
 
-  def update_themes(self):
+  def validate_themes(self):
+    asset_mappings = {
+      "CustomColors": "colors",
+      "CustomDistanceIcons": "distance_icons",
+      "CustomIcons": "icons",
+      "CustomSounds": "sounds",
+      "CustomSignals": "signals",
+      "WheelIcon": "steering_wheels"
+    }
+
+    for theme_param, theme_component in asset_mappings.items():
+      theme_name = self.params.get(theme_param, encoding='utf-8')
+      if not theme_name or theme_name == "stock":
+        continue
+
+      if theme_component == "distance_icons":
+        theme_path = os.path.join(THEME_SAVE_PATH, theme_component, theme_name)
+      elif theme_component == "steering_wheels":
+        pattern = os.path.join(THEME_SAVE_PATH, theme_component, theme_name + ".*")
+        matching_files = glob.glob(pattern)
+
+        if matching_files:
+          theme_path = matching_files[0]
+        else:
+          theme_path = None
+      else:
+        theme_path = os.path.join(THEME_SAVE_PATH, "theme_packs", theme_name, theme_component)
+
+      if theme_path is None or not os.path.exists(theme_path):
+        print(f"{theme_name} for {theme_component} not found. Downloading...")
+        self.download_theme(theme_component, theme_name, theme_param)
+        self.previous_assets = {}
+        self.update_active_theme()
+
+  def update_themes(self, boot_run=True):
     if not os.path.exists(THEME_SAVE_PATH):
       return
 
     repo_url = get_repository_url()
-    if repo_url is None:
+    if boot_run:
+      boot_checks = 0
+      while repo_url is None and boot_checks < 60:
+        boot_checks += 1
+        if boot_checks > 60:
+          break
+        time.sleep(1)
+      self.validate_themes()
+    elif repo_url is None:
       print("GitHub and GitLab are offline...")
       return
 

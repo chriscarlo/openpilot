@@ -54,6 +54,10 @@ def backup_directory(backup, destination, success_message, fail_message, minimum
     if not compressed:
       os.makedirs(in_progress_destination, exist_ok=False)
       run_cmd(["sudo", "rsync", "-avq", os.path.join(backup, "."), in_progress_destination], success_message, fail_message)
+
+      if os.path.exists(destination):
+        shutil.rmtree(destination)
+
       os.rename(in_progress_destination, destination)
       print(f"Backup successfully created at {destination}.")
     else:
@@ -211,40 +215,32 @@ def setup_frogpilot(build_metadata):
   os.makedirs(MODELS_PATH, exist_ok=True)
   os.makedirs(THEME_SAVE_PATH, exist_ok=True)
 
-  frog_color_source = os.path.join(ACTIVE_THEME_PATH, "colors")
-  frog_color_destination = os.path.join(THEME_SAVE_PATH, "frog/colors")
+  def copy_if_exists(source, destination):
+    if os.path.exists(source):
+      shutil.copytree(source, destination, dirs_exist_ok=True)
+      print(f"Successfully copied {source} to {destination}.")
+    else:
+      print(f"Source directory {source} does not exist. Skipping copy.")
 
-  if not os.path.exists(frog_color_destination):
-    shutil.copytree(frog_color_source, frog_color_destination)
-    print(f"Successfully copied {frog_color_source} to the theme save path.")
+  frog_color_source = os.path.join(ACTIVE_THEME_PATH, "colors")
+  frog_color_destination = os.path.join(THEME_SAVE_PATH, "theme_packs/frog/colors")
+  copy_if_exists(frog_color_source, frog_color_destination)
 
   frog_distance_icon_source = os.path.join(ACTIVE_THEME_PATH, "distance_icons")
   frog_distance_icon_destination = os.path.join(THEME_SAVE_PATH, "distance_icons/frog-animated")
-
-  if not os.path.exists(frog_distance_icon_destination):
-    shutil.copytree(frog_distance_icon_source, frog_distance_icon_destination)
-    print(f"Successfully copied {frog_distance_icon_source} to the theme save path.")
+  copy_if_exists(frog_distance_icon_source, frog_distance_icon_destination)
 
   frog_icon_source = os.path.join(ACTIVE_THEME_PATH, "icons")
-  frog_icon_destination = os.path.join(THEME_SAVE_PATH, "frog-animated/icons")
-
-  if not os.path.exists(frog_icon_destination):
-    shutil.copytree(frog_icon_source, frog_icon_destination)
-    print(f"Successfully copied {frog_icon_source} to the theme save path.")
+  frog_icon_destination = os.path.join(THEME_SAVE_PATH, "theme_packs/frog-animated/icons")
+  copy_if_exists(frog_icon_source, frog_icon_destination)
 
   frog_signal_source = os.path.join(ACTIVE_THEME_PATH, "signals")
-  frog_signal_destination = os.path.join(THEME_SAVE_PATH, "frog/signals")
-
-  if not os.path.exists(frog_signal_destination):
-    shutil.copytree(frog_signal_source, frog_signal_destination)
-    print(f"Successfully copied {frog_signal_source} to the theme save path.")
+  frog_signal_destination = os.path.join(THEME_SAVE_PATH, "theme_packs/frog/signals")
+  copy_if_exists(frog_signal_source, frog_signal_destination)
 
   frog_sound_source = os.path.join(ACTIVE_THEME_PATH, "sounds")
-  frog_sound_destination = os.path.join(THEME_SAVE_PATH, "frog/sounds")
-
-  if not os.path.exists(frog_sound_destination):
-    shutil.copytree(frog_sound_source, frog_sound_destination)
-    print(f"Successfully copied {frog_sound_source} to the theme save path.")
+  frog_sound_destination = os.path.join(THEME_SAVE_PATH, "theme_packs/frog/sounds")
+  copy_if_exists(frog_sound_source, frog_sound_destination)
 
   steering_wheel_source = os.path.join(ACTIVE_THEME_PATH, "steering_wheel")
   steering_wheel_destination = os.path.join(THEME_SAVE_PATH, "steering_wheels")

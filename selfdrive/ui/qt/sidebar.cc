@@ -60,10 +60,10 @@ void Sidebar::updateIcon(QLabel *&label, QMovie *&gif, const QString &gifPath, c
   }
 
   if (gif != nullptr) {
+    gif->stop();
     delete gif;
     gif = nullptr;
     label->hide();
-    isGif = false;
   }
 
   if (QFile::exists(selectedGifPath)) {
@@ -84,6 +84,8 @@ void Sidebar::updateIcon(QLabel *&label, QMovie *&gif, const QString &gifPath, c
     } else {
       settings_img = loadPixmap(settingsPngPath, btnRect.size(), Qt::IgnoreAspectRatio);
     }
+
+    isGif = false;
   }
 }
 
@@ -176,7 +178,23 @@ void Sidebar::offroadTransition(bool offroad) {
 }
 
 void Sidebar::updateState(const UIState &s) {
-  if (!isVisible()) return;
+  if (!isVisible()) {
+    if (home_gif != nullptr) {
+      home_gif->stop();
+      delete home_gif;
+      home_gif = nullptr;
+      home_label->hide();
+    }
+
+    if (settings_gif != nullptr) {
+      settings_gif->stop();
+      delete settings_gif;
+      settings_gif = nullptr;
+      settings_label->hide();
+    }
+
+    return;
+  }
 
   auto &sm = *(s.sm);
 

@@ -89,7 +89,7 @@ def time_checks(automatic_updates, deviceState, model_manager, now, started, the
     model_manager.update_models(boot_run=False)
 
   with locks["update_themes"]:
-    theme_manager.update_themes()
+    theme_manager.update_themes(boot_run=False)
 
 def toggle_updates(frogpilot_toggles, started, time_validated, params, params_storage):
   FrogPilotVariables.update_frogpilot_params(started, True)
@@ -144,7 +144,7 @@ def frogpilot_thread():
 
   run_time_checks = False
   started_previously = False
-  time_validated = system_time_valid()
+  time_validated = False
   update_toggles = False
 
   pm = messaging.PubMaster(['frogpilotPlan'])
@@ -194,9 +194,8 @@ def frogpilot_thread():
         time_validated = system_time_valid()
         if not time_validated:
           continue
-        if deviceState.networkType == WIFI:
-          run_thread_with_lock("update_models", model_manager.update_models)
-          run_thread_with_lock("update_themes", theme_manager.update_themes)
+        run_thread_with_lock("update_models", model_manager.update_models)
+        run_thread_with_lock("update_themes", theme_manager.update_themes)
 
       theme_manager.update_holiday()
 

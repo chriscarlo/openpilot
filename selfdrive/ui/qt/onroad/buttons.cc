@@ -36,9 +36,11 @@ ExperimentalButton::ExperimentalButton(QWidget *parent) : experimental_mode(fals
 }
 
 ExperimentalButton::~ExperimentalButton() {
-  if (gif) {
+  if (gif != nullptr) {
     gif->stop();
     delete gif;
+    gif = nullptr;
+    gif_label->hide();
   }
 }
 
@@ -122,12 +124,10 @@ void ExperimentalButton::updateBackgroundColor() {
 }
 
 void ExperimentalButton::updateIcon() {
-  if (use_gif) {
-    if (gif != nullptr) {
-      gif->stop();
-      delete gif;
-      gif = nullptr;
-    }
+  if (gif != nullptr) {
+    gif->stop();
+    delete gif;
+    gif = nullptr;
     gif_label->hide();
   }
 
@@ -195,6 +195,8 @@ DistanceButton::DistanceButton(QWidget *parent) : QPushButton(parent) {
 
 DistanceButton::~DistanceButton() {
   qDeleteAll(profile_data_gif);
+  profile_data_gif.clear();
+  profile_data_png.clear();
 }
 
 void DistanceButton::updateState(const UIScene &scene) {

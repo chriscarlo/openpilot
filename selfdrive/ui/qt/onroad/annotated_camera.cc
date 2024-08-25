@@ -673,7 +673,7 @@ void AnnotatedCameraWidget::showEvent(QShowEvent *event) {
   ui_update_params(uiState());
   prev_draw_t = millis_since_boot();
 
-  // Update FrogPilot button icons
+  // Update FrogPilot images
   distance_btn->updateIcon();
   experimental_btn->updateIcon();
   updateSignals();
@@ -912,7 +912,7 @@ void AnnotatedCameraWidget::paintFrogPilotWidgets(QPainter &painter) {
     drawSLCConfirmation(painter);
   }
 
-  if (turnSignalAnimation && (turnSignalLeft || turnSignalRight) && !bigMapOpen && (standstillDuration == 0 || signalStyle != "static")) {
+  if (turnSignalAnimation && (turnSignalLeft || turnSignalRight) && !bigMapOpen && ((!mapOpen && standstillDuration == 0) || signalStyle != "static")) {
     if (!animationTimer->isActive()) {
       animationTimer->start(signalAnimationLength);
     }
@@ -1286,7 +1286,7 @@ void AnnotatedCameraWidget::drawTurnSignals(QPainter &p) {
   bool blindspotActive = turnSignalLeft ? blindSpotLeft : blindSpotRight;
 
   if (signalStyle == "static") {
-    int signalXPosition = turnSignalLeft ? rect().center().x() - std::max(signalWidth, speedTextWidth) - signalWidth + (mapOpen ? UI_BORDER_SIZE : 0) : rect().center().x() + signalWidth;
+    int signalXPosition = turnSignalLeft ? width() / 2 - speedTextWidth - (signalWidth * 2) : width() / 2 + (signalWidth * 2);
     int signalYPosition = signalHeight / 2;
 
     if (blindspotActive && !blindspotImages.empty()) {

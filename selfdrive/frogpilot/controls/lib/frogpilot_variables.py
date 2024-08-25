@@ -189,8 +189,8 @@ class FrogPilotVariables:
     self.params_memory.put_float("MapTargetLatA", 2 * (self.params.get_int("MTSCAggressiveness") / 100.))
 
     toggle.model_manager = self.params.get_bool("ModelManagement", block=openpilot_installed)
-    available_models = self.params.get("AvailableModels", block=toggle.model_manager, encoding='utf-8')
-    available_model_names = self.params.get("AvailableModelsNames", block=toggle.model_manager, encoding='utf-8')
+    available_models = self.params.get("AvailableModels", block=toggle.model_manager, encoding='utf-8') or ''
+    available_model_names = self.params.get("AvailableModelsNames", block=toggle.model_manager, encoding='utf-8') or ''
     current_model = self.params_memory.get("CurrentModel", encoding='utf-8')
     current_model_name = self.params_memory.get("CurrentModelName", encoding='utf-8')
     if toggle.model_manager and available_models and (current_model is None or not started):
@@ -214,9 +214,9 @@ class FrogPilotVariables:
       toggle.model = DEFAULT_MODEL
       current_model_name = DEFAULT_MODEL_NAME
       toggle.part_model_param = ""
-    navigation_models = (self.params.get("NavigationModels", encoding='utf-8') or '')
+    navigation_models = self.params.get("NavigationModels", encoding='utf-8') or ''
     toggle.navigationless_model = navigation_models and toggle.model not in navigation_models.split(',')
-    radarless_models = (self.params.get("RadarlessModels", encoding='utf-8') or '')
+    radarless_models = self.params.get("RadarlessModels", encoding='utf-8') or ''
     toggle.radarless_model = radarless_models and toggle.model in radarless_models.split(',')
     toggle.clairvoyant_model = toggle.model == "clairvoyant-driver"
     toggle.secretgoodopenpilot_model = toggle.model == "secret-good-openpilot"

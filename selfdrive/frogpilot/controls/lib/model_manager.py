@@ -169,12 +169,18 @@ class ModelManager:
         print(f"Source default model not found at {source_path}. Exiting...")
 
   def update_models(self, boot_run=True):
+    self.repo_url = get_repository_url()
     if boot_run:
       self.copy_default_model()
+      boot_checks = 0
+      while self.repo_url is None and boot_checks < 60:
+        boot_checks += 1
+        if boot_checks > 60:
+          break
+        time.sleep(1)
       self.validate_models()
-
-    self.repo_url = get_repository_url()
-    if not self.repo_url:
+    elif self.repo_url is None:
+      print("GitHub and GitLab are offline...")
       return
 
     model_info = self.fetch_models(f"{self.repo_url}Versions/model_names_{VERSION}.json")
