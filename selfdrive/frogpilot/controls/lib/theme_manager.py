@@ -279,15 +279,23 @@ class ThemeManager:
 
   @staticmethod
   def fetch_files(url):
-    response = requests.get(url)
-    response.raise_for_status()
-    return [name for name in re.findall(r'href="[^"]*\/blob\/[^"]*\/([^"]*)"', response.text) if name.lower() != "license"]
+    try:
+      response = requests.get(url, timeout=10)
+      response.raise_for_status()
+      return [name for name in re.findall(r'href="[^"]*\/blob\/[^"]*\/([^"]*)"', response.text) if name.lower() != "license"]
+    except Exception as error:
+      handle_request_error(error, None, None, None, None)
+      return []
 
   @staticmethod
   def fetch_folders(url):
-    response = requests.get(url)
-    response.raise_for_status()
-    return re.findall(r'href="[^"]*\/tree\/[^"]*\/([^"]*)"', response.text)
+    try:
+      response = requests.get(url, timeout=10)
+      response.raise_for_status()
+      return re.findall(r'href="[^"]*\/tree\/[^"]*\/([^"]*)"', response.text)
+    except Exception as error:
+      handle_request_error(error, None, None, None, None)
+      return []
 
   def update_theme_params(self, downloadable_colors, downloadable_distance_icons, downloadable_icons, downloadable_signals, downloadable_sounds, downloadable_wheels):
     def filter_existing_assets(assets, subfolder):

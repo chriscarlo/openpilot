@@ -67,8 +67,12 @@ class ModelManager:
       self.handle_verification_failure(model_to_download, model_path)
 
   def fetch_models(self, url):
-    with urllib.request.urlopen(url) as response:
-      return json.loads(response.read().decode('utf-8'))['models']
+    try:
+      with urllib.request.urlopen(url, timeout=10) as response:
+        return json.loads(response.read().decode('utf-8'))['models']
+    except Exception as error:
+      handle_request_error(error, None, None, None, None)
+      return []
 
   def update_model_params(self, model_info):
     available_models, available_model_names, experimental_models, navigation_models, radarless_models = [], [], [], [], []

@@ -1,5 +1,5 @@
-from openpilot.selfdrive.frogpilot.controls.lib.frogpilot_functions import MovingAverageCalculator
-from openpilot.selfdrive.frogpilot.controls.lib.frogpilot_variables import CITY_SPEED_LIMIT, PROBABILITY
+from openpilot.selfdrive.frogpilot.controls.lib.frogpilot_functions import WeightedMovingAverageCalculator
+from openpilot.selfdrive.frogpilot.controls.lib.frogpilot_variables import CITY_SPEED_LIMIT, THRESHOLD
 
 class ConditionalExperimentalMode:
   def __init__(self, FrogPilotPlanner):
@@ -7,9 +7,9 @@ class ConditionalExperimentalMode:
 
     self.params_memory = self.frogpilot_planner.params_memory
 
-    self.curvature_mac = MovingAverageCalculator()
-    self.slow_lead_mac = MovingAverageCalculator()
-    self.stop_light_mac = MovingAverageCalculator()
+    self.curvature_wmac = WeightedMovingAverageCalculator(window_size=5)
+    self.slow_lead_wmac = WeightedMovingAverageCalculator(window_size=3)
+    self.stop_light_wmac = WeightedMovingAverageCalculator(window_size=5)
 
     self.curve_detected = False
     self.experimental_mode = False
@@ -72,10 +72,10 @@ class ConditionalExperimentalMode:
       curve_detected = (1 / self.frogpilot_planner.road_curvature)**0.5 < v_ego
       curve_active = (0.9 / self.frogpilot_planner.road_curvature)**0.5 < v_ego and self.curve_detected
 
-      self.curvature_mac.add_data(curve_detected or curve_active)
-      self.curve_detected = self.curvature_mac.get_moving_average() >= PROBABILITY
+      self.curvature_wmac.add_data(curve_detected or curve_active)
+      self.curve_detected = self.curvature_wmac.get_weighted_average() >= THRESHOLD
     else:
-      self.curvature_mac.reset_data()
+      self.curvature_wmac.reset_data()
       self.curve_detected = False
 
   def slow_lead(self, tracking_lead, v_lead, frogpilot_toggles):
@@ -83,18 +83,18 @@ class ConditionalExperimentalMode:
       slower_lead = self.frogpilot_planner.frogpilot_following.slower_lead and frogpilot_toggles.conditional_slower_lead
       stopped_lead = frogpilot_toggles.conditional_stopped_lead and v_lead < 1
 
-      self.slow_lead_mac.add_data(slower_lead or stopped_lead)
-      self.slow_lead_detected = self.slow_lead_mac.get_moving_average() >= PROBABILITY
+      self.slow_lead_wmac.add_data(slower_lead or stopped_lead)
+      self.slow_lead_detected = self.slow_lead_wmac.get_weighted_average() >= THRESHOLD
     else:
-      self.slow_lead_mac.reset_data()
+      self.slow_lead_wmac.reset_data()
       self.slow_lead_detected = False
 
   def stop_sign_and_light(self, tracking_lead, v_ego, frogpilot_toggles):
     if not (self.curve_detected or tracking_lead):
       model_stopping = self.frogpilot_planner.model_length < v_ego * frogpilot_toggles.conditional_model_stop_time
 
-      self.stop_light_mac.add_data(self.frogpilot_planner.model_stopped or model_stopping)
-      self.stop_light_detected = self.stop_light_mac.get_moving_average() >= PROBABILITY
+      self.stop_light_wmac.add_data(self.frogpilot_planner.model_stopped or model_stopping)
+      self.stop_light_detected = self.stop_light_wmac.get_weighted_average() >= THRESHOLD
     else:
-      self.stop_light_mac.reset_data()
+      self.stop_light_wmac.reset_data()
       self.stop_light_detected = False

@@ -56,7 +56,7 @@ FrogPilotControlsPanel::FrogPilotControlsPanel(SettingsWindow *parent) : FrogPil
     {"CustomPersonalities", tr("Customize Personalities"), tr("Customize the driving personality profiles to your driving style."), ""},
     {"PersonalityInfo", tr("What Do All These Do?"), tr("Learn what all the values in 'Custom Personality Profiles' do on openpilot's driving behaviors."), ""},
     {"TrafficPersonalityProfile", tr("Traffic Personality"), tr("Customize the 'Traffic' personality profile."), "../frogpilot/assets/stock_theme/distance_icons/traffic.png"},
-    {"TrafficFollow", tr("Following Distance"), tr("Set the minimum following distance when using 'Traffic Mode'. Your following distance will dynamically adjust between this distance and the following distance from the 'Aggressive' profile when driving between 0 and %1.\n\nFor example:\n\nTraffic Mode: 0.5s\nAggressive: 1.0s\n\n0%2 = 0.5s\n%3 = 0.75s\n%1 = 1.0s"), ""},
+    {"TrafficFollow", tr("Following Distance"), tr("Set the minimum following distance when using 'Traffic Mode'. Your following distance will dynamically adjust between this distance and the following distance from the 'Aggressive' profile."), ""},
     {"TrafficJerkAcceleration", tr("Acceleration Jerk"), tr("Customize the acceleration jerk when using 'Traffic Mode'."), ""},
     {"TrafficJerkDanger", tr("Danger Zone Jerk"), tr("Customize the danger zone jerk when using the 'Traffic' personality."), ""},
     {"TrafficJerkSpeed", tr("Speed Control Jerk"), tr("Customize the speed control jerk when using 'Traffic Mode'."), ""},
