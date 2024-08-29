@@ -1,4 +1,4 @@
-from openpilot.common.numpy_fast import clip, interp
+from openpilot.common.numpy_fast import clip, interp, exp
 
 from openpilot.selfdrive.car.interfaces import ACCEL_MIN, ACCEL_MAX
 from openpilot.selfdrive.controls.lib.longitudinal_planner import A_CRUISE_MIN, get_max_accel
@@ -22,8 +22,24 @@ def get_max_accel_sport(v_ego):
 def get_max_accel_sport_plus(v_ego):
   return interp(v_ego, A_CRUISE_MAX_BP_CUSTOM, A_CRUISE_MAX_VALS_SPORT_PLUS)
 
+"""
 def get_max_accel_ramp_off(max_accel, v_cruise, v_ego):
   return interp(v_ego, [0., v_cruise * 0.5, v_cruise * 0.75, v_cruise], [max_accel, max_accel, max_accel / 2, max_accel / 4])
+"""
+
+def get_max_accel_ramp_off(max_accel, v_cruise, v_ego):
+    def get_adaptive_transition_point(v_cruise):
+        if v_cruise <= 25:
+            return 0.5
+        elif v_cruise >= 65:
+            return 0.8
+        else:
+            return 0.5 + (v_cruise - 25) * (0.8 - 0.5) / (55 - 25)
+
+    v_normalized = v_ego / v_cruise
+    transition_point = get_adaptive_transition_point(v_cruise)
+    transition = 1 / (1 + exp((v_normalized - transition_point) * 10))
+    return max_accel * (0.25 + 0.75 * transition)
 
 class FrogPilotAcceleration:
   def __init__(self, FrogPilotPlanner):
