@@ -36,7 +36,7 @@ def get_max_accel_ramp_off(max_accel, v_cruise, v_ego):
         else:
             return 0.5 + (v_cruise - 25) * (0.8 - 0.5) / (55 - 25)
 
-    v_normalized = v_ego / v_cruise
+    v_normalized = v_ego / max(v_cruise, 1e-6)
     transition_point = get_adaptive_transition_point(v_cruise)
     transition = 1 / (1 + exp((v_normalized - transition_point) * 10))
     return max_accel * (0.25 + 0.75 * transition)
