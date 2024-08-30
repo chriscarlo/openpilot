@@ -19,4 +19,4 @@ def mean(x):
   return sum(x) / len(x)
 
 def exp(x):
-  return 2.718281828459045**x
+  return 2.71828**x

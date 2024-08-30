@@ -27,19 +27,26 @@ def get_max_accel_ramp_off(max_accel, v_cruise, v_ego):
   return interp(v_ego, [0., v_cruise * 0.5, v_cruise * 0.75, v_cruise], [max_accel, max_accel, max_accel / 2, max_accel / 4])
 """
 
-def get_max_accel_ramp_off(max_accel, v_cruise, v_ego):
-    def get_adaptive_transition_point(v_cruise):
-        if v_cruise <= 25:
-            return 0.5
-        elif v_cruise >= 65:
-            return 0.8
-        else:
-            return 0.5 + (v_cruise - 25) * (0.8 - 0.5) / (55 - 25)
+EPSILON = 1e-6
 
-    v_normalized = v_ego / max(v_cruise, 1e-6)
-    transition_point = get_adaptive_transition_point(v_cruise)
-    transition = 1 / (1 + exp((v_normalized - transition_point) * 10))
-    return max_accel * (0.25 + 0.75 * transition)
+def get_max_accel_ramp_off(max_accel, v_cruise, v_ego):
+  def get_adaptive_transition_point(v_cruise):
+    if v_cruise <= 25:
+      return 0.5
+    elif v_cruise >= 65:
+      return 0.8
+    else:
+      return 0.5 + (v_cruise - 25) * (0.8 - 0.5) / max(65 - 25, EPSILON)
+
+  v_normalized = v_ego / max(v_cruise, EPSILON)
+  transition_point = get_adaptive_transition_point(v_cruise)
+
+  x = (v_normalized - transition_point) * 10
+  if x < -2:
+    transition = 1 / max(1 + exp(x * 0.5), EPSILON)
+  else:
+    transition = 1 / max(1 + exp(x), EPSILON)
+  return max_accel * (0.25 + 0.75 * transition)
 
 class FrogPilotAcceleration:
   def __init__(self, FrogPilotPlanner):
