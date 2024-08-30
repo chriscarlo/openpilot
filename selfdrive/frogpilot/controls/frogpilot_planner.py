@@ -122,6 +122,9 @@ class FrogPilotPlanner:
     self.tracking_lead = self.set_lead_status(lead_distance, stopping_distance, v_ego)
     if frogpilot_toggles.openpilot_longitudinal:
       self.v_cruise = self.frogpilot_vcruise.update(carState, controlsState, frogpilotCarControl, frogpilotCarState, frogpilotNavigation, modelData, v_cruise, v_ego, frogpilot_toggles)
+    else:
+      self.frogpilot_vcruise.mtsc_target = v_cruise
+      self.frogpilot_vcruise.vtsc_target = v_cruise
 
     if self.frogpilot_events.frame == 1:  # Force update to check the current state of "Always On Lateral" and holiday theme
       update_frogpilot_toggles()

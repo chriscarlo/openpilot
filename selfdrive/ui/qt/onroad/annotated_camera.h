@@ -168,7 +168,6 @@ private:
   int signalAnimationLength;
   int signalHeight;
   int signalWidth;
-  int speedTextWidth;
   int standstillDuration;
   int statusBarHeight;
   int stoppedEquivalence;

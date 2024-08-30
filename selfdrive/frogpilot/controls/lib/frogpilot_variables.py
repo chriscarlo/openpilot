@@ -107,6 +107,8 @@ class FrogPilotVariables:
     toggle.conditional_navigation_lead = toggle.conditional_navigation and self.params.get_bool("CENavigationLead")
     toggle.conditional_navigation_turns = toggle.conditional_navigation and self.params.get_bool("CENavigationTurns")
     toggle.conditional_signal = toggle.conditional_experimental_mode and self.params.get_bool("CESignal")
+    if toggle.conditional_experimental_mode:
+      self.params.put_bool("ExperimentalMode", True)
 
     custom_alerts = self.params.get_bool("CustomAlerts")
     toggle.green_light_alert = custom_alerts and self.params.get_bool("GreenLightAlert")

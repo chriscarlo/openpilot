@@ -260,8 +260,6 @@ void AnnotatedCameraWidget::drawHud(QPainter &p) {
       p.setFont(InterFont(176, QFont::Bold));
       drawText(p, rect().center().x(), 210, speedStr);
       p.setFont(InterFont(66));
-      QFontMetrics metrics(p.font());
-      speedTextWidth = metrics.boundingRect(speedUnit).width();
       drawText(p, rect().center().x(), 290, speedUnit, 200);
     }
   }
@@ -1286,7 +1284,7 @@ void AnnotatedCameraWidget::drawTurnSignals(QPainter &p) {
   bool blindspotActive = turnSignalLeft ? blindSpotLeft : blindSpotRight;
 
   if (signalStyle == "static") {
-    int signalXPosition = turnSignalLeft ? rect().center().x() - signalWidth - speedTextWidth : rect().center().x() + signalWidth + speedTextWidth;
+    int signalXPosition = turnSignalLeft ? (rect().center().x() * 0.75) - signalWidth : rect().center().x() * 1.25;
     int signalYPosition = signalHeight / 2;
 
     if (blindspotActive && !blindspotImages.empty()) {
