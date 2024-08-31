@@ -47,5 +47,13 @@ jobs:
         run: |
           git fetch origin
           git checkout ${{ env.TARGET_BRANCH }}
-          git cherry-pick temp-branch -X theirs
+          git cherry-pick temp-branch -X theirs || {
+            if git status | grep -q "nothing to commit, working tree clean"; then
+              echo "Empty commit detected, skipping cherry-pick."
+              git cherry-pick --skip
+            else
+              echo "Continuing with cherry-pick."
+              git cherry-pick --continue
+            fi
+          }
           git push origin ${{ env.TARGET_BRANCH }}

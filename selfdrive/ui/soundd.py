@@ -81,6 +81,8 @@ class Soundd:
     # FrogPilot variables
     self.frogpilot_toggles = FrogPilotVariables.toggles
 
+    self.previous_sound_pack = "stock"
+
     self.random_events_directory = os.path.join(RANDOM_EVENTS_PATH, "sounds/")
 
     self.random_events_map = {
@@ -238,7 +240,9 @@ class Soundd:
     else:
       self.sound_directory = os.path.join(BASEDIR, "selfdrive", "assets", "sounds/")
 
-    self.load_sounds()
+    if self.frogpilot_toggles.sound_pack != self.previous_sound_pack:
+      self.load_sounds()
+      self.previous_sound_pack = self.frogpilot_toggles.sound_pack
 
 def main():
   s = Soundd()

@@ -103,7 +103,6 @@ class TorqueEstimator(ParameterEstimator):
     params_cache = params.get("CarParamsPrevRoute")
     self.torque_key = frogpilot_toggles.part_model_param + "LiveTorqueParameters"
     torque_cache = params.get(self.torque_key)
-    print(f"torque_cache: {self.torque_key}")
     if params_cache is not None and torque_cache is not None:
       try:
         with log.Event.from_bytes(torque_cache) as log_evt:

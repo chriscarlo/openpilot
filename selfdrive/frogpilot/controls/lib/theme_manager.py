@@ -34,7 +34,7 @@ def copy_theme_asset(asset_type, theme, holiday_theme, params):
         shutil.rmtree(save_location)
       print(f"Using the stock {asset_type[:-1]} instead")
       return
-  else:
+  elif asset_type == "colors":
     params.put_bool("UseStockColors", False)
 
   if os.path.exists(save_location):

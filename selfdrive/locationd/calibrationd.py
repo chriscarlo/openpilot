@@ -75,7 +75,6 @@ class Calibrator:
     self.params = Params()
     self.calibration_key = frogpilot_toggles.part_model_param + "CalibrationParams"
     calibration_params = self.params.get(self.calibration_key)
-    print(f"calibration_params: {self.calibration_key}")
     rpy_init = RPY_INIT
     wide_from_device_euler = WIDE_FROM_DEVICE_EULER_INIT
     height = HEIGHT_INIT

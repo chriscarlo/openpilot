@@ -62,7 +62,7 @@ class RouteEngine:
       self.mapbox_host = "https://api.mapbox.com"
     else:
       self.api = Api(self.params.get("DongleId", encoding='utf8'))
-      self.mapbox_host = "https://maps.comma.ai"
+      self.mapbox_host = os.getenv('MAPS_HOST', 'https://maps.comma.ai')
 
     # FrogPilot variables
     self.frogpilot_toggles = FrogPilotVariables.toggles
