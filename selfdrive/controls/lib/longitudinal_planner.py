@@ -165,7 +165,7 @@ class LongitudinalPlanner:
       j = np.zeros(len(T_IDXS_MPC))
 
     if taco_tune:
-      max_lat_accel = interp(v_ego, [5, 10, 20, 30, 40, 50, 60, 70], [8.0, 7.71, 7.43, 7.14, 6.86, 6.57, 6.29, 6.0])
+      max_lat_accel = interp(v_ego, [5, 10, 20, 30, 40, 50, 60, 70], [10.0, 8.5, 7.0, 5.71, 4.29, 3.86, 3.43, 3.0])
       curvatures = np.interp(T_IDXS_MPC, ModelConstants.T_IDXS, model_msg.orientationRate.z) / np.clip(v, 0.3, 100.0)
       max_v = np.sqrt(max_lat_accel / (np.abs(curvatures) + 1e-3)) - 0.8
       v = np.minimum(max_v, v)
