@@ -43,9 +43,10 @@ def get_max_accel_ramp_off(max_accel, v_cruise, v_ego):
 
   x = (v_normalized - transition_point) * 10
   if x < -2:
-    transition = 1 / max(1 + exp(x * 0.5), EPSILON)
+    transition = 1 / max(1 + exp(x * 0.4), EPSILON)
   else:
     transition = 1 / max(1 + exp(x), EPSILON)
+
   return max_accel * (0.25 + 0.75 * transition)
 
 class FrogPilotAcceleration:
