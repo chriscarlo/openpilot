@@ -101,6 +101,7 @@ class Soundd:
     self.update_toggles = False
 
     self.update_frogpilot_sounds()
+    self.load_sounds()  # Add this line to load sounds on initialization
 
   def load_sounds(self):
     self.loaded_sounds: dict[int, np.ndarray] = {}
@@ -184,38 +185,44 @@ class Soundd:
 
     sm = messaging.SubMaster(['controlsState', 'microphone'])
 
-    with self.get_stream(sd) as stream:
-      rk = Ratekeeper(20)
+    while True:  # Add an outer loop to handle stream restarts
+      try:
+        with self.get_stream(sd) as stream:
+          rk = Ratekeeper(20)
 
-      cloudlog.info(f"soundd stream started: {stream.samplerate=} {stream.channels=} {stream.dtype=} {stream.device=}, {stream.blocksize=}")
-      while True:
-        sm.update(0)
+          cloudlog.info(f"soundd stream started: {stream.samplerate=} {stream.channels=} {stream.dtype=} {stream.device=}, {stream.blocksize=}")
+          while stream.active:
+            sm.update(0)
 
-        if sm.updated['microphone'] and self.current_alert == AudibleAlert.none: # only update volume filter when not playing alert
-          if self.frogpilot_toggles.alert_volume_control:
-            self.current_volume = 0.0
-          else:
-            self.spl_filter_weighted.update(sm["microphone"].soundPressureWeightedDb)
-            self.current_volume = self.calculate_volume(float(self.spl_filter_weighted.x))
+            if sm.updated['microphone'] and self.current_alert == AudibleAlert.none: # only update volume filter when not playing alert
+              if self.frogpilot_toggles.alert_volume_control:
+                self.current_volume = 0.0
+              else:
+                self.spl_filter_weighted.update(sm["microphone"].soundPressureWeightedDb)
+                self.current_volume = self.calculate_volume(float(self.spl_filter_weighted.x))
 
-        elif self.frogpilot_toggles.alert_volume_control and self.current_alert in self.volume_map:
-          self.current_volume = self.volume_map[self.current_alert] / 100.0
+            elif self.frogpilot_toggles.alert_volume_control and self.current_alert in self.volume_map:
+              self.current_volume = self.volume_map[self.current_alert] / 100.0
 
-        elif self.current_alert in self.random_events_map:
-          self.current_volume = self.random_events_map[self.current_alert]
+            elif self.current_alert in self.random_events_map:
+              self.current_volume = self.random_events_map[self.current_alert]
 
-        self.get_audible_alert(sm)
+            self.get_audible_alert(sm)
 
-        rk.keep_time()
+            rk.keep_time()
 
-        assert stream.active
+            # Update FrogPilot parameters
+            if FrogPilotVariables.toggles_updated:
+              self.update_toggles = True
+            elif self.update_toggles:
+              self.update_frogpilot_sounds()
+              self.load_sounds()  # Reload sounds after updating FrogPilot sounds
+              self.update_toggles = False
 
-        # Update FrogPilot parameters
-        if FrogPilotVariables.toggles_updated:
-          self.update_toggles = True
-        elif self.update_toggles:
-          self.update_frogpilot_sounds()
-          self.update_toggles = False
+          cloudlog.warning("soundd stream became inactive, restarting...")
+      except Exception as e:
+        cloudlog.exception(f"Error in soundd thread: {e}")
+        time.sleep(5)  # Wait before attempting to restart
 
   def update_frogpilot_sounds(self):
     FrogPilotVariables.update_frogpilot_params()
@@ -241,7 +248,6 @@ class Soundd:
       self.sound_directory = os.path.join(BASEDIR, "selfdrive", "assets", "sounds/")
 
     if self.frogpilot_toggles.sound_pack != self.previous_sound_pack:
-      self.load_sounds()
       self.previous_sound_pack = self.frogpilot_toggles.sound_pack
 
 def main():
