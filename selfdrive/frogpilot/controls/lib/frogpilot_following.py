@@ -1,8 +1,7 @@
 from openpilot.common.numpy_fast import clip, interp
-
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import COMFORT_BRAKE, get_jerk_factor, get_safe_obstacle_distance, get_stopped_equivalence_factor, get_T_FOLLOW
-
 from openpilot.selfdrive.frogpilot.controls.lib.frogpilot_variables import CITY_SPEED_LIMIT, CRUISING_SPEED
+from selfdrive.frogpilot.controls.lib.dynamic_follow import get_dynamic_follow
 
 TRAFFIC_MODE_BP = [0., CITY_SPEED_LIMIT]
 
@@ -35,11 +34,13 @@ class FrogPilotFollowing:
         frogpilot_toggles.relaxed_jerk_acceleration, frogpilot_toggles.relaxed_jerk_danger, frogpilot_toggles.relaxed_jerk_speed,
         frogpilot_toggles.custom_personalities, controlsState.personality
       )
-      self.t_follow = get_T_FOLLOW(
+      self.t_follow = get_dynamic_follow(
         frogpilot_toggles.aggressive_follow,
         frogpilot_toggles.standard_follow,
         frogpilot_toggles.relaxed_follow,
-        frogpilot_toggles.custom_personalities, controlsState.personality
+        frogpilot_toggles.custom_personalities,
+        controlsState.personality,
+        v_ego
       )
 
     if self.frogpilot_planner.tracking_lead:
