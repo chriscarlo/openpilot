@@ -9,23 +9,23 @@ def calculate_dynamic_follow(base_follow, v_ego, personality):
     v_ego_mph = v_ego * 2.23694  # Convert m/s to mph
 
     if personality == "aggressive":
-        min_follow = 0.5
-        max_follow = 1.7
+        min_follow = 0.65
+        max_follow = 1.65
         L = max_follow - min_follow
-        k = 0.1
-        x0 = 60
+        k = 0.075
+        x0 = 35
     elif personality == "standard":
-        min_follow = 0.75
-        max_follow = 2.0
+        min_follow = 0.6
+        max_follow = 1.85
         L = max_follow - min_follow
-        k = 0.07
-        x0 = 60
+        k = 0.075
+        x0 = 25
     elif personality == "relaxed":
-        min_follow = 1.0
-        max_follow = 2.5
+        min_follow = 0.5
+        max_follow = 2.05
         L = max_follow - min_follow
-        k = 0.05
-        x0 = 60
+        k = 0.075
+        x0 = 18
     else:
         # Fallback to original calculation
         return np.clip(base_follow * (v_ego / (60 * 0.44704)), 0.8, 2.5)
