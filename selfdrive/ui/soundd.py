@@ -208,7 +208,7 @@ class Soundd:
 
         rk.keep_time()
 
-        assert stream.active
+        # assert stream.active
 
         # Update FrogPilot parameters
         if FrogPilotVariables.toggles_updated:
