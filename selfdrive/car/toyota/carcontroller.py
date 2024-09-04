@@ -143,9 +143,15 @@ class CarController(CarControllerBase):
         self.pcm_accel_comp = 0.0
         pcm_accel_cmd = 0.0
 
-      pcm_accel_cmd = clip(pcm_accel_cmd, self.params.ACCEL_MIN, self.params.ACCEL_MAX)
+      if frogpilot_toggles.sport_plus:
+        pcm_accel_cmd = clip(pcm_accel_cmd, self.params.ACCEL_MIN, get_max_allowed_accel(CS.out.vEgo))
+      else:
+        pcm_accel_cmd = clip(pcm_accel_cmd, self.params.ACCEL_MIN, self.params.ACCEL_MAX)
     else:
-      pcm_accel_cmd = clip(actuators.accel, self.params.ACCEL_MIN, self.params.ACCEL_MAX)
+      if frogpilot_toggles.sport_plus:
+        pcm_accel_cmd = clip(actuators.accel, self.params.ACCEL_MIN, get_max_allowed_accel(CS.out.vEgo))
+      else:
+        pcm_accel_cmd = clip(actuators.accel, self.params.ACCEL_MIN, self.params.ACCEL_MAX)
 
     if self.CP.enableGasInterceptor and CC.longActive and self.CP.carFingerprint not in STOP_AND_GO_CAR:
       MAX_INTERCEPTOR_GAS = 0.5
@@ -164,11 +170,6 @@ class CarController(CarControllerBase):
       interceptor_gas_cmd = 0.12 if CS.out.standstill else 0.
     else:
       interceptor_gas_cmd = 0.
-
-    if frogpilot_toggles.sport_plus:
-      pcm_accel_cmd = clip(actuators.accel + self.pcm_accel_comp, self.params.ACCEL_MIN, get_max_allowed_accel(CS.out.vEgo))
-    else:
-      pcm_accel_cmd = clip(actuators.accel + self.pcm_accel_comp, self.params.ACCEL_MIN, self.params.ACCEL_MAX)
 
     # on entering standstill, send standstill request
     if CS.out.standstill and not self.last_standstill and (self.CP.carFingerprint not in NO_STOP_TIMER_CAR or self.CP.enableGasInterceptor):

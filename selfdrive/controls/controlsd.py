@@ -749,7 +749,7 @@ class Controls:
       self.resume_previously_pressed = self.resume_pressed
 
     FPCC = custom.FrogPilotCarControl.new_message()
-    FPCC.alwaysOnLateralActive = self.always_on_lateral_active
+    FPCC.alwaysOnLateralActive = bool(self.always_on_lateral_active)
     FPCC.fcwEventTriggered = self.fcw_event_triggered
     FPCC.noEntryEventTriggered = self.no_entry_alert_triggered
     FPCC.resumePressed = self.resume_previously_pressed
