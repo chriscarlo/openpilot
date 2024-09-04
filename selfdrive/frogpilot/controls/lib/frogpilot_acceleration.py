@@ -114,7 +114,9 @@ class FrogPilotAcceleration:
 
     if frogpilot_toggles.human_acceleration:
       if self.frogpilot_planner.tracking_lead and self.frogpilot_planner.lead_one.dRel < CITY_SPEED_LIMIT * 2 and not frogpilotCarState.trafficModeActive:
-        self.max_accel = clip(self.frogpilot_planner.lead_one.aLeadK, get_max_accel_sport_plus(v_ego), get_max_allowed_accel(v_ego))
+        self.max_accel = clip(self.frogpilot_planner.lead_one.aLeadK, 
+                              get_max_accel_sport_plus(v_ego), 
+                              get_max_allowed_accel(get_max_accel(v_ego), v_cruise, v_ego))
       self.max_accel = get_max_accel_ramp_off(self.max_accel, self.frogpilot_planner.v_cruise, v_ego)
 
     if controlsState.experimentalMode:
