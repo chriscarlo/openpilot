@@ -120,8 +120,7 @@ FrogPilotVisualsPanel::FrogPilotVisualsPanel(SettingsWindow *parent) : FrogPilot
       });
       visualToggle = personalizeOpenpilotToggle;
     } else if (param == "CustomColors") {
-      std::vector<QString> customColorsOptions{tr("DELETE"), tr("DOWNLOAD"), tr("SELECT")};
-      manageCustomColorsBtn = new FrogPilotButtonsControl(title, desc, icon, customColorsOptions);
+      manageCustomColorsBtn = new FrogPilotButtonsControl(title, {tr("DELETE"), tr("DOWNLOAD"), tr("SELECT")}, desc);
 
       std::function<QString(QString)> formatColorName = [](QString name) -> QString {
         QChar separator = name.contains('_') ? '_' : '-';
@@ -202,7 +201,7 @@ FrogPilotVisualsPanel::FrogPilotVisualsPanel(SettingsWindow *parent) : FrogPilot
             themeDeleting = false;
           }
         } else if (id == 1) {
-          if (manageCustomColorsBtn->getButton(id)->text() == tr("CANCEL")) {
+          if (colorDownloading) {
             paramsMemory.putBool("CancelThemeDownload", true);
             cancellingDownload = true;
 
@@ -251,8 +250,7 @@ FrogPilotVisualsPanel::FrogPilotVisualsPanel(SettingsWindow *parent) : FrogPilot
       manageCustomColorsBtn->setValue(currentColor);
       visualToggle = reinterpret_cast<AbstractControl*>(manageCustomColorsBtn);
     } else if (param == "CustomIcons") {
-      std::vector<QString> customIconsOptions{tr("DELETE"), tr("DOWNLOAD"), tr("SELECT")};
-      manageCustomIconsBtn = new FrogPilotButtonsControl(title, desc, icon, customIconsOptions);
+      manageCustomIconsBtn = new FrogPilotButtonsControl(title, {tr("DELETE"), tr("DOWNLOAD"), tr("SELECT")}, desc);
 
       std::function<QString(QString)> formatIconName = [](QString name) -> QString {
         QChar separator = name.contains('_') ? '_' : '-';
@@ -332,7 +330,7 @@ FrogPilotVisualsPanel::FrogPilotVisualsPanel(SettingsWindow *parent) : FrogPilot
             themeDeleting = false;
           }
         } else if (id == 1) {
-          if (manageCustomIconsBtn->getButton(id)->text() == tr("CANCEL")) {
+          if (iconDownloading) {
             paramsMemory.putBool("CancelThemeDownload", true);
             cancellingDownload = true;
 
@@ -381,8 +379,7 @@ FrogPilotVisualsPanel::FrogPilotVisualsPanel(SettingsWindow *parent) : FrogPilot
       manageCustomIconsBtn->setValue(currentIcon);
       visualToggle = reinterpret_cast<AbstractControl*>(manageCustomIconsBtn);
     } else if (param == "CustomSignals") {
-      std::vector<QString> customSignalsOptions{tr("DELETE"), tr("DOWNLOAD"), tr("SELECT")};
-      manageCustomSignalsBtn = new FrogPilotButtonsControl(title, desc, icon, customSignalsOptions);
+      manageCustomSignalsBtn = new FrogPilotButtonsControl(title, {tr("DELETE"), tr("DOWNLOAD"), tr("SELECT")}, desc);
 
       std::function<QString(QString)> formatSignalName = [](QString name) -> QString {
         QChar separator = name.contains('_') ? '_' : '-';
@@ -462,7 +459,7 @@ FrogPilotVisualsPanel::FrogPilotVisualsPanel(SettingsWindow *parent) : FrogPilot
             themeDeleting = false;
           }
         } else if (id == 1) {
-          if (manageCustomSignalsBtn->getButton(id)->text() == tr("CANCEL")) {
+          if (signalDownloading) {
             paramsMemory.putBool("CancelThemeDownload", true);
             cancellingDownload = true;
 
@@ -511,8 +508,7 @@ FrogPilotVisualsPanel::FrogPilotVisualsPanel(SettingsWindow *parent) : FrogPilot
       manageCustomSignalsBtn->setValue(currentSignal);
       visualToggle = reinterpret_cast<AbstractControl*>(manageCustomSignalsBtn);
     } else if (param == "CustomSounds") {
-      std::vector<QString> customSoundsOptions{tr("DELETE"), tr("DOWNLOAD"), tr("SELECT")};
-      manageCustomSoundsBtn = new FrogPilotButtonsControl(title, desc, icon, customSoundsOptions);
+      manageCustomSoundsBtn = new FrogPilotButtonsControl(title, {tr("DELETE"), tr("DOWNLOAD"), tr("SELECT")}, desc);
 
       std::function<QString(QString)> formatSoundName = [](QString name) -> QString {
         QChar separator = name.contains('_') ? '_' : '-';
@@ -592,7 +588,7 @@ FrogPilotVisualsPanel::FrogPilotVisualsPanel(SettingsWindow *parent) : FrogPilot
             themeDeleting = false;
           }
         } else if (id == 1) {
-          if (manageCustomSoundsBtn->getButton(id)->text() == tr("CANCEL")) {
+          if (soundDownloading) {
             paramsMemory.putBool("CancelThemeDownload", true);
             cancellingDownload = true;
 
@@ -641,8 +637,7 @@ FrogPilotVisualsPanel::FrogPilotVisualsPanel(SettingsWindow *parent) : FrogPilot
       manageCustomSoundsBtn->setValue(currentSound);
       visualToggle = reinterpret_cast<AbstractControl*>(manageCustomSoundsBtn);
     } else if (param == "WheelIcon") {
-      std::vector<QString> wheelIconOptions{tr("DELETE"), tr("DOWNLOAD"), tr("SELECT")};
-      manageWheelIconsBtn = new FrogPilotButtonsControl(title, desc, icon, wheelIconOptions);
+      manageWheelIconsBtn = new FrogPilotButtonsControl(title, {tr("DELETE"), tr("DOWNLOAD"), tr("SELECT")}, desc);
 
       std::function<QString(QString)> formatWheelName = [](QString name) -> QString {
         QChar separator = name.contains('_') ? '_' : '-';
@@ -722,15 +717,15 @@ FrogPilotVisualsPanel::FrogPilotVisualsPanel(SettingsWindow *parent) : FrogPilot
             themeDeleting = false;
           }
         } else if (id == 1) {
-          if (manageWheelIconsBtn->getButton(id)->text() == tr("CANCEL")) {
+          if (wheelDownloading) {
             paramsMemory.putBool("CancelThemeDownload", true);
             cancellingDownload = true;
 
             QTimer::singleShot(2000, [=]() {
               paramsMemory.putBool("CancelThemeDownload", false);
               cancellingDownload = false;
-              themeDownloading = false;
               wheelDownloading = false;
+              themeDownloading = false;
             });
           } else {
             QStringList downloadableWheels = QString::fromStdString(params.get("DownloadableWheels")).split(",");
@@ -774,8 +769,7 @@ FrogPilotVisualsPanel::FrogPilotVisualsPanel(SettingsWindow *parent) : FrogPilot
       downloadStatusLabel = new LabelControl(title, "Idle");
       visualToggle = reinterpret_cast<AbstractControl*>(downloadStatusLabel);
     } else if (param == "StartupAlert") {
-      std::vector<QString> startupAlertOptions{tr("STOCK"), tr("FROGPILOT"), tr("CUSTOM"), tr("CLEAR")};
-      FrogPilotButtonsControl *startupAlertButton = new FrogPilotButtonsControl(title, desc, icon, startupAlertOptions);
+      FrogPilotButtonsControl *startupAlertButton = new FrogPilotButtonsControl(title, {tr("STOCK"), tr("FROGPILOT"), tr("CUSTOM"), tr("CLEAR")}, desc);
       QObject::connect(startupAlertButton, &FrogPilotButtonsControl::buttonClicked, [=](int id) {
         int maxLengthTop = 35;
         int maxLengthBottom = 45;
@@ -948,7 +942,7 @@ FrogPilotVisualsPanel::FrogPilotVisualsPanel(SettingsWindow *parent) : FrogPilot
       visualToggle = qolToggle;
     } else if (param == "CameraView") {
       std::vector<QString> cameraOptions{tr("Auto"), tr("Driver"), tr("Standard"), tr("Wide")};
-      FrogPilotButtonParamControl *preferredCamera = new FrogPilotButtonParamControl(param, title, desc, icon, cameraOptions);
+      ButtonParamControl *preferredCamera = new ButtonParamControl(param, title, desc, icon, cameraOptions);
       visualToggle = preferredCamera;
     } else if (param == "BigMap") {
       std::vector<QString> mapToggles{"FullMap"};
@@ -1103,29 +1097,29 @@ void FrogPilotVisualsPanel::updateState(const UIState &s) {
     }
 
     manageCustomColorsBtn->setText(1, colorDownloading ? tr("CANCEL") : tr("DOWNLOAD"));
-    manageCustomColorsBtn->setButtonEnabled(0, !themeDeleting && !themeDownloading);
-    manageCustomColorsBtn->setButtonEnabled(1, s.scene.online && (!themeDownloading || colorDownloading) && !cancellingDownload && !themeDeleting && !colorsDownloaded);
-    manageCustomColorsBtn->setButtonEnabled(2, !themeDeleting && !themeDownloading);
+    manageCustomColorsBtn->setEnabledButtons(0, !themeDeleting && !themeDownloading);
+    manageCustomColorsBtn->setEnabledButtons(1, s.scene.online && (!themeDownloading || colorDownloading) && !cancellingDownload && !themeDeleting && !colorsDownloaded);
+    manageCustomColorsBtn->setEnabledButtons(2, !themeDeleting && !themeDownloading);
 
     manageCustomIconsBtn->setText(1, iconDownloading ? tr("CANCEL") : tr("DOWNLOAD"));
-    manageCustomIconsBtn->setButtonEnabled(0, !themeDeleting && !themeDownloading);
-    manageCustomIconsBtn->setButtonEnabled(1, s.scene.online && (!themeDownloading || iconDownloading) && !cancellingDownload && !themeDeleting && !iconsDownloaded);
-    manageCustomIconsBtn->setButtonEnabled(2, !themeDeleting && !themeDownloading);
+    manageCustomIconsBtn->setEnabledButtons(0, !themeDeleting && !themeDownloading);
+    manageCustomIconsBtn->setEnabledButtons(1, s.scene.online && (!themeDownloading || iconDownloading) && !cancellingDownload && !themeDeleting && !iconsDownloaded);
+    manageCustomIconsBtn->setEnabledButtons(2, !themeDeleting && !themeDownloading);
 
     manageCustomSignalsBtn->setText(1, signalDownloading ? tr("CANCEL") : tr("DOWNLOAD"));
-    manageCustomSignalsBtn->setButtonEnabled(0, !themeDeleting && !themeDownloading);
-    manageCustomSignalsBtn->setButtonEnabled(1, s.scene.online && (!themeDownloading || signalDownloading) && !cancellingDownload && !themeDeleting && !signalsDownloaded);
-    manageCustomSignalsBtn->setButtonEnabled(2, !themeDeleting && !themeDownloading);
+    manageCustomSignalsBtn->setEnabledButtons(0, !themeDeleting && !themeDownloading);
+    manageCustomSignalsBtn->setEnabledButtons(1, s.scene.online && (!themeDownloading || signalDownloading) && !cancellingDownload && !themeDeleting && !signalsDownloaded);
+    manageCustomSignalsBtn->setEnabledButtons(2, !themeDeleting && !themeDownloading);
 
     manageCustomSoundsBtn->setText(1, soundDownloading ? tr("CANCEL") : tr("DOWNLOAD"));
-    manageCustomSoundsBtn->setButtonEnabled(0, !themeDeleting && !themeDownloading);
-    manageCustomSoundsBtn->setButtonEnabled(1, s.scene.online && (!themeDownloading || soundDownloading) && !cancellingDownload && !themeDeleting && !soundsDownloaded);
-    manageCustomSoundsBtn->setButtonEnabled(2, !themeDeleting && !themeDownloading);
+    manageCustomSoundsBtn->setEnabledButtons(0, !themeDeleting && !themeDownloading);
+    manageCustomSoundsBtn->setEnabledButtons(1, s.scene.online && (!themeDownloading || soundDownloading) && !cancellingDownload && !themeDeleting && !soundsDownloaded);
+    manageCustomSoundsBtn->setEnabledButtons(2, !themeDeleting && !themeDownloading);
 
     manageWheelIconsBtn->setText(1, wheelDownloading ? tr("CANCEL") : tr("DOWNLOAD"));
-    manageWheelIconsBtn->setButtonEnabled(0, !themeDeleting && !themeDownloading);
-    manageWheelIconsBtn->setButtonEnabled(1, s.scene.online && (!themeDownloading || wheelDownloading) && !cancellingDownload && !themeDeleting && !wheelsDownloaded);
-    manageWheelIconsBtn->setButtonEnabled(2, !themeDeleting && !themeDownloading);
+    manageWheelIconsBtn->setEnabledButtons(0, !themeDeleting && !themeDownloading);
+    manageWheelIconsBtn->setEnabledButtons(1, s.scene.online && (!themeDownloading || wheelDownloading) && !cancellingDownload && !themeDeleting && !wheelsDownloaded);
+    manageWheelIconsBtn->setEnabledButtons(2, !themeDeleting && !themeDownloading);
   }
 
   started = s.scene.started;

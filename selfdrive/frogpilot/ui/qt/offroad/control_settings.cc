@@ -208,7 +208,11 @@ FrogPilotControlsPanel::FrogPilotControlsPanel(SettingsWindow *parent) : FrogPil
       std::vector<QString> navigationToggleNames{tr("Intersections"), tr("Turns"), tr("With Lead")};
       controlToggle = new FrogPilotParamToggleControl(param, title, desc, icon, navigationToggles, navigationToggleNames);
     } else if (param == "CEModelStopTime") {
-      controlToggle = new FrogPilotParamValueControl(param, title, desc, icon, 0, 10, std::map<int, QString>(), this, false, tr(" seconds"));
+      std::map<int, QString> modelStopTimeLabels;
+      for (int i = 0; i <= 10; i++) {
+        modelStopTimeLabels[i] = (i == 0) ? tr("Off") : QString::number(i) + " seconds";
+      }
+      controlToggle = new FrogPilotParamValueControl(param, title, desc, icon, 0, 10, modelStopTimeLabels, this, false);
 
     } else if (param == "DeviceManagement") {
       FrogPilotParamManageControl *deviceManagementToggle = new FrogPilotParamManageControl(param, title, desc, icon, this);
@@ -268,8 +272,7 @@ FrogPilotControlsPanel::FrogPilotControlsPanel(SettingsWindow *parent) : FrogPil
       });
       controlToggle = reinterpret_cast<AbstractControl*>(personalitiesInfoBtn);
     } else if (param == "ResetTrafficPersonality" || param == "ResetAggressivePersonality" || param == "ResetStandardPersonality" || param == "ResetRelaxedPersonality") {
-      std::vector<QString> personalityOptions{tr("Reset")};
-      FrogPilotButtonsControl *profileBtn = new FrogPilotButtonsControl(title, desc, icon, personalityOptions);
+      FrogPilotButtonsControl *profileBtn = new FrogPilotButtonsControl(title, {tr("Reset")}, desc);
       controlToggle = profileBtn;
     } else if (param == "TrafficPersonalityProfile") {
       FrogPilotParamManageControl *trafficPersonalityToggle = new FrogPilotParamManageControl(param, title, desc, icon, this);
@@ -326,8 +329,7 @@ FrogPilotControlsPanel::FrogPilotControlsPanel(SettingsWindow *parent) : FrogPil
       }
 
     } else if (param == "OnroadDistanceButtonButtons") {
-      std::vector<QString> CustomDistanceIconsOptions{tr("DELETE"), tr("DOWNLOAD"), tr("SELECT")};
-      manageDistanceIconsBtn = new FrogPilotButtonsControl(title, desc, icon, CustomDistanceIconsOptions);
+      manageDistanceIconsBtn = new FrogPilotButtonsControl(title, {tr("DELETE"), tr("DOWNLOAD"), tr("SELECT")}, desc);
 
       std::function<QString(QString)> formatIconName = [](QString name) -> QString {
         QChar separator = name.contains('_') ? '_' : '-';
@@ -406,7 +408,7 @@ FrogPilotControlsPanel::FrogPilotControlsPanel(SettingsWindow *parent) : FrogPil
             themeDeleting = false;
           }
         } else if (id == 1) {
-          if (manageDistanceIconsBtn->getButton(id)->text() == tr("CANCEL")) {
+          if (iconsDownloading) {
             paramsMemory.putBool("CancelThemeDownload", true);
             cancellingDownload = true;
 
@@ -523,11 +525,11 @@ FrogPilotControlsPanel::FrogPilotControlsPanel(SettingsWindow *parent) : FrogPil
       controlToggle = longitudinalTuneToggle;
     } else if (param == "AccelerationProfile") {
       std::vector<QString> profileOptions{tr("Standard"), tr("Eco"), tr("Sport"), tr("Sport+")};
-      FrogPilotButtonParamControl *profileSelection = new FrogPilotButtonParamControl(param, title, desc, icon, profileOptions);
+      ButtonParamControl *profileSelection = new ButtonParamControl(param, title, desc, icon, profileOptions);
       controlToggle = profileSelection;
     } else if (param == "DecelerationProfile") {
       std::vector<QString> profileOptions{tr("Standard"), tr("Eco"), tr("Sport")};
-      FrogPilotButtonParamControl *profileSelection = new FrogPilotButtonParamControl(param, title, desc, icon, profileOptions);
+      ButtonParamControl *profileSelection = new ButtonParamControl(param, title, desc, icon, profileOptions);
       controlToggle = profileSelection;
     } else if (param == "StoppingDistance") {
       controlToggle = new FrogPilotParamValueControl(param, title, desc, icon, 0, 10, std::map<int, QString>(), this, false, tr(" feet"));
@@ -582,7 +584,7 @@ FrogPilotControlsPanel::FrogPilotControlsPanel(SettingsWindow *parent) : FrogPil
       });
       controlToggle = modelRandomizerToggle;
     } else if (param == "ManageBlacklistedModels") {
-      FrogPilotButtonsControl *blacklistBtn = new FrogPilotButtonsControl(title, desc, icon, {tr("ADD"), tr("REMOVE")});
+      FrogPilotButtonsControl *blacklistBtn = new FrogPilotButtonsControl(title, {tr("ADD"), tr("REMOVE")}, desc);
       QObject::connect(blacklistBtn, &FrogPilotButtonsControl::buttonClicked, [=](int id) {
         QStringList blacklistedModels = QString::fromStdString(params.get("BlacklistedModels")).split(",", QString::SkipEmptyParts);
         QMap<QString, QString> labelToModelMap;
@@ -841,7 +843,7 @@ FrogPilotControlsPanel::FrogPilotControlsPanel(SettingsWindow *parent) : FrogPil
       selectModelBtn->setValue(QString::fromStdString(params.get("ModelName")));
       controlToggle = reinterpret_cast<AbstractControl*>(selectModelBtn);
     } else if (param == "ResetCalibrations") {
-      FrogPilotButtonsControl *resetCalibrationsBtn = new FrogPilotButtonsControl(title, desc, icon, {tr("RESET ALL"), tr("RESET ONE")});
+      FrogPilotButtonsControl *resetCalibrationsBtn = new FrogPilotButtonsControl(title, {tr("RESET ALL"), tr("RESET ONE")}, desc);
       QObject::connect(resetCalibrationsBtn, &FrogPilotButtonsControl::showDescriptionEvent, this, &FrogPilotControlsPanel::updateCalibrationDescription);
       QObject::connect(resetCalibrationsBtn, &FrogPilotButtonsControl::buttonClicked, [=](int id) {
         if (id == 0) {
@@ -1013,11 +1015,11 @@ FrogPilotControlsPanel::FrogPilotControlsPanel(SettingsWindow *parent) : FrogPil
       controlToggle = new FrogPilotParamToggleControl(param, title, desc, icon, slcOffsetToggles, slcOffsetToggleNames);
     } else if (param == "SLCFallback") {
       std::vector<QString> fallbackOptions{tr("Set Speed"), tr("Experimental Mode"), tr("Previous Limit")};
-      FrogPilotButtonParamControl *fallbackSelection = new FrogPilotButtonParamControl(param, title, desc, icon, fallbackOptions);
+      ButtonParamControl *fallbackSelection = new ButtonParamControl(param, title, desc, icon, fallbackOptions);
       controlToggle = fallbackSelection;
     } else if (param == "SLCOverride") {
       std::vector<QString> overrideOptions{tr("None"), tr("Manual Set Speed"), tr("Set Speed")};
-      FrogPilotButtonParamControl *overrideSelection = new FrogPilotButtonParamControl(param, title, desc, icon, overrideOptions);
+      ButtonParamControl *overrideSelection = new ButtonParamControl(param, title, desc, icon, overrideOptions);
       controlToggle = overrideSelection;
     } else if (param == "SLCPriority") {
       ButtonControl *slcPriorityButton = new ButtonControl(title, tr("SELECT"), desc);
@@ -1305,9 +1307,9 @@ void FrogPilotControlsPanel::updateState(const UIState &s) {
     }
 
     manageDistanceIconsBtn->setText(1, iconsDownloading ? tr("CANCEL") : tr("DOWNLOAD"));
-    manageDistanceIconsBtn->setButtonEnabled(0, !themeDeleting && !themeDownloading);
-    manageDistanceIconsBtn->setButtonEnabled(1, s.scene.online && (!themeDownloading || iconsDownloading) && !cancellingDownload && !themeDeleting && !iconsDownloaded);
-    manageDistanceIconsBtn->setButtonEnabled(2, !themeDeleting && !themeDownloading);
+    manageDistanceIconsBtn->setEnabledButtons(0, !themeDeleting && !themeDownloading);
+    manageDistanceIconsBtn->setEnabledButtons(1, s.scene.online && (!themeDownloading || iconsDownloading) && !cancellingDownload && !themeDeleting && !iconsDownloaded);
+    manageDistanceIconsBtn->setEnabledButtons(2, !themeDeleting && !themeDownloading);
   } else if (modelManagementOpen) {
     downloadAllModelsBtn->setText(modelDownloading && allModelsDownloading ? tr("CANCEL") : tr("DOWNLOAD"));
     downloadModelBtn->setText(modelDownloading && !allModelsDownloading ? tr("CANCEL") : tr("DOWNLOAD"));

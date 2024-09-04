@@ -77,7 +77,7 @@ class CarState(CarStateBase):
     self.zss_angle_offset = 0
     self.zss_threshold_count = 0
 
-  def update(self, cp, cp_cam, frogpilot_toggles):
+  def update(self, cp, cp_cam, CC, frogpilot_toggles):
     ret = car.CarState.new_message()
     fp_ret = custom.FrogPilotCarState.new_message()
 
@@ -231,15 +231,14 @@ class CarState(CarStateBase):
     self.vsc_slope_angle = cp.vl["VSC1"]["SLOPE_ANGLE"]
 
     # ZSS Support - Credit goes to the DragonPilot team!
-    if self.CP.flags & ToyotaFlags.ZSS and self.zss_threshold_count < ZSS_THRESHOLD_COUNT:
+    if self.CP.flags & ToyotaFlags.ZSS and self.zss_threshold_count <= ZSS_THRESHOLD_COUNT:
       zorro_steer = cp.vl["SECONDARY_STEER_ANGLE"]["ZORRO_STEER"]
 
-      # Only compute ZSS offset when cruise is active
-      cruise_active = ret.cruiseState.available
-      if cruise_active and not self.zss_cruise_active_last:
-        self.zss_compute = True  # Cruise was just activated, so allow offset to be recomputed
+      # Only compute ZSS offset when control is active
+      if CC.latActive and not self.zss_cruise_active_last:
         self.zss_threshold_count = 0
-      self.zss_cruise_active_last = cruise_active
+        self.zss_compute = True  # Control was just activated, so allow offset to be recomputed
+      self.zss_cruise_active_last = CC.latActive
 
       # Compute ZSS offset
       if self.zss_compute:

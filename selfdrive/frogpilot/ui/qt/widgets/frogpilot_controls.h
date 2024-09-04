@@ -26,13 +26,16 @@ public:
 
 class FrogPilotListWidget : public QWidget {
   Q_OBJECT
+
 public:
-  explicit FrogPilotListWidget(QWidget *parent = nullptr) : QWidget(parent), outer_layout(this) {
+  explicit FrogPilotListWidget(QWidget *parent = nullptr) : QWidget(parent), outer_layout(this), inner_layout() {
     outer_layout.setMargin(0);
     outer_layout.setSpacing(0);
     outer_layout.addLayout(&inner_layout);
+
     inner_layout.setMargin(0);
     inner_layout.setSpacing(25);  // default spacing is 25
+    outer_layout.addStretch();
   }
 
   inline void addItem(QWidget *w) {
@@ -47,37 +50,32 @@ public:
 
   inline void setSpacing(int spacing) {
     inner_layout.setSpacing(spacing);
-    adjustStretch();
   }
 
-private:
-  void adjustStretch() {
-    if (inner_layout.stretch(inner_layout.count() - 1) > 0) {
-      inner_layout.setStretch(inner_layout.count() - 1, 0);
-    }
-    if (inner_layout.count() > 3) {
-      outer_layout.addStretch();
-    }
-  }
-
+protected:
   void paintEvent(QPaintEvent *event) override {
     QPainter p(this);
     p.setPen(Qt::gray);
 
-    int visibleWidgetCount = 0;
     std::vector<QRect> visibleRects;
-
     for (int i = 0; i < inner_layout.count(); ++i) {
       QWidget *widget = inner_layout.itemAt(i)->widget();
       if (widget && widget->isVisible()) {
-        visibleWidgetCount++;
-        visibleRects.push_back(inner_layout.itemAt(i)->geometry());
+        visibleRects.push_back(widget->geometry());
       }
     }
 
-    for (int i = 0; i < visibleWidgetCount - 1; ++i) {
-      int bottom = visibleRects[i].bottom() + inner_layout.spacing() / 2;
+    int lineOffset = inner_layout.spacing() / 2;
+    for (size_t i = 0; i + 1 < visibleRects.size(); ++i) {
+      int bottom = visibleRects[i].bottom() + lineOffset;
       p.drawLine(visibleRects[i].left() + 40, bottom, visibleRects[i].right() - 40, bottom);
+    }
+  }
+
+private:
+  void adjustStretch() {
+    if (inner_layout.count() > 3) {
+      outer_layout.addStretch();
     }
   }
 
@@ -85,55 +83,20 @@ private:
   QVBoxLayout inner_layout;
 };
 
-class FrogPilotButtonControl : public AbstractControl {
+class FrogPilotButtonsControl : public AbstractControl {
   Q_OBJECT
 
 public:
-  FrogPilotButtonControl(const QString &title, const QString &text, const QString &desc = "", QWidget *parent = nullptr);
-  inline void setText(const QString &text) { btn.setText(text); }
-  inline QString text() const { return btn.text(); }
+  FrogPilotButtonsControl(const QString &title, const std::vector<QString> &button_labels, const QString &desc, bool checkable = false, QWidget *parent = nullptr)
+    : AbstractControl(title, desc, "") {
 
-signals:
-  void clicked();
-
-public slots:
-  void setEnabled(bool enabled) { btn.setEnabled(enabled); }
-
-private:
-  QPushButton btn;
-};
-
-class FrogPilotButtonIconControl : public AbstractControl {
-  Q_OBJECT
-
-public:
-  FrogPilotButtonIconControl(const QString &title, const QString &text, const QString &desc = "", const QString &icon = "", QWidget *parent = nullptr);
-  inline void setText(const QString &text) { btn.setText(text); }
-  inline QString text() const { return btn.text(); }
-
-signals:
-  void clicked();
-
-public slots:
-  void setEnabled(bool enabled) { btn.setEnabled(enabled); }
-
-private:
-  QPushButton btn;
-};
-
-class FrogPilotButtonParamControl : public ParamControl {
-  Q_OBJECT
-public:
-  FrogPilotButtonParamControl(const QString &param, const QString &title, const QString &desc, const QString &icon,
-                              const std::vector<QString> &button_texts, const int minimum_button_width = 225)
-    : ParamControl(param, title, desc, icon) {
     const QString style = R"(
       QPushButton {
         border-radius: 50px;
         font-size: 40px;
         font-weight: 500;
-        height:100px;
-        padding: 0 25 0 25;
+        height: 100px;
+        padding: 0 25px;
         color: #E4E4E4;
         background-color: #393939;
       }
@@ -148,95 +111,18 @@ public:
       }
     )";
 
-    key = param.toStdString();
-    int value = atoi(params.get(key).c_str());
-
     button_group = new QButtonGroup(this);
     button_group->setExclusive(true);
-    for (size_t i = 0; i < button_texts.size(); i++) {
-      QPushButton *button = new QPushButton(button_texts[i], this);
-      button->setCheckable(true);
-      button->setChecked(i == value);
+
+    for (int i = 0; i < button_labels.size(); ++i) {
+      QPushButton *button = new QPushButton(button_labels[i], this);
+      button->setCheckable(checkable);
       button->setStyleSheet(style);
-      button->setMinimumWidth(minimum_button_width);
+      button->setMinimumWidth(255);
       hlayout->addWidget(button);
       button_group->addButton(button, i);
-    }
 
-    QObject::connect(button_group, QOverload<int, bool>::of(&QButtonGroup::buttonToggled), [=](int id, bool checked) {
-      if (checked) {
-        params.put(key, std::to_string(id));
-        refresh();
-        emit buttonClicked(id);
-      }
-    });
-
-    toggle.hide();
-  }
-
-  void setEnabled(bool enable) {
-    for (auto btn : button_group->buttons()) {
-      btn->setEnabled(enable);
-    }
-  }
-
-signals:
-  void buttonClicked(int id);
-
-private:
-  std::string key;
-  Params params;
-  QButtonGroup *button_group;
-};
-
-class FrogPilotButtonsControl : public ParamControl {
-  Q_OBJECT
-public:
-  FrogPilotButtonsControl(const QString &title, const QString &desc, const QString &icon,
-                          const std::vector<QString> &button_texts, const bool checkable = false, const int minimum_button_width = 225)
-    : ParamControl("", title, desc, icon) {
-    const QString style = R"(
-      QPushButton {
-        border-radius: 50px;
-        font-size: 40px;
-        font-weight: 500;
-        height: 100px;
-        padding: 0 25px 0 25px;
-        color: #E4E4E4;
-        background-color: #393939;
-      }
-      QPushButton:checked {
-        background-color: #33Ab4C;
-      }
-      QPushButton:pressed {
-        background-color: #33Ab4C;
-      }
-      QPushButton:disabled {
-        color: #33E4E4E4;
-      }
-    )";
-
-    button_group = new QButtonGroup(this);
-
-    for (size_t i = 0; i < button_texts.size(); i++) {
-      QPushButton *button = new QPushButton(button_texts[i], this);
-      button->setStyleSheet(style);
-      button->setCheckable(checkable);
-      button->setMinimumWidth(minimum_button_width);
-      hlayout->addWidget(button);
-      button_group->addButton(button, static_cast<int>(i));
-
-      connect(button, &QPushButton::clicked, this, [this, i]() {
-        emit buttonClicked(static_cast<int>(i));
-      });
-    }
-
-    toggle.hide();
-  }
-
-  void updateButtonStyles(int id) {
-    for (auto button : button_group->buttons()) {
-      button->setChecked(button_group->id(button) == id);
+      connect(button, &QPushButton::clicked, this, [this, i]() { emit buttonClicked(i); });
     }
   }
 
@@ -246,27 +132,31 @@ public:
     }
   }
 
-  void setButtonEnabled(int id, bool enable) {
-    if (QPushButton *button = qobject_cast<QPushButton *>(button_group->button(id))) {
+  void setCheckedButton(int id) {
+    if (auto button = button_group->button(id)) {
+      button->setChecked(true);
+    }
+  }
+
+  void setEnabledButtons(int id, bool enable) {
+    QPushButton *button = qobject_cast<QPushButton *>(button_group->button(id));
+    if (button) {
       button->setEnabled(enable);
     }
   }
 
   void setText(int id, const QString &text) {
-    if (QPushButton *button = qobject_cast<QPushButton *>(button_group->button(id))) {
+    QPushButton *button = qobject_cast<QPushButton *>(button_group->button(id));
+    if (button) {
       button->setText(text);
     }
   }
 
-  QPushButton *getButton(int id) const {
-    return qobject_cast<QPushButton *>(button_group->button(id));
-  }
+private:
+  QButtonGroup *button_group;
 
 signals:
   void buttonClicked(int id);
-
-private:
-  QButtonGroup *button_group;
 };
 
 class FrogPilotButtonsParamControl : public ParamControl {

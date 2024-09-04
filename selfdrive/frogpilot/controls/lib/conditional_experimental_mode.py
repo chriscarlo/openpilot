@@ -1,3 +1,5 @@
+from openpilot.common.params import Params
+
 from openpilot.selfdrive.frogpilot.controls.lib.frogpilot_functions import WeightedMovingAverageCalculator
 from openpilot.selfdrive.frogpilot.controls.lib.frogpilot_variables import CITY_SPEED_LIMIT, THRESHOLD
 
@@ -5,10 +7,9 @@ class ConditionalExperimentalMode:
   def __init__(self, FrogPilotPlanner):
     self.frogpilot_planner = FrogPilotPlanner
 
-    self.params_memory = self.frogpilot_planner.params_memory
+    self.params_memory = Params("/dev/shm/params")
 
     self.curvature_wmac = WeightedMovingAverageCalculator(window_size=5)
-    self.slow_lead_wmac = WeightedMovingAverageCalculator(window_size=3)
     self.stop_light_wmac = WeightedMovingAverageCalculator(window_size=5)
 
     self.curve_detected = False
@@ -61,6 +62,8 @@ class ConditionalExperimentalMode:
       self.status_value = 17
       return True
 
+    return False
+
   def update_conditions(self, tracking_lead, v_ego, v_lead, frogpilot_toggles):
     self.curve_detection(tracking_lead, v_ego, frogpilot_toggles)
     self.slow_lead(tracking_lead, v_lead, frogpilot_toggles)
@@ -82,10 +85,8 @@ class ConditionalExperimentalMode:
       slower_lead = self.frogpilot_planner.frogpilot_following.slower_lead and frogpilot_toggles.conditional_slower_lead
       stopped_lead = frogpilot_toggles.conditional_stopped_lead and v_lead < 1
 
-      self.slow_lead_wmac.add_data(slower_lead or stopped_lead)
-      self.slow_lead_detected = self.slow_lead_wmac.get_weighted_average() >= THRESHOLD
+      self.slow_lead_detected = slower_lead or stopped_lead
     else:
-      self.slow_lead_wmac.reset_data()
       self.slow_lead_detected = False
 
   def stop_sign_and_light(self, tracking_lead, v_ego, frogpilot_toggles):

@@ -451,7 +451,7 @@ void ui_update_frogpilot_params(UIState *s, Params &params) {
   scene.use_vienna_slc_sign = scene.speed_limit_controller && params.getBool("UseVienna");
 
   scene.tethering_config = params.getInt("TetheringEnabled");
-  if (scene.tethering_config == 2) {
+  if (scene.tethering_config == 1) {
     WifiManager(s).setTetheringEnabled(true);
   }
 }
@@ -488,7 +488,7 @@ void UIState::updateStatus() {
     started_prev = scene.started;
     scene.world_objects_visible = false;
     emit offroadTransition(!scene.started);
-    if (scene.tethering_config == 1) {
+    if (scene.tethering_config == 2) {
       wifi->setTetheringEnabled(scene.started);
     }
   }

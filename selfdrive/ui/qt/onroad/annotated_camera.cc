@@ -849,6 +849,11 @@ void AnnotatedCameraWidget::updateSignals() {
     QPixmap pixmap(fileInfo.absoluteFilePath());
     QVector<QPixmap> *targetList = fileInfo.fileName().contains("blindspot") ? &blindspotImages : &regularImages;
     targetList->push_back(pixmap);
+  }
+
+  for (const QFileInfo &fileInfo : fileList) {
+    QPixmap pixmap(fileInfo.absoluteFilePath());
+    QVector<QPixmap> *targetList = fileInfo.fileName().contains("blindspot") ? &blindspotImages : &regularImages;
     targetList->push_back(pixmap.transformed(flipTransform));
   }
 

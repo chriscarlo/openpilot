@@ -316,8 +316,7 @@ DevicePanel::DevicePanel(SettingsWindow *parent) : ListWidget(parent) {
   addItem(deleteDrivingDataBtn);
 
   // Screen recordings
-  std::vector<QString> recordingsOptions{tr("DELETE"), tr("RENAME")};
-  FrogPilotButtonsControl *screenRecordingsBtn = new FrogPilotButtonsControl(tr("Screen Recordings"), tr("Delete or rename your screen recordings."), "", recordingsOptions);
+  FrogPilotButtonsControl *screenRecordingsBtn = new FrogPilotButtonsControl(tr("Screen Recordings"), {tr("DELETE"), tr("RENAME")}, tr("Delete or rename your screen recordings."));
   connect(screenRecordingsBtn, &FrogPilotButtonsControl::buttonClicked, [=](int id) {
     QDir recordingsDir("/data/media/0/videos");
     QStringList recordingsNames = recordingsDir.entryList(QDir::Files | QDir::NoDotAndDotDot);
@@ -372,8 +371,7 @@ DevicePanel::DevicePanel(SettingsWindow *parent) : ListWidget(parent) {
   addItem(screenRecordingsBtn);
 
   // Backup FrogPilot
-  std::vector<QString> frogpilotBackupOptions{tr("BACKUP"), tr("DELETE"), tr("RESTORE")};
-  FrogPilotButtonsControl *frogpilotBackupBtn = new FrogPilotButtonsControl(tr("FrogPilot Backups"), tr("Backup, delete, or restore your FrogPilot backups."), "", frogpilotBackupOptions);
+  FrogPilotButtonsControl *frogpilotBackupBtn = new FrogPilotButtonsControl(tr("FrogPilot Backups"), {tr("BACKUP"), tr("DELETE"), tr("RESTORE")}, tr("Backup, delete, or restore your FrogPilot backups."));
   connect(frogpilotBackupBtn, &FrogPilotButtonsControl::buttonClicked, [=](int id) {
     QDir backupDir("/data/backups");
     QStringList backupNames = backupDir.entryList(QDir::Dirs | QDir::Files | QDir::NoDotAndDotDot, QDir::Name);
@@ -529,8 +527,7 @@ DevicePanel::DevicePanel(SettingsWindow *parent) : ListWidget(parent) {
   addItem(frogpilotBackupBtn);
 
   // Backup toggles
-  std::vector<QString> toggleBackupOptions{tr("BACKUP"), tr("DELETE"), tr("RESTORE")};
-  FrogPilotButtonsControl *toggleBackupBtn = new FrogPilotButtonsControl(tr("Toggle Backups"), tr("Backup, delete, or restore your toggle backups."), "", toggleBackupOptions);
+  FrogPilotButtonsControl *toggleBackupBtn = new FrogPilotButtonsControl(tr("Toggle Backups"), {tr("BACKUP"), tr("DELETE"), tr("RESTORE")}, tr("Backup, delete, or restore your toggle backups."));
   connect(toggleBackupBtn, &FrogPilotButtonsControl::buttonClicked, [=](int id) {
     QDir backupDir("/data/toggle_backups");
     QStringList backupNames = backupDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
@@ -674,8 +671,7 @@ DevicePanel::DevicePanel(SettingsWindow *parent) : ListWidget(parent) {
   addItem(resetTogglesBtn);
 
   // Force offroad/onroad
-  std::vector<QString> forceStartedOptions{tr("OFFROAD"), tr("ONROAD"), tr("OFF")};
-  forceStartedBtn = new FrogPilotButtonsControl(tr("Force Started State"), tr("Force openpilot either offroad or onroad."), "", forceStartedOptions, true);
+  forceStartedBtn = new FrogPilotButtonsControl(tr("Force Started State"), {tr("OFFROAD"), tr("ONROAD"), tr("OFF")}, tr("Force openpilot either offroad or onroad."), true);
   connect(forceStartedBtn, &FrogPilotButtonsControl::buttonClicked, [=](int id) {
     if (id == 0) {
       paramsMemory.putBool("ForceOffroad", true);
@@ -687,9 +683,9 @@ DevicePanel::DevicePanel(SettingsWindow *parent) : ListWidget(parent) {
       paramsMemory.putBool("ForceOffroad", false);
       paramsMemory.putBool("ForceOnroad", false);
     }
-    forceStartedBtn->updateButtonStyles(id);
+    forceStartedBtn->setCheckedButton(id);
   });
-  forceStartedBtn->updateButtonStyles(2);
+  forceStartedBtn->setCheckedButton(2);
   addItem(forceStartedBtn);
 
   // power buttons
@@ -859,7 +855,7 @@ SettingsWindow::SettingsWindow(QWidget *parent) : QFrame(parent) {
     {tr("Network"), new Networking(this)},
     {tr("Toggles"), toggles},
     {tr("Software"), new SoftwarePanel(this)},
-    {tr("Controls"), frogpilotControls},
+    {tr("Driving"), frogpilotControls},
     {tr("Navigation"), new FrogPilotNavigationPanel(this)},
     {tr("Vehicles"), new FrogPilotVehiclesPanel(this)},
     {tr("Visuals"), frogpilotVisuals},
