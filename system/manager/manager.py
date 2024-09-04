@@ -339,7 +339,6 @@ def manager_init() -> None:
     ("TrafficJerkAcceleration", "50"),
     ("TrafficJerkDanger", "100"),
     ("TrafficJerkSpeed", "50"),
-    ("TrafficMode", "0"),
     ("TrafficPersonalityProfile", "1"),
     ("TuningInfo", "1"),
     ("TurnAggressiveness", "100"),

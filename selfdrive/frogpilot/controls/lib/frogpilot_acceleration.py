@@ -3,7 +3,7 @@ from openpilot.common.numpy_fast import clip, interp, exp
 from openpilot.selfdrive.car.interfaces import ACCEL_MIN, ACCEL_MAX
 from openpilot.selfdrive.controls.lib.longitudinal_planner import A_CRUISE_MIN, get_max_accel
 
-from openpilot.selfdrive.frogpilot.controls.lib.frogpilot_variables import CITY_SPEED_LIMIT, CRUISING_SPEED, get_max_allowed_accel
+from openpilot.selfdrive.frogpilot.controls.lib.frogpilot_variables import CITY_SPEED_LIMIT, CRUISING_SPEED
 
 A_CRUISE_MIN_ECO = A_CRUISE_MIN / 4
 A_CRUISE_MIN_SPORT = A_CRUISE_MIN / 2
@@ -29,6 +29,7 @@ def get_max_accel_ramp_off(max_accel, v_cruise, v_ego):
 
 EPSILON = 1e-6
 
+#may need to change to def get_max_allowed_accel
 def get_max_accel_ramp_off(max_accel, v_cruise, v_ego):
   def get_adaptive_transition_point(v_cruise):
     if v_cruise <= 25:
