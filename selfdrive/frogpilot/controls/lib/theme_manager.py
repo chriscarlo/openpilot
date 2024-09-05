@@ -366,20 +366,12 @@ class ThemeManager:
         self.previous_assets = {}
         self.update_active_theme()
 
-  def update_themes(self, boot_run=True):
+  def update_themes(self):
     if not os.path.exists(THEME_SAVE_PATH):
       return
 
     repo_url = get_repository_url()
-    if boot_run:
-      boot_checks = 0
-      while repo_url is None and boot_checks < 60:
-        boot_checks += 1
-        if boot_checks > 60:
-          break
-        time.sleep(1)
-      self.validate_themes()
-    elif repo_url is None:
+    if repo_url is None:
       print("GitHub and GitLab are offline...")
       return
 

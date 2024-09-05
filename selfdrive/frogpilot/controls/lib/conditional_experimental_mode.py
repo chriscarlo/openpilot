@@ -1,6 +1,6 @@
 from openpilot.common.params import Params
 
-from openpilot.selfdrive.frogpilot.controls.lib.frogpilot_functions import WeightedMovingAverageCalculator
+from openpilot.selfdrive.frogpilot.controls.lib.frogpilot_functions import MovingAverageCalculator
 from openpilot.selfdrive.frogpilot.controls.lib.frogpilot_variables import CITY_SPEED_LIMIT, THRESHOLD
 
 class ConditionalExperimentalMode:
@@ -9,8 +9,8 @@ class ConditionalExperimentalMode:
 
     self.params_memory = Params("/dev/shm/params")
 
-    self.curvature_wmac = WeightedMovingAverageCalculator(window_size=5)
-    self.stop_light_wmac = WeightedMovingAverageCalculator(window_size=5)
+    self.curvature_mac = MovingAverageCalculator()
+    self.stop_light_mac = MovingAverageCalculator()
 
     self.curve_detected = False
     self.experimental_mode = False
@@ -74,10 +74,10 @@ class ConditionalExperimentalMode:
       curve_detected = (1 / self.frogpilot_planner.road_curvature)**0.5 < v_ego
       curve_active = (0.9 / self.frogpilot_planner.road_curvature)**0.5 < v_ego and self.curve_detected
 
-      self.curvature_wmac.add_data(curve_detected or curve_active)
-      self.curve_detected = self.curvature_wmac.get_weighted_average() >= THRESHOLD
+      self.curvature_mac.add_data(curve_detected or curve_active)
+      self.curve_detected = self.curvature_mac.get_moving_average() >= THRESHOLD
     else:
-      self.curvature_wmac.reset_data()
+      self.curvature_mac.reset_data()
       self.curve_detected = False
 
   def slow_lead(self, tracking_lead, v_lead, frogpilot_toggles):
@@ -93,8 +93,8 @@ class ConditionalExperimentalMode:
     if not (self.curve_detected or tracking_lead):
       model_stopping = self.frogpilot_planner.model_length < v_ego * frogpilot_toggles.conditional_model_stop_time
 
-      self.stop_light_wmac.add_data(self.frogpilot_planner.model_stopped or model_stopping)
-      self.stop_light_detected = self.stop_light_wmac.get_weighted_average() >= THRESHOLD
+      self.stop_light_mac.add_data(self.frogpilot_planner.model_stopped or model_stopping)
+      self.stop_light_detected = self.stop_light_mac.get_moving_average() >= THRESHOLD
     else:
-      self.stop_light_wmac.reset_data()
+      self.stop_light_mac.reset_data()
       self.stop_light_detected = False

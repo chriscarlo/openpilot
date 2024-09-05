@@ -13,7 +13,7 @@ from openpilot.selfdrive.frogpilot.controls.lib.conditional_experimental_mode im
 from openpilot.selfdrive.frogpilot.controls.lib.frogpilot_acceleration import FrogPilotAcceleration
 from openpilot.selfdrive.frogpilot.controls.lib.frogpilot_events import FrogPilotEvents
 from openpilot.selfdrive.frogpilot.controls.lib.frogpilot_following import FrogPilotFollowing
-from openpilot.selfdrive.frogpilot.controls.lib.frogpilot_functions import WeightedMovingAverageCalculator, calculate_lane_width, calculate_road_curvature, update_frogpilot_toggles
+from openpilot.selfdrive.frogpilot.controls.lib.frogpilot_functions import MovingAverageCalculator, calculate_lane_width, calculate_road_curvature, update_frogpilot_toggles
 from openpilot.selfdrive.frogpilot.controls.lib.frogpilot_variables import CITY_SPEED_LIMIT, CRUISING_SPEED, MODEL_LENGTH, PLANNER_TIME, THRESHOLD
 from openpilot.selfdrive.frogpilot.controls.lib.frogpilot_vcruise import FrogPilotVCruise
 
@@ -30,7 +30,7 @@ class FrogPilotPlanner:
     self.frogpilot_vcruise = FrogPilotVCruise(self)
     self.lead_one = Lead()
 
-    self.tracking_lead_mac = WeightedMovingAverageCalculator(window_size=5)
+    self.tracking_lead_mac = MovingAverageCalculator()
 
     self.lateral_check = False
     self.lead_departing = False
@@ -128,7 +128,7 @@ class FrogPilotPlanner:
     following_lead &= v_ego > CRUISING_SPEED or self.tracking_lead
 
     self.tracking_lead_mac.add_data(following_lead)
-    return self.tracking_lead_mac.get_weighted_average() >= THRESHOLD
+    return self.tracking_lead_mac.get_moving_average() >= THRESHOLD
 
   def publish(self, sm, pm, frogpilot_toggles):
     frogpilot_plan_send = messaging.new_message('frogpilotPlan')

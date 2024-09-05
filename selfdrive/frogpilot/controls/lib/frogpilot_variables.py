@@ -127,7 +127,7 @@ class FrogPilotVariables:
     device_shutdown_setting = self.params.get_int("DeviceShutdown") if toggle.device_management else 33
     toggle.device_shutdown_time = (device_shutdown_setting - 3) * 3600 if device_shutdown_setting >= 4 else device_shutdown_setting * (60 * 15)
     toggle.increase_thermal_limits = toggle.device_management and self.params.get_bool("IncreaseThermalLimits")
-    toggle.low_voltage_shutdown = self.params.get_float("LowVoltageShutdown") if toggle.device_management else VBATT_PAUSE_CHARGING
+    toggle.low_voltage_shutdown = self.params.get_float("LowVoltageShutdown") if toggle.device_management and openpilot_installed else VBATT_PAUSE_CHARGING
     toggle.offline_mode = toggle.device_management and self.params.get_bool("OfflineMode")
 
     driving_personalities = toggle.openpilot_longitudinal and self.params.get_bool("DrivingPersonalities")
@@ -163,7 +163,7 @@ class FrogPilotVariables:
     toggle.lane_change_delay = self.params.get_int("LaneChangeTime") if lane_change_customizations else 0
     toggle.lane_detection_width = self.params.get_int("LaneDetectionWidth") * distance_conversion / 10. if lane_change_customizations else 0
     toggle.lane_detection = toggle.lane_detection_width != 0
-    toggle.minimum_lane_change_speed = self.params.get_int("MinimumLaneChangeSpeed") * speed_conversion if lane_change_customizations else LANE_CHANGE_SPEED_MIN
+    toggle.minimum_lane_change_speed = self.params.get_int("MinimumLaneChangeSpeed") * speed_conversion if lane_change_customizations and openpilot_installed else LANE_CHANGE_SPEED_MIN
     toggle.nudgeless = lane_change_customizations and self.params.get_bool("NudgelessLaneChange")
     toggle.one_lane_change = lane_change_customizations and self.params.get_bool("OneLaneChange")
 

@@ -169,6 +169,14 @@ def convert_params(params, params_storage):
   for key in ["CustomColors", "CustomDistanceIcons", "CustomIcons", "CustomSignals", "CustomSounds", "WheelIcon"]:
     remove_param(key)
 
+  if params.get("LowVoltageShutdown", encoding='utf-8') == "VBATT_PAUSE_CHARGING":
+    params.remove("LowVoltageShutdown")
+    params_storage.remove("LowVoltageShutdown")
+
+  if params.get("MinimumLaneChangeSpeed", encoding='utf-8') == "LANE_CHANGE_SPEED_MIN":
+    params.remove("MinimumLaneChangeSpeed")
+    params_storage.remove("MinimumLaneChangeSpeed")
+
   print("Param conversion completed")
 
 def delete_file(file):
@@ -284,23 +292,21 @@ def uninstall_frogpilot():
 
   HARDWARE.uninstall()
 
-class WeightedMovingAverageCalculator:
-  def __init__(self, window_size):
-    self.window_size = window_size
-    self.data = []
-    self.weights = np.linspace(1, 2, window_size)
+class MovingAverageCalculator:
+  def __init__(self):
+    self.reset_data()
 
   def add_data(self, value):
-    if len(self.data) == self.window_size:
-      self.data.pop(0)
+    if len(self.data) == 5:
+      self.total -= self.data.pop(0)
     self.data.append(value)
+    self.total += value
 
-  def get_weighted_average(self):
+  def get_moving_average(self):
     if len(self.data) == 0:
       return None
-    weighted_sum = np.dot(self.data, self.weights[-len(self.data):])
-    weight_total = np.sum(self.weights[-len(self.data):])
-    return weighted_sum / weight_total
+    return self.total / len(self.data)
 
   def reset_data(self):
     self.data = []
+    self.total = 0

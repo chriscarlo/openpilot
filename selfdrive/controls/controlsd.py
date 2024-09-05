@@ -731,6 +731,7 @@ class Controls:
     self.always_on_lateral_active &= self.sm['frogpilotPlan'].lateralCheck
     self.always_on_lateral_active &= not (self.frogpilot_toggles.always_on_lateral_lkas and self.sm['frogpilotCarState'].alwaysOnLateralDisabled)
     self.always_on_lateral_active &= not (CS.brakePressed and CS.vEgo < self.frogpilot_toggles.always_on_lateral_pause_speed) or CS.standstill
+    self.always_on_lateral_active = bool(self.always_on_lateral_active)
 
     if self.frogpilot_toggles.conditional_experimental_mode:
       self.experimental_mode = self.sm['frogpilotPlan'].experimentalMode
@@ -749,7 +750,7 @@ class Controls:
       self.resume_previously_pressed = self.resume_pressed
 
     FPCC = custom.FrogPilotCarControl.new_message()
-    FPCC.alwaysOnLateralActive = bool(self.always_on_lateral_active)
+    FPCC.alwaysOnLateralActive = self.always_on_lateral_active
     FPCC.fcwEventTriggered = self.fcw_event_triggered
     FPCC.noEntryEventTriggered = self.no_entry_alert_triggered
     FPCC.resumePressed = self.resume_previously_pressed

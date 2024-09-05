@@ -9,6 +9,7 @@ import traceback
 from cereal import log
 import cereal.messaging as messaging
 import openpilot.system.sentry as sentry
+from openpilot.common.conversions import Conversions as CV
 from openpilot.common.params import Params, ParamKeyType
 from openpilot.common.text_window import TextWindow
 from openpilot.selfdrive.controls.lib.desire_helper import LANE_CHANGE_SPEED_MIN
@@ -201,7 +202,7 @@ def manager_init() -> None:
     ("LosAngelesLiveTorqueParameters", ""),
     ("LosAngelesScore", "0"),
     ("LoudBlindspotAlert", "0"),
-    ("LowVoltageShutdown", VBATT_PAUSE_CHARGING),
+    ("LowVoltageShutdown", str(VBATT_PAUSE_CHARGING)),
     ("MapAcceleration", "0"),
     ("MapDeceleration", "0"),
     ("MapGears", "0"),
@@ -209,7 +210,7 @@ def manager_init() -> None:
     ("MapboxSecretKey", ""),
     ("MapsSelected", ""),
     ("MapStyle", "10"),
-    ("MinimumLaneChangeSpeed", LANE_CHANGE_SPEED_MIN),
+    ("MinimumLaneChangeSpeed", str(LANE_CHANGE_SPEED_MIN / CV.MPH_TO_MS)),
     ("Model", DEFAULT_MODEL),
     ("ModelManagement", "0"),
     ("ModelName", DEFAULT_MODEL_NAME),
