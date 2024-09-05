@@ -10,19 +10,19 @@ def calculate_dynamic_follow(base_follow, v_ego, personality):
 
     if personality == "aggressive":
         min_follow = 0.65
-        max_follow = 1.65
+        max_follow = 1.4
         L = max_follow - min_follow
         k = 0.075
         x0 = 35
     elif personality == "standard":
         min_follow = 0.6
-        max_follow = 1.85
+        max_follow = 1.7
         L = max_follow - min_follow
         k = 0.075
         x0 = 25
     elif personality == "relaxed":
         min_follow = 0.5
-        max_follow = 2.05
+        max_follow = 2.0
         L = max_follow - min_follow
         k = 0.075
         x0 = 18

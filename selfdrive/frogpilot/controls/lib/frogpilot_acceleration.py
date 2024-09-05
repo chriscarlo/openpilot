@@ -47,7 +47,8 @@ def get_max_accel_ramp_off(max_accel, v_cruise, v_ego):
   else:
     transition = 1 / max(1 + exp(x), EPSILON)
 
-  return max_accel * (0.25 + 0.75 * transition)
+  # Adjust the throttle roll-on to be gentler
+  return max_accel * (0.15 + 0.85 * transition)
 
 # upstream made a change I don't like - not sure which of these is going to be called elsewhere
 def get_max_allowed_accel(max_accel, v_cruise, v_ego):
