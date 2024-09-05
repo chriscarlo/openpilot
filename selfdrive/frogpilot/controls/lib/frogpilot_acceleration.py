@@ -1,4 +1,4 @@
-from openpilot.common.numpy_fast import clip, interp, exp
+import numpy as np
 
 from openpilot.selfdrive.car.interfaces import ACCEL_MIN, ACCEL_MAX
 from openpilot.selfdrive.controls.lib.longitudinal_planner import A_CRUISE_MIN, get_max_accel
@@ -14,13 +14,13 @@ A_CRUISE_MAX_VALS_SPORT =      [3.0, 2.5, 2.0, 1.5, 1.0, 0.8, 0.6]
 A_CRUISE_MAX_VALS_SPORT_PLUS = [4.0, 3.5, 3.0, 2.0, 1.0, 0.8, 0.6]
 
 def get_max_accel_eco(v_ego):
-  return interp(v_ego, A_CRUISE_MAX_BP_CUSTOM, A_CRUISE_MAX_VALS_ECO)
+  return np.interp(v_ego, A_CRUISE_MAX_BP_CUSTOM, A_CRUISE_MAX_VALS_ECO)
 
 def get_max_accel_sport(v_ego):
-  return interp(v_ego, A_CRUISE_MAX_BP_CUSTOM, A_CRUISE_MAX_VALS_SPORT)
+  return np.interp(v_ego, A_CRUISE_MAX_BP_CUSTOM, A_CRUISE_MAX_VALS_SPORT)
 
 def get_max_accel_sport_plus(v_ego):
-  return interp(v_ego, A_CRUISE_MAX_BP_CUSTOM, A_CRUISE_MAX_VALS_SPORT_PLUS)
+  return np.interp(v_ego, A_CRUISE_MAX_BP_CUSTOM, A_CRUISE_MAX_VALS_SPORT_PLUS)
 
 """
 def get_max_accel_ramp_off(max_accel, v_cruise, v_ego):
@@ -43,9 +43,9 @@ def get_max_accel_ramp_off(max_accel, v_cruise, v_ego):
 
   x = (v_normalized - transition_point) * 10
   if x < -2:
-    transition = 1 / max(1 + exp(x * 0.4), EPSILON)
+    transition = 1 / np.maximum(1 + np.exp(x * 0.4), EPSILON)
   else:
-    transition = 1 / max(1 + exp(x), EPSILON)
+    transition = 1 / np.maximum(1 + np.exp(x), EPSILON)
 
   # Adjust the throttle roll-on to be gentler
   return max_accel * (0.15 + 0.85 * transition)
@@ -65,9 +65,9 @@ def get_max_allowed_accel(max_accel, v_cruise, v_ego):
 
   x = (v_normalized - transition_point) * 10
   if x < -2:
-    transition = 1 / max(1 + exp(x * 0.4), EPSILON)
+    transition = 1 / np.maximum(1 + np.exp(x * 0.4), EPSILON)
   else:
-    transition = 1 / max(1 + exp(x), EPSILON)
+    transition = 1 / np.maximum(1 + np.exp(x), EPSILON)
 
   return max_accel * (0.25 + 0.75 * transition)
 
@@ -115,9 +115,9 @@ class FrogPilotAcceleration:
 
     if frogpilot_toggles.human_acceleration:
       if self.frogpilot_planner.tracking_lead and self.frogpilot_planner.lead_one.dRel < CITY_SPEED_LIMIT * 2 and not frogpilotCarState.trafficModeActive:
-        self.max_accel = clip(self.frogpilot_planner.lead_one.aLeadK,
-                              get_max_accel_sport_plus(v_ego),
-                              get_max_allowed_accel(get_max_accel(v_ego), v_cruise, v_ego))
+        self.max_accel = np.clip(self.frogpilot_planner.lead_one.aLeadK,
+                                 get_max_accel_sport_plus(v_ego),
+                                 get_max_allowed_accel(get_max_accel(v_ego), v_cruise, v_ego))
       self.max_accel = get_max_accel_ramp_off(self.max_accel, self.frogpilot_planner.v_cruise, v_ego)
 
     if controlsState.experimentalMode:
