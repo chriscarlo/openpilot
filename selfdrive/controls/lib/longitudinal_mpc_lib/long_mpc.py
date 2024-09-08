@@ -321,7 +321,7 @@ class LongitudinalMpc:
         self.solver.set(i, 'x', self.x0)
 
   @staticmethod
-  def extrapolate_lead(x_lead, v_lead, a_lead, a_lead_tau):
+  def extrapolate_lead(x_lead, v_lead, a_lead, a_lead_tau, v_ego):
     # Original code
     a_lead_traj = a_lead * np.exp(-a_lead_tau * (T_IDXS**2)/2.)
     v_lead_traj = np.clip(v_lead + np.cumsum(T_DIFFS * a_lead_traj), 0.0, 1e8)
@@ -329,17 +329,21 @@ class LongitudinalMpc:
 
     # New code: Adjust prediction when lead is accelerating
     if a_lead > 0:
-        # Increase the predicted acceleration
-        a_lead_traj = a_lead * np.exp(-a_lead_tau * (T_IDXS**2)/4.)  # Slower decay
+      # Adaptive decay rate (option 3)
+      decay_rate = np.clip(2 - a_lead, 0.2, 2)  # Faster decay for lower accelerations
+      a_lead_traj = a_lead * np.exp(-a_lead_tau * (T_IDXS**2) / decay_rate)
 
-        # Calculate new velocity and position trajectories
-        v_lead_traj_optimistic = np.clip(v_lead + np.cumsum(T_DIFFS * a_lead_traj), 0.0, 1e8)
-        x_lead_traj_optimistic = x_lead + np.cumsum(T_DIFFS * v_lead_traj_optimistic)
+      # Calculate new velocity and position trajectories
+      v_lead_traj_optimistic = np.clip(v_lead + np.cumsum(T_DIFFS * a_lead_traj), 0.0, 1e8)
+      x_lead_traj_optimistic = x_lead + np.cumsum(T_DIFFS * v_lead_traj_optimistic)
 
-        # Blend between original and optimistic predictions
-        blend_factor = np.clip(a_lead / 2.0, 0, 1)  # Adjust blending based on acceleration
-        v_lead_traj = (1 - blend_factor) * v_lead_traj + blend_factor * v_lead_traj_optimistic
-        x_lead_traj = (1 - blend_factor) * x_lead_traj + blend_factor * x_lead_traj_optimistic
+      # Dynamic blending factor (option 1)
+      velocity_diff = v_lead - v_ego
+      blend_factor = np.clip((a_lead / 2.0) * (1 + velocity_diff / 10), 0, 1)
+
+      # Blend between original and optimistic predictions
+      v_lead_traj = (1 - blend_factor) * v_lead_traj + blend_factor * v_lead_traj_optimistic
+      x_lead_traj = (1 - blend_factor) * x_lead_traj + blend_factor * x_lead_traj_optimistic
 
     lead_xv = np.column_stack((x_lead_traj, v_lead_traj))
     return lead_xv
@@ -364,7 +368,7 @@ class LongitudinalMpc:
     x_lead = clip(x_lead, min_x_lead, 1e8)
     v_lead = clip(v_lead, 0.0, 1e8)
     a_lead = clip(a_lead, -10., 5.)
-    lead_xv = self.extrapolate_lead(x_lead, v_lead, a_lead, a_lead_tau)
+    lead_xv = self.extrapolate_lead(x_lead, v_lead, a_lead, a_lead_tau, v_ego)
     return lead_xv
 
   def set_accel_limits(self, min_a, max_a):
