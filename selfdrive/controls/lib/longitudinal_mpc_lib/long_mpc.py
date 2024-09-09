@@ -329,21 +329,21 @@ class LongitudinalMpc:
 
     # New code: Adjust prediction when lead is accelerating
     if a_lead > 0:
-      # Adaptive decay rate (option 3)
-      decay_rate = np.clip(2 - a_lead, 0.25, 1.75)  # Faster decay for lower accelerations
-      a_lead_traj = a_lead * np.exp(-a_lead_tau * (T_IDXS**2) / decay_rate)
+        # Adaptive decay rate (slightly less aggressive)
+        decay_rate = np.clip(1.75 - a_lead * 0.75, 0.5, 1.5)
+        a_lead_traj = a_lead * np.exp(-a_lead_tau * (T_IDXS**2) / decay_rate)
 
-      # Calculate new velocity and position trajectories
-      v_lead_traj_optimistic = np.clip(v_lead + np.cumsum(T_DIFFS * a_lead_traj), 0.0, 1e8)
-      x_lead_traj_optimistic = x_lead + np.cumsum(T_DIFFS * v_lead_traj_optimistic)
+        # Calculate new velocity and position trajectories
+        v_lead_traj_optimistic = np.clip(v_lead + np.cumsum(T_DIFFS * a_lead_traj), 0.0, 1e8)
+        x_lead_traj_optimistic = x_lead + np.cumsum(T_DIFFS * v_lead_traj_optimistic)
 
-      # Dynamic blending factor (option 1)
-      velocity_diff = v_lead - v_ego
-      blend_factor = np.clip((a_lead / 2.0) * (1 + velocity_diff / 10), 0, 1)
+        # Modified blend factor calculation (more balanced)
+        velocity_diff = v_lead - v_ego
+        blend_factor = np.clip((a_lead / 1.5) * (1 + velocity_diff / 7.5), 0.25, 0.75)
 
-      # Blend between original and optimistic predictions
-      v_lead_traj = (1 - blend_factor) * v_lead_traj + blend_factor * v_lead_traj_optimistic
-      x_lead_traj = (1 - blend_factor) * x_lead_traj + blend_factor * x_lead_traj_optimistic
+        # Blend between original and optimistic predictions
+        v_lead_traj = (1 - blend_factor) * v_lead_traj + blend_factor * v_lead_traj_optimistic
+        x_lead_traj = (1 - blend_factor) * x_lead_traj + blend_factor * x_lead_traj_optimistic
 
     lead_xv = np.column_stack((x_lead_traj, v_lead_traj))
     return lead_xv
