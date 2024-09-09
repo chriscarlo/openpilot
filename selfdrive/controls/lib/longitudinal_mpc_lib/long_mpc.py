@@ -330,7 +330,7 @@ class LongitudinalMpc:
     # New code: Adjust prediction when lead is accelerating
     if a_lead > 0:
       # Adaptive decay rate (option 3)
-      decay_rate = np.clip(2 - a_lead, 0.2, 2)  # Faster decay for lower accelerations
+      decay_rate = np.clip(2 - a_lead, 0.25, 1.75)  # Faster decay for lower accelerations
       a_lead_traj = a_lead * np.exp(-a_lead_tau * (T_IDXS**2) / decay_rate)
 
       # Calculate new velocity and position trajectories
