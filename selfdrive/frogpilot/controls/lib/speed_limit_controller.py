@@ -1,6 +1,7 @@
-# PFEIFER - SLC - Modified by FrogAi for FrogPilot
+# PFEIFER - SLC - Modified by FrogAi for FrogPilot, graceful decel logic by chris.carlo
 import json
 import math
+import time
 
 from openpilot.common.conversions import Conversions as CV
 from openpilot.common.params import Params
@@ -30,6 +31,10 @@ class SpeedLimitController:
     self.max_speed_limit = 0  # m/s
     self.nav_speed_limit = 0  # m/s
     self.prv_speed_limit = self.params.get_float("PreviousSpeedLimit")
+    self.transition_start_time = 0
+    self.transition_start_speed = 0
+    self.transition_target_speed = 0
+    self.gentle_decel_rate = 0.67  # m/s
 
   def get_param_memory(self, key, is_json=False):
     param_value = self.params_memory.get(key)
@@ -50,6 +55,17 @@ class SpeedLimitController:
     self.max_speed_limit = v_cruise if enabled else 0
 
     self.frogpilot_toggles = frogpilot_toggles
+
+    new_limit = self.speed_limit
+    if new_limit > 1:
+      target_speed = new_limit + self.offset
+      if target_speed < v_ego and (self.transition_start_time == 0 or target_speed < self.transition_target_speed):
+        self.transition_start_speed = v_ego
+        self.transition_target_speed = target_speed
+        self.transition_start_time = time.time()
+
+        speed_diff = self.transition_start_speed - self.transition_target_speed
+        self.transition_duration = speed_diff / self.gentle_decel_rate
 
   def write_map_state(self, v_ego):
     self.map_speed_limit = self.get_param_memory("MapSpeedLimit")
@@ -80,9 +96,29 @@ class SpeedLimitController:
 
   @property
   def desired_speed_limit(self):
-    if self.speed_limit > 1:
-      self.update_previous_limit(self.speed_limit)
-      return self.speed_limit + self.offset
+    new_limit = self.speed_limit
+    if new_limit > 1:
+      target_speed = new_limit + self.offset
+
+      if target_speed < self.transition_start_speed:
+        current_time = time.time()
+        if current_time > self.transition_start_time:
+          # Calculate the ideal speed based on gentle deceleration
+          time_elapsed = current_time - self.transition_start_time
+          ideal_speed_change = self.gentle_decel_rate * time_elapsed
+          ideal_current_speed = max(self.transition_start_speed - ideal_speed_change, target_speed)
+
+          return ideal_current_speed
+
+      else:
+        # If the new limit is higher or equal, update immediately
+        self.update_previous_limit(new_limit)
+        self.transition_start_speed = target_speed
+        self.transition_target_speed = target_speed
+        self.transition_start_time = time.time()
+
+      return target_speed
+
     return 0
 
   @property
