@@ -9,6 +9,12 @@ from openpilot.selfdrive.frogpilot.controls.lib.frogpilot_variables import CRUIS
 from openpilot.selfdrive.frogpilot.controls.lib.map_turn_speed_controller import MapTurnSpeedController
 from openpilot.selfdrive.frogpilot.controls.lib.speed_limit_controller import SpeedLimitController
 
+import numpy as np
+import cereal.messaging as messaging
+from cereal import log
+
+LaneChangeState = log.LaneChangeState
+
 TARGET_LAT_A = 1.9
 
 class FrogPilotVCruise:
@@ -19,6 +25,14 @@ class FrogPilotVCruise:
 
     self.mtsc = MapTurnSpeedController()
     self.slc = SpeedLimitController()
+
+    self.sm = messaging.SubMaster(['modelV2'])
+    self.lane_change_state = LaneChangeState.off
+    self.base_curvature = 0.0
+    self.lc_curvature_offset = 0.0
+    self.curvature_rate = 0.0
+    self.last_curvature = 0.0
+    self.curvature_confidence = 1.0
 
     self.forcing_stop = False
     self.override_force_stop = False
@@ -33,6 +47,39 @@ class FrogPilotVCruise:
     self.speed_limit_timer = 0
     self.tracked_model_length = 0
     self.vtsc_target = 0
+
+  def estimate_base_curvature(self, current_curvature, lane_change_state, dt):
+    # Calculate curvature rate of change
+    self.curvature_rate = (current_curvature - self.last_curvature) / dt
+    self.last_curvature = current_curvature
+
+    # Update base curvature estimate
+    if lane_change_state == LaneChangeState.off:
+      self.base_curvature = current_curvature
+      self.lc_curvature_offset = 0.0
+      self.curvature_confidence = 1.0
+    else:
+      if self.lane_change_state == LaneChangeState.off:  # Lane change just started
+        self.lc_curvature_offset = current_curvature - self.base_curvature
+        self.curvature_confidence = 0.5  # Reset confidence at start of lane change
+
+      # Estimate base curvature
+      estimated_base = current_curvature - self.lc_curvature_offset
+
+      # Adjust estimate based on curvature rate
+      if abs(self.curvature_rate) > 0.001:  # If curvature is changing rapidly
+        # Assume some of this change is due to the underlying road, not just the lane change
+        road_curvature_change = self.curvature_rate * 0.5  # Assume 50% of change is from road
+        estimated_base += road_curvature_change * dt
+
+      # Update base curvature with a weighted average
+      alpha = 0.2  # Smoothing factor
+      self.base_curvature = alpha * estimated_base + (1 - alpha) * self.base_curvature
+
+      # Update confidence
+      self.curvature_confidence = min(self.curvature_confidence + 0.1, 1.0)  # Slowly increase confidence
+
+    return max(self.base_curvature, 0.0001)  # Avoid division by zero
 
   def update(self, carState, controlsState, frogpilotCarControl, frogpilotCarState, frogpilotNavigation, modelData, v_cruise, v_ego, frogpilot_toggles):
     self.override_force_stop |= carState.gasPressed
@@ -113,13 +160,28 @@ class FrogPilotVCruise:
     else:
       self.slc_target = 0
 
+    # Update lane change state
+    self.sm.update()
+    prev_lane_change_state = self.lane_change_state
+    self.lane_change_state = self.sm['modelV2'].meta.laneChangeState
+
+    # Estimate base curvature
+    current_curvature = self.frogpilot_planner.road_curvature
+    dt = 0.1  # Assuming 10Hz update rate, adjust if different
+    estimated_base_curvature = self.estimate_base_curvature(current_curvature, self.lane_change_state, dt)
+
     # Pfeiferj's Vision Turn Controller
     if frogpilot_toggles.vision_turn_controller and v_ego > CRUISING_SPEED and controlsState.enabled:
-      adjusted_road_curvature = self.frogpilot_planner.road_curvature * frogpilot_toggles.curve_sensitivity
+      adjusted_base_curvature = estimated_base_curvature * frogpilot_toggles.curve_sensitivity
       adjusted_target_lat_a = TARGET_LAT_A * frogpilot_toggles.turn_aggressiveness
 
-      self.vtsc_target = (adjusted_target_lat_a / adjusted_road_curvature)**0.5
-      self.vtsc_target = clip(self.vtsc_target, CRUISING_SPEED, v_cruise)
+      # Calculate VTSC target based on estimated base curvature
+      raw_vtsc_target = (adjusted_target_lat_a / adjusted_base_curvature)**0.5
+
+      # Apply confidence factor
+      confidence_adjusted_target = np.interp(self.curvature_confidence, [0, 1], [v_cruise, raw_vtsc_target])
+
+      self.vtsc_target = clip(confidence_adjusted_target, CRUISING_SPEED, v_cruise)
     else:
       self.vtsc_target = v_cruise if v_cruise != V_CRUISE_UNSET else 0
 
