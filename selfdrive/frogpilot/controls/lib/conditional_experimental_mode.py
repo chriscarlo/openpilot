@@ -28,7 +28,7 @@ class ConditionalExperimentalMode:
       self.params_memory.put_int("CEStatus", self.status_value if self.experimental_mode else 0)
     else:
       self.experimental_mode = self.status_value in {2, 4, 6} or carState.standstill and self.experimental_mode
-      self.stop_light_detected = False
+      self.stop_light_detected &= self.status_value not in {1, 2, 3, 4, 5, 6}
 
   def check_conditions(self, carState, frogpilotNavigation, modelData, tracking_lead, v_ego, v_lead, frogpilot_toggles):
     below_speed = frogpilot_toggles.conditional_limit > v_ego >= 1 and not tracking_lead

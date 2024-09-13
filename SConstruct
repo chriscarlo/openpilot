@@ -182,7 +182,7 @@ env = Environment(
   CCFLAGS=[
     "-g",
     "-fPIC",
-    "-O2",
+    "-Og",
     "-Wunused",
     "-Werror",
     "-Wshadow",
@@ -194,6 +194,8 @@ env = Environment(
     "-Wno-reorder-init-list",
     "-Wno-error=unused-but-set-variable",
     "-Wno-vla-cxx-extension",
+    "-fno-omit-frame-pointer",
+    "-fstack-protector-strong"
   ] + cflags + ccflags,
 
   CPPPATH=cpppath + [
