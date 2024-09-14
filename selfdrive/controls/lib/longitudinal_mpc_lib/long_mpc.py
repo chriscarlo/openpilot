@@ -322,40 +322,27 @@ class LongitudinalMpc:
 
   @staticmethod
   def extrapolate_lead(x_lead, v_lead, a_lead, a_lead_tau, v_ego, a_ego):
-      # Original code
-      a_lead_traj = a_lead * np.exp(-a_lead_tau * (T_IDXS**2) / 2.)
+      # Adaptive decay rate
+      decay_rate = np.clip(2 - a_lead, 0.25, 1.25)
+      a_lead_traj = a_lead * np.exp(-a_lead_tau * (T_IDXS**2) / decay_rate)
+
+      # Calculate velocity and position trajectories
       v_lead_traj = np.clip(v_lead + np.cumsum(T_DIFFS * a_lead_traj), 0.0, 1e8)
       x_lead_traj = x_lead + np.cumsum(T_DIFFS * v_lead_traj)
 
-      # New code: Adjust prediction when lead is accelerating or moving faster
-      if a_lead > -0.1 or (v_lead > v_ego and a_lead >= 0):
-          # Adaptive decay rate
-          decay_rate = np.clip(2 - a_lead, 0.25, 1.25)
-          a_lead_traj = a_lead * np.exp(-a_lead_tau * (T_IDXS**2) / decay_rate)
+      # Dynamic adjustment factor based on ego perspective
+      velocity_diff = v_lead - v_ego
+      acceleration_diff = a_lead - a_ego
 
-          # Calculate new velocity and position trajectories
-          v_lead_traj_optimistic = np.clip(
-              v_lead + np.cumsum(T_DIFFS * a_lead_traj), 0.0, 1e8)
-          x_lead_traj_optimistic = x_lead + np.cumsum(
-              T_DIFFS * v_lead_traj_optimistic)
+      # Compute a ratio to adjust predictions based on acceleration differences
+      acceleration_ratio = acceleration_diff / max(abs(a_lead) + abs(a_ego), 1e-5)  # Avoid division by zero
 
-          # Dynamic blending factor with ego perspective
-          velocity_diff = v_lead - v_ego
-          acceleration_diff = a_lead - a_ego
+      # Adjustment factor considering both velocity and acceleration differences
+      adjustment_factor = np.clip((acceleration_ratio + (velocity_diff / 5.0)), 0.0, 1.0)
 
-          # Compute a ratio to adjust blending based on acceleration differences
-          acceleration_ratio = acceleration_diff / max(
-              abs(a_lead) + abs(a_ego), 1e-5)  # Avoid division by zero
-
-          # Adjust blend_factor to include both velocity and acceleration differences
-          blend_factor = np.clip(
-              (acceleration_ratio + (velocity_diff / 5.0)), 0.0, 1.0)
-
-          # Blend between original and optimistic predictions
-          v_lead_traj = ((1 - blend_factor) * v_lead_traj +
-                        blend_factor * v_lead_traj_optimistic)
-          x_lead_traj = ((1 - blend_factor) * x_lead_traj +
-                        blend_factor * x_lead_traj_optimistic)
+      # Apply adjustment to trajectories
+      v_lead_traj *= (1 + adjustment_factor)
+      x_lead_traj *= (1 + adjustment_factor)
 
       lead_xv = np.column_stack((x_lead_traj, v_lead_traj))
       return lead_xv
