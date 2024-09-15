@@ -812,7 +812,7 @@ void AnnotatedCameraWidget::updateFrogPilotWidgets(int alert_height, const UISce
   unconfirmedSpeedLimit = speedLimitController ? scene.unconfirmed_speed_limit : 0;
   useViennaSLCSign = scene.use_vienna_slc_sign;
 
-  bool stoppedTimer = scene.stopped_timer && scene.standstill && scene.started_timer / UI_FREQ >= 10 && !mapOpen;
+  bool stoppedTimer = scene.stopped_timer && scene.standstill && scene.started_timer / UI_FREQ >= 10;
   if (stoppedTimer) {
     if (!standstillTimer.isValid()) {
       standstillTimer.start();
