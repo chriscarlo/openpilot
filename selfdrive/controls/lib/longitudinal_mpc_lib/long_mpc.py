@@ -347,9 +347,9 @@ class LongitudinalMpc:
           acceleration_ratio = acceleration_diff / max(
               abs(a_lead) + abs(a_ego), 1e-5)  # Avoid division by zero
 
-          # Adjust blend_factor to include both velocity and acceleration differences
-          blend_factor = np.clip(
-              (acceleration_ratio + (velocity_diff / 5.0)), 0.0, 1.0)
+          # Adjust blend_factor to heavily favor optimistic predictions
+          base_blend = np.clip((acceleration_ratio + (velocity_diff / 5.0)), 0.0, 1.0)
+          blend_factor = 0.9 + (0.1 * base_blend)  # This ensures a minimum of 0.9 blend towards optimistic
 
           # Blend between original and optimistic predictions
           v_lead_traj = ((1 - blend_factor) * v_lead_traj +
