@@ -322,43 +322,30 @@ class LongitudinalMpc:
 
   @staticmethod
   def extrapolate_lead(x_lead, v_lead, a_lead, a_lead_tau, v_ego, a_ego):
-      # Original code
-      a_lead_traj = a_lead * np.exp(-a_lead_tau * (T_IDXS**2) / 2.)
+      # Default prediction: exponential decay of acceleration
+      a_lead_traj = a_lead * np.exp(-a_lead_tau * T_IDXS)
       v_lead_traj = np.clip(v_lead + np.cumsum(T_DIFFS * a_lead_traj), 0.0, 1e8)
       x_lead_traj = x_lead + np.cumsum(T_DIFFS * v_lead_traj)
 
-      # New code: Adjust prediction when lead is accelerating or moving faster
-      if a_lead > -0.1 or (v_lead > v_ego and a_lead >= 0):
-          # Adaptive decay rate
-          decay_rate = np.clip(2 - a_lead, 0.25, 1.25)
-          a_lead_traj = a_lead * np.exp(-a_lead_tau * (T_IDXS**2) / decay_rate)
-
-          # Calculate new velocity and position trajectories
-          v_lead_traj_optimistic = np.clip(
+      # Adjust prediction when lead is accelerating or moving faster
+      if a_lead > 0.0 or v_lead > v_ego:
+          # Assume constant acceleration
+          a_lead_traj = a_lead * np.ones_like(T_IDXS)
+          v_lead_traj = np.clip(
               v_lead + np.cumsum(T_DIFFS * a_lead_traj), 0.0, 1e8)
-          x_lead_traj_optimistic = x_lead + np.cumsum(
-              T_DIFFS * v_lead_traj_optimistic)
+          x_lead_traj = x_lead + np.cumsum(T_DIFFS * v_lead_traj)
 
-          # Dynamic blending factor with ego perspective
-          velocity_diff = v_lead - v_ego
-          acceleration_diff = a_lead - a_ego
-
-          # Compute a ratio to adjust blending based on acceleration differences
-          acceleration_ratio = acceleration_diff / max(
-              abs(a_lead) + abs(a_ego), 1e-5)  # Avoid division by zero
-
-          # Adjust blend_factor to heavily favor optimistic predictions
-          base_blend = np.clip((acceleration_ratio + (velocity_diff / 5.0)), 0.0, 1.0)
-          blend_factor = 0.9 + (0.1 * base_blend)  # This ensures a minimum of 0.9 blend towards optimistic
-
-          # Blend between original and optimistic predictions
-          v_lead_traj = ((1 - blend_factor) * v_lead_traj +
-                        blend_factor * v_lead_traj_optimistic)
-          x_lead_traj = ((1 - blend_factor) * x_lead_traj +
-                        blend_factor * x_lead_traj_optimistic)
+      # Handle when lead is faster but decelerating
+      elif v_lead > v_ego and a_lead < 0:
+          # Use less aggressive prediction with exponential decay
+          a_lead_traj = a_lead * np.exp(-a_lead_tau * T_IDXS)
+          v_lead_traj = np.clip(
+              v_lead + np.cumsum(T_DIFFS * a_lead_traj), 0.0, 1e8)
+          x_lead_traj = x_lead + np.cumsum(T_DIFFS * v_lead_traj)
 
       lead_xv = np.column_stack((x_lead_traj, v_lead_traj))
       return lead_xv
+
 
   def process_lead(self, lead, increased_stopping_distance=0, a_ego=0):
     v_ego = self.x0[1]
