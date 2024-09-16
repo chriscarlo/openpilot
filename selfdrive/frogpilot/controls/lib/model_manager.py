@@ -5,8 +5,6 @@ import shutil
 import time
 import urllib.request
 
-import openpilot.system.sentry as sentry
-
 from openpilot.common.basedir import BASEDIR
 from openpilot.common.params import Params, UnknownKeyName
 
@@ -171,6 +169,7 @@ class ModelManager:
         redownload_info.append(f"{model} isn't downloaded")
 
     if automatically_update_models and not all_models_downloaded:
+      import openpilot.system.sentry as sentry
       with sentry.sentry_sdk.configure_scope() as scope:
         scope.set_extra("existing_items", existing_items)
         scope.set_extra("existing_models", existing_models_info)
@@ -231,6 +230,7 @@ class ModelManager:
 
     existing_models_info, missing_models_info = list_existing_models(available_models.split(','), repo_url)
 
+    import openpilot.system.sentry as sentry
     with sentry.sentry_sdk.configure_scope() as scope:
       scope.set_extra("existing_items", existing_items)
       scope.set_extra("existing_models", existing_models_info)
