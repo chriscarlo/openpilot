@@ -170,7 +170,7 @@ class ModelManager:
         all_models_downloaded = False
         redownload_info.append(f"{model} isn't downloaded")
 
-    if redownload_info:
+    if automatically_update_models and not all_models_downloaded:
       with sentry.sentry_sdk.configure_scope() as scope:
         scope.set_extra("existing_items", existing_items)
         scope.set_extra("existing_models", existing_models_info)
