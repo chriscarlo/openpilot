@@ -56,7 +56,8 @@ class FrogPilotVCruise:
         self.prev_estimated_base_curvature = 0.0
         self.apex_reached = False               # Flag to indicate if apex has been reached
         self.apex_speed = 0.0                   # Speed at the apex
-        self.time_since_apex = 0.0 
+        self.time_since_apex = 0.0
+        self.prev_curvature_derivative = 0.0
 
     def estimate_base_curvature(self, current_curvature, lane_change_state, dt):
         self.curvature_rate = (current_curvature - self.last_curvature) / dt
@@ -175,62 +176,63 @@ class FrogPilotVCruise:
         if frogpilot_toggles.vision_turn_controller and v_ego > CRUISING_SPEED and controlsState.enabled:
             adjusted_base_curvature = estimated_base_curvature * frogpilot_toggles.curve_sensitivity
             adjusted_target_lat_a = TARGET_LAT_A * frogpilot_toggles.turn_aggressiveness
-    
+
             curvature_threshold = 0.0001
             if adjusted_base_curvature < curvature_threshold:
                 self.apex_reached = False
                 self.vtsc_rate_limited_target = v_cruise
                 self.time_since_apex = 0.0  # Reset time since apex
-    
+                self.prev_curvature_derivative = 0.0  # Reset previous curvature derivative
+
             # Calculate raw target speed
             raw_vtsc_target = (adjusted_target_lat_a / adjusted_base_curvature)**0.5
-    
+
             # Apply confidence factor
             confidence_adjusted_target = np.interp(
                 self.curvature_confidence, [0, 1], [v_cruise, raw_vtsc_target]
             )
-    
+
             # Desired target speed clipped to allowed range
             desired_vtsc_target = clip(confidence_adjusted_target, CRUISING_SPEED, v_cruise)
-    
-            # Detect curve entry, apex, and exit
-            if self.curvature_derivative > 0:
-                # Approaching apex, curvature increasing
-                self.apex_reached = False
-                self.time_since_apex = 0.0  # Reset time since apex
-            elif self.curvature_derivative < 0 and not self.apex_reached:
-                # Passed apex, curvature decreasing
+
+            # Detect when curvature derivative starts decreasing
+            if self.curvature_derivative < self.prev_curvature_derivative and not self.apex_reached:
+                # Curvature derivative is decreasing, start accelerating
                 self.apex_reached = True
                 self.apex_speed = v_ego
                 self.time_since_apex = 0.0  # Start timing since apex
-    
+
+            # Update previous curvature derivative
+            self.prev_curvature_derivative = self.curvature_derivative
+
             # Adjust target speed based on apex detection
             if self.apex_reached:
-                # After apex, increment time since apex
+                # After apex or when curvature derivative is decreasing, increment time
                 self.time_since_apex += DT_MDL
-    
+
                 # Exponential easing function parameters
                 k = 1.5  # Rate constant (adjust for desired smoothness)
-    
+
                 # Calculate eased speed
                 speed_diff = v_cruise - self.apex_speed
                 eased_speed = self.apex_speed + speed_diff * (1 - np.exp(-k * self.time_since_apex))
-    
+
                 # Ensure the eased speed does not exceed v_cruise
                 self.vtsc_rate_limited_target = min(eased_speed, v_cruise)
             else:
                 # Before apex, ensure the target speed doesn't exceed desired_vtsc_target
                 self.vtsc_rate_limited_target = min(desired_vtsc_target, self.vtsc_rate_limited_target)
-    
+
             # Ensure target speed does not fall below desired speed
             self.vtsc_rate_limited_target = max(self.vtsc_rate_limited_target, desired_vtsc_target)
-    
+
             self.vtsc_target = self.vtsc_rate_limited_target
         else:
             self.vtsc_target = v_cruise if v_cruise != V_CRUISE_UNSET else float('inf')
             self.vtsc_rate_limited_target = self.vtsc_target
             self.apex_reached = False
             self.time_since_apex = 0.0  # Reset time since apex
+            self.prev_curvature_derivative = 0.0
 
         if frogpilot_toggles.force_standstill and carState.standstill and not self.override_force_stop and controlsState.enabled:
             self.forcing_stop = True
