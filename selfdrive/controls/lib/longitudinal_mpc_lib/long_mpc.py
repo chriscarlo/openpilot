@@ -3,6 +3,7 @@ import os
 import time
 import numpy as np
 from cereal import log
+from collections import deque
 from openpilot.common.numpy_fast import clip
 from openpilot.common.realtime import DT_MDL
 from openpilot.common.swaglog import cloudlog
@@ -47,6 +48,9 @@ ACADOS_SOLVER_TYPE = 'SQP_RTI'
 # Default lead acceleration decay set to 50% at 1s
 LEAD_ACCEL_TAU = 1.5
 
+# Longitudinal filter constants
+LOW_SPEED = 15.6  # m/s (~35 mph)
+HIGH_SPEED = 26.8  # m/s (~60 mph)
 
 # Fewer timestamps don't hurt performance and lead to
 # much better convergence of the MPC with low iterations
@@ -254,6 +258,11 @@ class LongitudinalMpc:
     self.reset()
     self.source = SOURCES[2]
 
+    # Hybrid filter parameters
+    self.window_size = int(0.5 / dt)  # For a 0.5-second window
+    self.reset_threshold = 0.2        # Acceleration change threshold in m/s²
+    self.a_desired_buffer = deque(maxlen=self.window_size)
+
   def reset(self):
     # self.solver = AcadosOcpSolverCython(MODEL_NAME, ACADOS_SOLVER_TYPE, N)
     self.solver.reset()
@@ -285,10 +294,13 @@ class LongitudinalMpc:
 
   def set_cost_weights(self, cost_weights, constraint_cost_weights):
     W = np.asfortranarray(np.diag(cost_weights))
+    FOLLOW_DIST_COST_IDX = 0  # Define index for following distance cost
+    A_CHANGE_COST_IDX = 4     # Define index for acceleration change cost
     for i in range(N):
-      # TODO don't hardcode A_CHANGE_COST idx
-      # reduce the cost on (a-a_prev) later in the horizon.
-      W[4,4] = cost_weights[4] * np.interp(T_IDXS[i], [0.0, 1.0, 2.0], [1.0, 1.0, 0.0])
+      # Increase the weight on the following distance error earlier in the horizon
+      W[FOLLOW_DIST_COST_IDX, FOLLOW_DIST_COST_IDX] = cost_weights[FOLLOW_DIST_COST_IDX] * np.interp(T_IDXS[i], [0.0, 1.0, 2.0], [2.0, 1.0, 0.5])
+      # Maintain existing adjustment for acceleration changes
+      W[A_CHANGE_COST_IDX, A_CHANGE_COST_IDX] = cost_weights[A_CHANGE_COST_IDX] * np.interp(T_IDXS[i], [0.0, 1.0, 2.0], [1.0, 1.0, 0.0])
       self.solver.cost_set(i, 'W', W)
     # Setting the slice without the copy make the array not contiguous,
     # causing issues with the C interface.
@@ -302,6 +314,7 @@ class LongitudinalMpc:
   def set_weights(self, acceleration_jerk=1.0, danger_jerk=1.0, speed_jerk=1.0, prev_accel_constraint=True, personality=log.LongitudinalPersonality.standard):
     if self.mode == 'acc':
       a_change_cost = acceleration_jerk if prev_accel_constraint else 0
+      X_EGO_OBSTACLE_COST = 6.0
       cost_weights = [X_EGO_OBSTACLE_COST, X_EGO_COST, V_EGO_COST, A_EGO_COST, a_change_cost, speed_jerk]
       constraint_cost_weights = [LIMIT_COST, LIMIT_COST, LIMIT_COST, danger_jerk]
     elif self.mode == 'blended':
@@ -327,14 +340,19 @@ class LongitudinalMpc:
       v_lead_traj = np.clip(v_lead + np.cumsum(T_DIFFS * a_lead_traj), 0.0, 1e8)
       x_lead_traj = x_lead + np.cumsum(T_DIFFS * v_lead_traj)
 
-      # Adjust prediction when lead is accelerating or moving faster
-      if a_lead > 0.0 or v_lead > v_ego:
+      # Adjust prediction when lead is slower
+      if v_lead < v_ego:
+          # Assume the lead will maintain its speed or decelerate
+          a_lead_traj = min(a_lead, 0.0) * np.ones_like(T_IDXS)
+          v_lead_traj = np.clip(v_lead + np.cumsum(T_DIFFS * a_lead_traj), 0.0, v_lead)
+          x_lead_traj = x_lead + np.cumsum(T_DIFFS * v_lead_traj)
+      # Existing logic for faster or accelerating leads
+      elif a_lead > 0.0 or v_lead > v_ego:
           # Assume constant acceleration
           a_lead_traj = a_lead * np.ones_like(T_IDXS)
           v_lead_traj = np.clip(
               v_lead + np.cumsum(T_DIFFS * a_lead_traj), 0.0, 1e8)
           x_lead_traj = x_lead + np.cumsum(T_DIFFS * v_lead_traj)
-
       # Handle when lead is faster but decelerating
       elif v_lead > v_ego and a_lead < 0:
           # Use less aggressive prediction with exponential decay
@@ -441,6 +459,55 @@ class LongitudinalMpc:
     self.params[:,4] = t_follow
 
     self.run()
+
+    # Dynamic adjustment of window size and reset threshold based on speed
+    if v_ego <= LOW_SPEED:
+        # Disable the filter at low speeds
+        window_size = 0
+        reset_threshold = None  # No threshold needed since filter is disabled
+    elif v_ego >= HIGH_SPEED:
+        # Use maximum smoothing at high speeds
+        window_size = int(1.0 / self.dt)  # 1-second window
+        reset_threshold = 0.2             # Smaller threshold
+    else:
+        # Linearly interpolate window size and reset threshold between low and high speeds
+        speed_fraction = (v_ego - LOW_SPEED) / (HIGH_SPEED - LOW_SPEED)
+        window_size = int((speed_fraction * (1.0 - 0.2) + 0.2) / self.dt)
+        reset_threshold = (1 - speed_fraction) * (0.3 - 0.2) + 0.2
+
+    # Update the buffer's maxlen if window_size changes
+    if window_size != self.window_size:
+        self.window_size = window_size
+        if self.window_size > 0:
+            self.a_desired_buffer = deque(self.a_desired_buffer, maxlen=self.window_size)
+        else:
+            self.a_desired_buffer.clear()
+
+    # Calculate desired acceleration from the trajectory
+    a_prev = self.a_solution[0]  # Use the first element of a_solution as a_prev
+    self.a_desired = float(self.a_solution[1])  # Use the second element of a_solution as a_desired
+
+    # Hybrid Moving Average Filter Implementation
+    acceleration_change = abs(self.a_desired - a_prev)
+
+    if self.window_size == 0:
+        # Filter is disabled, use the raw desired acceleration
+        pass  # No filtering applied
+    else:
+        if acceleration_change > reset_threshold:
+            # Significant change detected, reset the buffer
+            self.a_desired_buffer.clear()
+        else:
+            # Append the current desired acceleration to the buffer
+            self.a_desired_buffer.append(self.a_desired)
+
+            if len(self.a_desired_buffer) >= 1:
+                # Compute the moving average
+                self.a_desired = sum(self.a_desired_buffer) / len(self.a_desired_buffer)
+
+    # Update the desired velocity
+    self.v_desired = self.v_solution[1]  # Use the second element of v_solution as v_desired
+
     lead_probability = lead_one.prob if frogpilot_toggles.radarless_model else lead_one.modelProb
     if (np.any(lead_xv_0[FCW_IDXS,0] - self.x_sol[FCW_IDXS,0] < CRASH_DISTANCE) and lead_probability > 0.9):
       self.crash_cnt += 1
