@@ -48,10 +48,6 @@ ACADOS_SOLVER_TYPE = 'SQP_RTI'
 # Default lead acceleration decay set to 50% at 1s
 LEAD_ACCEL_TAU = 1.5
 
-# Longitudinal filter constants
-LOW_SPEED = 10.0  # m/s (~22 mph)
-HIGH_SPEED = 26.8  # m/s (~60 mph)
-
 # Fewer timestamps don't hurt performance and lead to
 # much better convergence of the MPC with low iterations
 N = 12
@@ -258,11 +254,6 @@ class LongitudinalMpc:
     self.reset()
     self.source = SOURCES[2]
 
-    # Hybrid filter parameters
-    self.window_size = int(0.5 / dt)  # For a 0.5-second window
-    self.reset_threshold = 0.2        # Acceleration change threshold in m/s²
-    self.a_desired_buffer = deque(maxlen=self.window_size)
-
   def reset(self):
     # self.solver = AcadosOcpSolverCython(MODEL_NAME, ACADOS_SOLVER_TYPE, N)
     self.solver.reset()
@@ -459,41 +450,6 @@ class LongitudinalMpc:
     self.params[:,4] = t_follow
 
     self.run()
-
-    # Determine if the smoothing filter should be applied
-    if self.mode == 'blended':
-      # Apply the smoothing filter in blended mode
-      # Calculate desired acceleration from the trajectory
-      a_prev = self.a_solution[0]
-      a_desired_raw = float(self.a_solution[1])
-
-      # Conditional Low-Pass Filter Implementation
-      acceleration_change = abs(a_desired_raw - a_prev)
-
-      # Define thresholds and filter parameters
-      SMALL_ACCEL_CHANGE = 0.01  # m/s²
-      LARGE_ACCEL_CHANGE = 0.05  # m/s²
-      ALPHA_SMALL = 0.2         # Smoothing factor for small changes
-      ALPHA_LARGE = 0.8         # Smoothing factor for large changes
-
-      if acceleration_change <= SMALL_ACCEL_CHANGE:
-        # Small change, apply more smoothing
-        alpha = ALPHA_SMALL
-      elif acceleration_change <= LARGE_ACCEL_CHANGE:
-        # Moderate change, moderate smoothing
-        alpha = (ALPHA_SMALL + ALPHA_LARGE) / 2
-      else:
-        # Large change, minimal smoothing to allow quick response
-        alpha = ALPHA_LARGE
-
-      # Exponential smoothing
-      self.a_desired = alpha * a_desired_raw + (1 - alpha) * a_prev
-    else:
-      # In 'acc' mode, use the raw desired acceleration without filtering
-      self.a_desired = float(self.a_solution[1])
-
-    # Update the desired velocity
-    self.v_desired = self.v_solution[1]
 
     lead_probability = lead_one.prob if radarless_model else lead_one.modelProb
     if (np.any(lead_xv_0[FCW_IDXS,0] - self.x_sol[FCW_IDXS,0] < CRASH_DISTANCE) and lead_probability > 0.9):
