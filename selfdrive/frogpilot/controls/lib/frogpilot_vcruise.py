@@ -173,10 +173,6 @@ class FrogPilotVCruise:
         dt = 0.1
         estimated_base_curvature = self.estimate_base_curvature(current_curvature, self.lane_change_state, dt)
 
-        # Initialize vtsc_rate_limited_target to v_cruise if it's the first run or after reset
-        if self.vtsc_rate_limited_target < CRUISING_SPEED or self.vtsc_rate_limited_target > v_cruise:
-            self.vtsc_rate_limited_target = v_cruise
-
         if frogpilot_toggles.vision_turn_controller and v_ego > CRUISING_SPEED and controlsState.enabled:
             adjusted_base_curvature = estimated_base_curvature * frogpilot_toggles.curve_sensitivity
             adjusted_target_lat_a = TARGET_LAT_A * frogpilot_toggles.turn_aggressiveness
@@ -189,7 +185,7 @@ class FrogPilotVCruise:
                 self.prev_curvature_derivative = 0.0  # Reset previous curvature derivative
 
             # Calculate raw target speed
-            raw_vtsc_target = (adjusted_target_lat_a / adjusted_base_curvature) ** 0.5
+            raw_vtsc_target = (adjusted_target_lat_a / adjusted_base_curvature)**0.5
 
             # Apply confidence factor
             confidence_adjusted_target = np.interp(
@@ -211,7 +207,7 @@ class FrogPilotVCruise:
 
             # Adjust target speed based on apex detection
             if self.apex_reached:
-                # After apex, increment time since apex
+                # After apex or when curvature derivative is decreasing, increment time
                 self.time_since_apex += DT_MDL
 
                 # Exponential easing function parameters
@@ -225,18 +221,17 @@ class FrogPilotVCruise:
                 self.vtsc_rate_limited_target = min(eased_speed, v_cruise)
             else:
                 # Before apex, ensure the target speed doesn't exceed desired_vtsc_target
-                self.vtsc_rate_limited_target = min(self.vtsc_rate_limited_target, desired_vtsc_target)
+                self.vtsc_rate_limited_target = min(desired_vtsc_target, self.vtsc_rate_limited_target)
 
             # Ensure target speed does not fall below desired speed
             self.vtsc_rate_limited_target = max(self.vtsc_rate_limited_target, desired_vtsc_target)
 
             self.vtsc_target = self.vtsc_rate_limited_target
         else:
-            # Reset VTSC variables when not active
             self.vtsc_target = v_cruise if v_cruise != V_CRUISE_UNSET else float('inf')
             self.vtsc_rate_limited_target = self.vtsc_target
             self.apex_reached = False
-            self.time_since_apex = 0.0
+            self.time_since_apex = 0.0  # Reset time since apex
             self.prev_curvature_derivative = 0.0
 
         if frogpilot_toggles.force_standstill and carState.standstill and not self.override_force_stop and controlsState.enabled:
