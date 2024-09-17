@@ -59,6 +59,9 @@ class CarInterface(CarInterfaceBase):
     ret.enableDsu = len(found_ecus) > 0 and Ecu.dsu not in found_ecus and candidate not in (NO_DSU_CAR | UNSUPPORTED_DSU_CAR) \
                                         and not (ret.flags & ToyotaFlags.SMART_DSU)
 
+    if candidate == CAR.LEXUS_ES_TSS2 and Ecu.hybrid not in found_ecus:
+      ret.flags |= ToyotaFlags.RAISED_ACCEL_LIMIT.value
+
     if candidate == CAR.TOYOTA_PRIUS:
       # Only give steer angle deadzone to for bad angle sensor prius
       for fw in car_fw:
@@ -134,10 +137,11 @@ class CarInterface(CarInterfaceBase):
 
     tune = ret.longitudinalTuning
     if params.get_bool("ToyotaTune"):
-      tune.kiV = [1.2]
-      ret.vEgoStopping = 0.15
-      ret.vEgoStarting = 0.15
-      ret.stoppingDecelRate = 0.1  # reach stopping target smoothly
+      tune.kiBP = [5., 35.]
+      tune.kiV = [0.5, 0.5]
+      ret.vEgoStopping = 0.25
+      ret.vEgoStarting = 0.25
+      ret.stoppingDecelRate = 0.6  # reach stopping target smoothly
     elif candidate in TSS2_CAR:
       tune.kpV = [0.0]
       tune.kiV = [0.5]

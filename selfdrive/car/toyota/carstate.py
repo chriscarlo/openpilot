@@ -66,20 +66,26 @@ class CarState(CarStateBase):
     self.low_speed_lockout = False
     self.acc_type = 1
     self.lkas_hud = {}
+    self.pcm_accel_net = 0.0
 
     # FrogPilot variables
     self.zss_compute = False
     self.zss_cruise_active_last = False
 
-    self.pcm_accel_net = 0
-    self.pcm_neutral_force = 0
-    self.vsc_slope_angle = 0
-    self.zss_angle_offset = 0
-    self.zss_threshold_count = 0
+    self.pcm_accel_net = 0.0
+    self.pcm_true_accel_net = 0.0
+    self.pcm_calc_accel_net = 0.0
+    self.pcm_neutral_force = 0.0
+    self.vsc_slope_angle = 0.0
 
   def update(self, cp, cp_cam, CC, frogpilot_toggles):
     ret = car.CarState.new_message()
     fp_ret = custom.FrogPilotCarState.new_message()
+
+    # Describes the acceleration request from the PCM if on flat ground, may be higher or lower if pitched
+    # CLUTCH->ACCEL_NET is only accurate for gas, PCM_CRUISE->ACCEL_NET is only accurate for brake
+    if self.CP.flags & ToyotaFlags.RAISED_ACCEL_LIMIT:
+      self.pcm_accel_net = cp.vl["CLUTCH"]["ACCEL_NET"]  # - cp.vl["PCM_CRUISE"]["ACCEL_NET"]
 
     ret.doorOpen = any([cp.vl["BODY_CONTROL_STATE"]["DOOR_OPEN_FL"], cp.vl["BODY_CONTROL_STATE"]["DOOR_OPEN_FR"],
                         cp.vl["BODY_CONTROL_STATE"]["DOOR_OPEN_RL"], cp.vl["BODY_CONTROL_STATE"]["DOOR_OPEN_RR"]])
@@ -226,9 +232,12 @@ class CarState(CarStateBase):
       self.lkas_previously_enabled = self.lkas_enabled
       self.lkas_enabled = self.lkas_hud.get("LDA_ON_MESSAGE") == 1
 
-    self.pcm_accel_net = cp.vl["PCM_CRUISE"]["ACCEL_NET"]
+    # thought to be the gas/brake as issued by the pcm (0=coasting)
+    self.pcm_accel_net = cp.vl["PCM_CRUISE"]["ACCEL_NET"]  # this is only accurate for braking * 43
+    self.pcm_true_accel_net = cp.vl["CLUTCH"]["TRUE_ACCEL_NET"]  # this is only accurate for acceleration * 78
+    self.pcm_calc_accel_net = cp.vl["GEAR_PACKET_HYBRID"]["CAR_MOVEMENT"] / 78 - cp.vl["BRAKE"]["BRAKE_PEDAL"] / 43
     self.pcm_neutral_force = cp.vl["PCM_CRUISE"]["NEUTRAL_FORCE"]
-    self.vsc_slope_angle = cp.vl["VSC1"]["SLOPE_ANGLE"]
+    self.vsc_slope_angle = cp.vl["VSC1S07"]["ASLP"]
 
     # ZSS Support - Credit goes to the DragonPilot team!
     if self.CP.flags & ToyotaFlags.ZSS and self.zss_threshold_count <= ZSS_THRESHOLD_COUNT:
@@ -265,14 +274,20 @@ class CarState(CarStateBase):
       ("BODY_CONTROL_STATE_2", 2),
       ("ESP_CONTROL", 3),
       ("EPS_STATUS", 25),
+      ("GEAR_PACKET_HYBRID", 60),
+      ("BRAKE", 80),
       ("BRAKE_MODULE", 40),
       ("WHEEL_SPEEDS", 80),
       ("STEER_ANGLE_SENSOR", 80),
       ("PCM_CRUISE", 33),
       ("PCM_CRUISE_SM", 1),
-      ("VSC1", 20),
+      ("VSC1S07", 20),
       ("STEER_TORQUE_SENSOR", 50),
+      ("CLUTCH", 16),
     ]
+
+    if CP.flags & ToyotaFlags.RAISED_ACCEL_LIMIT:
+      messages.append(("CLUTCH", 15))
 
     if CP.carFingerprint != CAR.TOYOTA_MIRAI:
       messages.append(("ENGINE_RPM", 42))

@@ -129,7 +129,7 @@ def save_exception(exc_text: str) -> None:
   for file in files:
     with open(file, 'w') as f:
       if file.endswith("error.txt"):
-        lines = exc_text.splitlines()[-3:]
+        lines = exc_text.splitlines()[-10:]
         f.write("\n".join(lines))
       else:
         f.write(exc_text)
