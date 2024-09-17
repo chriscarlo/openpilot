@@ -34,7 +34,8 @@ class SpeedLimitController:
     self.transition_start_time = 0
     self.transition_start_speed = 0
     self.transition_target_speed = 0
-    self.gentle_decel_rate = 0.67  # m/s
+    self.gentle_decel_rate = 0.67  # m/s^2 (deceleration rate)
+    self.gentle_accel_rate = 0.8  # m/s^2 (acceleration rate)
 
   def get_param_memory(self, key, is_json=False):
     param_value = self.params_memory.get(key)
@@ -100,24 +101,39 @@ class SpeedLimitController:
     if new_limit > 1:
       target_speed = new_limit + self.offset
 
-      if target_speed < self.transition_start_speed:
-        current_time = time.time()
-        if current_time > self.transition_start_time:
-          # Calculate the ideal speed based on gentle deceleration
-          time_elapsed = current_time - self.transition_start_time
-          ideal_speed_change = self.gentle_decel_rate * time_elapsed
-          ideal_current_speed = max(self.transition_start_speed - ideal_speed_change, target_speed)
-
-          return ideal_current_speed
-
-      else:
-        # If the new limit is higher or equal, update immediately
+      # If the target speed has changed, reset the transition variables
+      if target_speed != self.transition_target_speed:
         self.update_previous_limit(new_limit)
-        self.transition_start_speed = target_speed
+        self.transition_start_speed = self.transition_target_speed if self.transition_target_speed else target_speed
         self.transition_target_speed = target_speed
         self.transition_start_time = time.time()
 
-      return target_speed
+      current_time = time.time()
+      time_elapsed = current_time - self.transition_start_time
+      speed_difference = self.transition_target_speed - self.transition_start_speed
+
+      # Determine the rate based on whether we're accelerating or decelerating
+      if speed_difference > 0:
+        # Accelerating
+        rate = self.gentle_accel_rate
+        ideal_speed_change = rate * time_elapsed
+        ideal_current_speed = min(
+          self.transition_start_speed + ideal_speed_change,
+          self.transition_target_speed
+        )
+      elif speed_difference < 0:
+        # Decelerating
+        rate = self.gentle_decel_rate
+        ideal_speed_change = rate * time_elapsed
+        ideal_current_speed = max(
+          self.transition_start_speed - ideal_speed_change,
+          self.transition_target_speed
+        )
+      else:
+        # No change in speed
+        ideal_current_speed = self.transition_target_speed
+
+      return ideal_current_speed
 
     return 0
 
