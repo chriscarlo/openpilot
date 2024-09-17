@@ -471,8 +471,8 @@ class LongitudinalMpc:
       acceleration_change = abs(a_desired_raw - a_prev)
 
       # Define thresholds and filter parameters
-      SMALL_ACCEL_CHANGE = 0.1  # m/s²
-      LARGE_ACCEL_CHANGE = 0.5  # m/s²
+      SMALL_ACCEL_CHANGE = 0.01  # m/s²
+      LARGE_ACCEL_CHANGE = 0.05  # m/s²
       ALPHA_SMALL = 0.2         # Smoothing factor for small changes
       ALPHA_LARGE = 0.8         # Smoothing factor for large changes
 
