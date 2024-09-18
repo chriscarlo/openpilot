@@ -196,14 +196,14 @@ class FrogPilotVCruise:
             desired_vtsc_target = clip(confidence_adjusted_target, CRUISING_SPEED, v_cruise)
 
             # Detect curve entry, apex prediction, and exit
-            CURVATURE_DERIVATIVE_THRESHOLD = 0.005  # New threshold value
+            CURVATURE_DERIVATIVE_THRESHOLD = 0.002  # Decreased threshold for later apex detection
 
             if self.curvature_derivative > CURVATURE_DERIVATIVE_THRESHOLD:
                 # Approaching apex, curvature increasing
                 self.apex_reached = False
                 self.time_since_apex = 0.0  # Reset time since apex
             elif self.curvature_derivative <= CURVATURE_DERIVATIVE_THRESHOLD and not self.apex_reached:
-                # Nearing apex, curvature increase is slowing down
+                # Nearing apex, curvature increase is slowing down further
                 self.apex_reached = True
                 self.apex_speed = v_ego
                 self.time_since_apex = 0.0  # Start timing since apex
