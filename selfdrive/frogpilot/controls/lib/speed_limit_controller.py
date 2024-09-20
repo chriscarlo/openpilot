@@ -35,7 +35,7 @@ class SpeedLimitController:
     self.transition_start_speed = 0
     self.transition_target_speed = 0
     self.gentle_decel_rate = 0.67  # m/s^2 (deceleration rate)
-    self.gentle_accel_rate = 0.8  # m/s^2 (acceleration rate)
+    self.gentle_accel_rate = 1.5  # m/s^2 (acceleration rate)
 
   def get_param_memory(self, key, is_json=False):
     param_value = self.params_memory.get(key)
