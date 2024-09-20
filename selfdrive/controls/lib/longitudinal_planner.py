@@ -17,7 +17,7 @@ from openpilot.selfdrive.controls.lib.drive_helpers import V_CRUISE_MAX, V_CRUIS
 from openpilot.common.swaglog import cloudlog
 
 LON_MPC_STEP = 0.2  # first step is 0.2s
-A_CRUISE_MIN = -5.5
+A_CRUISE_MIN = -6.0
 A_CRUISE_MAX_VALS = [4.2, 3.5, 2.8, 1.6, 0.8]
 A_CRUISE_MAX_BP = [0., 10.0, 25., 40., 50.]
 CONTROL_N_T_IDX = ModelConstants.T_IDXS[:CONTROL_N]
@@ -165,9 +165,9 @@ class LongitudinalPlanner:
       j = np.zeros(len(T_IDXS_MPC))
 
     if taco_tune:
-      max_lat_accel = interp(v_ego, [5, 10, 20, 30, 40, 50, 60, 70], [5.0, 4.5, 4.0, 3.5, 3.0, 2.8, 2.6, 2.5])
+      max_lat_accel = interp(v_ego, [5, 10, 20], [1.5, 2.0, 3.0])
       curvatures = np.interp(T_IDXS_MPC, ModelConstants.T_IDXS, model_msg.orientationRate.z) / np.clip(v, 0.3, 100.0)
-      max_v = np.sqrt(max_lat_accel / (np.abs(curvatures) + 1e-3)) - 0.8
+      max_v = np.sqrt(max_lat_accel / (np.abs(curvatures) + 1e-3)) - 2.0
       v = np.minimum(max_v, v)
 
     return x, v, a, j

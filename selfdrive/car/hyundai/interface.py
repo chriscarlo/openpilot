@@ -18,7 +18,6 @@ ENABLE_BUTTONS = (Buttons.RES_ACCEL, Buttons.SET_DECEL, Buttons.CANCEL)
 BUTTONS_DICT = {Buttons.RES_ACCEL: ButtonType.accelCruise, Buttons.SET_DECEL: ButtonType.decelCruise,
                 Buttons.GAP_DIST: ButtonType.gapAdjustCruise, Buttons.CANCEL: ButtonType.cancel}
 
-
 class CarInterface(CarInterfaceBase):
   @staticmethod
   def _get_params(ret, candidate, fingerprint, car_fw, disable_openpilot_long, experimental_long, docs, params):
@@ -78,7 +77,7 @@ class CarInterface(CarInterfaceBase):
       if 0x53E in fingerprint[2]:
         ret.flags |= HyundaiFlags.LKAS12.value
 
-    ret.steerActuatorDelay = 0.1  # Default delay
+    ret.steerActuatorDelay = 0.3  # Default delay = .1
     ret.steerLimitTimer = 1.0
     CarInterfaceBase.configure_torque_tune(candidate, ret.lateralTuning)
 
@@ -105,11 +104,11 @@ class CarInterface(CarInterfaceBase):
 
     ret.stoppingControl = True
     ret.startingState = True
-    ret.vEgoStarting = 0.5
+    ret.vEgoStarting = 0.25
     ret.startAccel = 1.8
-    ret.stopAccel = -1.0
-    ret.stoppingDecelRate = 10
-    ret.longitudinalActuatorDelay = 0.5
+    ret.stopAccel = -0.8
+    ret.stoppingDecelRate = 8
+    ret.longitudinalActuatorDelay = 0.75
 
     # *** feature detection ***
     if candidate in CANFD_CAR:

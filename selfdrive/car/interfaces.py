@@ -29,7 +29,7 @@ EventName = car.CarEvent.EventName
 
 MAX_CTRL_SPEED = (V_CRUISE_MAX + 4) * CV.KPH_TO_MS
 ACCEL_MAX = 5.0
-ACCEL_MIN = -5.5
+ACCEL_MIN = -6.0
 FRICTION_THRESHOLD = 0.3
 
 NEURAL_PARAMS_PATH = os.path.join(BASEDIR, 'selfdrive/car/torque_data/neural_ff_weights.json')

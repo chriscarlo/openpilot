@@ -45,7 +45,7 @@ class DynamicFollow:
 
     # Reduce follow distance by 20% if changing lanes
     if lane_change_state in (LaneChangeState.laneChangeStarting, LaneChangeState.laneChangeFinishing):
-      target_follow *= 0.8
+      target_follow *= 0.65
 
     return np.clip(target_follow, min_follow, max_follow)
 

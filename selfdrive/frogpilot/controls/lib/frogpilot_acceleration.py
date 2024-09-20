@@ -5,8 +5,8 @@ from openpilot.selfdrive.controls.lib.longitudinal_planner import A_CRUISE_MIN, 
 
 from openpilot.selfdrive.frogpilot.controls.lib.frogpilot_variables import CITY_SPEED_LIMIT, CRUISING_SPEED
 
-A_CRUISE_MIN_ECO = A_CRUISE_MIN / 4
-A_CRUISE_MIN_SPORT = A_CRUISE_MIN / 2
+A_CRUISE_MIN_ECO = A_CRUISE_MIN
+A_CRUISE_MIN_SPORT = A_CRUISE_MIN
                        # MPH = [ 0.,  11,  22,  34,  45,  56,  89]
 A_CRUISE_MAX_BP_CUSTOM =       [ 0.,  5., 10., 15., 20., 25., 40.]
 A_CRUISE_MAX_VALS_ECO =        [1.8, 1.6, 1.4, 1.2, 1.0, 0.8, 0.6]
@@ -21,11 +21,6 @@ def get_max_accel_sport(v_ego):
 
 def get_max_accel_sport_plus(v_ego):
   return np.interp(v_ego, A_CRUISE_MAX_BP_CUSTOM, A_CRUISE_MAX_VALS_SPORT_PLUS)
-
-"""
-def get_max_accel_ramp_off(max_accel, v_cruise, v_ego):
-  return interp(v_ego, [0., v_cruise * 0.5, v_cruise * 0.75, v_cruise], [max_accel, max_accel, max_accel / 2, max_accel / 4])
-"""
 
 EPSILON = 1e-6
 
