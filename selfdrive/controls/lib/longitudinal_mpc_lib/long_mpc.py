@@ -285,16 +285,18 @@ class LongitudinalMpc:
 
   def set_cost_weights(self, cost_weights, constraint_cost_weights):
     W = np.asfortranarray(np.diag(cost_weights))
-    FOLLOW_DIST_COST_IDX = 0  # Define index for following distance cost
-    A_CHANGE_COST_IDX = 4     # Define index for acceleration change cost
+    FOLLOW_DIST_COST_IDX = 0  # Index for following distance cost
+    A_CHANGE_COST_IDX = 4     # Index for acceleration change cost
     for i in range(N):
-      # Increase the weight on the following distance error earlier in the horizon
-      W[FOLLOW_DIST_COST_IDX, FOLLOW_DIST_COST_IDX] = cost_weights[FOLLOW_DIST_COST_IDX] * np.interp(T_IDXS[i], [0.0, 1.0, 2.0], [2.0, 1.0, 0.5])
-      # Maintain existing adjustment for acceleration changes
-      W[A_CHANGE_COST_IDX, A_CHANGE_COST_IDX] = cost_weights[A_CHANGE_COST_IDX] * np.interp(T_IDXS[i], [0.0, 1.0, 2.0], [1.0, 1.0, 0.0])
+      # Soften the increase in weight on the following distance error
+      W[FOLLOW_DIST_COST_IDX, FOLLOW_DIST_COST_IDX] = cost_weights[FOLLOW_DIST_COST_IDX] * np.interp(
+        T_IDXS[i], [0.0, 1.0, 2.0], [1.5, 1.0, 0.8])
+      # Adjust the cost on acceleration change over the horizon
+      W[A_CHANGE_COST_IDX, A_CHANGE_COST_IDX] = cost_weights[A_CHANGE_COST_IDX] * np.interp(
+        T_IDXS[i], [0.0, 1.0, 2.0], [1.0, 0.5, 0.0])
+
       self.solver.cost_set(i, 'W', W)
-    # Setting the slice without the copy make the array not contiguous,
-    # causing issues with the C interface.
+    # For the final state, ensure the weight matrix is correctly sized
     self.solver.cost_set(N, 'W', np.copy(W[:COST_E_DIM, :COST_E_DIM]))
 
     # Set L2 slack cost on lower bound constraints
@@ -326,35 +328,26 @@ class LongitudinalMpc:
 
   @staticmethod
   def extrapolate_lead(x_lead, v_lead, a_lead, a_lead_tau, v_ego, a_ego):
-      # Default prediction: exponential decay of acceleration
+    # Handle low-speed scenarios carefully
+    if v_lead < 1.0 and v_ego < 1.0:
+      # Both vehicles are nearly stopped; assume minimal acceleration
+      a_lead_traj = np.zeros_like(T_IDXS)
+    elif v_lead <= v_ego:
+      # Lead is slower or at the same speed; assume it will decelerate or maintain speed
+      a_lead_traj = min(a_lead, 0.0) * np.ones_like(T_IDXS)
+    elif a_lead > 0.0:
+      # Lead is accelerating away; assume constant acceleration
+      a_lead_traj = a_lead * np.ones_like(T_IDXS)
+    else:
+      # Lead is faster but not accelerating; use exponential decay
       a_lead_traj = a_lead * np.exp(-a_lead_tau * T_IDXS)
-      v_lead_traj = np.clip(v_lead + np.cumsum(T_DIFFS * a_lead_traj), 0.0, 1e8)
-      x_lead_traj = x_lead + np.cumsum(T_DIFFS * v_lead_traj)
 
-      # Adjust prediction when lead is slower
-      if v_lead < v_ego:
-          # Assume the lead will maintain its speed or decelerate
-          a_lead_traj = min(a_lead, 0.0) * np.ones_like(T_IDXS)
-          v_lead_traj = np.clip(v_lead + np.cumsum(T_DIFFS * a_lead_traj), 0.0, v_lead)
-          x_lead_traj = x_lead + np.cumsum(T_DIFFS * v_lead_traj)
-      # Existing logic for faster or accelerating leads
-      elif a_lead > 0.0 or v_lead > v_ego:
-          # Assume constant acceleration
-          a_lead_traj = a_lead * np.ones_like(T_IDXS)
-          v_lead_traj = np.clip(
-              v_lead + np.cumsum(T_DIFFS * a_lead_traj), 0.0, 1e8)
-          x_lead_traj = x_lead + np.cumsum(T_DIFFS * v_lead_traj)
-      # Handle when lead is faster but decelerating
-      elif v_lead > v_ego and a_lead < 0:
-          # Use less aggressive prediction with exponential decay
-          a_lead_traj = a_lead * np.exp(-a_lead_tau * T_IDXS)
-          v_lead_traj = np.clip(
-              v_lead + np.cumsum(T_DIFFS * a_lead_traj), 0.0, 1e8)
-          x_lead_traj = x_lead + np.cumsum(T_DIFFS * v_lead_traj)
+    # Compute lead's future velocity and position
+    v_lead_traj = np.clip(v_lead + np.cumsum(T_DIFFS * a_lead_traj), 0.0, 1e8)
+    x_lead_traj = x_lead + np.cumsum(T_DIFFS * v_lead_traj)
 
-      lead_xv = np.column_stack((x_lead_traj, v_lead_traj))
-      return lead_xv
-
+    lead_xv = np.column_stack((x_lead_traj, v_lead_traj))
+    return lead_xv
 
   def process_lead(self, lead, increased_stopping_distance=0, a_ego=0):
     v_ego = self.x0[1]
