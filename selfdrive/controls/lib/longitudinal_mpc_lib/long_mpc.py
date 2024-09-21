@@ -322,21 +322,19 @@ class LongitudinalMpc:
 
   @staticmethod
   def extrapolate_lead(x_lead, v_lead, a_lead, a_lead_tau, v_ego):
-    # Always apply the adjustment, regardless of relative speeds
-    distance_factor = max(x_lead - (v_ego * get_T_FOLLOW()), 1)
+    distance_factor = max(x_lead - (v_ego * get_T_FOLLOW()), 1.5)  # Changed from 1 to 1.5
     standstill_offset = max(STOP_DISTANCE - v_ego, 0) * max(v_lead - v_ego, 1)
-    acceleration_offset = clip((v_lead - v_ego) + standstill_offset - COMFORT_BRAKE, 1, distance_factor)
-    
-    # Adjust the acceleration and acceleration decay
-    a_lead /= acceleration_offset
-    a_lead_tau /= acceleration_offset
 
-    a_lead_traj = a_lead * np.exp(-a_lead_tau * (T_IDXS**2)/2.)
+    acceleration_offset = clip((v_lead - v_ego) + standstill_offset - COMFORT_BRAKE, 1, distance_factor * 0.95)
+
+    a_lead_adjusted = a_lead / (acceleration_offset ** 0.8)  # Reduced exponent from 1 to 0.8
+    a_lead_tau_adjusted = a_lead_tau / (acceleration_offset ** 0.8)
+
+    a_lead_traj = a_lead_adjusted * np.exp(-a_lead_tau_adjusted * (T_IDXS**2)/2.)
     v_lead_traj = np.clip(v_lead + np.cumsum(T_DIFFS * a_lead_traj), 0.0, 1e8)
     x_lead_traj = x_lead + np.cumsum(T_DIFFS * v_lead_traj)
-    lead_xv = np.column_stack((x_lead_traj, v_lead_traj))
     
-    return lead_xv
+    return np.column_stack((x_lead_traj, v_lead_traj))
 
   def process_lead(self, lead, increased_stopping_distance=0):
     v_ego = self.x0[1]
