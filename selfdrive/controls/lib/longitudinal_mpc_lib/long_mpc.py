@@ -37,7 +37,7 @@ X_EGO_OBSTACLE_COST = 3.
 X_EGO_COST = 0.
 V_EGO_COST = 0.
 A_EGO_COST = 0.
-J_EGO_COST = 6.0
+J_EGO_COST = 5.0
 A_CHANGE_COST = 200.
 DANGER_ZONE_COST = 100.
 CRASH_DISTANCE = .25
@@ -322,15 +322,18 @@ class LongitudinalMpc:
 
   @staticmethod
   def extrapolate_lead(x_lead, v_lead, a_lead, a_lead_tau, v_ego):
-    distance_factor = max(x_lead - (v_ego * get_T_FOLLOW()), 1.5)  # Changed from 1 to 1.5
-    standstill_offset = max(STOP_DISTANCE - v_ego, 0) * max(v_lead - v_ego, 1)
-
-    acceleration_offset = clip((v_lead - v_ego) + standstill_offset - COMFORT_BRAKE, 1, distance_factor * 0.95)
-
-    a_lead_adjusted = a_lead / (acceleration_offset ** 0.8)  # Reduced exponent from 1 to 0.8
+    distance_factor = max(x_lead - (v_ego * get_T_FOLLOW()), 1.5)
+    delta_v = v_lead - v_ego
+    delta_v_deadband = 0.5  # Deadband threshold (adjust as needed)
+    delta_v_positive = max(delta_v - delta_v_deadband, 0)
+    standstill_offset = max(STOP_DISTANCE - v_ego, 0) * max(delta_v_positive, 1)
+    
+    acceleration_offset = clip(delta_v_positive + standstill_offset - COMFORT_BRAKE, 1, distance_factor * 0.95)
+    
+    a_lead_adjusted = a_lead / (acceleration_offset ** 0.8)
     a_lead_tau_adjusted = a_lead_tau / (acceleration_offset ** 0.8)
-
-    a_lead_traj = a_lead_adjusted * np.exp(-a_lead_tau_adjusted * (T_IDXS**2)/2.)
+    
+    a_lead_traj = a_lead_adjusted * np.exp(-a_lead_tau_adjusted * (T_IDXS**2) / 2.)
     v_lead_traj = np.clip(v_lead + np.cumsum(T_DIFFS * a_lead_traj), 0.0, 1e8)
     x_lead_traj = x_lead + np.cumsum(T_DIFFS * v_lead_traj)
     
