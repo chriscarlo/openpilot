@@ -1,10 +1,10 @@
 #include "safety_hyundai_common.h"
 
 const SteeringLimits HYUNDAI_CANFD_STEERING_LIMITS = {
-  .max_steer = 409,
-  .max_rt_delta = 224,
+  .max_steer = 600,
+  .max_rt_delta = 336,
   .max_rt_interval = 250000,
-  .max_rate_up = 10,
+  .max_rate_up = 15,
   .max_rate_down = 15,
   .driver_torque_allowance = 450,
   .driver_torque_factor = 2,
@@ -132,8 +132,6 @@ const int HYUNDAI_PARAM_CANFD_HDA2_ALT_STEERING = 128;
 bool hyundai_canfd_alt_buttons = false;
 bool hyundai_canfd_hda2_alt_steering = false;
 
-float hyundai_canfd_front_left_vego = 0.;
-float hyundai_canfd_rear_right_vego = 0.;
 
 int hyundai_canfd_hda2_get_lkas_addr(void) {
   return hyundai_canfd_hda2_alt_steering ? 0x110 : 0x50;
@@ -163,18 +161,18 @@ static void hyundai_canfd_rx_hook(const CANPacket_t *to_push) {
 
   if (bus == pt_bus) {
     // driver torque
-    if (addr == 0xEA) {
-      int torque_driver_new = ((GET_BYTE(to_push, 11) & 0x1FU) << 8U) | GET_BYTE(to_push, 10);
+    if (addr == 0xea) {
+      int torque_driver_new = ((GET_BYTE(to_push, 11) & 0x1fU) << 8U) | GET_BYTE(to_push, 10);
       torque_driver_new -= 4095;
       update_sample(&torque_driver, torque_driver_new);
     }
 
     // cruise buttons
-    const int button_addr = hyundai_canfd_alt_buttons ? 0x1AA : 0x1CF;
+    const int button_addr = hyundai_canfd_alt_buttons ? 0x1aa : 0x1cf;
     if (addr == button_addr) {
       bool main_button = false;
       int cruise_button = 0;
-      if (addr == 0x1CF) {
+      if (addr == 0x1cf) {
         cruise_button = GET_BYTE(to_push, 2) & 0x7U;
         main_button = GET_BIT(to_push, 19U);
       } else {
@@ -191,6 +189,7 @@ static void hyundai_canfd_rx_hook(const CANPacket_t *to_push) {
       gas_pressed = GET_BIT(to_push, 103U) || (GET_BYTE(to_push, 13) != 0U) || GET_BIT(to_push, 112U);
     } else if ((addr == 0x100) && !hyundai_ev_gas_signal && !hyundai_hybrid_gas_signal) {
       gas_pressed = GET_BIT(to_push, 176U);
+    } else {
     }
 
     // brake press
@@ -199,18 +198,16 @@ static void hyundai_canfd_rx_hook(const CANPacket_t *to_push) {
     }
 
     // vehicle moving
-    if (addr == 0xA0) {
+    if (addr == 0xa0) {
       uint32_t front_left_speed = GET_BYTES(to_push, 8, 2);
       uint32_t rear_right_speed = GET_BYTES(to_push, 14, 2);
-      hyundai_canfd_front_left_vego = (float)front_left_speed * 0.277778f * 0.03125f;
-      hyundai_canfd_rear_right_vego = (float)rear_right_speed * 0.277778f * 0.03125f;
       vehicle_moving = (front_left_speed > HYUNDAI_STANDSTILL_THRSLD) || (rear_right_speed > HYUNDAI_STANDSTILL_THRSLD);
     }
   }
 
   if (bus == scc_bus) {
     // cruise state
-    if ((addr == 0x1A0) && !hyundai_longitudinal) {
+    if ((addr == 0x1a0) && !hyundai_longitudinal) {
       // 1=enabled, 2=driver override
       int cruise_status = ((GET_BYTE(to_push, 8) >> 4) & 0x7U);
       bool cruise_engaged = (cruise_status == 1) || (cruise_status == 2);
@@ -218,25 +215,16 @@ static void hyundai_canfd_rx_hook(const CANPacket_t *to_push) {
     }
   }
 
-  // *** Adjusted Stock ECU Detection for HDA2 ***
-  const int steer_addr = hyundai_canfd_hda2 ? hyundai_canfd_hda2_get_lkas_addr() : 0x12A;
-  bool stock_ecu_detected = false;
-
+  const int steer_addr = hyundai_canfd_hda2 ? hyundai_canfd_hda2_get_lkas_addr() : 0x12a;
+  bool stock_ecu_detected = (addr == steer_addr) && (bus == 0);
   if (hyundai_longitudinal) {
-    if (hyundai_canfd_hda2) {
-      stock_ecu_detected = (addr == steer_addr) && (bus == 1);
-      const int stock_scc_bus = 1;
-      stock_ecu_detected = stock_ecu_detected || ((addr == 0x1A0) && (bus == stock_scc_bus));
-    } else {
-      stock_ecu_detected = (addr == steer_addr) && (bus == 0);
-      const int stock_scc_bus = 0;
-      stock_ecu_detected = stock_ecu_detected || ((addr == 0x1A0) && (bus == stock_scc_bus));
-    }
-  } else {
-    stock_ecu_detected = false;
+    // on HDA2, ensure ADRV ECU is still knocked out
+    // on others, ensure accel msg is blocked from camera
+    const int stock_scc_bus = hyundai_canfd_hda2 ? 1 : 0;
+    stock_ecu_detected = stock_ecu_detected || ((addr == 0x1a0) && (bus == stock_scc_bus));
   }
-
   generic_rx_checks(stock_ecu_detected);
+
 }
 
 static bool hyundai_canfd_tx_hook(const CANPacket_t *to_send) {
@@ -249,43 +237,8 @@ static bool hyundai_canfd_tx_hook(const CANPacket_t *to_send) {
     int desired_torque = (((GET_BYTE(to_send, 6) & 0xFU) << 7U) | (GET_BYTE(to_send, 5) >> 1U)) - 1024U;
     bool steer_req = GET_BIT(to_send, 52U);
 
-    // 2m/s margin
-    if (hyundai_canfd_front_left_vego < (11.f + 2.f) || hyundai_canfd_rear_right_vego < (11.f + 2.f)) {
-      bool violation = false;
-      uint32_t ts = microsecond_timer_get();
-
-      if (controls_allowed) {
-        // *** global torque limit check ***
-        violation |= max_limit_check(desired_torque, 384, -384);
-
-        // ready to blend in limits
-        desired_torque_last = MAX(-330, MIN(desired_torque, 330));
-        rt_torque_last = desired_torque;
-        ts_torque_check_last = ts;
-      }
-
-      // no torque if controls is not allowed
-      if (!controls_allowed && (desired_torque != 0)) {
-        violation = true;
-      }
-
-      // reset to 0 if either controls is not allowed or there's a violation
-      if (violation || !controls_allowed) {
-        valid_steer_req_count = 0;
-        invalid_steer_req_count = 0;
-        desired_torque_last = 0;
-        rt_torque_last = 0;
-        ts_torque_check_last = ts;
-        ts_steer_req_mismatch_last = ts;
-      }
-
-      if (violation) {
-        tx = 0;
-      }
-    } else {
-      if (steer_torque_cmd_checks(desired_torque, steer_req, HYUNDAI_CANFD_STEERING_LIMITS)) {
-        tx = 0;
-      }
+    if (steer_torque_cmd_checks(desired_torque, steer_req, HYUNDAI_CANFD_STEERING_LIMITS)) {
+      tx = false;
     }
   }
 
