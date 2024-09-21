@@ -1,10 +1,10 @@
 #include "safety_hyundai_common.h"
 
 const SteeringLimits HYUNDAI_CANFD_STEERING_LIMITS = {
-  .max_steer = 600,
-  .max_rt_delta = 448,
+  .max_steer = 409,
+  .max_rt_delta = 224,
   .max_rt_interval = 250000,
-  .max_rate_up = 15,
+  .max_rate_up = 7,
   .max_rate_down = 15,
   .driver_torque_allowance = 450,
   .driver_torque_factor = 2,
@@ -241,22 +241,22 @@ static bool hyundai_canfd_tx_hook(const CANPacket_t *to_send) {
     int desired_torque = (((GET_BYTE(to_send, 6) & 0xFU) << 7U) | (GET_BYTE(to_send, 5) >> 1U)) - 1024U;
     bool steer_req = GET_BIT(to_send, 52U);
 
-    // Safety checks when vehicle speed is low (42-45 mph equivalent)
+    // 2m/s margin
     if (hyundai_canfd_front_left_vego < (11.f + 2.f) || hyundai_canfd_rear_right_vego < (11.f + 2.f)) {
       bool violation = false;
       uint32_t ts = microsecond_timer_get();
 
       if (controls_allowed) {
         // *** global torque limit check ***
-        violation |= max_limit_check(desired_torque, 600, -600);
+        violation |= max_limit_check(desired_torque, 384, -384);
 
         // ready to blend in limits
-        desired_torque_last = MAX(-409, MIN(desired_torque, 409));
+        desired_torque_last = MAX(-330, MIN(desired_torque, 330));
         rt_torque_last = desired_torque;
         ts_torque_check_last = ts;
       }
 
-      // no torque if controls are not allowed
+      // no torque if controls is not allowed
       if (!controls_allowed && (desired_torque != 0)) {
         violation = true;
       }
@@ -272,11 +272,11 @@ static bool hyundai_canfd_tx_hook(const CANPacket_t *to_send) {
       }
 
       if (violation) {
-        tx = 0; // Prevent transmission if a violation is detected
+        tx = 0;
       }
     } else {
       if (steer_torque_cmd_checks(desired_torque, steer_req, HYUNDAI_CANFD_STEERING_LIMITS)) {
-        tx = 0; // Block transmission if additional checks fail
+        tx = 0;
       }
     }
   }
