@@ -241,22 +241,22 @@ static bool hyundai_canfd_tx_hook(const CANPacket_t *to_send) {
     int desired_torque = (((GET_BYTE(to_send, 6) & 0xFU) << 7U) | (GET_BYTE(to_send, 5) >> 1U)) - 1024U;
     bool steer_req = GET_BIT(to_send, 52U);
 
-    // 2m/s margin
-    if (hyundai_canfd_front_left_vego < (11.f + 2.f) || hyundai_canfd_rear_right_vego < (11.f + 2.f)) {
+    // Safety checks when vehicle speed is low (42-45 mph equivalent)
+    if (hyundai_canfd_front_left_vego < (20.f + 2.f) || hyundai_canfd_rear_right_vego < (20.f + 2.f)) {
       bool violation = false;
       uint32_t ts = microsecond_timer_get();
 
       if (controls_allowed) {
         // *** global torque limit check ***
-        violation |= max_limit_check(desired_torque, 384, -384);
+        violation |= max_limit_check(desired_torque, 409, -409);
 
         // ready to blend in limits
-        desired_torque_last = MAX(-330, MIN(desired_torque, 330));
+        desired_torque_last = MAX(-409, MIN(desired_torque, 409));
         rt_torque_last = desired_torque;
         ts_torque_check_last = ts;
       }
 
-      // no torque if controls is not allowed
+      // no torque if controls are not allowed
       if (!controls_allowed && (desired_torque != 0)) {
         violation = true;
       }
@@ -272,11 +272,11 @@ static bool hyundai_canfd_tx_hook(const CANPacket_t *to_send) {
       }
 
       if (violation) {
-        tx = 0;
+        tx = 0; // Prevent transmission if a violation is detected
       }
     } else {
       if (steer_torque_cmd_checks(desired_torque, steer_req, HYUNDAI_CANFD_STEERING_LIMITS)) {
-        tx = 0;
+        tx = 0; // Block transmission if additional checks fail
       }
     }
   }
