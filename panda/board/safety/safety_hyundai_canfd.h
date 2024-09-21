@@ -242,13 +242,13 @@ static bool hyundai_canfd_tx_hook(const CANPacket_t *to_send) {
     bool steer_req = GET_BIT(to_send, 52U);
 
     // Safety checks when vehicle speed is low (42-45 mph equivalent)
-    if (hyundai_canfd_front_left_vego < (20.f + 2.f) || hyundai_canfd_rear_right_vego < (20.f + 2.f)) {
+    if (hyundai_canfd_front_left_vego < (11.f + 2.f) || hyundai_canfd_rear_right_vego < (11.f + 2.f)) {
       bool violation = false;
       uint32_t ts = microsecond_timer_get();
 
       if (controls_allowed) {
         // *** global torque limit check ***
-        violation |= max_limit_check(desired_torque, 409, -409);
+        violation |= max_limit_check(desired_torque, 600, -600);
 
         // ready to blend in limits
         desired_torque_last = MAX(-409, MIN(desired_torque, 409));
