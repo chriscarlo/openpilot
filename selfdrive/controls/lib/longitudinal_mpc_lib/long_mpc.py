@@ -374,35 +374,13 @@ class LongitudinalMpc:
     lead_xv_0 = self.process_lead(lead_one, increased_distance)
     lead_xv_1 = self.process_lead(lead_two)
 
-    # Calculate relative speeds
-    relative_speed_0 = lead_xv_0[:,1] - v_ego
-    relative_speed_1 = lead_xv_1[:,1] - v_ego
-    relative_speed = max(relative_speed_0.max(), relative_speed_1.max())
-
-    # Define a threshold for relative speed to adjust aggressiveness
-    RELATIVE_SPEED_THRESHOLD = 1.0  # m/s
-
-    # Adjust MPC cost weights based on relative speed
-    if relative_speed > RELATIVE_SPEED_THRESHOLD:
-        # Increase the cost for following distance to make MPC more aggressive
-        self.set_weights(
-            acceleration_jerk=0.8,  # Slightly decrease jerk to allow more aggressive acceleration
-            danger_jerk=1.5,         # Increase danger jerk to prioritize following distance
-            speed_jerk=1.0,
-            prev_accel_constraint=True,
-            personality=personality
-        )
-        # Optionally, log the adjustment for debugging
-        cloudlog.info(f"Relative speed {relative_speed:.2f} m/s exceeds threshold. Adjusting MPC weights for aggressive following.")
-    else:
-        # Reset to default weights
-        self.set_weights(
-            acceleration_jerk=1.0,
-            danger_jerk=1.0,
-            speed_jerk=1.0,
-            prev_accel_constraint=True,
-            personality=personality
-        )
+    self.set_weights(
+        acceleration_jerk=0.8,
+        danger_jerk=1.5,
+        speed_jerk=1.0,
+        prev_accel_constraint=True,
+        personality=personality
+    )
 
     # To estimate a safe distance from a moving lead, we calculate how much stopping
     # distance that lead needs as a minimum. We can add that to the current distance
