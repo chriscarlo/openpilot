@@ -41,7 +41,7 @@ J_EGO_COST = 5.0
 A_CHANGE_COST = 200.
 DANGER_ZONE_COST = 100.
 CRASH_DISTANCE = .25
-LEAD_DANGER_FACTOR = 0.75
+LEAD_DANGER_FACTOR = 1.0
 LIMIT_COST = 1e6
 ACADOS_SOLVER_TYPE = 'SQP_RTI'
 # Default lead acceleration decay set to 50% at 1s
@@ -321,7 +321,16 @@ class LongitudinalMpc:
         self.solver.set(i, 'x', self.x0)
 
   @staticmethod
-  def extrapolate_lead(x_lead, v_lead, a_lead, a_lead_tau):
+  def extrapolate_lead(x_lead, v_lead, a_lead, a_lead_tau, v_ego):
+    # If the lead is faster, adjust the acceleration trajectory
+    if v_lead > v_ego:
+        distance_factor = max(x_lead - (v_ego * get_T_FOLLOW()), 1)
+        standstill_offset = max(STOP_DISTANCE - v_ego, 0) * max(v_lead - v_ego, 1)
+        acceleration_offset = clip((v_lead - v_ego) + standstill_offset - COMFORT_BRAKE, 1, distance_factor)
+        # Adjust the acceleration decay
+        a_lead /= acceleration_offset
+        a_lead_tau /= acceleration_offset
+
     a_lead_traj = a_lead * np.exp(-a_lead_tau * (T_IDXS**2)/2.)
     v_lead_traj = np.clip(v_lead + np.cumsum(T_DIFFS * a_lead_traj), 0.0, 1e8)
     x_lead_traj = x_lead + np.cumsum(T_DIFFS * v_lead_traj)
@@ -348,7 +357,7 @@ class LongitudinalMpc:
     x_lead = clip(x_lead, min_x_lead, 1e8)
     v_lead = clip(v_lead, 0.0, 1e8)
     a_lead = clip(a_lead, -10., 5.)
-    lead_xv = self.extrapolate_lead(x_lead, v_lead, a_lead, a_lead_tau)
+    lead_xv = self.extrapolate_lead(x_lead, v_lead, a_lead, a_lead_tau, v_ego)
     return lead_xv
 
   def set_accel_limits(self, min_a, max_a):
@@ -364,6 +373,36 @@ class LongitudinalMpc:
 
     lead_xv_0 = self.process_lead(lead_one, increased_distance)
     lead_xv_1 = self.process_lead(lead_two)
+
+    # Calculate relative speeds
+    relative_speed_0 = lead_xv_0[:,1] - v_ego
+    relative_speed_1 = lead_xv_1[:,1] - v_ego
+    relative_speed = max(relative_speed_0.max(), relative_speed_1.max())
+
+    # Define a threshold for relative speed to adjust aggressiveness
+    RELATIVE_SPEED_THRESHOLD = 1.0  # m/s
+
+    # Adjust MPC cost weights based on relative speed
+    if relative_speed > RELATIVE_SPEED_THRESHOLD:
+        # Increase the cost for following distance to make MPC more aggressive
+        self.set_weights(
+            acceleration_jerk=0.8,  # Slightly decrease jerk to allow more aggressive acceleration
+            danger_jerk=1.5,         # Increase danger jerk to prioritize following distance
+            speed_jerk=1.0,
+            prev_accel_constraint=True,
+            personality=personality
+        )
+        # Optionally, log the adjustment for debugging
+        cloudlog.info(f"Relative speed {relative_speed:.2f} m/s exceeds threshold. Adjusting MPC weights for aggressive following.")
+    else:
+        # Reset to default weights
+        self.set_weights(
+            acceleration_jerk=1.0,
+            danger_jerk=1.0,
+            speed_jerk=1.0,
+            prev_accel_constraint=True,
+            personality=personality
+        )
 
     # To estimate a safe distance from a moving lead, we calculate how much stopping
     # distance that lead needs as a minimum. We can add that to the current distance
