@@ -16,7 +16,7 @@ class CarControllerParams:
   ACCEL_MIN = -6.0 # m/s
   ACCEL_MAX = 5.0 # m/s
 
-  def __init__(self, CP):
+  def __init__(self, CP, vEgoRaw=100.):
     self.STEER_DELTA_UP = 8
     self.STEER_DELTA_DOWN = 10
     self.STEER_DRIVER_ALLOWANCE = 450
