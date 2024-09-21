@@ -201,7 +201,7 @@ class FrogPilotVCruise:
                 # Approaching apex, curvature increasing
                 self.apex_reached = False
                 self.time_since_apex = 0.0  # Reset time since apex
-            elif self.curvature_derivative <= 0 and not self.apex_reached:
+            elif self.curvature_derivative < 0 and not self.apex_reached:
                 # At or slightly past apex, curvature decreasing or stable
                 self.apex_reached = True
                 self.apex_speed = v_ego
