@@ -251,10 +251,10 @@ class LongitudinalMpc:
     self.mode = mode
     self.dt = dt
     self.solver = AcadosOcpSolverCython(MODEL_NAME, ACADOS_SOLVER_TYPE, N)
+    self.faster_lead_active = False
+    self.a_change_cost_factor = 1.0
     self.reset()
     self.source = SOURCES[2]
-    self.faster_lead_active = False
-    self.a_change_cost_factor = 1.0  # Factor to modify a_change_cost in ACC mode
 
   def reset(self):
     # self.solver = AcadosOcpSolverCython(MODEL_NAME, ACADOS_SOLVER_TYPE, N)
