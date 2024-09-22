@@ -253,6 +253,8 @@ class LongitudinalMpc:
     self.solver = AcadosOcpSolverCython(MODEL_NAME, ACADOS_SOLVER_TYPE, N)
     self.reset()
     self.source = SOURCES[2]
+    self.faster_lead_active = False
+    self.a_change_cost_factor = 1.0  # Factor to modify a_change_cost in ACC mode
 
   def reset(self):
     # self.solver = AcadosOcpSolverCython(MODEL_NAME, ACADOS_SOLVER_TYPE, N)
@@ -286,12 +288,12 @@ class LongitudinalMpc:
   def set_cost_weights(self, cost_weights, constraint_cost_weights):
     W = np.asfortranarray(np.diag(cost_weights))
     for i in range(N):
-      # TODO don't hardcode A_CHANGE_COST idx
-      # reduce the cost on (a-a_prev) later in the horizon.
-      W[4,4] = cost_weights[4] * np.interp(T_IDXS[i], [0.0, 1.0, 2.0], [1.0, 1.0, 0.0])
+      # Adjust A_CHANGE_COST based on faster_lead_active flag
+      if self.faster_lead_active:
+        W[4,4] = self.A_CHANGE_COST_REDUCED * np.interp(T_IDXS[i], [0.0, 1.0, 2.0], [1.0, 1.0, 0.0])
+      else:
+        W[4,4] = cost_weights[4] * np.interp(T_IDXS[i], [0.0, 1.0, 2.0], [1.0, 1.0, 0.0])
       self.solver.cost_set(i, 'W', W)
-    # Setting the slice without the copy make the array not contiguous,
-    # causing issues with the C interface.
     self.solver.cost_set(N, 'W', np.copy(W[:COST_E_DIM, :COST_E_DIM]))
 
     # Set L2 slack cost on lower bound constraints
@@ -302,15 +304,21 @@ class LongitudinalMpc:
   def set_weights(self, acceleration_jerk=1.0, danger_jerk=1.0, speed_jerk=1.0, prev_accel_constraint=True, personality=log.LongitudinalPersonality.standard):
     if self.mode == 'acc':
       a_change_cost = acceleration_jerk * 2.0 if prev_accel_constraint else 0
-      cost_weights = [X_EGO_OBSTACLE_COST, X_EGO_COST, V_EGO_COST, A_EGO_COST * 1.5, a_change_cost, speed_jerk * 1.5]
+      # Apply a_change_cost_factor to a_change_cost
+      a_change_cost *= self.a_change_cost_factor
+      base_cost_weights = [X_EGO_OBSTACLE_COST, X_EGO_COST, V_EGO_COST, A_EGO_COST * 1.5, a_change_cost, speed_jerk * 1.5]
       constraint_cost_weights = [LIMIT_COST, LIMIT_COST, LIMIT_COST, danger_jerk * 1.2]
     elif self.mode == 'blended':
+      # Blended mode remains unchanged
       a_change_cost = 60.0 if prev_accel_constraint else 0
-      cost_weights = [0., 0.1, 0.2, 7.5, a_change_cost, 1.5]
+      base_cost_weights = [0., 0.1, 0.2, 7.5, a_change_cost, 1.5]
       constraint_cost_weights = [LIMIT_COST, LIMIT_COST, LIMIT_COST, 60.0]
     else:
       raise NotImplementedError(f'Planner mode {self.mode} not recognized in planner cost set')
-    self.set_cost_weights(cost_weights, constraint_cost_weights)
+
+    self.base_cost_weights = base_cost_weights
+    self.constraint_cost_weights = constraint_cost_weights
+    self.set_cost_weights(base_cost_weights, constraint_cost_weights)
 
   def set_cur_state(self, v, a):
     v_prev = self.x0[1]
@@ -356,6 +364,11 @@ class LongitudinalMpc:
     # needs refactor
     self.cruise_min_a = min_a
     self.max_a = max_a
+
+  def set_faster_lead_status(self, status):
+    self.faster_lead_active = status
+    # Update a_change_cost_factor based on faster_lead_active
+    self.a_change_cost_factor = 0.25 if self.faster_lead_active else 1.0
 
   def update(self, lead_one, lead_two, v_cruise, x, v, a, j, radarless_model, t_follow, trafficModeActive, frogpilot_toggles, personality=log.LongitudinalPersonality.standard):
     v_ego = self.x0[1]
@@ -421,6 +434,24 @@ class LongitudinalMpc:
     self.params[:,3] = np.copy(self.prev_a)
     self.params[:,4] = t_follow * 1.2  # Increase following distance by 20%
 
+    # Calculate jerk factors
+    acceleration_jerk, danger_jerk, speed_jerk = get_jerk_factor(
+        frogpilot_toggles.aggressive_jerk_acceleration,
+        frogpilot_toggles.aggressive_jerk_danger,
+        frogpilot_toggles.aggressive_jerk_speed,
+        frogpilot_toggles.standard_jerk_acceleration,
+        frogpilot_toggles.standard_jerk_danger,
+        frogpilot_toggles.standard_jerk_speed,
+        frogpilot_toggles.relaxed_jerk_acceleration,
+        frogpilot_toggles.relaxed_jerk_danger,
+        frogpilot_toggles.relaxed_jerk_speed,
+        frogpilot_toggles.custom_personalities,
+        personality
+    )
+
+    # Update weights
+    self.set_weights(acceleration_jerk, danger_jerk, speed_jerk, True, personality)
+
     self.run()
     lead_probability = lead_one.prob if radarless_model else lead_one.modelProb
     if (np.any(lead_xv_0[FCW_IDXS,0] - self.x_sol[FCW_IDXS,0] < CRASH_DISTANCE) and lead_probability > 0.9):
@@ -439,7 +470,8 @@ class LongitudinalMpc:
 
     # Apply a small deadzone to acceleration
     deadzone = 0.1
-    a = np.where(np.abs(a) < deadzone, 0.0, a)
+    if abs(a) < deadzone:
+      a = 0
 
   def run(self):
     # t0 = time.monotonic()
