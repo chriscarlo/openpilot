@@ -321,23 +321,12 @@ class LongitudinalMpc:
         self.solver.set(i, 'x', self.x0)
 
   @staticmethod
-  def extrapolate_lead(x_lead, v_lead, a_lead, a_lead_tau, v_ego):
-    distance_factor = max(x_lead - (v_ego * get_T_FOLLOW()), 1.5)
-    delta_v = v_lead - v_ego
-    delta_v_deadband = 0.5  # Deadband threshold (adjust as needed)
-    delta_v_positive = max(delta_v - delta_v_deadband, 0)
-    standstill_offset = max(STOP_DISTANCE - v_ego, 0) * max(delta_v_positive, 1)
-    
-    acceleration_offset = clip(delta_v_positive + standstill_offset - COMFORT_BRAKE, 1, distance_factor * 0.95)
-    
-    a_lead_adjusted = a_lead / (acceleration_offset ** 0.8)
-    a_lead_tau_adjusted = a_lead_tau / (acceleration_offset ** 0.8)
-    
-    a_lead_traj = a_lead_adjusted * np.exp(-a_lead_tau_adjusted * (T_IDXS**2) / 2.)
+  def extrapolate_lead(x_lead, v_lead, a_lead, a_lead_tau):
+    a_lead_traj = a_lead * np.exp(-a_lead_tau * (T_IDXS**2)/2.)
     v_lead_traj = np.clip(v_lead + np.cumsum(T_DIFFS * a_lead_traj), 0.0, 1e8)
     x_lead_traj = x_lead + np.cumsum(T_DIFFS * v_lead_traj)
-    
-    return np.column_stack((x_lead_traj, v_lead_traj))
+    lead_xv = np.column_stack((x_lead_traj, v_lead_traj))
+    return lead_xv
 
   def process_lead(self, lead, increased_stopping_distance=0):
     v_ego = self.x0[1]
@@ -359,7 +348,7 @@ class LongitudinalMpc:
     x_lead = clip(x_lead, min_x_lead, 1e8)
     v_lead = clip(v_lead, 0.0, 1e8)
     a_lead = clip(a_lead, -10., 5.)
-    lead_xv = self.extrapolate_lead(x_lead, v_lead, a_lead, a_lead_tau, v_ego)
+    lead_xv = self.extrapolate_lead(x_lead, v_lead, a_lead, a_lead_tau)
     return lead_xv
 
   def set_accel_limits(self, min_a, max_a):
@@ -375,14 +364,6 @@ class LongitudinalMpc:
 
     lead_xv_0 = self.process_lead(lead_one, increased_distance)
     lead_xv_1 = self.process_lead(lead_two)
-
-    self.set_weights(
-        acceleration_jerk=0.8,
-        danger_jerk=1.5,
-        speed_jerk=1.0,
-        prev_accel_constraint=True,
-        personality=personality
-    )
 
     # To estimate a safe distance from a moving lead, we calculate how much stopping
     # distance that lead needs as a minimum. We can add that to the current distance
@@ -502,4 +483,3 @@ class LongitudinalMpc:
 if __name__ == "__main__":
   ocp = gen_long_ocp()
   AcadosOcpSolver.generate(ocp, json_file=JSON_FILE)
-  # AcadosOcpSolver.build(ocp.code_export_directory, with_cython=True)
