@@ -59,7 +59,6 @@ class FrogPilotFollowing:
 
   def update_follow_values(self, lead_distance, stopping_distance, v_ego, v_lead, frogpilot_toggles):
 
-    """
     # Offset by FrogAi for FrogPilot for a more natural approach to a faster lead
     if frogpilot_toggles.human_following and v_lead > v_ego:
       distance_factor = max(lead_distance - (v_ego * self.t_follow), 1)
@@ -68,7 +67,6 @@ class FrogPilotFollowing:
       self.acceleration_jerk = self.base_acceleration_jerk / acceleration_offset
       self.speed_jerk = self.base_speed_jerk / acceleration_offset
       self.t_follow /= acceleration_offset
-  """
 
     # Offset by FrogAi for FrogPilot for a more natural approach to a slower lead
     if (frogpilot_toggles.conditional_slower_lead or frogpilot_toggles.human_following) and v_lead < v_ego:
