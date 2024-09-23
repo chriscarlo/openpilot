@@ -60,9 +60,9 @@ T_DIFFS = np.diff(T_IDXS, prepend=[0.])
 COMFORT_BRAKE = 2.5
 STOP_DISTANCE = 8.0
 
-def get_jerk_factor(aggressive_jerk_acceleration=0.7, aggressive_jerk_danger=0.7, aggressive_jerk_speed=0.7,
-                    standard_jerk_acceleration=1.2, standard_jerk_danger=1.2, standard_jerk_speed=1.2,
-                    relaxed_jerk_acceleration=1.5, relaxed_jerk_danger=1.5, relaxed_jerk_speed=1.5,
+def get_jerk_factor(aggressive_jerk_acceleration=0.5, aggressive_jerk_danger=0.5, aggressive_jerk_speed=0.5,
+                    standard_jerk_acceleration=1.0, standard_jerk_danger=1.0, standard_jerk_speed=1.0,
+                    relaxed_jerk_acceleration=1.0, relaxed_jerk_danger=1.0, relaxed_jerk_speed=1.0,
                     custom_personalities=False, personality=log.LongitudinalPersonality.standard):
   if custom_personalities:
     if personality==log.LongitudinalPersonality.relaxed:
@@ -75,11 +75,11 @@ def get_jerk_factor(aggressive_jerk_acceleration=0.7, aggressive_jerk_danger=0.7
       raise NotImplementedError("Longitudinal personality not supported")
   else:
     if personality==log.LongitudinalPersonality.relaxed:
-      return 1.5, 1.5, 1.5
+      return 1.0, 1.0, 1.0
     elif personality==log.LongitudinalPersonality.standard:
-      return 1.2, 1.2, 1.2
+      return 1.0, 1.0, 1.0
     elif personality==log.LongitudinalPersonality.aggressive:
-      return 0.7, 0.7, 0.7
+      return 0.5, 0.5, 0.5
     else:
       raise NotImplementedError("Longitudinal personality not supported")
 
@@ -304,7 +304,6 @@ class LongitudinalMpc:
   def set_weights(self, acceleration_jerk=1.0, danger_jerk=1.0, speed_jerk=1.0, prev_accel_constraint=True, personality=log.LongitudinalPersonality.standard):
     if self.mode == 'acc':
       a_change_cost = acceleration_jerk * 2.0 if prev_accel_constraint else 0
-      # Apply a_change_cost_factor to a_change_cost
       a_change_cost *= self.a_change_cost_factor
       base_cost_weights = [X_EGO_OBSTACLE_COST, X_EGO_COST, V_EGO_COST, A_EGO_COST * 1.5, a_change_cost, speed_jerk * 1.5]
       constraint_cost_weights = [LIMIT_COST, LIMIT_COST, LIMIT_COST, danger_jerk * 1.2]
@@ -385,7 +384,7 @@ class LongitudinalMpc:
     lead_1_obstacle = lead_xv_1[:,0] + get_stopped_equivalence_factor(lead_xv_1[:,1])
 
     self.params[:,0] = ACCEL_MIN
-    self.params[:,1] = self.max_a * 0.9  # Reduce max acceleration by 10%
+    self.params[:,1] = self.max_a
 
     # Update in ACC mode or ACC/e2e blend
     if self.mode == 'acc':
@@ -432,7 +431,7 @@ class LongitudinalMpc:
 
     self.params[:,2] = np.min(x_obstacles, axis=1)
     self.params[:,3] = np.copy(self.prev_a)
-    self.params[:,4] = t_follow * 1.2  # Increase following distance by 20%
+    self.params[:,4] = t_follow
 
     # Calculate jerk factors
     acceleration_jerk, danger_jerk, speed_jerk = get_jerk_factor(
