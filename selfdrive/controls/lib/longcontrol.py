@@ -89,9 +89,9 @@ class LongControl:
   def __init__(self, CP):
     self.CP = CP
     self.long_control_state = LongCtrlState.off
-    self.pid = PIDController((CP.longitudinalTuning.kpBP, [x * 0.9 for x in CP.longitudinalTuning.kpV]),
-                             (CP.longitudinalTuning.kiBP, [x * 0.8 for x in CP.longitudinalTuning.kiV]),
-                             k_f=CP.longitudinalTuning.kf * 0.95, rate=1 / DT_CTRL)
+    self.pid = PIDController((CP.longitudinalTuning.kpBP, CP.longitudinalTuning.kpV),
+                             (CP.longitudinalTuning.kiBP, CP.longitudinalTuning.kiV),
+                             k_f=CP.longitudinalTuning.kf, rate=1 / DT_CTRL)
     self.v_pid = 0.0
     self.last_output_accel = 0.0
 
@@ -184,7 +184,7 @@ class LongControl:
       # Freeze the integrator so we don't accelerate to compensate, and don't allow positive acceleration
       # TODO too complex, needs to be simplified and tested on toyotas
       prevent_overshoot = not self.CP.stoppingControl and CS.vEgo < 1.5 and v_target_1sec < 0.7 and v_target_1sec < self.v_pid
-      deadzone = interp(CS.vEgo, self.CP.longitudinalTuning.deadzoneBP, [x * 1.2 for x in self.CP.longitudinalTuning.deadzoneV])
+      deadzone = interp(CS.vEgo, self.CP.longitudinalTuning.deadzoneBP, self.CP.longitudinalTuning.deadzoneV)
       freeze_integrator = prevent_overshoot
 
       error = self.v_pid - CS.vEgo
