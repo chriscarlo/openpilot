@@ -31,9 +31,6 @@ from openpilot.selfdrive.controls.lib.vehicle_model import VehicleModel
 
 from openpilot.system.hardware import HARDWARE
 
-from openpilot.selfdrive.frogpilot.controls.lib.frogpilot_acceleration import get_max_allowed_accel
-from openpilot.selfdrive.frogpilot.controls.lib.frogpilot_variables import FrogPilotVariables
-
 SOFT_DISABLE_TIME = 3  # seconds
 LDW_MIN_SPEED = 31 * CV.MPH_TO_MS
 LANE_DEPARTURE_THRESHOLD = 0.1
@@ -66,6 +63,13 @@ ENABLED_STATES = (State.preEnabled, *ACTIVE_STATES)
 class Controls:
   def __init__(self, CI=None):
     self.params = Params()
+    self.CP = CI
+    from openpilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPlanner
+    from openpilot.selfdrive.frogpilot.controls.frogpilot_planner import FrogPilotPlanner
+    from openpilot.selfdrive.frogpilot.controls.lib.frogpilot_variables import FrogPilotVariables
+
+    self.longitudinal_planner = LongitudinalPlanner(self.CP)
+    self.frogpilot_planner = FrogPilotPlanner(self.longitudinal_planner.mpc)
 
     if CI is None:
       cloudlog.info("controlsd is waiting for CarParams")
@@ -200,6 +204,11 @@ class Controls:
     self.use_old_long |= self.CP.carName == "gm" and not self.params.get_bool("NewLongAPIGM")
 
     self.display_timer = 0
+
+    # Initialize the LongitudinalPlanner
+    self.longitudinal_planner = LongitudinalPlanner(self.CP)
+    # Initialize the FrogPilotPlanner and pass the mpc instance
+    self.frogpilot_planner = FrogPilotPlanner(self.longitudinal_planner.mpc)
 
   def set_initial_state(self):
     if REPLAY:
@@ -574,6 +583,8 @@ class Controls:
 
   def state_control(self, CS):
     """Given the state, this function returns a CarControl packet"""
+
+    from openpilot.selfdrive.frogpilot.controls.lib.frogpilot_acceleration import get_max_allowed_accel
 
     # Update VehicleModel
     lp = self.sm['liveParameters']

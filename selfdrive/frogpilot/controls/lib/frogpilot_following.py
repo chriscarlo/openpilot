@@ -8,6 +8,7 @@ TRAFFIC_MODE_BP = [0., CITY_SPEED_LIMIT]
 class FrogPilotFollowing:
   def __init__(self, FrogPilotPlanner):
     self.frogpilot_planner = FrogPilotPlanner
+    self.long_mpc = None  # This will be set later
 
     self.slower_lead = False
 
@@ -56,8 +57,8 @@ class FrogPilotFollowing:
       self.danger_jerk = self.base_danger_jerk
       self.speed_jerk = self.base_speed_jerk
 
-
   def update_follow_values(self, lead_distance, stopping_distance, v_ego, v_lead, frogpilot_toggles):
+    faster_lead_active = False
 
     # Offset by FrogAi for FrogPilot for a more natural approach to a faster lead
     if frogpilot_toggles.human_following and v_lead > v_ego:
@@ -67,6 +68,7 @@ class FrogPilotFollowing:
       self.acceleration_jerk = self.base_acceleration_jerk / acceleration_offset
       self.speed_jerk = self.base_speed_jerk / acceleration_offset
       self.t_follow /= acceleration_offset
+      faster_lead_active = True
 
     # Offset by FrogAi for FrogPilot for a more natural approach to a slower lead
     if (frogpilot_toggles.conditional_slower_lead or frogpilot_toggles.human_following) and v_lead < v_ego:
@@ -88,3 +90,6 @@ class FrogPilotFollowing:
         self.acceleration_jerk /= CRUISING_SPEED
         self.danger_jerk = self.base_danger_jerk / CRUISING_SPEED
         self.speed_jerk /= CRUISING_SPEED
+
+    if self.long_mpc is not None:
+      self.long_mpc.set_faster_lead_status(faster_lead_active)
