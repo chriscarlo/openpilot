@@ -468,9 +468,9 @@ class LongitudinalMpc:
         self.source = 'lead1'
 
     # Apply a small deadzone to acceleration
-    deadzone = 0.1
-    if np.all(np.abs(a) < deadzone):
-      a = np.zeros_like(a)
+    # deadzone = 0.1
+    # if np.all(np.abs(a) < deadzone):
+      # a = np.zeros_like(a)
 
   def run(self):
     # t0 = time.monotonic()
