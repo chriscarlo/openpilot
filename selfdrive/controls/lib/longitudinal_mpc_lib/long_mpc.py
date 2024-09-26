@@ -14,7 +14,6 @@ if __name__ == '__main__':  # generating code
   from openpilot.third_party.acados.acados_template import AcadosModel, AcadosOcp, AcadosOcpSolver
 else:
   from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.c_generated_code.acados_ocp_solver_pyx import AcadosOcpSolverCython
-
   from openpilot.selfdrive.frogpilot.controls.lib.frogpilot_variables import CITY_SPEED_LIMIT
 
 from casadi import SX, vertcat
@@ -288,11 +287,8 @@ class LongitudinalMpc:
   def set_cost_weights(self, cost_weights, constraint_cost_weights):
     W = np.asfortranarray(np.diag(cost_weights))
     for i in range(N):
-      # Adjust A_CHANGE_COST based on faster_lead_active flag
-      if self.faster_lead_active:
-        W[4,4] = self.A_CHANGE_COST_REDUCED * np.interp(T_IDXS[i], [0.0, 1.0, 2.0], [1.0, 1.0, 0.0])
-      else:
-        W[4,4] = cost_weights[4] * np.interp(T_IDXS[i], [0.0, 1.0, 2.0], [1.0, 1.0, 0.0])
+      # Adjust A_CHANGE_COST based on a_change_cost_factor
+      W[4,4] = cost_weights[4] * self.a_change_cost_factor * np.interp(T_IDXS[i], [0.0, 1.0, 2.0], [1.0, 1.0, 0.0])
       self.solver.cost_set(i, 'W', W)
     self.solver.cost_set(N, 'W', np.copy(W[:COST_E_DIM, :COST_E_DIM]))
 
@@ -304,19 +300,41 @@ class LongitudinalMpc:
   def set_weights(self, acceleration_jerk=1.0, danger_jerk=1.0, speed_jerk=1.0, prev_accel_constraint=True, personality=log.LongitudinalPersonality.standard):
     if self.mode == 'acc':
       a_change_cost = acceleration_jerk * 2.0 if prev_accel_constraint else 0
-      a_change_cost *= self.a_change_cost_factor
-      base_cost_weights = [X_EGO_OBSTACLE_COST, X_EGO_COST, V_EGO_COST, A_EGO_COST * 1.5, a_change_cost, speed_jerk * 1.5]
-      constraint_cost_weights = [LIMIT_COST, LIMIT_COST, LIMIT_COST, danger_jerk * 1.2]
+      # Do not multiply by self.a_change_cost_factor here
+      base_cost_weights = [
+          X_EGO_OBSTACLE_COST,
+          X_EGO_COST,
+          V_EGO_COST,
+          A_EGO_COST * 1.5,
+          a_change_cost,            # Use unadjusted a_change_cost
+          speed_jerk * 1.5
+      ]
+      constraint_cost_weights = [
+          LIMIT_COST,
+          LIMIT_COST,
+          LIMIT_COST,
+          danger_jerk * 1.2
+      ]
     elif self.mode == 'blended':
       # Blended mode remains unchanged
-      a_change_cost = 60.0 if prev_accel_constraint else 0
-      base_cost_weights = [0., 0.1, 0.2, 7.5, a_change_cost, 1.5]
-      constraint_cost_weights = [LIMIT_COST, LIMIT_COST, LIMIT_COST, 60.0]
+      a_change_cost = 40.0 if prev_accel_constraint else 0
+      base_cost_weights = [
+          0.,
+          0.1,
+          0.2,
+          7.5,
+          a_change_cost,
+          1.5
+      ]
+      constraint_cost_weights = [
+          LIMIT_COST,
+          LIMIT_COST,
+          LIMIT_COST,
+          40.0
+      ]
     else:
       raise NotImplementedError(f'Planner mode {self.mode} not recognized in planner cost set')
 
-    self.base_cost_weights = base_cost_weights
-    self.constraint_cost_weights = constraint_cost_weights
     self.set_cost_weights(base_cost_weights, constraint_cost_weights)
 
   def set_cur_state(self, v, a):
@@ -369,13 +387,31 @@ class LongitudinalMpc:
     # Update a_change_cost_factor based on faster_lead_active
     self.a_change_cost_factor = 0.25 if self.faster_lead_active else 1.0
 
-  def update(self, lead_one, lead_two, v_cruise, x, v, a, j, radarless_model, t_follow, trafficModeActive, frogpilot_toggles, personality=log.LongitudinalPersonality.standard):
+  def update(self, lead_one, lead_two, v_cruise, x, v, a, j, radarless_model, t_follow,
+           trafficModeActive, frogpilot_toggles, personality=log.LongitudinalPersonality.standard):
     v_ego = self.x0[1]
     self.status = lead_one.status or lead_two.status
-    increased_distance = max(frogpilot_toggles.increased_stopping_distance + min(CITY_SPEED_LIMIT - v_ego, 0), 0) if not trafficModeActive else 0
+    increased_distance = max(
+        frogpilot_toggles.increased_stopping_distance + min(CITY_SPEED_LIMIT - v_ego, 0), 0
+    ) if not trafficModeActive else 0
 
     lead_xv_0 = self.process_lead(lead_one, increased_distance)
     lead_xv_1 = self.process_lead(lead_two)
+
+    # Determine if there is an actual lead vehicle
+    real_lead_present = lead_one is not None and lead_one.status
+
+    # Simplify the logic: if the lead vehicle is faster, adjust the acceleration weight
+    if real_lead_present:
+      lead_speed = lead_xv_0[0, 1]  # Lead vehicle's speed at the first time index
+
+      if lead_speed > v_ego:
+        self.set_faster_lead_status(True)
+      else:
+        self.set_faster_lead_status(False)
+    else:
+      # No real lead present, do not reduce acceleration change cost
+      self.set_faster_lead_status(False)
 
     # To estimate a safe distance from a moving lead, we calculate how much stopping
     # distance that lead needs as a minimum. We can add that to the current distance
