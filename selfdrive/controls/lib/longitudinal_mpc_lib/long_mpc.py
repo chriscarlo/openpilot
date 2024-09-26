@@ -253,7 +253,6 @@ class LongitudinalMpc:
     self.solver = AcadosOcpSolverCython(MODEL_NAME, ACADOS_SOLVER_TYPE, N)
     self.faster_lead_active = False
     self.a_change_cost_factor = 1.0
-    self.A_CHANGE_COST_REDUCED = 0.25  # 25% of normal value
     self.reset()
     self.source = SOURCES[2]
 
@@ -291,13 +290,9 @@ class LongitudinalMpc:
     for i in range(N):
       # Adjust A_CHANGE_COST based on faster_lead_active flag
       if self.faster_lead_active:
-        W[4,4] = cost_weights[4] * self.A_CHANGE_COST_REDUCED * np.interp(
-            T_IDXS[i], [0.0, 1.0, 2.0], [1.0, 1.0, 0.0]
-        )
+        W[4,4] = self.A_CHANGE_COST_REDUCED * np.interp(T_IDXS[i], [0.0, 1.0, 2.0], [1.0, 1.0, 0.0])
       else:
-        W[4,4] = cost_weights[4] * np.interp(
-            T_IDXS[i], [0.0, 1.0, 2.0], [1.0, 1.0, 0.0]
-        )
+        W[4,4] = cost_weights[4] * np.interp(T_IDXS[i], [0.0, 1.0, 2.0], [1.0, 1.0, 0.0])
       self.solver.cost_set(i, 'W', W)
     self.solver.cost_set(N, 'W', np.copy(W[:COST_E_DIM, :COST_E_DIM]))
 
@@ -308,15 +303,15 @@ class LongitudinalMpc:
 
   def set_weights(self, acceleration_jerk=1.0, danger_jerk=1.0, speed_jerk=1.0, prev_accel_constraint=True, personality=log.LongitudinalPersonality.standard):
     if self.mode == 'acc':
-      a_change_cost = acceleration_jerk if prev_accel_constraint else 0
+      a_change_cost = acceleration_jerk * 2.0 if prev_accel_constraint else 0
       a_change_cost *= self.a_change_cost_factor
-      base_cost_weights = [X_EGO_OBSTACLE_COST, X_EGO_COST, V_EGO_COST, A_EGO_COST, a_change_cost, speed_jerk]
-      constraint_cost_weights = [LIMIT_COST, LIMIT_COST, LIMIT_COST, danger_jerk]
+      base_cost_weights = [X_EGO_OBSTACLE_COST, X_EGO_COST, V_EGO_COST, A_EGO_COST * 1.5, a_change_cost, speed_jerk * 1.5]
+      constraint_cost_weights = [LIMIT_COST, LIMIT_COST, LIMIT_COST, danger_jerk * 1.2]
     elif self.mode == 'blended':
       # Blended mode remains unchanged
-      a_change_cost = 40.0 if prev_accel_constraint else 0
-      base_cost_weights = [0., 0.1, 0.2, 5.0, a_change_cost, 1.0]
-      constraint_cost_weights = [LIMIT_COST, LIMIT_COST, LIMIT_COST, 50.0]
+      a_change_cost = 60.0 if prev_accel_constraint else 0
+      base_cost_weights = [0., 0.1, 0.2, 7.5, a_change_cost, 1.5]
+      constraint_cost_weights = [LIMIT_COST, LIMIT_COST, LIMIT_COST, 60.0]
     else:
       raise NotImplementedError(f'Planner mode {self.mode} not recognized in planner cost set')
 
@@ -372,7 +367,7 @@ class LongitudinalMpc:
   def set_faster_lead_status(self, status):
     self.faster_lead_active = status
     # Update a_change_cost_factor based on faster_lead_active
-    self.a_change_cost_factor = self.A_CHANGE_COST_REDUCED if self.faster_lead_active else 1.0
+    self.a_change_cost_factor = 0.25 if self.faster_lead_active else 1.0
 
   def update(self, lead_one, lead_two, v_cruise, x, v, a, j, radarless_model, t_follow, trafficModeActive, frogpilot_toggles, personality=log.LongitudinalPersonality.standard):
     v_ego = self.x0[1]

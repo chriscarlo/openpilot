@@ -20,7 +20,7 @@ from openpilot.selfdrive.frogpilot.controls.lib.frogpilot_vcruise import FrogPil
 GearShifter = car.CarState.GearShifter
 
 class FrogPilotPlanner:
-  def __init__(self, mpc):
+  def __init__(self):
     self.params_memory = Params("/dev/shm/params")
 
     self.cem = ConditionalExperimentalMode(self)
