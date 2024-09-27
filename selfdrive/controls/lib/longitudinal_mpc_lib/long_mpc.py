@@ -299,21 +299,21 @@ class LongitudinalMpc:
 
   def set_weights(self, acceleration_jerk=1.0, danger_jerk=1.0, speed_jerk=1.0, prev_accel_constraint=True, personality=log.LongitudinalPersonality.standard):
     if self.mode == 'acc':
-      a_change_cost = acceleration_jerk * 2.0 if prev_accel_constraint else 0
+      a_change_cost = acceleration_jerk if prev_accel_constraint else 0
       # Do not multiply by self.a_change_cost_factor here
       base_cost_weights = [
           X_EGO_OBSTACLE_COST,
           X_EGO_COST,
           V_EGO_COST,
-          A_EGO_COST * 1.5,
+          A_EGO_COST,
           a_change_cost,            # Use unadjusted a_change_cost
-          speed_jerk * 1.5
+          speed_jerk
       ]
       constraint_cost_weights = [
           LIMIT_COST,
           LIMIT_COST,
           LIMIT_COST,
-          danger_jerk * 1.2
+          danger_jerk
       ]
     elif self.mode == 'blended':
       # Blended mode remains unchanged
@@ -322,15 +322,15 @@ class LongitudinalMpc:
           0.,
           0.1,
           0.2,
-          7.5,
+          5.0,
           a_change_cost,
-          1.5
+          1.0
       ]
       constraint_cost_weights = [
           LIMIT_COST,
           LIMIT_COST,
           LIMIT_COST,
-          40.0
+          50.0
       ]
     else:
       raise NotImplementedError(f'Planner mode {self.mode} not recognized in planner cost set')
