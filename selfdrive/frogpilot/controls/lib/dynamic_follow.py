@@ -20,20 +20,20 @@ class DynamicFollow:
         lane_change_state = self.sm['modelV2'].meta.laneChangeState
 
         if personality == "aggressive":
-            min_follow = 0.7
-            max_follow = 1.5
+            min_follow = 0.6
+            max_follow = 1.4
             L = max_follow - min_follow
             k = 0.05
             x0 = 35
         elif personality == "standard":
-            min_follow = 0.8
-            max_follow = 1.7
+            min_follow = 0.6
+            max_follow = 1.6
             L = max_follow - min_follow
             k = 0.05
             x0 = 25
         elif personality == "relaxed":
-            min_follow = 0.9
-            max_follow = 2.0
+            min_follow = 0.6
+            max_follow = 2.8
             L = max_follow - min_follow
             k = 0.05
             x0 = 18
