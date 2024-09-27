@@ -250,8 +250,7 @@ class LongitudinalMpc:
     self.mode = mode
     self.dt = dt
     self.solver = AcadosOcpSolverCython(MODEL_NAME, ACADOS_SOLVER_TYPE, N)
-    self.faster_lead_active = False
-    self.a_change_cost_factor = 1.0
+    self.a_change_cost_factor = 1.0  # Set to constant value
     self.reset()
     self.source = SOURCES[2]
 
@@ -287,9 +286,12 @@ class LongitudinalMpc:
   def set_cost_weights(self, cost_weights, constraint_cost_weights):
     W = np.asfortranarray(np.diag(cost_weights))
     for i in range(N):
-      # Adjust A_CHANGE_COST based on a_change_cost_factor
-      W[4,4] = cost_weights[4] * self.a_change_cost_factor * np.interp(T_IDXS[i], [0.0, 1.0, 2.0], [1.0, 1.0, 0.0])
+      # TODO don't hardcode A_CHANGE_COST idx
+      # reduce the cost on (a-a_prev) later in the horizon.
+      W[4,4] = cost_weights[4] * np.interp(T_IDXS[i], [0.0, 1.0, 2.0], [1.0, 1.0, 0.0])
       self.solver.cost_set(i, 'W', W)
+    # Setting the slice without the copy make the array not contiguous,
+    # causing issues with the C interface.
     self.solver.cost_set(N, 'W', np.copy(W[:COST_E_DIM, :COST_E_DIM]))
 
     # Set L2 slack cost on lower bound constraints
@@ -347,7 +349,7 @@ class LongitudinalMpc:
 
   @staticmethod
   def extrapolate_lead(x_lead, v_lead, a_lead, a_lead_tau):
-    a_lead_traj = a_lead * np.exp(-a_lead_tau * (T_IDXS**2)/2.)
+    a_lead_traj = np.clip(a_lead - a_lead_tau * T_IDXS, 0, a_lead)
     v_lead_traj = np.clip(v_lead + np.cumsum(T_DIFFS * a_lead_traj), 0.0, 1e8)
     x_lead_traj = x_lead + np.cumsum(T_DIFFS * v_lead_traj)
     lead_xv = np.column_stack((x_lead_traj, v_lead_traj))
@@ -382,11 +384,6 @@ class LongitudinalMpc:
     self.cruise_min_a = min_a
     self.max_a = max_a
 
-  def set_faster_lead_status(self, status):
-    self.faster_lead_active = status
-    # Update a_change_cost_factor based on faster_lead_active
-    self.a_change_cost_factor = 0.25 if self.faster_lead_active else 1.0
-
   def update(self, lead_one, lead_two, v_cruise, x, v, a, j, radarless_model, t_follow,
            trafficModeActive, frogpilot_toggles, personality=log.LongitudinalPersonality.standard):
     v_ego = self.x0[1]
@@ -398,20 +395,8 @@ class LongitudinalMpc:
     lead_xv_0 = self.process_lead(lead_one, increased_distance)
     lead_xv_1 = self.process_lead(lead_two)
 
-    # Determine if there is an actual lead vehicle
-    real_lead_present = lead_one is not None and lead_one.status
-
-    # Simplify the logic: if the lead vehicle is faster, adjust the acceleration weight
-    if real_lead_present:
-      lead_speed = lead_xv_0[0, 1]  # Lead vehicle's speed at the first time index
-
-      if lead_speed > v_ego:
-        self.set_faster_lead_status(True)
-      else:
-        self.set_faster_lead_status(False)
-    else:
-      # No real lead present, do not reduce acceleration change cost
-      self.set_faster_lead_status(False)
+    # Always use a constant a_change_cost_factor
+    self.a_change_cost_factor = 1.0
 
     # To estimate a safe distance from a moving lead, we calculate how much stopping
     # distance that lead needs as a minimum. We can add that to the current distance

@@ -24,28 +24,6 @@ def get_max_accel_sport_plus(v_ego):
 
 EPSILON = 1e-6
 
-def get_max_accel_ramp_off(max_accel, v_cruise, v_ego):
-  def get_adaptive_transition_point(v_cruise):
-    if v_cruise <= 25:
-      return 0.5
-    elif v_cruise >= 65:
-      return 0.8
-    else:
-      return 0.5 + (v_cruise - 25) * (0.8 - 0.5) / max(65 - 25, EPSILON)
-
-  v_normalized = v_ego / max(v_cruise, EPSILON)
-  transition_point = get_adaptive_transition_point(v_cruise)
-
-  x = (v_normalized - transition_point) * 10
-  if x < -2:
-    transition = 1 / np.maximum(1 + np.exp(x * 0.4), EPSILON)
-  else:
-    transition = 1 / np.maximum(1 + np.exp(x), EPSILON)
-
-  # Adjust the throttle roll-on to be gentler
-  return max_accel * (0.15 + 0.85 * transition)
-
-# upstream made a change I don't like - not sure which of these is going to be called elsewhere
 def get_max_allowed_accel(max_accel, v_cruise, v_ego):
   def get_adaptive_transition_point(v_cruise):
     transition_bp = [0, 25, 65, 300]
@@ -112,7 +90,7 @@ class FrogPilotAcceleration:
         self.max_accel = np.clip(self.frogpilot_planner.lead_one.aLeadK,
                                  get_max_accel_sport_plus(v_ego),
                                  get_max_allowed_accel(get_max_accel(v_ego), v_cruise, v_ego))
-      self.max_accel = get_max_accel_ramp_off(self.max_accel, self.frogpilot_planner.v_cruise, v_ego)
+      self.max_accel = get_max_allowed_accel(self.max_accel, self.frogpilot_planner.v_cruise, v_ego)
 
     if controlsState.experimentalMode:
       self.min_accel = ACCEL_MIN
