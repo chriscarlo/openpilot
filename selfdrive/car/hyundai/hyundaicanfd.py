@@ -132,7 +132,7 @@ def create_acc_control(packer, CAN, enabled, accel_last, accel, stopping, gas_ov
 
   values = {
     "ACCMode": 0 if not enabled else (2 if gas_override else 1),
-    "MainMode_ACC": 1,
+    "MainMode_ACC": 0 if not enabled else 1,
     "StopReq": 1 if stopping else 0,
     "aReqValue": a_val,
     "aReqRaw": a_raw,
@@ -184,7 +184,7 @@ def create_adrv_messages(packer, CAN, frame):
 
   if frame % 2 == 0:
     values = {
-      'AEB_SETTING': 0x1,  # show AEB disabled icon
+      'AEB_SETTING': 0x0,  # don't show AEB disabled icon
       'SET_ME_2': 0x2,
       'SET_ME_FF': 0xff,
       'SET_ME_FC': 0xfc,
