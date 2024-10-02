@@ -124,4 +124,6 @@ private:
 
   // FrogPilot variables
   Params paramsMemory{"/dev/shm/params"};
+
+  bool frogsGoMoo = getDongleId().value_or("") == "FrogsGoMoo";
 };

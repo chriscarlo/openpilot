@@ -32,7 +32,7 @@ private:
 
   std::set<QString> longitudinalKeys = {
     "ExperimentalGMTune", "LongPitch", "NewLongAPI", "NewLongAPIGM",
-    "NewToyotaTune", "SNGHack", "VoltSNG"
+    "SNGHack", "VoltSNG"
   };
 
   std::set<QString> sngKeys = {
@@ -44,7 +44,7 @@ private:
   };
 
   std::set<QString> toyotaKeys = {
-    "ClusterOffset", "NewToyotaTune", "SNGHack", "ToyotaDoors"
+    "ClusterOffset", "FrogsGoMoosTweak", "SNGHack", "ToyotaDoors"
   };
 
   std::set<QString> voltKeys = {

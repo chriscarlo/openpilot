@@ -206,7 +206,7 @@ def frogpilot_thread():
         run_thread_with_lock("update_models", model_manager.update_models, (True,))
         run_thread_with_lock("update_themes", theme_manager.update_themes, (True,))
 
-      theme_manager.update_holiday()
+      theme_manager.update_holiday(now)
 
 def main():
   frogpilot_thread()

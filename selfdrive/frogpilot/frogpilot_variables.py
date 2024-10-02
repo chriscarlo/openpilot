@@ -244,20 +244,15 @@ class FrogPilotVariables:
         self.params.check_key(toggle.part_model_param + "CalibrationParams")
       except UnknownKeyName:
         toggle.part_model_param = ""
+    elif toggle.model == "secret-good-openpilot":
+      toggle.part_model_param = "SecretGoodOpenpilot"
     else:
       toggle.model = DEFAULT_MODEL
-      current_model_name = DEFAULT_MODEL_NAME
       toggle.part_model_param = ""
-    e2e_longitudinal_models = self.params.get("E2ELongitudinalModels", encoding='utf-8') or ""
-    toggle.e2e_longitudinal_model = e2e_longitudinal_models and toggle.model in e2e_longitudinal_models.split(',')
-    gas_brake_models = self.params.get("GasBrakeModels", encoding='utf-8') or ""
-    toggle.gas_brake_model = gas_brake_models and toggle.model in gas_brake_models.split(',')
     navigation_models = self.params.get("NavigationModels", encoding='utf-8') or ""
     toggle.navigationless_model = navigation_models and toggle.model not in navigation_models.split(',')
     radarless_models = self.params.get("RadarlessModels", encoding='utf-8') or ""
     toggle.radarless_model = radarless_models and toggle.model in radarless_models.split(',')
-    poseless_models = self.params.get("PoselessModels", encoding='utf-8') or ""
-    toggle.poseless_model = poseless_models and toggle.model in poseless_models.split(',')
     toggle.secretgoodopenpilot_model = toggle.model == "secret-good-openpilot"
     velocity_models = self.params.get("VelocityModels", encoding='utf-8') or ""
     toggle.velocity_model = velocity_models and toggle.model in velocity_models.split(',')
