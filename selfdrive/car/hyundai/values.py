@@ -16,7 +16,7 @@ class CarControllerParams:
   ACCEL_MIN = -6.0 # m/s
   ACCEL_MAX = 5.5 # m/s
 
-  def __init__(self, CP):
+  def __init__(self, CP, vEgoRaw=100.):
     self.STEER_DELTA_UP = 7
     self.STEER_DELTA_DOWN = 10
     self.STEER_DRIVER_ALLOWANCE = 450
@@ -26,12 +26,12 @@ class CarControllerParams:
     self.STEER_STEP = 1  # 100 Hz
 
     if CP.carFingerprint in CANFD_CAR:
-      self.STEER_MAX = 409
+      self.STEER_MAX = 409 if vEgoRaw < 31. else 409
       self.STEER_DRIVER_ALLOWANCE = 450
       self.STEER_DRIVER_MULTIPLIER = 2
-      self.STEER_THRESHOLD = 150
-      self.STEER_DELTA_UP = 7
-      self.STEER_DELTA_DOWN = 10
+      self.STEER_THRESHOLD = 350
+      self.STEER_DELTA_UP = 7 if vEgoRaw < 31. else 7
+      self.STEER_DELTA_DOWN = 10 if vEgoRaw < 31. else 10
 
     # To determine the limit for your car, find the maximum value that the stock LKAS will request.
     # If the max stock LKAS request is <384, add your car to this list.

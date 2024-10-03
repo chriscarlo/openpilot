@@ -44,6 +44,11 @@ const CanMsg HYUNDAI_CANFD_HDA2_LONG_TX_MSGS[] = {
   {0x200, 1, 8},  // ADRV_0x200
   {0x345, 1, 8},  // ADRV_0x345
   {0x1DA, 1, 32}, // ADRV_0x1da
+
+  // for blinkers
+  {0x165, 1, 24}, // SPAS1
+  {0x16A, 1, 32}, // SPAS2
+  {0x7B1, 1, 8},  // tester present for APRK ECU disable
 };
 
 const CanMsg HYUNDAI_CANFD_HDA1_TX_MSGS[] = {
@@ -132,6 +137,8 @@ const int HYUNDAI_PARAM_CANFD_HDA2_ALT_STEERING = 128;
 bool hyundai_canfd_alt_buttons = false;
 bool hyundai_canfd_hda2_alt_steering = false;
 
+float hyundai_canfd_front_left_vego = 0.;
+float hyundai_canfd_rear_right_vego = 0.;
 
 int hyundai_canfd_hda2_get_lkas_addr(void) {
   return hyundai_canfd_hda2_alt_steering ? 0x110 : 0x50;
@@ -201,6 +208,8 @@ static void hyundai_canfd_rx_hook(const CANPacket_t *to_push) {
     if (addr == 0xa0) {
       uint32_t front_left_speed = GET_BYTES(to_push, 8, 2);
       uint32_t rear_right_speed = GET_BYTES(to_push, 14, 2);
+      hyundai_canfd_front_left_vego = (float)front_left_speed * 0.277778f * 0.03125f;
+      hyundai_canfd_rear_right_vego = (float)rear_right_speed * 0.277778f * 0.03125f;
       vehicle_moving = (front_left_speed > HYUNDAI_STANDSTILL_THRSLD) || (rear_right_speed > HYUNDAI_STANDSTILL_THRSLD);
     }
   }
@@ -237,8 +246,24 @@ static bool hyundai_canfd_tx_hook(const CANPacket_t *to_send) {
     int desired_torque = (((GET_BYTE(to_send, 6) & 0xFU) << 7U) | (GET_BYTE(to_send, 5) >> 1U)) - 1024U;
     bool steer_req = GET_BIT(to_send, 52U);
 
-    if (steer_torque_cmd_checks(desired_torque, steer_req, HYUNDAI_CANFD_STEERING_LIMITS)) {
-      tx = false;
+    // 20m/s margin
+    if (hyundai_canfd_front_left_vego < (11.f + 20.f) || hyundai_canfd_rear_right_vego < (11.f + 20.f)) {
+      bool violation = false;
+      uint32_t ts = microsecond_timer_get();
+
+      // Perform steering torque checks
+      if (steer_torque_cmd_checks(desired_torque, steer_req, HYUNDAI_CANFD_STEERING_LIMITS)) {
+        violation = true;
+      }
+
+      // Update last torque values (for rate limiting)
+      desired_torque_last = MAX(-500, MIN(desired_torque, 500));
+      rt_torque_last = desired_torque;
+      ts_torque_check_last = ts;
+
+      if (violation) {
+        tx = false;
+      }
     }
   }
 
@@ -255,7 +280,7 @@ static bool hyundai_canfd_tx_hook(const CANPacket_t *to_send) {
   }
 
   // UDS: only tester present ("\x02\x3E\x80\x00\x00\x00\x00\x00") allowed on diagnostics address
-  if ((addr == 0x730) && hyundai_canfd_hda2) {
+  if (((addr == 0x730) || (addr == 0x7b1)) && hyundai_canfd_hda2) {
     if ((GET_BYTES(to_send, 0, 4) != 0x00803E02U) || (GET_BYTES(to_send, 4, 4) != 0x0U)) {
       tx = false;
     }
@@ -280,6 +305,21 @@ static bool hyundai_canfd_tx_hook(const CANPacket_t *to_send) {
 
     if (violation) {
       tx = false;
+    }
+  }
+
+  // SPAS: only blinkers
+  if ((addr == 0x165) || (addr == 0x16a)) {
+    // skip counter and checksum
+    for (int i = 3; i < GET_LEN(to_send); i++) {
+      uint8_t val = GET_BYTE(to_send, i);
+      if (i == 16) {
+        // allow blinkers
+        val &= 0x1fU;
+      }
+      if (val != 0U) {
+        tx = 0;
+      }
     }
   }
 
