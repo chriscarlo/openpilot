@@ -1,6 +1,6 @@
-# PFEIFER - SLC - Modified by FrogAi for FrogPilot
 import json
 import math
+import time
 
 from openpilot.common.conversions import Conversions as CV
 from openpilot.common.params import Params
@@ -30,6 +30,11 @@ class SpeedLimitController:
     self.max_speed_limit = 0  # m/s
     self.nav_speed_limit = 0  # m/s
     self.prv_speed_limit = self.params.get_float("PreviousSpeedLimit")
+    self.transition_start_time = 0
+    self.transition_start_speed = 0
+    self.transition_target_speed = 0
+    self.gentle_decel_rate = 0.67  # m/s^2 (deceleration rate)
+    self.gentle_accel_rate = 3.0  # m/s^2 (acceleration rate)
 
   def get_param_memory(self, key, is_json=False):
     param_value = self.params_memory.get(key)
@@ -50,6 +55,17 @@ class SpeedLimitController:
     self.max_speed_limit = v_cruise if enabled else 0
 
     self.frogpilot_toggles = frogpilot_toggles
+
+    new_limit = self.speed_limit
+    if new_limit > 1:
+      target_speed = new_limit + self.offset
+      if target_speed < v_ego and (self.transition_start_time == 0 or target_speed < self.transition_target_speed):
+        self.transition_start_speed = v_ego
+        self.transition_target_speed = target_speed
+        self.transition_start_time = time.time()
+
+        speed_diff = self.transition_start_speed - self.transition_target_speed
+        self.transition_duration = speed_diff / self.gentle_decel_rate
 
   def write_map_state(self, v_ego):
     self.map_speed_limit = self.get_param_memory("MapSpeedLimit")
@@ -80,9 +96,44 @@ class SpeedLimitController:
 
   @property
   def desired_speed_limit(self):
-    if self.speed_limit > 1:
-      self.update_previous_limit(self.speed_limit)
-      return self.speed_limit + self.offset
+    new_limit = self.speed_limit
+    if new_limit > 1:
+      target_speed = new_limit + self.offset
+
+      # If the target speed has changed, reset the transition variables
+      if target_speed != self.transition_target_speed:
+        self.update_previous_limit(new_limit)
+        self.transition_start_speed = self.transition_target_speed if self.transition_target_speed else target_speed
+        self.transition_target_speed = target_speed
+        self.transition_start_time = time.time()
+
+      current_time = time.time()
+      time_elapsed = current_time - self.transition_start_time
+      speed_difference = self.transition_target_speed - self.transition_start_speed
+
+      # Determine the rate based on whether we're accelerating or decelerating
+      if speed_difference > 0:
+        # Accelerating
+        rate = self.gentle_accel_rate
+        ideal_speed_change = rate * time_elapsed
+        ideal_current_speed = min(
+          self.transition_start_speed + ideal_speed_change,
+          self.transition_target_speed
+        )
+      elif speed_difference < 0:
+        # Decelerating
+        rate = self.gentle_decel_rate
+        ideal_speed_change = rate * time_elapsed
+        ideal_current_speed = max(
+          self.transition_start_speed - ideal_speed_change,
+          self.transition_target_speed
+        )
+      else:
+        # No change in speed
+        ideal_current_speed = self.transition_target_speed
+
+      return ideal_current_speed
+
     return 0
 
   @property
