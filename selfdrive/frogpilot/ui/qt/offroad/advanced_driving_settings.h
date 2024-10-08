@@ -19,6 +19,18 @@ protected:
   void showEvent(QShowEvent *event) override;
 
 private:
+  void hideSubToggles();
+  void hideSubSubToggles();
+  void hideToggles();
+  void showToggles(const std::set<QString> &keys);
+
+  void startDownloadAllModels();
+  void updateCalibrationDescription();
+  void updateCarToggles();
+  void updateMetric();
+  void updateModelLabels();
+  void updateState(const UIState &s);
+
   FrogPilotSettingsWindow *parent;
 
   ButtonControl *deleteModelBtn;
@@ -38,13 +50,14 @@ private:
   };
 
   std::set<QString> customDrivingPersonalityKeys = {
-    "AggressivePersonalityProfile", "RelaxedPersonalityProfile",
-    "StandardPersonalityProfile", "TrafficPersonalityProfile"
+    "AggressivePersonalityProfile", "RelaxedPersonalityProfile", "StandardPersonalityProfile",
+    "TrafficPersonalityProfile"
   };
 
   std::set<QString> lateralTuneKeys = {
-    "ForceAutoTune", "ForceAutoTuneOff", "SteerFriction", "SteerLatAccel",
-    "SteerKP", "SteerRatio", "TacoTune", "TurnDesires"
+    "ForceAutoTune", "ForceAutoTuneOff", "SteerFriction",
+    "SteerLatAccel", "SteerKP", "SteerRatio", "TacoTune",
+    "TurnDesires"
   };
 
   std::set<QString> longitudinalTuneKeys = {
@@ -52,8 +65,9 @@ private:
   };
 
   std::set<QString> modelManagementKeys = {
-    "AutomaticallyUpdateModels", "DeleteModel", "DownloadModel", "DownloadAllModels",
-    "ModelRandomizer", "ResetCalibrations", "SelectModel"
+    "AutomaticallyUpdateModels", "DeleteModel", "DownloadModel",
+    "DownloadAllModels", "ModelRandomizer", "ResetCalibrations",
+    "SelectModel"
   };
 
   std::set<QString> modelRandomizerKeys = {
@@ -82,15 +96,13 @@ private:
     "ResetTrafficPersonality"
   };
 
-  std::map<QString, AbstractControl*> toggles;
+  QDir modelDir{"/data/models/"};
+
+  QList<LabelControl*> labelControls;
 
   QStringList availableModelNames;
   QStringList availableModels;
   QStringList experimentalModels;
-
-  QList<LabelControl*> labelControls;
-
-  QDir modelDir{"/data/models/"};
 
   Params params;
   Params paramsMemory{"/dev/shm/params"};
@@ -106,6 +118,7 @@ private:
   bool hasPCMCruise;
   bool haveModelsDownloaded;
   bool isMetric = params.getBool("IsMetric");
+  bool isPIDCar;
   bool liveValid;
   bool modelDeleting;
   bool modelDownloading;
@@ -120,15 +133,5 @@ private:
   float steerKPStock;
   float steerRatioStock;
 
-  void hideSubToggles();
-  void hideSubSubToggles();
-  void hideToggles();
-  void showToggles(const std::set<QString> &keys);
-
-  void startDownloadAllModels();
-  void updateCalibrationDescription();
-  void updateCarToggles();
-  void updateMetric();
-  void updateModelLabels();
-  void updateState(const UIState &s);
+  std::map<QString, AbstractControl*> toggles;
 };

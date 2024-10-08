@@ -48,7 +48,7 @@ class FrogPilotEvents:
     if self.random_event_played:
       self.random_event_timer += DT_MDL
       if self.random_event_timer >= 4:
-        update_wheel_image(frogpilot_toggles.wheel_image, None, False)
+        update_wheel_image(frogpilot_toggles.wheel_image, frogpilot_toggles.current_holiday_theme, False)
         self.params_memory.put_bool("UpdateWheelImage", True)
         self.random_event_played = False
         self.random_event_timer = 0
@@ -126,7 +126,7 @@ class FrogPilotEvents:
         if not self.goat_played:
           event_choices.append("goatSteerSaturated")
 
-        if event_choices and self.frame % (100 // len(event_choices)) == 0:
+        if self.frame % 100 == 0 and event_choices:
           event_choice = random.choice(event_choices)
           if event_choice == "firefoxSteerSaturated":
             self.events.add(EventName.firefoxSteerSaturated)

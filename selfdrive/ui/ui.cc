@@ -530,6 +530,7 @@ void UIState::update() {
   emit uiUpdate(*this);
 
   // Update FrogPilot parameters
+  static bool theme_updated = false;
   static bool update_toggles = false;
 
   if (paramsMemory.getBool("FrogPilotTogglesUpdated")) {
@@ -542,6 +543,15 @@ void UIState::update() {
   if (paramsMemory.getBool("DriveRated")) {
     emit driveRated();
     paramsMemory.remove("DriveRated");
+  }
+
+  if (theme_updated) {
+    loadThemeColors("", true);
+    ui_update_params(this);
+    paramsMemory.remove("UpdateTheme");
+    theme_updated = false;
+  } else if (paramsMemory.getBool("UpdateTheme")) {
+    theme_updated = true;
   }
 
   // FrogPilot variables that need to be constantly updated
