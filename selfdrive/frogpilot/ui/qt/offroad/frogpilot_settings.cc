@@ -174,25 +174,26 @@ void FrogPilotSettingsWindow::updateCarVariables() {
     cereal::CarParams::SafetyModel safetyModel = CP.getSafetyConfigs()[0].getSafetyModel();
 
     std::string carFingerprint = CP.getCarFingerprint();
-    std::string carName = CP.getCarName();
+    std::string carModel = CP.getCarName();
 
-    hasAutoTune = (carName == "hyundai" || carName == "toyota") && CP.getLateralTuning().which() == cereal::CarParams::LateralTuning::TORQUE;
+    hasAutoTune = (carModel == "hyundai" || carModel == "toyota") && CP.getLateralTuning().which() == cereal::CarParams::LateralTuning::TORQUE;
     hasBSM = CP.getEnableBsm();
-    hasDashSpeedLimits = carName == "hyundai" || carName == "toyota";
+    hasDashSpeedLimits = carModel == "ford" || carModel == "hyundai" || carModel == "toyota";
     hasExperimentalOpenpilotLongitudinal = CP.getExperimentalLongitudinalAvailable();
     hasNNFFLog = checkNNFFLogFileExists(carFingerprint);
     hasOpenpilotLongitudinal = hasLongitudinalControl(CP);
     hasPCMCruise = CP.getPcmCruise();
     hasSNG = CP.getMinEnableSpeed() <= 0;
-    isGM = carName == "gm";
+    isGM = carModel == "gm";
     isGMPCMCruise = CP.getCarName() == "gm" && CP.getPcmCruise();
-    isHKGCanFd = carName == "hyundai" && safetyModel == cereal::CarParams::SafetyModel::HYUNDAI_CANFD;
+    isHKGCanFd = carModel == "hyundai" && safetyModel == cereal::CarParams::SafetyModel::HYUNDAI_CANFD;
     isImpreza = carFingerprint == "SUBARU_IMPREZA";
-    isSubaru = carName == "subaru";
-    isToyota = carName == "toyota";
+    isPIDCar = CP.getLateralTuning().which() == cereal::CarParams::LateralTuning::PID;
+    isSubaru = carModel == "subaru";
+    isToyota = carModel == "toyota";
     isToyotaTuneSupported = carFingerprint == "LEXUS_ES_TSS2";
     isVolt = carFingerprint == "CHEVROLET_VOLT";
-    forcingAutoTune = params.getBool("LateralTune") && params.getBool("ForceAutoTune");
+    forcingAutoTune = params.getBool("AdvancedLateralTune") && params.getBool("ForceAutoTune");
     steerFrictionStock = CP.getLateralTuning().getTorque().getFriction();
     steerKPStock = CP.getLateralTuning().getTorque().getKp();
     steerLatAccelStock = CP.getLateralTuning().getTorque().getLatAccelFactor();

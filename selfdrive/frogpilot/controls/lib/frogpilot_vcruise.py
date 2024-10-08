@@ -98,25 +98,29 @@ class FrogPilotVCruise:
         v_ego_cluster = max(carState.vEgoCluster, v_ego)
         v_ego_diff = v_ego_cluster - v_ego
 
-        # MTSC
-        if frogpilot_toggles.map_turn_speed_controller and v_ego > CRUISING_SPEED and controlsState.enabled:
-            mtsc_active = self.mtsc_target < v_cruise
-            self.mtsc_target = clip(self.mtsc.target_speed(v_ego, carState.aEgo), CRUISING_SPEED, v_cruise)
+    # Pfeiferj's Map Turn Speed Controller
+    if frogpilot_toggles.map_turn_speed_controller and v_ego > CRUISING_SPEED and controlsState.enabled:
+      mtsc_active = self.mtsc_target < v_cruise
+      self.mtsc_target = clip(self.mtsc.target_speed(v_ego, carState.aEgo, frogpilot_toggles), CRUISING_SPEED, v_cruise)
 
-            if frogpilot_toggles.mtsc_curvature_check and self.frogpilot_planner.road_curvature < 1.0 and not mtsc_active:
-                self.mtsc_target = v_cruise
-            if self.mtsc_target == CRUISING_SPEED:
-                self.mtsc_target = v_cruise
-        else:
-            self.mtsc_target = v_cruise if v_cruise != V_CRUISE_UNSET else 0
+      curve_detected = (1 / road_curvature)**0.5 < v_ego
+      if curve_detected and mtsc_active:
+        self.mtsc_target = self.frogpilot_planner.v_cruise
+      elif not curve_detected and frogpilot_toggles.mtsc_curvature_check:
+        self.mtsc_target = v_cruise
+
+      if self.mtsc_target == CRUISING_SPEED:
+        self.mtsc_target = v_cruise
+    else:
+      self.mtsc_target = v_cruise if v_cruise != V_CRUISE_UNSET else 0
 
         # SLC
         if frogpilot_toggles.speed_limit_controller:
             self.slc.update(frogpilotCarState.dashboardSpeedLimit, controlsState.enabled, frogpilotNavigation.navigationSpeedLimit, v_cruise, v_ego, frogpilot_toggles)
             unconfirmed_slc_target = self.slc.desired_speed_limit
 
-            if frogpilot_toggles.speed_limit_confirmation and self.slc_target != 0:
-                self.speed_limit_changed = unconfirmed_slc_target != self.previous_speed_limit and abs(self.slc_target - unconfirmed_slc_target) > 1
+      if (frogpilot_toggles.speed_limit_confirmation_lower or frogpilot_toggles.speed_limit_confirmation_higher) and self.slc_target != 0:
+        self.speed_limit_changed = unconfirmed_slc_target != self.previous_speed_limit and abs(self.slc_target - unconfirmed_slc_target) > 1
 
                 speed_limit_decreased = self.speed_limit_changed and self.slc_target > unconfirmed_slc_target
                 speed_limit_increased = self.speed_limit_changed and self.slc_target < unconfirmed_slc_target
