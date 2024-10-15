@@ -24,6 +24,9 @@ TEMP_STEER_FAULTS = (0, 9, 11, 21, 25)
 # - prolonged high driver torque: 17 (permanent)
 PERM_STEER_FAULTS = (3, 17)
 
+ZSS_THRESHOLD = 4.0
+ZSS_THRESHOLD_COUNT = 10
+
 # Traffic signals for Speed Limit Controller - Credit goes to the DragonPilot team!
 @staticmethod
 def calculate_speed_limit(cp_cam, frogpilot_toggles):
@@ -67,11 +70,11 @@ class CarState(CarStateBase):
     self.slope_angle = 0.0
 
     # FrogPilot variables
-    self.latActive_previous = False
-    self.needs_angle_offset_zss = True
+    self.zss_compute = False
+    self.zss_cruise_active_last = False
 
-    self.angle_offset_zss = 0
-    self.zorro_steer_value = 0
+    self.zss_angle_offset = 0
+    self.zss_threshold_count = 0
 
   def update(self, cp, cp_cam, CC, frogpilot_toggles):
     ret = car.CarState.new_message()
@@ -240,27 +243,28 @@ class CarState(CarStateBase):
       self.lkas_previously_enabled = self.lkas_enabled
       self.lkas_enabled = self.lkas_hud.get("LDA_ON_MESSAGE") == 1
 
-    # ZSS Support - Credit goes to Erich!
-    if self.CP.flags & ToyotaFlags.ZSS:
-      if abs(torque_sensor_angle_deg) > 1e-3:
-        self.accurate_steer_angle_seen = True
+    # ZSS Support - Credit goes to the DragonPilot team!
+    if self.CP.flags & ToyotaFlags.ZSS and self.zss_threshold_count <= ZSS_THRESHOLD_COUNT:
+      zorro_steer = cp.vl["SECONDARY_STEER_ANGLE"]["ZORRO_STEER"]
 
-      if CC.latActive and not self.latActive_previous:
-        self.needs_angle_offset_zss = True
-      self.latActive_previous = CC.latActive
+      # Only compute ZSS offset when control is active
+      if CC.latActive and not self.zss_cruise_active_last:
+        self.zss_threshold_count = 0
+        self.zss_compute = True  # Control was just activated, so allow offset to be recomputed
+      self.zss_cruise_active_last = CC.latActive
 
-      if self.needs_angle_offset_zss:
-        zorro_steer = cp.vl["SECONDARY_STEER_ANGLE"]["ZORRO_STEER"]
+      # Compute ZSS offset
+      if self.zss_compute:
         if abs(ret.steeringAngleDeg) > 1e-3 and abs(zorro_steer) > 1e-3:
-          self.needs_angle_offset_zss = False
-          self.angle_offset_zss = zorro_steer - ret.steeringAngleDeg
-      self.zorro_steer_value = cp.vl["SECONDARY_STEER_ANGLE"]["ZORRO_STEER"] - self.angle_offset_zss
+          self.zss_compute = False
+          self.zss_angle_offset = zorro_steer - ret.steeringAngleDeg
 
-      if not self.needs_angle_offset_zss:
-        if abs(ret.steeringAngleDeg - self.zorro_steer_value) > 4.0:
-          ret.steeringAngleDeg = ret.steeringAngleDeg
-        else:
-          ret.steeringAngleDeg = self.zorro_steer_value
+      # Safety checks
+      steering_angle_deg = zorro_steer - self.zss_angle_offset
+      if abs(ret.steeringAngleDeg - steering_angle_deg) > ZSS_THRESHOLD:
+        self.zss_threshold_count += 1
+      else:
+        ret.steeringAngleDeg = steering_angle_deg
 
     return ret, fp_ret
 
@@ -321,8 +325,7 @@ class CarState(CarStateBase):
         ("SDSU", 100),
       ]
 
-    if CP.flags & ToyotaFlags.ZSS:
-      messages += [("SECONDARY_STEER_ANGLE", 0)]
+    messages += [("SECONDARY_STEER_ANGLE", 0)]
 
     return CANParser(DBC[CP.carFingerprint]["pt"], messages, 0)
 

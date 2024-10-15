@@ -24,9 +24,14 @@ private:
   QPushButton *createButton(const QString &text, const QString &type, int rating, int width, int height);
 
   void checkBlacklistButtonVisibility();
+  void setupModelInfoLayout();
+  void setupRatingLayout();
   void updateLabel();
 
   QStackedLayout *mainLayout;
+
+  QVBoxLayout *ratingLayout;
+  QVBoxLayout *modelInfoLayout;
 
   QLabel *blacklistMessageLabel;
   QLabel *modelLabel;
@@ -38,6 +43,8 @@ private:
   QLabel *totalOverallDrivesLabel;
 
   QPushButton *blacklistButton;
+
+  QList<QPushButton*> ratingButtons;
 
   Params params;
   Params paramsMemory{"/dev/shm/params"};

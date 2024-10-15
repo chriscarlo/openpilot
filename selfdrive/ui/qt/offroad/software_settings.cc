@@ -94,7 +94,7 @@ SoftwarePanel::SoftwarePanel(QWidget* parent) : ListWidget(parent) {
       if (FrogPilotConfirmationDialog::yesorno(tr("Do you want to permanently delete any additional FrogPilot assets? This is 100% unrecoverable and includes backups, downloaded models, themes, and long-term storage toggle settings for easy reinstalls."), this)) {
         std::system("rm -rf /data/backups");
         std::system("rm -rf /data/crashes");
-        std::system("rm -rf /data/media/screen_recordings");
+        std::system("rm -rf /data/media/0/videos");
         std::system("rm -rf /data/themes");
         std::system("rm -rf /data/toggle_backups");
         std::system("rm -rf /persist/params");

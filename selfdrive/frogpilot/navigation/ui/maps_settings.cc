@@ -49,12 +49,8 @@ FrogPilotMapsPanel::FrogPilotMapsPanel(FrogPilotSettingsWindow *parent) : FrogPi
   QObject::connect(removeMapsButton, &ButtonControl::clicked, [this] {
     if (FrogPilotConfirmationDialog::yesorno(tr("Are you sure you want to delete all of your downloaded maps?"), this)) {
       std::thread([this] {
-        lastMapsDownload->setText("Never");
         mapsSize->setText("0 MB");
-
         std::system("rm -rf /data/media/0/osm/offline");
-
-        params.remove("LastMapsUpdate");
       }).detach();
     }
   });
@@ -222,8 +218,6 @@ void FrogPilotMapsPanel::resetDownloadState() {
   downloadETA->setVisible(false);
   downloadStatus->setVisible(false);
   downloadTimeElapsed->setVisible(false);
-
-  lastMapsDownload->setVisible(true);
   removeMapsButton->setVisible(QDir(mapsFolderPath).exists());
 
   downloadActive = false;
@@ -271,8 +265,6 @@ void FrogPilotMapsPanel::finalizeDownload() {
   downloadETA->setVisible(false);
   downloadStatus->setVisible(false);
   downloadTimeElapsed->setVisible(false);
-
-  lastMapsDownload->setVisible(true);
   removeMapsButton->setVisible(true);
 
   downloadActive = false;

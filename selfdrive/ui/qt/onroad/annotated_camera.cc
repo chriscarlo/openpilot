@@ -768,7 +768,7 @@ void AnnotatedCameraWidget::initializeFrogPilotWidgets() {
   QObject::connect(recordTimer, &QTimer::timeout, [this] {
     recorder->updateScreen();
   });
-  recordTimer->start(1000 / UI_FREQ);
+  recordTimer->start(75);
 }
 
 void AnnotatedCameraWidget::updateFrogPilotVariables(int alert_height, const UIScene &scene) {

@@ -182,22 +182,26 @@ class ModelManager:
 
   def copy_default_model(self):
     default_model_path = os.path.join(MODELS_PATH, f"{DEFAULT_MODEL}.thneed")
-    source_path = os.path.join(BASEDIR, "selfdrive", "classic_modeld", "models", "supercombo.thneed")
 
-    if os.path.isfile(source_path):
-      shutil.copyfile(source_path, default_model_path)
-      print(f"Copied default model from {source_path} to {default_model_path}")
-    else:
-      print(f"Source default model not found at {source_path}. Exiting...")
+    if not os.path.isfile(default_model_path):
+      source_path = os.path.join(BASEDIR, "selfdrive", "classic_modeld", "models", "supercombo.thneed")
+
+      if os.path.isfile(source_path):
+        shutil.copyfile(source_path, default_model_path)
+        print(f"Copied default model from {source_path} to {default_model_path}")
+      else:
+        print(f"Source default model not found at {source_path}. Exiting...")
 
     sgo_model_path = os.path.join(MODELS_PATH, "secret-good-openpilot.thneed")
-    source_path = os.path.join(BASEDIR, "selfdrive", "modeld", "models", "supercombo.thneed")
 
-    if os.path.isfile(source_path):
-      shutil.copyfile(source_path, sgo_model_path)
-      print(f"Copied 'secret-good-openpilot' model from {source_path} to {sgo_model_path}")
-    else:
-      print(f"Source 'secret-good-openpilot' model not found at {source_path}. Exiting...")
+    if not os.path.isfile(sgo_model_path):
+      source_path = os.path.join(BASEDIR, "selfdrive", "modeld", "models", "supercombo.thneed")
+
+      if os.path.isfile(source_path):
+        shutil.copyfile(source_path, sgo_model_path)
+        print(f"Copied 'secret-good-openpilot' model from {source_path} to {sgo_model_path}")
+      else:
+        print(f"Source 'secret-good-openpilot' model not found at {source_path}. Exiting...")
 
   def update_models(self, boot_run=False):
     if boot_run:

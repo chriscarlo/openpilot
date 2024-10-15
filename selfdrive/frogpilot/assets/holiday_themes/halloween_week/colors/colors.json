@@ -12,15 +12,15 @@
     "alpha": 255
   },
   "Path": {
-    "red": 134,
-    "green": 47,
-    "blue": 224,
+    "red": 242,
+    "green": 117,
+    "blue": 3,
     "alpha": 255
   },
   "PathEdge": {
-    "red": 161,
-    "green": 56,
-    "blue": 255,
+    "red": 194,
+    "green": 94,
+    "blue": 2,
     "alpha": 255
   },
   "RoadEdges": {
@@ -30,9 +30,9 @@
     "alpha": 255
   },
   "Sidebar1": {
-    "red": 134,
-    "green": 47,
-    "blue": 224,
+    "red": 242,
+    "green": 117,
+    "blue": 3,
     "alpha": 255
   },
   "Sidebar2": {
@@ -42,9 +42,9 @@
     "alpha": 255
   },
   "Sidebar3": {
-    "red": 80,
-    "green": 184,
-    "blue": 72,
+    "red": 242,
+    "green": 117,
+    "blue": 3,
     "alpha": 255
   }
 }

@@ -1,4 +1,4 @@
-# PFEIFER - MTSC - Modified by FrogAi for FrogPilot
+# PFEIFER - MTSC
 import json
 import math
 
@@ -18,6 +18,9 @@ TARGET_OFFSET = 1.0  # seconds - This controls how soon before the curve you rea
                      # done to keep the distance calculations consistent but results in the offset actually being less
                      # time than specified depending on how much of a speed diffrential there is between v_ego and the
                      # target velocity.
+
+def calculate_accel(t, target_jerk, a_ego):
+  return a_ego  + target_jerk * t
 
 def calculate_velocity(t, target_jerk, a_ego, v_ego):
   return v_ego + a_ego * t + target_jerk/2 * (t ** 2)
@@ -40,7 +43,7 @@ class MapTurnSpeedController:
     self.target_lon = 0.0
     self.target_v = 0.0
 
-  def target_speed(self, v_ego, a_ego, frogpilot_toggles) -> float:
+  def target_speed(self, v_ego, a_ego) -> float:
     lat = 0.0
     lon = 0.0
     try:
@@ -86,7 +89,7 @@ class MapTurnSpeedController:
 
       a_diff = (a_ego - TARGET_ACCEL)
       accel_t = abs(a_diff / TARGET_JERK)
-      min_accel_v = calculate_velocity(accel_t, TARGET_JERK, a_ego, v_ego) / frogpilot_toggles.turn_aggressiveness
+      min_accel_v = calculate_velocity(accel_t, TARGET_JERK, a_ego, v_ego)
 
       max_d = 0
       if tv > min_accel_v:
@@ -113,7 +116,7 @@ class MapTurnSpeedController:
         t = abs((min_accel_v - tv) / TARGET_ACCEL)
         max_d += calculate_distance(t, 0, TARGET_ACCEL, min_accel_v)
 
-      if d < (max_d + tv * TARGET_OFFSET) * frogpilot_toggles.curve_sensitivity:
+      if d < max_d + tv * TARGET_OFFSET:
         valid_velocities.append((float(tv), tlat, tlon))
 
     # Find the smallest velocity we need to adjust for

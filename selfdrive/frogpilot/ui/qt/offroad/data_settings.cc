@@ -24,7 +24,7 @@ FrogPilotDataPanel::FrogPilotDataPanel(FrogPilotSettingsWindow *parent) : FrogPi
 
   FrogPilotButtonsControl *screenRecordingsBtn = new FrogPilotButtonsControl(tr("Screen Recordings"), tr("Manage your screen recordings."), {tr("DELETE"), tr("RENAME")});
   QObject::connect(screenRecordingsBtn, &FrogPilotButtonsControl::buttonClicked, [=](int id) {
-    QDir recordingsDir("/data/media/screen_recordings");
+    QDir recordingsDir("/data/media/0/videos");
     QStringList recordingsNames = recordingsDir.entryList(QDir::Files | QDir::NoDotAndDotDot);
 
     if (id == 0) {
@@ -218,7 +218,7 @@ FrogPilotDataPanel::FrogPilotDataPanel(FrogPilotSettingsWindow *parent) : FrogPi
   FrogPilotButtonsControl *toggleBackupBtn = new FrogPilotButtonsControl(tr("Toggle Backups"), tr("Manage your toggle backups."), {tr("BACKUP"), tr("DELETE"), tr("RESTORE")});
   QObject::connect(toggleBackupBtn, &FrogPilotButtonsControl::buttonClicked, [=](int id) {
     QDir backupDir("/data/toggle_backups");
-    QStringList backupNames = backupDir.entryList(QDir::Dirs | QDir::Files | QDir::NoDotAndDotDot, QDir::Name).filter(QRegularExpression("^(?!.*_in_progress$).*$"));
+    QStringList backupNames = backupDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
 
     if (id == 0) {
       QString nameSelection = InputDialog::getText(tr("Name your backup"), this, "", false, 1);

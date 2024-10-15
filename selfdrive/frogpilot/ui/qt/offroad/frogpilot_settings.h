@@ -21,7 +21,6 @@ public:
   bool isGMPCMCruise;
   bool isHKGCanFd;
   bool isImpreza;
-  bool isPIDCar;
   bool isSubaru;
   bool isToyota;
   bool isToyotaTuneSupported;

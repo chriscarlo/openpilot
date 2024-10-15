@@ -95,7 +95,11 @@ def time_checks(automatic_updates, deviceState, model_manager, now, screen_off, 
 def toggle_updates(frogpilot_toggles, started, time_validated, params, params_storage):
   FrogPilotVariables.update_frogpilot_params(started)
 
-  if time_validated:
+  if not frogpilot_toggles.model_manager:
+    params.put_nonblocking("Model", DEFAULT_MODEL)
+    params.put_nonblocking("ModelName", DEFAULT_MODEL_NAME)
+
+  if time_validated and not started:
     run_thread_with_lock("backup_toggles", backup_toggles, (params, params_storage))
 
 def update_maps(now, params, params_memory):
@@ -119,7 +123,7 @@ def update_maps(now, params, params_memory):
     return
 
   if params.get("OSMDownloadProgress", encoding='utf-8') is None:
-    params_memory.put("OSMDownloadLocations", maps_selected)
+    params_memory.put_nonblocking("OSMDownloadLocations", maps_selected)
     params.put_nonblocking("LastMapsUpdate", todays_date)
 
 def frogpilot_thread():
@@ -180,6 +184,7 @@ def frogpilot_thread():
       update_toggles = True
     elif update_toggles:
       run_thread_with_lock("toggle_updates", toggle_updates, (frogpilot_toggles, started, time_validated, params, params_storage))
+
       update_toggles = False
 
     started_previously = started

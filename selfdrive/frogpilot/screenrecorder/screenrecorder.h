@@ -23,21 +23,23 @@ private:
   void stop();
   void toggleRecording();
 
-  BlockingQueue<QImage> imageQueue{UI_FREQ};
-  BlockingQueue<QImage> encodeQueue{UI_FREQ};
-
-  QWidget *rootWidget;
-
   bool recording;
 
-  int screenHeight = 1080;
-  int screenWidth = 2160;
+  int frame;
+  int screenHeight;
+  int screenWidth;
 
-  long long started_time;
+  long long started;
+
+  std::unique_ptr<OmxEncoder> encoder;
+  std::unique_ptr<uint8_t[]> rgbScaleBuffer;
 
   std::thread encodingThread;
 
-  std::unique_ptr<OmxEncoder> encoder;
+  BlockingQueue<QImage> imageQueue{30};
 
-  std::vector<uint8_t> rgbScaleBuffer;
+  QWidget *rootWidget;
+
+  QPixmap recorderIcon;
+  QPixmap recordingIcon;
 };

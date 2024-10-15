@@ -4,6 +4,7 @@ import os
 import re
 import requests
 import shutil
+import time
 import zipfile
 
 from openpilot.common.basedir import BASEDIR
@@ -71,10 +72,10 @@ def update_distance_icons(pack, holiday_theme):
 def update_wheel_image(image, holiday_theme=None, random_event=True):
   if image == "stock":
     wheel_location = os.path.join(BASEDIR, "selfdrive", "frogpilot", "assets", "stock_theme", "steering_wheel")
-  elif holiday_theme:
-    wheel_location = os.path.join(BASEDIR, "selfdrive", "frogpilot", "assets", "holiday_themes", holiday_theme, "steering_wheel")
   elif random_event:
     wheel_location = os.path.join(BASEDIR, "selfdrive", "frogpilot", "assets", "random_events", "icons")
+  elif holiday_theme:
+    wheel_location = os.path.join(BASEDIR, "selfdrive", "frogpilot", "assets", "holiday_themes", holiday_theme, "icons")
   else:
     wheel_location = os.path.join(THEME_SAVE_PATH, "steering_wheels")
 
@@ -88,7 +89,7 @@ def update_wheel_image(image, holiday_theme=None, random_event=True):
 
   image_name = image.replace(" ", "_").lower()
   for filename in os.listdir(wheel_location):
-    if os.path.splitext(filename)[0].lower() in (image_name, "wheel"):
+    if os.path.splitext(filename)[0].lower() == image_name:
       source_file = os.path.join(wheel_location, filename)
       destination_file = os.path.join(wheel_save_location, f"wheel{os.path.splitext(filename)[1]}")
       shutil.copy2(source_file, destination_file)
@@ -157,7 +158,7 @@ class ThemeManager:
       if (holiday.endswith("_week") and self.is_within_week_of(date, now)) or (now.date() == date.date()):
         if holiday != self.previous_assets.get("holiday_theme"):
           self.params.put("CurrentHolidayTheme", holiday)
-          self.params_memory.put_bool("UpdateTheme", True)
+          self.update_active_theme()
         return
 
     if "holiday_theme" in self.previous_assets:
@@ -197,6 +198,8 @@ class ThemeManager:
         self.previous_assets[toggle] = current_value
 
     self.previous_assets["holiday_theme"] = current_holiday_theme
+
+    self.params_memory.remove("UpdateTheme")
     update_frogpilot_toggles()
 
   def extract_zip(self, zip_file, extract_path):

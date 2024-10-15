@@ -60,9 +60,8 @@ class ModelState:
     self.enable_navigation = not frogpilot_toggles.navigationless_model
     self.radarless = frogpilot_toggles.radarless_model
 
-    model_path = Path(__file__).parent / f'{MODELS_PATH}/{frogpilot_toggles.model}.thneed'
-    if frogpilot_toggles.model != DEFAULT_MODEL and model_path.exists():
-      MODEL_PATHS[ModelRunner.THNEED] = model_path
+    if frogpilot_toggles.model != DEFAULT_MODEL:
+      MODEL_PATHS[ModelRunner.THNEED] = Path(__file__).parent / f'{MODELS_PATH}/{frogpilot_toggles.model}.thneed'
 
     self.frame = ModelFrame(context)
     self.wide_frame = ModelFrame(context)

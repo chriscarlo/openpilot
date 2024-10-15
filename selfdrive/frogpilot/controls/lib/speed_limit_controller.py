@@ -92,7 +92,7 @@ class SpeedLimitController:
 
   @property
   def experimental_mode(self):
-    return self.speed_limit == 0 and self.frogpilot_toggles.slc_fallback_experimental
+    return self.speed_limit == 0 and self.frogpilot_toggles.use_experimental_mode
 
   @property
   def desired_speed_limit(self):
@@ -170,7 +170,7 @@ class SpeedLimitController:
       if speed_limits.get(priority, 0) in filtered_limits:
         return speed_limits[priority]
 
-    if self.frogpilot_toggles.slc_fallback_previous:
+    if self.frogpilot_toggles.use_previous_limit:
       return self.prv_speed_limit
 
     if self.frogpilot_toggles.use_set_speed:
