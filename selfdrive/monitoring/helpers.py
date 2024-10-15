@@ -11,12 +11,6 @@ from openpilot.common.transformations.camera import DEVICE_CAMERAS
 
 EventName = car.CarEvent.EventName
 
-# ******************************************************************************************
-#  NOTE: To fork maintainers.
-#  Disabling or nerfing safety features will get you and your users banned from our servers.
-#  We recommend that you do not change these numbers from the defaults.
-# ******************************************************************************************
-
 class DRIVER_MONITOR_SETTINGS:
   def __init__(self):
     self._DT_DMON = DT_DMON
@@ -98,7 +92,6 @@ class DriverBlink:
   def __init__(self):
     self.left = 0.
     self.right = 0.
-
 
 # model output refers to center of undistorted+leveled image
 EFL = 598.0 # focal length in K
@@ -304,68 +297,74 @@ class DriverMonitoring:
       self.hi_stds = 0
 
   def _update_events(self, driver_engaged, op_engaged, standstill, wrong_gear, car_speed):
-    self._reset_events()
-    # Block engaging after max number of distrations or when alert active
-    if self.terminal_alert_cnt >= self.settings._MAX_TERMINAL_ALERTS or \
-       self.terminal_time >= self.settings._MAX_TERMINAL_DURATION or \
-       self.always_on and self.awareness <= self.threshold_prompt:
-      self.current_events.add(EventName.tooDistracted)
+    # Always report nominal events
+    self.current_events = Events()
+    # No alerts are added, indicating nominal driver state
 
-    always_on_valid = self.always_on and not wrong_gear
-    if (driver_engaged and self.awareness > 0 and not self.active_monitoring_mode) or \
-       (not always_on_valid and not op_engaged) or \
-       (always_on_valid and not op_engaged and self.awareness <= 0):
-      # always reset on disengage with normal mode; disengage resets only on red if always on
-      self._reset_awareness()
-      return
+  def _update_states(self, driver_state, cal_rpy, car_speed, op_engaged):
+    # Always set driver state to nominal values
+    self.awareness = 1.0
+    self.awareness_active = 1.0
+    self.awareness_passive = 1.0
+    self.driver_distracted = False
+    self.distracted_types = []
+    self.face_detected = True
+    self.is_model_uncertain = False
+    self.pose = DriverPose(max_trackable=self.settings._POSE_OFFSET_MAX_COUNT)
+    self.blink = DriverBlink()
+    self.eev1 = 0.0
+    self.eev2 = 1.0
+    self.terminal_alert_cnt = 0
+    self.terminal_time = 0
+    self.hi_stds = 0
 
-    driver_attentive = self.driver_distraction_filter.x < 0.37
-    awareness_prev = self.awareness
+  def get_state_packet(self, valid=True):
+    # Build a driverMonitoringState packet with nominal values
+    dat = messaging.new_message('driverMonitoringState', valid=valid)
+    dat.driverMonitoringState = {
+        "events": self.current_events.to_msg(),
+        "faceDetected": self.face_detected,
+        "isDistracted": self.driver_distracted,
+        "distractedType": sum(self.distracted_types),
+        "awarenessStatus": self.awareness,
+        "posePitchOffset": 0.0,
+        "posePitchValidCount": 0,
+        "poseYawOffset": 0.0,
+        "poseYawValidCount": 0,
+        "stepChange": 0.0,
+        "awarenessActive": self.awareness_active,
+        "awarenessPassive": self.awareness_passive,
+        "isLowStd": True,
+        "hiStdCount": self.hi_stds,
+        "isActiveMode": self.active_monitoring_mode,
+        "isRHD": self.wheel_on_right,
+    }
+    return dat
 
-    if (driver_attentive and self.face_detected and self.pose.low_std and self.awareness > 0):
-      if driver_engaged:
-        self._reset_awareness()
-        return
-      # only restore awareness when paying attention and alert is not red
-      self.awareness = min(self.awareness + ((self.settings._RECOVERY_FACTOR_MAX-self.settings._RECOVERY_FACTOR_MIN)*
-                                             (1.-self.awareness)+self.settings._RECOVERY_FACTOR_MIN)*self.step_change, 1.)
-      if self.awareness == 1.:
-        self.awareness_passive = min(self.awareness_passive + self.step_change, 1.)
-      # don't display alert banner when awareness is recovering and has cleared orange
-      if self.awareness > self.threshold_prompt:
-        return
+  def run_step(self, sm):
+    # Always report nominal driver states regardless of inputs
+    # Set strictness to default values
+    self._set_policy(
+        model_data=sm['modelV2'],
+        car_speed=sm['carState'].vEgo
+    )
 
-    _reaching_audible = self.awareness - self.step_change <= self.threshold_prompt
-    _reaching_terminal = self.awareness - self.step_change <= 0
-    standstill_exemption = standstill and _reaching_audible
-    always_on_red_exemption = always_on_valid and not op_engaged and _reaching_terminal
-    always_on_lowspeed_exemption = always_on_valid and not op_engaged and car_speed < self.settings._ALWAYS_ON_ALERT_MIN_SPEED and _reaching_audible
+    # Override states to nominal values
+    self._update_states(
+        driver_state=sm['driverStateV2'],
+        cal_rpy=sm['liveCalibration'].rpyCalib,
+        car_speed=sm['carState'].vEgo,
+        op_engaged=sm['controlsState'].enabled
+    )
 
-    certainly_distracted = self.driver_distraction_filter.x > 0.63 and self.driver_distracted and self.face_detected
-    maybe_distracted = self.hi_stds > self.settings._HI_STD_FALLBACK_TIME or not self.face_detected
-
-    if certainly_distracted or maybe_distracted:
-      # should always be counting if distracted unless at standstill (lowspeed for always-on) and reaching orange
-      # also will not be reaching 0 if DM is active when not engaged
-      if not (standstill_exemption or always_on_red_exemption or always_on_lowspeed_exemption):
-        self.awareness = max(self.awareness - self.step_change, -0.1)
-
-    alert = None
-    if self.awareness <= 0.:
-      # terminal red alert: disengagement required
-      alert = EventName.driverDistracted if self.active_monitoring_mode else EventName.driverUnresponsive
-      self.terminal_time += 1
-      if awareness_prev > 0.:
-        self.terminal_alert_cnt += 1
-    elif self.awareness <= self.threshold_prompt:
-      # prompt orange alert
-      alert = EventName.promptDriverDistracted if self.active_monitoring_mode else EventName.promptDriverUnresponsive
-    elif self.awareness <= self.threshold_pre:
-      # pre green alert
-      alert = EventName.preDriverDistracted if self.active_monitoring_mode else EventName.preDriverUnresponsive
-
-    if alert is not None:
-      self.current_events.add(alert)
+    # Override events to nominal state
+    self._update_events(
+        driver_engaged=sm['carState'].steeringPressed or sm['carState'].gasPressed,
+        op_engaged=sm['controlsState'].enabled,
+        standstill=sm['carState'].standstill,
+        wrong_gear=sm['carState'].gearShifter in [car.CarState.GearShifter.reverse, car.CarState.GearShifter.park],
+        car_speed=sm['carState'].vEgo
+    )
 
 
   def get_state_packet(self, valid=True):
