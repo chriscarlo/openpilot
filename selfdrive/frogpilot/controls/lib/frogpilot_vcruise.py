@@ -59,6 +59,9 @@ class FrogPilotVCruise:
     self.apex_reached = False               # Flag to indicate if apex has been reached
     self.apex_speed = 0.0                   # Speed at the apex
     self.time_since_apex = 0.0
+    self.deceleration_distance = float('inf')  # Initialize with infinity
+    self.deceleration_total_time = 0.0
+    self.deceleration_initial_speed = 0.0
 
     # Initialize variables for deceleration easing
     self.deceleration_started = False       # Flag indicating if deceleration has started
@@ -349,6 +352,7 @@ class FrogPilotVCruise:
                         self.apex_reached = False
                         self.deceleration_started = False
                         self.time_since_deceleration = 0.0
+                        self.deceleration_distance = float('inf')  # Reset deceleration distance
                 else:
                     # Maintain current speed until it's time to decelerate
                     self.vtsc_rate_limited_target = v_cruise
@@ -356,6 +360,7 @@ class FrogPilotVCruise:
                     self.apex_reached = False
                     self.time_since_deceleration = 0.0
                     self.time_since_apex = 0.0
+                    self.deceleration_distance = float('inf')  # Reset deceleration distance
 
                 # Update the target speed
                 self.vtsc_target = self.vtsc_rate_limited_target
@@ -367,14 +372,16 @@ class FrogPilotVCruise:
                 self.apex_reached = False
                 self.time_since_deceleration = 0.0
                 self.time_since_apex = 0.0
+                self.deceleration_distance = float('inf')  # Reset deceleration distance
         else:
-            # Not enough data, fallback to normal behavior
-            self.vtsc_target = v_cruise
+            # VTSC not active or conditions not met
+            self.vtsc_target = v_cruise if v_cruise != V_CRUISE_UNSET else float('inf')
             self.vtsc_rate_limited_target = self.vtsc_target
             self.deceleration_started = False
             self.apex_reached = False
             self.time_since_deceleration = 0.0
             self.time_since_apex = 0.0
+            self.deceleration_distance = float('inf')  # Reset deceleration distance
     else:
         # VTSC not active or conditions not met
         self.vtsc_target = v_cruise if v_cruise != V_CRUISE_UNSET else float('inf')
@@ -383,6 +390,7 @@ class FrogPilotVCruise:
         self.apex_reached = False
         self.time_since_deceleration = 0.0
         self.time_since_apex = 0.0
+        self.deceleration_distance = float('inf')  # Reset deceleration distance
 
     if frogpilot_toggles.force_standstill and carState.standstill and not self.override_force_stop and controlsState.enabled:
       self.forcing_stop = True
