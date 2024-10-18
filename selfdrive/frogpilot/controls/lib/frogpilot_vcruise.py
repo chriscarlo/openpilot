@@ -15,7 +15,7 @@ from cereal import log
 
 LaneChangeState = log.LaneChangeState
 
-TARGET_LAT_A = 2.5
+TARGET_LAT_A = 2.2
 
 class FrogPilotVCruise:
   def __init__(self, FrogPilotPlanner):
@@ -67,29 +67,20 @@ class FrogPilotVCruise:
     self.deceleration_started = False       # Flag indicating if deceleration has started
     self.time_since_deceleration = 0.0      # Timer for deceleration easing
 
-  def estimate_base_curvature(self, current_curvature, lane_change_state, dt):
+    # EMA parameters
+    self.ema_alpha = 0.1
+    self.ema_target_speed = 0.0
+
+    # Jerk limiting parameters
+    self.max_jerk = 1.0
+    self.last_target_speed = 0.0
+
+  def estimate_base_curvature(self, current_curvature, dt):
     self.curvature_rate = (current_curvature - self.last_curvature) / dt
     self.last_curvature = current_curvature
 
-    if lane_change_state == LaneChangeState.off:
-      self.base_curvature = current_curvature
-      self.lc_curvature_offset = 0.0
-      self.curvature_confidence = 1.0
-    else:
-      if self.lane_change_state == LaneChangeState.off:
-        self.lc_curvature_offset = current_curvature - self.base_curvature
-        self.curvature_confidence = 0.5
-
-      estimated_base = current_curvature - self.lc_curvature_offset
-
-      if abs(self.curvature_rate) > 0.001:
-        road_curvature_change = self.curvature_rate * 0.5
-        estimated_base += road_curvature_change * dt
-
-      alpha = 0.2
-      self.base_curvature = alpha * estimated_base + (1 - alpha) * self.base_curvature
-
-      self.curvature_confidence = min(self.curvature_confidence + 0.1, 1.0)
+    alpha = 0.2
+    self.base_curvature = alpha * current_curvature + (1 - alpha) * self.base_curvature
 
     self.curvature_derivative = (self.base_curvature - self.prev_estimated_base_curvature) / dt
     self.prev_estimated_base_curvature = self.base_curvature
@@ -252,7 +243,7 @@ class FrogPilotVCruise:
 
     dt = 0.1  # Time step
     current_curvature = self.frogpilot_planner.road_curvature
-    estimated_base_curvature = self.estimate_base_curvature(current_curvature, self.lane_change_state, dt)
+    estimated_base_curvature = self.estimate_base_curvature(current_curvature, dt)
 
     if frogpilot_toggles.vision_turn_controller and v_ego > CRUISING_SPEED and controlsState.enabled:
         # Get future positions from the model
@@ -307,14 +298,21 @@ class FrogPilotVCruise:
                 # Calculate distance to apex
                 apex_distance = cumulative_distances[curve_indices[apex_index]]
 
-                # Deceleration phase before the apex
+                # Calculate base deceleration_total_time
+                base_deceleration_total_time = max(5.0, min(15.0, abs(speed_diff) / 0.1))
+                # Calculate adjusted deceleration_total_time to hit target speed 1 second before critical curve
+                adjusted_deceleration_total_time = base_deceleration_total_time
+                # Compensate for adjusted decel time
+                additional_distance = v_ego * 1.0  # distance = speed * time
+                # Update deceleration_distance to include the additional distance
+                self.deceleration_distance = (v_initial + v_final) / 2.0 * adjusted_deceleration_total_time + additional_distance
+
                 if distance_to_curve <= self.deceleration_distance and not self.apex_reached:
-                    # Start decelerating
                     if not self.deceleration_started:
                         self.time_since_deceleration = 0.0  # Reset timer
-                        self.deceleration_total_time = max(5.0, min(15.0, abs(speed_diff) / 0.1))
+                        self.deceleration_total_time = adjusted_deceleration_total_time
                         self.deceleration_initial_speed = v_ego
-                        self.deceleration_distance = (v_initial + v_final) / 2.0 * self.deceleration_total_time
+                        # self.deceleration_distance already includes additional_distance
                     self.deceleration_started = True
                     self.time_since_deceleration += dt
 
@@ -336,7 +334,7 @@ class FrogPilotVCruise:
                 elif self.apex_reached:
                     # Acceleration phase after the apex
                     self.time_since_apex += dt
-                    acceleration_time = 5.0  # Time to accelerate back to cruise speed
+                    acceleration_time = 4.0  # Time to accelerate back to cruise speed
 
                     # Apply sigmoid easing for acceleration
                     self.vtsc_rate_limited_target = self.sigmoid_ease(
@@ -413,5 +411,26 @@ class FrogPilotVCruise:
 
       targets = [self.mtsc_target, max(self.overridden_speed, self.slc_target) - v_ego_diff, self.vtsc_target]
       v_cruise = float(min([target if target > CRUISING_SPEED else v_cruise for target in targets]))
+
+    # Apply EMA smoothing
+    if self.ema_target_speed == 0.0:
+        self.ema_target_speed = self.vtsc_target
+    else:
+        self.ema_target_speed = self.ema_alpha * self.vtsc_target + (1 - self.ema_alpha) * self.ema_target_speed
+
+    # Apply jerk limiting
+    max_speed_change = self.max_jerk * 0.1  # dt = 0.1
+    speed_diff = self.ema_target_speed - self.last_target_speed
+
+    if speed_diff > max_speed_change:
+        speed_diff = max_speed_change
+    elif speed_diff < -max_speed_change:
+        speed_diff = -max_speed_change
+
+    self.vtsc_target = self.last_target_speed + speed_diff
+    self.last_target_speed = self.vtsc_target
+
+    # Update the final cruise speed using the smoothed and jerk-limited target
+    smoothed_vtsc_target = self.vtsc_target
 
     return v_cruise
