@@ -15,7 +15,7 @@ from cereal import log
 
 LaneChangeState = log.LaneChangeState
 
-TARGET_LAT_A = 2.0
+TARGET_LAT_A = 2.5
 
 class FrogPilotVCruise:
   def __init__(self, FrogPilotPlanner):
@@ -129,7 +129,7 @@ class FrogPilotVCruise:
     self.adjusted_target_lat_a = TARGET_LAT_A * frogpilot_toggles.turn_aggressiveness
 
     for i, (curve, dist) in enumerate(zip(curvatures, distances)):
-        lookahead_time = 8.0  #seconds
+        lookahead_time = 6.0  #seconds
         max_lookahead_distance = v_ego * lookahead_time
 
         if dist > max_lookahead_distance:
