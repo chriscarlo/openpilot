@@ -337,7 +337,7 @@ class FrogPilotVCruise:
           elif self.apex_reached:
             # Acceleration phase after the apex
             self.time_since_apex += dt
-            acceleration_time = 4.0  # Time to accelerate back to cruise speed
+            acceleration_time = 2.0  # Time to accelerate back to cruise speed
 
             # Apply sigmoid easing for acceleration
             self.vtsc_rate_limited_target = self.sigmoid_ease(
