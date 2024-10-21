@@ -347,13 +347,8 @@ class Controls:
         self.events.add(EventName.radarFault)
     if not self.sm.valid['pandaStates']:
       self.events.add(EventName.usbError)
-    if CS.canTimeout:
-      self.events.add(EventName.canBusMissing)
-    elif not CS.canValid:
-      self.events.add(EventName.canError)
 
-    """
-    # Logic to suppress CANBUS errors if needed - cause of this may have already been fixed
+    # Suppress CANBUS errors if needed - cause of this may have already been fixed
     self.can_error_counter = getattr(self, 'can_error_counter', 0)
     CAN_ERROR_THRESHOLD = 20
     if CS.canTimeout or not CS.canValid:
@@ -365,7 +360,7 @@ class Controls:
         self.events.add(EventName.canBusMissing)
       elif not CS.canValid:
         self.events.add(EventName.canError)
-    """
+
     # generic catch-all. ideally, a more specific event should be added above instead
     has_disable_events = self.events.contains(ET.NO_ENTRY) and (self.events.contains(ET.SOFT_DISABLE) or self.events.contains(ET.IMMEDIATE_DISABLE))
     no_system_errors = (not has_disable_events) or (len(self.events) == num_events)
