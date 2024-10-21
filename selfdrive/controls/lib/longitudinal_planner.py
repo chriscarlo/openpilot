@@ -17,7 +17,7 @@ from openpilot.selfdrive.controls.lib.drive_helpers import V_CRUISE_MAX, V_CRUIS
 from openpilot.common.swaglog import cloudlog
 
 LON_MPC_STEP = 0.2  # first step is 0.2s
-A_CRUISE_MIN = -6.0
+A_CRUISE_MIN = -8.0
 A_CRUISE_MAX_VALS = [4.2, 3.5, 2.8, 1.6, 0.8]
 A_CRUISE_MAX_BP = [0., 10.0, 25., 40., 50.]
 CONTROL_N_T_IDX = ModelConstants.T_IDXS[:CONTROL_N]
@@ -114,11 +114,15 @@ class Lead:
     self.status = False
 
     self.kf: KF1D | None = None
+    self.prev_vLead = 0.0
+    self.prev_dRel = 0.0
 
   def reset(self):
     self.status = False
     self.kf = None
     self.aLeadTau = LEAD_ACCEL_TAU
+    self.prev_vLead = 0.0
+    self.prev_dRel = 0.0
 
   def update(self, dRel: float, yRel: float, vLead: float, aLead: float, prob: float):
     self.dRel = dRel
@@ -136,11 +140,33 @@ class Lead:
     self.vLeadK = float(self.kf.x[LEAD_KALMAN_SPEED][0])
     self.aLeadK = float(self.kf.x[LEAD_KALMAN_ACCEL][0])
 
-    # Learn if constant acceleration
-    if abs(self.aLeadK) < 0.5:
-      self.aLeadTau = LEAD_ACCEL_TAU
+    # Compute relative velocity and distance change
+    relative_velocity = self.vLead - self.prev_vLead
+    distance_change = self.dRel - self.prev_dRel
+
+    # Update previous states
+    self.prev_vLead = self.vLead
+    self.prev_dRel = self.dRel
+
+    # Enhanced adaptive behavior for aLeadTau
+    acceleration_threshold = 0.2  # Lowered threshold for increased sensitivity
+    relative_velocity_threshold = 0.2
+    distance_change_threshold = 0.2
+
+    if (
+        abs(self.aLeadK) < acceleration_threshold
+        and abs(relative_velocity) < relative_velocity_threshold
+        and abs(distance_change) < distance_change_threshold
+    ):
+        # Slowly increase aLeadTau up to the default value
+        self.aLeadTau = min(self.aLeadTau * 1.05, LEAD_ACCEL_TAU)
     else:
-      self.aLeadTau *= 0.9
+        # More aggressive reduction factor based on pull-away scenarios
+        reduction_factor = 0.8  # Increased reduction factor for faster response
+        self.aLeadTau *= reduction_factor
+
+        # Ensure aLeadTau doesn't get too small to maintain stability
+        self.aLeadTau = max(self.aLeadTau, 0.1 * LEAD_ACCEL_TAU)
 
 
 class LongitudinalPlanner:
@@ -179,7 +205,7 @@ class LongitudinalPlanner:
       j = np.zeros(len(T_IDXS_MPC))
 
     if taco_tune:
-      max_lat_accel = interp(v_ego, [5, 10, 20], [1.5, 2.0, 3.0])
+      max_lat_accel = interp(v_ego, [5, 10, 20], [2.0, 2.5, 3.0])
       curvatures = np.interp(T_IDXS_MPC, ModelConstants.T_IDXS, model_msg.orientationRate.z) / np.clip(v, 0.3, 100.0)
       max_v = np.sqrt(max_lat_accel / (np.abs(curvatures) + 1e-3)) - 2.0
       v = np.minimum(max_v, v)
@@ -303,3 +329,5 @@ class LongitudinalPlanner:
     longitudinalPlan.allowThrottle = self.allow_throttle
 
     pm.send('longitudinalPlan', plan_send)
+
+
