@@ -58,6 +58,10 @@ T_DIFFS = np.diff(T_IDXS, prepend=[0.])
 COMFORT_BRAKE = 2.5
 STOP_DISTANCE = 8.0
 
+# Add Minimum and Maximum Lead Deceleration
+MIN_LEAD_DECEL = 0.1  # Minimum lead deceleration to avoid division by zero
+MAX_LEAD_DECEL = 6.0  # Maximum lead deceleration in m/s²
+
 def get_jerk_factor(aggressive_jerk_acceleration=0.5, aggressive_jerk_danger=0.5, aggressive_jerk_speed=0.5,
                     standard_jerk_acceleration=1.0, standard_jerk_danger=1.0, standard_jerk_speed=1.0,
                     relaxed_jerk_acceleration=1.0, relaxed_jerk_danger=1.0, relaxed_jerk_speed=1.0,
@@ -102,8 +106,10 @@ def get_T_FOLLOW(aggressive_follow=1.25, standard_follow=1.45, relaxed_follow=1.
     else:
       raise NotImplementedError("Longitudinal personality not supported")
 
-def get_stopped_equivalence_factor(v_lead):
-  return (v_lead**2) / (2 * COMFORT_BRAKE)
+def get_stopped_equivalence_factor(v_lead, a_lead):
+  # Clip lead deceleration to within defined bounds
+  effective_decel = clip(-a_lead, MIN_LEAD_DECEL, MAX_LEAD_DECEL)
+  return (v_lead**2) / (2 * effective_decel)
 
 def get_safe_obstacle_distance(v_ego, t_follow):
   return (v_ego**2) / (2 * COMFORT_BRAKE) + t_follow * v_ego + STOP_DISTANCE
@@ -300,7 +306,15 @@ class LongitudinalMpc:
   def set_weights(self, acceleration_jerk=1.0, danger_jerk=1.0, speed_jerk=1.0, prev_accel_constraint=True, personality=log.LongitudinalPersonality.standard):
     if self.mode == 'acc':
       a_change_cost = acceleration_jerk if prev_accel_constraint else 0
-      cost_weights = [X_EGO_OBSTACLE_COST, X_EGO_COST, V_EGO_COST, A_EGO_COST, a_change_cost, speed_jerk]
+      # Reduce penalty on high deceleration and jerk to allow more aggressive braking
+      cost_weights = [
+          X_EGO_OBSTACLE_COST,       # Obstacle distance penalty
+          X_EGO_COST,                # Ego position penalty
+          V_EGO_COST,                # Ego velocity penalty
+          A_EGO_COST / 2,            # Ego acceleration penalty reduced by half
+          a_change_cost / 2,         # Acceleration change penalty reduced by half
+          speed_jerk / 2             # Jerk penalty reduced by half
+      ]
       constraint_cost_weights = [LIMIT_COST, LIMIT_COST, LIMIT_COST, danger_jerk]
     elif self.mode == 'blended':
       a_change_cost = 40.0 if prev_accel_constraint else 0
@@ -320,6 +334,11 @@ class LongitudinalMpc:
 
   @staticmethod
   def extrapolate_lead(x_lead, v_lead, a_lead, a_lead_tau):
+    # Clip a_lead to within defined deceleration bounds
+    if a_lead < 0:
+        a_lead = clip(a_lead, -MAX_LEAD_DECEL, -MIN_LEAD_DECEL)
+    else:
+        a_lead = 0.0  # Ensure non-decelerating leads don't cause issues
     a_lead_traj = a_lead * np.exp(-a_lead_tau * (T_IDXS**2)/2.)
     v_lead_traj = np.clip(v_lead + np.cumsum(T_DIFFS * a_lead_traj), 0.0, 1e8)
     x_lead_traj = x_lead + np.cumsum(T_DIFFS * v_lead_traj)
@@ -355,6 +374,14 @@ class LongitudinalMpc:
     self.cruise_min_a = min_a
     self.max_a = max_a
 
+  # Add a new method to get dynamic comfort brake
+  def get_dynamic_comfort_brake(self, a_lead):
+      if a_lead < -COMFORT_BRAKE:
+          # Increase deceleration capability when lead is braking aggressively
+          return min(-a_lead, MAX_LEAD_DECEL)
+      else:
+          return COMFORT_BRAKE
+
   def update(self, lead_one, lead_two, v_cruise, x, v, a, j, radarless_model, t_follow, trafficModeActive, frogpilot_toggles, personality=log.LongitudinalPersonality.standard):
     v_ego = self.x0[1]
     self.status = lead_one.status or lead_two.status
@@ -363,14 +390,20 @@ class LongitudinalMpc:
     lead_xv_0 = self.process_lead(lead_one, increased_distance)
     lead_xv_1 = self.process_lead(lead_two)
 
-    # To estimate a safe distance from a moving lead, we calculate how much stopping
-    # distance that lead needs as a minimum. We can add that to the current distance
-    # and then treat that as a stopped car/obstacle at this new distance.
-    lead_0_obstacle = lead_xv_0[:,0] + get_stopped_equivalence_factor(lead_xv_0[:,1])
-    lead_1_obstacle = lead_xv_1[:,0] + get_stopped_equivalence_factor(lead_xv_1[:,1])
+    # Calculate obstacle positions using the updated function with a_lead
+    lead_0_obstacle = lead_xv_0[:,0] + get_stopped_equivalence_factor(lead_xv_0[:,1], lead_one.aLeadK)
+    lead_1_obstacle = lead_xv_1[:,0] + get_stopped_equivalence_factor(lead_xv_1[:,1], lead_two.aLeadK)
 
-    self.params[:,0] = ACCEL_MIN
-    self.params[:,1] = self.max_a
+    self.params[:,0] = ACCEL_MIN  # Minimum acceleration (maximum deceleration)
+    self.params[:,1] = self.max_a  # Maximum acceleration
+
+    # Calculate dynamic comfort brake for each lead
+    dynamic_comfort_brake_0 = self.get_dynamic_comfort_brake(lead_one.aLeadK) if lead_one.status else COMFORT_BRAKE
+    dynamic_comfort_brake_1 = self.get_dynamic_comfort_brake(lead_two.aLeadK) if lead_two.status else COMFORT_BRAKE
+
+    # Recalculate obstacles with dynamic comfort brake
+    lead_0_obstacle = lead_xv_0[:,0] + (lead_xv_0[:,1]**2) / (2 * dynamic_comfort_brake_0)
+    lead_1_obstacle = lead_xv_1[:,0] + (lead_xv_1[:,1]**2) / (2 * dynamic_comfort_brake_1)
 
     # Update in ACC mode or ACC/e2e blend
     if self.mode == 'acc':
@@ -384,6 +417,7 @@ class LongitudinalMpc:
                                  v_lower,
                                  v_upper)
       cruise_obstacle = np.cumsum(T_DIFFS * v_cruise_clipped) + get_safe_obstacle_distance(v_cruise_clipped, t_follow)
+
       x_obstacles = np.column_stack([lead_0_obstacle, lead_1_obstacle, cruise_obstacle])
       self.source = SOURCES[np.argmin(x_obstacles[0])]
 
@@ -429,15 +463,14 @@ class LongitudinalMpc:
     # Check if it got within lead comfort range
     # TODO This should be done cleaner
     if self.mode == 'blended':
-      if any((lead_0_obstacle - get_safe_obstacle_distance(self.x_sol[:,1], t_follow))- self.x_sol[:,0] < 0.0):
+      if any((lead_0_obstacle - get_safe_obstacle_distance(self.x_sol[:,1], t_follow)) - self.x_sol[:,0] < 0.0):
         self.source = 'lead0'
-      if any((lead_1_obstacle - get_safe_obstacle_distance(self.x_sol[:,1], t_follow))- self.x_sol[:,0] < 0.0) and \
+      if any((lead_1_obstacle - get_safe_obstacle_distance(self.x_sol[:,1], t_follow)) - self.x_sol[:,0] < 0.0) and \
          (lead_1_obstacle[0] - lead_0_obstacle[0]):
         self.source = 'lead1'
 
   def run(self):
-    # t0 = time.monotonic()
-    # reset = 0
+    # Set all parameters for the solver
     for i in range(N+1):
       self.solver.set(i, 'p', self.params[i])
     self.solver.constraints_set(0, "lbx", self.x0)
@@ -449,13 +482,7 @@ class LongitudinalMpc:
     self.time_linearization = float(self.solver.get_stats('time_lin')[0])
     self.time_integrator = float(self.solver.get_stats('time_sim')[0])
 
-    # qp_iter = self.solver.get_stats('statistics')[-1][-1] # SQP_RTI specific
-    # print(f"long_mpc timings: tot {self.solve_time:.2e}, qp {self.time_qp_solution:.2e}, lin {self.time_linearization:.2e}, \
-    # integrator {self.time_integrator:.2e}, qp_iter {qp_iter}")
-    # res = self.solver.get_residuals()
-    # print(f"long_mpc residuals: {res[0]:.2e}, {res[1]:.2e}, {res[2]:.2e}, {res[3]:.2e}")
-    # self.solver.print_statistics()
-
+    # Retrieve solutions
     for i in range(N+1):
       self.x_sol[i] = self.solver.get(i, 'x')
     for i in range(N):
@@ -473,6 +500,8 @@ class LongitudinalMpc:
         self.last_cloudlog_t = t
         cloudlog.warning(f"Long mpc reset, solution_status: {self.solution_status}")
       self.reset()
+
+    # Optionally, log or print timing statistics here
       # reset = 1
     # print(f"long_mpc timings: total internal {self.solve_time:.2e}, external: {(time.monotonic() - t0):.2e} qp {self.time_qp_solution:.2e}, \
     # lin {self.time_linearization:.2e} qp_iter {qp_iter}, reset {reset}")
