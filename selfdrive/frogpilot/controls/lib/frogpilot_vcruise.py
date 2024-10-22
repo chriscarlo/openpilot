@@ -15,7 +15,49 @@ from cereal import log
 
 LaneChangeState = log.LaneChangeState
 
-TARGET_LAT_A = 2.2
+TARGET_LAT_A = 2.0
+
+class VTSCKalmanFilter:
+  def __init__(self, dt=0.1):
+    self.dt = dt
+
+    # State: [target_speed, speed_rate_of_change]
+    self.A = np.array([[1.0, dt],    # State transition matrix
+                      [0.0, 1.0]])
+
+    self.C = np.array([1.0, 0.0])    # Measurement matrix
+
+    # Initial state uncertainty
+    self.P = np.array([[10.0, 0.0],  # Higher initial uncertainty
+                      [0.0, 10.0]])
+
+    # Process noise (tune these)
+    self.Q = np.array([[0.1, 0.0],   # Speed process noise
+                      [0.0, 0.5]])   # Acceleration process noise
+
+    # Measurement noise (tune this)
+    self.R = 5.0                     # Higher value = more smoothing
+
+    self.x = np.array([[0.0],        # Initial speed
+                      [0.0]])        # Initial rate of change
+
+  def update(self, measured_speed, curve_confidence):
+    # Adjust measurement noise based on curve confidence
+    R_adjusted = self.R / max(curve_confidence, 0.1)
+
+    # Predict step
+    self.x = np.dot(self.A, self.x)
+    self.P = np.dot(np.dot(self.A, self.P), np.transpose(self.A)) + self.Q
+
+    # Update step
+    S = np.dot(np.dot(self.C, self.P), np.transpose(self.C)) + R_adjusted
+    K = np.dot(np.dot(self.P, np.transpose(self.C)), 1/S)
+
+    y = measured_speed - np.dot(self.C, self.x)
+    self.x = self.x + np.dot(K, y)
+    self.P = self.P - np.dot(np.dot(K, self.C), self.P)
+
+    return float(self.x[0])
 
 class FrogPilotVCruise:
   def __init__(self, FrogPilotPlanner):
@@ -67,13 +109,8 @@ class FrogPilotVCruise:
     self.deceleration_started = False       # Flag indicating if deceleration has started
     self.time_since_deceleration = 0.0      # Timer for deceleration easing
 
-    # EMA parameters
-    self.ema_alpha = 0.1
-    self.ema_target_speed = 0.0
-
-    # Jerk limiting parameters
-    self.max_jerk = 1.0
-    self.last_target_speed = 0.0
+    self.kf = VTSCKalmanFilter()
+    self.curve_confidence = 1.0
 
   def estimate_base_curvature(self, current_curvature, dt):
     self.curvature_rate = (current_curvature - self.last_curvature) / dt
@@ -90,7 +127,6 @@ class FrogPilotVCruise:
   def update_curvature(self, x, y):
     # Ensure there are enough data points
     if len(x) < 4 or len(y) < 4:
-      # Not enough data points to compute second derivatives
       return None
 
     # Compute curvature along the path
@@ -99,15 +135,21 @@ class FrogPilotVCruise:
     d2x = np.diff(dx)
     d2y = np.diff(dy)
 
-    # Prevent division by zero
+    # Calculate numerator and denominator separately
+    numerator = np.abs(d2x * dy[1:] - dx[1:] * d2y)
     denom = (dx[1:]**2 + dy[1:]**2)**1.5
-    zero_denom_indices = denom < 1e-6
-    denom[zero_denom_indices] = 1e-6  # Set a small number to prevent division by zero
 
-    curvature = np.abs(d2x * dy[1:] - dx[1:] * d2y) / denom
-    curvature = np.insert(curvature, 0, curvature[0])  # Pad to match original length
+    # Handle nearly straight paths
+    straight_threshold = 1e-6
+    is_straight = denom < straight_threshold
 
-    # Remove any NaN or infinite values
+    # Set curvature to 0 for straight segments, calculate normally for curves
+    curvature = np.zeros_like(denom)
+    curve_mask = ~is_straight
+    curvature[curve_mask] = numerator[curve_mask] / denom[curve_mask]
+
+    # Pad to match original length and clean up any remaining invalid values
+    curvature = np.insert(curvature, 0, curvature[0])
     curvature = np.nan_to_num(curvature, nan=0.0, posinf=0.0, neginf=0.0)
 
     return curvature
@@ -280,12 +322,14 @@ class FrogPilotVCruise:
           # Calculate desired speed for the curve
           raw_vtsc_target = np.sqrt(self.adjusted_target_lat_a / max(adjusted_base_curvature, 0.0001))
 
-          # Apply confidence factor
-          confidence_adjusted_target = np.interp(
-            self.curvature_confidence, [0, 1], [v_cruise, raw_vtsc_target]
-          )
+          # Calculate curve confidence and apply Kalman filter
+          distance_factor = np.clip(1.0 - (distance_to_curve / self.deceleration_distance), 0.1, 1.0)
+          curvature_factor = np.clip(abs(adjusted_base_curvature) * 1000, 0.1, 1.0)
+          self.curve_confidence = distance_factor * curvature_factor
 
-          desired_vtsc_target = clip(confidence_adjusted_target, CRUISING_SPEED, v_cruise)
+          # Use Kalman filter to smooth the target speed
+          filtered_target = self.kf.update(raw_vtsc_target, self.curve_confidence)
+          desired_vtsc_target = clip(filtered_target, CRUISING_SPEED, v_cruise)
 
           v_initial = v_ego
           v_final = desired_vtsc_target
@@ -405,26 +449,5 @@ class FrogPilotVCruise:
 
       targets = [self.mtsc_target, max(self.overridden_speed, self.slc_target) - v_ego_diff, self.vtsc_target]
       v_cruise = float(min([target if target > CRUISING_SPEED else v_cruise for target in targets]))
-
-    # Apply EMA smoothing
-    if self.ema_target_speed == 0.0:
-      self.ema_target_speed = self.vtsc_target
-    else:
-      self.ema_target_speed = self.ema_alpha * self.vtsc_target + (1 - self.ema_alpha) * self.ema_target_speed
-
-    # Apply jerk limiting
-    max_speed_change = self.max_jerk * 0.1  # dt = 0.1
-    speed_diff = self.ema_target_speed - self.last_target_speed
-
-    if speed_diff > max_speed_change:
-      speed_diff = max_speed_change
-    elif speed_diff < -max_speed_change:
-      speed_diff = -max_speed_change
-
-    self.vtsc_target = self.last_target_speed + speed_diff
-    self.last_target_speed = self.vtsc_target
-
-    # Update the final cruise speed using the smoothed and jerk-limited target
-    smoothed_vtsc_target = self.vtsc_target
 
     return v_cruise
