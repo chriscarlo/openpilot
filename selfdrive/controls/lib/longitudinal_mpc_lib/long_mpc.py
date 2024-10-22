@@ -410,11 +410,17 @@ class LongitudinalMpc:
     lead_0_obstacle = lead_xv_0[:,0] + (lead_xv_0[:,1]**2) / (2 * dynamic_comfort_brake)
     lead_1_obstacle = lead_xv_1[:,0] + (lead_xv_1[:,1]**2) / (2 * dynamic_comfort_brake)
 
-    # Increase solver iterations for better convergence in hard braking
+    # Adjust solver tolerance based on lead deceleration instead of iterations
     if abs(lead_one.aLeadK) > 2.25:
-        self.solver.options_set('qp_solver_iter_max', 20)
+        self.solver.options_set('qp_tol_stat', 1e-2)  # Looser tolerance for faster solve
+        self.solver.options_set('qp_tol_eq', 1e-2)
+        self.solver.options_set('qp_tol_ineq', 1e-2)
+        self.solver.options_set('qp_tol_comp', 1e-2)
     else:
-        self.solver.options_set('qp_solver_iter_max', 10)
+        self.solver.options_set('qp_tol_stat', 1e-3)  # Default tighter tolerance
+        self.solver.options_set('qp_tol_eq', 1e-3)
+        self.solver.options_set('qp_tol_ineq', 1e-3)
+        self.solver.options_set('qp_tol_comp', 1e-3)
 
     self.params[:,0] = ACCEL_MIN  # Minimum acceleration (maximum deceleration)
     self.params[:,1] = self.max_a  # Maximum acceleration
@@ -533,3 +539,4 @@ if __name__ == "__main__":
   ocp = gen_long_ocp()
   AcadosOcpSolver.generate(ocp, json_file=JSON_FILE)
   # AcadosOcpSolver.build(ocp.code_export_directory, with_cython=True)
+
