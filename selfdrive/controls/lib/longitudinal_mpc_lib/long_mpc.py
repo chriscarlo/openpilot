@@ -306,16 +306,16 @@ class LongitudinalMpc:
   def set_weights(self, acceleration_jerk=1.0, danger_jerk=1.0, speed_jerk=1.0, prev_accel_constraint=True, personality=log.LongitudinalPersonality.standard):
     if self.mode == 'acc':
       a_change_cost = acceleration_jerk if prev_accel_constraint else 0
-      # Reduce penalty on high deceleration and jerk to allow more aggressive braking
       cost_weights = [
-          X_EGO_OBSTACLE_COST,       # Obstacle distance penalty
-          X_EGO_COST,                # Ego position penalty
-          V_EGO_COST,                # Ego velocity penalty
-          A_EGO_COST / 2,            # Ego acceleration penalty reduced by half
-          a_change_cost / 2,         # Acceleration change penalty reduced by half
-          speed_jerk / 2             # Jerk penalty reduced by half
+          X_EGO_OBSTACLE_COST * 1.5,  # Increase obstacle cost
+          X_EGO_COST,
+          V_EGO_COST,
+          A_EGO_COST * 0.5,  # Reduce accel penalty
+          a_change_cost * 0.5,  # Reduce accel change penalty
+          speed_jerk * 0.5  # Reduce jerk penalty
       ]
-      constraint_cost_weights = [LIMIT_COST, LIMIT_COST, LIMIT_COST, danger_jerk]
+      # Increase weight on safety constraint
+      constraint_cost_weights = [LIMIT_COST, LIMIT_COST, LIMIT_COST, danger_jerk * 2.0]
     elif self.mode == 'blended':
       a_change_cost = 40.0 if prev_accel_constraint else 0
       cost_weights = [0., 0.1, 0.2, 5.0, a_change_cost, 1.0]
@@ -328,22 +328,40 @@ class LongitudinalMpc:
     v_prev = self.x0[1]
     self.x0[1] = v
     self.x0[2] = a
-    if abs(v_prev - v) > 2.:  # probably only helps if v < v_prev
-      for i in range(N+1):
-        self.solver.set(i, 'x', self.x0)
 
-  @staticmethod
-  def extrapolate_lead(x_lead, v_lead, a_lead, a_lead_tau):
-    # Clip a_lead to within defined deceleration bounds
+    # Reset solver state if velocity changes significantly or during hard braking
+    if abs(v_prev - v) > 2. or a < -2.25:
+        for i in range(N+1):
+            self.solver.set(i, 'x', self.x0)
+
+  def get_dynamic_comfort_brake(self, a_lead):
+    """
+    Calculate dynamic comfort brake level based on lead vehicle deceleration.
+    More aggressive when lead is braking hard.
+    """
+    if a_lead < -COMFORT_BRAKE:
+        # Increase deceleration capability proportionally to lead decel
+        return min(-a_lead * 1.25, MAX_LEAD_DECEL)  # Add 25% margin
+    return COMFORT_BRAKE
+
+  def extrapolate_lead(self, x_lead, v_lead, a_lead, a_lead_tau):
+    """
+    Improved lead vehicle trajectory extrapolation with better deceleration handling
+    """
+    # Clip lead deceleration more conservatively
     if a_lead < 0:
-        a_lead = clip(a_lead, -MAX_LEAD_DECEL, -MIN_LEAD_DECEL)
+        a_lead = clip(a_lead, -MAX_LEAD_DECEL * 1.1, -MIN_LEAD_DECEL)
     else:
-        a_lead = 0.0  # Ensure non-decelerating leads don't cause issues
-    a_lead_traj = a_lead * np.exp(-a_lead_tau * (T_IDXS**2)/2.)
+        a_lead = clip(a_lead, 0.0, 2.0)  # Limit positive acceleration
+
+    # More aggressive decay for hard braking scenarios
+    decay_factor = 2.0 if a_lead < -4.0 else 1.0
+    a_lead_traj = a_lead * np.exp(-a_lead_tau * decay_factor * (T_IDXS**2)/2.)
+
     v_lead_traj = np.clip(v_lead + np.cumsum(T_DIFFS * a_lead_traj), 0.0, 1e8)
     x_lead_traj = x_lead + np.cumsum(T_DIFFS * v_lead_traj)
-    lead_xv = np.column_stack((x_lead_traj, v_lead_traj))
-    return lead_xv
+
+    return np.column_stack((x_lead_traj, v_lead_traj))
 
   def process_lead(self, lead, increased_distance=0):
     v_ego = self.x0[1]
@@ -374,25 +392,29 @@ class LongitudinalMpc:
     self.cruise_min_a = min_a
     self.max_a = max_a
 
-  # Add a new method to get dynamic comfort brake
-  def get_dynamic_comfort_brake(self, a_lead):
-      if a_lead < -COMFORT_BRAKE:
-          # Increase deceleration capability when lead is braking aggressively
-          return min(-a_lead, MAX_LEAD_DECEL)
-      else:
-          return COMFORT_BRAKE
-
   def update(self, lead_one, lead_two, v_cruise, x, v, a, j, radarless_model, t_follow, trafficModeActive, frogpilot_toggles, personality=log.LongitudinalPersonality.standard):
     v_ego = self.x0[1]
     self.status = lead_one.status or lead_two.status
     increased_distance = max(frogpilot_toggles.increase_stopped_distance + min(10 - v_ego, 0), 0) if not trafficModeActive else 0
 
-    lead_xv_0 = self.process_lead(lead_one, increased_distance)
+    # Process leads with dynamic comfort brake
+    lead_xv_0 = self.process_lead(lead_one)
     lead_xv_1 = self.process_lead(lead_two)
 
-    # Calculate obstacle positions using the updated function with a_lead
-    lead_0_obstacle = lead_xv_0[:,0] + get_stopped_equivalence_factor(lead_xv_0[:,1], lead_one.aLeadK)
-    lead_1_obstacle = lead_xv_1[:,0] + get_stopped_equivalence_factor(lead_xv_1[:,1], lead_two.aLeadK)
+    # Use dynamic comfort brake based on lead deceleration
+    dynamic_comfort_brake = self.get_dynamic_comfort_brake(
+        lead_one.aLeadK if lead_one.status else 0.0
+    )
+
+    # Update safety distances with dynamic braking capability
+    lead_0_obstacle = lead_xv_0[:,0] + (lead_xv_0[:,1]**2) / (2 * dynamic_comfort_brake)
+    lead_1_obstacle = lead_xv_1[:,0] + (lead_xv_1[:,1]**2) / (2 * dynamic_comfort_brake)
+
+    # Increase solver iterations for better convergence in hard braking
+    if abs(lead_one.aLeadK) > 2.25:
+        self.solver.options_set('qp_solver_iter_max', 20)
+    else:
+        self.solver.options_set('qp_solver_iter_max', 10)
 
     self.params[:,0] = ACCEL_MIN  # Minimum acceleration (maximum deceleration)
     self.params[:,1] = self.max_a  # Maximum acceleration

@@ -88,13 +88,14 @@ def lead_kf(v_lead: float, dt: float = 0.05):
                 0.27162685, 0.27023228, 0.26888809, 0.26758976, 0.26633338, 0.26511557,
                 0.26393339, 0.26278425]
 
-  # Scaling factors to increase responsiveness (e.g., increase by 20%)
-  scale_factor_K0 = 1.5
-  scale_factor_K1 = 1.5
+  # Scale factors increased for faster response
+  scale_factor_K0 = 2.0  # Increased from 1.5
+  scale_factor_K1 = 2.0  # Increased from 1.5
 
-  # Scaled K0 and K1 arrays
+  # Original K0 and K1 arrays with higher gains
   K0 = [k * scale_factor_K0 for k in K0_base]
   K1 = [k * scale_factor_K1 for k in K1_base]
+
   K = [[interp(dt, dts, K0)], [interp(dt, dts, K1)]]
 
   kf = KF1D([[v_lead], [0.0]], A, C, K)
@@ -124,7 +125,7 @@ class Lead:
     self.prev_vLead = 0.0
     self.prev_dRel = 0.0
 
-  def update(self, dRel: float, yRel: float, vLead: float, aLead: float, prob: float):
+  def update(self, dRel, yRel, vLead, aLead, prob):
     self.dRel = dRel
     self.yRel = yRel
     self.vLead = vLead
@@ -140,33 +141,30 @@ class Lead:
     self.vLeadK = float(self.kf.x[LEAD_KALMAN_SPEED][0])
     self.aLeadK = float(self.kf.x[LEAD_KALMAN_ACCEL][0])
 
-    # Compute relative velocity and distance change
+    # Enhanced adaptive behavior for rapid deceleration
     relative_velocity = self.vLead - self.prev_vLead
     distance_change = self.dRel - self.prev_dRel
 
-    # Update previous states
+    # Lower thresholds for quicker response
+    acceleration_threshold = 0.15  # Reduced from 0.2
+    relative_velocity_threshold = 0.15  # Reduced from 0.2
+    distance_change_threshold = 0.15  # Reduced from 0.2
+
+    if (abs(self.aLeadK) < acceleration_threshold and
+        abs(relative_velocity) < relative_velocity_threshold and
+        abs(distance_change) < distance_change_threshold):
+      # Slower increase in steady state
+      self.aLeadTau = min(self.aLeadTau * 1.02, LEAD_ACCEL_TAU)
+    else:
+      # More aggressive reduction for rapid changes
+      reduction_factor = 0.7  # Increased from 0.8
+      self.aLeadTau *= reduction_factor
+
+      # Lower minimum tau for faster response
+      self.aLeadTau = max(self.aLeadTau, 0.05 * LEAD_ACCEL_TAU)  # Reduced from 0.1
+
     self.prev_vLead = self.vLead
     self.prev_dRel = self.dRel
-
-    # Enhanced adaptive behavior for aLeadTau
-    acceleration_threshold = 0.2  # Lowered threshold for increased sensitivity
-    relative_velocity_threshold = 0.2
-    distance_change_threshold = 0.2
-
-    if (
-        abs(self.aLeadK) < acceleration_threshold
-        and abs(relative_velocity) < relative_velocity_threshold
-        and abs(distance_change) < distance_change_threshold
-    ):
-        # Slowly increase aLeadTau up to the default value
-        self.aLeadTau = min(self.aLeadTau * 1.05, LEAD_ACCEL_TAU)
-    else:
-        # More aggressive reduction factor based on pull-away scenarios
-        reduction_factor = 0.8  # Increased reduction factor for faster response
-        self.aLeadTau *= reduction_factor
-
-        # Ensure aLeadTau doesn't get too small to maintain stability
-        self.aLeadTau = max(self.aLeadTau, 0.1 * LEAD_ACCEL_TAU)
 
 
 class LongitudinalPlanner:
@@ -248,8 +246,8 @@ class LongitudinalPlanner:
 
     if reset_state:
       self.v_desired_filter.x = v_ego
-      # Clip aEgo to cruise limits to prevent large accelerations when becoming active
-      self.a_desired = clip(sm['carState'].aEgo, accel_limits[0], accel_limits[1])
+      # Allow stronger deceleration even when becoming active
+      self.a_desired = clip(sm['carState'].aEgo, accel_limits[0] * 1.2, accel_limits[1])
 
     # Prevent divergence, smooth in current v_ego
     self.v_desired_filter.x = max(0.0, self.v_desired_filter.update(v_ego))
@@ -266,8 +264,8 @@ class LongitudinalPlanner:
     if force_slow_decel:
       v_cruise = 0.0
     # clip limits, cannot init MPC outside of bounds
-    accel_limits_turns[0] = min(accel_limits_turns[0], self.a_desired + 0.05)
-    accel_limits_turns[1] = max(accel_limits_turns[1], self.a_desired - 0.05)
+    accel_limits_turns[0] = min(accel_limits_turns[0], self.a_desired + 0.1)  # Increased from 0.05
+    accel_limits_turns[1] = max(accel_limits_turns[1], self.a_desired - 0.1)  # Increased from 0.05
 
     if radarless_model:
       model_leads = list(sm['modelV2'].leadsV3)
@@ -283,7 +281,14 @@ class LongitudinalPlanner:
       self.lead_one = sm['radarState'].leadOne
       self.lead_two = sm['radarState'].leadTwo
 
-    self.mpc.set_weights(sm['frogpilotPlan'].accelerationJerk, sm['frogpilotPlan'].dangerJerk, sm['frogpilotPlan'].speedJerk, prev_accel_constraint, personality=sm['controlsState'].personality)
+    # Update MPC with more aggressive jerk factors for rapid response
+    self.mpc.set_weights(
+      sm['frogpilotPlan'].accelerationJerk * 1.2,  # Increase base jerk
+      sm['frogpilotPlan'].dangerJerk * 1.5,       # Increase danger jerk
+      sm['frogpilotPlan'].speedJerk,              # Keep speed jerk same
+      prev_accel_constraint,
+      personality=sm['controlsState'].personality
+    )
     self.mpc.set_accel_limits(accel_limits_turns[0], accel_limits_turns[1])
     self.mpc.set_cur_state(self.v_desired_filter.x, self.a_desired)
     self.mpc.update(self.lead_one, self.lead_two, sm['frogpilotPlan'].vCruise, x, v, a, j, radarless_model, sm['frogpilotPlan'].tFollow,
@@ -329,5 +334,3 @@ class LongitudinalPlanner:
     longitudinalPlan.allowThrottle = self.allow_throttle
 
     pm.send('longitudinalPlan', plan_send)
-
-
