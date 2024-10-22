@@ -51,11 +51,11 @@ class VTSCKalmanFilter:
 
     # Update step
     S = np.dot(np.dot(self.C, self.P), np.transpose(self.C)) + R_adjusted
-    K = np.dot(np.dot(self.P, np.transpose(self.C)), 1/S)
+    K = np.dot(self.P, np.transpose(self.C).reshape(-1, 1)) / S
 
     y = measured_speed - np.dot(self.C, self.x)
-    self.x = self.x + np.dot(K, y)
-    self.P = self.P - np.dot(np.dot(K, self.C), self.P)
+    self.x = self.x + K * y
+    self.P = self.P - np.dot(np.dot(K, self.C.reshape(1, -1)), self.P)
 
     return float(self.x[0])
 
