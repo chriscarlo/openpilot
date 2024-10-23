@@ -109,22 +109,10 @@ class FrogPilotFollowing:
       self.stopped_equivalence_factor = 0
 
   def update_follow_values(self, lead_distance, stopping_distance, v_ego, v_lead, frogpilot_toggles):
-    # Offset by FrogAi for FrogPilot for a more natural approach to a faster lead
+    # Disabled FrogAI modifications while testing core following behavior
     if frogpilot_toggles.human_following and v_lead > v_ego:
-      distance_factor = max(lead_distance - (v_ego * self.t_follow), 1)
-      standstill_offset = max(stopping_distance - v_ego, 0) * max(v_lead - v_ego, 1)
-      acceleration_offset = clip((v_lead - v_ego) + standstill_offset - COMFORT_BRAKE, 1, distance_factor)
-      self.acceleration_jerk /= acceleration_offset
-      self.speed_jerk /= acceleration_offset
-      self.t_follow /= acceleration_offset
+      pass  # Removed faster lead logic
 
-    # Offset by FrogAi for FrogPilot for a more natural approach to a slower lead
     if (frogpilot_toggles.conditional_slower_lead or frogpilot_toggles.human_following) and v_lead < v_ego:
-      distance_factor = max(lead_distance - (v_lead * self.t_follow), 1)
-      far_lead_offset = max(lead_distance - (v_ego * self.t_follow) - stopping_distance + (v_lead - CITY_SPEED_LIMIT), 0)
-      braking_offset = clip((v_ego - v_lead) + far_lead_offset - COMFORT_BRAKE, 1, distance_factor)
-      if frogpilot_toggles.human_following:
-        self.acceleration_jerk *= braking_offset
-        self.speed_jerk *= braking_offset
-        self.t_follow /= braking_offset
-      self.slower_lead = braking_offset - far_lead_offset > 1
+      pass  # Removed slower lead logic
+      self.slower_lead = False  # Maintain expected state variable

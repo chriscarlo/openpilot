@@ -114,10 +114,10 @@ def get_stopped_equivalence_factor(v_lead, a_lead):
 def get_safe_obstacle_distance(v_ego, t_follow):
   return (v_ego**2) / (2 * COMFORT_BRAKE) + t_follow * v_ego + STOP_DISTANCE
 
-def desired_follow_distance(v_ego, v_lead, t_follow=None):
+def desired_follow_distance(v_ego, v_lead, a_lead=0.0, t_follow=None):
   if t_follow is None:
     t_follow = get_T_FOLLOW()
-  return get_safe_obstacle_distance(v_ego, t_follow) - get_stopped_equivalence_factor(v_lead)
+  return get_safe_obstacle_distance(v_ego, t_follow) - get_stopped_equivalence_factor(v_lead, a_lead)
 
 
 def gen_long_model():
@@ -255,6 +255,10 @@ class LongitudinalMpc:
     self.mode = mode
     self.dt = dt
     self.solver = AcadosOcpSolverCython(MODEL_NAME, ACADOS_SOLVER_TYPE, N)
+    # Add missing initializations
+    self.personality = log.LongitudinalPersonality.standard
+    self.radarless_model = False
+    self.frogpilot_toggles = None
     self.reset()
     self.source = SOURCES[2]
 
@@ -304,18 +308,25 @@ class LongitudinalMpc:
       self.solver.cost_set(i, 'Zl', Zl)
 
   def set_weights(self, acceleration_jerk=1.0, danger_jerk=1.0, speed_jerk=1.0, prev_accel_constraint=True, personality=log.LongitudinalPersonality.standard):
+    # Store personality
+    self.personality = personality
+
     if self.mode == 'acc':
+      # Adjust weights based on personality
+      base_obstacle_cost = X_EGO_OBSTACLE_COST * (1.2 if personality == log.LongitudinalPersonality.aggressive else 1.5)
+      base_accel_cost = A_EGO_COST * (0.4 if personality == log.LongitudinalPersonality.aggressive else 0.5)
+
       a_change_cost = acceleration_jerk if prev_accel_constraint else 0
       cost_weights = [
-          X_EGO_OBSTACLE_COST * 1.5,  # Increase obstacle cost
-          X_EGO_COST,
-          V_EGO_COST,
-          A_EGO_COST * 0.5,  # Reduce accel penalty
-          a_change_cost * 0.5,  # Reduce accel change penalty
-          speed_jerk * 0.5  # Reduce jerk penalty
+        base_obstacle_cost,
+        X_EGO_COST,
+        V_EGO_COST,
+        base_accel_cost,
+        a_change_cost * 0.5,
+        speed_jerk * 0.5
       ]
-      # Increase weight on safety constraint
       constraint_cost_weights = [LIMIT_COST, LIMIT_COST, LIMIT_COST, danger_jerk * 2.0]
+
     elif self.mode == 'blended':
       a_change_cost = 40.0 if prev_accel_constraint else 0
       cost_weights = [0., 0.1, 0.2, 5.0, a_change_cost, 1.0]
@@ -393,8 +404,26 @@ class LongitudinalMpc:
     self.max_a = max_a
 
   def update(self, lead_one, lead_two, v_cruise, x, v, a, j, radarless_model, t_follow, trafficModeActive, frogpilot_toggles, personality=log.LongitudinalPersonality.standard):
+    # Store these values
+    self.radarless_model = radarless_model
+    self.frogpilot_toggles = frogpilot_toggles
+    self.personality = personality
+
     v_ego = self.x0[1]
     self.status = lead_one.status or lead_two.status
+
+    # Use personality in dynamic calculations
+    jerk_factor_accel, jerk_factor_danger, jerk_factor_speed = get_jerk_factor(personality=self.personality)
+    self.set_weights(
+      acceleration_jerk=jerk_factor_accel,
+      danger_jerk=jerk_factor_danger,
+      speed_jerk=jerk_factor_speed,
+      personality=self.personality
+    )
+
+    # Use personality for following distance
+    t_follow = get_T_FOLLOW(personality=self.personality)
+
     increased_distance = max(frogpilot_toggles.increase_stopped_distance + min(10 - v_ego, 0), 0) if not trafficModeActive else 0
 
     # Process leads with dynamic comfort brake
@@ -405,10 +434,6 @@ class LongitudinalMpc:
     dynamic_comfort_brake = self.get_dynamic_comfort_brake(
         lead_one.aLeadK if lead_one.status else 0.0
     )
-
-    # Update safety distances with dynamic braking capability
-    lead_0_obstacle = lead_xv_0[:,0] + (lead_xv_0[:,1]**2) / (2 * dynamic_comfort_brake)
-    lead_1_obstacle = lead_xv_1[:,0] + (lead_xv_1[:,1]**2) / (2 * dynamic_comfort_brake)
 
     # Adjust solver tolerance based on lead deceleration instead of iterations
     if abs(lead_one.aLeadK) > 2.25:
@@ -539,4 +564,7 @@ if __name__ == "__main__":
   ocp = gen_long_ocp()
   AcadosOcpSolver.generate(ocp, json_file=JSON_FILE)
   # AcadosOcpSolver.build(ocp.code_export_directory, with_cython=True)
+
+
+
 

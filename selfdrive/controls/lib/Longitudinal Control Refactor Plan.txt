@@ -1,0 +1,120 @@
+Longitudinal Control Refactor Plan
+1. Core Principles
+Move curvature handling to longitudinal_planner.py
+Use existing MPC framework instead of parallel control paths
+Integrate with existing weight adjustments
+Maintain proper jerk limits through MPC
+Keep VTSC's good ideas but implement them more cleanly
+2. File Changes
+
+longitudinal_planner.py
+1. Add new methods:
+def calculate_curve_response(self, model_position, frogpilot_toggles):
+    """
+    Calculates curve response using model position data
+    Returns: curve_urgency (0-1), safe_speed
+    Components:
+    - Curvature calculation
+    - Speed adjustment
+    - Weight modification factors
+    """
+
+def update_curvature(self, x_points, y_points):
+    """
+    Enhanced version of current VTSC curvature calculation
+    Includes:
+    - Better handling of straight sections
+    - Confidence metrics
+    - Noise filtering
+    """
+
+def calculate_deceleration_profile(self, current_speed, target_speed, distance):
+    """
+    Calculates optimal deceleration profile
+    Returns: decel_rate, completion_time
+    """
+2. Modify update() method:
+def update(self):
+    # Add curve handling section
+    # Integrate with MPC weights
+    # Maintain existing lead vehicle logic
+
+3. Add new state variables to init:
+def __init__(self):
+    # Add curve tracking variables
+    self.prev_curvature = 0.0
+    self.curvature_rate = 0.0
+    self.curve_confidence = 1.0
+
+frogpilot_vcruise.py
+Remove duplicate curvature calculations
+Maintain toggle handling
+Convert to interface layer that:
+Passes toggle states
+Handles UI feedback
+Manages mode transitions
+Keep speed limit and map data handling
+long_mpc.py
+Add curve-aware cost functions
+Enhance weight handling for combined lead/curve scenarios
+Add curve confidence to solver constraints
+3. Data Flow
+Model data → longitudinal_planner.py
+Planner calculates:
+Curvature
+Safe speeds
+Deceleration profiles
+MPC receives:
+Modified weights
+Speed targets
+Confidence metrics
+FrogPilot layer handles:
+User preferences
+Mode selection
+Speed limit integration
+4. Key Algorithms to Preserve
+Curve detection:
+Progressive response
+Early detection
+Confidence metrics
+Speed management:
+Smooth deceleration
+Apex handling
+Exit acceleration
+Safety features:
+Multiple redundant checks
+Conservative limits
+Confidence thresholds
+5. Implementation Order
+Add new planner methods
+Modify MPC integration
+Update FrogPilot interface
+Remove duplicate code
+Test and validate
+6. Critical Variables to Track
+# Curvature
+self.prev_curvature
+self.curvature_rate
+self.curve_confidence
+
+# Speed Management
+self.decel_profile
+self.target_speed
+self.completion_time
+
+# MPC Integration
+self.curve_weights
+self.combined_urgency
+self.safe_speed
+
+7. Toggle Integration
+Maintain all existing toggles
+Add new curve confidence toggle
+Keep speed limit integration
+Preserve manual override capability
+8. Safety Checks
+Minimum speed thresholds
+Maximum lateral acceleration limits
+Confidence requirements
+Override preservation
+Smooth transitions

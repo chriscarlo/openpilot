@@ -17,183 +17,27 @@ LaneChangeState = log.LaneChangeState
 
 TARGET_LAT_A = 2.0
 
-class VTSCKalmanFilter:
-  def __init__(self, dt=0.1):
-    self.dt = dt
-
-    # State: [target_speed, speed_rate_of_change]
-    self.A = np.array([[1.0, dt],    # State transition matrix
-                      [0.0, 1.0]])
-
-    self.C = np.array([1.0, 0.0])    # Measurement matrix
-
-    # Initial state uncertainty
-    self.P = np.array([[10.0, 0.0],  # Higher initial uncertainty
-                      [0.0, 10.0]])
-
-    # Process noise (tune these)
-    self.Q = np.array([[0.1, 0.0],   # Speed process noise
-                      [0.0, 0.5]])   # Acceleration process noise
-
-    # Measurement noise (tune this)
-    self.R = 5.0                     # Higher value = more smoothing
-
-    self.x = np.array([[0.0],        # Initial speed
-                      [0.0]])        # Initial rate of change
-
-  def update(self, measured_speed, curve_confidence):
-    # Adjust measurement noise based on curve confidence
-    R_adjusted = self.R / max(curve_confidence, 0.1)
-
-    # Predict step
-    self.x = np.dot(self.A, self.x)
-    self.P = np.dot(np.dot(self.A, self.P), np.transpose(self.A)) + self.Q
-
-    # Update step
-    S = np.dot(np.dot(self.C, self.P), np.transpose(self.C)) + R_adjusted
-    K = np.dot(self.P, np.transpose(self.C).reshape(-1, 1)) / S
-
-    y = measured_speed - np.dot(self.C, self.x)
-    self.x = self.x + K * y
-    self.P = self.P - np.dot(np.dot(K, self.C.reshape(1, -1)), self.P)
-
-    return float(self.x[0])
-
 class FrogPilotVCruise:
   def __init__(self, FrogPilotPlanner):
     self.frogpilot_planner = FrogPilotPlanner
-
-    self.adjusted_target_lat_a = TARGET_LAT_A
-
     self.params_memory = self.frogpilot_planner.params_memory
 
     self.mtsc = MapTurnSpeedController()
     self.slc = SpeedLimitController()
 
-    self.sm = messaging.SubMaster(['modelV2'])
-    self.lane_change_state = LaneChangeState.off
-    self.base_curvature = 0.0
-    self.lc_curvature_offset = 0.0
-    self.curvature_rate = 0.0
-    self.last_curvature = 0.0
-    self.curvature_confidence = 1.0
-
+    # Simplified state variables
     self.forcing_stop = False
     self.override_force_stop = False
     self.override_slc = False
     self.speed_limit_changed = False
 
-    self.model_length = 0
-    self.mtsc_target = 0
     self.overridden_speed = 0
     self.previous_speed_limit = 0
     self.slc_target = 0
     self.speed_limit_timer = 0
     self.tracked_model_length = 0
-    self.vtsc_target = 0
 
-    # Initialize variables for VTSC rate limiting and apex detection
-    self.initial_v_cruise = V_CRUISE_UNSET  # Stores the original cruise speed before curve
-    self.vtsc_rate_limited_target = 0.0     # Rate-limited target speed
-    self.vtsc_max_accel = 0.5               # Maximum acceleration in m/s^2 (adjust as needed)
-    self.curvature_derivative = 0.0         # Derivative of curvature
-    self.prev_estimated_base_curvature = 0.0
-    self.apex_reached = False               # Flag to indicate if apex has been reached
-    self.apex_speed = 0.0                   # Speed at the apex
-    self.time_since_apex = 0.0
-    self.deceleration_distance = float('inf')  # Initialize with infinity
-    self.deceleration_total_time = 0.0
-    self.deceleration_initial_speed = 0.0
-
-    # Initialize variables for deceleration easing
-    self.deceleration_started = False       # Flag indicating if deceleration has started
-    self.time_since_deceleration = 0.0      # Timer for deceleration easing
-
-    self.kf = VTSCKalmanFilter()
-    self.curve_confidence = 1.0
-
-  def estimate_base_curvature(self, current_curvature, dt):
-    self.curvature_rate = (current_curvature - self.last_curvature) / dt
-    self.last_curvature = current_curvature
-
-    alpha = 0.2
-    self.base_curvature = alpha * current_curvature + (1 - alpha) * self.base_curvature
-
-    self.curvature_derivative = (self.base_curvature - self.prev_estimated_base_curvature) / dt
-    self.prev_estimated_base_curvature = self.base_curvature
-
-    return max(self.base_curvature, 0.0001)
-
-  def update_curvature(self, x, y):
-    # Ensure there are enough data points
-    if len(x) < 4 or len(y) < 4:
-      return None
-
-    # Compute curvature along the path
-    dx = np.diff(x)
-    dy = np.diff(y)
-    d2x = np.diff(dx)
-    d2y = np.diff(dy)
-
-    # Calculate numerator and denominator separately
-    numerator = np.abs(d2x * dy[1:] - dx[1:] * d2y)
-    denom = (dx[1:]**2 + dy[1:]**2)**1.5
-
-    # Handle nearly straight paths
-    straight_threshold = 1e-6
-    is_straight = denom < straight_threshold
-
-    # Set curvature to 0 for straight segments, calculate normally for curves
-    curvature = np.zeros_like(denom)
-    curve_mask = ~is_straight
-    curvature[curve_mask] = numerator[curve_mask] / denom[curve_mask]
-
-    # Pad to match original length and clean up any remaining invalid values
-    curvature = np.insert(curvature, 0, curvature[0])
-    curvature = np.nan_to_num(curvature, nan=0.0, posinf=0.0, neginf=0.0)
-
-    return curvature
-
-  def calculate_deceleration_rate(self, curvature):
-    base_deceleration = -0.25
-    curvature_factor = min(abs(curvature) * 1000, 1)  # Normalize curvature influence
-    return base_deceleration * (1 + curvature_factor)
-
-  def find_critical_curve(self, curvatures, distances, v_ego, frogpilot_toggles):
-    critical_curve_index = 0
-    min_safe_speed = float('inf')
-    self.adjusted_target_lat_a = TARGET_LAT_A * frogpilot_toggles.turn_aggressiveness
-
-    for i, (curve, dist) in enumerate(zip(curvatures, distances)):
-      lookahead_time = 6.0  #seconds
-      max_lookahead_distance = v_ego * lookahead_time
-
-      if dist > max_lookahead_distance:
-        break
-
-      safe_speed = np.sqrt(self.adjusted_target_lat_a / max(curve, 0.0001))
-      if safe_speed < min_safe_speed:
-        min_safe_speed = safe_speed
-        critical_curve_index = i
-
-    return critical_curve_index, min_safe_speed
-
-  def smooth_target_speed(self, current_target, new_target, smoothing_factor=0.1):
-    return current_target + smoothing_factor * (new_target - current_target)
-
-  def exponential_decay_ease(self, current_speed, target_speed, time_elapsed, rate_constant):
-    speed_diff = current_speed - target_speed
-    eased_speed = target_speed + speed_diff * np.exp(-rate_constant * time_elapsed)
-    return eased_speed
-
-  def sigmoid_ease(self, current_speed, target_speed, time_elapsed, total_time):
-    speed_diff = current_speed - target_speed
-    midpoint = total_time / 2.0
-    k = 10.0 / total_time  # Adjust k for desired smoothness
-    eased_speed = target_speed + speed_diff / (1 + np.exp(k * (time_elapsed - midpoint)))
-    return eased_speed
-
-  def update(self, carState, controlsState, frogpilotCarControl, frogpilotCarState, frogpilotNavigation, modelData, v_cruise, v_ego, frogpilot_toggles):
+  def update(self, carState, controlsState, frogpilotCarControl, frogpilotCarState, frogpilotNavigation, v_cruise, v_ego, frogpilot_toggles):
     self.override_force_stop |= carState.gasPressed
     self.override_force_stop |= frogpilot_toggles.force_stops and carState.standstill and self.frogpilot_planner.tracking_lead
     self.override_force_stop |= frogpilotCarControl.resumePressed
@@ -206,12 +50,13 @@ class FrogPilotVCruise:
     v_ego_cluster = max(carState.vEgoCluster, v_ego)
     v_ego_diff = v_ego_cluster - v_ego
 
-    # Pfeiferj's Map Turn Speed Controller
+    # MTSC handling
     if frogpilot_toggles.map_turn_speed_controller and v_ego > CRUISING_SPEED and controlsState.enabled:
       mtsc_active = self.mtsc_target < v_cruise
       self.mtsc_target = clip(self.mtsc.target_speed(v_ego, carState.aEgo, frogpilot_toggles), CRUISING_SPEED, v_cruise)
 
-      curve_detected = (1 / road_curvature)**0.5 < v_ego
+      # Use planner's curve detection
+      curve_detected = self.frogpilot_planner.is_curve_detected(v_ego)
       if curve_detected and mtsc_active:
         self.mtsc_target = self.frogpilot_planner.v_cruise
       elif not curve_detected and frogpilot_toggles.mtsc_curvature_check:
@@ -278,176 +123,14 @@ class FrogPilotVCruise:
     else:
       self.slc_target = 0
 
-    # VTSC
-    self.sm.update()
-    prev_lane_change_state = self.lane_change_state
-    self.lane_change_state = self.sm['modelV2'].meta.laneChangeState
-
-    dt = 0.1  # Time step
-    current_curvature = self.frogpilot_planner.road_curvature
-    estimated_base_curvature = self.estimate_base_curvature(current_curvature, dt)
-
+    # Get VTSC target directly from planner
     if frogpilot_toggles.vision_turn_controller and v_ego > CRUISING_SPEED and controlsState.enabled:
-      # Get future positions from the model
-      positions = self.sm['modelV2'].position
-      x = np.array(positions.x)
-      y = np.array(positions.y)
-
-      # Dynamically update curvature
-      curvature = self.update_curvature(x, y)
-
-      # Check if curvature data is valid
-      if curvature is not None:
-        # Calculate cumulative distances
-        dx = np.diff(x)
-        dy = np.diff(y)
-        distances = np.sqrt(dx**2 + dy**2)
-        cumulative_distances = np.cumsum(distances)
-        cumulative_distances = np.insert(cumulative_distances, 0, 0)  # Add 0 at the beginning for the current position
-
-        # Detect upcoming curves
-        curvature_threshold = 0.0001  # Adjust as needed
-        curve_indices = np.where(abs(curvature) > curvature_threshold)[0]
-
-        if len(curve_indices) > 0:
-          critical_index, desired_vtsc_target = self.find_critical_curve(
-            curvature[curve_indices], cumulative_distances[curve_indices], v_ego, frogpilot_toggles)
-          curve_start_index = curve_indices[critical_index]
-          distance_to_curve = cumulative_distances[curve_start_index]
-
-          # Adjusted curvature based on user settings
-          adjusted_base_curvature = curvature[curve_start_index] * frogpilot_toggles.curve_sensitivity
-          self.adjusted_target_lat_a = TARGET_LAT_A * frogpilot_toggles.turn_aggressiveness
-
-          # Calculate desired speed for the curve
-          raw_vtsc_target = np.sqrt(self.adjusted_target_lat_a / max(adjusted_base_curvature, 0.0001))
-
-          # Calculate curve confidence and apply Kalman filter
-          distance_factor = np.clip(1.0 - (distance_to_curve / self.deceleration_distance), 0.1, 1.0)
-          curvature_factor = np.clip(abs(adjusted_base_curvature) * 1000, 0.1, 1.0)
-          self.curve_confidence = distance_factor * curvature_factor
-
-          # Use Kalman filter to smooth the target speed
-          filtered_target = self.kf.update(raw_vtsc_target, self.curve_confidence)
-          desired_vtsc_target = clip(filtered_target, CRUISING_SPEED, v_cruise)
-
-          v_initial = v_ego
-          v_final = desired_vtsc_target
-          speed_diff = v_initial - v_final
-
-          # Determine if we're approaching the apex or exiting the curve
-          curvature_derivative = np.gradient(curvature)
-          apex_index = np.argmin(curvature_derivative[curve_indices])
-
-          # Calculate distance to apex
-          apex_distance = cumulative_distances[curve_indices[apex_index]]
-
-          # === Modified Section Start ===
-          # Increase the deceleration_total_time by 1 second for earlier and gentler deceleration
-          base_deceleration_total_time = max(5.0, min(15.0, abs(speed_diff) / 0.1)) + 1.0  # Added 1.0 second
-          # === Modified Section End ===
-
-          # Calculate adjusted deceleration_total_time to hit target speed 1 second before critical curve
-          adjusted_deceleration_total_time = base_deceleration_total_time
-          # Compensate for adjusted decel time
-          additional_distance = v_ego * 1.0  # distance = speed * time
-          # Update deceleration_distance to include the additional distance
-          self.deceleration_distance = (v_initial + v_final) / 2.0 * adjusted_deceleration_total_time + additional_distance
-
-          if distance_to_curve <= self.deceleration_distance and not self.apex_reached:
-            if not self.deceleration_started:
-              self.time_since_deceleration = 0.0  # Reset timer
-              self.deceleration_total_time = adjusted_deceleration_total_time
-              self.deceleration_initial_speed = v_ego
-              # self.deceleration_distance already includes additional_distance
-            self.deceleration_started = True
-            self.time_since_deceleration += dt
-
-            # Apply sigmoid easing function for deceleration
-            self.vtsc_rate_limited_target = self.sigmoid_ease(
-              current_speed=self.deceleration_initial_speed,
-              target_speed=desired_vtsc_target,
-              time_elapsed=self.time_since_deceleration,
-              total_time=self.deceleration_total_time
-            )
-            # Ensure target speed does not fall below desired speed
-            self.vtsc_rate_limited_target = max(self.vtsc_rate_limited_target, desired_vtsc_target)
-
-            # Check if we've reached the apex
-            if distance_to_curve <= apex_distance:
-              self.apex_reached = True
-              self.apex_speed = v_ego
-              self.time_since_apex = 0.0
-          elif self.apex_reached:
-            # Acceleration phase after the apex
-            self.time_since_apex += dt
-            acceleration_time = 2.0  # Time to accelerate back to cruise speed
-
-            # Apply sigmoid easing for acceleration
-            self.vtsc_rate_limited_target = self.sigmoid_ease(
-              current_speed=self.apex_speed,
-              target_speed=v_cruise,
-              time_elapsed=self.time_since_apex,
-              total_time=acceleration_time
-            )
-            self.vtsc_rate_limited_target = min(self.vtsc_rate_limited_target, v_cruise)
-
-            # Reset deceleration variables if we have reached cruise speed
-            if self.vtsc_rate_limited_target >= v_cruise:
-              self.apex_reached = False
-              self.deceleration_started = False
-              self.time_since_deceleration = 0.0
-              self.deceleration_distance = float('inf')  # Reset deceleration distance
-          else:
-            # Maintain current speed until it's time to decelerate
-            self.vtsc_rate_limited_target = v_cruise
-            self.deceleration_started = False
-            self.apex_reached = False
-            self.time_since_deceleration = 0.0
-            self.time_since_apex = 0.0
-            self.deceleration_distance = float('inf')  # Reset deceleration distance
-
-          # Update the target speed
-          self.vtsc_target = self.vtsc_rate_limited_target
-        else:
-          # No curve ahead detected
-          self.vtsc_target = v_cruise
-          self.vtsc_rate_limited_target = self.vtsc_target
-          self.deceleration_started = False
-          self.apex_reached = False
-          self.time_since_deceleration = 0.0
-          self.time_since_apex = 0.0
-          self.deceleration_distance = float('inf')  # Reset deceleration distance
-      else:
-        # VTSC not active or conditions not met
-        self.vtsc_target = v_cruise if v_cruise != V_CRUISE_UNSET else float('inf')
-        self.vtsc_rate_limited_target = self.vtsc_target
-        self.deceleration_started = False
-        self.apex_reached = False
-        self.time_since_deceleration = 0.0
-        self.time_since_apex = 0.0
-        self.deceleration_distance = float('inf')  # Reset deceleration distance
-
-    if frogpilot_toggles.force_standstill and carState.standstill and not self.override_force_stop and controlsState.enabled:
-      self.forcing_stop = True
-      v_cruise = -1
-
-    elif frogpilot_toggles.force_stops and self.frogpilot_planner.cem.stop_light_detected and not self.override_force_stop and controlsState.enabled:
-      if self.tracked_model_length == 0:
-        self.tracked_model_length = self.model_length
-
-      self.forcing_stop = True
-      self.tracked_model_length -= v_ego * DT_MDL
-      v_cruise = min((self.tracked_model_length / PLANNER_TIME) - 1, v_cruise)
-
+      vtsc_target = self.frogpilot_planner.get_curve_adjusted_speed(v_ego, v_cruise, frogpilot_toggles)
     else:
-      if not self.frogpilot_planner.cem.stop_light_detected:
-        self.override_force_stop = False
+      vtsc_target = v_cruise if v_cruise != V_CRUISE_UNSET else float('inf')
 
-      self.forcing_stop = False
-      self.tracked_model_length = 0
-
-      targets = [self.mtsc_target, max(self.overridden_speed, self.slc_target) - v_ego_diff, self.vtsc_target]
-      v_cruise = float(min([target if target > CRUISING_SPEED else v_cruise for target in targets]))
+    # Combine all targets
+    targets = [self.mtsc_target, max(self.overridden_speed, self.slc_target) - v_ego_diff, vtsc_target]
+    v_cruise = float(min([target if target > CRUISING_SPEED else v_cruise for target in targets]))
 
     return v_cruise
