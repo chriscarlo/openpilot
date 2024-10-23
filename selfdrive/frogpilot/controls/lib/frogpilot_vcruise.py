@@ -128,7 +128,14 @@ class FrogPilotVCruise:
 
     # Get VTSC target directly from planner
     if frogpilot_toggles.vision_turn_controller and v_ego > CRUISING_SPEED and controlsState.enabled:
-      vtsc_target = self.frogpilot_planner.get_curve_adjusted_speed(v_ego, v_cruise, frogpilot_toggles)
+      # Use longitudinal planner's curve handling
+      sm = messaging.SubMaster(['longitudinalPlan'])
+      sm.update()
+      if sm.valid['longitudinalPlan']:
+        # Use the first speed from the trajectory as the target speed
+        vtsc_target = sm['longitudinalPlan'].speeds[0] if len(sm['longitudinalPlan'].speeds) > 0 else v_cruise
+      else:
+        vtsc_target = v_cruise
     else:
       vtsc_target = v_cruise if v_cruise != V_CRUISE_UNSET else float('inf')
 
