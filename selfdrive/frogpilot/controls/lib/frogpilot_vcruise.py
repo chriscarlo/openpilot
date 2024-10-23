@@ -32,13 +32,15 @@ class FrogPilotVCruise:
     self.speed_limit_changed = False
 
     # Initialize missing attributes
-    self.mtsc_target = 0  # Add this line
+    self.mtsc_target = 0
     self.vtsc_target = 0
     self.overridden_speed = 0
     self.previous_speed_limit = 0
     self.slc_target = 0
     self.speed_limit_timer = 0
     self.tracked_model_length = 0
+    self.force_stop_timer = 0
+    self.override_force_stop_timer = 0
 
     self.sm = messaging.SubMaster(['longitudinalPlan'])
 
