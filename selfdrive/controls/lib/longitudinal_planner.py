@@ -495,32 +495,39 @@ class LongitudinalPlanner:
       self.lead_two = sm['radarState'].leadTwo
 
     if self.lead_one.status:
-        urgency, optimal_jerk = self.calculate_dynamic_response(self.lead_one)
-        v_rel = self.lead_one.vLead - self.x0[1]
+        # Only calculate dynamic response for radarless mode where lead_one is our custom Lead class
+        if radarless_model:
+            urgency, optimal_jerk = self.calculate_dynamic_response(self.lead_one)
+            v_rel = self.lead_one.vLead - self.x0[1]
 
-        # Dynamic weight adjustment
-        acceleration_jerk = 1.0 / (1 + urgency**2)
-        danger_jerk = 1.0 + urgency * 2.0
-        speed_jerk = np.clip(1.0 - urgency, 0.5, 1.0)
+            # Dynamic weight adjustment
+            acceleration_jerk = 1.0 / (1 + urgency**2)
+            danger_jerk = 1.0 + urgency * 2.0
+            speed_jerk = np.clip(1.0 - urgency, 0.5, 1.0)
 
-        # Update MPC weights
-        self.mpc.set_weights(
-            acceleration_jerk=acceleration_jerk,
-            danger_jerk=danger_jerk,
-            speed_jerk=speed_jerk,
-            personality=sm['controlsState'].personality
-        )
+            # Update MPC weights
+            self.mpc.set_weights(
+                acceleration_jerk=acceleration_jerk,
+                danger_jerk=danger_jerk,
+                speed_jerk=speed_jerk,
+                personality=sm['controlsState'].personality
+            )
 
-        # Update lead tau with hysteresis
-        target_tau = LEAD_ACCEL_TAU * (1 - 0.8 * urgency)
-        if target_tau < self.lead_one.aLeadTau:
-            self.lead_one.aLeadTau = target_tau
+            # Update lead tau with hysteresis - only in radarless mode
+            target_tau = LEAD_ACCEL_TAU * (1 - 0.8 * urgency)
+            if target_tau < self.lead_one.aLeadTau:
+                self.lead_one.aLeadTau = target_tau
+            else:
+                self.lead_one.aLeadTau += (target_tau - self.lead_one.aLeadTau) * 0.2
+
+            # Store states for next iteration
+            self.prev_dRel = self.lead_one.dRel
+            self.prev_v_rel = v_rel
         else:
-            self.lead_one.aLeadTau += (target_tau - self.lead_one.aLeadTau) * 0.2
-
-        # Store states for next iteration
-        self.prev_dRel = self.lead_one.dRel
-        self.prev_v_rel = v_rel
+            # For radar-based system, use simpler logic
+            v_rel = self.lead_one.vRel
+            self.prev_dRel = self.lead_one.dRel
+            self.prev_v_rel = v_rel
 
     # Add curve handling section
     if len(sm['modelV2'].position.x) > 0:
