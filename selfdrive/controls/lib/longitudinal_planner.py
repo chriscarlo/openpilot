@@ -313,37 +313,100 @@ class LongitudinalPlanner:
     Returns:
         float: The calculated safe speed in m/s.
     """
-    # Define speed constants (~67 mph max, ~11 mph min)
-    MAX_SAFE_SPEED = 30.0  # m/s
-    MIN_SAFE_SPEED = 5.0   # m/s
-    SAFETY_MARGIN = 2.0    # m/s
+    # Define speed constants (~120 mph max, ~11 mph min)
+    MAX_SAFE_SPEED = 54.0  # m/s (~120 mph)
+    MIN_SAFE_SPEED = 5.0   # m/s (~11 mph)
+
+    # Make safety margin proportional to curve urgency
+    # Reduced base safety margin to allow higher speeds on straights
+    SAFETY_MARGIN = 1.5 * curve_urgency  # More margin in curves, less on straights
 
     # Calculate safe speed inversely proportional to curve urgency
     safe_speed = MAX_SAFE_SPEED - (curve_urgency * (MAX_SAFE_SPEED - MIN_SAFE_SPEED))
     safe_speed = np.clip(safe_speed, MIN_SAFE_SPEED, MAX_SAFE_SPEED)
 
-    # Apply safety margin
+    # Apply dynamic safety margin
     return max(safe_speed - SAFETY_MARGIN, MIN_SAFE_SPEED)
 
   def calculate_curve_response(self, model_position, frogpilot_toggles):
     """
-    Calculate curve urgency and safe speed based on model position.
+    Calculate curve response with professional driver-like behavior.
     """
-    curve_urgency = 0.0
-
-    # Calculate curve response based on model position
     x_points = model_position.x
     y_points = model_position.y
 
-    # Calculate curvature and determine curve urgency
-    for i in range(len(x_points) - 1):
-      curve_factor = abs(y_points[i] / max(x_points[i], 1.0))
-      curve_urgency = max(curve_urgency, curve_factor)
+    # Constants for professional driving behavior
+    COMFORT_DECEL = 0.6  # Target deceleration rate (m/s²)
+    MIN_CURVE_SPEED = 5.0  # Minimum speed in curves (m/s)
+    PLANNING_HORIZON = 50.0  # How far ahead to look (m)
+    ENTRY_MARGIN = 10.0  # Distance before curve for settling (m)
 
-    # Get safe speed based on curve urgency
-    safe_speed = self.get_safe_speed(curve_urgency)
+    max_curvature = 0.0
+    distance_to_curve = float('inf')
+    curve_entry_point = 0.0
 
-    return curve_urgency, safe_speed
+    # First pass: Identify significant curves and their entry points
+    for i in range(len(x_points) - 2):
+        if x_points[i] > PLANNING_HORIZON:
+            break
+
+        # Calculate local curvature using three points
+        if i < len(x_points) - 2:
+            dx1 = x_points[i+1] - x_points[i]
+            dx2 = x_points[i+2] - x_points[i+1]
+            dy1 = y_points[i+1] - y_points[i]
+            dy2 = y_points[i+2] - y_points[i+1]
+
+            if abs(dx1) > 0.1 and abs(dx2) > 0.1:
+                k1 = dy1 / dx1
+                k2 = dy2 / dx2
+                local_curvature = abs(k2 - k1) / ((dx1 + dx2) / 2.0)
+
+                # If this is the sharpest curve we've seen and it's significant
+                if local_curvature > max_curvature and local_curvature > 0.05:
+                    max_curvature = local_curvature
+                    distance_to_curve = x_points[i] - ENTRY_MARGIN
+                    curve_entry_point = x_points[i]
+
+    if max_curvature == 0.0:
+        return 0.0, float('inf')  # No significant curves found
+
+    # Calculate required speed for curve
+    safe_curve_speed = self.get_safe_speed(max_curvature)
+
+    # Current speed from vehicle state
+    v_current = self.x0[1]
+
+    if v_current <= safe_curve_speed:
+        return 0.0, float('inf')  # No deceleration needed
+
+    # Calculate deceleration profile
+    # Use s = ut + (1/2)at² to determine when to start braking
+    # Rearranged to solve for required distance
+    speed_delta = v_current - safe_curve_speed
+
+    # Required distance to achieve speed reduction with comfort decel
+    required_distance = (v_current * v_current - safe_curve_speed * safe_curve_speed) / (2 * COMFORT_DECEL)
+
+    # Calculate urgency based on available vs required distance
+    distance_ratio = distance_to_curve / max(required_distance, 0.1)
+
+    # Progressive urgency that ramps up if we're getting close to required braking distance
+    if distance_ratio > 1.5:  # We have plenty of distance
+        curve_urgency = 0.0
+    elif distance_ratio < 0.8:  # We're behind schedule
+        curve_urgency = min((0.8 - distance_ratio) * 2.0, 1.0)
+    else:  # We're in the sweet spot for initiating deceleration
+        curve_urgency = math.pow((1.5 - distance_ratio) / 0.7, 2.0)
+
+    # Calculate target speed based on urgency and curve speed
+    target_speed = safe_curve_speed + (v_current - safe_curve_speed) * (1 - curve_urgency)
+
+    # Add hysteresis to prevent oscillation
+    if abs(v_current - target_speed) < 1.0:  # 1 m/s deadband
+        target_speed = v_current
+
+    return curve_urgency, target_speed
 
   def update_curvature(self, x_points, y_points):
     """
@@ -404,15 +467,24 @@ class LongitudinalPlanner:
 
   def calculate_deceleration_profile(self, current_speed, target_speed, distance):
     """
-    Calculates optimal deceleration profile
+    Calculate smooth deceleration profile
     """
-    # Simple constant deceleration profile
-    if distance > 0:
-        decel_rate = (current_speed**2 - target_speed**2) / (2.0 * distance)
-        completion_time = 2.0 * distance / (current_speed + target_speed)
-    else:
-        decel_rate = 0.0
-        completion_time = 0.0
+    if distance <= 0 or current_speed <= target_speed:
+        return 0.0, 0.0
+
+    # Constants for smooth profile
+    COMFORT_JERK = 0.3  # m/s³ - Rate of decel increase
+    MAX_DECEL = 0.7  # m/s² - Upper limit
+    MIN_DECEL = 0.5  # m/s² - Lower limit
+
+    # Calculate required average deceleration
+    avg_decel = (current_speed * current_speed - target_speed * target_speed) / (2.0 * distance)
+
+    # Clamp to comfortable limits
+    decel_rate = np.clip(avg_decel, MIN_DECEL, MAX_DECEL)
+
+    # Calculate time to complete maneuver
+    completion_time = 2.0 * distance / (current_speed + target_speed)
 
     return decel_rate, completion_time
 

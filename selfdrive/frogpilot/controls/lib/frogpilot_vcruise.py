@@ -40,12 +40,24 @@ class FrogPilotVCruise:
     self.speed_limit_timer = 0
     self.tracked_model_length = 0
 
-  def update(self, carState, controlsState, frogpilotCarControl, frogpilotCarState, frogpilotNavigation, modelData, v_cruise, v_ego, frogpilot_toggles):
-    self.override_force_stop |= carState.gasPressed
-    self.override_force_stop |= frogpilot_toggles.force_stops and carState.standstill and self.frogpilot_planner.tracking_lead
-    self.override_force_stop |= frogpilotCarControl.resumePressed
+    self.sm = messaging.SubMaster(['longitudinalPlan'])
 
-    road_curvature = self.frogpilot_planner.road_curvature * frogpilot_toggles.curve_sensitivity
+  def update(self, carState, controlsState, frogpilotCarControl, frogpilotCarState, frogpilotNavigation, modelData, v_cruise, v_ego, frogpilot_toggles):
+    force_stop_enabled = frogpilot_toggles.force_stops and self.frogpilot_planner.cem.stop_light_detected and controlsState.enabled
+    force_stop_enabled &= self.frogpilot_planner.model_length < 100
+    force_stop_enabled &= self.override_force_stop_timer <= 0
+
+    self.force_stop_timer = self.force_stop_timer + DT_MDL if force_stop_enabled else 0
+
+    self.override_force_stop |= not frogpilot_toggles.force_standstill and carState.standstill and self.frogpilot_planner.tracking_lead
+    self.override_force_stop |= carState.gasPressed
+    self.override_force_stop |= frogpilotCarControl.resumePressed
+    self.override_force_stop &= self.force_stop_timer >= 1
+
+    if self.override_force_stop:
+      self.override_force_stop_timer = 10
+    elif self.override_force_stop_timer > 0:
+      self.override_force_stop_timer -= DT_MDL
 
     v_cruise_cluster = max(controlsState.vCruiseCluster, v_cruise) * CV.KPH_TO_MS
     v_cruise_diff = v_cruise_cluster - v_cruise
@@ -53,13 +65,12 @@ class FrogPilotVCruise:
     v_ego_cluster = max(carState.vEgoCluster, v_ego)
     v_ego_diff = v_ego_cluster - v_ego
 
-    # MTSC handling
+    # Pfeiferj's Map Turn Speed Controller
     if frogpilot_toggles.map_turn_speed_controller and v_ego > CRUISING_SPEED and controlsState.enabled:
       mtsc_active = self.mtsc_target < v_cruise
       self.mtsc_target = clip(self.mtsc.target_speed(v_ego, carState.aEgo, frogpilot_toggles), CRUISING_SPEED, v_cruise)
 
-      # Use planner's curve detection
-      curve_detected = self.frogpilot_planner.is_curve_detected(v_ego)
+      curve_detected = (1 / self.frogpilot_planner.road_curvature)**0.5 < v_ego
       if curve_detected and mtsc_active:
         self.mtsc_target = self.frogpilot_planner.v_cruise
       elif not curve_detected and frogpilot_toggles.mtsc_curvature_check:
@@ -128,19 +139,16 @@ class FrogPilotVCruise:
 
     # Get VTSC target directly from planner
     if frogpilot_toggles.vision_turn_controller and v_ego > CRUISING_SPEED and controlsState.enabled:
-      # Use longitudinal planner's curve handling
-      sm = messaging.SubMaster(['longitudinalPlan'])
-      sm.update()
-      if sm.valid['longitudinalPlan']:
-        # Use the first speed from the trajectory as the target speed
-        vtsc_target = sm['longitudinalPlan'].speeds[0] if len(sm['longitudinalPlan'].speeds) > 0 else v_cruise
+      self.sm.update()
+      if self.sm.valid['longitudinalPlan']:
+        self.vtsc_target = self.sm['longitudinalPlan'].speeds[0] if len(self.sm['longitudinalPlan'].speeds) > 0 else v_cruise
       else:
-        vtsc_target = v_cruise
+        self.vtsc_target = v_cruise
     else:
-      vtsc_target = v_cruise if v_cruise != V_CRUISE_UNSET else float('inf')
+      self.vtsc_target = v_cruise if v_cruise != V_CRUISE_UNSET else float('inf')
 
     # Combine all targets
-    targets = [self.mtsc_target, max(self.overridden_speed, self.slc_target) - v_ego_diff, vtsc_target]
+    targets = [self.mtsc_target, max(self.overridden_speed, self.slc_target) - v_ego_diff, self.vtsc_target]
     v_cruise = float(min([target if target > CRUISING_SPEED else v_cruise for target in targets]))
 
     return v_cruise
