@@ -420,45 +420,45 @@ class LongitudinalPlanner:
     # Store the model type
     self.secretgoodopenpilot_model = secretgoodopenpilot_model
 
-    self.mpc.mode = 'blended' if sm.controlsState.experimentalMode else 'acc'
+    self.mpc.mode = 'blended' if sm['controlsState'].experimentalMode else 'acc'
 
-    if len(sm.carControl.orientationNED) == 3:
-      accel_coast = get_coast_accel(sm.carControl.orientationNED[1])
+    if len(sm['carControl'].orientationNED) == 3:
+      accel_coast = get_coast_accel(sm['carControl'].orientationNED[1])
     else:
       accel_coast = ACCEL_MAX
 
-    v_ego = sm.carState.vEgo
-    v_cruise_kph = min(sm.controlsState.vCruise, V_CRUISE_MAX)
+    v_ego = sm['carState'].vEgo
+    v_cruise_kph = min(sm['controlsState'].vCruise, V_CRUISE_MAX)
     v_cruise = v_cruise_kph * CV.KPH_TO_MS
-    v_cruise_initialized = sm.controlsState.vCruise != V_CRUISE_UNSET
+    v_cruise_initialized = sm['controlsState'].vCruise != V_CRUISE_UNSET
 
-    long_control_off = sm.controlsState.longControlState == LongCtrlState.off
-    force_slow_decel = sm.controlsState.forceDecel
+    long_control_off = sm['controlsState'].longControlState == LongCtrlState.off
+    force_slow_decel = sm['controlsState'].forceDecel
 
     # Reset current state when not engaged, or user is controlling the speed
-    reset_state = long_control_off if self.CP.openpilotLongitudinalControl else not sm.controlsState.enabled
+    reset_state = long_control_off if self.CP.openpilotLongitudinalControl else not sm['controlsState'].enabled
     # PCM cruise speed may be updated a few cycles later, check if initialized
     reset_state = reset_state or not v_cruise_initialized
 
     # No change cost when user is controlling the speed, or when standstill
-    prev_accel_constraint = not (reset_state or sm.carState.standstill)
+    prev_accel_constraint = not (reset_state or sm['carState'].standstill)
 
-    accel_limits = [sm.frogpilotPlan.minAcceleration, sm.frogpilotPlan.maxAcceleration]
+    accel_limits = [sm['frogpilotPlan'].minAcceleration, sm['frogpilotPlan'].maxAcceleration]
     # if self.mpc.mode == 'acc':
-      # accel_limits_turns = limit_accel_in_turns(v_ego, sm.carState.steeringAngleDeg, accel_limits, self.CP)
+      # accel_limits_turns = limit_accel_in_turns(v_ego, sm['carState'].steeringAngleDeg, accel_limits, self.CP)
     # else:
     accel_limits_turns = [ACCEL_MIN, ACCEL_MAX]
 
     if reset_state:
       self.v_desired_filter.x = v_ego
       # Allow stronger deceleration even when becoming active
-      self.a_desired = clip(sm.carState.aEgo, accel_limits[0] * 1.2, accel_limits[1])
+      self.a_desired = clip(sm['carState'].aEgo, accel_limits[0] * 1.2, accel_limits[1])
 
     # Prevent divergence, smooth in current v_ego
     self.v_desired_filter.x = max(0.0, self.v_desired_filter.update(v_ego))
     # Compute model v_ego error
-    self.v_model_error = get_speed_error(sm.modelV2, v_ego)
-    x, v, a, j, throttle_prob = self.parse_model(sm.modelV2, self.v_model_error, v_ego, frogpilot_toggles.taco_tune)
+    self.v_model_error = get_speed_error(sm['modelV2'], v_ego)
+    x, v, a, j, throttle_prob = self.parse_model(sm['modelV2'], self.v_model_error, v_ego, frogpilot_toggles.taco_tune)
     self.allow_throttle = throttle_prob > ALLOW_THROTTLE_THRESHOLD
 
     if not self.allow_throttle and v_ego > 5.0 and self.secretgoodopenpilot_model:  # Don't clip at low speeds since throttle_prob doesn't account for creep
@@ -473,7 +473,7 @@ class LongitudinalPlanner:
     accel_limits_turns[1] = max(accel_limits_turns[1], self.a_desired - 0.1)  # Increased from 0.05
 
     if radarless_model:
-      model_leads = list(sm.modelV2.leadsV3)
+      model_leads = list(sm['modelV2'].leadsV3)
       while len(self.lead_states) < len(model_leads):
           self.lead_states.append(Lead(sm))
       while len(self.lead_states) > len(model_leads):
@@ -491,8 +491,8 @@ class LongitudinalPlanner:
       self.lead_one = self.lead_states[0] if self.lead_states else Lead(sm)
       self.lead_two = self.lead_states[1] if len(self.lead_states) > 1 else Lead(sm)
     else:
-      self.lead_one = sm.radarState.leadOne
-      self.lead_two = sm.radarState.leadTwo
+      self.lead_one = sm['radarState'].leadOne
+      self.lead_two = sm['radarState'].leadTwo
 
     if self.lead_one.status:
         urgency, optimal_jerk = self.calculate_dynamic_response(self.lead_one)
@@ -508,7 +508,7 @@ class LongitudinalPlanner:
             acceleration_jerk=acceleration_jerk,
             danger_jerk=danger_jerk,
             speed_jerk=speed_jerk,
-            personality=sm.controlsState.personality
+            personality=sm['controlsState'].personality
         )
 
         # Update lead tau with hysteresis
@@ -523,18 +523,18 @@ class LongitudinalPlanner:
         self.prev_v_rel = v_rel
 
     # Add curve handling section
-    if len(sm.modelV2.position.x) > 0:
+    if len(sm['modelV2'].position.x) > 0:
         curve_urgency, safe_speed = self.calculate_curve_response(
-            sm.modelV2.position,
+            sm['modelV2'].position,
             frogpilot_toggles
         )
 
         # Integrate curve response with MPC weights
         self.mpc.set_weights(
-            acceleration_jerk=sm.frogpilotPlan.accelerationJerk * (1.0 + curve_urgency),
-            danger_jerk=sm.frogpilotPlan.dangerJerk * (1.0 + curve_urgency * 0.5),
-            speed_jerk=sm.frogpilotPlan.speedJerk,
-            personality=sm.controlsState.personality
+            acceleration_jerk=sm['frogpilotPlan'].accelerationJerk * (1.0 + curve_urgency),
+            danger_jerk=sm['frogpilotPlan'].dangerJerk * (1.0 + curve_urgency * 0.5),
+            speed_jerk=sm['frogpilotPlan'].speedJerk,
+            personality=sm['controlsState'].personality
         )
 
         # Adjust speed target for curves
@@ -544,16 +544,16 @@ class LongitudinalPlanner:
 
     # Update MPC with more aggressive jerk factors for rapid response
     self.mpc.set_weights(
-        acceleration_jerk=sm.frogpilotPlan.accelerationJerk * 1.2,  # Increase base jerk
-        danger_jerk=sm.frogpilotPlan.dangerJerk * 1.5,              # Increase danger jerk
-        speed_jerk=sm.frogpilotPlan.speedJerk,
-        personality=sm.controlsState.personality
+        acceleration_jerk=sm['frogpilotPlan'].accelerationJerk * 1.2,  # Increase base jerk
+        danger_jerk=sm['frogpilotPlan'].dangerJerk * 1.5,              # Increase danger jerk
+        speed_jerk=sm['frogpilotPlan'].speedJerk,
+        personality=sm['controlsState'].personality
     )
     self.mpc.set_accel_limits(accel_limits_turns[0], accel_limits_turns[1])
     self.mpc.set_cur_state(self.v_desired_filter.x, self.a_desired)
     self.mpc.update(self.lead_one, self.lead_two, v_target, x, v, a, j, radarless_model,
-                    sm.frogpilotPlan.tFollow, sm.frogpilotCarState.trafficModeActive,
-                    frogpilot_toggles, personality=sm.controlsState.personality)
+                    sm['frogpilotPlan'].tFollow, sm['frogpilotCarState'].trafficModeActive,
+                    frogpilot_toggles, personality=sm['controlsState'].personality)
 
     self.a_desired_trajectory_full = np.interp(CONTROL_N_T_IDX, T_IDXS_MPC, self.mpc.a_solution)
     self.v_desired_trajectory = np.interp(CONTROL_N_T_IDX, T_IDXS_MPC, self.mpc.v_solution)
@@ -561,7 +561,7 @@ class LongitudinalPlanner:
     self.j_desired_trajectory = np.interp(CONTROL_N_T_IDX, T_IDXS_MPC[:-1], self.mpc.j_solution)
 
     # TODO counter is only needed because radar is glitchy, remove once radar is gone
-    self.fcw = self.mpc.crash_cnt > 2 and not sm.carState.standstill
+    self.fcw = self.mpc.crash_cnt > 2 and not sm['carState'].standstill
     if self.fcw:
       cloudlog.info("FCW triggered")
 
