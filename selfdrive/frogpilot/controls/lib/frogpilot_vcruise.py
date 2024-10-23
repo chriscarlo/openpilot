@@ -31,6 +31,8 @@ class FrogPilotVCruise:
     self.override_slc = False
     self.speed_limit_changed = False
 
+    # Initialize missing attributes
+    self.mtsc_target = 0  # Add this line
     self.overridden_speed = 0
     self.previous_speed_limit = 0
     self.slc_target = 0
