@@ -23,7 +23,7 @@ class FrogPilotFollowing:
     self.stopped_equivalence_factor = 0
     self.t_follow = 0
 
-  def update(self, aEgo, controlsState, frogpilotCarState, lead_distance, stopping_distance, v_ego, v_lead, frogpilot_toggles):
+  def update(self, aEgo, controlsState, frogpilotCarState, lead_distance, stopping_distance, v_ego, v_lead, frogpilot_toggles, dynamic_brake=COMFORT_BRAKE):
     # Determine jerk factors based on traffic mode and vehicle acceleration
     if frogpilotCarState.trafficModeActive:
       if aEgo >= 0:
@@ -83,7 +83,7 @@ class FrogPilotFollowing:
     self.following_lead = self.frogpilot_planner.tracking_lead and lead_distance < (self.t_follow + 1) * v_ego
 
     if self.frogpilot_planner.tracking_lead:
-      self.safe_obstacle_distance = int(get_safe_obstacle_distance(v_ego, self.t_follow, dynamic_brake))
+      self.safe_obstacle_distance = int(get_safe_obstacle_distance(v_ego, self.t_follow, COMFORT_BRAKE))
       self.safe_obstacle_distance_stock = self.safe_obstacle_distance
 
       # Retrieve lead acceleration (a_lead) from frogpilotCarState
@@ -116,3 +116,4 @@ class FrogPilotFollowing:
     if (frogpilot_toggles.conditional_slower_lead or frogpilot_toggles.human_following) and v_lead < v_ego:
       pass  # Removed slower lead logic
       self.slower_lead = False  # Maintain expected state variable
+

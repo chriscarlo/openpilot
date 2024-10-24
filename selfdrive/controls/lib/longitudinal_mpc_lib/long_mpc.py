@@ -115,7 +115,7 @@ def get_safe_obstacle_distance(v_ego, t_follow, dynamic_brake):
     """
     Calculate safe following distance using dynamic brake value and proper following logic,
     compatible with CasADi symbolic computation.
-    
+
     Args:
         v_ego: ego vehicle velocity (CasADi SX)
         t_follow: time gap for following distance (float)
@@ -124,12 +124,12 @@ def get_safe_obstacle_distance(v_ego, t_follow, dynamic_brake):
     # Calculate distances using CasADi-compatible operations
     stopping_distance = (v_ego * v_ego) / (2 * dynamic_brake)
     following_distance = t_follow * v_ego
-    
+
     # Create speed condition using CasADi if_else
     # Note: We avoid direct boolean operations and use mathematical expressions
     speed_factor = (1 - fmax(0, fmax(v_ego - 2.0, 0) / (v_ego + 1e-6)))
     min_distance = STOP_DISTANCE * speed_factor
-    
+
     # Combine distances using fmax for CasADi compatibility
     return fmax(stopping_distance, following_distance) + min_distance
 
@@ -581,3 +581,4 @@ if __name__ == "__main__":
   ocp = gen_long_ocp()
   AcadosOcpSolver.generate(ocp, json_file=JSON_FILE)
   # AcadosOcpSolver.build(ocp.code_export_directory, with_cython=True)
+
