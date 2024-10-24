@@ -117,16 +117,15 @@ def get_safe_obstacle_distance(v_ego, t_follow, dynamic_brake):
     """
     # Calculate minimum stopping distance based on dynamic brake capability
     stopping_distance = (v_ego**2) / (2 * dynamic_brake)
-    
+
     # Calculate desired following distance
     following_distance = t_follow * v_ego
-    
+
     # Instead of using an if statement, use multiplication with boolean expression
     speed_condition = v_ego < 2.0
     min_distance = STOP_DISTANCE * speed_condition
-    
-    # Use casadi-friendly max operation
-    return casadi.fmax(stopping_distance, following_distance) + min_distance
+
+    return fmax(stopping_distance, following_distance) + min_distance
 
 def gen_long_model():
   model = AcadosModel()
