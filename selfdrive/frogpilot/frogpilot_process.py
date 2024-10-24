@@ -135,7 +135,6 @@ def frogpilot_thread():
   params_memory = Params("/dev/shm/params")
   params_storage = Params("/persist/params")
 
-  frogpilot_planner = FrogPilotPlanner()
   frogpilot_tracking = FrogPilotTracking()
   model_manager = ModelManager()
   theme_manager = ThemeManager()
@@ -150,9 +149,19 @@ def frogpilot_thread():
   radarless_model = frogpilot_toggles.radarless_model
 
   pm = messaging.PubMaster(['frogpilotPlan'])
-  sm = messaging.SubMaster(['carState', 'controlsState', 'deviceState', 'frogpilotCarControl',
+  sm = messaging.SubMaster(['carParams', 'carState', 'controlsState', 'deviceState', 'frogpilotCarControl',
                             'frogpilotCarState', 'frogpilotNavigation', 'modelV2', 'radarState'],
                             poll='modelV2', ignore_avg_freq=['radarState'])
+
+  # Wait for carParams to be available
+  CP = None
+  while CP is None:
+    sm.update()
+    if sm.updated['carParams']:
+      CP = sm['carParams']
+
+  # Now instantiate FrogPilotPlanner with CP
+  frogpilot_planner = FrogPilotPlanner(CP)
 
   while True:
     sm.update()
@@ -163,7 +172,7 @@ def frogpilot_thread():
     started = deviceState.started
 
     if not started and started_previously:
-      frogpilot_planner = FrogPilotPlanner()
+      frogpilot_planner = FrogPilotPlanner(CP)
       frogpilot_tracking = FrogPilotTracking()
 
     if started and sm.updated['modelV2']:

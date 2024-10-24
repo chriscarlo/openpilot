@@ -16,18 +16,19 @@ from openpilot.selfdrive.frogpilot.frogpilot_functions import MovingAverageCalcu
 from openpilot.selfdrive.frogpilot.frogpilot_variables import CRUISING_SPEED, MODEL_LENGTH, NON_DRIVING_GEARS, PLANNER_TIME, THRESHOLD
 
 class FrogPilotPlanner:
-    def __init__(self):
+    def __init__(self, CP):
         self.params_memory = Params("/dev/shm/params")
+        self.CP = CP  # Store CP for use in LongitudinalPlanner
         self.frogpilot_vcruise = FrogPilotVCruise()
 
         self.cem = ConditionalExperimentalMode(self)
         self.frogpilot_acceleration = FrogPilotAcceleration(self)
         self.frogpilot_events = FrogPilotEvents(self)
         self.frogpilot_following = FrogPilotFollowing(self)
-        # Removed redundant instantiation of FrogPilotVCruise
 
         self.lead_one = Lead()
-        self.longitudinal_planner = LongitudinalPlanner()  # Remove CP if not required
+
+        self.longitudinal_planner = LongitudinalPlanner(self.CP)
 
         self.tracking_lead_mac = MovingAverageCalculator()
 
@@ -182,3 +183,4 @@ class FrogPilotPlanner:
 
     def calculate_curve_response(self, model_position, frogpilot_toggles):
         return self.longitudinal_planner.calculate_curve_response(model_position, frogpilot_toggles)
+
