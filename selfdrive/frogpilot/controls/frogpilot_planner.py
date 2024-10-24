@@ -5,7 +5,7 @@ from openpilot.common.params import Params
 
 from openpilot.selfdrive.controls.lib.drive_helpers import V_CRUISE_UNSET
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import A_CHANGE_COST, DANGER_ZONE_COST, J_EGO_COST, STOP_DISTANCE
-from openpilot.selfdrive.controls.lib.longitudinal_planner import Lead
+from openpilot.selfdrive.controls.lib.longitudinal_planner import Lead, LongitudinalPlanner
 
 from openpilot.selfdrive.frogpilot.controls.lib.conditional_experimental_mode import ConditionalExperimentalMode
 from openpilot.selfdrive.frogpilot.controls.lib.frogpilot_acceleration import FrogPilotAcceleration
@@ -16,7 +16,7 @@ from openpilot.selfdrive.frogpilot.frogpilot_functions import MovingAverageCalcu
 from openpilot.selfdrive.frogpilot.frogpilot_variables import CRUISING_SPEED, MODEL_LENGTH, NON_DRIVING_GEARS, PLANNER_TIME, THRESHOLD
 
 class FrogPilotPlanner:
-  def __init__(self):
+  def __init__(self, CP):
     self.params_memory = Params("/dev/shm/params")
 
     self.cem = ConditionalExperimentalMode(self)
@@ -25,6 +25,7 @@ class FrogPilotPlanner:
     self.frogpilot_following = FrogPilotFollowing(self)
     self.frogpilot_vcruise = FrogPilotVCruise(self)
     self.lead_one = Lead()
+    self.longitudinal_planner = LongitudinalPlanner(CP)
 
     self.tracking_lead_mac = MovingAverageCalculator()
 
@@ -165,3 +166,6 @@ class FrogPilotPlanner:
     frogpilotPlan.vCruise = self.v_cruise
 
     pm.send('frogpilotPlan', frogpilot_plan_send)
+
+  def calculate_curve_response(self, model_position, frogpilot_toggles):
+    return self.longitudinal_planner.calculate_curve_response(model_position, frogpilot_toggles)

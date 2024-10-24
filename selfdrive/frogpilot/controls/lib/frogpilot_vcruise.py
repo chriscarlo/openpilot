@@ -17,9 +17,13 @@ LaneChangeState = log.LaneChangeState
 
 TARGET_LAT_A = 2.0
 
+from openpilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPlanner
+
+from openpilot.selfdrive.frogpilot.controls.frogpilot_planner import FrogPilotPlanner
+
 class FrogPilotVCruise:
-  def __init__(self, FrogPilotPlanner):
-    self.frogpilot_planner = FrogPilotPlanner
+  def __init__(self, CP):
+    self.frogpilot_planner = FrogPilotPlanner(CP)  # Use FrogPilotPlanner
     self.params_memory = self.frogpilot_planner.params_memory
 
     self.mtsc = MapTurnSpeedController()
@@ -141,7 +145,7 @@ class FrogPilotVCruise:
 
     # VTSC section
     if frogpilot_toggles.vision_turn_controller and v_ego > CRUISING_SPEED and controlsState.enabled:
-      # Get safe_speed directly from curve response
+      # Use the calculate_curve_response method from FrogPilotPlanner
       _, safe_speed = self.frogpilot_planner.calculate_curve_response(
           modelData.position,
           frogpilot_toggles
