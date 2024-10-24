@@ -2,6 +2,7 @@
 import os
 import time
 import numpy as np
+import casadi
 from cereal import log
 from openpilot.common.numpy_fast import clip
 from openpilot.common.realtime import DT_MDL
@@ -114,23 +115,28 @@ def get_stopped_equivalence_factor(v_lead, a_lead):
 def get_safe_obstacle_distance(v_ego, t_follow, dynamic_brake):
     """
     Calculate safe following distance using dynamic brake value and proper following logic,
-    compatible with CasADi symbolic computation.
+    compatible with both CasADi symbolic computation and numerical operations.
 
     Args:
-        v_ego: ego vehicle velocity (CasADi SX)
+        v_ego: ego vehicle velocity (CasADi SX/MX or NumPy array)
         t_follow: time gap for following distance (float)
         dynamic_brake: dynamic braking capability (float)
     """
-    # Calculate distances using CasADi-compatible operations
+    if isinstance(v_ego, (casadi.SX, casadi.MX)):
+        # CasADi symbolic operations
+        fmax = casadi.fmax
+    else:
+        # Numerical operations
+        fmax = np.fmax
+
     stopping_distance = (v_ego * v_ego) / (2 * dynamic_brake)
     following_distance = t_follow * v_ego
 
-    # Create speed condition using CasADi if_else
-    # Note: We avoid direct boolean operations and use mathematical expressions
-    speed_factor = (1 - fmax(0, fmax(v_ego - 2.0, 0) / (v_ego + 1e-6)))
+    # Use appropriate fmax function
+    speed_factor = 1 - fmax(0, fmax(v_ego - 2.0, 0) / (v_ego + 1e-6))
     min_distance = STOP_DISTANCE * speed_factor
 
-    # Combine distances using fmax for CasADi compatibility
+    # Combine distances using fmax
     return fmax(stopping_distance, following_distance) + min_distance
 
 def gen_long_model():
@@ -581,4 +587,3 @@ if __name__ == "__main__":
   ocp = gen_long_ocp()
   AcadosOcpSolver.generate(ocp, json_file=JSON_FILE)
   # AcadosOcpSolver.build(ocp.code_export_directory, with_cython=True)
-
