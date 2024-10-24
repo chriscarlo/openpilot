@@ -139,13 +139,14 @@ class FrogPilotVCruise:
     else:
       self.slc_target = 0
 
-    # Get VTSC target directly from planner
+    # VTSC section
     if frogpilot_toggles.vision_turn_controller and v_ego > CRUISING_SPEED and controlsState.enabled:
-      self.sm.update()
-      if self.sm.valid['longitudinalPlan']:
-        self.vtsc_target = self.sm['longitudinalPlan'].speeds[0] if len(self.sm['longitudinalPlan'].speeds) > 0 else v_cruise
-      else:
-        self.vtsc_target = v_cruise
+      # Get safe_speed directly from curve response
+      _, safe_speed = self.frogpilot_planner.calculate_curve_response(
+          modelData.position,
+          frogpilot_toggles
+      )
+      self.vtsc_target = safe_speed if safe_speed < v_cruise else v_cruise
     else:
       self.vtsc_target = v_cruise if v_cruise != V_CRUISE_UNSET else float('inf')
 

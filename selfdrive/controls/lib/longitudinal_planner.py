@@ -250,7 +250,7 @@ class LongitudinalPlanner:
   def calculate_dynamic_response(self, lead):
     """
     Model expert driver response incorporating rate of change
-    and vehicle capabilities
+    and vehicle capabilities, with added steady-state handling
     """
     v_ego = self.x0[1]
     v_rel = lead.vLead - v_ego
@@ -259,8 +259,19 @@ class LongitudinalPlanner:
     d_rel_rate = (lead.dRel - self.prev_dRel) / self.dt
     v_rel_rate = (v_rel - self.prev_v_rel) / self.dt
 
+    # Detect steady-state following
+    STEADY_REL_SPEED = 0.7     # m/s (~1.5mph)
+    STEADY_REL_RATE = 0.15     # m/s²
+    STEADY_DIST_RATE = 0.3     # m/s
+    STEADY_LEAD_ACCEL = 0.2    # m/s²
+
+    is_steady_following = (abs(v_rel) < STEADY_REL_SPEED and
+                         abs(v_rel_rate) < STEADY_REL_RATE and
+                         abs(d_rel_rate) < STEADY_DIST_RATE and
+                         abs(lead.aLeadK) < STEADY_LEAD_ACCEL)
+
     # Time to collision with dynamic adjustment
-    if v_rel < 0 and lead.dRel > 0.5:  # Added minimal distance threshold
+    if v_rel < 0 and lead.dRel > 0.5:
         ttc = lead.dRel / abs(v_rel)
     else:
         ttc = float('inf')
@@ -294,12 +305,22 @@ class LongitudinalPlanner:
     # Add lead acceleration influence with hysteresis
     accel_factor = np.clip((-lead.aLeadK / g) * (1.5 if lead.aLeadK < 0 else 1.0), 0, 1)
 
+    # Modify urgency and response in steady state
+    if is_steady_following:
+        # Reduce urgency significantly in steady state
+        urgency *= 0.3
+
+        # Smooth lead measurements in steady state
+        lead.vLead = v_ego * 0.8 + lead.vLead * 0.2
+        lead.aLeadK *= 0.5
+
     # Smooth response using geometric mean
     combined_urgency = np.sqrt(urgency * (1 + accel_factor))
 
-    # Calculate optimal jerk profile
+    # Calculate optimal jerk profile with steady-state damping
+    jerk_factor = 0.3 if is_steady_following else 1.0
     optimal_jerk = -combined_urgency * max_brake_decel * \
-                   (1 - np.exp(-abs(self.prev_a - req_decel)))
+                   (1 - np.exp(-abs(self.prev_a - req_decel))) * jerk_factor
 
     return combined_urgency, optimal_jerk
 

@@ -56,7 +56,7 @@ T_IDXS = np.array(T_IDXS_LST)
 FCW_IDXS = T_IDXS < 5.0
 T_DIFFS = np.diff(T_IDXS, prepend=[0.])
 COMFORT_BRAKE = 2.5
-STOP_DISTANCE = 8.0
+STOP_DISTANCE = 5.0
 
 # Add Minimum and Maximum Lead Deceleration
 MIN_LEAD_DECEL = 0.1  # Minimum lead deceleration to avoid division by zero
@@ -111,14 +111,19 @@ def get_stopped_equivalence_factor(v_lead, a_lead):
   effective_decel = clip(-a_lead, MIN_LEAD_DECEL, MAX_LEAD_DECEL)
   return (v_lead**2) / (2 * effective_decel)
 
-def get_safe_obstacle_distance(v_ego, t_follow):
-  return (v_ego**2) / (2 * COMFORT_BRAKE) + t_follow * v_ego + STOP_DISTANCE
+def get_safe_obstacle_distance(v_ego, t_follow, dynamic_brake):
+    """
+    Calculate safe following distance using dynamic brake value and proper following logic
+    """
+    # Calculate minimum stopping distance based on dynamic brake capability
+    stopping_distance = (v_ego**2) / (2 * dynamic_brake)
 
-def desired_follow_distance(v_ego, v_lead, a_lead=0.0, t_follow=None):
-  if t_follow is None:
-    t_follow = get_T_FOLLOW()
-  return get_safe_obstacle_distance(v_ego, t_follow) - get_stopped_equivalence_factor(v_lead, a_lead)
+    # Calculate desired following distance
+    following_distance = t_follow * v_ego
 
+    # Use the larger of the two distances plus minimal buffer at very low speeds
+    min_distance = STOP_DISTANCE if v_ego < 2.0 else 0
+    return max(stopping_distance, following_distance) + min_distance
 
 def gen_long_model():
   model = AcadosModel()
@@ -426,16 +431,15 @@ class LongitudinalMpc:
 
     increased_distance = max(frogpilot_toggles.increase_stopped_distance + min(10 - v_ego, 0), 0) if not trafficModeActive else 0
 
-    # Process leads with dynamic comfort brake
+    # Process leads
     lead_xv_0 = self.process_lead(lead_one)
     lead_xv_1 = self.process_lead(lead_two)
 
-    # Use dynamic comfort brake based on lead deceleration
-    dynamic_comfort_brake = self.get_dynamic_comfort_brake(
-        lead_one.aLeadK if lead_one.status else 0.0
-    )
+    # Calculate dynamic brake values based on lead behavior
+    dynamic_brake_0 = self.get_dynamic_comfort_brake(lead_one.aLeadK) if lead_one.status else COMFORT_BRAKE
+    dynamic_brake_1 = self.get_dynamic_comfort_brake(lead_two.aLeadK) if lead_two.status else COMFORT_BRAKE
 
-    # Adjust solver tolerance based on lead deceleration instead of iterations
+    # Adjust solver tolerance based on lead deceleration
     if abs(lead_one.aLeadK) > 2.25:
         self.solver.options_set('qp_tol_stat', 1e-2)  # Looser tolerance for faster solve
         self.solver.options_set('qp_tol_eq', 1e-2)
@@ -450,56 +454,63 @@ class LongitudinalMpc:
     self.params[:,0] = ACCEL_MIN  # Minimum acceleration (maximum deceleration)
     self.params[:,1] = self.max_a  # Maximum acceleration
 
-    # Calculate dynamic comfort brake for each lead
-    dynamic_comfort_brake_0 = self.get_dynamic_comfort_brake(lead_one.aLeadK) if lead_one.status else COMFORT_BRAKE
-    dynamic_comfort_brake_1 = self.get_dynamic_comfort_brake(lead_two.aLeadK) if lead_two.status else COMFORT_BRAKE
-
-    # Recalculate obstacles with dynamic comfort brake
-    lead_0_obstacle = lead_xv_0[:,0] + (lead_xv_0[:,1]**2) / (2 * dynamic_comfort_brake_0)
-    lead_1_obstacle = lead_xv_1[:,0] + (lead_xv_1[:,1]**2) / (2 * dynamic_comfort_brake_1)
+    # Calculate safe following distances using dynamic brake values
+    lead_0_obstacle = lead_xv_0[:,0] + get_safe_obstacle_distance(
+        lead_xv_0[:,1],  # v_lead trajectory
+        t_follow,
+        dynamic_brake_0
+    )
+    lead_1_obstacle = lead_xv_1[:,0] + get_safe_obstacle_distance(
+        lead_xv_1[:,1],  # v_lead trajectory
+        t_follow,
+        dynamic_brake_1
+    )
 
     # Update in ACC mode or ACC/e2e blend
     if self.mode == 'acc':
-      self.params[:,5] = LEAD_DANGER_FACTOR
+        self.params[:,5] = LEAD_DANGER_FACTOR
 
-      # Fake an obstacle for cruise, this ensures smooth acceleration to set speed
-      # when the leads are no factor.
-      v_lower = v_ego + (T_IDXS * self.cruise_min_a * 1.05)
-      v_upper = v_ego + (T_IDXS * self.max_a * 1.05)
-      v_cruise_clipped = np.clip(v_cruise * np.ones(N+1),
-                                 v_lower,
-                                 v_upper)
-      cruise_obstacle = np.cumsum(T_DIFFS * v_cruise_clipped) + get_safe_obstacle_distance(v_cruise_clipped, t_follow)
+        # Fake an obstacle for cruise, this ensures smooth acceleration to set speed
+        # when the leads are no factor.
+        v_lower = v_ego + (T_IDXS * self.cruise_min_a * 1.05)
+        v_upper = v_ego + (T_IDXS * self.max_a * 1.05)
+        v_cruise_clipped = np.clip(v_cruise * np.ones(N+1),
+                                  v_lower,
+                                  v_upper)
+        cruise_obstacle = np.cumsum(T_DIFFS * v_cruise_clipped) + get_safe_obstacle_distance(
+            v_cruise_clipped,
+            t_follow,
+            COMFORT_BRAKE  # Use standard comfort brake for cruise target
+        )
 
-      x_obstacles = np.column_stack([lead_0_obstacle, lead_1_obstacle, cruise_obstacle])
-      self.source = SOURCES[np.argmin(x_obstacles[0])]
+        x_obstacles = np.column_stack([lead_0_obstacle, lead_1_obstacle, cruise_obstacle])
+        self.source = SOURCES[np.argmin(x_obstacles[0])]
 
-      # These are not used in ACC mode
-      x[:], v[:], a[:], j[:] = 0.0, 0.0, 0.0, 0.0
+        # These are not used in ACC mode
+        x[:], v[:], a[:], j[:] = 0.0, 0.0, 0.0, 0.0
 
     elif self.mode == 'blended':
-      self.params[:,5] = 1.0
+        self.params[:,5] = 1.0
 
-      x_obstacles = np.column_stack([lead_0_obstacle,
-                                     lead_1_obstacle])
-      cruise_target = T_IDXS * np.clip(v_cruise, v_ego - 2.0, 1e3) + x[0]
-      xforward = ((v[1:] + v[:-1]) / 2) * (T_IDXS[1:] - T_IDXS[:-1])
-      x = np.cumsum(np.insert(xforward, 0, x[0]))
+        x_obstacles = np.column_stack([lead_0_obstacle, lead_1_obstacle])
+        cruise_target = T_IDXS * np.clip(v_cruise, v_ego - 2.0, 1e3) + x[0]
+        xforward = ((v[1:] + v[:-1]) / 2) * (T_IDXS[1:] - T_IDXS[:-1])
+        x = np.cumsum(np.insert(xforward, 0, x[0]))
 
-      x_and_cruise = np.column_stack([x, cruise_target])
-      x = np.min(x_and_cruise, axis=1)
+        x_and_cruise = np.column_stack([x, cruise_target])
+        x = np.min(x_and_cruise, axis=1)
 
-      self.source = 'e2e' if x_and_cruise[1,0] < x_and_cruise[1,1] else 'cruise'
+        self.source = 'e2e' if x_and_cruise[1,0] < x_and_cruise[1,1] else 'cruise'
 
     else:
-      raise NotImplementedError(f'Planner mode {self.mode} not recognized in planner update')
+        raise NotImplementedError(f'Planner mode {self.mode} not recognized in planner update')
 
     self.yref[:,1] = x
     self.yref[:,2] = v
     self.yref[:,3] = a
     self.yref[:,5] = j
     for i in range(N):
-      self.solver.set(i, "yref", self.yref[i])
+        self.solver.set(i, "yref", self.yref[i])
     self.solver.set(N, "yref", self.yref[N][:COST_E_DIM])
 
     self.params[:,2] = np.min(x_obstacles, axis=1)
@@ -509,18 +520,17 @@ class LongitudinalMpc:
     self.run()
     lead_probability = lead_one.prob if radarless_model else lead_one.modelProb
     if (np.any(lead_xv_0[FCW_IDXS,0] - self.x_sol[FCW_IDXS,0] < CRASH_DISTANCE) and lead_probability > 0.9):
-      self.crash_cnt += 1
+        self.crash_cnt += 1
     else:
-      self.crash_cnt = 0
+        self.crash_cnt = 0
 
     # Check if it got within lead comfort range
-    # TODO This should be done cleaner
     if self.mode == 'blended':
-      if any((lead_0_obstacle - get_safe_obstacle_distance(self.x_sol[:,1], t_follow)) - self.x_sol[:,0] < 0.0):
-        self.source = 'lead0'
-      if any((lead_1_obstacle - get_safe_obstacle_distance(self.x_sol[:,1], t_follow)) - self.x_sol[:,0] < 0.0) and \
-         (lead_1_obstacle[0] - lead_0_obstacle[0]):
-        self.source = 'lead1'
+        if any((lead_0_obstacle - get_safe_obstacle_distance(self.x_sol[:,1], t_follow, dynamic_brake_0)) - self.x_sol[:,0] < 0.0):
+            self.source = 'lead0'
+        if any((lead_1_obstacle - get_safe_obstacle_distance(self.x_sol[:,1], t_follow, dynamic_brake_1)) - self.x_sol[:,0] < 0.0) and \
+           (lead_1_obstacle[0] - lead_0_obstacle[0]):
+            self.source = 'lead1'
 
   def run(self):
     # Set all parameters for the solver
@@ -559,12 +569,7 @@ class LongitudinalMpc:
     # print(f"long_mpc timings: total internal {self.solve_time:.2e}, external: {(time.monotonic() - t0):.2e} qp {self.time_qp_solution:.2e}, \
     # lin {self.time_linearization:.2e} qp_iter {qp_iter}, reset {reset}")
 
-
 if __name__ == "__main__":
   ocp = gen_long_ocp()
   AcadosOcpSolver.generate(ocp, json_file=JSON_FILE)
   # AcadosOcpSolver.build(ocp.code_export_directory, with_cython=True)
-
-
-
-
