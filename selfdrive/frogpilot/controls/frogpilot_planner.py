@@ -5,7 +5,7 @@ from openpilot.common.params import Params
 
 from openpilot.selfdrive.controls.lib.drive_helpers import V_CRUISE_UNSET
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import A_CHANGE_COST, DANGER_ZONE_COST, J_EGO_COST, STOP_DISTANCE
-from openpilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPlanner
+from openpilot.selfdrive.controls.lib.longitudinal_planner import Lead
 
 from openpilot.selfdrive.frogpilot.controls.lib.conditional_experimental_mode import ConditionalExperimentalMode
 from openpilot.selfdrive.frogpilot.controls.lib.frogpilot_acceleration import FrogPilotAcceleration
@@ -15,10 +15,8 @@ from openpilot.selfdrive.frogpilot.controls.lib.frogpilot_vcruise import FrogPil
 from openpilot.selfdrive.frogpilot.frogpilot_functions import MovingAverageCalculator, calculate_lane_width, calculate_road_curvature, update_frogpilot_toggles
 from openpilot.selfdrive.frogpilot.frogpilot_variables import CRUISING_SPEED, MODEL_LENGTH, NON_DRIVING_GEARS, PLANNER_TIME, THRESHOLD
 
-class FrogPilotPlanner(LongitudinalPlanner):
-  def __init__(self, CP):
-    super().__init__(CP)
-
+class FrogPilotPlanner:
+  def __init__(self):
     self.params_memory = Params("/dev/shm/params")
 
     self.cem = ConditionalExperimentalMode(self)
