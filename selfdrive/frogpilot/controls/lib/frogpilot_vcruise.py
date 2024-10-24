@@ -17,8 +17,6 @@ LaneChangeState = log.LaneChangeState
 
 TARGET_LAT_A = 2.0
 
-from openpilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPlanner
-
 from openpilot.selfdrive.frogpilot.controls.frogpilot_planner import FrogPilotPlanner
 
 class FrogPilotVCruise:
