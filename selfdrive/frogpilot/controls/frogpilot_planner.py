@@ -18,6 +18,7 @@ from openpilot.selfdrive.frogpilot.frogpilot_variables import CRUISING_SPEED, MO
 class FrogPilotPlanner:
   def __init__(self, CP):
     self.params_memory = Params("/dev/shm/params")
+    self.frogpilot_vcruise = FrogPilotVCruise()
 
     self.cem = ConditionalExperimentalMode(self)
     self.frogpilot_acceleration = FrogPilotAcceleration(self)
@@ -107,7 +108,18 @@ class FrogPilotPlanner:
       self.taking_curve_quickly = False
 
     self.tracking_lead = self.set_lead_status(lead_distance, stopping_distance, v_ego)
-    self.v_cruise = self.frogpilot_vcruise.update(carState, controlsState, frogpilotCarControl, frogpilotCarState, frogpilotNavigation, modelData, v_cruise, v_ego, frogpilot_toggles)
+    self.v_cruise = self.frogpilot_vcruise.update(
+      self,
+      carState,
+      controlsState,
+      frogpilotCarControl,
+      frogpilotCarState,
+      frogpilotNavigation,
+      modelData,
+      v_cruise,
+      v_ego,
+      frogpilot_toggles
+    )
 
     if self.frogpilot_events.frame == 1:  # Force update to check the current state of "Always On Lateral" and holiday theme
       update_frogpilot_toggles()
@@ -169,3 +181,4 @@ class FrogPilotPlanner:
 
   def calculate_curve_response(self, model_position, frogpilot_toggles):
     return self.longitudinal_planner.calculate_curve_response(model_position, frogpilot_toggles)
+

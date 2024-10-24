@@ -1,10 +1,8 @@
 from openpilot.common.conversions import Conversions as CV
 from openpilot.common.numpy_fast import clip
 from openpilot.common.realtime import DT_MDL
-
 from openpilot.selfdrive.controls.controlsd import ButtonType
 from openpilot.selfdrive.controls.lib.drive_helpers import V_CRUISE_UNSET
-
 from openpilot.selfdrive.frogpilot.controls.lib.map_turn_speed_controller import MapTurnSpeedController
 from openpilot.selfdrive.frogpilot.controls.lib.speed_limit_controller import SpeedLimitController
 from openpilot.selfdrive.frogpilot.frogpilot_variables import CRUISING_SPEED, PLANNER_TIME
@@ -12,17 +10,15 @@ from openpilot.selfdrive.frogpilot.frogpilot_variables import CRUISING_SPEED, PL
 import numpy as np
 import cereal.messaging as messaging
 from cereal import log
+from openpilot.common.params import Params
 
 LaneChangeState = log.LaneChangeState
 
 TARGET_LAT_A = 2.0
 
-from openpilot.selfdrive.frogpilot.controls.frogpilot_planner import FrogPilotPlanner
-
 class FrogPilotVCruise:
-  def __init__(self, CP):
-    self.frogpilot_planner = FrogPilotPlanner(CP)  # Use FrogPilotPlanner
-    self.params_memory = self.frogpilot_planner.params_memory
+  def __init__(self):
+    self.params_memory = Params("/dev/shm/params")
 
     self.mtsc = MapTurnSpeedController()
     self.slc = SpeedLimitController()
@@ -46,14 +42,22 @@ class FrogPilotVCruise:
 
     self.sm = messaging.SubMaster(['longitudinalPlan'])
 
-  def update(self, carState, controlsState, frogpilotCarControl, frogpilotCarState, frogpilotNavigation, modelData, v_cruise, v_ego, frogpilot_toggles):
-    force_stop_enabled = frogpilot_toggles.force_stops and self.frogpilot_planner.cem.stop_light_detected and controlsState.enabled
-    force_stop_enabled &= self.frogpilot_planner.model_length < 100
+  def update(self, frogpilot_planner, carState, controlsState, frogpilotCarControl, frogpilotCarState, frogpilotNavigation, modelData, v_cruise, v_ego, frogpilot_toggles):
+    force_stop_enabled = (
+      frogpilot_toggles.force_stops and
+      frogpilot_planner.cem.stop_light_detected and
+      controlsState.enabled
+    )
+    force_stop_enabled &= frogpilot_planner.model_length < 100
     force_stop_enabled &= self.override_force_stop_timer <= 0
 
     self.force_stop_timer = self.force_stop_timer + DT_MDL if force_stop_enabled else 0
 
-    self.override_force_stop |= not frogpilot_toggles.force_standstill and carState.standstill and self.frogpilot_planner.tracking_lead
+    self.override_force_stop |= (
+      not frogpilot_toggles.force_standstill and
+      carState.standstill and
+      frogpilot_planner.tracking_lead
+    )
     self.override_force_stop |= carState.gasPressed
     self.override_force_stop |= frogpilotCarControl.resumePressed
     self.override_force_stop &= self.force_stop_timer >= 1
@@ -69,14 +73,18 @@ class FrogPilotVCruise:
     v_ego_cluster = max(carState.vEgoCluster, v_ego)
     v_ego_diff = v_ego_cluster - v_ego
 
-    # Pfeiferj's Map Turn Speed Controller
+    # Map Turn Speed Controller
     if frogpilot_toggles.map_turn_speed_controller and v_ego > CRUISING_SPEED and controlsState.enabled:
       mtsc_active = self.mtsc_target < v_cruise
-      self.mtsc_target = clip(self.mtsc.target_speed(v_ego, carState.aEgo, frogpilot_toggles), CRUISING_SPEED, v_cruise)
+      self.mtsc_target = clip(
+        self.mtsc.target_speed(v_ego, carState.aEgo, frogpilot_toggles),
+        CRUISING_SPEED,
+        v_cruise
+      )
 
-      curve_detected = (1 / self.frogpilot_planner.road_curvature)**0.5 < v_ego
+      curve_detected = (1 / frogpilot_planner.road_curvature) ** 0.5 < v_ego
       if curve_detected and mtsc_active:
-        self.mtsc_target = self.frogpilot_planner.v_cruise
+        self.mtsc_target = frogpilot_planner.v_cruise
       elif not curve_detected and frogpilot_toggles.mtsc_curvature_check:
         self.mtsc_target = v_cruise
 
