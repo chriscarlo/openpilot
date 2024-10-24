@@ -15,7 +15,7 @@ if __name__ == '__main__':  # generating code
 else:
   from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.c_generated_code.acados_ocp_solver_pyx import AcadosOcpSolverCython
 
-from casadi import SX, vertcat
+from casadi import SX, vertcat, fmax
 
 MODEL_NAME = 'long'
 LONG_MPC_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -117,13 +117,16 @@ def get_safe_obstacle_distance(v_ego, t_follow, dynamic_brake):
     """
     # Calculate minimum stopping distance based on dynamic brake capability
     stopping_distance = (v_ego**2) / (2 * dynamic_brake)
-
+    
     # Calculate desired following distance
     following_distance = t_follow * v_ego
-
-    # Use the larger of the two distances plus minimal buffer at very low speeds
-    min_distance = STOP_DISTANCE if v_ego < 2.0 else 0
-    return max(stopping_distance, following_distance) + min_distance
+    
+    # Instead of using an if statement, use multiplication with boolean expression
+    speed_condition = v_ego < 2.0
+    min_distance = STOP_DISTANCE * speed_condition
+    
+    # Use casadi-friendly max operation
+    return casadi.fmax(stopping_distance, following_distance) + min_distance
 
 def gen_long_model():
   model = AcadosModel()
