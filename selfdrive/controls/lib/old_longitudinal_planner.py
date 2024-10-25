@@ -11,11 +11,8 @@ from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.modeld.constants import ModelConstants
 from openpilot.selfdrive.car.interfaces import ACCEL_MIN, ACCEL_MAX
 from openpilot.selfdrive.controls.lib.longcontrol import LongCtrlState
-from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import (
-  LongitudinalMpc,
-  T_IDXS as T_IDXS_MPC,
-  LEAD_ACCEL_TAU
-)
+from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LongitudinalMpc
+from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import T_IDXS as T_IDXS_MPC, LEAD_ACCEL_TAU
 from openpilot.selfdrive.controls.lib.drive_helpers import V_CRUISE_MAX, V_CRUISE_UNSET, CONTROL_N, get_speed_error
 from openpilot.common.swaglog import cloudlog
 
@@ -69,6 +66,7 @@ def get_accel_from_plan(CP, speeds, accels):
                  v_target_1sec < CP.vEgoStopping)
   return a_target, should_stop
 
+
 def lead_kf(v_lead: float, dt: float = 0.05):
   # Lead Kalman Filter params, calculating K from A, C, Q, R requires the control library.
   # hardcoding a lookup table to compute K for values of radar_ts between 0.01s and 0.2s
@@ -98,16 +96,14 @@ def lead_kf(v_lead: float, dt: float = 0.05):
   K0 = [k * scale_factor_K0 for k in K0_base]
   K1 = [k * scale_factor_K1 for k in K1_base]
 
-  # Interpolate K0 and K1 based on dt
-  K0_interp = interp(dt, dts, K0)
-  K1_interp = interp(dt, dts, K1)
-  K = [[K0_interp], [K1_interp]]  # Ensure matrix dimensions are correct
+  K = [[interp(dt, dts, K0)], [interp(dt, dts, K1)]]
 
   kf = KF1D([[v_lead], [0.0]], A, C, K)
   return kf
 
+
 class Lead:
-  def __init__(self, sm=None):
+  def __init__(self):
     self.dRel = 0.0
     self.yRel = 0.0
     self.vLead = 0.0
@@ -117,9 +113,6 @@ class Lead:
     self.aLeadTau = LEAD_ACCEL_TAU
     self.prob = 0.0
     self.status = False
-    self.sm = sm  # Initialize sm
-    self.curve_urgency = 0.0  # Add missing attribute
-    self.safe_speed = 0.0     # Add missing attribute
 
     self.kf: KF1D | None = None
     self.prev_vLead = 0.0
@@ -132,8 +125,7 @@ class Lead:
     self.prev_vLead = 0.0
     self.prev_dRel = 0.0
 
-  def update(self, dRel, yRel, vLead, aLead, prob, sm=None):
-    self.sm = sm  # Update state manager reference
+  def update(self, dRel, yRel, vLead, aLead, prob):
     self.dRel = dRel
     self.yRel = yRel
     self.vLead = vLead
@@ -174,6 +166,7 @@ class Lead:
     self.prev_vLead = self.vLead
     self.prev_dRel = self.dRel
 
+
 class LongitudinalPlanner:
   def __init__(self, CP, init_v=0.0, init_a=0.0, dt=DT_MDL):
     self.CP = CP
@@ -193,17 +186,6 @@ class LongitudinalPlanner:
     self.a_desired_trajectory = np.zeros(CONTROL_N)
     self.j_desired_trajectory = np.zeros(CONTROL_N)
     self.solverExecutionTime = 0.0
-
-    self.prev_dRel = 0.0
-    self.prev_v_rel = 0.0
-    self.prev_a = init_a
-    self.x0 = np.zeros(3)
-    self.x0[1] = init_v
-    self.x0[2] = init_a
-
-    self.secretgoodopenpilot_model = False  # Default to False
-
-    self.lead_states = []  # Add this line
 
   @staticmethod
   def parse_model(model_msg, model_error, v_ego, taco_tune):
@@ -232,110 +214,7 @@ class LongitudinalPlanner:
       throttle_prob = 1.0
     return x, v, a, j, throttle_prob
 
-  def calculate_dynamic_response(self, lead):
-    """
-    Model expert driver response incorporating rate of change
-    and vehicle capabilities, with added steady-state handling
-    """
-    v_ego = self.x0[1]
-    v_rel = lead.vLead - v_ego
-
-    # Calculate derivatives
-    d_rel_rate = (lead.dRel - self.prev_dRel) / self.dt
-    v_rel_rate = (v_rel - self.prev_v_rel) / self.dt
-
-    # Detect steady-state following
-    STEADY_REL_SPEED = 0.7     # m/s (~1.5mph)
-    STEADY_REL_RATE = 0.15     # m/s²
-    STEADY_DIST_RATE = 0.3     # m/s
-    STEADY_LEAD_ACCEL = 0.2    # m/s²
-
-    is_steady_following = (abs(v_rel) < STEADY_REL_SPEED and
-                         abs(v_rel_rate) < STEADY_REL_RATE and
-                         abs(d_rel_rate) < STEADY_DIST_RATE and
-                         abs(lead.aLeadK) < STEADY_LEAD_ACCEL)
-
-    # Time to collision with dynamic adjustment
-    if v_rel < 0 and lead.dRel > 0.5:
-        ttc = lead.dRel / abs(v_rel)
-    else:
-        ttc = float('inf')
-
-    # Further safety checks
-    if ttc < 0:
-        ttc = float('inf')
-
-    # Required deceleration including velocity trend
-    req_decel = (v_ego**2 - lead.vLead**2) / (2 * lead.dRel)
-    if v_rel_rate < 0:  # Closure rate increasing
-        req_decel *= (1 + abs(v_rel_rate) * 0.5)
-
-    # Vehicle capability factor
-    g = 9.81
-    max_brake_decel = abs(ACCEL_MIN)
-    capability_factor = np.clip(max_brake_decel / req_decel, 0, 1) if req_decel > 0 else 1.0
-
-    # Anticipation factor - earlier response when closing quickly
-    anticipation = 1 - np.exp(-abs(v_rel) / 5.0)
-
-    # Combine into urgency metric with continuous derivatives
-    tau = 2.0 * (1 + capability_factor)
-
-    # Core urgency calculation incorporating all factors
-    urgency = (1 - np.exp(-req_decel/g)) * \
-              np.exp(-ttc/tau) * \
-              (1 + anticipation) * \
-              capability_factor
-
-    # Add lead acceleration influence with hysteresis
-    accel_factor = np.clip((-lead.aLeadK / g) * (1.5 if lead.aLeadK < 0 else 1.0), 0, 1)
-
-    # Modify urgency and response in steady state
-    if is_steady_following:
-        # Reduce urgency significantly in steady state
-        urgency *= 0.3
-
-        # Smooth lead measurements in steady state
-        lead.vLead = v_ego * 0.8 + lead.vLead * 0.2
-        lead.aLeadK *= 0.5
-
-    # Smooth response using geometric mean
-    combined_urgency = np.sqrt(urgency * (1 + accel_factor))
-
-    # Calculate optimal jerk profile with steady-state damping
-    jerk_factor = 0.3 if is_steady_following else 1.0
-    optimal_jerk = -combined_urgency * max_brake_decel * \
-                   (1 - np.exp(-abs(self.prev_a - req_decel))) * jerk_factor
-
-    return combined_urgency, optimal_jerk
-
-  def calculate_deceleration_profile(self, current_speed, target_speed, distance):
-    """
-    Calculate smooth deceleration profile
-    """
-    if distance <= 0 or current_speed <= target_speed:
-        return 0.0, 0.0
-
-    # Constants for smooth profile
-    COMFORT_JERK = 0.3  # m/s³ - Rate of decel increase
-    MAX_DECEL = 0.7  # m/s² - Upper limit
-    MIN_DECEL = 0.5  # m/s² - Lower limit
-
-    # Calculate required average deceleration
-    avg_decel = (current_speed * current_speed - target_speed * target_speed) / (2.0 * distance)
-
-    # Clamp to comfortable limits
-    decel_rate = np.clip(avg_decel, MIN_DECEL, MAX_DECEL)
-
-    # Calculate time to complete maneuver
-    completion_time = 2.0 * distance / (current_speed + target_speed)
-
-    return decel_rate, completion_time
-
   def update(self, radarless_model, secretgoodopenpilot_model, sm, frogpilot_toggles):
-    # Store the model type
-    self.secretgoodopenpilot_model = secretgoodopenpilot_model
-
     self.mpc.mode = 'blended' if sm['controlsState'].experimentalMode else 'acc'
 
     if len(sm['carControl'].orientationNED) == 3:
@@ -377,7 +256,7 @@ class LongitudinalPlanner:
     x, v, a, j, throttle_prob = self.parse_model(sm['modelV2'], self.v_model_error, v_ego, frogpilot_toggles.taco_tune)
     self.allow_throttle = throttle_prob > ALLOW_THROTTLE_THRESHOLD
 
-    if not self.allow_throttle and v_ego > 5.0 and self.secretgoodopenpilot_model:  # Don't clip at low speeds since throttle_prob doesn't account for creep
+    if not self.allow_throttle and v_ego > 5.0 and secretgoodopenpilot_model:  # Don't clip at low speeds since throttle_prob doesn't account for creep
       # MPC breaks when accel limits would cause negative velocity within the MPC horizon, so we clip the max accel limit at vEgo/T_MAX plus a bit of margin
       clipped_accel_coast = max(accel_coast, accel_limits_turns[0], -v_ego / T_IDXS_MPC[-1] + ACCEL_LIMIT_MARGIN)
       accel_limits_turns[1] = min(accel_limits_turns[1], clipped_accel_coast)
@@ -390,86 +269,30 @@ class LongitudinalPlanner:
 
     if radarless_model:
       model_leads = list(sm['modelV2'].leadsV3)
-      while len(self.lead_states) < len(model_leads):
-          self.lead_states.append(Lead(sm))
-      while len(self.lead_states) > len(model_leads):
-          self.lead_states.pop()
-
-      for index, model_lead in enumerate(model_leads):
-          self.lead_states[index].update(
-              model_lead.x[0],
-              model_lead.y[0],
-              model_lead.v[0],
-              model_lead.a[0],
-              model_lead.prob,
-              sm
-          )
-      self.lead_one = self.lead_states[0] if self.lead_states else Lead(sm)
-      self.lead_two = self.lead_states[1] if len(self.lead_states) > 1 else Lead(sm)
+      # TODO lead state should be invalidated if its different point than the previous one
+      lead_states = [self.lead_one, self.lead_two]
+      for index in range(len(lead_states)):
+        if len(model_leads) > index:
+          model_lead = model_leads[index]
+          lead_states[index].update(model_lead.x[0], model_lead.y[0], model_lead.v[0], model_lead.a[0], model_lead.prob)
+        else:
+          lead_states[index].reset()
     else:
       self.lead_one = sm['radarState'].leadOne
       self.lead_two = sm['radarState'].leadTwo
 
-    if self.lead_one.status:
-        # Only calculate dynamic response for radarless mode where lead_one is our custom Lead class
-        if radarless_model:
-            urgency, optimal_jerk = self.calculate_dynamic_response(self.lead_one)
-            v_rel = self.lead_one.vLead - self.x0[1]
-
-            # Dynamic weight adjustment
-            acceleration_jerk = 1.0 / (1 + urgency**2)
-            danger_jerk = 1.0 + urgency * 2.0
-            speed_jerk = np.clip(1.0 - urgency, 0.5, 1.0)
-
-            # Update MPC weights
-            self.mpc.set_weights(
-                acceleration_jerk=acceleration_jerk,
-                danger_jerk=danger_jerk,
-                speed_jerk=speed_jerk,
-                personality=sm['controlsState'].personality
-            )
-
-            # Update lead tau with hysteresis - only in radarless mode
-            target_tau = LEAD_ACCEL_TAU * (1 - 0.8 * urgency)
-            if target_tau < self.lead_one.aLeadTau:
-                self.lead_one.aLeadTau = target_tau
-            else:
-                self.lead_one.aLeadTau += (target_tau - self.lead_one.aLeadTau) * 0.2
-
-            # Store states for next iteration
-            self.prev_dRel = self.lead_one.dRel
-            self.prev_v_rel = v_rel
-        else:
-            # For radar-based system, use simpler logic
-            v_rel = self.lead_one.vRel
-            self.prev_dRel = self.lead_one.dRel
-            self.prev_v_rel = v_rel
-
-        # Integrate curve response with MPC weights
-        self.mpc.set_weights(
-            acceleration_jerk=sm['frogpilotPlan'].accelerationJerk * (1.0 + curve_urgency),
-            danger_jerk=sm['frogpilotPlan'].dangerJerk * (1.0 + curve_urgency * 0.5),
-            speed_jerk=sm['frogpilotPlan'].speedJerk,
-            personality=sm['controlsState'].personality
-        )
-
-        # Adjust speed target for curves
-        v_target = min(v_cruise, safe_speed)
-    else:
-        v_target = v_cruise
-
     # Update MPC with more aggressive jerk factors for rapid response
     self.mpc.set_weights(
-        acceleration_jerk=sm['frogpilotPlan'].accelerationJerk * 1.2,  # Increase base jerk
-        danger_jerk=sm['frogpilotPlan'].dangerJerk * 1.5,              # Increase danger jerk
-        speed_jerk=sm['frogpilotPlan'].speedJerk,
-        personality=sm['controlsState'].personality
+      sm['frogpilotPlan'].accelerationJerk * 1.2,  # Increase base jerk
+      sm['frogpilotPlan'].dangerJerk * 1.5,       # Increase danger jerk
+      sm['frogpilotPlan'].speedJerk,              # Keep speed jerk same
+      prev_accel_constraint,
+      personality=sm['controlsState'].personality
     )
     self.mpc.set_accel_limits(accel_limits_turns[0], accel_limits_turns[1])
     self.mpc.set_cur_state(self.v_desired_filter.x, self.a_desired)
-    self.mpc.update(self.lead_one, self.lead_two, v_target, x, v, a, j, radarless_model,
-                    sm['frogpilotPlan'].tFollow, sm['frogpilotCarState'].trafficModeActive,
-                    frogpilot_toggles, personality=sm['controlsState'].personality)
+    self.mpc.update(self.lead_one, self.lead_two, sm['frogpilotPlan'].vCruise, x, v, a, j, radarless_model, sm['frogpilotPlan'].tFollow,
+                    sm['frogpilotCarState'].trafficModeActive, frogpilot_toggles, personality=sm['controlsState'].personality)
 
     self.a_desired_trajectory_full = np.interp(CONTROL_N_T_IDX, T_IDXS_MPC, self.mpc.a_solution)
     self.v_desired_trajectory = np.interp(CONTROL_N_T_IDX, T_IDXS_MPC, self.mpc.v_solution)

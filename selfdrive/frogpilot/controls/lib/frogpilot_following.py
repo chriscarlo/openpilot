@@ -1,18 +1,12 @@
 from openpilot.common.numpy_fast import clip, interp
-
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import COMFORT_BRAKE, get_jerk_factor, get_safe_obstacle_distance, get_stopped_equivalence_factor, get_T_FOLLOW
-
 from openpilot.selfdrive.frogpilot.frogpilot_variables import CITY_SPEED_LIMIT, CRUISING_SPEED
-
 TRAFFIC_MODE_BP = [0., CITY_SPEED_LIMIT]
-
 class FrogPilotFollowing:
   def __init__(self, FrogPilotPlanner):
     self.frogpilot_planner = FrogPilotPlanner
-
     self.following_lead = False
     self.slower_lead = False
-
     self.acceleration_jerk = 0
     self.base_acceleration_jerk = 0
     self.base_speed_jerk = 0
@@ -23,7 +17,7 @@ class FrogPilotFollowing:
     self.stopped_equivalence_factor = 0
     self.t_follow = 0
 
-  def update(self, aEgo, controlsState, frogpilotCarState, lead_distance, stopping_distance, v_ego, v_lead, frogpilot_toggles):
+  def update(self, aEgo, controlsState, frogpilotCarState, lead_distance, stopping_distance, v_ego, v_lead, frogpilot_toggles, dynamic_brake=COMFORT_BRAKE):
     # Determine jerk factors based on traffic mode and vehicle acceleration
     if frogpilotCarState.trafficModeActive:
       if aEgo >= 0:
@@ -32,10 +26,8 @@ class FrogPilotFollowing:
       else:
         self.base_acceleration_jerk = interp(v_ego, TRAFFIC_MODE_BP, frogpilot_toggles.traffic_mode_jerk_deceleration)
         self.base_speed_jerk = interp(v_ego, TRAFFIC_MODE_BP, frogpilot_toggles.traffic_mode_jerk_speed_decrease)
-
       self.base_danger_jerk = interp(v_ego, TRAFFIC_MODE_BP, frogpilot_toggles.traffic_mode_jerk_danger)
       self.t_follow = interp(v_ego, TRAFFIC_MODE_BP, frogpilot_toggles.traffic_mode_t_follow)
-
     else:
       if aEgo >= 0:
         self.base_acceleration_jerk, self.base_danger_jerk, self.base_speed_jerk = get_jerk_factor(
@@ -65,7 +57,6 @@ class FrogPilotFollowing:
           frogpilot_toggles.custom_personalities,
           controlsState.personality
         )
-
       self.t_follow = get_T_FOLLOW(
         frogpilot_toggles.aggressive_follow,
         frogpilot_toggles.standard_follow,
@@ -73,17 +64,15 @@ class FrogPilotFollowing:
         frogpilot_toggles.custom_personalities,
         controlsState.personality
       )
-
     # Set current jerk values
     self.acceleration_jerk = self.base_acceleration_jerk
     self.danger_jerk = self.base_danger_jerk
     self.speed_jerk = self.base_speed_jerk
-
     # Determine if the ego vehicle is following the lead
     self.following_lead = self.frogpilot_planner.tracking_lead and lead_distance < (self.t_follow + 1) * v_ego
 
     if self.frogpilot_planner.tracking_lead:
-      self.safe_obstacle_distance = int(get_safe_obstacle_distance(v_ego, self.t_follow))
+      self.safe_obstacle_distance = int(get_safe_obstacle_distance(v_ego, self.t_follow, COMFORT_BRAKE))
       self.safe_obstacle_distance_stock = self.safe_obstacle_distance
 
       # Retrieve lead acceleration (a_lead) from frogpilotCarState
@@ -91,7 +80,6 @@ class FrogPilotFollowing:
         a_lead = frogpilotCarState.lead_vehicle.aLeadK  # Replace with the correct attribute if different
       else:
         a_lead = 0.0  # Default value when no lead vehicle is detected
-
       # Update stopped equivalence factor with both v_lead and a_lead
       try:
         self.stopped_equivalence_factor = int(get_stopped_equivalence_factor(v_lead, a_lead))
@@ -100,7 +88,6 @@ class FrogPilotFollowing:
         from openpilot.common.swaglog import cloudlog
         cloudlog.error(f"Error calculating stopped_equivalence_factor: {e}")
         self.stopped_equivalence_factor = int(get_stopped_equivalence_factor(v_lead, COMFORT_BRAKE))
-
       # Update follow-related values
       self.update_follow_values(lead_distance, stopping_distance, v_ego, v_lead, frogpilot_toggles)
     else:
@@ -109,22 +96,10 @@ class FrogPilotFollowing:
       self.stopped_equivalence_factor = 0
 
   def update_follow_values(self, lead_distance, stopping_distance, v_ego, v_lead, frogpilot_toggles):
-    # Offset by FrogAi for FrogPilot for a more natural approach to a faster lead
+    # Disabled FrogAI modifications while testing core following behavior
     if frogpilot_toggles.human_following and v_lead > v_ego:
-      distance_factor = max(lead_distance - (v_ego * self.t_follow), 1)
-      standstill_offset = max(stopping_distance - v_ego, 0) * max(v_lead - v_ego, 1)
-      acceleration_offset = clip((v_lead - v_ego) + standstill_offset - COMFORT_BRAKE, 1, distance_factor)
-      self.acceleration_jerk /= acceleration_offset
-      self.speed_jerk /= acceleration_offset
-      self.t_follow /= acceleration_offset
+      pass  # Removed faster lead logic
 
-    # Offset by FrogAi for FrogPilot for a more natural approach to a slower lead
     if (frogpilot_toggles.conditional_slower_lead or frogpilot_toggles.human_following) and v_lead < v_ego:
-      distance_factor = max(lead_distance - (v_lead * self.t_follow), 1)
-      far_lead_offset = max(lead_distance - (v_ego * self.t_follow) - stopping_distance + (v_lead - CITY_SPEED_LIMIT), 0)
-      braking_offset = clip((v_ego - v_lead) + far_lead_offset - COMFORT_BRAKE, 1, distance_factor)
-      if frogpilot_toggles.human_following:
-        self.acceleration_jerk *= braking_offset
-        self.speed_jerk *= braking_offset
-        self.t_follow /= braking_offset
-      self.slower_lead = braking_offset - far_lead_offset > 1
+      pass  # Removed slower lead logic
+      self.slower_lead = False  # Maintain expected state variable

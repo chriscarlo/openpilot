@@ -112,6 +112,11 @@ class FrogPilotVCruise:
     self.kf = VTSCKalmanFilter()
     self.curve_confidence = 1.0
 
+    # Add new attributes for curve handling
+    self.prev_curvature = 0.0
+    self.curvature_rate = 0.0
+    self.curve_confidence = 1.0
+
   def estimate_base_curvature(self, current_curvature, dt):
     self.curvature_rate = (current_curvature - self.last_curvature) / dt
     self.last_curvature = current_curvature
@@ -124,35 +129,161 @@ class FrogPilotVCruise:
 
     return max(self.base_curvature, 0.0001)
 
-  def update_curvature(self, x, y):
-    # Ensure there are enough data points
-    if len(x) < 4 or len(y) < 4:
-      return None
+  def update_curvature(self, x_points, y_points):
+    """
+    Enhanced version of current VTSC curvature calculation with improved confidence metrics
+    """
+    # Calculate curvature using three-point method
+    if len(x_points) >= 3 and len(y_points) >= 3:
+        x1, x2, x3 = x_points[0:3]
+        y1, y2, y3 = y_points[0:3]
 
-    # Compute curvature along the path
-    dx = np.diff(x)
-    dy = np.diff(y)
-    d2x = np.diff(dx)
-    d2y = np.diff(dy)
+        # Enhanced curvature calculation with better noise handling
+        dx1 = x2 - x1
+        dx2 = x3 - x2
+        dy1 = y2 - y1
+        dy2 = y3 - y2
 
-    # Calculate numerator and denominator separately
-    numerator = np.abs(d2x * dy[1:] - dx[1:] * d2y)
-    denom = (dx[1:]**2 + dy[1:]**2)**1.5
+        # More stringent division checks
+        if abs(dx1) > 1e-6 and abs(dx2) > 1e-6 and abs((dx1 + dx2) / 2.0) > 1e-6:
+            k1 = dy1 / dx1
+            k2 = dy2 / dx2
+            curvature = (k2 - k1) / ((dx1 + dx2) / 2.0)
 
-    # Handle nearly straight paths
-    straight_threshold = 1e-6
-    is_straight = denom < straight_threshold
+            # Update curvature rate
+            self.curvature_rate = (curvature - self.prev_curvature) / self.dt
+            self.prev_curvature = curvature
 
-    # Set curvature to 0 for straight segments, calculate normally for curves
-    curvature = np.zeros_like(denom)
-    curve_mask = ~is_straight
-    curvature[curve_mask] = numerator[curve_mask] / denom[curve_mask]
+            # Enhanced confidence metrics
+            # 1. Noise factor based on rate of change
+            noise_factor = np.clip(1.0 - abs(self.curvature_rate), 0.5, 1.0)
 
-    # Pad to match original length and clean up any remaining invalid values
-    curvature = np.insert(curvature, 0, curvature[0])
-    curvature = np.nan_to_num(curvature, nan=0.0, posinf=0.0, neginf=0.0)
+            # 2. Path straightness metric
+            path_variance = np.std(y_points) / (np.std(x_points) + 1e-6)
+            straightness_factor = np.clip(1.0 - path_variance, 0.3, 1.0)
 
-    return curvature
+            # 3. Point density metric
+            path_length = x_points[-1] - x_points[0]
+            if path_length > 0:
+                point_density = len(x_points) / path_length
+                density_factor = np.clip(point_density / 10.0, 0.5, 1.0)
+            else:
+                density_factor = 0.5
+
+            # 4. Temporal consistency
+            temporal_factor = np.clip(1.0 - min(abs(self.curvature_rate), 1.0), 0.4, 1.0)
+
+            # Combine confidence metrics
+            self.curve_confidence = np.mean([
+                noise_factor * 1.0,
+                straightness_factor * 1.2,
+                density_factor * 0.8,
+                temporal_factor * 1.0
+            ])
+
+            return curvature
+
+    self.curve_confidence = 0.0
+    return 0.0
+
+  def get_safe_speed(self, curve_urgency):
+    """
+    Calculate a safe speed based on curve urgency.
+    """
+    # Define speed constants (~120 mph max, ~11 mph min)
+    MAX_SAFE_SPEED = 54.0  # m/s (~120 mph)
+    MIN_SAFE_SPEED = 5.0   # m/s (~11 mph)
+
+    # Make safety margin proportional to curve urgency
+    # Reduced base safety margin to allow higher speeds on straights
+    SAFETY_MARGIN = 1.5 * curve_urgency  # More margin in curves, less on straights
+
+    # Calculate safe speed inversely proportional to curve urgency
+    safe_speed = MAX_SAFE_SPEED - (curve_urgency * (MAX_SAFE_SPEED - MIN_SAFE_SPEED))
+    safe_speed = np.clip(safe_speed, MIN_SAFE_SPEED, MAX_SAFE_SPEED)
+
+    # Apply dynamic safety margin
+    return max(safe_speed - SAFETY_MARGIN, MIN_SAFE_SPEED)
+
+  def calculate_curve_response(self, model_position, frogpilot_toggles):
+    """
+    Calculate curve response with professional driver-like behavior.
+    """
+    x_points = model_position.x
+    y_points = model_position.y
+
+    # Constants for professional driving behavior
+    COMFORT_DECEL = 0.6  # Target deceleration rate (m/s²)
+    MIN_CURVE_SPEED = 5.0  # Minimum speed in curves (m/s)
+    PLANNING_HORIZON = 50.0  # How far ahead to look (m)
+    ENTRY_MARGIN = 10.0  # Distance before curve for settling (m)
+
+    max_curvature = 0.0
+    distance_to_curve = float('inf')
+    curve_entry_point = 0.0
+
+    # First pass: Identify significant curves and their entry points
+    for i in range(len(x_points) - 2):
+        if x_points[i] > PLANNING_HORIZON:
+            break
+
+        # Calculate local curvature using three points
+        if i < len(x_points) - 2:
+            dx1 = x_points[i+1] - x_points[i]
+            dx2 = x_points[i+2] - x_points[i+1]
+            dy1 = y_points[i+1] - y_points[i]
+            dy2 = y_points[i+2] - y_points[i+1]
+
+            if abs(dx1) > 0.1 and abs(dx2) > 0.1:
+                k1 = dy1 / dx1
+                k2 = dy2 / dx2
+                local_curvature = abs(k2 - k1) / ((dx1 + dx2) / 2.0)
+
+                # If this is the sharpest curve we've seen and it's significant
+                if local_curvature > max_curvature and local_curvature > 0.05:
+                    max_curvature = local_curvature
+                    distance_to_curve = x_points[i] - ENTRY_MARGIN
+                    curve_entry_point = x_points[i]
+
+    if max_curvature == 0.0:
+        return 0.0, float('inf')  # No significant curves found
+
+    # Calculate required speed for curve
+    safe_curve_speed = self.get_safe_speed(max_curvature)
+
+    # Current speed from vehicle state
+    v_current = self.x0[1]
+
+    if v_current <= safe_curve_speed:
+        return 0.0, float('inf')  # No deceleration needed
+
+    # Calculate deceleration profile
+    # Use s = ut + (1/2)at² to determine when to start braking
+    # Rearranged to solve for required distance
+    speed_delta = v_current - safe_curve_speed
+
+    # Required distance to achieve speed reduction with comfort decel
+    required_distance = (v_current * v_current - safe_curve_speed * safe_curve_speed) / (2 * COMFORT_DECEL)
+
+    # Calculate urgency based on available vs required distance
+    distance_ratio = distance_to_curve / max(required_distance, 0.1)
+
+    # Progressive urgency that ramps up if we're getting close to required braking distance
+    if distance_ratio > 1.5:  # We have plenty of distance
+        curve_urgency = 0.0
+    elif distance_ratio < 0.8:  # We're behind schedule
+        curve_urgency = min((0.8 - distance_ratio) * 2.0, 1.0)
+    else:  # We're in the sweet spot for initiating deceleration
+        curve_urgency = math.pow((1.5 - distance_ratio) / 0.7, 2.0)
+
+    # Calculate target speed based on urgency and curve speed
+    target_speed = safe_curve_speed + (v_current - safe_curve_speed) * (1 - curve_urgency)
+
+    # Add hysteresis to prevent oscillation
+    if abs(v_current - target_speed) < 1.0:  # 1 m/s deadband
+        target_speed = v_current
+
+    return curve_urgency, target_speed
 
   def calculate_deceleration_rate(self, curvature):
     base_deceleration = -0.25
@@ -449,5 +580,15 @@ class FrogPilotVCruise:
 
       targets = [self.mtsc_target, max(self.overridden_speed, self.slc_target) - v_ego_diff, self.vtsc_target]
       v_cruise = float(min([target if target > CRUISING_SPEED else v_cruise for target in targets]))
+
+    # Add curve handling section
+    if len(modelData.position.x) > 0:
+        curve_urgency, safe_speed = self.calculate_curve_response(
+            modelData.position,
+            frogpilot_toggles
+        )
+
+        # Adjust v_cruise based on curve response
+        v_cruise = min(v_cruise, safe_speed)
 
     return v_cruise
