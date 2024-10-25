@@ -17,8 +17,10 @@ from openpilot.selfdrive.frogpilot.frogpilot_variables import CRUISING_SPEED, MO
 class FrogPilotPlanner:
     def __init__(self, CP=None):
         self.params_memory = Params("/dev/shm/params")
-        self.CP = CP  # Store CP for use in LongitudinalPlanner
-        self.frogpilot_vcruise = FrogPilotVCruise()
+        self.CP = CP
+
+        # Pass FrogPilotPlanner instance (self) to match the existing constructor
+        self.frogpilot_vcruise = FrogPilotVCruise(FrogPilotPlanner=self)
 
         # Only initialize LongitudinalPlanner if CP is available
         self.longitudinal_planner = LongitudinalPlanner(self.CP) if self.CP is not None else None
