@@ -15,10 +15,13 @@ from openpilot.selfdrive.frogpilot.frogpilot_functions import MovingAverageCalcu
 from openpilot.selfdrive.frogpilot.frogpilot_variables import CRUISING_SPEED, MODEL_LENGTH, NON_DRIVING_GEARS, PLANNER_TIME, THRESHOLD
 
 class FrogPilotPlanner:
-    def __init__(self, CP):
+    def __init__(self, CP=None):
         self.params_memory = Params("/dev/shm/params")
         self.CP = CP  # Store CP for use in LongitudinalPlanner
         self.frogpilot_vcruise = FrogPilotVCruise()
+
+        # Only initialize LongitudinalPlanner if CP is available
+        self.longitudinal_planner = LongitudinalPlanner(self.CP) if self.CP is not None else None
 
         self.cem = ConditionalExperimentalMode(self)
         self.frogpilot_acceleration = FrogPilotAcceleration(self)
@@ -26,8 +29,6 @@ class FrogPilotPlanner:
         self.frogpilot_following = FrogPilotFollowing(self)
 
         self.lead_one = Lead()
-
-        self.longitudinal_planner = LongitudinalPlanner(self.CP)
 
         self.tracking_lead_mac = MovingAverageCalculator()
 
@@ -44,6 +45,13 @@ class FrogPilotPlanner:
         self.v_cruise = 0
 
     def update(self, carState, controlsState, frogpilotCarControl, frogpilotCarState, frogpilotNavigation, modelData, radarless_model, radarState, frogpilot_toggles):
+        # Update CP if it wasn't available at init
+        if self.CP is None and self.longitudinal_planner is None:
+            sm = messaging.SubMaster(['carParams'])
+            sm.update()
+            self.CP = sm['carParams']
+            self.longitudinal_planner = LongitudinalPlanner(self.CP)
+
         if radarless_model:
             model_leads = list(modelData.leadsV3)
             if len(model_leads) > 0:
