@@ -137,5 +137,7 @@ if __name__ == "__main__":
   if args.stream:
     start_juggler(layout=args.layout)
   else:
-    route_or_segment_name = DEMO_ROUTE if args.demo else args.route_or_segment_name.strip()
-    juggle_route(route_or_segment_name, args.can, args.layout, args.dbc, not args.no_migration)
+    route_or_segment_name = DEMO_ROUTE if args.demo else args.route_or_segment_name
+    if route_or_segment_name is None:
+      parser.error("route_or_segment_name is required unless using --demo or --stream")
+    juggle_route(route_or_segment_name.strip(), args.can, args.layout, args.dbc, not args.no_migration)
