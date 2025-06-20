@@ -21,8 +21,8 @@
 
 extern const LongitudinalLimits HYUNDAI_LONG_LIMITS;
 const LongitudinalLimits HYUNDAI_LONG_LIMITS = {
-  .max_accel = 200,   // 1/100 m/s2
-  .min_accel = -350,  // 1/100 m/s2
+  .max_accel = 550,   // 1/100 m/s2 (= 5.5 m/s2)
+  .min_accel = -650,  // 1/100 m/s2 (= -6.5 m/s2)
 };
 
 #define HYUNDAI_COMMON_TX_MSGS(scc_bus) \
