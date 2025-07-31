@@ -8,6 +8,12 @@ DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null && pwd )"
 ROOT="$DIR"/../
 cd "$ROOT"
 
+# On AGNOS/TICI, dependencies are pre-installed in /usr/local/venv
+if [ -f /AGNOS ]; then
+  echo "Running on AGNOS device - using pre-installed dependencies"
+  exit 0
+fi
+
 if ! command -v "uv" > /dev/null 2>&1; then
   echo "installing uv..."
   curl -LsSf https://astral.sh/uv/install.sh | sh

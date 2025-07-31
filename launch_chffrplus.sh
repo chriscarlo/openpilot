@@ -70,13 +70,17 @@ function launch {
   export PYTHONPATH="$PWD"
 
   # ensure we have the correct Python environment set up
-  if [ ! -f "$DIR/.venv/bin/activate" ]; then
+  # On TICI, use the system venv at /usr/local/venv
+  if [ -f /AGNOS ] && [ -d /usr/local/venv ]; then
+    export VIRTUAL_ENV=/usr/local/venv
+    export PATH="$VIRTUAL_ENV/bin:$PATH"
+  elif [ ! -f "$DIR/.venv/bin/activate" ]; then
     echo "Setting up Python environment..."
     $DIR/tools/install_python_dependencies.sh
+    source "$DIR/.venv/bin/activate"
+  else
+    source "$DIR/.venv/bin/activate"
   fi
-  
-  # activate the virtual environment for all subsequent Python operations
-  source "$DIR/.venv/bin/activate"
 
   # hardware specific init
   if [ -f /AGNOS ]; then
