@@ -20,6 +20,13 @@ echo "updating uv..."
 uv self update || true
 
 echo "installing python packages..."
+# Ensure we use Python 3.12 specifically for Cython module compatibility
+if command -v python3.12 > /dev/null 2>&1; then
+  echo "Using Python 3.12 for virtual environment..."
+  uv venv --python python3.12
+else
+  echo "WARNING: Python 3.12 not found, using default Python. This may cause Cython module compatibility issues."
+fi
 uv sync --frozen --all-extras
 source .venv/bin/activate
 

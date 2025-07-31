@@ -1,5 +1,8 @@
 venv/
 .venv/
+.venv312/
+.python-version
+.serena/
 .ci_cache
 .env
 .clang-format

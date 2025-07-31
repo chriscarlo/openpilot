@@ -69,6 +69,15 @@ function launch {
   ln -sfn $(pwd) /data/pythonpath
   export PYTHONPATH="$PWD"
 
+  # ensure we have the correct Python environment set up
+  if [ ! -f "$DIR/.venv/bin/activate" ]; then
+    echo "Setting up Python environment..."
+    $DIR/tools/install_python_dependencies.sh
+  fi
+  
+  # activate the virtual environment for all subsequent Python operations
+  source "$DIR/.venv/bin/activate"
+
   # hardware specific init
   if [ -f /AGNOS ]; then
     agnos_init
