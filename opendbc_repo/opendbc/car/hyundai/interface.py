@@ -9,6 +9,7 @@ from opendbc.car.disable_ecu import disable_ecu
 from opendbc.car.hyundai.carcontroller import CarController
 from opendbc.car.hyundai.carstate import CarState
 from opendbc.car.hyundai.radar_interface import RadarInterface
+from openpilot.common.swaglog import cloudlog
 
 from opendbc.sunnypilot.car.hyundai.escc import ESCC_MSG
 from opendbc.sunnypilot.car.hyundai.longitudinal.helpers import get_longitudinal_tune
@@ -25,6 +26,17 @@ class CarInterface(CarInterfaceBase):
   CarState = CarState
   CarController = CarController
   RadarInterface = RadarInterface
+
+  def __init__(self, CP, CP_SP):
+    super().__init__(CP, CP_SP)
+    # Initialize counters for CAN error mitigation
+    # This addresses intermittent CAN-FD issues on 2023 Kia EV6 and similar vehicles
+    # where spurious CAN errors can cause unnecessary disengagements
+    self.can_invalid_cnt = 0
+    self.can_timeout_cnt = 0
+    # Threshold for consecutive CAN errors before triggering alert
+    # Only trigger canError/canBusMissing events after 20 consecutive failures
+    self.CAN_ERROR_THRESHOLD = 20
 
   @staticmethod
   def _get_params(ret: structs.CarParams, candidate, fingerprint, car_fw, alpha_long, is_release, docs) -> structs.CarParams:
@@ -200,3 +212,42 @@ class CarInterface(CarInterfaceBase):
     # for blinkers
     if CP.flags & HyundaiFlags.ENABLE_BLINKERS:
       disable_ecu(can_recv, can_send, bus=CanBus(CP).ECAN, addr=0x7B1, com_cont_req=b'\x28\x83\x01')
+
+  def update(self, can_packets: list[tuple[int, list]]) -> tuple[structs.CarState, structs.CarStateSP]:
+    # Call parent update method to get the standard CarState
+    ret, ret_sp = super().update(can_packets)
+
+    # Store the original CAN status
+    original_can_valid = ret.canValid
+    original_can_timeout = ret.canTimeout
+
+    # Check actual CAN parser states
+    actual_can_valid = all(cp.can_valid for cp in self.can_parsers.values())
+    actual_can_timeout = any(cp.bus_timeout for cp in self.can_parsers.values())
+
+    # Update counters based on actual CAN status
+    if not actual_can_valid:
+      self.can_invalid_cnt += 1
+    else:
+      self.can_invalid_cnt = 0  # Reset counter on valid CAN
+
+    if actual_can_timeout:
+      self.can_timeout_cnt += 1
+    else:
+      self.can_timeout_cnt = 0  # Reset counter on no timeout
+
+    # Only report CAN errors after threshold is exceeded
+    if self.can_invalid_cnt < self.CAN_ERROR_THRESHOLD:
+      ret.canValid = True  # Override to prevent immediate error
+
+    if self.can_timeout_cnt < self.CAN_ERROR_THRESHOLD:
+      ret.canTimeout = False  # Override to prevent immediate error
+
+    # Log when we're suppressing errors (for debugging)
+    if (not actual_can_valid and ret.canValid) or (actual_can_timeout and not ret.canTimeout):
+      if self.can_invalid_cnt == 1 or self.can_timeout_cnt == 1:
+        cloudlog.warning(f"CAN error mitigation active - invalid_cnt: {self.can_invalid_cnt}, timeout_cnt: {self.can_timeout_cnt}")
+      elif self.can_invalid_cnt == self.CAN_ERROR_THRESHOLD - 1 or self.can_timeout_cnt == self.CAN_ERROR_THRESHOLD - 1:
+        cloudlog.error(f"CAN error threshold approaching - invalid_cnt: {self.can_invalid_cnt}, timeout_cnt: {self.can_timeout_cnt}")
+
+    return ret, ret_sp

@@ -33,6 +33,12 @@ a.out
 *.os
 *.os-*
 *.so
+# Allow third-party pre-built libraries
+!third_party/acados/larch64/lib/*.so
+!third_party/acados/x86_64/lib/*.so
+!third_party/acados/Darwin/lib/*.so
+!third_party/snpe/**/*.so
+!third_party/libyuv/**/*.so
 *.a
 *.clb
 *.class
