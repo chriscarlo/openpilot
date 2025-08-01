@@ -9,6 +9,7 @@
 
 #include "common/util.h"
 #include "selfdrive/ui/sunnypilot/qt/widgets/controls.h"
+#include "selfdrive/ui/sunnypilot/qt/offroad/settings/lateral/live_steer_ratio.h"
 
 LateralPanel::LateralPanel(SettingsWindowSP *parent) : QFrame(parent) {
   main_layout = new QStackedLayout(this);
@@ -72,6 +73,12 @@ LateralPanel::LateralPanel(SettingsWindowSP *parent) : QFrame(parent) {
     "",
     this);
   list->addItem(blinkerPauseLateralSettings);
+
+  list->addItem(horizontal_line());
+
+  // Live Steering Ratio
+  liveSteerRatioControl = new LiveSteerRatioControl();
+  list->addItem(liveSteerRatioControl);
 
   list->addItem(horizontal_line());
 

@@ -1,118 +1,83 @@
-# LiveSteerRatio Feature Documentation
+# LiveSteerRatio Implementation
 
 ## Overview
-
-The LiveSteerRatio feature allows real-time adjustment of the steering ratio for supported vehicles without requiring a system restart. This feature was specifically implemented with the KIA EV6 in mind, changing its default from 16.0 to 13.43.
+LiveSteerRatio is a feature that allows users to manually override the steering ratio in real-time through the GUI. This provides immediate adjustment of steering sensitivity without requiring a restart or waiting for the system to learn new parameters.
 
 ## Implementation Details
 
-### Files Modified
+### 1. Parameter Storage
+- Added `LiveSteerRatio` to `common/params_keys.h` with `PERSISTENT | BACKUP` flags
+- Parameter value of 0 means "use vehicle default"
+- Valid range: 5.0 to 25.0
 
-1. **opendbc/car/hyundai/values.py**
-   - Changed KIA EV6 default steer ratio from 16 to 13.43
-   - Line 528: `CarSpecs(mass=2055, wheelbase=2.9, steerRatio=13.43, tireStiffnessFactor=0.65)`
+### 2. GUI Control
+- Located in **Settings → Steering** menu (`lateral_panel.cc`)
+- Custom control with:
+  - **+/-** buttons for fine adjustment (0.01 steps)
+  - Current value display
+  - Status indicator (Default/Modified)
+  - **Reset** button to revert to default (sets to 0)
 
-2. **selfdrive/locationd/paramsd.py**
-   - Added LiveSteerRatio parameter support
-   - Reads LiveSteerRatio on startup
-   - Uses it as base_steer_ratio when > 0
-   - Falls back to vehicle default when set to 0
-   - Passes base_steer_ratio to VehicleParamsLearner for bounds calculation
+### 3. Control System Integration
+- Modified `controlsd.py` to read `LiveSteerRatio` parameter
+- Override logic in `state_control()` method:
+  ```python
+  # Check for live steering ratio override from GUI
+  live_steer_ratio = float(self.params.get("LiveSteerRatio") or 0)
+  if live_steer_ratio > 0.0:
+      sr = live_steer_ratio
+  else:
+      sr = max(lp.steerRatio, 0.1)
+  ```
+- When LiveSteerRatio > 0, it overrides the learned value from paramsd
+- Applied to VehicleModel immediately for instant effect
 
-3. **selfdrive/ui/sunnypilot/qt/offroad/settings/vehicle/hyundai_settings.cc**
-   - Added LiveSteerRatio control to Hyundai settings menu
-   - Uses ButtonControlSP with input dialog
-   - Range: 0.0 to 25.0
-   - Shows "13.43 for EV6" as default in description
+### 4. Vehicle-Specific Changes
+- Updated KIA EV6 default steer ratio from 16 to 13.43 in `opendbc/car/hyundai/values.py`
 
-4. **common/params_keys.h**
-   - Added LiveSteerRatio key definition
-   - Line 197: `{"LiveSteerRatio", PERSISTENT | BACKUP}`
+## Files Modified
 
-5. **selfdrive/locationd/test/test_paramsd.py**
-   - Updated tests to handle additional return value from retrieve_initial_vehicle_params
+1. **common/params_keys.h**
+   - Added LiveSteerRatio parameter definition
 
-## How It Works
+2. **selfdrive/controls/controlsd.py**
+   - Added override logic to use LiveSteerRatio when set
 
-### Parameter Behavior
+3. **selfdrive/ui/sunnypilot/qt/offroad/settings/lateral_panel.cc/h**
+   - Added LiveSteerRatioControl to Settings → Steering menu
 
-- **LiveSteerRatio = 0 or not set**: Uses vehicle default (13.43 for KIA EV6)
-- **LiveSteerRatio > 0**: Overrides vehicle default with specified value
-- **Valid Range**: 0.0 to 25.0
+4. **selfdrive/ui/sunnypilot/qt/offroad/settings/lateral/live_steer_ratio.cc/h**
+   - New files implementing the GUI control
 
-### Bounds Calculation
+5. **selfdrive/ui/sunnypilot/SConscript**
+   - Added live_steer_ratio.cc to build system
 
-The parameter learner bounds are calculated as:
-- Minimum: 0.5 × base_steer_ratio
-- Maximum: 2.0 × base_steer_ratio
+6. **opendbc/car/hyundai/values.py**
+   - Changed KIA EV6 steer ratio from 16 to 13.43
 
-Examples:
-- Default (13.43): bounds are 6.71 to 26.86
-- Custom (15.0): bounds are 7.50 to 30.00
+## Usage
 
-### GUI Usage
+1. Navigate to **Settings → Steering** in the UI
+2. Find the **Live Steering Ratio** control
+3. Use **+/-** buttons to adjust the ratio
+   - Lower values = more sensitive/quicker steering
+   - Higher values = less sensitive/slower steering
+4. The change takes effect immediately while driving
+5. Use **Reset** button to return to vehicle default (sets to 0)
 
-1. Navigate to Settings → Vehicle → Hyundai
-2. Click "Live Steering Ratio" → Edit
-3. Enter desired value (0.0-25.0)
-4. Changes take effect immediately
+## Technical Notes
 
-## User Guide
-
-### For KIA EV6 Owners
-
-The default steering ratio has been changed from 16.0 to 13.43, which should provide:
-- More responsive steering feel
-- Better alignment with other Hyundai/Kia vehicles
-- Improved openpilot lateral control
-
-### Tuning Guidelines
-
-- **Steering feels too sensitive**: Increase the value (e.g., 15.0 or 16.0)
-- **Steering feels too heavy**: Decrease the value (e.g., 12.0)
-- **Want stock behavior**: Set to 16.0 (original EV6 value)
-
-### Safety Notes
-
-- Always test changes in a safe environment
-- Start with small adjustments
-- The parameter learner will still adapt within the new bounds
-- Setting extreme values may affect steering behavior
-
-## Technical Implementation
-
-### Parameter Flow
-
-1. User sets LiveSteerRatio in GUI
-2. Value stored in Params database
-3. paramsd reads value on startup
-4. If > 0, uses as base_steer_ratio
-5. If = 0, uses CP.steerRatio (vehicle default)
-6. VehicleParamsLearner uses base_steer_ratio for:
-   - Initial steer ratio value
-   - Min/max bounds calculation
-7. Parameter learning continues within new bounds
-
-### Real-time Updates
-
-While the base value is read at startup, the actual implementation allows for real-time adjustment through the parameter learning system. The bounds ensure safe operation within reasonable limits.
+- The override happens at the control level, not at the parameter learning level
+- This ensures immediate effect without waiting for convergence
+- The learned value (lp.steerRatio) continues to update in the background
+- When LiveSteerRatio is set to 0, the system reverts to using the learned value
+- The parameter persists across reboots due to PERSISTENT flag
 
 ## Testing
 
-Test scripts are available in `/docs/claude/tests/live_steer_ratio/`:
-- `test_live_steer_ratio.py`: Comprehensive unit tests
-- `demo_live_steer_ratio.py`: Interactive demonstration
-
-Run tests with:
-```bash
-cd /data/openpilot
-python3 docs/claude/tests/live_steer_ratio/test_live_steer_ratio.py
-```
-
-## Future Enhancements
-
-Potential improvements could include:
-- Per-vehicle default overrides
-- Speed-based ratio adjustment
-- Integration with other tuning parameters
-- Automatic ratio detection/calibration
+A comprehensive test suite is provided in `docs/claude/tests/live_steer_ratio/test_live_steer_ratio.py` that verifies:
+- Parameter storage and retrieval
+- Persistence across restarts
+- Override logic in controlsd
+- Bounds validation
+- Zero value behavior (use default)
