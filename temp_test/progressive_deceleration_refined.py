@@ -17,7 +17,7 @@ from emergency_scenarios_definition import (
 
 
 # Deceleration limits (m/s²)
-# System constraint: Maximum -6.0 m/s²
+# Note: Longitudinal planner limits to 5.5-6.0 m/s²
 DECEL_LIMITS = {
     EmergencyLevel.NORMAL: -1.47,      # 0.15g
     EmergencyLevel.CAUTION: -2.45,     # 0.25g
@@ -78,7 +78,8 @@ class VisionOcclusionState:
 
         # Conservative safety factors
         if vision_status == VisionStatus.CURVE_EXCEEDS_FOV:
-            safety_factor = 1.0 + 0.1 * min(occlusion_duration, 2.0)
+            # 5% safety margin for blind corners
+            safety_factor = 1.0 + 0.05 * min(occlusion_duration, 2.0)
             self.extrapolated_curvature = self.last_valid_curvature * safety_factor
         elif vision_status == VisionStatus.PARTIAL_OCCLUSION:
             if current_curvature is not None:
@@ -88,9 +89,9 @@ class VisionOcclusionState:
                     (1 - blend_factor) * self.last_valid_curvature * 1.05
                 )
             else:
-                self.extrapolated_curvature = self.last_valid_curvature * 1.1
+                self.extrapolated_curvature = self.last_valid_curvature * 1.05
         else:  # LOST_ROAD
-            self.extrapolated_curvature = self.last_valid_curvature * 1.2
+            self.extrapolated_curvature = self.last_valid_curvature * 1.1
 
         return self.extrapolated_curvature
 
@@ -242,7 +243,7 @@ class RefinedProgressiveDecelerationController:
         if predicted_curvatures is not None and distances is not None and len(predicted_curvatures) > 0:
             # Minimal safety factor for blind corners
             if vision_status == VisionStatus.CURVE_EXCEEDS_FOV:
-                safety_factor = 1.0 + 0.1 * (1 - self.occlusion_state.confidence_decay_factor)
+                safety_factor = 1.0 + 0.05 * (1 - self.occlusion_state.confidence_decay_factor)
                 adjusted_curvatures = predicted_curvatures * safety_factor
             else:
                 adjusted_curvatures = predicted_curvatures

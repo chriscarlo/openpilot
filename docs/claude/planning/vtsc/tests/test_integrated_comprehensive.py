@@ -6,6 +6,8 @@ Tests both anticipatory control and emergency handling
 
 import numpy as np
 from dataclasses import dataclass
+import sys
+sys.path.insert(0, '../implementation')
 
 from enhanced_vtsc_integrated import (
     EnhancedVisionTurnSpeedController,

@@ -5,8 +5,6 @@ Comprehensive test of refined progressive deceleration controller
 
 import numpy as np
 from dataclasses import dataclass, asdict
-import sys
-sys.path.insert(0, '../implementation')
 
 from emergency_scenarios_definition import (
     EMERGENCY_SCENARIOS, EmergencyScenario, EmergencyLevel, VisionStatus
