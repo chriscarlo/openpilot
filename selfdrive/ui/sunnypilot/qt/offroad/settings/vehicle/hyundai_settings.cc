@@ -16,6 +16,28 @@ HyundaiSettings::HyundaiSettings(QWidget *parent) : BrandSettingsInterface(paren
   settingsLayout->setContentsMargins(0, 0, 0, 0);
   settingsLayout->addWidget(list);
 
+  // Add live steering ratio control first
+  ButtonControlSP *liveSteerRatioControl = new ButtonControlSP(tr("Live Steering Ratio"), tr("Edit"));
+  liveSteerRatioControl->setDescription(tr("Override steering ratio for real-time adjustment. Set to 0 to use vehicle default (13.43 for EV6)."));
+  connect(liveSteerRatioControl, &ButtonControlSP::clicked, [this]() {
+    QString current = QString::fromStdString(params.get("LiveSteerRatio"));
+    if (current.isEmpty()) current = "0.0";
+    
+    QString new_value = InputDialog::getText(tr("Live Steering Ratio"), this, 
+      tr("Enter steering ratio (0.0-25.0)\n0 = use vehicle default"), false, -1, current);
+    
+    if (!new_value.isEmpty()) {
+      bool ok;
+      float value = new_value.toFloat(&ok);
+      if (ok && value >= 0.0f && value <= 25.0f) {
+        params.put("LiveSteerRatio", QString::number(value, 'f', 2).toStdString());
+      } else {
+        ConfirmationDialog(tr("Value must be between 0.0 and 25.0"), tr("OK"), "", false, this).exec();
+      }
+    }
+  });
+  list->addItem(liveSteerRatioControl);
+
   longitudinalTuningToggle = new ButtonParamControlSP("HyundaiLongitudinalTuning", tr("Longitudinal Tuning"), "", "", {tr("Off"), tr("Dynamic"), tr("Predictive")}, 500);
   connect(longitudinalTuningToggle, &ButtonParamControlSP::buttonClicked, this, &HyundaiSettings::updateSettings);
   list->addItem(longitudinalTuningToggle);

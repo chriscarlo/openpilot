@@ -32,7 +32,7 @@ class TestParamsd:
     params.put("CarParamsPrevRoute", CP.as_builder().to_bytes())
 
     migrate_cached_vehicle_params_if_needed(params) # this is not tested here but should not mess anything up or throw an error
-    sr, sf, offset, p_init = retrieve_initial_vehicle_params(params, CP, replay=True, debug=True)
+    sr, sf, offset, p_init, _ = retrieve_initial_vehicle_params(params, CP, replay=True, debug=True)
     np.testing.assert_allclose(sr, msg.liveParameters.steerRatio)
     np.testing.assert_allclose(sf, msg.liveParameters.stiffnessFactor)
     np.testing.assert_allclose(offset, msg.liveParameters.angleOffsetAverageDeg)
@@ -52,7 +52,7 @@ class TestParamsd:
     params.remove("LiveParametersV2")
 
     migrate_cached_vehicle_params_if_needed(params)
-    sr, sf, offset, _ = retrieve_initial_vehicle_params(params, CP, replay=True, debug=True)
+    sr, sf, offset, _, _ = retrieve_initial_vehicle_params(params, CP, replay=True, debug=True)
     np.testing.assert_allclose(sr, msg.liveParameters.steerRatio)
     np.testing.assert_allclose(sf, msg.liveParameters.stiffnessFactor)
     np.testing.assert_allclose(offset, msg.liveParameters.angleOffsetAverageDeg)

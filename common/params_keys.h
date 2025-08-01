@@ -194,6 +194,7 @@ inline static std::unordered_map<std::string, uint32_t> keys = {
     {"HyundaiLongitudinalTuning", PERSISTENT | BACKUP},
 
     // Hyundai Longitudinal Tuning Live Parameters
+    {"LiveSteerRatio", PERSISTENT | BACKUP},
     {"LongTuningCustomToggle", PERSISTENT | BACKUP},
     {"LongTuningVEgoStopping", PERSISTENT | BACKUP},
     {"LongTuningVEgoStarting", PERSISTENT | BACKUP},
