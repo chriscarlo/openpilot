@@ -1,8 +1,7 @@
 import cereal.messaging as messaging
 from openpilot.common.realtime import DT_DMON
-from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.stat_live import RunningStatFilter
-from openpilot.selfdrived.events import Events
+from openpilot.selfdrive.selfdrived.events import Events
 
 # Minimal settings class to maintain interface compatibility
 class DRIVER_MONITOR_SETTINGS:
@@ -17,20 +16,20 @@ class DriverMonitoring:
     if settings is None:
       settings = DRIVER_MONITOR_SETTINGS()
     self.settings = settings
-    
+
     # Properties accessed by dmonitoringd.py
     self.always_on = always_on
     self.wheel_on_right = rhd_saved
     self.wheelpos_learner = RunningStatFilter()
-    
+
     # Properties accessed by tests
     self.current_events = Events()
     self.awareness = 1.0
-    
+
   def run_step(self, sm):
     # No-op - all monitoring disabled
     pass
-    
+
   def get_state_packet(self, valid=True):
     # Return nominal values for all fields
     dat = messaging.new_message('driverMonitoringState', valid=valid)
@@ -53,10 +52,10 @@ class DriverMonitoring:
       "isRHD": self.wheel_on_right,
     }
     return dat
-    
+
   # Methods needed for tests but can be no-ops
   def _update_states(self, driver_state, cal_rpy, car_speed, op_engaged):
     pass
-    
+
   def _update_events(self, driver_engaged, op_engaged, standstill, wrong_gear, car_speed):
     pass
