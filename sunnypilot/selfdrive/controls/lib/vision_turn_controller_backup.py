@@ -269,19 +269,6 @@ class VisionTurnController:
   def intervention_required(self):
     return self._intervention_required
 
-  # Physics script properties for external access
-  @property
-  def apex_detected(self):
-    return self._apex_detected
-
-  @property
-  def past_apex(self):
-    return self._past_apex
-
-  @property
-  def acceleration_embargo_lifted(self):
-    return self._acceleration_embargo_lifted
-
   def _reset(self):
     self._current_lat_acc = 0.
     self._max_v_for_current_curvature = 0.
@@ -295,18 +282,6 @@ class VisionTurnController:
     self._time_at_current_level = 0.0
     self._critical_situation_time = 0.0
     self._intervention_required = False
-
-    # Physics script features
-    self.curvature_trajectory = []
-    self.target_speeds_trajectory = []
-    self.filtered_curvature = 0.0
-    self.physics_max_pred_lat_acc = 0.0
-    self._apex_detected = False
-    self._past_apex = False
-    self._acceleration_embargo_lifted = False
-    self._last_filtered_curvature = 0.0
-    self._curvature_ema_ratio = 0.3
-    self._past_apex_steps = 0  # Count steps since past apex
 
   def _update_params(self):
     tm = time.time()
@@ -424,94 +399,12 @@ class VisionTurnController:
     else:
       return level_limit
 
-  def _original_curvature_based_lat_accel(self, abs_curvature_scaled: float) -> float:
-    """Calculate lateral acceleration based on curvature - exact physics script implementation"""
-    high_accel = 1.4  # Tuned down from original 3.12
-    low_accel = 1.5
-    span = high_accel - low_accel
-    center_curvature = 0.080  # TUNED: Increased from 0.060
-    k = 75
-    reduction = span / (1.0 + math.exp(-k * (abs_curvature_scaled - center_curvature)))
-    lat_acc = high_accel - reduction
-    return max(low_accel, min(lat_acc, high_accel))
-
-  def _curvature_to_speed(self, curvature: float) -> float:
-    """Convert curvature to safe speed - exact physics script implementation"""
-    if curvature <= 1e-7:
-      return 200.0  # Very high speed for straight roads
-
-    # Calculate safe lateral acceleration for this curvature
-    safe_lat_accel = self._original_curvature_based_lat_accel(abs(curvature))
-
-    # Calculate safe speed: v = sqrt(a_lat / curvature)
-    safe_speed = math.sqrt(safe_lat_accel / abs(curvature))
-
-    # Apply reasonable limits
-    return max(5.6, min(safe_speed, 50.0))  # 5.6 m/s = 20 km/h minimum
-
   def _update_enhanced_calculations(self, sm, pred_curvatures):
     """Enhanced calculations for anticipatory control"""
     current_time = time.time()
     dt = current_time - self._last_update_time if self._last_update_time > 0 else 0.05
     self._last_update_time = current_time
     self._time_at_current_level += dt
-
-    # PHYSICS SCRIPT INTEGRATION - Model data ingestion from modelV2
-    model_data = sm['modelV2'] if sm.valid.get('modelV2', False) else None
-    if model_data is not None:
-      # Extract orientation rates and velocities - EXACT PHYSICS SCRIPT METHOD
-      orientation_rates = np.array(model_data.orientationRate.z)
-      velocities = np.array(model_data.velocity.x)
-
-      # Calculate curvature trajectory: curvature = orientation_rate / velocity
-      self.curvature_trajectory = []
-      self.target_speeds_trajectory = []
-
-      for i in range(min(len(orientation_rates), len(velocities), 33)):
-        if abs(velocities[i]) > 0.1:  # Avoid division by zero
-          curvature = abs(orientation_rates[i] / velocities[i])
-          target_speed = self._curvature_to_speed(curvature)
-        else:
-          curvature = 0.0
-          target_speed = 50.0
-
-        self.curvature_trajectory.append(curvature)
-        self.target_speeds_trajectory.append(target_speed)
-
-      # EMA filtering of current curvature - EXACT PHYSICS SCRIPT METHOD
-      if len(self.curvature_trajectory) > 0:
-        current_curvature = self.curvature_trajectory[0]
-        self.filtered_curvature = (self._curvature_ema_ratio * current_curvature +
-                                 (1 - self._curvature_ema_ratio) * self._last_filtered_curvature)
-        self._last_filtered_curvature = self.filtered_curvature
-
-      # APEX DETECTION - EXACT PHYSICS SCRIPT LOGIC
-      if len(self.curvature_trajectory) > 0 and self._v_ego > 0.1:
-        # Calculate maximum predicted lateral acceleration
-        self.physics_max_pred_lat_acc = max([curvature * (self._v_ego ** 2) for curvature in self.curvature_trajectory])
-
-        # Apex detection using curvature ratio - EXACT PHYSICS SCRIPT METHOD
-        curvature_ratio = self.filtered_curvature / max(self.physics_max_pred_lat_acc / (self._v_ego**2), 1e-6)
-
-        # Update apex detection state
-        if not self._apex_detected and curvature_ratio >= 0.7:
-          self._apex_detected = True
-
-        # Past apex detection - EXACT PHYSICS SCRIPT LOGIC
-        if self._apex_detected and curvature_ratio < 0.7:
-          if not self._past_apex:
-            self._past_apex = True
-            self._past_apex_steps = 0  # Reset counter when first detecting past apex
-
-        # Count steps since past apex
-        if self._past_apex:
-          self._past_apex_steps += 1
-
-        # Acceleration embargo lifting - PHYSICS SCRIPT LOGIC
-        if self._past_apex and not self._acceleration_embargo_lifted:
-          # Simple approach: lift embargo after 3 steps past apex
-          if self._past_apex_steps >= 3:
-            self._acceleration_embargo_lifted = True
 
     # Get model confidence
     model_data = sm['modelV2'] if sm.valid.get('modelV2', False) else None
@@ -793,33 +686,6 @@ class VisionTurnController:
     elif self.state == VisionTurnSpeedControlState.leaving:
       # When leaving, we provide a comfortable acceleration to regain speed.
       a_target = _LEAVING_ACC
-
-    # PHYSICS SCRIPT: Post-apex acceleration logic
-    apex_acceleration_active = False
-    if self._past_apex and self._acceleration_embargo_lifted and self.filtered_curvature > 1e-7:
-      # Calculate target speed using physics script method
-      physics_safe_speed = self._curvature_to_speed(self.filtered_curvature)
-
-      # Apply apex recovery factor - EXACT PHYSICS SCRIPT LOGIC
-      apex_recovery_factor = 1.4  # Tuned recovery factor
-      target_speed = physics_safe_speed * apex_recovery_factor
-
-      # Conservative cruise speed estimate
-      estimated_cruise = min(self._v_cruise_setpoint, 30.0)
-      target_speed = max(5.6, min(target_speed, estimated_cruise * 1.2))
-
-      # Calculate acceleration command based on speed difference
-      speed_error = target_speed - self._v_ego
-
-      # Apply apex acceleration if speed error warrants it
-      if speed_error > 0.2:  # Tuned threshold for responsiveness
-        apex_acceleration_active = True
-        dt = 0.05  # 20Hz matching physics script
-        acceleration_command = min(speed_error / dt, 2.0)  # Limit to 2.0 m/s² max
-        a_target = acceleration_command
-
-        # Override current decel for immediate response
-        self._current_decel = a_target
 
     # update solution values.
     self._a_target = a_target

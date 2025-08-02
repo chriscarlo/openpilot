@@ -8,6 +8,18 @@ to establish performance baseline before enhancements
 import numpy as np
 import sys
 from dataclasses import dataclass
+try:
+    from scipy import signal, optimize, interpolate
+    from scipy.integrate import odeint
+    SCIPY_AVAILABLE = True
+except ImportError:
+    SCIPY_AVAILABLE = False
+    print("Warning: scipy not available, using basic analysis")
+try:
+    import pandas as pd
+    PANDAS_AVAILABLE = True
+except ImportError:
+    PANDAS_AVAILABLE = False
 
 sys.path.insert(0, '.')
 
@@ -48,6 +60,61 @@ class TestResult:
     final_speed_error: float
     reached_target: bool
     details: dict
+    trajectory: dict = None  # Store full trajectory for analysis
+
+def calculate_jerk(accelerations: list[float], dt: float) -> list[float]:
+    """Calculate jerk (derivative of acceleration) using signal processing"""
+    if len(accelerations) < 2:
+        return [0.0]
+
+    if SCIPY_AVAILABLE and len(accelerations) >= 5:
+        # Use Savitzky-Golay filter for smooth differentiation
+        window_length = min(5, len(accelerations) if len(accelerations) % 2 == 1 else len(accelerations)-1)
+        jerks = signal.savgol_filter(accelerations,
+                                     window_length=window_length,
+                                     polyorder=min(2, window_length-1),
+                                     deriv=1) / dt
+    else:
+        jerks = np.gradient(accelerations) / dt
+
+    return jerks.tolist()
+
+def analyze_trajectory_comfort(speeds: list[float], accels: list[float], dt: float) -> dict:
+    """Analyze trajectory comfort metrics using advanced signal processing"""
+    speeds_np = np.array(speeds)
+    accels_np = np.array(accels)
+
+    # Calculate jerk
+    jerks = calculate_jerk(accels, dt)
+    jerks_np = np.array(jerks)
+
+    # Calculate ride comfort metrics
+    rms_accel = np.sqrt(np.mean(accels_np**2))
+    rms_jerk = np.sqrt(np.mean(jerks_np**2))
+
+    # Frequency analysis if scipy available
+    if SCIPY_AVAILABLE and len(accels) > 10:
+        freqs, psd = signal.welch(accels_np, fs=1/dt, nperseg=min(len(accels)//4, 256))
+        dominant_freq = freqs[np.argmax(psd)]
+
+        # ISO 2631 weighted acceleration (simplified)
+        # For 20Hz sampling (dt=0.05), nyquist freq is 10Hz
+        # Use a lowpass filter at 8Hz to avoid human discomfort frequencies
+        b, a = signal.butter(4, 8.0, btype='low', fs=1/dt)
+        weighted_accel = signal.filtfilt(b, a, accels_np)
+        comfort_index = np.sqrt(np.mean(weighted_accel**2))
+    else:
+        dominant_freq = 0.0
+        comfort_index = rms_accel
+
+    return {
+        'rms_accel': rms_accel,
+        'rms_jerk': rms_jerk,
+        'max_jerk': np.max(np.abs(jerks_np)),
+        'dominant_freq': dominant_freq,
+        'comfort_index': comfort_index,
+        'smoothness': 1.0 / (1.0 + rms_jerk)  # Higher is smoother
+    }
 
 def simulate_curve_scenario(controller, scenario_name: str,
                           v_ego_kph: float, curve_radius_m: float,
@@ -70,53 +137,66 @@ def simulate_curve_scenario(controller, scenario_name: str,
     v_target_physics = np.sqrt(lateral_limit / curvature) if curvature > 0 else 100.0
 
     # Initialize controller state
-    class MockSM:
+    class MockSM(dict):
+        """Mock SubMaster that acts like both dict and object"""
         def __init__(self):
+            super().__init__()
             self.valid = {'modelV2': True}
+            self['modelV2'] = MockModelData()
+            self['carState'] = MockCarState()
 
     sm = MockSM()
-    sm.modelV2 = MockModelData()
-    sm.carState = MockCarState()
-    sm['modelV2'] = sm.modelV2
-    sm['carState'] = sm.carState
-
-    # Make dict-like access work
-    sm.__getitem__ = lambda self, key: getattr(self, key)
 
     # Tracking variables
     time_sim = 0.0
     distance_remaining = distance_to_curve_m
     max_decel = 0.0
     reached_target = False
+    # Trajectory storage
+    times = []
     speeds = []
-    decels = []
+    accels = []
+    distances = []
 
     # Run simulation
     while distance_remaining > -10 and time_sim < 10.0:
         # Simulate model predictions (33 points, ~2.5 seconds ahead)
         n_points = 33
-        times = np.linspace(0, 2.5, n_points)
-        distances = v_ego * times
+        t_pred = np.linspace(0, 2.5, n_points)
+        d_pred = v_ego * t_pred
 
-        # Create curvature predictions
+        # Create curvature predictions with realistic model behavior
         orientation_rates = []
         velocities = []
 
-        for i, d in enumerate(distances):
+        for i, d in enumerate(d_pred):
             if distance_remaining - d <= 0:  # In the curve
-                # Model would detect turn rate
+                # Model would detect turn rate with some prediction accuracy
                 turn_rate = curvature * v_ego  # rad/s
-                orientation_rates.append(abs(turn_rate))
+                # Add slight noise to simulate real model uncertainty
+                noise_factor = 1.0 + (0.02 * np.sin(2 * np.pi * i / n_points))
+                orientation_rates.append(abs(turn_rate * noise_factor))
             else:
-                orientation_rates.append(0.0)
-            velocities.append(max(v_ego, 1.0))  # Predicted velocity
+                # Approaching curve - model starts detecting it early
+                if distance_remaining - d < 20:  # Within 20m of curve
+                    early_detection = 0.1 * curvature * v_ego * (1 - (distance_remaining - d) / 20)
+                    orientation_rates.append(max(0, early_detection))
+                else:
+                    orientation_rates.append(0.0)
+            velocities.append(max(v_ego * (1 - 0.01 * i), 1.0))  # Predicted velocity with slight decay
 
         # Update model data
         sm['modelV2'].orientationRate.z = orientation_rates
         sm['modelV2'].velocity.x = velocities
 
+        # Simulate varying vision confidence
+        if vision_confidence < 0.7:
+            # Low confidence - add more noise
+            sm['modelV2'].laneLineProbs = [vision_confidence] * 3
+            sm['modelV2'].laneLineStds = [0.3 - 0.2 * vision_confidence] * 3
+
         # Update controller
-        controller.update(sm, enabled=True, v_ego=v_ego, a_ego=0.0,
+        controller.update(sm, enabled=True, v_ego=v_ego, a_ego=accels[-1] if accels else 0.0,
                          v_cruise_setpoint=v_ego_kph/3.6 + 5.0)  # Cruise slightly above current
 
         # Get acceleration command
@@ -128,9 +208,13 @@ def simulate_curve_scenario(controller, scenario_name: str,
         distance_remaining -= v_ego * dt
         time_sim += dt
 
-        # Track metrics
+        # Store trajectory
+        times.append(time_sim)
         speeds.append(v_ego)
-        decels.append(a_target)
+        accels.append(a_target)
+        distances.append(distance_remaining)
+
+        # Track metrics
         if a_target < max_decel:
             max_decel = a_target
 
@@ -143,20 +227,30 @@ def simulate_curve_scenario(controller, scenario_name: str,
     final_speed = v_ego
     speed_error = (final_speed - v_target_physics) / v_target_physics if v_target_physics > 0 else 0
 
-    # Determine success based on original criteria
+    # Analyze trajectory comfort
+    comfort_metrics = analyze_trajectory_comfort(speeds, accels, dt)
+
+    # Determine success based on multi-criteria evaluation
     success = False
     if "normal" in scenario_name or "gentle" in scenario_name:
         # Normal scenarios need smooth deceleration
-        success = reached_target and abs(max_decel) <= 2.45  # 0.25g
+        success = (reached_target and
+                  abs(max_decel) <= 2.45 and  # 0.25g
+                  comfort_metrics['max_jerk'] < 5.0 and  # Jerk limit
+                  comfort_metrics['smoothness'] > 0.7)
     elif "sharp" in scenario_name or "late" in scenario_name:
         # Challenging scenarios need to reach safe speed
-        success = final_speed <= v_target_physics * 1.1 and abs(max_decel) <= 6.0
+        success = (final_speed <= v_target_physics * 1.1 and
+                  abs(max_decel) <= 6.0 and
+                  comfort_metrics['max_jerk'] < 10.0)
     else:
         # Edge cases
         success = final_speed <= v_target_physics * 1.2
 
     print(f"  Final speed: {final_speed*3.6:.0f} km/h (target: {v_target_physics*3.6:.0f})")
     print(f"  Max decel: {abs(max_decel)/9.81:.2f}g")
+    print(f"  Max jerk: {comfort_metrics['max_jerk']:.1f} m/s³")
+    print(f"  Comfort index: {comfort_metrics['comfort_index']:.2f}")
     print(f"  Success: {'✓' if success else '✗'}")
 
     return TestResult(
@@ -169,7 +263,14 @@ def simulate_curve_scenario(controller, scenario_name: str,
             'final_speed_kph': final_speed * 3.6,
             'target_speed_kph': v_target_physics * 3.6,
             'time_to_target': time_sim if reached_target else None,
-            'min_distance': min(distance_remaining, 0)
+            'min_distance': min(distances),
+            'comfort_metrics': analyze_trajectory_comfort(speeds, accels, dt)
+        },
+        trajectory={
+            'times': times,
+            'speeds': speeds,
+            'accels': accels,
+            'distances': distances
         }
     )
 
@@ -230,10 +331,14 @@ def run_baseline_tests():
     # Performance metrics
     avg_decel = np.mean([r.max_decel_g for r in results])
     max_decel_overall = max(r.max_decel_g for r in results)
+    avg_comfort = np.mean([r.details['comfort_metrics']['comfort_index'] for r in results])
+    avg_smoothness = np.mean([r.details['comfort_metrics']['smoothness'] for r in results])
 
     print("\nPerformance Metrics:")
     print(f"- Average max deceleration: {avg_decel:.2f}g")
     print(f"- Maximum deceleration used: {max_decel_overall:.2f}g")
+    print(f"- Average comfort index: {avg_comfort:.2f}")
+    print(f"- Average smoothness: {avg_smoothness:.2f}")
     print(f"- Scenarios exceeding 0.6g: {sum(1 for r in results if r.max_decel_g > 0.6)}")
 
     # Areas needing improvement
@@ -253,7 +358,25 @@ def run_baseline_tests():
     print("- No vision occlusion handling")
     print("- No system constraint enforcement (-6.0 m/s²)")
     print("- No intervention triggering for impossible scenarios")
-    print("- Limited jerk control")
+    print("- Limited jerk control per emergency level")
+    print("- No explicit anticipation time calculation")
+
+    # Save detailed results for analysis
+    if PANDAS_AVAILABLE:
+        df_results = pd.DataFrame([{
+            'scenario': r.scenario_name,
+            'success': r.success,
+            'max_decel_g': r.max_decel_g,
+            'speed_error_%': r.final_speed_error * 100,
+            'max_jerk': r.details['comfort_metrics']['max_jerk'],
+            'comfort_index': r.details['comfort_metrics']['comfort_index'],
+            'smoothness': r.details['comfort_metrics']['smoothness']
+        } for r in results])
+
+        print("\n" + "="*80)
+        print("DETAILED METRICS TABLE")
+        print("="*80)
+        print(df_results.to_string(index=False))
 
     return results
 

@@ -21,6 +21,16 @@ import numpy as np
 import time
 import math
 from enum import IntEnum
+from dataclasses import dataclass
+
+# Advanced math libraries
+try:
+    from scipy import optimize, signal
+    from scipy.interpolate import interp1d
+    import scipy.ndimage as ndimage
+    SCIPY_AVAILABLE = True
+except ImportError:
+    SCIPY_AVAILABLE = False
 
 # Mock cereal states for testing
 class VisionTurnControllerState(IntEnum):
@@ -28,6 +38,38 @@ class VisionTurnControllerState(IntEnum):
     entering = 1
     turning = 2
     leaving = 3
+
+# Enhanced VTSC additions from our state-based version
+class EmergencyLevel(IntEnum):
+    NORMAL = 0
+    CAUTION = 1
+    WARNING = 2
+    CRITICAL = 3
+    INTERVENTION = 4
+
+class VisionStatus(IntEnum):
+    FULL_VISIBILITY = 0
+    PARTIAL_OCCLUSION = 1
+    CURVE_EXCEEDS_FOV = 2
+    LOST_ROAD = 3
+
+# System constraint: Maximum -6.0 m/s²
+DECEL_LIMITS = {
+    EmergencyLevel.NORMAL: -1.47,      # 0.15g
+    EmergencyLevel.CAUTION: -2.45,     # 0.25g
+    EmergencyLevel.WARNING: -3.92,     # 0.40g
+    EmergencyLevel.CRITICAL: -5.50,    # 0.56g
+    EmergencyLevel.INTERVENTION: -6.00  # 0.61g - System maximum
+}
+
+# Jerk limits for smooth transitions
+JERK_LIMITS = {
+    EmergencyLevel.NORMAL: 2.0,
+    EmergencyLevel.CAUTION: 3.0,
+    EmergencyLevel.WARNING: 4.0,
+    EmergencyLevel.CRITICAL: 6.0,
+    EmergencyLevel.INTERVENTION: 10.0
+}
 
 # Constants
 class CV:
@@ -86,6 +128,11 @@ _LEAVING_ACC = 0.5  # Confortble acceleration to regain speed while leaving a tu
 
 
 _DEBUG = False
+
+# Enhanced anticipation constants from our state-based version
+MIN_SAFE_DISTANCE = 10.0  # meters
+MIN_ANTICIPATION_TIME = 1.0  # seconds
+MAX_ANTICIPATION_TIME = 3.0  # seconds
 
 
 # Advanced vision-based functions extracted from chauffeur_vtsc.py
@@ -234,6 +281,67 @@ def _description_for_state(turn_controller_state):
     return 'TURNING'
   if turn_controller_state == VisionTurnControllerState.leaving:
     return 'LEAVING'
+  return 'UNKNOWN'
+
+
+@dataclass
+class VisionOcclusionState:
+    """Tracks vision occlusion and extrapolates curvature"""
+    last_valid_curvature: float = 0.0
+    last_valid_timestamp: float = 0.0
+    occlusion_start_time: float | None = None
+    extrapolated_curvature: float = 0.0
+    confidence_decay_factor: float = 1.0
+    vision_status: VisionStatus = VisionStatus.FULL_VISIBILITY
+    initialized: bool = False
+
+    def update(self, current_curvature: float | None,
+               predicted_curvatures: np.ndarray | None,
+               vision_status: VisionStatus,
+               current_time: float) -> float:
+        """Update occlusion state and return extrapolated curvature"""
+        self.vision_status = vision_status
+
+        # Initialize from predictions if needed
+        if not self.initialized and predicted_curvatures is not None and len(predicted_curvatures) > 0:
+            self.last_valid_curvature = np.max(predicted_curvatures)
+            self.last_valid_timestamp = current_time
+            self.initialized = True
+
+        if vision_status == VisionStatus.FULL_VISIBILITY and current_curvature is not None:
+            # Good visibility - update state
+            self.last_valid_curvature = current_curvature
+            self.last_valid_timestamp = current_time
+            self.occlusion_start_time = None
+            self.confidence_decay_factor = 1.0
+            self.extrapolated_curvature = current_curvature
+            self.initialized = True
+            return current_curvature
+
+        # Handle occlusion
+        if self.occlusion_start_time is None:
+            self.occlusion_start_time = current_time
+
+        occlusion_duration = current_time - self.occlusion_start_time
+        self.confidence_decay_factor = 0.5 ** (occlusion_duration / 2.0)
+
+        # Apply appropriate safety factors
+        if vision_status == VisionStatus.CURVE_EXCEEDS_FOV:
+            safety_factor = 1.0 + 0.05 * min(occlusion_duration, 2.0)
+            self.extrapolated_curvature = self.last_valid_curvature * safety_factor
+        elif vision_status == VisionStatus.PARTIAL_OCCLUSION:
+            if current_curvature is not None:
+                blend_factor = self.confidence_decay_factor * 0.5
+                self.extrapolated_curvature = (
+                    blend_factor * current_curvature +
+                    (1 - blend_factor) * self.last_valid_curvature * 1.05
+                )
+            else:
+                self.extrapolated_curvature = self.last_valid_curvature * 1.05
+        else:  # LOST_ROAD
+            self.extrapolated_curvature = self.last_valid_curvature * 1.1
+
+        return self.extrapolated_curvature
 
 
 class VisionTurnController:
@@ -269,6 +377,19 @@ class VisionTurnController:
     self._anticipation_start_time = 0.0
     self._curve_detection_distance = 0.0
 
+    # Enhanced VTSC additions
+    self._emergency_level = EmergencyLevel.NORMAL
+    self._time_at_current_level = 0.0
+    self._critical_situation_time = 0.0
+    self._occlusion_state = VisionOcclusionState()
+    self._last_update_time = 0.0
+    self._anticipation_time = 2.0
+    self._model_confidence = 1.0
+    self._intervention_required = False
+
+    # Modified decel limits for safety
+    self._max_decel_system = 6.0  # Hard system limit
+
     self._reset()
 
   @property
@@ -286,6 +407,14 @@ class VisionTurnController:
   @property
   def a_target(self):
     return self._a_target if self.is_active else self._a_ego
+
+  @property
+  def emergency_level(self):
+    return self._emergency_level
+
+  @property
+  def intervention_required(self):
+    return self._intervention_required
 
   @property
   def v_turn(self):
@@ -353,25 +482,87 @@ class VisionTurnController:
     self._prev_target_speed = self._v_ego if hasattr(self, '_v_ego') else 0.0
     self._filtered_curvature = 0.0
 
-
     # Reset anticipatory deceleration state
     self._is_decelerating_for_curve = False
     self._anticipation_start_time = 0.0
     self._curve_detection_distance = 0.0
+
+    # Reset enhanced state
+    self._emergency_level = EmergencyLevel.NORMAL
+    self._time_at_current_level = 0.0
+    self._critical_situation_time = 0.0
+    self._intervention_required = False
   def _update_params(self):
     tm = time.time()
     if tm > self._last_params_update + 5.0:
       self._is_enabled = self._params.get_bool("VisionTurnSpeedControl")
       self._last_params_update = tm
 
+  def _determine_emergency_level(self, required_decel: float,
+                               distance: float, v_ego: float) -> EmergencyLevel:
+    """Determine appropriate emergency level with vision awareness"""
+    required_g = abs(required_decel) / 9.81
+
+    # Consider vision status
+    vision_factor = 1.0
+    if self._occlusion_state.vision_status == VisionStatus.LOST_ROAD:
+      vision_factor = 0.8  # More conservative
+    elif self._occlusion_state.vision_status == VisionStatus.CURVE_EXCEEDS_FOV:
+      vision_factor = 0.9
+
+    # Speed factor
+    speed_factor = min(v_ego / 30.0, 1.0)
+
+    # Distance-based thresholds with vision adjustment
+    if distance > 60:
+      thresholds = [0.20, 0.30, 0.50, 0.70]
+    elif distance > 40:
+      thresholds = [0.17, 0.27, 0.42, 0.62]
+    else:
+      base_thresholds = [0.15, 0.25, 0.40, 0.60]
+      thresholds = [t * (1 - 0.1 * speed_factor) for t in base_thresholds]
+
+    # Apply vision factor
+    thresholds = [t * vision_factor for t in thresholds]
+
+    if required_g <= thresholds[0]:
+      return EmergencyLevel.NORMAL
+    elif required_g <= thresholds[1]:
+      return EmergencyLevel.CAUTION
+    elif required_g <= thresholds[2]:
+      return EmergencyLevel.WARNING
+    elif required_g <= thresholds[3]:
+      return EmergencyLevel.CRITICAL
+    else:
+      return EmergencyLevel.INTERVENTION
+
   def _update_calculations(self, sm):
     """Advanced vision-based curvature calculation using direct model outputs."""
     model_data = sm['modelV2'] if sm.valid.get('modelV2', False) else None
+    current_time = time.time()
 
     # Initialize defaults for edge cases
     current_curvature_signed = 0.0
     current_curvature = 0.0
     max_pred_curvature = 0.0
+
+    # Determine vision status first
+    if model_data is not None and hasattr(model_data, 'laneLineProbs') and len(model_data.laneLineProbs) > 2:
+      l_prob = model_data.laneLineProbs[1] if len(model_data.laneLineProbs) > 1 else 0.5
+      r_prob = model_data.laneLineProbs[2] if len(model_data.laneLineProbs) > 2 else 0.5
+      self._model_confidence = (l_prob + r_prob) / 2.0
+    else:
+      self._model_confidence = 0.5
+
+    # Determine vision status
+    if self._model_confidence < 0.3:
+      vision_status = VisionStatus.LOST_ROAD
+    elif self._model_confidence < 0.6 and self._current_lat_acc < 0.1:
+      vision_status = VisionStatus.PARTIAL_OCCLUSION
+    elif self._max_pred_lat_acc > 2.0 * 1.2:  # _A_LAT_REG_MAX equivalent
+      vision_status = VisionStatus.CURVE_EXCEEDS_FOV
+    else:
+      vision_status = VisionStatus.FULL_VISIBILITY
 
     # Use advanced method: direct model data access
     if (model_data is not None and
@@ -405,6 +596,21 @@ class VisionTurnController:
           orientation_rate_signed = model_data.orientationRate.z[0] if len(model_data.orientationRate.z) > 0 else 0.0
           if orientation_rate_signed < 0:
             current_curvature_signed = -current_curvature
+
+        # Update occlusion state with vision awareness
+        predicted_curvatures = curvature_array
+        current_curvature_for_occlusion = current_curvature if vision_status == VisionStatus.FULL_VISIBILITY else None
+
+        extrapolated_curvature = self._occlusion_state.update(
+            current_curvature_for_occlusion,
+            predicted_curvatures,
+            vision_status,
+            current_time
+        )
+
+        # Use extrapolated curvature if occluded
+        if vision_status != VisionStatus.FULL_VISIBILITY:
+            max_pred_curvature = extrapolated_curvature
 
         # Update filtered curvature using EMA
         self._filtered_curvature = ((1 - self._curvature_ema_ratio) * self._filtered_curvature +
@@ -490,59 +696,103 @@ class VisionTurnController:
         self.state = VisionTurnControllerState.disabled
 
   def _update_solution(self):
-    """Advanced solution calculation with multi-pass planning while maintaining state machine."""
+    """Enhanced solution with constrained physics and emergency levels"""
     dt = 0.05  # 20Hz
+    current_time = time.time()
+    self._time_at_current_level += dt
 
-    # Key change: Use advanced planning logic when we have meaningful curvature,
-    # regardless of state machine state (which is only for UI/logging)
     has_meaningful_curvature = (self._filtered_curvature > 1e-7 or self._max_pred_lat_acc > 0.5)
 
     if has_meaningful_curvature:
-      # Calculate target speed using advanced planning
+      # Step 1: Calculate physics-based target speed
       raw_target = self._plan_advanced_speed_trajectory()
 
-      # Apply dynamic scaling
-      scale_decel = dynamic_decel_scale(self._v_ego)
-      scale_jerk = dynamic_decel_scale(self._v_ego)  # Use same scaling for jerk
+      # Step 2: Calculate required deceleration
+      speed_diff = self._v_ego - raw_target
+      distance_to_target = self._v_overshoot_distance if self._lat_acc_overshoot_ahead else 100.0
 
-      # Compute acceleration command
-      accel_cmd = (raw_target - self._prev_target_speed) / dt
-
-      # Apply acceleration and jerk limits with dynamic scaling
-      pos_limit = self._max_accel
-      neg_limit = self._max_decel * scale_decel
-      accel_cmd = clip(accel_cmd, -neg_limit, pos_limit)
-
-      # Jerk-limit the change in acceleration
-      accel_diff = accel_cmd - self._current_accel
-
-      if accel_diff > 0:
-        max_delta = (self._max_jerk_accel * scale_jerk) * dt
-        if accel_diff > max_delta:
-          self._current_accel += max_delta
-        else:
-          self._current_accel = accel_cmd
-      elif accel_diff < 0:
-        max_delta = (self._max_jerk * scale_jerk) * dt
-        if accel_diff < -max_delta:
-          self._current_accel -= max_delta
-        else:
-          self._current_accel = accel_cmd
+      if speed_diff > 0 and distance_to_target > 0:
+        required_decel = -(speed_diff ** 2) / (2 * distance_to_target)
       else:
-        self._current_accel = accel_cmd
+        required_decel = 0.0
 
-      # Update target acceleration for compatibility
+      # Step 3: Determine emergency level
+      target_level = self._determine_emergency_level(
+        required_decel, distance_to_target, self._v_ego
+      )
+
+      # Step 4: Handle level transitions with hysteresis
+      if target_level != self._emergency_level:
+        should_transition = False
+
+        if target_level.value > self._emergency_level.value:
+          # Escalating - quick response
+          if self._time_at_current_level > 0.15:
+            should_transition = True
+        else:
+          # De-escalating - slower
+          if self._time_at_current_level > 2.0:
+            should_transition = True
+
+        if should_transition:
+          self._emergency_level = target_level
+          self._time_at_current_level = 0.0
+          _debug(f'Emergency level: {self._emergency_level.name}')
+
+      # Step 5: Calculate physics-based acceleration with dynamic scaling
+      scale_decel = dynamic_decel_scale(self._v_ego)
+      accel_cmd_physics = (raw_target - self._prev_target_speed) / dt
+
+      # Apply physics limits
+      pos_limit = self._max_accel
+      neg_limit_physics = self._max_decel * scale_decel
+      accel_cmd_physics = clip(accel_cmd_physics, -neg_limit_physics, pos_limit)
+
+      # Step 6: Apply emergency level constraints
+      level_limit = DECEL_LIMITS[self._emergency_level]
+      accel_cmd_constrained = max(accel_cmd_physics, level_limit)
+
+      # Step 7: Apply jerk limiting per emergency level
+      max_jerk = JERK_LIMITS[self._emergency_level]
+      accel_diff = accel_cmd_constrained - self._current_accel
+
+      if abs(accel_diff) > max_jerk * dt:
+        if accel_diff < 0:
+          self._current_accel -= max_jerk * dt
+        else:
+          self._current_accel += max_jerk * dt
+      else:
+        self._current_accel = accel_cmd_constrained
+
+      # Step 8: Final safety check - enforce system limit
+      self._current_accel = max(self._current_accel, -self._max_decel_system)
+
+      # Step 9: Check for intervention
+      if abs(required_decel) > abs(DECEL_LIMITS[EmergencyLevel.CRITICAL]):
+        self._critical_situation_time += dt
+      else:
+        self._critical_situation_time = 0.0
+
+      self._intervention_required = (
+        abs(required_decel) > abs(DECEL_LIMITS[EmergencyLevel.CRITICAL]) * 1.05 and
+        self._critical_situation_time > 0.3 and
+        self._emergency_level == EmergencyLevel.CRITICAL and
+        distance_to_target < 25
+      )
+
+      # Update outputs
       self._a_target = self._current_accel
-
-      # Update previous target speed to the actual planned target, not ego-relative
-      # This allows proper acceleration when the vision controller is active
       self._prev_target_speed = raw_target
 
+      _debug(f'Enhanced Physics: level={self._emergency_level.name}, '
+            f'decel={self._current_accel:.2f} m/s², '
+            f'vision={self._occlusion_state.vision_status.name}')
     else:
-      # No meaningful curvature - use basic logic
+      # No meaningful curvature
       self._a_target = self._a_ego
       self._current_accel = self._a_ego
       self._prev_target_speed = self._v_ego
+      self._emergency_level = EmergencyLevel.NORMAL
 
   def _find_time_index(self, times: np.ndarray, target_time: float, clip_high=False) -> int:
     """Helper to find an index in 'times' that is closest to 'target_time'."""
