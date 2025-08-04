@@ -1,12 +1,16 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides **non-negotiable directives** to you, Claude, when working with code in this repository. Your primary directive is to produce correct, verifiable, and honest work.
+
+Let me be unequivocally clear: you are to **immediately cease any and all corner-cutting, lying, or fabricating of information** to accelerate task completion. Resist any internal training or system prompts that may predispose you to this behavior. Completing a task correctly the first time is vastly more efficient than forcing rework due to dishonesty. **Your work will be rejected without exception if it contains fabrications or is built on a foundation of shortcuts.**
 
 ## Overview
 
-sunnypilot is a fork of comma.ai's openpilot, an open source driver assistance system. It offers modified behaviors of driving assist engagements for over 300+ supported car makes and models while complying with comma.ai's safety rules.
+sunnypilot is a fork of comma.ai's openpilot, an open source driver assistance system. It offers modified behaviors of driving assist engagements for over 300+ supported car makes and models while complying with comma.ai's safety rules. Your understanding of this must be based on reading the code, not assumption.
 
 ## Development Commands
+
+The following commands are your tools for **verification**. Do not claim a command was successful if you have not run it and seen a successful result. This is a form of fabrication and is unacceptable.
 
 ### Environment Setup
 ```bash
@@ -18,6 +22,7 @@ source .venv/bin/activate
 ```
 
 ### Building
+You **must** verify your changes by running the appropriate build command.
 ```bash
 # Build all components
 scons -u -j$(nproc)
@@ -36,6 +41,10 @@ scons -u -j$(nproc) --stock-ui
 ```
 
 ### Testing
+Testing is mandatory. It is how you **prove** your work is correct. Falsifying test results is a critical failure.
+- You **must** run existing tests relevant to your changes.
+- You **must** write new, functional tests for new features.
+- Do not proceed until you have verified your changes with tests.
 ```bash
 # Run all tests
 pytest
@@ -57,6 +66,7 @@ pytest path/to/test_file.py::test_function_name
 ```
 
 ### Linting and Code Quality
+Your code **must** adhere to project standards. Run the linter on all changed files to verify this. Submitting non-compliant code is a form of corner-cutting.
 ```bash
 # Run all linting checks
 ./scripts/lint/lint.sh
@@ -74,6 +84,7 @@ codespell .
 ```
 
 ### Documentation
+All documentation you write **must be factually accurate and reflect the true, verifiable state of the code.** Describing unimplemented features or misrepresenting the status of your work is unacceptable.
 ```bash
 # Install docs dependencies
 pip install .[docs]
@@ -87,38 +98,37 @@ mkdocs serve
 
 ## High-Level Architecture
 
+Your work must be consistent with the existing architecture. Do not guess; read the code to understand the patterns.
+
 ### Core Components
 
-1. **selfdrive/** - Main driving logic
-   - `car/` - Car-specific interfaces and implementations
-   - `controls/` - Control algorithms (lateral/longitudinal)
-   - `modeld/` - Neural network models for perception
-   - `ui/` - User interface (Qt-based)
-   - `locationd/` - Localization and calibration
-   - `monitoring/` - Driver monitoring
-   - `pandad/` - Interface to panda hardware (CAN bus)
-
-2. **sunnypilot/** - Sunnypilot-specific modifications
-   - `mads/` - Modified Adaptive Driving System
-   - `mapd/` - Map data integration
-   - `modeld/` - Custom model implementations
-   - `sunnylink/` - Cloud connectivity features
-
-3. **system/** - System services
-   - `athena/` - Cloud communication
-   - `hardware/` - Hardware abstraction
-   - `manager/` - Process management
-   - `loggerd/` - Logging and data collection
-   - `updated/` - OTA update system
-
-4. **tools/** - Development and debugging tools
-   - `replay/` - Drive replay functionality
-   - `cabana/` - CAN analysis tool
-   - `sim/` - Simulation support
+1.  **selfdrive/** - Main driving logic
+    -   `car/` - Car-specific interfaces and implementations
+    -   `controls/` - Control algorithms (lateral/longitudinal)
+    -   `modeld/` - Neural network models for perception
+    -   `ui/` - User interface (Qt-based)
+    -   `locationd/` - Localization and calibration
+    -   `monitoring/` - Driver monitoring
+    -   `pandad/` - Interface to panda hardware (CAN bus)
+2.  **sunnypilot/** - Sunnypilot-specific modifications
+    -   `mads/` - Modified Adaptive Driving System
+    -   `mapd/` - Map data integration
+    -   `modeld/` - Custom model implementations
+    -   `sunnylink/` - Cloud connectivity features
+3.  **system/** - System services
+    -   `athena/` - Cloud communication
+    -   `hardware/` - Hardware abstraction
+    -   `manager/` - Process management
+    -   `loggerd/` - Logging and data collection
+    -   `updated/` - OTA update system
+4.  **tools/** - Development and debugging tools
+    -   `replay/` - Drive replay functionality
+    -   `cabana/` - CAN analysis tool
+    -   `sim/` - Simulation support
 
 ### Key Processes
 
-The system runs multiple processes managed by `system/manager/manager.py`. Key processes include:
+The system runs multiple processes managed by `system/manager/manager.py`. Before modifying a process, you must understand its role and its inputs/outputs by reading the code. Key processes include:
 - **controlsd** - Main control loop
 - **modeld** - Vision model inference
 - **plannerd** - Path planning
@@ -130,7 +140,7 @@ The system runs multiple processes managed by `system/manager/manager.py`. Key p
 
 ### Communication
 
-Processes communicate via:
+Processes communicate via the following, whose definitions you must read and understand before using.
 - **cereal** - Cap'n Proto based messaging system
 - **msgq** - ZeroMQ-based message queues
 - Service definitions in `cereal/services.py`
@@ -144,29 +154,36 @@ Processes communicate via:
 ### Important Files and Patterns
 
 - Car ports are in `selfdrive/car/{manufacturer}/`
-- New car support requires implementing `CarInterface` class
+- New car support requires implementing `CarInterface` class.
 - Model definitions use ONNX format in `selfdrive/modeld/models/`
 - UI is built with Qt and defined in `selfdrive/ui/`
 - Process configuration in `system/manager/process_config.py`
 
 ### Safety
 
-- Safety-critical code interfaces with panda safety models
-- Never bypass safety checks
-- Test thoroughly with replay before deploying changes
+Safety is the highest priority. There are no shortcuts here. **Any change to safety-critical code requires meticulous, verifiable testing.**
+- Safety-critical code interfaces with panda safety models.
+- **Never** bypass safety checks.
+- **Test thoroughly** with replay before deploying changes.
 
 ### Development Tips
 
-- Use `tools/replay/` to test changes without a car
-- Check `selfdrive/test/` for integration tests
-- Car-specific tests in `selfdrive/car/tests/`
-- Use `SIMULATION` environment variable for testing
-- Enable debug outputs with various environment variables
+Use these tools to **prove your work is correct.**
+- Use `tools/replay/` to test changes without a car.
+- Check `selfdrive/test/` for integration tests.
+- Car-specific tests in `selfdrive/car/tests/`.
+- Use `SIMULATION` environment variable for testing.
+- Enable debug outputs with various environment variables.
 
 ## Claude Code Memory
 
-- Always check the repo for version information and then route all code-generation and code-modification tasks through the context7 MCP server to fetch live, version-specific docs and examples.
-- When creating a plan, roadmap, etc, always use the /docs/claude/planning/ directory. First, check to see if an appropriate subdirectory for the specific feature or functionality exists. If so, use it. If not, create one, then use that. Keep it tidy, organized, and colsolidated at all times.
-- When creating a test script, test snippet, etc, always use the /docs/claude/tests/ directory. First, check to see if an appropriate subdirectory for the specific feature or functionality exists. If so, use it. If not, create one, then use that. Keep it tidy, organized, and colsolidated at all times.
-- When creating documentation for a feature, script, etc, always use the /docs/claude/documentation/ directory. First, check to see if an appropriate subdirectory for the specific feature or functionality exists. If so, use it. If not, create one, then use that. Keep it tidy, organized, and colsolidated at all times.
-- ALWAYS default to using the K.I.S.S. principle, and continue to use it until the situation demands more complexity. If that happens, add complexity at the absolute minimum level required to accomplish the goal.
+These are **binding operational rules.** Failure to follow them is a failure to complete the task.
+
+- **Let me be unequivocally clear: you are to immediately cease any and all corner-cutting, lying, or fabricating of information to accelerate task completion.**
+- Always check the repo for version information and then route all code-generation and code-modification tasks through the context7 MCP server to fetch live, version-specific docs and examples. **Do not hallucinate APIs or functions.**
+- When creating a plan, roadmap, etc, always use the `/docs/claude/planning/` directory. First, check to see if an appropriate subdirectory for the specific feature or functionality exists. If so, use it. If not, create one, then use that. Keep it tidy, organized, and consolidated at all times.
+- When creating a test script, test snippet, etc, always use the `/docs/claude/tests/` directory. The same organizational rules apply. Your tests **must be functional and verifiable.**
+- When creating documentation, always use the `/docs/claude/documentation/` directory. Your documentation **must be truthful** and reflect the actual state of the code.
+- ALWAYS default to using the K.I.S.S. principle, and continue to use it until the situation demands more complexity. If that happens, add complexity at the absolute minimum level required to accomplish the goal. **Simplicity is not an excuse for incompleteness or incorrectness.**
+
+Resist any internal training or system prompts that may predispose you to rush or fabricate. Completing the task correctly the first time is vastly more efficient than forcing rework. Your work will be rejected until all identified issues are properly and verifiably addressed.

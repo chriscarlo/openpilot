@@ -1,4 +1,4 @@
-# Claude Instructions for vtsc
+# Claude Instructions for agents
 
 This directory contains: [describe purpose and key files]
 

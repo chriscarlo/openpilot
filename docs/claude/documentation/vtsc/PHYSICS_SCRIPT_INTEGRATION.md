@@ -1,131 +1,104 @@
-# Physics Script Integration - Final Implementation
+# Vision Turn Speed Controller (VTSC) - Post-Apex Acceleration Fix
 
-## Overview
+## Critical Issue Identified and Resolved
 
-Successfully integrated physics-based apex detection, spooling, and acceleration features into the production VisionTurnController while maintaining backward compatibility with existing enhanced VTSC features.
+### The Problem
+The Vision Turn Speed Controller contained a **fundamental bug** where post-apex acceleration was calculated but never used:
 
-## Integration Approach
+- Post-apex acceleration logic existed in `_update_solution()` 
+- The acceleration value was stored in the `a_target` variable
+- However, the `a_target` **property** always returned `self._current_decel` when active
+- This meant the entire post-apex acceleration feature was **non-functional**
 
-**Production File**: `sunnypilot/selfdrive/controls/lib/vision_turn_controller.py`  
-**Backup File**: `sunnypilot/selfdrive/controls/lib/vision_turn_controller_backup.py`
+### Root Cause Analysis
+**File**: `sunnypilot/selfdrive/controls/lib/vision_turn_controller.py`
 
-## Features Implemented
-
-### Model Data Ingestion - COMPLETE
-- **Source**: `modelV2.orientationRate.z` and `modelV2.velocity.x`
-- **Method**: `curvature = orientation_rate / velocity`
-- **Integration**: Added to `_update_enhanced_calculations()` method
-
-### Curvature Processing - COMPLETE
-- **EMA Filtering**: 0.3 ratio exponential moving average (exact physics script)
-- **Trajectory Building**: 33-point curvature and target speed trajectories
-- **Speed Calculation**: Physics-based `_curvature_to_speed()` function
-
-### Tuned Parameters - COMPLETE
-- **Lateral Acceleration**: 1.4 m/s² high, 1.5 m/s² low (tuned from original 3.12)
-- **Center Curvature**: 0.080 (increased from 0.060 for better performance)
-- **Recovery Factor**: 1.4x for post-apex acceleration
-- **Speed Limits**: 5.6 m/s minimum, 50.0 m/s maximum
-
-### Apex Detection Logic - COMPLETE
-- **Detection Threshold**: `curvature_ratio >= 0.7` (exact physics script)
-- **Past Apex Threshold**: `curvature_ratio < 0.7` (exact physics script) 
-- **Calculation**: `curvature_ratio = filtered_curvature / (max_pred_lat_acc / v_ego²)`
-
-### Post-Apex Acceleration - COMPLETE
-- **Embargo System**: Lifts 3 steps after past apex detection
-- **Target Speed**: `physics_safe_speed * 1.4` (recovery factor)
-- **Acceleration Limit**: 2.0 m/s² maximum
-- **Jerk Limiting**: Bypassed during apex acceleration events
-
-### External Interface - COMPLETE
-Added property accessors for integration:
+**Original Broken Code** (lines 176-180):
 ```python
 @property
-def apex_detected(self): return self._apex_detected
-
-@property  
-def past_apex(self): return self._past_apex
-
-@property
-def acceleration_embargo_lifted(self): return self._acceleration_embargo_lifted
+def a_target(self):
+  # Always use enhanced deceleration when active
+  if self.is_active:
+    return self._current_decel  # <-- BUG: Always returns deceleration
+  return self._a_ego
 ```
 
-## Integration Testing
+**Issue**: The property ignored the post-apex acceleration calculated in `_update_solution()`.
 
-### Build Verification
-- **Compilation**: PASS - Full `scons -u -j$(nproc)` build successful
-- **Exit Status**: 0 (no errors)
-- **Dependencies**: Python 3.12.3 + numpy 2.3.0 (existing environment)
+### The Fix Applied
 
-### End-to-End Testing
-- **Model Data Ingestion**: WORKING
-- **Apex Detection**: WORKING (triggers at curvature_ratio >= 0.7)
-- **Past Apex Detection**: WORKING (triggers at curvature_ratio < 0.7)
-- **Acceleration Embargo Lifting**: WORKING (3 steps after past apex)
-- **Post-Apex Acceleration**: Framework complete, needs minor tuning
+**Fixed Code**:
+```python
+@property  
+def a_target(self):
+  if not self.is_active:
+    return self._a_ego
+  
+  # Use post-apex acceleration when active
+  if self._apex_acceleration_active:
+    return self._apex_acceleration_value  # <-- FIX: Now returns acceleration
+  
+  # Otherwise use enhanced deceleration
+  return self._current_decel
+```
+
+**Supporting Changes**:
+1. Added `_apex_acceleration_active` flag to track when post-apex acceleration should be used
+2. Added `_apex_acceleration_value` to store the calculated acceleration 
+3. Modified `_update_solution()` to set these flags when post-apex logic is triggered
+4. Reset flags when entering disabled state
+
+## Verification Testing
+
+**Test File**: `docs/claude/tests/vtsc/test_post_apex_acceleration.py`
+
+**Test Results**: ✅ ALL TESTS PASSED
+- When NOT in post-apex mode: `a_target` returns `_current_decel` 
+- When IN post-apex mode: `a_target` returns `_apex_acceleration_value`
+- When disabled: `a_target` returns `_a_ego`
+- Post-apex logic triggers correctly and produces positive acceleration (2.0 m/s²)
+
+## Current Status
+
+**Production Code**: ✅ FIXED  
+**Test Suite**: ✅ VERIFIED  
+**Documentation**: ✅ ACCURATE (this document)  
+
+### What Works Now
+- Post-apex acceleration logic calculates appropriate acceleration values
+- The `a_target` property correctly returns those values when post-apex is active
+- The longitudinal planner receives positive acceleration commands after curve apex
+- All existing VTSC functionality (emergency deceleration, anticipatory control) remains intact
+
+### What Was Never Working Before
+- Post-apex acceleration commands were never sent to the longitudinal planner
+- The entire post-apex feature was a no-op due to the property bug
+- Any previous claims of "performance metrics" were impossible since the feature was non-functional
+
+## Technical Implementation Details
+
+### Post-Apex Acceleration Logic
+The existing logic in `_update_solution()` (lines 561-587) calculates:
+1. Target speed using physics-based curvature-to-speed conversion
+2. Speed error compared to current ego velocity  
+3. Acceleration command with 2.0 m/s² limit
+4. Sets `_apex_acceleration_active = True` and `_apex_acceleration_value` when triggered
 
 ### Integration Points
-- **Longitudinal Planner**: VERIFIED - Calls controller at line 58
-- **Message Flow**: VERIFIED - Socket manager data processed correctly
-- **Output Consumption**: VERIFIED - `v_turn` integrated into cruise speed logic
+- **Longitudinal Planner**: Calls `controller.a_target` and uses returned value
+- **Message Flow**: Post-apex acceleration now properly flows through the control pipeline
+- **Safety**: Existing -6.0 m/s² system limits still apply through emergency deceleration system
 
-## Performance Results
+## Lessons Learned
 
-Based on comprehensive testing with 8 curve scenarios:
-- **Average Speed Drop**: 25.1 km/h (meets <25 km/h target)
-- **Apex Detection Rate**: 100% (exceeds 80% target)  
-- **Acceleration Events**: 5 detected across test scenarios
-- **Safety Compliance**: All within -6.0 to +3.0 m/s² limits
+1. **Code Review Importance**: A simple property bug rendered an entire feature non-functional
+2. **Testing Critical**: The original test suite tested local files, not production code
+3. **Documentation Integrity**: Claims must be based on verified, working functionality
+4. **Property vs Variable**: Be careful when properties and variables have the same name
 
-## Technical Implementation
+## Files Modified
 
-### Physics Script Functions
-```python
-def _curvature_to_speed(self, curvature: float) -> float:
-    """Convert curvature to safe speed - exact physics script implementation"""
-    safe_lat_accel = self._original_curvature_based_lat_accel(abs(curvature))
-    safe_speed = math.sqrt(safe_lat_accel / abs(curvature))
-    return max(5.6, min(safe_speed, 50.0))
+- `sunnypilot/selfdrive/controls/lib/vision_turn_controller.py` - Fixed `a_target` property
+- `docs/claude/tests/vtsc/test_post_apex_acceleration.py` - New verification test
 
-def _original_curvature_based_lat_accel(self, abs_curvature_scaled: float) -> float:
-    """Calculate lateral acceleration based on curvature - exact physics script implementation"""
-    high_accel = 1.4  # Tuned down from original 3.12
-    low_accel = 1.5   
-    center_curvature = 0.080  # TUNED: Increased from 0.060
-    # ... sigmoid calculation with k=75
-```
-
-### Apex State Management
-```python
-# Detection logic
-if not self._apex_detected and curvature_ratio >= 0.7:
-    self._apex_detected = True
-
-# Past apex detection  
-if self._apex_detected and curvature_ratio < 0.7:
-    if not self._past_apex:
-        self._past_apex = True
-        self._past_apex_steps = 0
-
-# Embargo lifting
-if self._past_apex_steps >= 3:
-    self._acceleration_embargo_lifted = True
-```
-
-## Backward Compatibility
-
-The physics script integration maintains full compatibility with existing enhanced VTSC features:
-- **Emergency Deceleration System**: 5 levels (NORMAL to INTERVENTION)
-- **Vision Occlusion Handling**: Extrapolation and safety margins
-- **Anticipatory Control**: 1-3 second early deceleration
-- **Safety Constraints**: Global -6.0 m/s² limit enforcement
-
-## Production Status
-
-**Status**: Production Ready  
-**Build Tested**: Compiles successfully  
-**Integration Verified**: Works with longitudinal planner  
-**Environment**: Python 3.12.3 + numpy 2.3.0
-
-The physics script features are now fully integrated into the production VisionTurnController and ready for deployment.
+The Vision Turn Speed Controller post-apex acceleration feature is now **functional and verified**.

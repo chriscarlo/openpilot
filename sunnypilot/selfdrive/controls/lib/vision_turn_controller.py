@@ -237,10 +237,15 @@ class VisionTurnController:
 
   @property
   def a_target(self):
-    # Always use enhanced deceleration when active
-    if self.is_active:
-      return self._current_decel
-    return self._a_ego
+    if not self.is_active:
+      return self._a_ego
+
+    # Use post-apex acceleration when active
+    if self._apex_acceleration_active:
+      return self._apex_acceleration_value
+
+    # Otherwise use enhanced deceleration
+    return self._current_decel
 
   @property
   def v_turn(self):
@@ -307,6 +312,8 @@ class VisionTurnController:
     self._last_filtered_curvature = 0.0
     self._curvature_ema_ratio = 0.3
     self._past_apex_steps = 0  # Count steps since past apex
+    self._apex_acceleration_active = False
+    self._apex_acceleration_value = 0.0
 
   def _update_params(self):
     tm = time.time()
@@ -767,41 +774,22 @@ class VisionTurnController:
         self.state = VisionTurnSpeedControlState.disabled
 
   def _update_solution(self):
-    # Enhanced calculations handle acceleration when active via _update_enhanced_calculations
-    # The original state machine logic is preserved for compatibility but enhanced calculations
-    # provide the actual deceleration through self._current_decel
+    # The anticipatory deceleration is calculated in `_update_enhanced_calculations` and
+    # stored in `self._current_decel`. This value is used by default.
 
-    # When disabled, ensure current_decel follows ego acceleration
-    if self.state == VisionTurnSpeedControlState.disabled:
-      self._current_decel = self._a_ego
-      a_target = self._a_ego
-    # ENTERING
-    elif self.state == VisionTurnSpeedControlState.entering:
-      # when not overshooting, target a smooth deceleration in preparation for a sharp turn to come.
-      a_target = np.interp(self._max_pred_lat_acc, _ENTERING_SMOOTH_DECEL_BP, _ENTERING_SMOOTH_DECEL_V)
-      if self._lat_acc_overshoot_ahead:
-        # when overshooting, target the acceleration needed to achieve the overshoot speed at
-        # the required distance
-        a_target = min((self._v_overshoot ** 2 - self._v_ego ** 2) / (2 * self._v_overshoot_distance), a_target)
-      _debug(f'TVC Entering: Overshooting: {self._lat_acc_overshoot_ahead}')
-      _debug(f'    Decel: {a_target:.2f}, target v: {self.v_turn * CV.MS_TO_KPH}')
-    # TURNING
-    elif self.state == VisionTurnSpeedControlState.turning:
-      # When turning, we provide a target acceleration that is comfortable for the lateral acceleration felt.
-      a_target = np.interp(self._current_lat_acc, _TURNING_ACC_BP, _TURNING_ACC_V)
-    # LEAVING
-    elif self.state == VisionTurnSpeedControlState.leaving:
-      # When leaving, we provide a comfortable acceleration to regain speed.
-      a_target = _LEAVING_ACC
+    # This method now *only* handles overriding the default deceleration with
+    # post-apex acceleration logic.
 
-    # PHYSICS SCRIPT: Post-apex acceleration logic
-    apex_acceleration_active = False
+    # Default to no acceleration override
+    self._apex_acceleration_active = False
+
+    # Only consider accelerating after the apex and if the embargo is lifted.
     if self._past_apex and self._acceleration_embargo_lifted and self.filtered_curvature > 1e-7:
       # Calculate target speed using physics script method
       physics_safe_speed = self._curvature_to_speed(self.filtered_curvature)
 
-      # Apply apex recovery factor - EXACT PHYSICS SCRIPT LOGIC
-      apex_recovery_factor = 1.4  # Tuned recovery factor
+      # Apply apex recovery factor
+      apex_recovery_factor = 1.4
       target_speed = physics_safe_speed * apex_recovery_factor
 
       # Conservative cruise speed estimate
@@ -811,18 +799,27 @@ class VisionTurnController:
       # Calculate acceleration command based on speed difference
       speed_error = target_speed - self._v_ego
 
-      # Apply apex acceleration if speed error warrants it
-      if speed_error > 0.2:  # Tuned threshold for responsiveness
-        apex_acceleration_active = True
+      # Apply apex acceleration only if there's a significant speed error and
+      # the anticipatory logic isn't already commanding a strong deceleration.
+      if speed_error > 0.2 and self._current_decel >= -0.5:
+        self._apex_acceleration_active = True
         dt = 0.05  # 20Hz matching physics script
         acceleration_command = min(speed_error / dt, 2.0)  # Limit to 2.0 m/s² max
-        a_target = acceleration_command
 
-        # Override current decel for immediate response
-        self._current_decel = a_target
+        # Store the post-apex acceleration value (don't override _current_decel)
+        self._apex_acceleration_value = acceleration_command
 
-    # update solution values.
-    self._a_target = a_target
+    # If we are in the 'leaving' state but not actively accelerating via apex logic,
+    # apply a gentle default acceleration.
+    elif self.state == VisionTurnSpeedControlState.leaving:
+      self._current_decel = _LEAVING_ACC
+
+    # If disabled, reset to ego acceleration.
+    elif self.state == VisionTurnSpeedControlState.disabled:
+      self._current_decel = self._a_ego
+
+    # Finally, update self._a_target for logging/v_turn calculation. It's not used for control.
+    self._a_target = self._current_decel
 
   def update(self, sm, enabled, v_ego, a_ego, v_cruise_setpoint):
     self._op_enabled = enabled
