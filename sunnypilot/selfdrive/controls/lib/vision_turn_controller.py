@@ -61,6 +61,9 @@ class VisionOcclusionState:
 
     def update(self, current_curvature: float, vision_confidence: float, current_time: float):
         """Update occlusion state based on current vision conditions."""
+        # Store previous status before updating
+        previous_status = self.vision_status
+
         # Determine vision status from confidence
         if vision_confidence > 0.8:
             self.vision_status = VisionStatus.FULL_VISIBILITY
@@ -68,16 +71,14 @@ class VisionOcclusionState:
             self.confidence_decay_factor = 1.0
         elif vision_confidence > 0.5:
             self.vision_status = VisionStatus.PARTIAL_OCCLUSION
-            if self.vision_status != VisionStatus.PARTIAL_OCCLUSION:
-                self.occlusion_start_time = current_time
         elif vision_confidence > 0.2:
             self.vision_status = VisionStatus.SEVERE_OCCLUSION
-            if self.vision_status != VisionStatus.SEVERE_OCCLUSION:
-                self.occlusion_start_time = current_time
         else:
             self.vision_status = VisionStatus.VISION_LOST
-            if self.vision_status != VisionStatus.VISION_LOST:
-                self.occlusion_start_time = current_time
+
+        # Set occlusion start time when transitioning from full visibility to any occlusion
+        if previous_status == VisionStatus.FULL_VISIBILITY and self.vision_status != VisionStatus.FULL_VISIBILITY:
+            self.occlusion_start_time = current_time
 
         # Update confidence decay factor based on occlusion duration
         if self.vision_status != VisionStatus.FULL_VISIBILITY:
