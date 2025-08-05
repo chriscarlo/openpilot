@@ -144,7 +144,7 @@ def _physics_based_lateral_acceleration(curvature: float) -> float:
     """
     # Physical constants - no arbitrary scaling
     a_max = 3.12   # Maximum lateral acceleration (m/s²) - safety limit
-    a_min = 1.2    # Minimum lateral acceleration (m/s²) - tight curve limit
+    a_min = 1.8    # Minimum lateral acceleration (m/s²) - adjusted for more appropriate hairpin speeds
     alpha = 24.3   # Decay rate - tuned for sports car performance
     beta = 0.78    # Power law exponent - tuned for sports car performance
 
