@@ -48,29 +48,28 @@ sys.modules['openpilot.selfdrive.controls.lib.drive_helpers'] = openpilot.selfdr
 sys.path.append('/data/openpilot/sunnypilot/selfdrive/controls/lib')
 sys.path.append('/data/openpilot/docs/claude/reference')
 
-# Import all 3 VTSC implementations
+# Import VTSC implementations
+# Note: "Integrated" is now the production version, "Stock" was the old state-machine version
 try:
-    from vision_turn_controller import VisionTurnController as StockVTSC
-    print("Successfully imported Stock VTSC")
+    from vision_turn_controller_physics_based_original import VisionTurnController as PhysicsOriginalVTSC
+    print("Successfully imported Physics-Based Original VTSC")
 except ImportError as e:
-    print(f"Failed to import Stock VTSC: {e}")
-    StockVTSC = None
+    print(f"Failed to import Physics-Based Original VTSC: {e}")
+    PhysicsOriginalVTSC = None
 
 try:
-    from vision_turn_controller_physics_based_original import VisionTurnController as PhysicsVTSC
-    print("Successfully imported Physics VTSC")
+    from vision_turn_controller import VisionTurnController as ProductionVTSC
+    print("Successfully imported Current Production (Integrated) VTSC")
 except ImportError as e:
-    print(f"Failed to import Physics VTSC: {e}")
-    PhysicsVTSC = None
+    print(f"Failed to import Current Production VTSC: {e}")
+    ProductionVTSC = None
 
-try:
-    from vision_turn_controller_integrated import VisionTurnController as IntegratedVTSC
-    print("Successfully imported Integrated VTSC")
-except ImportError as e:
-    print(f"Failed to import Integrated VTSC: {e}")
-    IntegratedVTSC = None
+# For backwards compatibility, map the old names
+StockVTSC = None  # Old state-machine version no longer exists
+PhysicsVTSC = PhysicsOriginalVTSC
+IntegratedVTSC = ProductionVTSC
 
-if not all([StockVTSC, PhysicsVTSC, IntegratedVTSC]):
+if not all([PhysicsOriginalVTSC, ProductionVTSC]):
     print("Failed to import required VTSC implementations")
     sys.exit(1)
 
@@ -591,10 +590,9 @@ class VTSCComparativeTest:
             steerRatio = 15.0
             wheelbase = 2.7
 
-        # Initialize all 3 VTSC implementations
-        stock_vtsc = StockVTSC(MockCP())
+        # Initialize VTSC implementations
         physics_vtsc = PhysicsVTSC(MockCP())
-        integrated_vtsc = IntegratedVTSC(MockCP())
+        production_vtsc = IntegratedVTSC(MockCP())
 
         # Test parameters
         enabled = True
@@ -608,9 +606,8 @@ class VTSCComparativeTest:
                 'v_ego': scenario.v_ego_initial,
                 'v_cruise': scenario.v_cruise_setpoint
             },
-            'stock_results': [],
-            'physics_results': [],
-            'integrated_results': [],
+            'physics_original_results': [],
+            'production_results': [],
             'comparison': {}
         }
 
@@ -622,113 +619,92 @@ class VTSCComparativeTest:
             # Create mock data for this step
             sm = self._create_mock_sm(scenario, step)
 
-            # Update all 3 VTSC implementations
-            stock_vtsc.update(sm, enabled, v_ego, a_ego, scenario.v_cruise_setpoint)
+            # Update both VTSC implementations
             physics_vtsc.update(sm, enabled, v_ego, a_ego, scenario.v_cruise_setpoint)
-            integrated_vtsc.update(sm, enabled, v_ego, a_ego, scenario.v_cruise_setpoint)
+            production_vtsc.update(sm, enabled, v_ego, a_ego, scenario.v_cruise_setpoint)
 
             # Collect results with safe speed handling
-            stock_result = {
-                'step': step,
-                'v_turn': self._safe_speed_value(stock_vtsc.v_turn, "Stock VTSC"),
-                'a_target': stock_vtsc.a_target,
-                'is_active': stock_vtsc.is_active,
-                'state': stock_vtsc.state.name if hasattr(stock_vtsc.state, 'name') else str(stock_vtsc.state),
-                'emergency_level': stock_vtsc.emergency_level.name if hasattr(stock_vtsc, 'emergency_level') else 'N/A'
-            }
-
             physics_result = {
                 'step': step,
-                'v_turn': self._safe_speed_value(physics_vtsc.v_turn, "Physics VTSC"),
+                'v_turn': self._safe_speed_value(physics_vtsc.v_turn, "Physics Original"),
                 'a_target': physics_vtsc.a_target,
                 'is_active': physics_vtsc.is_active,
                 'state': physics_vtsc.state.name if hasattr(physics_vtsc.state, 'name') else str(physics_vtsc.state)
             }
 
-            integrated_result = {
+            production_result = {
                 'step': step,
-                'v_turn': self._safe_speed_value(integrated_vtsc.v_turn, "Integrated VTSC"),
-                'a_target': integrated_vtsc.a_target,
-                'is_active': integrated_vtsc.is_active,
-                'state': integrated_vtsc.state.name if hasattr(integrated_vtsc.state, 'name') else str(integrated_vtsc.state),
-                'emergency_level': integrated_vtsc.emergency_level.name if hasattr(integrated_vtsc, 'emergency_level') else 'N/A',
-                'intervention_required': integrated_vtsc.intervention_required if hasattr(integrated_vtsc, 'intervention_required') else False
+                'v_turn': self._safe_speed_value(production_vtsc.v_turn, "Production"),
+                'a_target': production_vtsc.a_target,
+                'is_active': production_vtsc.is_active,
+                'state': production_vtsc.state.name if hasattr(production_vtsc.state, 'name') else str(production_vtsc.state),
+                'emergency_level': production_vtsc.emergency_level.name if hasattr(production_vtsc, 'emergency_level') else 'N/A',
+                'intervention_required': production_vtsc.intervention_required if hasattr(production_vtsc, 'intervention_required') else False
             }
 
-            results['stock_results'].append(stock_result)
-            results['physics_results'].append(physics_result)
-            results['integrated_results'].append(integrated_result)
+            results['physics_original_results'].append(physics_result)
+            results['production_results'].append(production_result)
 
             # Update ego velocity based on acceleration (simplified physics)
             if step < steps - 1:
                 dt = 0.05  # 20Hz = 50ms
-                # Use average of all three accelerations for next step
-                avg_accel = (stock_vtsc.a_target + physics_vtsc.a_target + integrated_vtsc.a_target) / 3
+                # Use average of both accelerations for next step
+                avg_accel = (physics_vtsc.a_target + production_vtsc.a_target) / 2
                 v_ego = max(0.1, v_ego + avg_accel * dt)  # Prevent negative speeds
 
         # Calculate comparison metrics
         results['comparison'] = self._calculate_comparison_metrics(
-            results['stock_results'],
-            results['physics_results'],
-            results['integrated_results']
+            results['physics_original_results'],
+            results['production_results']
         )
 
         # Print summary
-        stock_v_final = self._safe_speed_value(stock_vtsc.v_turn, "Stock Final")
-        physics_v_final = self._safe_speed_value(physics_vtsc.v_turn, "Physics Final")
-        integrated_v_final = self._safe_speed_value(integrated_vtsc.v_turn, "Integrated Final")
+        physics_v_final = self._safe_speed_value(physics_vtsc.v_turn, "Physics Original Final")
+        production_v_final = self._safe_speed_value(production_vtsc.v_turn, "Production Final")
 
-        print(f"   Stock Final: v_turn={stock_v_final:.1f} m/s, a_target={stock_vtsc.a_target:.2f} m/s²")
-        print(f"   Physics Final: v_turn={physics_v_final:.1f} m/s, a_target={physics_vtsc.a_target:.2f} m/s²")
-        print(f"   Integrated Final: v_turn={integrated_v_final:.1f} m/s, a_target={integrated_vtsc.a_target:.2f} m/s²")
+        print(f"   Physics Original: v_turn={physics_v_final:.1f} m/s ({physics_v_final*2.237:.1f} mph), a_target={physics_vtsc.a_target:.2f} m/s²")
+        print(f"   Production: v_turn={production_v_final:.1f} m/s ({production_v_final*2.237:.1f} mph), a_target={production_vtsc.a_target:.2f} m/s²")
         print("   Scenario completed")
 
         return results
 
-    def _calculate_comparison_metrics(self, stock_results: list[dict], physics_results: list[dict], integrated_results: list[dict]) -> dict[str, float]:
-        """Calculate comparison metrics between all 3 VTSC implementations"""
+    def _calculate_comparison_metrics(self, physics_results: list[dict], production_results: list[dict]) -> dict[str, float]:
+        """Calculate comparison metrics between physics original and production VTSC implementations"""
 
         # Extract time series data
-        stock_v_turn = [r['v_turn'] for r in stock_results]
         physics_v_turn = [r['v_turn'] for r in physics_results]
-        integrated_v_turn = [r['v_turn'] for r in integrated_results]
+        production_v_turn = [r['v_turn'] for r in production_results]
 
-        stock_a_target = [r['a_target'] for r in stock_results]
         physics_a_target = [r['a_target'] for r in physics_results]
-        integrated_a_target = [r['a_target'] for r in integrated_results]
+        production_a_target = [r['a_target'] for r in production_results]
 
         # Calculate metrics
         metrics = {}
 
-        # Speed differences vs Stock
-        physics_v_diff = np.array(physics_v_turn) - np.array(stock_v_turn)
-        integrated_v_diff = np.array(integrated_v_turn) - np.array(stock_v_turn)
+        # Speed differences
+        v_diff = np.array(production_v_turn) - np.array(physics_v_turn)
+        metrics['production_vs_physics_v_diff_mean'] = float(np.mean(v_diff))
+        metrics['production_vs_physics_v_diff_max'] = float(np.max(np.abs(v_diff)))
 
-        metrics['physics_vs_stock_v_diff'] = float(np.mean(physics_v_diff))
-        metrics['integrated_vs_stock_v_diff'] = float(np.mean(integrated_v_diff))
-        metrics['integrated_vs_physics_v_diff'] = float(np.mean(np.array(integrated_v_turn) - np.array(physics_v_turn)))
-
-        # Acceleration differences vs Stock
-        physics_a_diff = np.array(physics_a_target) - np.array(stock_a_target)
-        integrated_a_diff = np.array(integrated_a_target) - np.array(stock_a_target)
-
-        metrics['physics_vs_stock_a_diff'] = float(np.mean(physics_a_diff))
-        metrics['integrated_vs_stock_a_diff'] = float(np.mean(integrated_a_diff))
-        metrics['integrated_vs_physics_a_diff'] = float(np.mean(np.array(integrated_a_target) - np.array(physics_a_target)))
+        # Acceleration differences
+        a_diff = np.array(production_a_target) - np.array(physics_a_target)
+        metrics['production_vs_physics_a_diff_mean'] = float(np.mean(a_diff))
+        metrics['production_vs_physics_a_diff_max'] = float(np.max(np.abs(a_diff)))
 
         # Smoothness metrics (standard deviation of accelerations)
-        metrics['stock_smoothness'] = float(np.std(stock_a_target))
         metrics['physics_smoothness'] = float(np.std(physics_a_target))
-        metrics['integrated_smoothness'] = float(np.std(integrated_a_target))
+        metrics['production_smoothness'] = float(np.std(production_a_target))
 
         # Final values
-        metrics['final_v_turn_stock'] = float(stock_v_turn[-1])
         metrics['final_v_turn_physics'] = float(physics_v_turn[-1])
-        metrics['final_v_turn_integrated'] = float(integrated_v_turn[-1])
+        metrics['final_v_turn_production'] = float(production_v_turn[-1])
 
-        metrics['final_a_target_stock'] = float(stock_a_target[-1])
         metrics['final_a_target_physics'] = float(physics_a_target[-1])
-        metrics['final_a_target_integrated'] = float(integrated_a_target[-1])
+        metrics['final_a_target_production'] = float(production_a_target[-1])
+
+        # Min speeds (important for curve handling)
+        metrics['min_v_turn_physics'] = float(np.min(physics_v_turn))
+        metrics['min_v_turn_production'] = float(np.min(production_v_turn))
 
         return metrics
 

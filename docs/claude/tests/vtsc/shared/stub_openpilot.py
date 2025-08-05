@@ -24,8 +24,7 @@ class MockConversions:
     RAD_TO_DEG = 180.0 / 3.14159265359
 
 class MockModelConstants:
-    # Use actual T_IDXS calculation from ModelConstants
-    T_IDXS = [(10.0) * ((idx/32)**2) for idx in range(33)]
+    T_IDXS = list(range(33))
 
 def clip(x, min_val, max_val):
     return max(min_val, min(x, max_val))

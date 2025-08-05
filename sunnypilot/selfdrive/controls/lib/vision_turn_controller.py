@@ -686,11 +686,48 @@ class VisionTurnController:
         self._lat_acc_overshoot_ahead = np.any(overshoot_mask)
 
         if self._lat_acc_overshoot_ahead:
-          overshoot_idx = np.where(overshoot_mask)[0][0]
-          self._v_overshoot = min(safe_speeds[overshoot_idx], self._v_cruise_setpoint)
-          # Estimate distance using time indices and current velocity
+          # PROPER FIX: Consider ALL points requiring deceleration, not just first or tightest
+          # Calculate which points need immediate action based on deceleration requirements
+          overshoot_indices = np.where(overshoot_mask)[0]
           times = np.array(ModelConstants.T_IDXS[:n_points])
-          self._v_overshoot_distance = max(times[overshoot_idx] * self._v_ego, 10.0)
+
+          # For each point that needs slowing, calculate if we need to start NOW
+          max_decel = 3.5  # m/s² (reasonable deceleration limit)
+          immediate_requirements = []
+
+          for idx in overshoot_indices:
+            # How much distance do we need to slow down to this point's safe speed?
+            speed_diff_sq = safe_speeds[idx]**2 - self._v_ego**2
+            decel_distance_needed = abs(speed_diff_sq) / (2 * max_decel)
+
+            # How far away is this point?
+            point_distance = times[idx] * self._v_ego
+
+            # Do we need to start slowing NOW for this point?
+            if point_distance <= decel_distance_needed * 1.2:  # 20% safety margin
+              immediate_requirements.append((idx, safe_speeds[idx], point_distance))
+
+          if immediate_requirements:
+            # Among all points needing immediate action, target the MINIMUM safe speed
+            # This ensures we plan for the tightest part of the curve
+            min_required_speed = min([speed for _, speed, _ in immediate_requirements])
+            # Find the index with that minimum speed
+            for idx, speed, dist in immediate_requirements:
+              if speed == min_required_speed:
+                overshoot_idx = idx
+                self._v_overshoot_distance = dist
+                break
+          else:
+            # FIX: No immediate requirements, but still plan for the TIGHTEST point ahead
+            # Don't just use the first overshoot - find the point with minimum safe speed
+            tightest_idx = overshoot_indices[np.argmin(safe_speeds[overshoot_indices])]
+            overshoot_idx = tightest_idx
+            self._v_overshoot_distance = times[overshoot_idx] * self._v_ego
+
+          self._v_overshoot = min(safe_speeds[overshoot_idx], self._v_cruise_setpoint)
+          # Distance already set above based on immediate requirements or tightest point
+          # Ensure minimum distance for safety
+          self._v_overshoot_distance = max(self._v_overshoot_distance, 10.0)
           # Calculate anticipation time for early deceleration
           anticipation_time = calculate_anticipation_time(
               self._v_ego,
