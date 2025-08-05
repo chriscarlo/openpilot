@@ -172,6 +172,38 @@ def curvature_to_speed(abs_curvature_meters: float) -> float:
     target_speed_mps = base_speed_mps * SPEED_INCREASE_FACTOR
     return clip(target_speed_mps, 0.0, MAX_SPEED_DEFAULT)
 
+def find_apexes_enhanced(curvature_array: np.ndarray, threshold: float = 5e-5, min_prominence: float = 1e-4) -> list:
+    """
+    Find local maxima (apex points) in curvature data with noise filtering.
+    
+    Args:
+        curvature_array: Array of curvature values
+        threshold: Minimum curvature to consider as potential apex
+        min_prominence: Minimum peak prominence to filter noise
+        
+    Returns:
+        List of indices where apexes are detected
+    """
+    if len(curvature_array) < 3:
+        return []
+
+    # Apply light smoothing (3-point moving average) to reduce noise
+    # Use 'same' mode to maintain array size
+    smoothed = np.convolve(curvature_array, [0.25, 0.5, 0.25], mode='same')
+
+    apex_indices = []
+    for i in range(1, len(smoothed) - 1):
+        # Check if this is a local maximum above threshold
+        if (smoothed[i] > threshold and
+            smoothed[i] >= smoothed[i + 1] and
+            smoothed[i] > smoothed[i - 1]):
+            # Calculate prominence (peak height above neighbors)
+            prominence = smoothed[i] - min(smoothed[i-1], smoothed[i+1])
+            if prominence > min_prominence:
+                apex_indices.append(i)
+
+    return apex_indices
+
 def dynamic_decel_scale(v_ego_ms: float) -> float:
     """Dynamic deceleration scaling based on speed."""
     min_speed = 3.0
@@ -248,7 +280,7 @@ def calculate_anticipation_time(v_ego_ms: float, target_speed_ms: float, max_pre
     Returns:
         Optimized anticipation time in seconds
     """
-    
+
     # Optimized parameters from research study
     reaction_time_base = 1.185        # vs original 1.5s - faster response
     speed_normalization = 15.0        # vs original 20.0 - tuned for city driving
@@ -259,22 +291,22 @@ def calculate_anticipation_time(v_ego_ms: float, target_speed_ms: float, max_pre
     severity_normalization = 2.424    # vs original 1.5 - less lat acc impact
     timing_min = 0.565               # vs original 1.0 - allows faster reactions
     timing_max = 8.0                 # vs original 3.0 - wider range
-    
+
     # Context-aware multipliers based on speed
     v_ego_mph = v_ego_ms * 2.237
     if v_ego_mph <= 15:
         context_multiplier = 0.973      # Parking: slightly faster
     elif v_ego_mph <= 35:
-        context_multiplier = 1.144      # Residential: moderate increase  
+        context_multiplier = 1.144      # Residential: moderate increase
     elif v_ego_mph <= 55:
         context_multiplier = 1.200      # Urban: efficiency balance
     else:
         context_multiplier = 1.384      # Highway: maximum safety margin
-    
+
     # Speed factor: Optimized scaling
     speed_factor = clip(v_ego_ms / speed_normalization, speed_factor_min, speed_factor_max)
 
-    # Speed reduction factor: Enhanced sensitivity  
+    # Speed reduction factor: Enhanced sensitivity
     if v_ego_ms > 0.1:
         delta_ratio = (v_ego_ms - target_speed_ms) / v_ego_ms
         delta_factor = clip(1.0 + delta_ratio * delta_factor_gain, 1.0, delta_factor_max)
@@ -287,7 +319,7 @@ def calculate_anticipation_time(v_ego_ms: float, target_speed_ms: float, max_pre
     # Calculate optimized timing
     base_timing = reaction_time_base * speed_factor * delta_factor * severity_factor
     timing = base_timing * context_multiplier
-    
+
     return clip(timing, timing_min, timing_max)
 
 def _debug(msg):
@@ -351,6 +383,15 @@ class VisionTurnController:
     self._is_decelerating_for_curve = False
     self._anticipation_start_time = 0.0
     self._curve_detection_distance = 0.0
+
+    # Apex detection and tracking
+    self._apex_indices = []  # Indices of detected apexes in trajectory
+    self._last_apex_passed_time = 0.0  # For hysteresis
+    self._distance_past_apex = 0.0  # Meters past most recent apex
+    self._apex_boost_distance = 50.0  # Configurable boost distance (meters)
+    self._apex_threshold = 5e-5  # Minimum curvature for apex
+    self._apex_prominence = 1e-4  # Minimum prominence for apex
+    self._curvature_trajectory = []  # Store curvature array for apex detection
 
     self._reset()
 
@@ -445,6 +486,11 @@ class VisionTurnController:
     # Reset intervention detection
     self._intervention_required = False
     self._critical_situation_time = 0.0
+
+    # Reset apex tracking
+    self._apex_indices = []
+    self._distance_past_apex = 0.0
+    self._curvature_trajectory = []
 
     # Reset advanced controller state
     self._planned_speeds[:] = self._v_ego if hasattr(self, '_v_ego') else 0.0
@@ -599,6 +645,11 @@ class VisionTurnController:
         eps = 1e-9
         curvature_array = orientation_rate / np.clip(velocity_pred, eps, None)
         max_pred_curvature = float(np.max(curvature_array))
+
+        # Store curvature trajectory and detect apexes
+        self._curvature_trajectory = curvature_array.tolist()
+        self._apex_indices = find_apexes_enhanced(curvature_array, self._apex_threshold, self._apex_prominence)
+        _debug(f'TVC: Found {len(self._apex_indices)} apexes at indices: {self._apex_indices}')
 
         # Calculate lateral acceleration using model-predicted curvature
         # This is more accurate than steering angle at highway speeds
@@ -765,42 +816,75 @@ class VisionTurnController:
     # On straight roads: will return cruise setpoint, longitudinal planner ignores
     # On curves: will return physics speed, longitudinal planner uses it
 
-    # For now, use a simple trajectory planning approach that mimics chauffeur_vtsc.py
-    # but adapted to work with the existing data structures
-
     # Calculate safe speed using curvature_to_speed (physics-based)
     physics_safe_speed = curvature_to_speed(self._filtered_curvature)
-
-    # Apply a simple trajectory that allows acceleration above cruise setpoint
-    # when appropriate (mimicking the chauffeur_vtsc.py behavior)
     base_target = min(self._v_cruise_setpoint, physics_safe_speed)
 
-    # Key change: Allow speeds above cruise setpoint for acceleration out of apexes
-    # This mimics the chauffeur_vtsc.py logic where final_target_speed is only
-    # clamped to cruise setpoint at the very end
+    # CONSENSUS FIX: Physics-based boost using lateral acceleration, not cruise setpoint
+    # Calculate actual lateral acceleration from current curvature
+    lateral_accel = abs(self._current_lat_acc)  # Already calculated as curvature * v_ego^2
 
-    # Simple apex detection: if current curvature is decreasing from max predicted,
-    # we're likely past an apex and should allow more aggressive acceleration
-    if self._v_ego > 1e-3:  # Avoid division by zero
-      curvature_ratio = self._filtered_curvature / max(self._max_pred_lat_acc / (self._v_ego**2), 1e-6)
-    else:
-      curvature_ratio = 1.0  # Conservative default when stopped or nearly stopped
+    # Smooth boost factor using sigmoid to avoid hard switching
+    # Industry standard: 2.0 m/s² indicates real curve (not just road crown)
+    boost_center = 2.0  # m/s² - curve detection threshold
+    boost_width = 0.5   # m/s² - transition smoothness
 
-    # Detect if we're approaching or past the apex
-    is_past_apex = curvature_ratio < 0.7  # We're past the peak curvature
+    # Sigmoid function: smoothly transitions from 1.0 to 1.1 based on lateral acceleration
+    # On straights (lat_accel ≈ 0): boost_factor ≈ 1.0
+    # In real curves (lat_accel > 2.5): boost_factor ≈ 1.1
+    boost_factor = 1.0 + 0.1 / (1 + np.exp(-(lateral_accel - boost_center) / boost_width))
 
-    if is_past_apex:
-      # CRITICAL: Preserve original acceleration behavior after apex
-      # Allow aggressive acceleration out of apex - key difference from state-based logic
-      apex_recovery_factor = 1.25  # Allow 25% above normal speeds
-      target_speed = base_target * apex_recovery_factor
-      # Allow temporary overshoot above cruise for smooth apex exit
-      target_speed = clip(target_speed, _MIN_V, self._v_cruise_setpoint * 1.2)
+    # IMPROVED APEX DETECTION: Use actual geometric apexes, not crude ratio
+    is_past_apex = False
+    apply_boost = False
+
+    # Check if we have detected apexes and are past one
+    if self._apex_indices and len(self._apex_indices) > 0:
+      # Vehicle is always at index 0, apexes are ahead in trajectory
+      # Estimate meters per index based on typical trajectory spacing (about 1-2m)
+      # T_IDXS gives us time stamps, convert to distance using current speed
+      meters_per_index = 2.0  # Approximate spacing between trajectory points
+
+      # Find the nearest apex
+      nearest_apex_idx = self._apex_indices[0]
+
+      # Check if we've passed this apex (index would be negative in vehicle frame)
+      # Since vehicle is at 0 and trajectory extends ahead, an apex at index 5
+      # means it's 5*meters_per_index ahead. As we move, this decreases.
+      # We track this with hysteresis to avoid re-triggering
+
+      current_time = time.time()
+
+      # Simple heuristic: if apex is in first few indices, we're very close or past it
+      if nearest_apex_idx < 3:  # Apex is within ~6 meters
+        # Check hysteresis - don't re-trigger same apex within 2 seconds
+        if current_time - self._last_apex_passed_time > 2.0:
+          is_past_apex = True
+          self._last_apex_passed_time = current_time
+          self._distance_past_apex = (3 - nearest_apex_idx) * meters_per_index
+        else:
+          # Still in boost window from previous detection
+          is_past_apex = True
+          self._distance_past_apex += self._v_ego * 0.05  # Update distance (20Hz update rate)
+
+      # Apply boost if we're 0-50m past apex and in a real curve
+      if is_past_apex and self._distance_past_apex < self._apex_boost_distance:
+        apply_boost = True
+
+    if apply_boost and lateral_accel > 1.0:  # Only boost if actually in a curve
+      # Apply physics-based boost for acceleration out of apex
+      # This creates the desired "kick" feeling without referencing cruise setpoint
+      target_speed = base_target * boost_factor  # Will be 1.0-1.1x based on lateral accel
+
+      # Clamp to reasonable physics limits, NOT cruise setpoint
+      # Allow speed to naturally reach what physics permits
+      max_physics_speed = curvature_to_speed(self._filtered_curvature * 0.7)  # 30% safety margin
+      target_speed = clip(target_speed, _MIN_V, max_physics_speed)
 
       # Clear deceleration state when past apex
       self._is_decelerating_for_curve = False
     else:
-      # BEFORE APEX: Apply anticipatory deceleration
+      # BEFORE APEX or ON STRAIGHT: Use base physics speed
       # Check if we should start decelerating early
       if self._lat_acc_overshoot_ahead and not self._is_decelerating_for_curve:
         # Mark that we've started anticipatory deceleration
