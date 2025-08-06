@@ -267,6 +267,17 @@ class CarState(CarStateBase, EsccCarStateBase, MadsCarState, CarStateExt):
     ret.steeringPressed = self.update_steering_pressed(abs(ret.steeringTorque) > self.params.STEER_THRESHOLD, 5)
     ret.steerFaultTemporary = cp.vl["MDPS"]["LKA_FAULT"] != 0
 
+    # Dashboard speed limit reading from CCNC_0x162 message
+    if "CCNC_0x162" in cp_cam.vl:
+      speed_limit_raw = cp_cam.vl["CCNC_0x162"]["SPEEDLIMIT"]
+      # Convert from km/h to m/s, 0 and 255 indicate no speed limit detected
+      if speed_limit_raw != 0 and speed_limit_raw != 255:
+        ret_sp.speedLimit = speed_limit_raw * CV.KPH_TO_MS
+      else:
+        ret_sp.speedLimit = 0.0
+    else:
+      ret_sp.speedLimit = 0.0
+
     # TODO: alt signal usage may be described by cp.vl['BLINKERS']['USE_ALT_LAMP']
     left_blinker_sig, right_blinker_sig = "LEFT_LAMP", "RIGHT_LAMP"
     if self.CP.carFingerprint == CAR.HYUNDAI_KONA_EV_2ND_GEN:
@@ -363,7 +374,9 @@ class CarState(CarStateBase, EsccCarStateBase, MadsCarState, CarStateExt):
         ("SCC_CONTROL", 50),
       ]
 
-    cam_messages = []
+    cam_messages = [
+      ("CCNC_0x162", 20),  # Dashboard speed limit reading
+    ]
     if CP.flags & HyundaiFlags.CANFD_LKA_STEERING:
       block_lfa_msg = "CAM_0x362" if CP.flags & HyundaiFlags.CANFD_LKA_STEERING_ALT else "CAM_0x2a4"
       cam_messages += [(block_lfa_msg, 20)]

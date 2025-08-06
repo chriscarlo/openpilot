@@ -108,12 +108,20 @@ class SpeedLimitResolver:
       for source in sources_for_policy:
         if self._limit_solutions[source] > 0.:
           return Source(source)
-
-    limits = np.array([self._limit_solutions[source] for source in sources_for_policy], dtype=float)
-    sources = np.array([source.value for source in sources_for_policy], dtype=int)
-
-    if len(limits) > 0:
-      min_idx = np.argmin(limits)
-      return Source(sources[min_idx])
+    else:
+      # Combined mode: take the MAXIMUM of both sources (highest speed limit)
+      # Filter out zero values (no limit detected)
+      valid_limits = []
+      valid_sources = []
+      for source in sources_for_policy:
+        if self._limit_solutions[source] > 0.:
+          valid_limits.append(self._limit_solutions[source])
+          valid_sources.append(source.value)
+      
+      if valid_limits:
+        limits = np.array(valid_limits, dtype=float)
+        sources = np.array(valid_sources, dtype=int)
+        max_idx = np.argmax(limits)  # Take the HIGHER speed limit
+        return Source(sources[max_idx])
 
     return None
