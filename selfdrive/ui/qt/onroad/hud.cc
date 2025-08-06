@@ -82,10 +82,29 @@ void HudRenderer::updateState(const UIState &s) {
   is_cruise_set = set_speed > 0 && set_speed != SET_SPEED_NA;
   is_cruise_available = set_speed != -1;
 
-  // Show VTSC widget only when actively intervening (lowering speed below cruise setting)
-  float speed_threshold = is_metric ? 1.0f : 0.5f; // 1 kph or 0.5 mph threshold - more sensitive
-  show_vtsc = (vtsc_state != 0) && (vtsc_velocity > 0) && is_cruise_set && 
-              (vtsc_velocity < set_speed - speed_threshold);
+  // Show VTSC widget with hysteresis to prevent flicker
+  // Entry threshold: 1 kph / 0.5 mph to activate
+  // Exit threshold: 0.2 kph / 0.1 mph to deactivate
+  float entry_threshold = is_metric ? 1.0f : 0.5f;
+  float exit_threshold = is_metric ? 0.2f : 0.1f;
+  
+  bool below_entry = (vtsc_velocity < set_speed - entry_threshold);
+  bool above_exit = (vtsc_velocity > set_speed - exit_threshold);
+  
+  // Apply hysteresis logic
+  if (!show_vtsc_prev && below_entry) {
+    // Entering: require larger delta to activate
+    show_vtsc = (vtsc_state != 0) && (vtsc_velocity > 0) && is_cruise_set;
+  } else if (show_vtsc_prev && !above_exit) {
+    // Staying active: maintain visibility with smaller threshold
+    show_vtsc = (vtsc_state != 0) && (vtsc_velocity > 0) && is_cruise_set;
+  } else {
+    // Exiting: deactivate when speed rises above exit threshold
+    show_vtsc = false;
+  }
+  
+  // Store current state for next frame
+  show_vtsc_prev = show_vtsc;
 
   if (is_cruise_set && !is_metric) {
     set_speed *= KM_TO_MILE;

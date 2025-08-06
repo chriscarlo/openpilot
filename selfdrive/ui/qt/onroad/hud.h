@@ -58,6 +58,7 @@ protected:
   float vtsc_current_lateral_accel = 0.0;
   float vtsc_max_predicted_lateral_accel = 0.0;
   bool show_vtsc = false;
+  bool show_vtsc_prev = false;  // For hysteresis
 
   float speed = 0;
   float set_speed = 0;

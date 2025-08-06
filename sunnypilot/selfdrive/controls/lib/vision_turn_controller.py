@@ -653,29 +653,28 @@ class VisionTurnController:
         n_points = int(min(len(orientation_rate_raw), len(velocity_pred_raw), N_POINTS))
         # Ensure n_points is a pure Python int for Cap'n Proto compatibility
         n_points = int(n_points)
-        orientation_rate = np.abs(np.array(list(orientation_rate_raw)[:n_points], dtype=float))
+        # FIXED: Preserve sign information - don't use np.abs() here!
+        orientation_rate_signed = np.array(list(orientation_rate_raw)[:n_points], dtype=float)
         velocity_pred = np.array(list(velocity_pred_raw)[:n_points], dtype=float)
 
-        # Compute curvature array: curvature = orientation_rate / velocity
+        # Compute curvature array with SIGNED values: curvature = orientation_rate / velocity
         eps = 1e-9
-        curvature_array = orientation_rate / np.clip(velocity_pred, eps, None)
-        max_pred_curvature = float(np.max(curvature_array))
+        curvature_array_signed = orientation_rate_signed / np.clip(velocity_pred, eps, None)
+        # For max calculations, use absolute values
+        curvature_array_abs = np.abs(curvature_array_signed)
+        max_pred_curvature = float(np.max(curvature_array_abs))
 
-        # Store curvature trajectory and detect apexes
-        self._curvature_trajectory = curvature_array.tolist()
-        self._apex_indices = find_apexes_enhanced(curvature_array, self._apex_threshold, self._apex_prominence)
+        # Store curvature trajectory and detect apexes (use absolute values for apex detection)
+        self._curvature_trajectory = curvature_array_abs.tolist()
+        self._apex_indices = find_apexes_enhanced(curvature_array_abs, self._apex_threshold, self._apex_prominence)
         _debug(f'TVC: Found {len(self._apex_indices)} apexes at indices: {self._apex_indices}')
 
         # Calculate lateral acceleration using model-predicted curvature
         # This is more accurate than steering angle at highway speeds
-        # Use the current model-predicted curvature instead of steering angle
-        if len(curvature_array) > 0:
-          current_curvature = float(curvature_array[0])  # Use model's current prediction
-          current_curvature_signed = current_curvature  # Preserve sign from orientation rate sign
-          # Get the original signed orientation rate to preserve direction
-          orientation_rate_signed = model_data.orientationRate.z[0] if len(model_data.orientationRate.z) > 0 else 0.0
-          if orientation_rate_signed < 0:
-            current_curvature_signed = -current_curvature
+        # Use the current model-predicted curvature WITH SIGN preserved
+        if len(curvature_array_signed) > 0:
+          current_curvature = float(curvature_array_abs[0])  # Absolute value for calculations
+          current_curvature_signed = float(curvature_array_signed[0])  # Signed value for lateral accel
 
         # Apply vision occlusion adjustments if needed
         if self._occlusion_state.vision_status != VisionStatus.FULL_VISIBILITY:
@@ -695,8 +694,8 @@ class VisionTurnController:
         # Calculate safe speed using advanced physics-based method
         self._max_v_for_current_curvature = curvature_to_speed(current_curvature) if current_curvature > 0 else V_CRUISE_MAX * CV.KPH_TO_MS
 
-        # Check for overshoot using curvature_to_speed method
-        safe_speeds = np.array([curvature_to_speed(abs(curv)) for curv in curvature_array])
+        # Check for overshoot using curvature_to_speed method (use absolute values)
+        safe_speeds = np.array([curvature_to_speed(curv) for curv in curvature_array_abs])
         overshoot_mask = safe_speeds < self._v_ego
         self._lat_acc_overshoot_ahead = np.any(overshoot_mask)
 
