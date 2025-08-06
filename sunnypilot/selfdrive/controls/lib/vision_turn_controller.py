@@ -90,7 +90,7 @@ class VisionOcclusionState:
             self.extrapolated_curvature = self.last_valid_curvature * self.confidence_decay_factor
 
 # ===== ORIGINAL PHYSICS-BASED VTSC CONSTANTS =====
-_MIN_V = 5.6  # Do not operate under 20km/h
+_MIN_V = 2.24  # Do not operate under 5mph (was 5.6 m/s = 12.5mph)
 
 _ENTERING_PRED_LAT_ACC_TH = 1.3  # Predicted Lat Acc threshold to trigger entering turn state.
 _ABORT_ENTERING_PRED_LAT_ACC_TH = 1.1  # Predicted Lat Acc threshold to abort entering state if speed drops.
@@ -136,23 +136,38 @@ def _original_curvature_based_lat_accel(abs_curvature_scaled: float) -> float:
 
 def _physics_based_lateral_acceleration(curvature: float) -> float:
     """
-    FIXED sports car sigmoid for curvature-based lateral acceleration
-    NO SCALING HACKS - Takes curvature in SI units (1/meters)
+    Piecewise function for curvature-based lateral acceleration
+    FIXED aggressive behavior below 50mph by using conservative values
     
-    Returns LOWER lateral acceleration for HIGHER curvature (inverse relationship)
-    This ensures sharp curves get appropriate low speeds while maintaining safety.
+    Returns appropriate lateral acceleration based on speed zones:
+    - Below 50mph: Conservative (1.5-1.7 m/s²)
+    - 50-70mph: Rapid transition zone
+    - Above 70mph: Maximum performance (3.12 m/s²)
     """
-    # Physical constants - no arbitrary scaling
-    a_max = 3.12   # Maximum lateral acceleration (m/s²) - safety limit
-    a_min = 1.8    # Minimum lateral acceleration (m/s²) - adjusted for more appropriate hairpin speeds
-    alpha = 24.3   # Decay rate - tuned for sports car performance
-    beta = 0.78    # Power law exponent - tuned for sports car performance
+    # Critical curvature boundaries
+    CURV_50MPH = 0.0053  # Curvature corresponding to ~50mph curves
+    CURV_70MPH = 0.0029  # Curvature corresponding to ~70mph curves
 
-    # Power law sigmoid: exponential decay for smooth inverse relationship
-    lateral_acceleration = a_min + (a_max - a_min) * math.exp(-alpha * (curvature ** beta))
+    if curvature > CURV_50MPH:
+        # Zone 1: Tight curves (<50mph) - CONSERVATIVE
+        # Linear interpolation from 1.5 m/s² (hairpins) to 1.7 m/s² (50mph boundary)
+        if curvature > 0.3:
+            # Very tight curves (hairpins): absolute minimum
+            return 1.5
+        else:
+            # Gradual increase toward 50mph boundary
+            t = (curvature - CURV_50MPH) / (0.3 - CURV_50MPH)
+            return 1.7 + t * (1.5 - 1.7)
 
-    # Safety bounds (function naturally stays within bounds)
-    return max(a_min, min(lateral_acceleration, a_max))
+    elif curvature > CURV_70MPH:
+        # Zone 2: Transition (50-70mph) - RAPID INCREASE
+        # Exponential rise from 1.7 to 3.12 m/s²
+        t = (curvature - CURV_70MPH) / (CURV_50MPH - CURV_70MPH)
+        return 1.7 + (3.12 - 1.7) * (1 - math.exp(-5 * (1 - t)))
+
+    else:
+        # Zone 3: Highway speeds (>70mph) - MAXIMUM PERFORMANCE
+        return 3.12
 
 def curvature_to_speed(abs_curvature_meters: float) -> float:
     """FIXED: Calculates target speed (m/s) directly from curvature with NO SCALING HACK"""
