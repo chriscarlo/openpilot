@@ -83,7 +83,7 @@ void HudRenderer::updateState(const UIState &s) {
   is_cruise_available = set_speed != -1;
 
   // Show VTSC widget only when actively intervening (lowering speed below cruise setting)
-  float speed_threshold = is_metric ? 3.0f : 2.0f; // 3 kph or 2 mph threshold
+  float speed_threshold = is_metric ? 1.0f : 0.5f; // 1 kph or 0.5 mph threshold - more sensitive
   show_vtsc = (vtsc_state != 0) && (vtsc_velocity > 0) && is_cruise_set && 
               (vtsc_velocity < set_speed - speed_threshold);
 
@@ -508,126 +508,136 @@ void HudRenderer::drawVisionTurnControl(QPainter &p, const QRect &surface_rect) 
 
   QRect vtsc_rect(vtsc_x, vtsc_y, vtsc_width, vtsc_height);
 
-  // Determine state colors and text
-  QColor state_color;
+  // Determine state text (keep for reference, but simplify display)
   QString state_text;
-  QColor bg_color = QColor(0, 0, 0, 180);
+  QColor text_color = QColor(255, 255, 255, 200);
 
   switch (vtsc_state) {
     case 1: // entering
-      state_color = QColor(255, 200, 0, 255); // Orange
       state_text = tr("TURN AHEAD");
-      bg_color = QColor(40, 30, 0, 200); // Dark orange tint
       break;
     case 2: // turning
-      state_color = QColor(255, 100, 100, 255); // Light red
       state_text = tr("TURNING");
-      bg_color = QColor(40, 20, 20, 200); // Dark red tint
       break;
     case 3: // leaving
-      state_color = QColor(100, 255, 100, 255); // Light green
       state_text = tr("TURN EXIT");
-      bg_color = QColor(20, 40, 20, 200); // Dark green tint
       break;
     default:
       return; // Don't draw if disabled
   }
 
-  // Draw background with subtle border
-  p.setPen(QPen(state_color, 2));
-  p.setBrush(bg_color);
+  // Draw transparent background (no border)
+  p.setPen(Qt::NoPen);
+  p.setBrush(QColor(0, 0, 0, 100)); // Very transparent background
   p.drawRoundedRect(vtsc_rect, 12, 12);
 
   // Draw smaller state text at top of widget
-  p.setFont(InterFont(20, QFont::Bold));
-  p.setPen(state_color);
+  p.setFont(InterFont(18, QFont::Normal));
+  p.setPen(text_color);
   p.drawText(vtsc_rect.adjusted(0, 5, 0, 0), Qt::AlignTop | Qt::AlignHCenter, state_text);
 
-  // Draw bidirectional lateral acceleration meter
+  // Draw bidirectional lateral acceleration meter with static bars
   drawLateralAccelMeter(p, vtsc_rect, vtsc_current_lateral_accel);
 }
 
 void HudRenderer::drawLateralAccelMeter(QPainter &p, const QRect &widget_rect, float lateral_accel) {
   // Meter area within the widget (leave margins for text)
   const int meter_margin = 50; // 50px margin on each side
-  const int meter_top = 35; // Below the state text
-  const int meter_height = 25;
+  const int meter_top = 30; // Below the state text
+  const int meter_height = 30;
   
   QRect meter_rect = widget_rect.adjusted(meter_margin, meter_top, -meter_margin, -(widget_rect.height() - meter_top - meter_height));
   
   const int meter_width = meter_rect.width();
   const int center_x = meter_rect.x() + meter_width / 2;
-  const float max_accel = 3.12f; // Maximum lateral acceleration
+  const float max_accel = 3.0f; // Maximum lateral acceleration for display
   const int max_bar_width = meter_width / 2 - 10; // Leave 10px margin from edges
   
-  // Draw background track
+  // First, draw static translucent bars on BOTH sides (always visible)
   p.setPen(Qt::NoPen);
-  p.setBrush(QColor(60, 60, 60, 150));
-  p.drawRoundedRect(meter_rect, 4, 4);
   
-  // Draw center line (zero point)
-  p.setPen(QPen(QColor(255, 255, 255, 180), 2));
+  // Left side static bar (for right turns)
+  QRect left_static_rect(meter_rect.x() + 10, meter_rect.top() + 2, 
+                        center_x - meter_rect.x() - 15, meter_rect.height() - 4);
+  p.setBrush(QColor(200, 200, 200, 40)); // Translucent gray/white
+  p.drawRoundedRect(left_static_rect, 3, 3);
+  
+  // Right side static bar (for left turns)
+  QRect right_static_rect(center_x + 5, meter_rect.top() + 2, 
+                         meter_rect.right() - center_x - 15, meter_rect.height() - 4);
+  p.setBrush(QColor(200, 200, 200, 40)); // Translucent gray/white
+  p.drawRoundedRect(right_static_rect, 3, 3);
+  
+  // Draw center line (zero point) 
+  p.setPen(QPen(QColor(255, 255, 255, 200), 2));
   p.drawLine(center_x, meter_rect.top(), center_x, meter_rect.bottom());
   
   // Draw reference marks at ±1.0 and ±2.0 m/s²
-  p.setPen(QPen(QColor(200, 200, 200, 120), 1));
+  p.setPen(QPen(QColor(200, 200, 200, 80), 1));
   for (float ref_accel : {-2.0f, -1.0f, 1.0f, 2.0f}) {
     int mark_x = center_x + static_cast<int>((ref_accel / max_accel) * max_bar_width);
     if (mark_x > meter_rect.left() && mark_x < meter_rect.right()) {
-      p.drawLine(mark_x, meter_rect.top(), mark_x, meter_rect.bottom());
+      p.drawLine(mark_x, meter_rect.top() + 5, mark_x, meter_rect.bottom() - 5);
     }
   }
   
-  // Calculate bar properties
+  // Calculate active bar properties
   float clamped_accel = std::max(-max_accel, std::min(max_accel, lateral_accel));
-  float accel_ratio = std::abs(clamped_accel) / max_accel;
+  float accel_magnitude = std::abs(clamped_accel);
+  float accel_ratio = accel_magnitude / max_accel;
   int bar_width = static_cast<int>(accel_ratio * max_bar_width);
   
-  if (bar_width > 0) {
-    // Passenger-centric direction: left turn (positive accel) = bar extends RIGHT
-    // right turn (negative accel) = bar extends LEFT
-    int bar_x = (clamped_accel > 0) ? center_x : center_x - bar_width;
-    QRect bar_rect(bar_x, meter_rect.top() + 2, bar_width, meter_rect.height() - 4);
+  if (bar_width > 3) { // Only draw if meaningful width
+    // FIX: INVERT the direction logic
+    // Left turn (positive accel) = passenger pushed RIGHT = bar on RIGHT side
+    // Right turn (negative accel) = passenger pushed LEFT = bar on LEFT side
+    // BUT the sign convention is inverted, so we need to flip it
+    bool draw_on_right = (clamped_accel < 0); // INVERTED: negative accel = left turn = right bar
     
-    // Color based on magnitude
+    int bar_x = draw_on_right ? center_x + 5 : (center_x - bar_width - 5);
+    QRect active_bar_rect(bar_x, meter_rect.top() + 2, bar_width, meter_rect.height() - 4);
+    
+    // New color gradient: green -> yellow -> orange -> red
     QColor bar_color;
-    if (accel_ratio <= 1.0f/3.12f) { // 0-1.0 m/s²
-      bar_color = interpColor(accel_ratio * 3.12f, {0.0f, 1.0f}, 
-                             {QColor(100, 255, 100, 200), QColor(255, 255, 100, 200)});
-    } else if (accel_ratio <= 2.0f/3.12f) { // 1.0-2.0 m/s²
-      bar_color = interpColor((accel_ratio * 3.12f - 1.0f), {0.0f, 1.0f},
-                             {QColor(255, 255, 100, 200), QColor(255, 150, 100, 200)});
-    } else { // 2.0-3.12 m/s²
-      bar_color = interpColor((accel_ratio * 3.12f - 2.0f) / 1.12f, {0.0f, 1.0f},
-                             {QColor(255, 150, 100, 200), QColor(255, 100, 100, 220)});
+    if (accel_magnitude <= 1.0f) { // 0-1.0 m/s² = Green
+      bar_color = QColor(0, 255, 0, 200);
+    } else if (accel_magnitude <= 1.5f) { // 1.0-1.5 m/s² = Yellow
+      float t = (accel_magnitude - 1.0f) / 0.5f;
+      bar_color = interpColor(t, {0.0f, 1.0f},
+                             {QColor(0, 255, 0, 200), QColor(255, 255, 0, 200)});
+    } else if (accel_magnitude <= 2.0f) { // 1.5-2.0 m/s² = Orange
+      float t = (accel_magnitude - 1.5f) / 0.5f;
+      bar_color = interpColor(t, {0.0f, 1.0f},
+                             {QColor(255, 255, 0, 200), QColor(255, 165, 0, 200)});
+    } else { // 2.0+ m/s² = Red
+      float t = std::min(1.0f, (accel_magnitude - 2.0f) / 1.0f);
+      bar_color = interpColor(t, {0.0f, 1.0f},
+                             {QColor(255, 165, 0, 200), QColor(255, 0, 0, 220)});
     }
     
     p.setPen(Qt::NoPen);
     p.setBrush(bar_color);
-    p.drawRoundedRect(bar_rect, 3, 3);
+    p.drawRoundedRect(active_bar_rect, 3, 3);
   }
   
-  // Draw scale labels
-  p.setFont(InterFont(12, QFont::Normal));
-  p.setPen(QColor(180, 180, 180, 160));
+  // Draw scale labels (smaller, more subtle)
+  p.setFont(InterFont(11, QFont::Normal));
+  p.setPen(QColor(180, 180, 180, 120));
   
-  // Left side: -3.0
-  QString left_label = "-3.0";
-  QRect left_rect(meter_rect.left() - 25, meter_rect.bottom() + 5, 50, 15);
-  p.drawText(left_rect, Qt::AlignCenter, left_label);
+  // Left side: -3
+  p.drawText(QRect(meter_rect.left(), meter_rect.bottom() + 2, 30, 12), 
+             Qt::AlignLeft, "-3");
   
   // Center: 0
-  QString center_label = "0";
-  QRect center_rect(center_x - 10, meter_rect.bottom() + 5, 20, 15);
-  p.drawText(center_rect, Qt::AlignCenter, center_label);
+  p.drawText(QRect(center_x - 10, meter_rect.bottom() + 2, 20, 12), 
+             Qt::AlignCenter, "0");
   
-  // Right side: +3.0
-  QString right_label = "+3.0";
-  QRect right_rect(meter_rect.right() - 25, meter_rect.bottom() + 5, 50, 15);
-  p.drawText(right_rect, Qt::AlignCenter, right_label);
+  // Right side: +3
+  p.drawText(QRect(meter_rect.right() - 30, meter_rect.bottom() + 2, 30, 12), 
+             Qt::AlignRight, "+3");
   
-  // Units label
-  QString units_label = "m/s²";
-  QRect units_rect(meter_rect.right() + 10, meter_rect.top(), 40, meter_rect.height());
-  p.drawText(units_rect, Qt::AlignLeft | Qt::AlignVCenter, units_label);
+  // Units label (smaller)
+  p.setFont(InterFont(10, QFont::Normal));
+  p.drawText(QRect(meter_rect.right() + 5, meter_rect.top(), 35, meter_rect.height()),
+             Qt::AlignLeft | Qt::AlignVCenter, "m/s²");
 }
