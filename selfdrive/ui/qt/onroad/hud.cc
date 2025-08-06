@@ -166,10 +166,8 @@ void HudRenderer::draw(QPainter &p, const QRect &surface_rect) {
     drawRoadName(p, surface_rect);
   }
 
-  // Draw Vision Turn Speed Control if active
-  if (show_vtsc) {
-    drawVisionTurnControl(p, surface_rect);
-  }
+  // Always draw Vision Turn Speed Control widget (static bars always visible)
+  drawVisionTurnControl(p, surface_rect);
 
   drawCurrentSpeed(p, surface_rect);
 
@@ -519,51 +517,26 @@ void HudRenderer::drawText(QPainter &p, int x, int y, const QString &text, int a
 }
 
 void HudRenderer::drawVisionTurnControl(QPainter &p, const QRect &surface_rect) {
-  // New bottom positioning with increased width (golden ratio ~57% of screen width)
+  // Position as close to bottom as possible with minimal margin
   const int vtsc_width = 1100;
-  const int vtsc_height = 90;
+  const int vtsc_height = 60;  // Reduced height for cleaner look
   const int vtsc_x = (surface_rect.width() - vtsc_width) / 2;
-  const int vtsc_y = surface_rect.height() - vtsc_height - 50; // 50px from bottom
+  const int vtsc_y = surface_rect.height() - vtsc_height - 15; // Only 15px from bottom
 
   QRect vtsc_rect(vtsc_x, vtsc_y, vtsc_width, vtsc_height);
 
-  // Determine state text (keep for reference, but simplify display)
-  QString state_text;
-  QColor text_color = QColor(255, 255, 255, 200);
+  // 100% transparent - no background, no border
+  // Only the meter bars themselves will be visible
 
-  switch (vtsc_state) {
-    case 1: // entering
-      state_text = tr("TURN AHEAD");
-      break;
-    case 2: // turning
-      state_text = tr("TURNING");
-      break;
-    case 3: // leaving
-      state_text = tr("TURN EXIT");
-      break;
-    default:
-      return; // Don't draw if disabled
-  }
-
-  // Draw transparent background (no border)
-  p.setPen(Qt::NoPen);
-  p.setBrush(QColor(0, 0, 0, 100)); // Very transparent background
-  p.drawRoundedRect(vtsc_rect, 12, 12);
-
-  // Draw smaller state text at top of widget
-  p.setFont(InterFont(18, QFont::Normal));
-  p.setPen(text_color);
-  p.drawText(vtsc_rect.adjusted(0, 5, 0, 0), Qt::AlignTop | Qt::AlignHCenter, state_text);
-
-  // Draw bidirectional lateral acceleration meter with static bars
+  // Draw bidirectional lateral acceleration meter - always visible
   drawLateralAccelMeter(p, vtsc_rect, vtsc_current_lateral_accel);
 }
 
 void HudRenderer::drawLateralAccelMeter(QPainter &p, const QRect &widget_rect, float lateral_accel) {
-  // Meter area within the widget (leave margins for text)
+  // Meter fills the entire widget height with minimal margins
   const int meter_margin = 50; // 50px margin on each side
-  const int meter_top = 30; // Below the state text
-  const int meter_height = 30;
+  const int meter_top = 10; // Minimal top margin
+  const int meter_height = 40; // Taller bars for better visibility
   
   QRect meter_rect = widget_rect.adjusted(meter_margin, meter_top, -meter_margin, -(widget_rect.height() - meter_top - meter_height));
   
@@ -572,20 +545,20 @@ void HudRenderer::drawLateralAccelMeter(QPainter &p, const QRect &widget_rect, f
   const float max_accel = 3.0f; // Maximum lateral acceleration for display
   const int max_bar_width = meter_width / 2 - 10; // Leave 10px margin from edges
   
-  // First, draw static translucent bars on BOTH sides (always visible)
+  // Always draw static inactive bars on BOTH sides - these are ALWAYS visible
   p.setPen(Qt::NoPen);
   
-  // Left side static bar (for right turns)
+  // Left side static bar (for right turns) - always visible as inactive
   QRect left_static_rect(meter_rect.x() + 10, meter_rect.top() + 2, 
                         center_x - meter_rect.x() - 15, meter_rect.height() - 4);
-  p.setBrush(QColor(200, 200, 200, 40)); // Translucent gray/white
-  p.drawRoundedRect(left_static_rect, 3, 3);
+  p.setBrush(QColor(200, 200, 200, 60)); // More visible white-gray
+  p.drawRoundedRect(left_static_rect, 5, 5);
   
-  // Right side static bar (for left turns)
+  // Right side static bar (for left turns) - always visible as inactive
   QRect right_static_rect(center_x + 5, meter_rect.top() + 2, 
                          meter_rect.right() - center_x - 15, meter_rect.height() - 4);
-  p.setBrush(QColor(200, 200, 200, 40)); // Translucent gray/white
-  p.drawRoundedRect(right_static_rect, 3, 3);
+  p.setBrush(QColor(200, 200, 200, 60)); // More visible white-gray
+  p.drawRoundedRect(right_static_rect, 5, 5);
   
   // Draw center line (zero point) 
   p.setPen(QPen(QColor(255, 255, 255, 200), 2));
@@ -600,13 +573,16 @@ void HudRenderer::drawLateralAccelMeter(QPainter &p, const QRect &widget_rect, f
     }
   }
   
-  // Calculate active bar properties
+  // Only draw active bar overlay when there's actual lateral acceleration
   float clamped_accel = std::max(-max_accel, std::min(max_accel, lateral_accel));
   float accel_magnitude = std::abs(clamped_accel);
-  float accel_ratio = accel_magnitude / max_accel;
-  int bar_width = static_cast<int>(accel_ratio * max_bar_width);
   
-  if (bar_width > 3) { // Only draw if meaningful width
+  // Only show active bar when acceleration exceeds minimum threshold (0.1 m/s²)
+  if (accel_magnitude > 0.1f) {
+    float accel_ratio = accel_magnitude / max_accel;
+    int bar_width = static_cast<int>(accel_ratio * max_bar_width);
+    
+    if (bar_width > 3) { // Only draw if meaningful width
     // FIX: INVERT the direction logic
     // Left turn (positive accel) = passenger pushed RIGHT = bar on RIGHT side
     // Right turn (negative accel) = passenger pushed LEFT = bar on LEFT side
@@ -636,7 +612,8 @@ void HudRenderer::drawLateralAccelMeter(QPainter &p, const QRect &widget_rect, f
     
     p.setPen(Qt::NoPen);
     p.setBrush(bar_color);
-    p.drawRoundedRect(active_bar_rect, 3, 3);
+    p.drawRoundedRect(active_bar_rect, 5, 5); // Match static bar corner radius
+    }
   }
   
   // Draw scale labels (smaller, more subtle)
