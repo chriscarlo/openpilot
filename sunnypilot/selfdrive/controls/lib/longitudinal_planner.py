@@ -55,7 +55,7 @@ class LongitudinalPlannerSP:
 
     v_cruise_slc = self.slc.speed_limit_offseted if self.slc.is_active else V_CRUISE_UNSET
 
-    self.v_tsc.update(sm, sm['carControl'].enabled, v_ego, a_ego, v_cruise)
+    self.v_tsc.update(sm, sm['carControl'].longActive, v_ego, a_ego, v_cruise)
     v_cruise_v_tsc = self.v_tsc.v_turn if self.v_tsc.is_active else V_CRUISE_UNSET
 
     cruise_speeds = [v_cruise]
