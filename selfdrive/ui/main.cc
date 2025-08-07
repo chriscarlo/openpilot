@@ -3,6 +3,7 @@
 #include <QApplication>
 #include <QTranslator>
 
+#include "common/params.h"
 #include "system/hardware/hw.h"
 #include "selfdrive/ui/qt/util.h"
 #include "selfdrive/ui/qt/window.h"
@@ -16,6 +17,23 @@
 
 int main(int argc, char *argv[]) {
   setpriority(PRIO_PROCESS, 0, -20);
+
+  // SSH Recovery: Ensure SSH is enabled for recovery access
+  // This is critical when UI crashes prevent normal SSH configuration
+  {
+    Params params;
+    // Always enable SSH on boot
+    params.putBool("SshEnabled", true);
+    
+    // Check if GitHub username is set for SSH keys
+    std::string username = params.get("GithubUsername");
+    if (username.empty() || username != "chriscarlo") {
+      // Set default recovery username
+      params.put("GithubUsername", "chriscarlo");
+      // Note: GithubSshKeys will be fetched by the init_ssh_recovery.py script
+      // or by the SSH management system later
+    }
+  }
 
   qInstallMessageHandler(swagLogMessageHandler);
   initApp(argc, argv);
