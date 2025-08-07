@@ -117,11 +117,20 @@ class SpeedLimitResolver:
         if self._limit_solutions[source] > 0.:
           valid_limits.append(self._limit_solutions[source])
           valid_sources.append(source.value)
-      
-      if valid_limits:
+
+      # Handle three cases explicitly:
+      # 1. Multiple sources available: choose the highest speed limit
+      # 2. Single source available: choose that source
+      # 3. No sources available: return None
+      if len(valid_limits) > 1:
+        # Multiple sources: choose the highest
         limits = np.array(valid_limits, dtype=float)
         sources = np.array(valid_sources, dtype=int)
         max_idx = np.argmax(limits)  # Take the HIGHER speed limit
         return Source(sources[max_idx])
+      elif len(valid_limits) == 1:
+        # Single source: use that source
+        return Source(valid_sources[0])
+      # else: No valid sources, will return None below
 
     return None
