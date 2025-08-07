@@ -267,8 +267,17 @@ class CarState(CarStateBase, EsccCarStateBase, MadsCarState, CarStateExt):
     ret.steeringPressed = self.update_steering_pressed(abs(ret.steeringTorque) > self.params.STEER_THRESHOLD, 5)
     ret.steerFaultTemporary = cp.vl["MDPS"]["LKA_FAULT"] != 0
 
-    # Dashboard speed limit reading from CCNC_0x162 message
-    if "CCNC_0x162" in cp_cam.vl:
+    # Dashboard speed limit reading
+    # EV6 uses FR_CMR_02_100ms (0x1FA), other vehicles may use CCNC_0x162
+    if "FR_CMR_02_100ms" in cp_cam.vl:
+      # ISLW_SpdCluMainDis signal from FR_CMR_02_100ms
+      speed_limit_raw = cp_cam.vl["FR_CMR_02_100ms"]["ISLW_SpdCluMainDis"]
+      # Convert from km/h to m/s, 0 and 255 indicate no speed limit detected
+      if speed_limit_raw != 0 and speed_limit_raw != 255:
+        ret_sp.speedLimit = speed_limit_raw * CV.KPH_TO_MS
+      else:
+        ret_sp.speedLimit = 0.0
+    elif "CCNC_0x162" in cp_cam.vl:
       speed_limit_raw = cp_cam.vl["CCNC_0x162"]["SPEEDLIMIT"]
       # Convert from km/h to m/s, 0 and 255 indicate no speed limit detected
       if speed_limit_raw != 0 and speed_limit_raw != 255:
@@ -374,9 +383,14 @@ class CarState(CarStateBase, EsccCarStateBase, MadsCarState, CarStateExt):
         ("SCC_CONTROL", 50),
       ]
 
-    cam_messages = [
-      ("CCNC_0x162", 20),  # Dashboard speed limit reading
-    ]
+    cam_messages = []
+
+    # Only add dashboard speed limit message if it's present in the fingerprint
+    if CP.flags & HyundaiFlags.HAS_DASHBOARD_SPEED_LIMIT:
+      # EV6 uses FR_CMR_02_100ms, other vehicles may use CCNC_0x162
+      # Both are at 10Hz (every 100ms)
+      cam_messages.append(("FR_CMR_02_100ms", 10))  # ISLW speed limit data
+      cam_messages.append(("CCNC_0x162", 20))  # Alternative speed limit source
     if CP.flags & HyundaiFlags.CANFD_LKA_STEERING:
       block_lfa_msg = "CAM_0x362" if CP.flags & HyundaiFlags.CANFD_LKA_STEERING_ALT else "CAM_0x2a4"
       cam_messages += [(block_lfa_msg, 20)]

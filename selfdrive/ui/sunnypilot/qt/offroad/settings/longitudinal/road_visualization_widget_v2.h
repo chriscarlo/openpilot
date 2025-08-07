@@ -71,7 +71,6 @@ private:
   float marker_position;  // 0.0 (bottom) to 1.0 (curve start)
   bool is_dragging;
   bool is_hovering;
-  float drag_offset_y;  // Store offset between click and marker when dragging starts
   
   // Professional visual constants
   struct Theme {

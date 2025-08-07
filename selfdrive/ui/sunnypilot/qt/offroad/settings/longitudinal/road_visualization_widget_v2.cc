@@ -14,13 +14,13 @@ ConfigurationDataPanel::ConfigurationDataPanel(QWidget *parent) : QFrame(parent)
 }
 
 void ConfigurationDataPanel::setupUI() {
-  setFixedWidth(735);  // Additional width to prevent text cutoff
+  setFixedWidth(650);  // Optimized width for better space utilization
   // No background or borders - plain black
   setStyleSheet("background-color: transparent; border: none;");
   
   QVBoxLayout *main_layout = new QVBoxLayout(this);
-  main_layout->setContentsMargins(30, 25, 30, 25);
-  main_layout->setSpacing(25);
+  main_layout->setContentsMargins(20, 15, 20, 15);
+  main_layout->setSpacing(15);
   
   // Main description at the TOP - what this setting does
   main_description = new QLabel(this);
@@ -173,7 +173,9 @@ void ConfigurationDataPanel::updateConfiguration(float aggressiveness) {
 
 // ProfessionalRoadWidget Implementation
 ProfessionalRoadWidget::ProfessionalRoadWidget(QWidget *parent) : QWidget(parent) {
-  setMinimumSize(600, 800);
+  // Reduced height to fit within available space (900px - headers)
+  setMinimumSize(500, 600);
+  setMaximumSize(800, 700);  // Prevent excessive stretching
   setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
   
   // Get current aggressiveness
@@ -183,7 +185,6 @@ ProfessionalRoadWidget::ProfessionalRoadWidget(QWidget *parent) : QWidget(parent
   
   is_dragging = false;
   is_hovering = false;
-  drag_offset_y = 0.0f;
   
   // Enable mouse tracking
   setMouseTracking(true);
@@ -428,21 +429,19 @@ void ProfessionalRoadWidget::drawInteractiveMarker(QPainter &painter) {
 
 void ProfessionalRoadWidget::mousePressEvent(QMouseEvent *event) {
   float click_y = event->pos().y();
-  float marker_y = layout.road_start.y() + marker_position * (layout.curve_start.y() - layout.road_start.y());
   
-  // Allow clicking anywhere on the widget or near the marker
-  bool near_marker = std::abs(click_y - marker_y) < 60;
+  // Allow clicking anywhere in the road area to position the marker
   bool in_road_area = click_y >= layout.curve_start.y() - 50 && click_y <= layout.road_start.y() + 50;
   
-  if (near_marker || in_road_area) {
+  if (in_road_area) {
     is_dragging = true;
     setCursor(Qt::ClosedHandCursor);
     
-    // Store the offset between click position and current marker position
-    // This prevents the marker from jumping to the click location
-    drag_offset_y = click_y - marker_y;
+    // Immediately move marker to click position for responsive interaction
+    float road_height = layout.road_start.y() - layout.curve_start.y();
+    marker_position = (layout.road_start.y() - click_y) / road_height;
+    marker_position = std::max(0.0f, std::min(1.0f, marker_position));
     
-    // Don't update marker_position here - only update during drag
     update();
   }
 }
@@ -452,12 +451,10 @@ void ProfessionalRoadWidget::mouseMoveEvent(QMouseEvent *event) {
   
   if (is_dragging) {
     float click_y = pos.y();
-    // Apply the offset to get the desired marker position
-    float desired_marker_y = click_y - drag_offset_y;
     
-    // Convert from y coordinate to marker_position (0=bottom, 1=top)
+    // Direct marker positioning for smooth dragging
     float road_height = layout.road_start.y() - layout.curve_start.y();
-    marker_position = (layout.road_start.y() - desired_marker_y) / road_height;
+    marker_position = (layout.road_start.y() - click_y) / road_height;
     marker_position = std::max(0.0f, std::min(1.0f, marker_position));
     update();
   } else {
@@ -551,8 +548,8 @@ void AnticipationConfigPanel::setupUI() {
   // Content area
   QWidget *content = new QWidget(this);
   QHBoxLayout *content_layout = new QHBoxLayout(content);
-  content_layout->setContentsMargins(40, 40, 40, 40);
-  content_layout->setSpacing(40);
+  content_layout->setContentsMargins(25, 20, 25, 20);
+  content_layout->setSpacing(30);
   
   // Road visualization (left side)
   road_widget = new ProfessionalRoadWidget(this);

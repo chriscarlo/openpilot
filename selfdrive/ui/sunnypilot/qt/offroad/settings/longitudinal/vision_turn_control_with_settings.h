@@ -18,12 +18,16 @@ public:
   VisionTurnControlWithSettings(const QString &param, const QString &title, const QString &desc, 
                                 const QString &icon, QWidget *parent = nullptr);
 
+  void refresh();  // Public method to refresh toggle state
+
 signals:
   void settingsClicked();
   void toggleFlipped(bool state);
 
+protected:
+  void showEvent(QShowEvent *event) override;
+
 private:
-  void updateState();
   void setupSettingsButton();
   
   QPushButton *settings_btn;

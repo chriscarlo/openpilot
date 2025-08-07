@@ -6,6 +6,7 @@
  */
 
 #include "selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/vision_turn_control_with_settings.h"
+#include <QShowEvent>
 
 VisionTurnControlWithSettings::VisionTurnControlWithSettings(const QString &param, const QString &title, 
                                                              const QString &desc, const QString &icon, 
@@ -34,11 +35,16 @@ VisionTurnControlWithSettings::VisionTurnControlWithSettings(const QString &para
   QObject::connect(toggle, &Toggle::stateChanged, this, [this](bool state) {
     params.putBool(param_name.toStdString(), state);
     emit toggleFlipped(state);
-    updateState();
+    refresh();
   });
   
   // Initial state
-  updateState();
+  refresh();
+}
+
+void VisionTurnControlWithSettings::showEvent(QShowEvent *event) {
+  refresh();  // Refresh state when widget is shown
+  AbstractControlSP::showEvent(event);
 }
 
 void VisionTurnControlWithSettings::setupSettingsButton() {
@@ -70,7 +76,7 @@ void VisionTurnControlWithSettings::setupSettingsButton() {
   QObject::connect(settings_btn, &QPushButton::clicked, this, &VisionTurnControlWithSettings::settingsClicked);
 }
 
-void VisionTurnControlWithSettings::updateState() {
+void VisionTurnControlWithSettings::refresh() {
   bool enabled = params.getBool(param_name.toStdString());
   toggle->setChecked(enabled);
   settings_btn->setEnabled(enabled);

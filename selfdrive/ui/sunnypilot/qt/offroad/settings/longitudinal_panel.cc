@@ -222,6 +222,9 @@ void LongitudinalPanel::refresh(bool _offroad) {
   vibePersonalityControl->setEnabled(true);
   vibeAccelPersonalityControl->setEnabled(true);
   vibeFollowPersonalityControl->setEnabled(true);
+  
+  // Refresh VTSC toggle state
+  visionTurnSpeedControl->refresh();
   vibePersonalityControl->refresh();
   vibeAccelPersonalityControl->refresh();
   vibeFollowPersonalityControl->refresh();

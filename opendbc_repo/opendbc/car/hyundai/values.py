@@ -91,6 +91,9 @@ class HyundaiFlags(IntFlag):
   HYBRID = 2 ** 10
   EV = 2 ** 11
 
+  # Dashboard speed limit message (CCNC_0x162) is present on camera bus
+  HAS_DASHBOARD_SPEED_LIMIT = 2 ** 23
+
   # Static flags
 
   # If 0x500 is present on bus 1 it probably has a Mando radar outputting radar points.

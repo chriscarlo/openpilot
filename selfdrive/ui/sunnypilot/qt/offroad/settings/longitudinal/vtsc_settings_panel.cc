@@ -7,7 +7,6 @@
 
 #include "selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/vtsc_settings_panel.h"
 #include <QVBoxLayout>
-#include <QScrollArea>
 
 VTSCIconButton::VTSCIconButton(const QString &icon_path, const QString &text, QWidget *parent)
   : QPushButton(parent) {
@@ -97,25 +96,23 @@ void VTSCSettingsPanel::setupUI() {
   main_vlayout->addLayout(header_layout);
   main_vlayout->addSpacing(30);
   
-  // Scrollable area for icon grid
-  QScrollArea *scroll_area = new QScrollArea(this);
-  scroll_area->setWidgetResizable(true);
-  scroll_area->setStyleSheet("QScrollArea { background-color: transparent; border: none; }");
+  // Create centered layout for the grid
+  QHBoxLayout *center_layout = new QHBoxLayout();
+  center_layout->addStretch();  // Add stretch on left to center the grid
   
-  QWidget *scroll_content = new QWidget();
-  QVBoxLayout *scroll_layout = new QVBoxLayout(scroll_content);
+  // Create the icon grid
+  QWidget *grid_container = createIconGrid();
+  center_layout->addWidget(grid_container);
   
-  createIconGrid();
-  scroll_layout->addWidget(icon_grid_screen);
-  scroll_layout->addStretch();
+  center_layout->addStretch();  // Add stretch on right to center the grid
   
-  scroll_area->setWidget(scroll_content);
-  main_vlayout->addWidget(scroll_area);
+  main_vlayout->addLayout(center_layout);
+  main_vlayout->addStretch();  // Push everything to the top
   
   main_layout->addWidget(icon_grid_screen);
 }
 
-void VTSCSettingsPanel::createIconGrid() {
+QWidget* VTSCSettingsPanel::createIconGrid() {
   QWidget *grid_container = new QWidget();
   QGridLayout *grid_layout = new QGridLayout(grid_container);
   grid_layout->setSpacing(30);
@@ -157,5 +154,5 @@ void VTSCSettingsPanel::createIconGrid() {
     }
   }
   
-  icon_grid_screen = grid_container;
+  return grid_container;
 }

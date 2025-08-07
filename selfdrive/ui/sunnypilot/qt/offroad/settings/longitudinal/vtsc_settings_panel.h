@@ -38,7 +38,7 @@ signals:
   
 private:
   void setupUI();
-  void createIconGrid();
+  QWidget* createIconGrid();
   
   QStackedLayout *main_layout;
   QWidget *icon_grid_screen;
