@@ -1,6 +1,11 @@
 #include "selfdrive/ui/qt/onroad/model.h"
 
 void ModelRenderer::draw(QPainter &painter, const QRect &surface_rect) {
+  // Skip model drawing if in local mode
+  if (getenv("OPENPILOT_UI_LOCAL")) {
+    return;
+  }
+  
   auto *s = uiState();
   auto &sm = *(s->sm);
   // Check if data is up-to-date

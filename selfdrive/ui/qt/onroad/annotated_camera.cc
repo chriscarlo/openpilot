@@ -91,37 +91,44 @@ void AnnotatedCameraWidget::paintGL() {
   SubMaster &sm = *(s->sm);
   const double start_draw_t = millis_since_boot();
 
-  // draw camera frame
-  {
-    std::lock_guard lk(frame_lock);
+  // Skip camera drawing if in local mode
+  if (!getenv("OPENPILOT_UI_LOCAL")) {
+    // draw camera frame
+    {
+      std::lock_guard lk(frame_lock);
 
-    if (frames.empty()) {
-      if (skip_frame_count > 0) {
-        skip_frame_count--;
-        qDebug() << "skipping frame, not ready";
-        return;
+      if (frames.empty()) {
+        if (skip_frame_count > 0) {
+          skip_frame_count--;
+          qDebug() << "skipping frame, not ready";
+          return;
+        }
+      } else {
+        // skip drawing up to this many frames if we're
+        // missing camera frames. this smooths out the
+        // transitions from the narrow and wide cameras
+        skip_frame_count = 5;
       }
-    } else {
-      // skip drawing up to this many frames if we're
-      // missing camera frames. this smooths out the
-      // transitions from the narrow and wide cameras
-      skip_frame_count = 5;
-    }
 
-    // Wide or narrow cam dependent on speed
-    bool has_wide_cam = available_streams.count(VISION_STREAM_WIDE_ROAD);
-    if (has_wide_cam) {
-      float v_ego = sm["carState"].getCarState().getVEgo();
-      if ((v_ego < 10) || available_streams.size() == 1) {
-        wide_cam_requested = true;
-      } else if (v_ego > 15) {
-        wide_cam_requested = false;
+      // Wide or narrow cam dependent on speed
+      bool has_wide_cam = available_streams.count(VISION_STREAM_WIDE_ROAD);
+      if (has_wide_cam) {
+        float v_ego = sm["carState"].getCarState().getVEgo();
+        if ((v_ego < 10) || available_streams.size() == 1) {
+          wide_cam_requested = true;
+        } else if (v_ego > 15) {
+          wide_cam_requested = false;
+        }
+        wide_cam_requested = wide_cam_requested && sm["selfdriveState"].getSelfdriveState().getExperimentalMode();
       }
-      wide_cam_requested = wide_cam_requested && sm["selfdriveState"].getSelfdriveState().getExperimentalMode();
+      CameraWidget::setStreamType(wide_cam_requested ? VISION_STREAM_WIDE_ROAD : VISION_STREAM_ROAD);
+      CameraWidget::setFrameId(sm["modelV2"].getModelV2().getFrameId());
+      CameraWidget::paintGL();
     }
-    CameraWidget::setStreamType(wide_cam_requested ? VISION_STREAM_WIDE_ROAD : VISION_STREAM_ROAD);
-    CameraWidget::setFrameId(sm["modelV2"].getModelV2().getFrameId());
-    CameraWidget::paintGL();
+  } else {
+    // In local mode, just clear the background
+    glClearColor(0.1, 0.1, 0.1, 1.0);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
   }
 
   QPainter painter(this);

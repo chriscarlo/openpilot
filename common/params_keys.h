@@ -153,6 +153,7 @@ inline static std::unordered_map<std::string, uint32_t> keys = {
     {"RainbowMode", PERSISTENT},
     {"ShowAdvancedControls", PERSISTENT | BACKUP},
     {"VisionTurnSpeedControl", PERSISTENT | BACKUP},
+    {"VisionTurnSpeedControlAggressiveness", PERSISTENT | BACKUP},
     {"VibePersonalityEnabled", PERSISTENT},
     {"VibeAccelPersonalityEnabled", PERSISTENT},
     {"VibeFollowPersonalityEnabled", PERSISTENT},

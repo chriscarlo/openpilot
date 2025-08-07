@@ -37,6 +37,20 @@ void HudRenderer::updateState(const UIState &s) {
   is_metric = s.scene.is_metric;
   status = s.status;
 
+  // In local mode, provide default values
+  if (getenv("OPENPILOT_UI_LOCAL") || !s.sm) {
+    is_cruise_set = true;
+    set_speed = 60;  // Default cruise speed
+    speed = 55.5;    // Default current speed  
+    is_cruise_available = true;
+    v_ego_cluster_seen = true;
+    show_slc = false;
+    show_vtsc = false;
+    speed_limit_ahead_valid = false;
+    road_name = "Local Test Mode";
+    return;
+  }
+
   const SubMaster &sm = *(s.sm);
   if (sm.rcv_frame("carState") < s.scene.started_frame) {
     is_cruise_set = false;

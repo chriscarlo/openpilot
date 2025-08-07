@@ -272,7 +272,7 @@ def margin_time_fn(v_ego_ms: float) -> float:
         ratio = (v_ego_ms - v_med) / (v_high - v_med)
         return t_med + ratio * (t_high - t_med)
 
-def calculate_anticipation_time(v_ego_ms: float, target_speed_ms: float, max_pred_lat_acc: float) -> float:
+def calculate_anticipation_time(v_ego_ms: float, target_speed_ms: float, max_pred_lat_acc: float, aggressiveness: float = 1.0) -> float:
     """
     OPTIMIZED anticipation time calculation with research-validated parameters.
     17.6% improvement over original algorithm through Bayesian optimization.
@@ -291,6 +291,7 @@ def calculate_anticipation_time(v_ego_ms: float, target_speed_ms: float, max_pre
         v_ego_ms: Current vehicle speed (m/s)
         target_speed_ms: Target speed for curve (m/s)  
         max_pred_lat_acc: Maximum predicted lateral acceleration (m/s²)
+        aggressiveness: User-configurable multiplier (0.5-2.0, default 1.0)
         
     Returns:
         Optimized anticipation time in seconds
@@ -333,9 +334,12 @@ def calculate_anticipation_time(v_ego_ms: float, target_speed_ms: float, max_pre
 
     # Calculate optimized timing
     base_timing = reaction_time_base * speed_factor * delta_factor * severity_factor
-    timing = base_timing * context_multiplier
+    timing = base_timing * context_multiplier * aggressiveness
 
-    return clip(timing, timing_min, timing_max)
+    # Adjust max timing limit based on aggressiveness to allow more pre-emptive slowing
+    adjusted_timing_max = timing_max * aggressiveness
+
+    return clip(timing, timing_min, adjusted_timing_max)
 
 def _debug(msg):
   if not _DEBUG:
@@ -360,6 +364,19 @@ class VisionTurnController:
     self._op_enabled = False
     self._gas_pressed = False
     self._is_enabled = self._params.get_bool("VisionTurnSpeedControl")
+    # User-configurable aggressiveness for pre-emptive slowing (0.5-2.0, default 1.0)
+    # Higher values = earlier/more conservative slowing before curves
+    aggressiveness_bytes = self._params.get("VisionTurnSpeedControlAggressiveness")
+    try:
+      if aggressiveness_bytes:
+        # Decode bytes to string, then convert to float
+        aggressiveness_str = aggressiveness_bytes.decode('utf-8') if isinstance(aggressiveness_bytes, bytes) else aggressiveness_bytes
+        aggressiveness_val = float(aggressiveness_str)
+      else:
+        aggressiveness_val = 1.0
+    except (ValueError, TypeError, AttributeError):
+      aggressiveness_val = 1.0
+    self._aggressiveness = clip(aggressiveness_val, 0.5, 2.0)
     self._last_params_update = 0.
     self._v_cruise_setpoint = 0.
     self._v_ego = 0.
@@ -522,6 +539,17 @@ class VisionTurnController:
     tm = time.time()
     if tm > self._last_params_update + 5.0:
       self._is_enabled = self._params.get_bool("VisionTurnSpeedControl")
+      aggressiveness_bytes = self._params.get("VisionTurnSpeedControlAggressiveness")
+      try:
+        if aggressiveness_bytes:
+          # Decode bytes to string, then convert to float
+          aggressiveness_str = aggressiveness_bytes.decode('utf-8') if isinstance(aggressiveness_bytes, bytes) else aggressiveness_bytes
+          aggressiveness_val = float(aggressiveness_str)
+        else:
+          aggressiveness_val = 1.0
+      except (ValueError, TypeError, AttributeError):
+        aggressiveness_val = 1.0
+      self._aggressiveness = clip(aggressiveness_val, 0.5, 2.0)
       self._last_params_update = tm
 
   def _determine_emergency_level(self, required_decel: float, current_time: float) -> EmergencyLevel:
@@ -746,7 +774,8 @@ class VisionTurnController:
           anticipation_time = calculate_anticipation_time(
               self._v_ego,
               self._v_overshoot,
-              max_pred_curvature * self._v_ego**2
+              max_pred_curvature * self._v_ego**2,
+              self._aggressiveness
           )
 
           # Adjust the overshoot distance to start deceleration earlier

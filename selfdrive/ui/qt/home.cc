@@ -55,6 +55,11 @@ void HomeWindow::updateState(const UIState &s) {
 }
 
 void HomeWindow::offroadTransition(bool offroad) {
+  // Allow forcing onroad mode for local development
+  if (getenv("FORCE_ONROAD_UI")) {
+    offroad = false;
+  }
+  
   body->setEnabled(false);
   sidebar->setVisible(offroad);
   if (offroad) {

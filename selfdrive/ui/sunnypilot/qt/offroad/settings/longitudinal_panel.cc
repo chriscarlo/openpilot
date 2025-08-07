@@ -108,11 +108,18 @@ LongitudinalPanel::LongitudinalPanel(QWidget *parent) : QWidget(parent) {
   bool decEnabled = params.getBool("DynamicExperimentalControl");
   decManageRectBtn->setVisible(decEnabled);
 
-  visionTurnSpeedControl = new ParamControlSP("VisionTurnSpeedControl",
+  visionTurnSpeedControl = new VisionTurnControlWithSettings("VisionTurnSpeedControl",
     tr("Vision Turn Speed Controller"),
     tr("Also known as V-TSC, this controller automatically slows down for curvature while OP longitudinal is engaged."),
     "../assets/offroad/icon_shell.png");
+  visionTurnSpeedControl->showDescription();
   list->addItem(visionTurnSpeedControl);
+  
+  // Connect VTSC settings button
+  connect(visionTurnSpeedControl, &VisionTurnControlWithSettings::settingsClicked, [=]() {
+    cruisePanelScroller->setLastScrollPosition();
+    main_layout->setCurrentWidget(vtscSettingsScreen);
+  });
 
   connect(slcControl, &SpeedLimitControl::slcSettingsButtonClicked, [=]() {
     cruisePanelScroller->setLastScrollPosition();
@@ -130,10 +137,29 @@ LongitudinalPanel::LongitudinalPanel(QWidget *parent) : QWidget(parent) {
     cruisePanelScroller->restoreScrollPosition();
     main_layout->setCurrentWidget(cruisePanelScreen);
   });
+  
+  // Create VTSC settings screens
+  vtscSettingsScreen = new VTSCSettingsPanel(this);
+  connect(vtscSettingsScreen, &VTSCSettingsPanel::backPress, [=]() {
+    cruisePanelScroller->restoreScrollPosition();
+    main_layout->setCurrentWidget(cruisePanelScreen);
+  });
+  
+  anticipationDistanceScreen = new AnticipationConfigPanel(this);
+  connect(anticipationDistanceScreen, &AnticipationConfigPanel::backPress, [=]() {
+    main_layout->setCurrentWidget(vtscSettingsScreen);
+  });
+  
+  // Connect VTSC settings panel to anticipation distance screen
+  connect(vtscSettingsScreen, &VTSCSettingsPanel::anticipationSettingsClicked, [=]() {
+    main_layout->setCurrentWidget(anticipationDistanceScreen);
+  });
 
   main_layout->addWidget(cruisePanelScreen);
   main_layout->addWidget(slcScreen);
   main_layout->addWidget(decScreen);
+  main_layout->addWidget(vtscSettingsScreen);
+  main_layout->addWidget(anticipationDistanceScreen);
   main_layout->setCurrentWidget(cruisePanelScreen);
 }
 

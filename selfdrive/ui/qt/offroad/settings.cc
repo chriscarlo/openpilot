@@ -133,6 +133,11 @@ TogglesPanel::TogglesPanel(SettingsWindow *parent) : ListWidget(parent) {
 }
 
 void TogglesPanel::updateState(const UIState &s) {
+  // Skip updates if running locally without messaging system
+  if (!s.sm || getenv("OPENPILOT_UI_LOCAL")) {
+    return;
+  }
+  
   const SubMaster &sm = *(s.sm);
 
   if (sm.updated("selfdriveState")) {

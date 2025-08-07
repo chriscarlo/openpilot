@@ -69,6 +69,9 @@ longitudinal_panel_qt_src = [
   "sunnypilot/qt/offroad/settings/longitudinal/slc/speed_limit_control_policy.cc",
   "sunnypilot/qt/offroad/settings/longitudinal/slc/speed_limit_control_subpanel.cc",
   "sunnypilot/qt/offroad/settings/longitudinal/slc/speed_limit_control_warning.cc",
+  "sunnypilot/qt/offroad/settings/longitudinal/vision_turn_control_with_settings.cc",
+  "sunnypilot/qt/offroad/settings/longitudinal/vtsc_settings_panel.cc",
+  "sunnypilot/qt/offroad/settings/longitudinal/road_visualization_widget_v2.cc",
 ]
 
 vehicle_panel_qt_src = [
