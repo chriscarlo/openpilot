@@ -107,7 +107,7 @@ void VTSCSettingsPanel::setupUI() {
   center_layout->addStretch();  // Add stretch on right to center the grid
   
   main_vlayout->addLayout(center_layout);
-  main_vlayout->addStretch();  // Push everything to the top
+  // Removed addStretch() to eliminate excessive bottom padding that causes unwanted scrolling
   
   main_layout->addWidget(icon_grid_screen);
 }

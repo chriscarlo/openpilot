@@ -19,8 +19,8 @@ void ConfigurationDataPanel::setupUI() {
   setStyleSheet("background-color: transparent; border: none;");
   
   QVBoxLayout *main_layout = new QVBoxLayout(this);
-  main_layout->setContentsMargins(20, 15, 20, 15);
-  main_layout->setSpacing(15);
+  main_layout->setContentsMargins(20, 10, 20, 10);  // Reduced vertical margins  
+  main_layout->setSpacing(12);
   
   // Main description at the TOP - what this setting does
   main_description = new QLabel(this);
@@ -173,10 +173,10 @@ void ConfigurationDataPanel::updateConfiguration(float aggressiveness) {
 
 // ProfessionalRoadWidget Implementation
 ProfessionalRoadWidget::ProfessionalRoadWidget(QWidget *parent) : QWidget(parent) {
-  // Reduced height to fit within available space (900px - headers)
-  setMinimumSize(500, 600);
-  setMaximumSize(800, 700);  // Prevent excessive stretching
-  setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+  // Optimized size to fit within available space without creating blank space above
+  setMinimumSize(400, 500);
+  setMaximumSize(700, 650);  // Reduced max height to fit better in panel
+  setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);  // Changed to Preferred to prevent over-expansion
   
   // Get current aggressiveness
   std::string aggr_str = params.get("VisionTurnSpeedControlAggressiveness");
@@ -548,8 +548,8 @@ void AnticipationConfigPanel::setupUI() {
   // Content area
   QWidget *content = new QWidget(this);
   QHBoxLayout *content_layout = new QHBoxLayout(content);
-  content_layout->setContentsMargins(25, 20, 25, 20);
-  content_layout->setSpacing(30);
+  content_layout->setContentsMargins(15, 10, 15, 15);  // Reduced top margin to minimize blank space above road
+  content_layout->setSpacing(20);
   
   // Road visualization (left side)
   road_widget = new ProfessionalRoadWidget(this);
