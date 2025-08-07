@@ -87,10 +87,6 @@ function launch {
     agnos_init
   fi
 
-  # Enable SSH recovery access
-  echo "Setting up SSH recovery access..."
-  python3 $DIR/system/init_ssh_recovery.py || true
-
   # write tmux scrollback to a file
   tmux capture-pane -pq -S-1000 > /tmp/launch_log
 
