@@ -7,6 +7,7 @@
 
 #include "selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/vision_turn_control_with_settings.h"
 #include <QShowEvent>
+#include <QDebug>
 
 VisionTurnControlWithSettings::VisionTurnControlWithSettings(const QString &param, const QString &title, 
                                                              const QString &desc, const QString &icon, 
@@ -38,8 +39,7 @@ VisionTurnControlWithSettings::VisionTurnControlWithSettings(const QString &para
     refresh();
   });
   
-  // Initial state
-  refresh();
+  // Don't call refresh() in constructor - showEvent will handle initial state
 }
 
 void VisionTurnControlWithSettings::showEvent(QShowEvent *event) {
@@ -77,6 +77,22 @@ void VisionTurnControlWithSettings::setupSettingsButton() {
 }
 
 void VisionTurnControlWithSettings::refresh() {
+  // Add defensive checks to prevent crash
+  if (param_name.isEmpty()) {
+    qWarning() << "VisionTurnControlWithSettings::refresh() called with empty param_name";
+    return;
+  }
+  
+  if (!toggle) {
+    qWarning() << "VisionTurnControlWithSettings::refresh() called with null toggle";
+    return;
+  }
+  
+  if (!settings_btn) {
+    qWarning() << "VisionTurnControlWithSettings::refresh() called with null settings_btn";
+    return;
+  }
+  
   bool enabled = params.getBool(param_name.toStdString());
   if (enabled != toggle->on) {
     toggle->togglePosition();
