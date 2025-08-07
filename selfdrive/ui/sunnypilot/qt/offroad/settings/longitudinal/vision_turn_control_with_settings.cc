@@ -78,6 +78,8 @@ void VisionTurnControlWithSettings::setupSettingsButton() {
 
 void VisionTurnControlWithSettings::refresh() {
   bool enabled = params.getBool(param_name.toStdString());
-  toggle->setChecked(enabled);
+  if (enabled != toggle->on) {
+    toggle->togglePosition();
+  }
   settings_btn->setEnabled(enabled);
 }
