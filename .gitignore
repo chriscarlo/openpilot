@@ -117,3 +117,4 @@ Pipfile
 !.idea/customTargets.xml
 !.idea/tools/*
 !.run/*
+third_party/libjson11.a
