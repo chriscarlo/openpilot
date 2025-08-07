@@ -77,7 +77,7 @@ LongitudinalPanel::LongitudinalPanel(QWidget *parent) : QWidget(parent) {
 
   main_layout->addWidget(cruisePanelScreen);
   main_layout->setCurrentWidget(cruisePanelScreen);
-  refresh(offroad);
+  // Moved refresh() call to end of constructor after all controls are initialized
 
   slcControl = new SpeedLimitControl(
     "SpeedLimitControl",
@@ -161,6 +161,9 @@ LongitudinalPanel::LongitudinalPanel(QWidget *parent) : QWidget(parent) {
   main_layout->addWidget(vtscSettingsScreen);
   main_layout->addWidget(anticipationDistanceScreen);
   main_layout->setCurrentWidget(cruisePanelScreen);
+  
+  // Call refresh after all controls are initialized to avoid null pointer dereference
+  refresh(offroad);
 }
 
 void LongitudinalPanel::showEvent(QShowEvent *event) {

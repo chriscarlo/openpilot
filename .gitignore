@@ -118,3 +118,6 @@ Pipfile
 !.idea/tools/*
 !.run/*
 third_party/libjson11.a
+
+# Claude Code settings
+.claude/
