@@ -138,7 +138,7 @@ QWidget* VTSCSettingsPanel::createIconGrid() {
   
   int row = 0, col = 0;
   for (size_t i = 0; i < icons.size(); ++i) {
-    VTSCIconButton *btn = new VTSCIconButton(icons[i].emoji, icons[i].text, this);
+    VTSCIconButton *btn = new VTSCIconButton(icons[i].emoji, icons[i].text, grid_container);
     btn->setEnabled(icons[i].enabled);
     
     if (i == 0) {  // Anticipation Distance button
