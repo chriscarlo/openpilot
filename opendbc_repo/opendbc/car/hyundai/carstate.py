@@ -385,12 +385,13 @@ class CarState(CarStateBase, EsccCarStateBase, MadsCarState, CarStateExt):
 
     cam_messages = []
 
-    # Only add dashboard speed limit message if it's present in the fingerprint
-    if CP.flags & HyundaiFlags.HAS_DASHBOARD_SPEED_LIMIT:
-      # EV6 uses FR_CMR_02_100ms, other vehicles may use CCNC_0x162
-      # Both are at 10Hz (every 100ms)
-      cam_messages.append(("FR_CMR_02_100ms", 10))  # ISLW speed limit data
-      cam_messages.append(("CCNC_0x162", 20))  # Alternative speed limit source
+    # Only add dashboard speed limit messages that are actually present in the fingerprint
+    # EV6 uses FR_CMR_02_100ms (0x1FA) for ISLW speed limit data
+    if CP.flags & HyundaiFlags.HAS_DASHBOARD_SPEED_LIMIT_FR_CMR:
+      cam_messages.append(("FR_CMR_02_100ms", 10))  # ISLW speed limit data at 10Hz
+    # Some models use CCNC_0x162 (0x162) as an alternative speed limit source
+    if CP.flags & HyundaiFlags.HAS_DASHBOARD_SPEED_LIMIT_CCNC:
+      cam_messages.append(("CCNC_0x162", 20))  # Alternative speed limit source at 20Hz
     if CP.flags & HyundaiFlags.CANFD_LKA_STEERING:
       block_lfa_msg = "CAM_0x362" if CP.flags & HyundaiFlags.CANFD_LKA_STEERING_ALT else "CAM_0x2a4"
       cam_messages += [(block_lfa_msg, 20)]

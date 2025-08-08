@@ -91,8 +91,11 @@ class HyundaiFlags(IntFlag):
   HYBRID = 2 ** 10
   EV = 2 ** 11
 
-  # Dashboard speed limit message (CCNC_0x162) is present on camera bus
-  HAS_DASHBOARD_SPEED_LIMIT = 2 ** 23
+  # Dashboard speed limit messages on camera bus
+  # FR_CMR_02_100ms (0x1FA) - Used by EV6 and some newer models for ISLW speed limit data
+  HAS_DASHBOARD_SPEED_LIMIT_FR_CMR = 2 ** 23
+  # CCNC_0x162 (0x162) - Alternative speed limit source used by other models
+  HAS_DASHBOARD_SPEED_LIMIT_CCNC = 2 ** 24
 
   # Static flags
 
@@ -529,7 +532,7 @@ class CAR(Platforms):
       HyundaiCarDocs("Kia EV6 (with HDA II) 2022-24", "Highway Driving Assist II", car_parts=CarParts.common([CarHarness.hyundai_p]))
     ],
     CarSpecs(mass=2055, wheelbase=2.9, steerRatio=13.43, tireStiffnessFactor=0.65),
-    flags=HyundaiFlags.EV | HyundaiFlags.HAS_DASHBOARD_SPEED_LIMIT,
+    flags=HyundaiFlags.EV,
   )
   KIA_CARNIVAL_4TH_GEN = HyundaiCanFDPlatformConfig(
     [

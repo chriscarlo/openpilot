@@ -63,10 +63,17 @@ class CarInterface(CarInterfaceBase):
       if 0xFA in fingerprint[CAN.ECAN]:
         ret.flags |= HyundaiFlags.HYBRID.value
 
-      # Check if dashboard speed limit message is present on camera bus
+      # Check which dashboard speed limit messages are present on camera bus
+      # IMPORTANT: These flags must be set based on runtime detection, NOT hardcoded in values.py
+      # This ensures we only try to parse messages that actually exist on the vehicle
+
       # EV6 uses FR_CMR_02_100ms (0x1FA) for ISLW speed limit data
-      if 0x1FA in fingerprint[CAN.CAM] or 0x162 in fingerprint[CAN.CAM]:
-        ret.flags |= HyundaiFlags.HAS_DASHBOARD_SPEED_LIMIT.value
+      if 0x1FA in fingerprint[CAN.CAM]:
+        ret.flags |= HyundaiFlags.HAS_DASHBOARD_SPEED_LIMIT_FR_CMR.value
+
+      # Some models use CCNC_0x162 (0x162) as an alternative speed limit source
+      if 0x162 in fingerprint[CAN.CAM]:
+        ret.flags |= HyundaiFlags.HAS_DASHBOARD_SPEED_LIMIT_CCNC.value
 
       if lka_steering:
         # detect LKA steering
