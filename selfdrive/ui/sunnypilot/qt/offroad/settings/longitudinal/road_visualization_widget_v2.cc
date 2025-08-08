@@ -6,6 +6,7 @@
 #include "selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/road_visualization_widget_v2.h"
 #include <QPainterPath>
 #include <QHBoxLayout>
+#include <algorithm>
 #include <cmath>
 
 // ConfigurationDataPanel Implementation
@@ -443,6 +444,10 @@ void ProfessionalRoadWidget::mousePressEvent(QMouseEvent *event) {
     marker_position = std::max(0.0f, std::min(1.0f, marker_position));
     
     update();
+    event->accept();  // Prevent scroll propagation
+  } else {
+    event->ignore();  // Allow parent to handle scrolling
+    QWidget::mousePressEvent(event);
   }
 }
 
@@ -457,6 +462,7 @@ void ProfessionalRoadWidget::mouseMoveEvent(QMouseEvent *event) {
     marker_position = (layout.road_start.y() - click_y) / road_height;
     marker_position = std::max(0.0f, std::min(1.0f, marker_position));
     update();
+    event->accept();  // Prevent scroll propagation during drag
   } else {
     // Check for hover near the car/marker
     float marker_y = layout.road_start.y() + marker_position * (layout.curve_start.y() - layout.road_start.y());
@@ -470,6 +476,8 @@ void ProfessionalRoadWidget::mouseMoveEvent(QMouseEvent *event) {
     }
     
     setCursor(is_hovering ? Qt::OpenHandCursor : Qt::PointingHandCursor);
+    event->ignore();  // Allow parent to handle scrolling
+    QWidget::mouseMoveEvent(event);
   }
 }
 
@@ -481,6 +489,11 @@ void ProfessionalRoadWidget::mouseReleaseEvent(QMouseEvent *event) {
     // Convert position to aggressiveness (inverted)
     float new_aggressiveness = 0.5f + (1.0f - marker_position) * 1.5f;
     updateAggressiveness(new_aggressiveness);
+    
+    event->accept();  // Prevent scroll propagation
+  } else {
+    event->ignore();  // Allow parent to handle scrolling
+    QWidget::mouseReleaseEvent(event);
   }
 }
 
@@ -548,7 +561,7 @@ void AnticipationConfigPanel::setupUI() {
   // Content area
   QWidget *content = new QWidget(this);
   QHBoxLayout *content_layout = new QHBoxLayout(content);
-  content_layout->setContentsMargins(15, 10, 15, 15);  // Reduced top margin to minimize blank space above road
+  content_layout->setContentsMargins(15, 0, 15, 15);  // ZERO top margin - fixes alignment issue
   content_layout->setSpacing(20);
   
   // Road visualization (left side)
