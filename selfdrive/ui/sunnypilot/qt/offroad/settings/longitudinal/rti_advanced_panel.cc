@@ -14,6 +14,20 @@
 #include <QComboBox>
 #include <cmath>
 
+// Helper function for safe string conversion
+static int safeStringToInt(const std::string& str, int defaultValue) {
+  if (str.empty()) return defaultValue;
+  try {
+    // Check if string contains only digits and optional leading negative sign
+    if (str.find_first_not_of("0123456789-") != std::string::npos) {
+      return defaultValue;
+    }
+    return std::atoi(str.c_str());
+  } catch (...) {
+    return defaultValue;
+  }
+}
+
 // RTI Visualization Widget Implementation
 RTIVisualizationWidget::RTIVisualizationWidget(QWidget *parent) : QWidget(parent) {
   // Responsive sizing
@@ -892,18 +906,4 @@ void RTIAdvancedPanel::updateVisualization() {
   // Update widgets
   visualization_widget->updateConfiguration(aggressiveness, min_dist, max_dist);
   config_data_panel->updateConfiguration(aggressiveness, min_dist, max_dist, speed_reduction);
-}
-
-// Helper function for safe string conversion
-static int safeStringToInt(const std::string& str, int defaultValue) {
-  if (str.empty()) return defaultValue;
-  try {
-    // Check if string contains only digits and optional leading negative sign
-    if (str.find_first_not_of("0123456789-") != std::string::npos) {
-      return defaultValue;
-    }
-    return std::atoi(str.c_str());
-  } catch (...) {
-    return defaultValue;
-  }
 }
