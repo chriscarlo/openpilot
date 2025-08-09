@@ -186,13 +186,35 @@ void RTIVisualizationWidget::drawThreatZones(QPainter &painter) {
   painter.setFont(label_font);
   painter.setPen(QColor(255, 255, 255, 180));
   
+  // Format distances with proper units
+  Params params;
+  bool is_metric = params.getBool("IsMetric");
+  QString min_label, max_label;
+  
   if (min_y > layout.road_end.y() + 50) {
+    if (is_metric) {
+      double min_km = min_distance_m * 0.001;
+      min_label = QString("%1 km").arg(min_km, 0, 'f', 1);
+    } else {
+      double min_mi = min_distance_m * 0.000621371;
+      min_label = QString("%1 mi").arg(min_mi, 0, 'f', 2);
+    }
+    
     painter.drawText(QRect(10, min_y - 15, width() - 20, 30),
-                    Qt::AlignCenter, QString("Min Detection: %1m").arg(min_distance_m));
+                    Qt::AlignCenter, QString("Min Detection: %1").arg(min_label));
   }
+  
   if (max_y > layout.road_end.y() + 50) {
+    if (is_metric) {
+      double max_km = max_distance_m * 0.001;
+      max_label = QString("%1 km").arg(max_km, 0, 'f', 1);
+    } else {
+      double max_mi = max_distance_m * 0.000621371;
+      max_label = QString("%1 mi").arg(max_mi, 0, 'f', 2);
+    }
+    
     painter.drawText(QRect(10, max_y - 15, width() - 20, 30),
-                    Qt::AlignCenter, QString("Max Detection: %1m").arg(max_distance_m));
+                    Qt::AlignCenter, QString("Max Detection: %1").arg(max_label));
   }
 }
 
@@ -458,8 +480,24 @@ void RTIConfigDataPanel::updateConfiguration(RTIAggressiveness aggressiveness, i
     "and adjusts speed automatically for safer driving."
   ));
   
-  distance_info->setText(QString("• Detection Range: %1m - %2m")
-    .arg(min_dist).arg(max_dist));
+  // Format distance based on metric setting
+  Params params;
+  bool is_metric = params.getBool("IsMetric");
+  QString distance_text;
+  
+  if (is_metric) {
+    double min_km = min_dist * 0.001;
+    double max_km = max_dist * 0.001;
+    distance_text = QString("• Detection Range: %1 - %2 km")
+      .arg(min_km, 0, 'f', 1).arg(max_km, 0, 'f', 1);
+  } else {
+    double min_mi = min_dist * 0.000621371;
+    double max_mi = max_dist * 0.000621371;
+    distance_text = QString("• Detection Range: %1 - %2 mi")
+      .arg(min_mi, 0, 'f', 2).arg(max_mi, 0, 'f', 2);
+  }
+  
+  distance_info->setText(distance_text);
   
   speed_reduction_info->setText(QString("• Max Speed Reduction: %1 km/h")
     .arg(speed_reduction));

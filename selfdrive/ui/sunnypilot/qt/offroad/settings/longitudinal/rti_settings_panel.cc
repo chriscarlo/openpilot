@@ -195,14 +195,29 @@ RTISettingsPanel::RTISettingsPanel(QWidget *parent) : QStackedWidget(parent) {
   distanceLayout->addWidget(distanceTitle);
   
   // Min distance slider
-  QLabel *minDistLabel = new QLabel(tr("Minimum: 100m"));
+  QLabel *minDistLabel = new QLabel(tr("Minimum: 0.5 km"));
   minDistLabel->setStyleSheet("font-size: 32px; color: #999999;");
   distanceLayout->addWidget(minDistLabel);
   
   rti_min_slider = new QSlider(Qt::Horizontal);
-  rti_min_slider->setRange(50, 2000);
-  rti_min_slider->setSingleStep(50);
-  rti_min_slider->setValue(safeStringToInt(params.get("RTIMinDistance"), 100));
+  rti_min_slider->setStyleSheet(R"(
+    QSlider::groove:horizontal {
+      height: 10px;
+      background: #393939;
+      border-radius: 5px;
+    }
+    QSlider::handle:horizontal {
+      width: 40px;
+      height: 40px;
+      background: #4a90e2;
+      border-radius: 20px;
+      margin: -15px 0;
+    }
+    QSlider::sub-page:horizontal {
+      background: #4a90e2;
+      border-radius: 5px;
+    }
+  )");
   rti_min_slider->setStyleSheet(R"(
     QSlider::groove:horizontal {
       height: 10px;
@@ -222,7 +237,7 @@ RTISettingsPanel::RTISettingsPanel(QWidget *parent) : QStackedWidget(parent) {
     }
   )");
   connect(rti_min_slider, &QSlider::valueChanged, [this, minDistLabel](int value) {
-    minDistLabel->setText(QString(tr("Minimum: %1m")).arg(value));
+    minDistLabel->setText(formatDistanceLabel(value, true));
     params.put("RTIMinDistance", std::to_string(value));
   });
   distanceLayout->addWidget(rti_min_slider);
@@ -230,17 +245,15 @@ RTISettingsPanel::RTISettingsPanel(QWidget *parent) : QStackedWidget(parent) {
   distanceLayout->addSpacing(20);
   
   // Max distance slider
-  QLabel *maxDistLabel = new QLabel(tr("Maximum: 2000m"));
+  QLabel *maxDistLabel = new QLabel(tr("Maximum: 2.0 km"));
   maxDistLabel->setStyleSheet("font-size: 32px; color: #999999;");
   distanceLayout->addWidget(maxDistLabel);
   
   rti_max_slider = new QSlider(Qt::Horizontal);
-  rti_max_slider->setRange(500, 5000);
-  rti_max_slider->setSingleStep(100);
-  rti_max_slider->setValue(safeStringToInt(params.get("RTIMaxDistance"), 2000));
+  rti_max_slider->setStyleSheet(rti_min_slider->styleSheet());
   rti_max_slider->setStyleSheet(rti_min_slider->styleSheet());
   connect(rti_max_slider, &QSlider::valueChanged, [this, maxDistLabel](int value) {
-    maxDistLabel->setText(QString(tr("Maximum: %1m")).arg(value));
+    maxDistLabel->setText(formatDistanceLabel(value, false));
     params.put("RTIMaxDistance", std::to_string(value));
   });
   distanceLayout->addWidget(rti_max_slider);
@@ -344,6 +357,9 @@ RTISettingsPanel::RTISettingsPanel(QWidget *parent) : QStackedWidget(parent) {
   scrollArea->setWidget(scrollWidget);
   subPanelLayout->addWidget(scrollArea);
   
+  // Configure sliders with proper unit-aware settings
+  configureDistanceSliders();
+  
   refresh();
   addWidget(subPanelFrame);
   setCurrentWidget(subPanelFrame);
@@ -378,6 +394,16 @@ void RTISettingsPanel::loadWazeApiKey() {
 }
 
 void RTISettingsPanel::refresh() {
+  // Check if metric setting changed and reconfigure sliders if needed
+  static bool last_metric_state = isMetricSystem();
+  bool current_metric_state = isMetricSystem();
+  
+  if (current_metric_state != last_metric_state) {
+    // Metric setting changed - reconfigure sliders
+    configureDistanceSliders();
+    last_metric_state = current_metric_state;
+  }
+  
   // Check if RTI is enabled
   int source_val = safeStringToInt(params.get("RTIDataSource"), 0);
   bool sourceEnabled = (source_val != 0);
@@ -393,5 +419,134 @@ void RTISettingsPanel::refresh() {
 }
 
 void RTISettingsPanel::showEvent(QShowEvent *event) {
+  // Validate parameters and update sliders when panel is shown
+  validateAndMigrateParameters();
+  configureDistanceSliders();
   refresh();
+}
+
+// Helper method to check if system is in metric mode
+bool RTISettingsPanel::isMetricSystem() {
+  return params.getBool("IsMetric");
+}
+
+// Configure distance sliders based on metric/imperial setting
+void RTISettingsPanel::configureDistanceSliders() {
+  const bool is_metric = isMetricSystem();
+  
+  if (is_metric) {
+    // Metric: 0.5km - 5km in 0.5km increments
+    // Convert to meters: 500m - 5000m in 500m increments
+    const int min_range_m = static_cast<int>(METRIC_INCREMENT_KM * KM_TO_METERS);  // 500m
+    const int max_range_m = static_cast<int>(5.0 * KM_TO_METERS);                // 5000m
+    const int step_m = min_range_m;                                               // 500m
+    
+    rti_min_slider->setRange(min_range_m, max_range_m);
+    rti_min_slider->setSingleStep(step_m);
+    rti_max_slider->setRange(min_range_m, max_range_m);
+    rti_max_slider->setSingleStep(step_m);
+  } else {
+    // Imperial: 0.25mi - 2mi in 0.25mi increments
+    // Convert to meters: 402m - 3219m in 402m increments
+    const int min_range_m = static_cast<int>(IMPERIAL_INCREMENT_MI * MILES_TO_METERS);  // ~402m
+    const int max_range_m = static_cast<int>(2.0 * MILES_TO_METERS);                   // ~3219m
+    const int step_m = min_range_m;                                                     // ~402m
+    
+    rti_min_slider->setRange(min_range_m, max_range_m);
+    rti_min_slider->setSingleStep(step_m);
+    rti_max_slider->setRange(min_range_m, max_range_m);
+    rti_max_slider->setSingleStep(step_m);
+  }
+  
+  // Update current values from params, snapping to valid increments
+  int current_min = safeStringToInt(params.get("RTIMinDistance"), is_metric ? 500 : 402);
+  int current_max = safeStringToInt(params.get("RTIMaxDistance"), is_metric ? 2000 : 1609);
+  
+  // Snap to nearest valid increment and enforce range limits
+  current_min = snapToValidIncrement(current_min);
+  current_max = snapToValidIncrement(current_max);
+  
+  // Ensure min < max
+  if (current_min >= current_max) {
+    if (is_metric) {
+      current_min = 500;   // 0.5km
+      current_max = 1000;  // 1.0km
+    } else {
+      current_min = static_cast<int>(0.25 * MILES_TO_METERS);  // 0.25mi
+      current_max = static_cast<int>(0.5 * MILES_TO_METERS);   // 0.5mi
+    }
+  }
+  
+  rti_min_slider->setValue(current_min);
+  rti_max_slider->setValue(current_max);
+}
+
+// Validate parameters and migrate if needed
+void RTISettingsPanel::validateAndMigrateParameters() {
+  // Get current values
+  int current_min = safeStringToInt(params.get("RTIMinDistance"), 500);
+  int current_max = safeStringToInt(params.get("RTIMaxDistance"), 2000);
+  
+  // Ensure they meet new constraints
+  int valid_min = snapToValidIncrement(current_min);
+  int valid_max = snapToValidIncrement(current_max);
+  
+  // Enforce range limits based on current metric setting
+  const bool is_metric = isMetricSystem();
+  if (is_metric) {
+    valid_min = std::max(500, std::min(5000, valid_min));   // 0.5km - 5km
+    valid_max = std::max(500, std::min(5000, valid_max));
+  } else {
+    const int min_imperial_m = static_cast<int>(0.25 * MILES_TO_METERS);   // 0.25mi ≈ 402m
+    const int max_imperial_m = static_cast<int>(2.0 * MILES_TO_METERS);    // 2mi ≈ 3219m
+    valid_min = std::max(min_imperial_m, std::min(max_imperial_m, valid_min));
+    valid_max = std::max(min_imperial_m, std::min(max_imperial_m, valid_max));
+  }
+  
+  // Ensure min < max
+  if (valid_min >= valid_max) {
+    if (is_metric) {
+      valid_min = 500;  // 0.5km
+      valid_max = 1000; // 1km
+    } else {
+      valid_min = static_cast<int>(0.25 * MILES_TO_METERS);  // 0.25mi
+      valid_max = static_cast<int>(0.5 * MILES_TO_METERS);   // 0.5mi
+    }
+  }
+  
+  // Update params if values changed
+  if (valid_min != current_min) {
+    params.put("RTIMinDistance", std::to_string(valid_min));
+  }
+  if (valid_max != current_max) {
+    params.put("RTIMaxDistance", std::to_string(valid_max));
+  }
+}
+
+// Format distance labels with appropriate units
+QString RTISettingsPanel::formatDistanceLabel(int meters_value, bool is_minimum) {
+  const bool is_metric = isMetricSystem();
+  const QString prefix = is_minimum ? tr("Minimum: ") : tr("Maximum: ");
+  
+  if (is_metric) {
+    const double km = meters_value * METERS_TO_KM;
+    return QString("%1%2 km").arg(prefix).arg(km, 0, 'f', 1);
+  } else {
+    const double miles = meters_value * METERS_TO_MILES;
+    return QString("%1%2 mi").arg(prefix).arg(miles, 0, 'f', 2);
+  }
+}
+
+// Snap meter values to valid increments based on current unit system
+int RTISettingsPanel::snapToValidIncrement(int meters) {
+  const bool is_metric = isMetricSystem();
+  
+  if (is_metric) {
+    // Round to nearest 0.5km (500m)
+    return ((meters + 250) / 500) * 500;
+  } else {
+    // Round to nearest 0.25mi (≈402m)
+    const int increment_m = static_cast<int>(IMPERIAL_INCREMENT_MI * MILES_TO_METERS);
+    return ((meters + increment_m/2) / increment_m) * increment_m;
+  }
 }

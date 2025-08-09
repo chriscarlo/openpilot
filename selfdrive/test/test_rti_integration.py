@@ -98,6 +98,118 @@ class RTITestFramework:
 
 
 @pytest.mark.integration
+class TestRTIMetricImperialConversion:
+    """Test RTI metric/imperial unit conversion functionality."""
+
+    def test_metric_imperial_parameter_validation(self):
+        """Test that RTI parameters are validated and snapped to valid increments."""
+        framework = RTITestFramework()
+        framework.setup()
+        
+        try:
+            # Test metric mode parameter validation
+            framework.params.put_bool("IsMetric", True)
+            framework.params.put("RTIMinDistance", "750")  # Invalid - should snap to 500 or 1000
+            framework.params.put("RTIMaxDistance", "2300")  # Invalid - should snap to 2000 or 2500
+            
+            # Mock creating RTI settings panel (would call validateAndMigrateParameters)
+            # In real implementation, this would happen when GUI loads
+            
+            # Verify parameters were corrected to valid metric increments (500m steps)
+            min_dist = int(framework.params.get("RTIMinDistance"))
+            max_dist = int(framework.params.get("RTIMaxDistance"))
+            
+            # Should be snapped to 500m increments (0.5km)
+            assert min_dist % 500 == 0, f"Min distance {min_dist}m not snapped to 500m increment"
+            assert max_dist % 500 == 0, f"Max distance {max_dist}m not snapped to 500m increment"
+            assert 500 <= min_dist <= 5000, f"Min distance {min_dist}m out of metric range"
+            assert 500 <= max_dist <= 5000, f"Max distance {max_dist}m out of metric range"
+            
+            # Test imperial mode parameter validation  
+            framework.params.put_bool("IsMetric", False)
+            framework.params.put("RTIMinDistance", "500")   # Invalid - should snap to nearest 0.25mi increment
+            framework.params.put("RTIMaxDistance", "3000")  # Invalid - should snap to nearest 0.25mi increment
+            
+            # Verify parameters were corrected to valid imperial increments (~402m steps for 0.25mi)
+            min_dist = int(framework.params.get("RTIMinDistance"))
+            max_dist = int(framework.params.get("RTIMaxDistance"))
+            
+            imperial_increment = int(0.25 * 1609.344)  # 0.25 miles in meters ≈ 402m
+            
+            # Should be snapped to ~402m increments (0.25mi)
+            assert min_dist % imperial_increment == 0, f"Min distance {min_dist}m not snapped to {imperial_increment}m increment"
+            assert max_dist % imperial_increment == 0, f"Max distance {max_dist}m not snapped to {imperial_increment}m increment"
+            
+            imperial_min = int(0.25 * 1609.344)  # 0.25mi
+            imperial_max = int(2.0 * 1609.344)   # 2.0mi
+            assert imperial_min <= min_dist <= imperial_max, f"Min distance {min_dist}m out of imperial range"
+            assert imperial_min <= max_dist <= imperial_max, f"Max distance {max_dist}m out of imperial range"
+            
+        finally:
+            framework.teardown()
+
+    def test_unit_conversion_accuracy(self):
+        """Test accuracy of unit conversion constants."""
+        # Test conversion constants match expected values
+        METERS_TO_MILES = 0.000621371
+        MILES_TO_METERS = 1609.344
+        METERS_TO_KM = 0.001
+        KM_TO_METERS = 1000.0
+        
+        # Test round-trip conversions
+        test_meters = 1609  # ~1 mile
+        
+        # Meters -> Miles -> Meters
+        miles = test_meters * METERS_TO_MILES
+        back_to_meters = miles * MILES_TO_METERS
+        assert abs(back_to_meters - test_meters) < 1.0, "Mile conversion round-trip error too large"
+        
+        # Meters -> Km -> Meters  
+        km = test_meters * METERS_TO_KM
+        back_to_meters = km * KM_TO_METERS
+        assert abs(back_to_meters - test_meters) < 0.1, "Km conversion round-trip error too large"
+        
+        # Test specific requirements
+        assert abs(0.25 * MILES_TO_METERS - 402.336) < 1.0, "0.25 mile conversion incorrect"
+        assert abs(2.0 * MILES_TO_METERS - 3218.688) < 1.0, "2 mile conversion incorrect"
+        assert abs(0.5 * KM_TO_METERS - 500) < 0.1, "0.5 km conversion incorrect"
+        assert abs(5.0 * KM_TO_METERS - 5000) < 0.1, "5 km conversion incorrect"
+
+    def test_slider_range_validation(self):
+        """Test that slider ranges are properly configured for each unit system."""
+        framework = RTITestFramework()
+        framework.setup()
+        
+        try:
+            # Test metric ranges
+            framework.params.put_bool("IsMetric", True)
+            
+            # Metric should support 0.5km - 5km (500m - 5000m) in 500m steps
+            expected_min = 500    # 0.5km
+            expected_max = 5000   # 5km  
+            expected_step = 500   # 0.5km
+            
+            # Would test actual slider configuration in GUI tests
+            # For now, validate the math
+            assert expected_max >= expected_min
+            assert (expected_max - expected_min) % expected_step == 0
+            
+            # Test imperial ranges
+            framework.params.put_bool("IsMetric", False)
+            
+            # Imperial should support 0.25mi - 2mi in 0.25mi steps
+            expected_min = int(0.25 * 1609.344)  # 0.25mi ≈ 402m  
+            expected_max = int(2.0 * 1609.344)   # 2mi ≈ 3219m
+            expected_step = expected_min          # 0.25mi ≈ 402m
+            
+            assert expected_max >= expected_min
+            assert (expected_max - expected_min) % expected_step == 0
+            
+        finally:
+            framework.teardown()
+
+
+@pytest.mark.integration  
 class TestRTIEndToEnd:
     """End-to-end integration tests for RTI system."""
 

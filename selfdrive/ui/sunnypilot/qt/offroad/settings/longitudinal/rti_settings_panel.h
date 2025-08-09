@@ -44,6 +44,23 @@ private:
   ToggleSP *rti_audio_toggle;
   
   void loadWazeApiKey();
+  
+  // Metric/Imperial conversion constants
+  static constexpr double METERS_TO_MILES = 0.000621371;
+  static constexpr double MILES_TO_METERS = 1609.344;
+  static constexpr double METERS_TO_KM = 0.001;
+  static constexpr double KM_TO_METERS = 1000.0;
+  
+  // Slider increments for each unit system
+  static constexpr double IMPERIAL_INCREMENT_MI = 0.25;  // 0.25 miles
+  static constexpr double METRIC_INCREMENT_KM = 0.5;     // 0.5 km
+  
+  // Helper methods for unit conversion and slider management
+  bool isMetricSystem();
+  void configureDistanceSliders();
+  void validateAndMigrateParameters();
+  QString formatDistanceLabel(int meters_value, bool is_minimum);
+  int snapToValidIncrement(int meters);
 
   static QString sourceDescription(RTISourceType type = RTISourceType::DISABLED) {
     QString disabled_str = tr("⦿ Disabled: RTI system is completely disabled");
