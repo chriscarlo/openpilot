@@ -44,6 +44,9 @@ RTISettingsPanel::RTISettingsPanel(QWidget *parent) : QStackedWidget(parent) {
   QWidget *scrollWidget = new QWidget();
   QVBoxLayout *scrollLayout = new QVBoxLayout(scrollWidget);
   scrollLayout->setContentsMargins(50, 20, 50, 20);
+  
+  // Enforce maximum width constraint to prevent horizontal scrolling
+  scrollWidget->setMaximumWidth(1300); // Leave 100px margin from 1400px limit
   scrollLayout->setSpacing(30);
 
   // Title
@@ -84,11 +87,18 @@ RTISettingsPanel::RTISettingsPanel(QWidget *parent) : QStackedWidget(parent) {
     }
     QComboBox::down-arrow {
       image: none;
-      width: 0;
-      height: 0;
-      border-left: 15px solid transparent;
-      border-right: 15px solid transparent;
-      border-top: 20px solid white;
+      width: 20px;
+      height: 15px;
+      background: transparent;
+    }
+    QComboBox::drop-down {
+      background: transparent;
+      border: none;
+    }
+    QComboBox::drop-down:after {
+      content: "▼";
+      color: white;
+      font-size: 14px;
     }
     QComboBox QAbstractItemView {
       font-size: 36px;

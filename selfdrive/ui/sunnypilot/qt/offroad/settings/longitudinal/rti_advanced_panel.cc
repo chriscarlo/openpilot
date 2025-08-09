@@ -797,8 +797,8 @@ void RTIAdvancedPanel::setupUI() {
   
   // Content container - constrained width to prevent horizontal scrolling
   QWidget *content_container = new QWidget();
-  content_container->setMaximumWidth(1600);  // Max width to fit screen
-  content_container->setMinimumWidth(1200);  // Min width for content
+  content_container->setMaximumWidth(1300);  // Enforce 1400px total constraint
+  content_container->setMinimumWidth(1000);  // Reasonable minimum width
   
   QVBoxLayout *container_layout = new QVBoxLayout(content_container);
   container_layout->setContentsMargins(50, 30, 50, 30);
