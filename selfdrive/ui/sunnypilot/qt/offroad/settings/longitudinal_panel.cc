@@ -88,6 +88,16 @@ LongitudinalPanel::LongitudinalPanel(QWidget *parent) : QWidget(parent) {
     this);
   list->addItem(slcControl);
 
+  // RTI Control
+  rtiControl = new RTIControl(
+    "RTIEnabled",
+    tr("Realtime Traffic Intelligence (RTI)"),
+    tr("Advanced traffic intelligence system that uses real-time data to detect threats like police, speed cameras, accidents, and hazards ahead. "
+      "Automatically adjusts speed when threats are detected to help maintain safe and legal driving."),
+    "",
+    this);
+  list->addItem(rtiControl);
+
   dynamicExperimentalControl = new ParamControlSP("DynamicExperimentalControl",
     tr("Enable Dynamic Experimental Control"),
     tr("Enable toggle to allow the model to determine when to use sunnypilot ACC or sunnypilot End to End Longitudinal."),
@@ -126,10 +136,32 @@ LongitudinalPanel::LongitudinalPanel(QWidget *parent) : QWidget(parent) {
     main_layout->setCurrentWidget(slcScreen);
   });
 
+  connect(rtiControl, &RTIControl::rtiSettingsButtonClicked, [=]() {
+    cruisePanelScroller->setLastScrollPosition();
+    main_layout->setCurrentWidget(rtiSettingsScreen);
+  });
+
   slcScreen = new SpeedLimitControlSubpanel(this);
   connect(slcScreen, &SpeedLimitControlSubpanel::backPress, [=]() {
     cruisePanelScroller->restoreScrollPosition();
     main_layout->setCurrentWidget(cruisePanelScreen);
+  });
+
+  rtiSettingsScreen = new RTISettingsPanel(this);
+  connect(rtiSettingsScreen, &RTISettingsPanel::backPress, [=]() {
+    cruisePanelScroller->restoreScrollPosition();
+    main_layout->setCurrentWidget(cruisePanelScreen);
+  });
+  
+  // Connect RTI advanced settings navigation
+  connect(rtiSettingsScreen, &RTISettingsPanel::advancedSettingsRequested, [=]() {
+    main_layout->setCurrentWidget(rtiAdvancedScreen);
+  });
+
+  // Create RTI Advanced Configuration Panel
+  rtiAdvancedScreen = new RTIAdvancedPanel(this);
+  connect(rtiAdvancedScreen, &RTIAdvancedPanel::backPress, [=]() {
+    main_layout->setCurrentWidget(rtiSettingsScreen);
   });
 
   decScreen = new DecControllerSubpanel(this);
@@ -157,6 +189,8 @@ LongitudinalPanel::LongitudinalPanel(QWidget *parent) : QWidget(parent) {
 
   main_layout->addWidget(cruisePanelScreen);
   main_layout->addWidget(slcScreen);
+  main_layout->addWidget(rtiSettingsScreen);
+  main_layout->addWidget(rtiAdvancedScreen);
   main_layout->addWidget(decScreen);
   main_layout->addWidget(vtscSettingsScreen);
   main_layout->addWidget(anticipationDistanceScreen);

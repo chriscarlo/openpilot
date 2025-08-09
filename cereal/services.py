@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-from typing import Optional
 
 
 class Service:
-  def __init__(self, should_log: bool, frequency: float, decimation: Optional[int] = None):
+  def __init__(self, should_log: bool, frequency: float, decimation: int | None = None):
     self.should_log = should_log
     self.frequency = frequency
     self.decimation = decimation
@@ -81,6 +80,7 @@ _services: dict[str, tuple] = {
   "backupManagerSP": (False, 1., 1),
   "selfdriveStateSP": (True, 100., 10),
   "longitudinalPlanSP": (True, 20., 10),
+  "rtiStateSP": (True, 1., 1),  # Realtime Traffic Intelligence - 1Hz as recommended
   "onroadEventsSP": (True, 1., 1),
   "carParamsSP": (True, 0.02, 1),
   "carControlSP": (True, 100., 10),

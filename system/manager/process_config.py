@@ -91,6 +91,10 @@ def is_stock_model(started, params, CP: car.CarParams) -> bool:
 def mapd_ready(started: bool, params: Params, CP: car.CarParams) -> bool:
   return bool(os.path.exists(Paths.mapd_root()))
 
+def rti_enabled(started: bool, params: Params, CP: car.CarParams) -> bool:
+  """Check if RTI (Realtime Traffic Intelligence) is enabled."""
+  return started and params.get_bool("RTIEnabled")
+
 def or_(*fns):
   return lambda *args: operator.or_(*(fn(*args) for fn in fns))
 
@@ -168,6 +172,9 @@ procs += [
   # mapd
   NativeProcess("mapd", Paths.mapd_root(), [MAPD_PATH], mapd_ready),
   PythonProcess("mapd_manager", "sunnypilot.mapd.mapd_manager", always_run),
+
+  # RTI (Realtime Traffic Intelligence)
+  PythonProcess("rtid", "sunnypilot.rtid.rtid", rti_enabled),
 ]
 
 if os.path.exists("./github_runner.sh"):

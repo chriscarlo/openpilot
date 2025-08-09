@@ -288,7 +288,82 @@ struct LiveMapDataSP @0xf416ec09499d9d19 {
   roadName @5 :Text;
 }
 
-struct CustomReserved9 @0xa1680744031fdb2d {
+struct RtiStateSP @0xa1680744031fdb2d {
+  # Timestamp when this state was computed (in nanoseconds since boot)
+  timeStamp @0 :UInt64;
+  
+  # True if there's a threat ahead that requires speed reduction
+  threatAhead @1 :Bool;
+  
+  # Distance to the nearest relevant threat in meters (0 if no threat)
+  threatDistanceM @2 :Float32;
+  
+  # Recommended speed in m/s (0 means no recommendation)
+  # Must satisfy: 0 <= recommendedSpeed <= current_speed
+  recommendedSpeed @3 :Float32;
+  
+  # Source of traffic intelligence data
+  source @4 :Text;
+  
+  # API connection health status
+  apiStatus @5 :ApiStatus;
+  
+  # Detailed threat information for HUD display (up to 5 threats)
+  threats @6 :List(Threat);
+  
+  enum ApiStatus {
+    connected @0;
+    disconnected @1;
+    rateLimited @2;
+    error @3;
+    offline @4;  # Offline mode - no API calls being made
+  }
+  
+  struct Threat {
+    # Unique identifier for this threat
+    id @0 :Text;
+    
+    # Type of threat detected
+    type @1 :ThreatType;
+    
+    # Geographic coordinates
+    latitude @2 :Float64;
+    longitude @3 :Float64;
+    
+    # Distance from ego vehicle in meters
+    distance @4 :Float32;
+    
+    # Direction relative to ego vehicle
+    direction @5 :Direction;
+    
+    # Confidence in threat detection (0.0 - 1.0)
+    confidence @6 :Float32;
+    
+    # Speed limit at threat location (m/s)
+    speedLimitMs @7 :Float32;
+  }
+  
+  enum ThreatType {
+    police @0;
+    speedTrap @1;
+    speedCamera @2;
+    accident @3;
+    hazard @4;
+    construction @5;
+    jam @6;
+    policeHiding @7;     # Police hiding (subtype of police)
+    roadHazard @8;       # Hazard on road
+    shoulderHazard @9;   # Hazard on shoulder
+    roadClosed @10;      # Road closed alerts
+  }
+  
+  enum Direction {
+    ahead @0;
+    behind @1;
+    left @2;
+    right @3;
+    unknown @4;
+  }
 }
 
 struct CustomReserved10 @0xcb9fd56c7057593a {

@@ -127,6 +127,17 @@ def manager_init() -> None:
     ("SpeedLimitWarningOffsetType", "0"),
     ("SpeedLimitWarningValueOffset", "0"),
 
+    # Realtime Traffic Intelligence (RTI)
+    ("RTIEnabled", "0"),
+    ("RTIDataSource", "0"),           # 0=Disabled, 1=Waze, 2=TomTom, 3=INRIX, 4=Manual
+    ("RTIThreatFilter", "0"),         # 0=All, 1=Police, 2=Speed, 3=Hazards, 4=Custom
+    ("RTIAggressiveness", "1"),       # 0=Conservative, 1=Balanced, 2=Aggressive  
+    ("RTIMinDistance", "100"),        # Minimum activation distance in meters
+    ("RTIMaxDistance", "2000"),       # Maximum activation distance in meters
+    ("RTISpeedReduction", "15"),      # Maximum speed reduction in km/h
+    ("RTIHUDEnabled", "1"),           # Show HUD display
+    ("RTIAudioAlerts", "1"),          # Play audio alerts
+
     # Longitudinal Tuning Live Parameters
     ("LongTuningCustomToggle", "0"),
     ("LongTuningVEgoStopping", "0.25"),
