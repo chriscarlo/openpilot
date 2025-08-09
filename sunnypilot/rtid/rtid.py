@@ -14,7 +14,7 @@ import json
 import os
 import time
 
-from cereal import log, messaging
+from cereal import messaging
 from openpilot.common.params import Params
 from openpilot.common.swaglog import cloudlog
 
@@ -32,7 +32,7 @@ class RTIDaemon:
         # Messaging setup
         self.sm = messaging.SubMaster([
             'gpsLocationExternal',
-            'liveLocationKalman',
+            'gpsLocation',
             'carState'
         ], ignore_avg_freq=True)
         self.pm = messaging.PubMaster(['rtiStateSP'])
@@ -87,11 +87,11 @@ class RTIDaemon:
             if gps_ext.accuracy < 10.0:  # Only use if accuracy is reasonable
                 return (gps_ext.latitude, gps_ext.longitude)
 
-        # Fall back to Kalman filter location
-        if self.sm.updated['liveLocationKalman']:
-            live_loc = self.sm['liveLocationKalman']
-            if live_loc.status == log.LiveLocationKalman.Status.valid:
-                return (live_loc.lat, live_loc.lon)
+        # Fall back to regular GPS location
+        if self.sm.updated['gpsLocation']:
+            gps_loc = self.sm['gpsLocation']
+            if gps_loc.hasFix:
+                return (gps_loc.latitude, gps_loc.longitude)
 
         return None
 
@@ -151,7 +151,7 @@ class RTIDaemon:
                 # Get cache statistics if available
                 cache_stats = self.waze_client.cache.get_stats() if self.waze_client else {}
                 cache_info = f", Cache: {cache_stats.get('entries', 0)} items, {cache_stats.get('memory_mb', 0):.1f}MB" if cache_stats else ""
-                
+
                 cloudlog.info(f"RTI processed {self.loop_count} cycles, "
                              f"API: {api_status}, Location: {location}{cache_info}")
 
@@ -238,8 +238,13 @@ class RTIDaemon:
             await self.cleanup()
 
 
-async def main():
-    """Main entry point for RTI daemon."""
+def main():
+    """Entry point for RTI daemon - compatible with process manager."""
+    asyncio.run(main_async())
+
+
+async def main_async():
+    """Main async entry point for RTI daemon."""
     daemon = RTIDaemon()
 
     try:
@@ -254,10 +259,5 @@ async def main():
         await daemon.cleanup()
 
 
-def daemon_main():
-    """Synchronous entry point that runs the async main."""
-    asyncio.run(main())
-
-
 if __name__ == "__main__":
-    daemon_main()
+    main()

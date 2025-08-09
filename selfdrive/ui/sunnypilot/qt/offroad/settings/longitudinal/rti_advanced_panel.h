@@ -15,6 +15,7 @@
 #include <QHBoxLayout>
 #include <QGridLayout>
 #include <QStackedLayout>
+#include <QScrollArea>
 #include <QPainter>
 #include <QPaintEvent>
 #include <QMouseEvent>

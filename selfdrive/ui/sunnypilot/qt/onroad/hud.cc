@@ -133,10 +133,10 @@ void HudRendererSP::draw(QPainter &p, const QRect &surface_rect) {
 
 void HudRendererSP::drawRTIThreatIndicator(QPainter &p, const QRect &surface_rect) {
   // Position: bottom left corner of the display
-  const int x_offset = 50;  // Left margin
-  const int y_offset = surface_rect.height() - 290;  // Bottom margin (height + 50px from bottom)
-  const int widget_width = 180;
-  const int widget_height = 240;
+  const int x_offset = 50;  // Left margin from edge
+  const int y_offset = surface_rect.height() - 350;  // Position from bottom (increased to avoid overlap)
+  const int widget_width = 200;
+  const int widget_height = 260;
   
   QRect rti_rect(x_offset, y_offset, widget_width, widget_height);
   

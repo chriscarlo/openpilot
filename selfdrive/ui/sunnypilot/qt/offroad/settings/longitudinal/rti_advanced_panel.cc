@@ -30,18 +30,10 @@ static int safeStringToInt(const std::string& str, int defaultValue) {
 
 // RTI Visualization Widget Implementation
 RTIVisualizationWidget::RTIVisualizationWidget(QWidget *parent) : QWidget(parent) {
-  // Responsive sizing
-  QScreen *screen = QApplication::primaryScreen();
-  QRect screen_geometry = screen->geometry();
-  
-  int min_width = std::min(450, screen_geometry.width() / 3);
-  int max_width = std::min(650, screen_geometry.width() / 2);
-  int min_height = std::min(400, screen_geometry.height() - 250);
-  int max_height = std::min(550, screen_geometry.height() - 200);
-  
-  setMinimumSize(min_width, min_height);
-  setMaximumSize(max_width, max_height);
-  setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+  // Match VTSC panel dimensions
+  setMinimumSize(400, 350);
+  setMaximumSize(500, 450);
+  setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
   
   // Initialize state
   current_aggressiveness = RTIAggressiveness::BALANCED;
@@ -77,13 +69,13 @@ void RTIVisualizationWidget::updateConfiguration(RTIAggressiveness aggressivenes
 }
 
 void RTIVisualizationWidget::recalculateLayout() {
-  // Professional road layout with perspective
-  layout.road_width = width() * 0.4f;
-  layout.scale_factor = height() / 5000.0f; // 5km max view distance
+  // Compact road layout matching VTSC dimensions
+  layout.road_width = width() * 0.5f;
+  layout.scale_factor = height() / 3000.0f; // Reduced view distance for compact display
   
   // Road runs from bottom (vehicle) to top (horizon)
-  layout.road_start = QPointF(width() / 2, height() - 40);
-  layout.road_end = QPointF(width() / 2, 40);
+  layout.road_start = QPointF(width() / 2, height() - 30);
+  layout.road_end = QPointF(width() / 2, 30);
 }
 
 void RTIVisualizationWidget::paintEvent(QPaintEvent *event) {
@@ -130,7 +122,7 @@ void RTIVisualizationWidget::drawRoadScene(QPainter &painter) {
   painter.drawLine(layout.road_start, layout.road_end);
   
   // Distance markers
-  painter.setFont(QFont("Inter", 20));
+  painter.setFont(QFont("Inter", 16));
   painter.setPen(QColor(150, 150, 150));
   
   for (int distance = 500; distance <= 2000; distance += 500) {
@@ -352,14 +344,9 @@ RTIConfigDataPanel::RTIConfigDataPanel(QWidget *parent) : QFrame(parent) {
 }
 
 void RTIConfigDataPanel::setupUI() {
-  // Responsive sizing
-  QScreen *screen = QApplication::primaryScreen();
-  QRect screen_geometry = screen->geometry();
-  int responsive_width = std::min(550, screen_geometry.width() / 3);
-  
-  setMinimumWidth(300);
-  setMaximumWidth(responsive_width);
-  setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
+  // Match VTSC text panel fixed width
+  setFixedWidth(650);
+  setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Preferred);
   setStyleSheet("background-color: transparent; border: none;");
   
   QVBoxLayout *main_layout = new QVBoxLayout(this);
@@ -754,30 +741,36 @@ RTIAdvancedPanel::RTIAdvancedPanel(QWidget *parent) : QFrame(parent) {
 void RTIAdvancedPanel::setupUI() {
   main_layout = new QStackedLayout(this);
   
-  // Main configuration screen
+  // Main configuration screen with scroll area
+  QScrollArea *scrollArea = new QScrollArea(this);
+  scrollArea->setWidgetResizable(true);
+  scrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+  scrollArea->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+  scrollArea->setStyleSheet("QScrollArea { background-color: black; border: none; }");
+  
   main_screen = new QWidget();
   QVBoxLayout *screen_layout = new QVBoxLayout(main_screen);
   screen_layout->setContentsMargins(0, 0, 0, 0);
   screen_layout->setSpacing(0);
   
-  // Header
+  // Header - Fixed size and position
   QWidget *header = new QWidget();
-  header->setFixedHeight(90);
+  header->setFixedHeight(100);
   header->setStyleSheet("background-color: #292929;");
   
   QHBoxLayout *header_layout = new QHBoxLayout(header);
-  header_layout->setContentsMargins(30, 0, 30, 0);
+  header_layout->setContentsMargins(50, 0, 50, 0);
   
   back_btn = new QPushButton(tr("← Back"), this);
-  back_btn->setFixedSize(180, 70);
+  back_btn->setFixedSize(200, 80);
   back_btn->setStyleSheet(R"(
     QPushButton {
       background-color: #393939;
-      border-radius: 35px;
+      border-radius: 40px;
       color: #E4E4E4;
-      font-size: 32px;
+      font-size: 35px;
       font-weight: 500;
-      padding: 18px;
+      padding: 20px;
     }
     QPushButton:pressed {
       background-color: #4a4a4a;
@@ -787,7 +780,7 @@ void RTIAdvancedPanel::setupUI() {
   
   title_label = new QLabel(tr("Advanced RTI Configuration"), this);
   title_label->setStyleSheet(R"(
-    font-size: 46px;
+    font-size: 50px;
     font-weight: 450;
     color: #E4E4E4;
     background-color: transparent;
@@ -798,39 +791,55 @@ void RTIAdvancedPanel::setupUI() {
   header_layout->addStretch();
   header_layout->addWidget(title_label);
   header_layout->addStretch();
-  header_layout->addSpacing(180);
+  header_layout->addSpacing(200);  // Balance for back button width
   
   screen_layout->addWidget(header);
   
-  // Content area
-  QWidget *content = new QWidget();
-  QHBoxLayout *content_layout = new QHBoxLayout(content);
-  content_layout->setContentsMargins(20, 0, 20, 20);
-  content_layout->setSpacing(20);
+  // Content container - constrained width to prevent horizontal scrolling
+  QWidget *content_container = new QWidget();
+  content_container->setMaximumWidth(1600);  // Max width to fit screen
+  content_container->setMinimumWidth(1200);  // Min width for content
+  
+  QVBoxLayout *container_layout = new QVBoxLayout(content_container);
+  container_layout->setContentsMargins(50, 30, 50, 30);
+  container_layout->setSpacing(40);
+  
+  // Visualization row - Fixed dimensions
+  QWidget *viz_row = new QWidget();
+  viz_row->setFixedHeight(450);  // Controlled height
+  QHBoxLayout *viz_layout = new QHBoxLayout(viz_row);
+  viz_layout->setContentsMargins(0, 0, 0, 0);
+  viz_layout->setSpacing(30);
   
   // Visualization widget (left side)
   visualization_widget = new RTIVisualizationWidget(this);
-  content_layout->addWidget(visualization_widget, 2);
+  viz_layout->addWidget(visualization_widget);
   
-  // Configuration panel (right side)
+  // Configuration panel (right side - fixed width)
   config_data_panel = new RTIConfigDataPanel(this);
-  content_layout->addWidget(config_data_panel, 1);
+  viz_layout->addWidget(config_data_panel);
   
-  screen_layout->addWidget(content);
+  viz_layout->addStretch();  // Prevent horizontal expansion
+  container_layout->addWidget(viz_row);
   
-  // Quick controls at bottom
-  QWidget *controls = new QWidget();
-  controls->setStyleSheet("background-color: #2d2d2d; padding: 15px;");
-  QHBoxLayout *controls_layout = new QHBoxLayout(controls);
+  // Control buttons section
+  QFrame *controls_frame = new QFrame();
+  controls_frame->setStyleSheet("QFrame { background-color: #292929; border-radius: 20px; }");
+  controls_frame->setFixedHeight(120);
   
-  api_config_btn = new QPushButton(tr("API Config"), this);
+  QHBoxLayout *controls_layout = new QHBoxLayout(controls_frame);
+  controls_layout->setContentsMargins(40, 20, 40, 20);
+  controls_layout->setSpacing(30);
+  
+  api_config_btn = new QPushButton(tr("API Configuration"), this);
+  api_config_btn->setFixedSize(350, 80);
   api_config_btn->setStyleSheet(R"(
     QPushButton {
-      font-size: 26px;
-      padding: 12px 24px;
+      font-size: 35px;
+      font-weight: 500;
       background-color: #4a90e2;
       color: white;
-      border-radius: 10px;
+      border-radius: 20px;
     }
     QPushButton:pressed {
       background-color: #357abd;
@@ -840,13 +849,14 @@ void RTIAdvancedPanel::setupUI() {
   controls_layout->addWidget(api_config_btn);
   
   reset_defaults_btn = new QPushButton(tr("Reset to Defaults"), this);
+  reset_defaults_btn->setFixedSize(350, 80);
   reset_defaults_btn->setStyleSheet(R"(
     QPushButton {
-      font-size: 26px;
-      padding: 12px 24px;
+      font-size: 35px;
+      font-weight: 500;
       background-color: #666;
       color: white;
-      border-radius: 10px;
+      border-radius: 20px;
     }
     QPushButton:pressed {
       background-color: #555;
@@ -855,9 +865,20 @@ void RTIAdvancedPanel::setupUI() {
   controls_layout->addWidget(reset_defaults_btn);
   
   controls_layout->addStretch();
-  screen_layout->addWidget(controls);
+  container_layout->addWidget(controls_frame);
   
-  main_layout->addWidget(main_screen);
+  container_layout->addStretch();  // Push content to top
+  
+  // Center the content container horizontally
+  QHBoxLayout *center_layout = new QHBoxLayout();
+  center_layout->addStretch();
+  center_layout->addWidget(content_container);
+  center_layout->addStretch();
+  
+  screen_layout->addLayout(center_layout);
+  
+  scrollArea->setWidget(main_screen);
+  main_layout->addWidget(scrollArea);
   
   // API configuration screen
   api_config_screen = new RTIApiConfigPanel();

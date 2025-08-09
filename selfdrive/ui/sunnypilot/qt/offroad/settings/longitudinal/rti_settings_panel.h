@@ -7,6 +7,11 @@
 
 #pragma once
 
+#include <QComboBox>
+#include <QSlider>
+#include <QScrollArea>
+#include <QLabel>
+#include <fstream>
 #include "selfdrive/ui/sunnypilot/ui.h"
 #include "selfdrive/ui/sunnypilot/qt/offroad/settings/settings.h"
 #include "selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/rti_control.h"
@@ -27,15 +32,18 @@ signals:
 private:
   Params params;
   QFrame *subPanelFrame;
-  ButtonParamControlSP *rti_source_setting;
-  ButtonParamControlSP *rti_threat_filter_setting;
-  ButtonParamControlSP *rti_aggressiveness_setting;
-  OptionControlSP *rti_min_distance;
-  OptionControlSP *rti_max_distance;
-  OptionControlSP *rti_speed_reduction;
-  ParamControlSP *rti_hud_enabled;
-  ParamControlSP *rti_audio_alerts;
-  PushButtonSP *rti_advanced_button;
+  
+  // UI controls
+  QComboBox *rti_source_combo;
+  QComboBox *rti_filter_combo;
+  QComboBox *rti_aggr_combo;
+  QSlider *rti_min_slider;
+  QSlider *rti_max_slider;
+  QSlider *rti_speed_slider;
+  ToggleSP *rti_hud_toggle;
+  ToggleSP *rti_audio_toggle;
+  
+  void loadWazeApiKey();
 
   static QString sourceDescription(RTISourceType type = RTISourceType::DISABLED) {
     QString disabled_str = tr("⦿ Disabled: RTI system is completely disabled");

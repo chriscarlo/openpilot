@@ -259,4 +259,19 @@ inline static std::unordered_map<std::string, uint32_t> keys = {
     {"SpeedLimitWarningOffsetType", PERSISTENT | BACKUP},
     {"SpeedLimitWarningValueOffset", PERSISTENT | BACKUP},
     {"LiveSteerRatio", PERSISTENT | BACKUP},
+
+    // Realtime Traffic Intelligence (RTI)
+    {"RTIEnabled", PERSISTENT | BACKUP},
+    {"RTIDataSource", PERSISTENT | BACKUP},
+    {"RTIThreatFilter", PERSISTENT | BACKUP},
+    {"RTIAggressiveness", PERSISTENT | BACKUP},
+    {"RTIMinDistance", PERSISTENT | BACKUP},
+    {"RTIMaxDistance", PERSISTENT | BACKUP},
+    {"RTISpeedReduction", PERSISTENT | BACKUP},
+    {"RTIHUDEnabled", PERSISTENT | BACKUP},
+    {"RTIAudioAlerts", PERSISTENT | BACKUP},
+    {"RTIManualApiEndpoint", PERSISTENT | BACKUP},
+    {"RTIManualApiKey", PERSISTENT | BACKUP | DONT_LOG},
+    {"RTIManualApiFormat", PERSISTENT | BACKUP},
+    {"RTIManualApiFrequency", PERSISTENT | BACKUP},
 };
