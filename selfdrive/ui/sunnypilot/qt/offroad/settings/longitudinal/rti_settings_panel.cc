@@ -7,6 +7,38 @@
 
 #include "selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/rti_settings_panel.h"
 
+// Helper methods to eliminate code duplication
+static QPair<QFrame*, QVBoxLayout*> createSettingsFrame() {
+  QFrame *frame = new QFrame();
+  frame->setStyleSheet("QFrame { background-color: #292929; border-radius: 20px; padding: 25px; }");
+  QVBoxLayout *layout = new QVBoxLayout(frame);
+  return qMakePair(frame, layout);
+}
+
+static QLabel* createSectionLabel(const QString &text, QVBoxLayout *layout) {
+  QLabel *label = new QLabel(text);
+  label->setStyleSheet("font-size: 40px; font-weight: 500; color: #E4E4E4; padding-bottom: 15px;");
+  layout->addWidget(label);
+  return label;
+}
+
+static QHBoxLayout* createToggleRow(const QString &text, ToggleSP *toggle, const QString &param, Params &params, QVBoxLayout *parentLayout) {
+  QHBoxLayout *layout = new QHBoxLayout();
+  QLabel *label = new QLabel(text);
+  label->setStyleSheet("font-size: 36px; color: #E4E4E4;");
+  layout->addWidget(label);
+  layout->addStretch();
+  
+  toggle->setFixedSize(150, 80);
+  toggle->setChecked(params.getBool(param.toStdString()));
+  QObject::connect(toggle, &ToggleSP::stateChanged, [&params, param](bool checked) {
+    params.putBool(param.toStdString(), checked);
+  });
+  layout->addWidget(toggle);
+  parentLayout->addLayout(layout);
+  return layout;
+}
+
 // Helper function for safe string to int conversion
 static int safeStringToInt(const std::string& str, int defaultValue = 0) {
   if (str.empty()) return defaultValue;
@@ -63,13 +95,10 @@ RTISettingsPanel::RTISettingsPanel(QWidget *parent) : QStackedWidget(parent) {
   scrollLayout->addWidget(description);
   
   // Data Source Dropdown
-  QFrame *sourceFrame = new QFrame();
-  sourceFrame->setStyleSheet("QFrame { background-color: #292929; border-radius: 20px; padding: 25px; }");
-  QVBoxLayout *sourceLayout = new QVBoxLayout(sourceFrame);
-  
-  QLabel *sourceLabel = new QLabel(tr("Data Source"));
-  sourceLabel->setStyleSheet("font-size: 40px; font-weight: 500; color: #E4E4E4; padding-bottom: 15px;");
-  sourceLayout->addWidget(sourceLabel);
+  QPair<QFrame*, QVBoxLayout*> sourcePair = createSettingsFrame();
+  QFrame *sourceFrame = sourcePair.first;
+  QVBoxLayout *sourceLayout = sourcePair.second;
+  createSectionLabel(tr("Data Source"), sourceLayout);
   
   rti_source_combo = new QComboBox();
   rti_source_combo->setStyleSheet(R"(
@@ -103,7 +132,13 @@ RTISettingsPanel::RTISettingsPanel(QWidget *parent) : QStackedWidget(parent) {
       background-color: #393939;
       selection-background-color: #4a90e2;
       border: 2px solid #555;
+      border-radius: 5px;
       padding: 10px;
+      outline: none;
+    }
+    QComboBox QAbstractItemView::item {
+      padding: 8px;
+      border: none;
     }
   )");
   
@@ -129,13 +164,10 @@ RTISettingsPanel::RTISettingsPanel(QWidget *parent) : QStackedWidget(parent) {
   scrollLayout->addWidget(sourceFrame);
 
   // Threat Filter Dropdown
-  QFrame *filterFrame = new QFrame();
-  filterFrame->setStyleSheet("QFrame { background-color: #292929; border-radius: 20px; padding: 25px; }");
-  QVBoxLayout *filterLayout = new QVBoxLayout(filterFrame);
-  
-  QLabel *filterLabel = new QLabel(tr("Threat Filter"));
-  filterLabel->setStyleSheet("font-size: 40px; font-weight: 500; color: #E4E4E4; padding-bottom: 15px;");
-  filterLayout->addWidget(filterLabel);
+  QPair<QFrame*, QVBoxLayout*> filterPair = createSettingsFrame();
+  QFrame *filterFrame = filterPair.first;
+  QVBoxLayout *filterLayout = filterPair.second;
+  createSectionLabel(tr("Threat Filter"), filterLayout);
   
   rti_filter_combo = new QComboBox();
   rti_filter_combo->setStyleSheet(rti_source_combo->styleSheet());
@@ -158,13 +190,10 @@ RTISettingsPanel::RTISettingsPanel(QWidget *parent) : QStackedWidget(parent) {
   scrollLayout->addWidget(filterFrame);
 
   // Response Style Dropdown
-  QFrame *aggrFrame = new QFrame();
-  aggrFrame->setStyleSheet("QFrame { background-color: #292929; border-radius: 20px; padding: 25px; }");
-  QVBoxLayout *aggrLayout = new QVBoxLayout(aggrFrame);
-  
-  QLabel *aggrLabel = new QLabel(tr("Response Style"));
-  aggrLabel->setStyleSheet("font-size: 40px; font-weight: 500; color: #E4E4E4; padding-bottom: 15px;");
-  aggrLayout->addWidget(aggrLabel);
+  QPair<QFrame*, QVBoxLayout*> aggrPair = createSettingsFrame();
+  QFrame *aggrFrame = aggrPair.first;
+  QVBoxLayout *aggrLayout = aggrPair.second;
+  createSectionLabel(tr("Response Style"), aggrLayout);
   
   rti_aggr_combo = new QComboBox();
   rti_aggr_combo->setStyleSheet(rti_source_combo->styleSheet());
@@ -185,13 +214,10 @@ RTISettingsPanel::RTISettingsPanel(QWidget *parent) : QStackedWidget(parent) {
   scrollLayout->addWidget(aggrFrame);
 
   // Distance Settings
-  QFrame *distanceFrame = new QFrame();
-  distanceFrame->setStyleSheet("QFrame { background-color: #292929; border-radius: 20px; padding: 25px; }");
-  QVBoxLayout *distanceLayout = new QVBoxLayout(distanceFrame);
-  
-  QLabel *distanceTitle = new QLabel(tr("Detection Range"));
-  distanceTitle->setStyleSheet("font-size: 40px; font-weight: 500; color: #E4E4E4; padding-bottom: 20px;");
-  distanceLayout->addWidget(distanceTitle);
+  QPair<QFrame*, QVBoxLayout*> distancePair = createSettingsFrame();
+  QFrame *distanceFrame = distancePair.first;
+  QVBoxLayout *distanceLayout = distancePair.second;
+  createSectionLabel(tr("Detection Range"), distanceLayout);
   
   // Min distance slider
   QLabel *minDistLabel = new QLabel(tr("Minimum: 0.5 km"));
@@ -199,24 +225,6 @@ RTISettingsPanel::RTISettingsPanel(QWidget *parent) : QStackedWidget(parent) {
   distanceLayout->addWidget(minDistLabel);
   
   rti_min_slider = new QSlider(Qt::Horizontal);
-  rti_min_slider->setStyleSheet(R"(
-    QSlider::groove:horizontal {
-      height: 10px;
-      background: #393939;
-      border-radius: 5px;
-    }
-    QSlider::handle:horizontal {
-      width: 40px;
-      height: 40px;
-      background: #4a90e2;
-      border-radius: 20px;
-      margin: -15px 0;
-    }
-    QSlider::sub-page:horizontal {
-      background: #4a90e2;
-      border-radius: 5px;
-    }
-  )");
   rti_min_slider->setStyleSheet(R"(
     QSlider::groove:horizontal {
       height: 10px;
@@ -250,7 +258,6 @@ RTISettingsPanel::RTISettingsPanel(QWidget *parent) : QStackedWidget(parent) {
   
   rti_max_slider = new QSlider(Qt::Horizontal);
   rti_max_slider->setStyleSheet(rti_min_slider->styleSheet());
-  rti_max_slider->setStyleSheet(rti_min_slider->styleSheet());
   connect(rti_max_slider, &QSlider::valueChanged, [this, maxDistLabel](int value) {
     maxDistLabel->setText(formatDistanceLabel(value, false));
     params.put("RTIMaxDistance", std::to_string(value));
@@ -260,13 +267,10 @@ RTISettingsPanel::RTISettingsPanel(QWidget *parent) : QStackedWidget(parent) {
   scrollLayout->addWidget(distanceFrame);
   
   // Speed Reduction
-  QFrame *speedFrame = new QFrame();
-  speedFrame->setStyleSheet("QFrame { background-color: #292929; border-radius: 20px; padding: 25px; }");
-  QVBoxLayout *speedLayout = new QVBoxLayout(speedFrame);
-  
-  QLabel *speedTitle = new QLabel(tr("Speed Reduction"));
-  speedTitle->setStyleSheet("font-size: 40px; font-weight: 500; color: #E4E4E4; padding-bottom: 20px;");
-  speedLayout->addWidget(speedTitle);
+  QPair<QFrame*, QVBoxLayout*> speedPair = createSettingsFrame();
+  QFrame *speedFrame = speedPair.first;
+  QVBoxLayout *speedLayout = speedPair.second;
+  createSectionLabel(tr("Speed Reduction"), speedLayout);
   
   QLabel *speedLabel = new QLabel(tr("Max reduction: 15 km/h"));
   speedLabel->setStyleSheet("font-size: 32px; color: #999999;");
@@ -286,47 +290,20 @@ RTISettingsPanel::RTISettingsPanel(QWidget *parent) : QStackedWidget(parent) {
   scrollLayout->addWidget(speedFrame);
 
   // Visual & Audio Settings
-  QFrame *alertsFrame = new QFrame();
-  alertsFrame->setStyleSheet("QFrame { background-color: #292929; border-radius: 20px; padding: 25px; }");
-  QVBoxLayout *alertsLayout = new QVBoxLayout(alertsFrame);
-  
-  QLabel *alertsTitle = new QLabel(tr("Alerts & Display"));
-  alertsTitle->setStyleSheet("font-size: 40px; font-weight: 500; color: #E4E4E4; padding-bottom: 20px;");
-  alertsLayout->addWidget(alertsTitle);
+  QPair<QFrame*, QVBoxLayout*> alertsPair = createSettingsFrame();
+  QFrame *alertsFrame = alertsPair.first;
+  QVBoxLayout *alertsLayout = alertsPair.second;
+  createSectionLabel(tr("Alerts & Display"), alertsLayout);
   
   // HUD toggle
-  QHBoxLayout *hudLayout = new QHBoxLayout();
-  QLabel *hudLabel = new QLabel(tr("HUD Display"));
-  hudLabel->setStyleSheet("font-size: 36px; color: #E4E4E4;");
-  hudLayout->addWidget(hudLabel);
-  hudLayout->addStretch();
-  
   rti_hud_toggle = new ToggleSP();
-  rti_hud_toggle->setFixedSize(150, 80);
-  rti_hud_toggle->setChecked(params.getBool("RTIHUDEnabled"));
-  connect(rti_hud_toggle, &ToggleSP::stateChanged, [this](bool checked) {
-    params.putBool("RTIHUDEnabled", checked);
-  });
-  hudLayout->addWidget(rti_hud_toggle);
-  alertsLayout->addLayout(hudLayout);
+  createToggleRow(tr("HUD Display"), rti_hud_toggle, "RTIHUDEnabled", params, alertsLayout);
   
   alertsLayout->addSpacing(15);
   
   // Audio toggle
-  QHBoxLayout *audioLayout = new QHBoxLayout();
-  QLabel *audioLabel = new QLabel(tr("Audio Alerts"));
-  audioLabel->setStyleSheet("font-size: 36px; color: #E4E4E4;");
-  audioLayout->addWidget(audioLabel);
-  audioLayout->addStretch();
-  
   rti_audio_toggle = new ToggleSP();
-  rti_audio_toggle->setFixedSize(150, 80);
-  rti_audio_toggle->setChecked(params.getBool("RTIAudioAlerts"));
-  connect(rti_audio_toggle, &ToggleSP::stateChanged, [this](bool checked) {
-    params.putBool("RTIAudioAlerts", checked);
-  });
-  audioLayout->addWidget(rti_audio_toggle);
-  alertsLayout->addLayout(audioLayout);
+  createToggleRow(tr("Audio Alerts"), rti_audio_toggle, "RTIAudioAlerts", params, alertsLayout);
   
   scrollLayout->addWidget(alertsFrame);
 
@@ -449,33 +426,33 @@ bool RTISettingsPanel::isMetricSystem() {
 void RTISettingsPanel::configureDistanceSliders() {
   const bool is_metric = isMetricSystem();
   
+  int min_range_m, max_range_m, step_m;
+  int default_min, default_max;
+  
   if (is_metric) {
     // Metric: 0.5km - 5km in 0.5km increments
-    // Convert to meters: 500m - 5000m in 500m increments
-    const int min_range_m = static_cast<int>(METRIC_INCREMENT_KM * KM_TO_METERS);  // 500m
-    const int max_range_m = static_cast<int>(5.0 * KM_TO_METERS);                // 5000m
-    const int step_m = min_range_m;                                               // 500m
-    
-    rti_min_slider->setRange(min_range_m, max_range_m);
-    rti_min_slider->setSingleStep(step_m);
-    rti_max_slider->setRange(min_range_m, max_range_m);
-    rti_max_slider->setSingleStep(step_m);
+    min_range_m = static_cast<int>(METRIC_INCREMENT_KM * KM_TO_METERS);  // 500m
+    max_range_m = static_cast<int>(5.0 * KM_TO_METERS);                // 5000m
+    step_m = min_range_m;                                               // 500m
+    default_min = 500;
+    default_max = 2000;
   } else {
     // Imperial: 0.25mi - 2mi in 0.25mi increments
-    // Convert to meters: 402m - 3219m in 402m increments
-    const int min_range_m = static_cast<int>(IMPERIAL_INCREMENT_MI * MILES_TO_METERS);  // ~402m
-    const int max_range_m = static_cast<int>(2.0 * MILES_TO_METERS);                   // ~3219m
-    const int step_m = min_range_m;                                                     // ~402m
-    
-    rti_min_slider->setRange(min_range_m, max_range_m);
-    rti_min_slider->setSingleStep(step_m);
-    rti_max_slider->setRange(min_range_m, max_range_m);
-    rti_max_slider->setSingleStep(step_m);
+    min_range_m = static_cast<int>(IMPERIAL_INCREMENT_MI * MILES_TO_METERS);  // ~402m
+    max_range_m = static_cast<int>(2.0 * MILES_TO_METERS);                   // ~3219m
+    step_m = min_range_m;                                                     // ~402m
+    default_min = min_range_m;
+    default_max = static_cast<int>(1.0 * MILES_TO_METERS);  // 1 mile
   }
   
+  rti_min_slider->setRange(min_range_m, max_range_m);
+  rti_min_slider->setSingleStep(step_m);
+  rti_max_slider->setRange(min_range_m, max_range_m);
+  rti_max_slider->setSingleStep(step_m);
+  
   // Update current values from params, snapping to valid increments
-  int current_min = safeStringToInt(params.get("RTIMinDistance"), is_metric ? 500 : 402);
-  int current_max = safeStringToInt(params.get("RTIMaxDistance"), is_metric ? 2000 : 1609);
+  int current_min = safeStringToInt(params.get("RTIMinDistance"), default_min);
+  int current_max = safeStringToInt(params.get("RTIMaxDistance"), default_max);
   
   // Snap to nearest valid increment and enforce range limits
   current_min = snapToValidIncrement(current_min);
@@ -483,13 +460,8 @@ void RTISettingsPanel::configureDistanceSliders() {
   
   // Ensure min < max
   if (current_min >= current_max) {
-    if (is_metric) {
-      current_min = 500;   // 0.5km
-      current_max = 1000;  // 1.0km
-    } else {
-      current_min = static_cast<int>(0.25 * MILES_TO_METERS);  // 0.25mi
-      current_max = static_cast<int>(0.5 * MILES_TO_METERS);   // 0.5mi
-    }
+    current_min = default_min;
+    current_max = default_max;
   }
   
   rti_min_slider->setValue(current_min);
@@ -506,27 +478,18 @@ void RTISettingsPanel::validateAndMigrateParameters() {
   int valid_min = snapToValidIncrement(current_min);
   int valid_max = snapToValidIncrement(current_max);
   
-  // Enforce range limits based on current metric setting
   const bool is_metric = isMetricSystem();
-  if (is_metric) {
-    valid_min = std::max(500, std::min(5000, valid_min));   // 0.5km - 5km
-    valid_max = std::max(500, std::min(5000, valid_max));
-  } else {
-    const int min_imperial_m = static_cast<int>(0.25 * MILES_TO_METERS);   // 0.25mi ≈ 402m
-    const int max_imperial_m = static_cast<int>(2.0 * MILES_TO_METERS);    // 2mi ≈ 3219m
-    valid_min = std::max(min_imperial_m, std::min(max_imperial_m, valid_min));
-    valid_max = std::max(min_imperial_m, std::min(max_imperial_m, valid_max));
-  }
+  const int min_limit = is_metric ? 500 : static_cast<int>(0.25 * MILES_TO_METERS);
+  const int max_limit = is_metric ? 5000 : static_cast<int>(2.0 * MILES_TO_METERS);
+  
+  // Enforce range limits
+  valid_min = std::max(min_limit, std::min(max_limit, valid_min));
+  valid_max = std::max(min_limit, std::min(max_limit, valid_max));
   
   // Ensure min < max
   if (valid_min >= valid_max) {
-    if (is_metric) {
-      valid_min = 500;  // 0.5km
-      valid_max = 1000; // 1km
-    } else {
-      valid_min = static_cast<int>(0.25 * MILES_TO_METERS);  // 0.25mi
-      valid_max = static_cast<int>(0.5 * MILES_TO_METERS);   // 0.5mi
-    }
+    valid_min = is_metric ? 500 : static_cast<int>(0.25 * MILES_TO_METERS);
+    valid_max = is_metric ? 1000 : static_cast<int>(0.5 * MILES_TO_METERS);
   }
   
   // Update params if values changed
