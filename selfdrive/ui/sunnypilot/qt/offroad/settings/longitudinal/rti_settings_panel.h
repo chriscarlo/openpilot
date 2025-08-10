@@ -12,6 +12,9 @@
 #include <QScrollArea>
 #include <QLabel>
 #include <fstream>
+#include <vector>
+#include <cstdlib>
+#include <cstring>
 #include "selfdrive/ui/sunnypilot/ui.h"
 #include "selfdrive/ui/sunnypilot/qt/offroad/settings/settings.h"
 #include "selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/rti_control.h"
@@ -64,35 +67,36 @@ private:
 
   static QString sourceDescription(RTISourceType type = RTISourceType::DISABLED) {
     QString disabled_str = tr("⦿ Disabled: RTI system is completely disabled");
-    QString waze_str = tr("⦿ Waze: Uses Waze crowd-sourced traffic data");
-    QString tomtom_str = tr("⦿ TomTom: Uses TomTom professional traffic data");
-    QString inrix_str = tr("⦿ INRIX: Uses INRIX real-time traffic intelligence");
-    QString manual_str = tr("⦿ Manual API: Custom API endpoint configuration");
+    QString waze_str = tr("⦿ Waze: Uses Waze crowd-sourced traffic data (requires RapidAPI key)");
+    // Commented out until implemented
+    // QString tomtom_str = tr("⦿ TomTom: Uses TomTom professional traffic data");
+    // QString inrix_str = tr("⦿ INRIX: Uses INRIX real-time traffic intelligence");
+    // QString manual_str = tr("⦿ Manual API: Custom API endpoint configuration");
 
     switch (type) {
       case RTISourceType::WAZE:
         waze_str = "<font color='white'><b>" + waze_str + "</b></font>";
         break;
-      case RTISourceType::TOMTOM:
-        tomtom_str = "<font color='white'><b>" + tomtom_str + "</b></font>";
-        break;
-      case RTISourceType::INRIX:
-        inrix_str = "<font color='white'><b>" + inrix_str + "</b></font>";
-        break;
-      case RTISourceType::MANUAL_API:
-        manual_str = "<font color='white'><b>" + manual_str + "</b></font>";
-        break;
+      // case RTISourceType::TOMTOM:
+      //   tomtom_str = "<font color='white'><b>" + tomtom_str + "</b></font>";
+      //   break;
+      // case RTISourceType::INRIX:
+      //   inrix_str = "<font color='white'><b>" + inrix_str + "</b></font>";
+      //   break;
+      // case RTISourceType::MANUAL_API:
+      //   manual_str = "<font color='white'><b>" + manual_str + "</b></font>";
+      //   break;
       default:
         disabled_str = "<font color='white'><b>" + disabled_str + "</b></font>";
         break;
     }
 
-    return QString("%1<br>%2<br>%3<br>%4<br>%5")
+    return QString("%1<br>%2")
         .arg(disabled_str)
-        .arg(waze_str)
-        .arg(tomtom_str)
-        .arg(inrix_str)
-        .arg(manual_str);
+        .arg(waze_str);
+        // .arg(tomtom_str)
+        // .arg(inrix_str)
+        // .arg(manual_str);
   }
 
   static QString threatFilterDescription(RTIThreatFilter type = RTIThreatFilter::ALL) {

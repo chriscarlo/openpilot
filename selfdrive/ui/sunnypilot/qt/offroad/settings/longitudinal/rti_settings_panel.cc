@@ -76,6 +76,7 @@ RTISettingsPanel::RTISettingsPanel(QWidget *parent) : QStackedWidget(parent) {
     QComboBox {
       font-size: 36px;
       padding: 20px;
+      padding-right: 60px;
       background-color: #393939;
       color: white;
       border-radius: 15px;
@@ -84,21 +85,18 @@ RTISettingsPanel::RTISettingsPanel(QWidget *parent) : QStackedWidget(parent) {
     QComboBox::drop-down {
       width: 60px;
       border-left: 1px solid #555;
+      background: transparent;
+      subcontrol-origin: padding;
+      subcontrol-position: top right;
     }
     QComboBox::down-arrow {
       image: none;
-      width: 20px;
-      height: 15px;
-      background: transparent;
-    }
-    QComboBox::drop-down {
-      background: transparent;
-      border: none;
-    }
-    QComboBox::drop-down:after {
-      content: "▼";
-      color: white;
-      font-size: 14px;
+      width: 0;
+      height: 0;
+      border-left: 12px solid transparent;
+      border-right: 12px solid transparent;
+      border-top: 16px solid white;
+      margin: 22px 18px;
     }
     QComboBox QAbstractItemView {
       font-size: 36px;
@@ -111,9 +109,10 @@ RTISettingsPanel::RTISettingsPanel(QWidget *parent) : QStackedWidget(parent) {
   
   rti_source_combo->addItem(tr("Disabled"));
   rti_source_combo->addItem(tr("Waze"));
-  rti_source_combo->addItem(tr("TomTom"));
-  rti_source_combo->addItem(tr("INRIX"));
-  rti_source_combo->addItem(tr("Manual API"));
+  // Commented out non-functional data sources for now
+  // rti_source_combo->addItem(tr("TomTom"));
+  // rti_source_combo->addItem(tr("INRIX"));
+  // rti_source_combo->addItem(tr("Manual API"));
   
   int source_val = safeStringToInt(params.get("RTIDataSource"), 0);
   rti_source_combo->setCurrentIndex(source_val);
@@ -331,26 +330,26 @@ RTISettingsPanel::RTISettingsPanel(QWidget *parent) : QStackedWidget(parent) {
   
   scrollLayout->addWidget(alertsFrame);
 
-  // Advanced settings button
-  QPushButton *advanced_btn = new QPushButton(tr("Advanced Settings"));
-  advanced_btn->setFixedHeight(100);
-  advanced_btn->setStyleSheet(R"(
-    QPushButton {
-      font-size: 38px;
-      font-weight: 500;
-      background-color: #4a90e2;
-      color: white;
-      border-radius: 20px;
-      margin: 20px 0;
-    }
-    QPushButton:pressed {
-      background-color: #357abd;
-    }
-  )");
-  connect(advanced_btn, &QPushButton::clicked, [=]() {
-    emit advancedSettingsRequested();
-  });
-  scrollLayout->addWidget(advanced_btn);
+  // Advanced settings button - commented out until other data sources are implemented
+  // QPushButton *advanced_btn = new QPushButton(tr("Advanced Settings"));
+  // advanced_btn->setFixedHeight(100);
+  // advanced_btn->setStyleSheet(R"(
+  //   QPushButton {
+  //     font-size: 38px;
+  //     font-weight: 500;
+  //     background-color: #4a90e2;
+  //     color: white;
+  //     border-radius: 20px;
+  //     margin: 20px 0;
+  //   }
+  //   QPushButton:pressed {
+  //     background-color: #357abd;
+  //   }
+  // )");
+  // connect(advanced_btn, &QPushButton::clicked, [=]() {
+  //   emit advancedSettingsRequested();
+  // });
+  // scrollLayout->addWidget(advanced_btn);
   
   scrollLayout->addStretch();
   
@@ -366,30 +365,46 @@ RTISettingsPanel::RTISettingsPanel(QWidget *parent) : QStackedWidget(parent) {
 }
 
 void RTISettingsPanel::loadWazeApiKey() {
-  // Load Waze API key from /persist/waze/waze_rapidapi.json
-  std::string api_key_path = "/persist/waze/waze_rapidapi.json";
-  std::ifstream file(api_key_path);
-  if (file.is_open()) {
-    std::string content((std::istreambuf_iterator<char>(file)),
-                       std::istreambuf_iterator<char>());
-    file.close();
-    
-    // Parse JSON to get API key
-    try {
-      size_t key_pos = content.find("\"api_key\": \"");
-      if (key_pos != std::string::npos) {
-        key_pos += 12; // Length of "api_key": "
-        size_t key_end = content.find("\"", key_pos);
-        if (key_end != std::string::npos) {
-          std::string api_key = content.substr(key_pos, key_end - key_pos);
-          params.put("RTIManualApiKey", api_key);
-          params.put("RTIManualApiEndpoint", "https://waze.p.rapidapi.com/alerts-and-jams");
-          params.put("RTIManualApiFormat", "waze_rapid");
+  // Try to load API key from various locations in priority order
+  const std::vector<std::string> api_key_paths = {
+    "/data/persist/rapidapi_key",
+    "/persist/rapidapi_key",
+    "/data/openpilot/persist/rapidapi_key",
+    "/data/openpilot/rapidapi_key"
+  };
+  
+  std::string api_key;
+  
+  // First check environment variables
+  const char* env_key = std::getenv("RAPIDAPI_KEY");
+  if (env_key && strlen(env_key) > 0) {
+    api_key = env_key;
+  } else {
+    // Try each file location
+    for (const auto& path : api_key_paths) {
+      std::ifstream file(path);
+      if (file.is_open()) {
+        std::getline(file, api_key);
+        file.close();
+        // Trim whitespace
+        api_key.erase(0, api_key.find_first_not_of(" \n\r\t"));
+        api_key.erase(api_key.find_last_not_of(" \n\r\t") + 1);
+        if (!api_key.empty()) {
+          break;
         }
       }
-    } catch (...) {
-      // Silently fail if parsing fails
     }
+  }
+  
+  // If we found a key, configure Waze parameters
+  if (!api_key.empty()) {
+    params.put("RTIManualApiKey", api_key);
+    params.put("RTIManualApiEndpoint", "https://waze.p.rapidapi.com/alerts-and-jams");
+    params.put("RTIManualApiFormat", "waze_rapid");
+    params.put("RTIApiConfigured", "1");
+  } else {
+    // No API key found - mark as not configured
+    params.put("RTIApiConfigured", "0");
   }
 }
 
