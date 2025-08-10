@@ -598,6 +598,12 @@ void RTIApiConfigPanel::setupUI() {
   main_layout->addWidget(format_label);
   
   api_format = new QComboBox(this);
+  
+  // Fix popup positioning issue with QStackedWidget + QScrollArea  
+  auto *api_format_view = api_format->view();
+  api_format_view->setParent(nullptr);
+  api_format_view->setWindowFlags(Qt::Popup | Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint);
+  
   api_format->addItems({"JSON", "XML", "CSV"});
   api_format->setStyleSheet(R"(
     font-size: 28px; 

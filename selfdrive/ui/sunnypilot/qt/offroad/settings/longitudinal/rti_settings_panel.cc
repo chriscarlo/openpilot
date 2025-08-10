@@ -114,6 +114,12 @@ RTISettingsPanel::RTISettingsPanel(QWidget *parent) : QStackedWidget(parent) {
     }
   )");
   
+  // Fix popup positioning issue with QStackedWidget + QScrollArea
+  // Ensure popup uses correct parent for coordinate calculations
+  auto *rti_source_view = rti_source_combo->view();
+  rti_source_view->setParent(nullptr);
+  rti_source_view->setWindowFlags(Qt::Popup | Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint);
+  
   rti_source_combo->addItem(tr("Disabled"));
   rti_source_combo->addItem(tr("Waze"));
   // Commented out non-functional data sources for now
@@ -144,6 +150,11 @@ RTISettingsPanel::RTISettingsPanel(QWidget *parent) : QStackedWidget(parent) {
   rti_filter_combo = new QComboBox();
   rti_filter_combo->setStyleSheet(rti_source_combo->styleSheet());
   
+  // Fix popup positioning issue with QStackedWidget + QScrollArea
+  auto *rti_filter_view = rti_filter_combo->view();
+  rti_filter_view->setParent(nullptr);
+  rti_filter_view->setWindowFlags(Qt::Popup | Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint);
+  
   rti_filter_combo->addItem(tr("All Threats"));
   rti_filter_combo->addItem(tr("Police Only"));
   rti_filter_combo->addItem(tr("Speed Cameras Only"));
@@ -169,6 +180,11 @@ RTISettingsPanel::RTISettingsPanel(QWidget *parent) : QStackedWidget(parent) {
   
   rti_aggr_combo = new QComboBox();
   rti_aggr_combo->setStyleSheet(rti_source_combo->styleSheet());
+  
+  // Fix popup positioning issue with QStackedWidget + QScrollArea
+  auto *rti_aggr_view = rti_aggr_combo->view();
+  rti_aggr_view->setParent(nullptr);
+  rti_aggr_view->setWindowFlags(Qt::Popup | Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint);
   
   rti_aggr_combo->addItem(tr("Conservative - Early, gentle braking"));
   rti_aggr_combo->addItem(tr("Balanced - Optimal comfort"));
