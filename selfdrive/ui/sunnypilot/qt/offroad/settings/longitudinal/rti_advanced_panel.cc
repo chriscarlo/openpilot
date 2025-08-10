@@ -7,6 +7,7 @@
 
 #include "selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/rti_advanced_panel.h"
 #include "selfdrive/ui/qt/util.h"
+#include "selfdrive/ui/sunnypilot/qt/util/numeric_utils.h"
 #include <QPainterPath>
 #include <QApplication>
 #include <QScreen>
@@ -14,19 +15,6 @@
 #include <QComboBox>
 #include <cmath>
 
-// Helper function for safe string conversion
-static int safeStringToInt(const std::string& str, int defaultValue) {
-  if (str.empty()) return defaultValue;
-  try {
-    // Check if string contains only digits and optional leading negative sign
-    if (str.find_first_not_of("0123456789-") != std::string::npos) {
-      return defaultValue;
-    }
-    return std::atoi(str.c_str());
-  } catch (...) {
-    return defaultValue;
-  }
-}
 
 // RTI Visualization Widget Implementation
 RTIVisualizationWidget::RTIVisualizationWidget(QWidget *parent) : QWidget(parent) {
@@ -949,10 +937,10 @@ void RTIAdvancedPanel::showApiConfig() {
 
 void RTIAdvancedPanel::updateVisualization() {
   // Get current parameter values using safe conversion
-  int min_dist = safeStringToInt(params.get("RTIMinDistance"), 100);
-  int max_dist = safeStringToInt(params.get("RTIMaxDistance"), 2000);
-  int speed_reduction = safeStringToInt(params.get("RTISpeedReduction"), 15);
-  int aggr_val = safeStringToInt(params.get("RTIAggressiveness"), 1);
+  int min_dist = SunnypilotUtils::safeStringToInt(params.get("RTIMinDistance"), 100);
+  int max_dist = SunnypilotUtils::safeStringToInt(params.get("RTIMaxDistance"), 2000);
+  int speed_reduction = SunnypilotUtils::safeStringToInt(params.get("RTISpeedReduction"), 15);
+  int aggr_val = SunnypilotUtils::safeStringToInt(params.get("RTIAggressiveness"), 1);
   
   // Validate values
   min_dist = std::max(50, std::min(2000, min_dist));

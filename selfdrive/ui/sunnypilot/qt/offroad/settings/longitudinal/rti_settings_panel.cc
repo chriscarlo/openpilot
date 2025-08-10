@@ -6,6 +6,7 @@
  */
 
 #include "selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/rti_settings_panel.h"
+#include "selfdrive/ui/sunnypilot/qt/util/numeric_utils.h"
 
 // Helper methods to eliminate code duplication
 static QPair<QFrame*, QVBoxLayout*> createSettingsFrame() {
@@ -39,19 +40,6 @@ static QHBoxLayout* createToggleRow(const QString &text, ToggleSP *toggle, const
   return layout;
 }
 
-// Helper function for safe string to int conversion
-static int safeStringToInt(const std::string& str, int defaultValue = 0) {
-  if (str.empty()) return defaultValue;
-  try {
-    // Check if string contains only digits and optional leading negative sign
-    if (str.find_first_not_of("0123456789-") != std::string::npos) {
-      return defaultValue;
-    }
-    return std::atoi(str.c_str());
-  } catch (...) {
-    return defaultValue;
-  }
-}
 
 RTISettingsPanel::RTISettingsPanel(QWidget *parent) : QStackedWidget(parent) {
   subPanelFrame = new QFrame();
@@ -105,27 +93,11 @@ RTISettingsPanel::RTISettingsPanel(QWidget *parent) : QStackedWidget(parent) {
     QComboBox {
       font-size: 36px;
       padding: 20px;
-      padding-right: 60px;
       background-color: #393939;
       color: white;
+      border: 2px solid #555;
       border-radius: 15px;
       min-height: 60px;
-    }
-    QComboBox::drop-down {
-      width: 60px;
-      border-left: 1px solid #555;
-      background: transparent;
-      subcontrol-origin: padding;
-      subcontrol-position: top right;
-    }
-    QComboBox::down-arrow {
-      image: none;
-      width: 0;
-      height: 0;
-      border-left: 12px solid transparent;
-      border-right: 12px solid transparent;
-      border-top: 16px solid white;
-      margin: 22px 18px;
     }
     QComboBox QAbstractItemView {
       font-size: 36px;
@@ -149,7 +121,7 @@ RTISettingsPanel::RTISettingsPanel(QWidget *parent) : QStackedWidget(parent) {
   // rti_source_combo->addItem(tr("INRIX"));
   // rti_source_combo->addItem(tr("Manual API"));
   
-  int source_val = safeStringToInt(params.get("RTIDataSource"), 0);
+  int source_val = SunnypilotUtils::safeStringToInt(params.get("RTIDataSource"), 0);
   rti_source_combo->setCurrentIndex(source_val);
   
   connect(rti_source_combo, QOverload<int>::of(&QComboBox::currentIndexChanged), [this](int index) {
@@ -178,7 +150,7 @@ RTISettingsPanel::RTISettingsPanel(QWidget *parent) : QStackedWidget(parent) {
   rti_filter_combo->addItem(tr("Hazards Only"));
   rti_filter_combo->addItem(tr("Custom"));
   
-  int filter_val = safeStringToInt(params.get("RTIThreatFilter"), 0);
+  int filter_val = SunnypilotUtils::safeStringToInt(params.get("RTIThreatFilter"), 0);
   rti_filter_combo->setCurrentIndex(filter_val);
   
   connect(rti_filter_combo, QOverload<int>::of(&QComboBox::currentIndexChanged), [this](int index) {
@@ -202,7 +174,7 @@ RTISettingsPanel::RTISettingsPanel(QWidget *parent) : QStackedWidget(parent) {
   rti_aggr_combo->addItem(tr("Balanced - Optimal comfort"));
   rti_aggr_combo->addItem(tr("Aggressive - Later, quicker response"));
   
-  int aggr_val = safeStringToInt(params.get("RTIAggressiveness"), 1);
+  int aggr_val = SunnypilotUtils::safeStringToInt(params.get("RTIAggressiveness"), 1);
   rti_aggr_combo->setCurrentIndex(aggr_val);
   
   connect(rti_aggr_combo, QOverload<int>::of(&QComboBox::currentIndexChanged), [this](int index) {
@@ -279,7 +251,7 @@ RTISettingsPanel::RTISettingsPanel(QWidget *parent) : QStackedWidget(parent) {
   rti_speed_slider = new QSlider(Qt::Horizontal);
   rti_speed_slider->setRange(5, 50);
   rti_speed_slider->setSingleStep(5);
-  rti_speed_slider->setValue(safeStringToInt(params.get("RTISpeedReduction"), 15));
+  rti_speed_slider->setValue(SunnypilotUtils::safeStringToInt(params.get("RTISpeedReduction"), 15));
   rti_speed_slider->setStyleSheet(rti_min_slider->styleSheet());
   connect(rti_speed_slider, &QSlider::valueChanged, [this, speedLabel](int value) {
     speedLabel->setText(QString(tr("Max reduction: %1 km/h")).arg(value));
@@ -397,7 +369,7 @@ void RTISettingsPanel::refresh() {
   }
   
   // Check if RTI is enabled
-  int source_val = safeStringToInt(params.get("RTIDataSource"), 0);
+  int source_val = SunnypilotUtils::safeStringToInt(params.get("RTIDataSource"), 0);
   bool sourceEnabled = (source_val != 0);
   
   // Enable/disable controls based on source selection
@@ -451,8 +423,8 @@ void RTISettingsPanel::configureDistanceSliders() {
   rti_max_slider->setSingleStep(step_m);
   
   // Update current values from params, snapping to valid increments
-  int current_min = safeStringToInt(params.get("RTIMinDistance"), default_min);
-  int current_max = safeStringToInt(params.get("RTIMaxDistance"), default_max);
+  int current_min = SunnypilotUtils::safeStringToInt(params.get("RTIMinDistance"), default_min);
+  int current_max = SunnypilotUtils::safeStringToInt(params.get("RTIMaxDistance"), default_max);
   
   // Snap to nearest valid increment and enforce range limits
   current_min = snapToValidIncrement(current_min);
@@ -471,8 +443,8 @@ void RTISettingsPanel::configureDistanceSliders() {
 // Validate parameters and migrate if needed
 void RTISettingsPanel::validateAndMigrateParameters() {
   // Get current values
-  int current_min = safeStringToInt(params.get("RTIMinDistance"), 500);
-  int current_max = safeStringToInt(params.get("RTIMaxDistance"), 2000);
+  int current_min = SunnypilotUtils::safeStringToInt(params.get("RTIMinDistance"), 500);
+  int current_max = SunnypilotUtils::safeStringToInt(params.get("RTIMaxDistance"), 2000);
   
   // Ensure they meet new constraints
   int valid_min = snapToValidIncrement(current_min);
