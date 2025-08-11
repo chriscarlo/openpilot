@@ -5,14 +5,13 @@
  * See the LICENSE.md file in the root directory for more details.
  */
 
-#include "selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/slc/speed_limit_control.h"
+#include "selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/dec_control.h"
 #include <QHBoxLayout>
 #include <QShowEvent>
 
-SpeedLimitControl::SpeedLimitControl(QWidget *parent) : AbstractControlSP(
-  tr("Speed Limit Control (SLC)"),
-  tr("When you engage ACC, you will be prompted to set the cruising speed to the speed limit of the road adjusted by the Offset and Source Policy specified, or the current driving speed. "
-    "The maximum cruising speed will always be the MAX set speed."),
+DecControl::DecControl(QWidget *parent) : AbstractControlSP(
+  tr("Dynamic Experimental Control"),
+  tr("Enable toggle to allow the model to determine when to use sunnypilot ACC or sunnypilot End to End Longitudinal."),
   "",
   parent
 ) {
@@ -36,20 +35,20 @@ SpeedLimitControl::SpeedLimitControl(QWidget *parent) : AbstractControlSP(
   
   // Connect toggle
   QObject::connect(toggle, &Toggle::stateChanged, this, [this](bool state) {
-    params.putBool("SpeedLimitControl", state);
+    params.putBool("DynamicExperimentalControl", state);
     emit toggleFlipped(state);
     refresh();
   });
 }
 
-void SpeedLimitControl::showEvent(QShowEvent *event) {
+void DecControl::showEvent(QShowEvent *event) {
   refresh();
   AbstractControlSP::showEvent(event);
 }
 
-void SpeedLimitControl::setupSettingsButton() {
+void DecControl::setupSettingsButton() {
   settings_btn = new QPushButton(this);
-  settings_btn->setObjectName("slc_settings_btn");
+  settings_btn->setObjectName("dec_settings_btn");
   settings_btn->setFixedSize(120, 120);  // 20% larger than original
   
   // Style the button with a gear icon
@@ -73,15 +72,15 @@ void SpeedLimitControl::setupSettingsButton() {
   
   settings_btn->setText("⚙");  // Gear emoji
   
-  QObject::connect(settings_btn, &QPushButton::clicked, this, &SpeedLimitControl::settingsClicked);
+  QObject::connect(settings_btn, &QPushButton::clicked, this, &DecControl::settingsClicked);
 }
 
-void SpeedLimitControl::refresh() {
+void DecControl::refresh() {
   if (!toggle || !settings_btn) {
     return;
   }
   
-  bool enabled = params.getBool("SpeedLimitControl");
+  bool enabled = params.getBool("DynamicExperimentalControl");
   if (enabled != toggle->on) {
     toggle->togglePosition();
   }

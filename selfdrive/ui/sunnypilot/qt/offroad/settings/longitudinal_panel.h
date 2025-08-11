@@ -12,12 +12,12 @@
 #include "selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/slc/speed_limit_control.h"
 #include "selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/slc/speed_limit_control_subpanel.h"
 #include "selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/dec_controller.h"
+#include "selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/dec_control.h"
 #include "selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/vision_turn_control_with_settings.h"
 #include "selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/vtsc_settings_panel.h"
 #include "selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/road_visualization_widget_v2.h"
 #include "selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/rti_control.h"
 #include "selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/rti_settings_panel.h"
-#include "selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/rti_advanced_panel.h"
 #include "selfdrive/ui/sunnypilot/qt/offroad/settings/settings.h"
 #include "selfdrive/ui/sunnypilot/qt/widgets/scrollview.h"
 
@@ -43,11 +43,10 @@ private:
   SpeedLimitControlSubpanel *slcScreen;
   SpeedLimitControl *slcControl;
   DecControllerSubpanel *decScreen;
-  ButtonControlSP *decManageBtn = nullptr;
+  DecControl *decControl;
   VisionTurnControlWithSettings *visionTurnSpeedControl = nullptr;
   VTSCSettingsPanel *vtscSettingsScreen = nullptr;
   AnticipationConfigPanel *anticipationDistanceScreen = nullptr;
-  ParamControlSP *dynamicExperimentalControl = nullptr;
 
   ParamControlSP *accToE2ETransitionControl;
   ParamControlSP *vibePersonalityControl;
@@ -57,5 +56,4 @@ private:
   // RTI controls
   RTIControl *rtiControl;
   RTISettingsPanel *rtiSettingsScreen;
-  RTIAdvancedPanel *rtiAdvancedScreen;
 };

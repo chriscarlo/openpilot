@@ -245,12 +245,13 @@ ParamControlSP::ParamControlSP(const QString &param, const QString &title, const
 
   key = param.toStdString();
   QObject::connect(this, &ParamControlSP::toggleFlipped, this, &ParamControlSP::toggleClicked);
-
-  hlayout->removeWidget(&toggle);
-  hlayout->insertWidget(0, &toggle);
-
-  hlayout->removeWidget(this->icon_label);
-  hlayout->insertWidget(1, this->icon_label);
+  
+  // The ToggleControlSP constructor already added a container with the toggle
+  // We just need to add a spacer to that existing container to match controls with settings buttons
+  // Settings button is 120px wide
+  QWidget *spacer = new QWidget();
+  spacer->setFixedWidth(120);
+  controls_layout->addWidget(spacer);
 }
 
 void ParamControlSP::toggleClicked(bool state) {

@@ -1,25 +1,79 @@
 /**
- * Copyright (c) 2021-, Haibin Wen, sunnypilot, and a number of other contributors.
- *
- * This file is part of sunnypilot and is licensed under the MIT License.
- * See the LICENSE.md file in the root directory for more details.
+ * RTI Control Widget Implementation - Clean Redesign
  */
 
 #include "selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/rti_control.h"
+#include <QHBoxLayout>
+#include <QLabel>
 
-RTIControl::RTIControl(const QString &param, const QString &title, const QString &desc, const QString &icon, QWidget *parent)
-    : ExpandableToggleRow(param, title, desc, icon, parent) {
+RTIControl::RTIControl(QWidget *parent) : AbstractControlSP(
+  tr("Real-time Traffic Intelligence"),
+  tr("Monitor traffic ahead and adjust speed automatically"),
+  "",
+  parent
+) {
+  // Create toggle
+  toggle = new ToggleSP();
+  toggle->setFixedSize(150, 100);  // Match other controls
+  
+  // Connect toggle state changes
+  connect(toggle, &ToggleSP::stateChanged, this, &RTIControl::updateState);
+  
+  // Create settings button with gear icon
+  settingsBtn = new QPushButton();
+  settingsBtn->setFixedSize(120, 120);  // 20% larger than original 100x100
+  settingsBtn->setEnabled(params.getBool("RTIEnabled"));
+  settingsBtn->setStyleSheet(R"(
+    QPushButton {
+      background-color: #393939;
+      border-radius: 60px;
+      font-size: 63px;
+      font-weight: 500;
+      border: 2px solid #696969;
+    }
+    QPushButton:pressed {
+      background-color: #4a4a4a;
+    }
+    QPushButton:disabled {
+      background-color: #2d2d2d;
+      border-color: #444444;
+      color: #696969;
+    }
+  )");
+  settingsBtn->setText("⚙");  // Gear emoji
+  
+  connect(settingsBtn, &QPushButton::clicked, this, &RTIControl::settingsClicked);
+  
+  // Create a container for toggle and settings button (consistent with SLC/DEC)
+  QWidget *controls_container = new QWidget(this);
+  QHBoxLayout *controls_layout = new QHBoxLayout(controls_container);
+  controls_layout->setContentsMargins(0, 0, 0, 0);
+  controls_layout->setSpacing(20);
+  
+  controls_layout->addWidget(toggle);
+  controls_layout->addWidget(settingsBtn);
+  
+  hlayout->addWidget(controls_container);
+}
 
-  auto *rtiFrame = new QFrame(this);
-  auto *rtiFrameLayout = new QVBoxLayout();
-  rtiFrame->setLayout(rtiFrameLayout);
-  rtiFrameLayout->setSpacing(0);
-  rtiFrameLayout->setContentsMargins(0, 0, 0, 0);
+void RTIControl::showEvent(QShowEvent *event) {
+  refresh();
+  AbstractControlSP::showEvent(event);
+}
 
-  rtiSettings = new PushButtonSP(tr("Customize RTI"));
-  rtiFrameLayout->addWidget(rtiSettings);
-  connect(rtiSettings, &QPushButton::clicked, [&]() {
-    emit rtiSettingsButtonClicked();
-  });
-  addItem(rtiFrame);
+void RTIControl::refresh() {
+  if (!toggle || !settingsBtn) {
+    return;
+  }
+  
+  bool enabled = params.getBool("RTIEnabled");
+  if (enabled != toggle->on) {
+    toggle->togglePosition();
+  }
+  settingsBtn->setEnabled(enabled);
+}
+
+void RTIControl::updateState(bool enabled) {
+  params.putBool("RTIEnabled", enabled);
+  settingsBtn->setEnabled(enabled);
 }

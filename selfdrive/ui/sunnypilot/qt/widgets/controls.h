@@ -12,6 +12,8 @@
 #include <string>
 #include <vector>
 
+#include <QHBoxLayout>
+
 #include "common/params.h"
 #include "selfdrive/ui/qt/widgets/controls.h"
 #include "selfdrive/ui/qt/widgets/input.h"
@@ -161,16 +163,24 @@ class ToggleControlSP : public AbstractControlSP {
 
 public:
   ToggleControlSP(const QString &title, const QString &desc = "", const QString &icon = "", const bool state = false, QWidget *parent = nullptr, bool advancedControl = false) : AbstractControlSP(title, desc, icon, parent, advancedControl) {
-    // space between toggle and title
+    // Create icon label for compatibility
     icon_label = new QLabel(this);
-    hlayout->addWidget(icon_label);
-
+    
+    // Create a container for toggle (matches layout of controls with settings buttons)
+    controls_container = new QWidget(this);
+    controls_layout = new QHBoxLayout(controls_container);
+    controls_layout->setContentsMargins(0, 0, 0, 0);
+    controls_layout->setSpacing(20);
+    
+    // Add toggle to the container
     toggle.setFixedSize(150, 100);
     if (state) {
       toggle.togglePosition();
     }
-    hlayout->insertWidget(0, &toggle);
-    hlayout->insertWidget(1, this->icon_label);
+    controls_layout->addWidget(&toggle);
+    
+    // Add the container to the main layout
+    hlayout->addWidget(controls_container);
     QObject::connect(&toggle, &ToggleSP::stateChanged, this, &ToggleControlSP::toggleFlipped);
   }
 
@@ -184,6 +194,9 @@ signals:
 
 protected:
   ToggleSP toggle;
+  QLabel *icon_label;
+  QWidget *controls_container;
+  QHBoxLayout *controls_layout;
 };
 
 // widget to toggle params

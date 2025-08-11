@@ -1,60 +1,422 @@
 /**
- * Copyright (c) 2021-, Haibin Wen, sunnypilot, and a number of other contributors.
- *
- * This file is part of sunnypilot and is licensed under the MIT License.
- * See the LICENSE.md file in the root directory for more details.
+ * RTI Settings Panel Implementation - Clean Redesign
  */
 
 #include "selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/rti_settings_panel.h"
-#include "selfdrive/ui/sunnypilot/qt/util/numeric_utils.h"
+#include <QScrollArea>
+#include <cmath>
+#include "common/util.h"
 
-// Helper methods to eliminate code duplication
-static QPair<QFrame*, QVBoxLayout*> createSettingsFrame() {
-  QFrame *frame = new QFrame();
-  frame->setStyleSheet("QFrame { background-color: #292929; border-radius: 20px; padding: 25px; }");
-  QVBoxLayout *layout = new QVBoxLayout(frame);
-  return qMakePair(frame, layout);
-}
+// Unit conversion constants
+static constexpr float MILES_TO_METERS = 1609.344f;
+static constexpr float METERS_TO_MILES = 0.000621371f;
+static constexpr float MPH_TO_KMH = 1.60934f;
+static constexpr float KMH_TO_MPH = 0.621371f;
 
-static QLabel* createSectionLabel(const QString &text, QVBoxLayout *layout) {
-  QLabel *label = new QLabel(text);
-  label->setStyleSheet("font-size: 40px; font-weight: 500; color: #E4E4E4; padding-bottom: 15px;");
-  layout->addWidget(label);
-  return label;
-}
+// ============================================================================
+// RTIRangeControl Implementation
+// ============================================================================
 
-static QHBoxLayout* createToggleRow(const QString &text, ToggleSP *toggle, const QString &param, Params &params, QVBoxLayout *parentLayout) {
-  QHBoxLayout *layout = new QHBoxLayout();
-  QLabel *label = new QLabel(text);
-  label->setStyleSheet("font-size: 36px; color: #E4E4E4;");
-  layout->addWidget(label);
-  layout->addStretch();
+RTIRangeControl::RTIRangeControl(const QString &title, const QString &description,
+                                 const QString &paramKey, float minVal, float maxVal, 
+                                 float step, float defaultVal, const QString &units,
+                                 QWidget *parent) 
+  : QFrame(parent), paramKey(paramKey), units(units), 
+    minValue(minVal), maxValue(maxVal), stepSize(step), defaultValue(defaultVal) {
   
-  toggle->setFixedSize(150, 80);
-  toggle->setChecked(params.getBool(param.toStdString()));
-  QObject::connect(toggle, &ToggleSP::stateChanged, [&params, param](bool checked) {
-    params.putBool(param.toStdString(), checked);
-  });
-  layout->addWidget(toggle);
-  parentLayout->addLayout(layout);
-  return layout;
+  // Main layout
+  QVBoxLayout *mainLayout = new QVBoxLayout(this);
+  mainLayout->setContentsMargins(0, 0, 0, 0);
+  
+  // Title
+  QLabel *titleLabel = new QLabel(title);
+  titleLabel->setStyleSheet("font-size: 42px; font-weight: 500; color: #E4E4E4;");
+  mainLayout->addWidget(titleLabel);
+  
+  // Description
+  if (!description.isEmpty()) {
+    QLabel *descLabel = new QLabel(description);
+    descLabel->setWordWrap(true);
+    descLabel->setStyleSheet("font-size: 32px; color: #999999; margin-top: 5px; margin-bottom: 15px;");
+    mainLayout->addWidget(descLabel);
+  }
+  
+  // Control layout
+  QHBoxLayout *controlLayout = new QHBoxLayout();
+  controlLayout->setSpacing(20);
+  
+  // Minus button
+  minusBtn = new QPushButton("-");
+  minusBtn->setFixedSize(100, 100);
+  minusBtn->setStyleSheet(R"(
+    QPushButton {
+      font-size: 60px;
+      font-weight: 500;
+      border-radius: 50px;
+      background-color: #393939;
+      color: #E4E4E4;
+    }
+    QPushButton:pressed {
+      background-color: #4a4a4a;
+    }
+    QPushButton:disabled {
+      background-color: #2a2a2a;
+      color: #666666;
+    }
+  )");
+  controlLayout->addWidget(minusBtn);
+  
+  // Value display
+  QVBoxLayout *valueLayout = new QVBoxLayout();
+  valueLayout->setAlignment(Qt::AlignCenter);
+  
+  valueLabel = new QLabel("0.00");
+  valueLabel->setAlignment(Qt::AlignCenter);
+  valueLabel->setStyleSheet("font-size: 70px; font-weight: 500; color: #FFFFFF;");
+  valueLabel->setFixedWidth(300);
+  valueLayout->addWidget(valueLabel);
+  
+  statusLabel = new QLabel(tr("(Default)"));
+  statusLabel->setAlignment(Qt::AlignCenter);
+  statusLabel->setStyleSheet("font-size: 32px; color: #999999;");
+  valueLayout->addWidget(statusLabel);
+  
+  controlLayout->addLayout(valueLayout);
+  
+  // Plus button
+  plusBtn = new QPushButton("+");
+  plusBtn->setFixedSize(100, 100);
+  plusBtn->setStyleSheet(minusBtn->styleSheet());
+  controlLayout->addWidget(plusBtn);
+  
+  controlLayout->addStretch();
+  
+  // Reset button
+  resetBtn = new QPushButton(tr("Reset"));
+  resetBtn->setFixedSize(150, 80);
+  resetBtn->setStyleSheet(R"(
+    QPushButton {
+      font-size: 35px;
+      font-weight: 500;
+      border-radius: 20px;
+      background-color: #393939;
+      color: #E4E4E4;
+    }
+    QPushButton:pressed {
+      background-color: #4a4a4a;
+    }
+    QPushButton:disabled {
+      background-color: #2a2a2a;
+      color: #666666;
+    }
+  )");
+  controlLayout->addWidget(resetBtn);
+  
+  mainLayout->addLayout(controlLayout);
+  
+  // Load current value from params (stored in meters, display in miles)
+  QString storedValue = QString::fromStdString(params.get(paramKey.toStdString()));
+  if (storedValue.isEmpty()) {
+    currentValue = defaultValue;
+  } else {
+    // Convert from meters to miles for display
+    float meters = storedValue.toFloat();
+    currentValue = meters * METERS_TO_MILES;
+  }
+  
+  // Connect signals
+  connect(minusBtn, &QPushButton::clicked, this, &RTIRangeControl::decrement);
+  connect(plusBtn, &QPushButton::clicked, this, &RTIRangeControl::increment);
+  connect(resetBtn, &QPushButton::clicked, this, &RTIRangeControl::reset);
+  
+  updateLabels();
 }
 
+void RTIRangeControl::updateLabels() {
+  // Display value with units
+  valueLabel->setText(QString::number(currentValue, 'f', 2) + " " + units);
+  
+  bool isDefault = std::abs(currentValue - defaultValue) < 0.01f;
+  if (isDefault) {
+    statusLabel->setText(tr("(Default)"));
+    statusLabel->setStyleSheet("font-size: 32px; color: #999999;");
+  } else {
+    statusLabel->setText(tr("(Modified)"));
+    statusLabel->setStyleSheet("font-size: 32px; color: #FFC107;");
+  }
+  
+  // Update button states
+  minusBtn->setEnabled(currentValue > minValue);
+  plusBtn->setEnabled(currentValue < maxValue);
+  resetBtn->setEnabled(!isDefault);
+}
 
-RTISettingsPanel::RTISettingsPanel(QWidget *parent) : QStackedWidget(parent) {
-  subPanelFrame = new QFrame();
-  QVBoxLayout *subPanelLayout = new QVBoxLayout(subPanelFrame);
-  subPanelLayout->setContentsMargins(0, 0, 0, 0);
-  subPanelLayout->setSpacing(0);
+void RTIRangeControl::increment() {
+  currentValue = std::min(currentValue + stepSize, maxValue);
+  // Convert miles to meters for storage
+  float meters = currentValue * MILES_TO_METERS;
+  params.put(paramKey.toStdString(), QString::number(meters, 'f', 0).toStdString());
+  updateLabels();
+}
 
+void RTIRangeControl::decrement() {
+  currentValue = std::max(currentValue - stepSize, minValue);
+  // Convert miles to meters for storage
+  float meters = currentValue * MILES_TO_METERS;
+  params.put(paramKey.toStdString(), QString::number(meters, 'f', 0).toStdString());
+  updateLabels();
+}
+
+void RTIRangeControl::reset() {
+  currentValue = defaultValue;
+  float meters = currentValue * MILES_TO_METERS;
+  params.put(paramKey.toStdString(), QString::number(meters, 'f', 0).toStdString());
+  updateLabels();
+}
+
+// ============================================================================
+// RTISpeedReductionControl Implementation
+// ============================================================================
+
+RTISpeedReductionControl::RTISpeedReductionControl(QWidget *parent) : QFrame(parent) {
+  QVBoxLayout *mainLayout = new QVBoxLayout(this);
+  mainLayout->setContentsMargins(0, 0, 0, 0);
+  
+  // Title
+  QLabel *titleLabel = new QLabel(tr("Speed Reduction"));
+  titleLabel->setStyleSheet("font-size: 42px; font-weight: 500; color: #E4E4E4;");
+  mainLayout->addWidget(titleLabel);
+  
+  // Description
+  QLabel *descLabel = new QLabel(tr("How much to reduce speed when approaching threats"));
+  descLabel->setWordWrap(true);
+  descLabel->setStyleSheet("font-size: 32px; color: #999999; margin-top: 5px; margin-bottom: 15px;");
+  mainLayout->addWidget(descLabel);
+  
+  // Mode selector
+  QHBoxLayout *modeLayout = new QHBoxLayout();
+  
+  modeSelector = new QComboBox();
+  modeSelector->setStyleSheet(R"(
+    QComboBox {
+      font-size: 36px;
+      padding: 15px;
+      background-color: #393939;
+      color: white;
+      border: 2px solid #555;
+      border-radius: 15px;
+      min-height: 60px;
+    }
+    QComboBox::drop-down {
+      width: 50px;
+      border: none;
+    }
+    QComboBox::down-arrow {
+      image: none;
+      border-left: 10px solid transparent;
+      border-right: 10px solid transparent;
+      border-top: 15px solid #E4E4E4;
+      margin-right: 10px;
+    }
+    QComboBox QAbstractItemView {
+      font-size: 36px;
+      background-color: #393939;
+      selection-background-color: #4a90e2;
+      border: 2px solid #555;
+      padding: 10px;
+    }
+  )");
+  
+  modeSelector->addItem(tr("Posted Speed Limit"));
+  modeSelector->addItem(tr("Custom"));
+  
+  // Load current setting
+  QString speedMode = QString::fromStdString(params.get("RTISpeedReductionMode"));
+  if (speedMode == "custom") {
+    modeSelector->setCurrentIndex(1);
+  } else {
+    modeSelector->setCurrentIndex(0);
+  }
+  
+  connect(modeSelector, QOverload<int>::of(&QComboBox::currentIndexChanged), 
+          this, &RTISpeedReductionControl::updateMode);
+  
+  modeLayout->addWidget(modeSelector);
+  modeLayout->addStretch();
+  mainLayout->addLayout(modeLayout);
+  
+  // Custom speed control (initially hidden)
+  customFrame = new QFrame();
+  customFrame->setStyleSheet("background-color: transparent;");
+  QVBoxLayout *customLayout = new QVBoxLayout(customFrame);
+  customLayout->setContentsMargins(0, 20, 0, 0);
+  
+  // Custom speed control layout
+  QHBoxLayout *speedControlLayout = new QHBoxLayout();
+  speedControlLayout->setSpacing(20);
+  
+  // Minus button
+  speedMinusBtn = new QPushButton("-");
+  speedMinusBtn->setFixedSize(100, 100);
+  speedMinusBtn->setStyleSheet(R"(
+    QPushButton {
+      font-size: 60px;
+      font-weight: 500;
+      border-radius: 50px;
+      background-color: #393939;
+      color: #E4E4E4;
+    }
+    QPushButton:pressed {
+      background-color: #4a4a4a;
+    }
+    QPushButton:disabled {
+      background-color: #2a2a2a;
+      color: #666666;
+    }
+  )");
+  speedControlLayout->addWidget(speedMinusBtn);
+  
+  // Value display
+  QVBoxLayout *speedValueLayout = new QVBoxLayout();
+  speedValueLayout->setAlignment(Qt::AlignCenter);
+  
+  speedValueLabel = new QLabel("15 mph");
+  speedValueLabel->setAlignment(Qt::AlignCenter);
+  speedValueLabel->setStyleSheet("font-size: 70px; font-weight: 500; color: #FFFFFF;");
+  speedValueLabel->setFixedWidth(300);
+  speedValueLayout->addWidget(speedValueLabel);
+  
+  speedStatusLabel = new QLabel(tr("(Default)"));
+  speedStatusLabel->setAlignment(Qt::AlignCenter);
+  speedStatusLabel->setStyleSheet("font-size: 32px; color: #999999;");
+  speedValueLayout->addWidget(speedStatusLabel);
+  
+  speedControlLayout->addLayout(speedValueLayout);
+  
+  // Plus button
+  speedPlusBtn = new QPushButton("+");
+  speedPlusBtn->setFixedSize(100, 100);
+  speedPlusBtn->setStyleSheet(speedMinusBtn->styleSheet());
+  speedControlLayout->addWidget(speedPlusBtn);
+  
+  speedControlLayout->addStretch();
+  
+  // Reset button
+  speedResetBtn = new QPushButton(tr("Reset"));
+  speedResetBtn->setFixedSize(150, 80);
+  speedResetBtn->setStyleSheet(R"(
+    QPushButton {
+      font-size: 35px;
+      font-weight: 500;
+      border-radius: 20px;
+      background-color: #393939;
+      color: #E4E4E4;
+    }
+    QPushButton:pressed {
+      background-color: #4a4a4a;
+    }
+    QPushButton:disabled {
+      background-color: #2a2a2a;
+      color: #666666;
+    }
+  )");
+  speedControlLayout->addWidget(speedResetBtn);
+  
+  customLayout->addLayout(speedControlLayout);
+  customFrame->setLayout(customLayout);
+  
+  // Load custom speed value (stored in km/h, display in mph)
+  QString storedSpeed = QString::fromStdString(params.get("RTISpeedReduction"));
+  if (storedSpeed.isEmpty()) {
+    customSpeed = 10; // Default 10 mph
+  } else {
+    float kmh = storedSpeed.toFloat();
+    customSpeed = static_cast<int>(kmh * KMH_TO_MPH);
+  }
+  
+  // Connect custom speed controls
+  connect(speedMinusBtn, &QPushButton::clicked, this, &RTISpeedReductionControl::decrementSpeed);
+  connect(speedPlusBtn, &QPushButton::clicked, this, &RTISpeedReductionControl::incrementSpeed);
+  connect(speedResetBtn, &QPushButton::clicked, this, &RTISpeedReductionControl::resetSpeed);
+  
+  updateCustomValue();
+  
+  mainLayout->addWidget(customFrame);
+  
+  // Show/hide custom frame based on current selection
+  customFrame->setVisible(modeSelector->currentIndex() == 1);
+}
+
+void RTISpeedReductionControl::updateMode(int index) {
+  if (index == 0) {
+    params.put("RTISpeedReductionMode", "posted");
+    customFrame->setVisible(false);
+  } else {
+    params.put("RTISpeedReductionMode", "custom");
+    customFrame->setVisible(true);
+  }
+}
+
+void RTISpeedReductionControl::updateCustomValue() {
+  speedValueLabel->setText(QString::number(customSpeed) + " mph");
+  
+  bool isDefault = (customSpeed == 10);
+  if (isDefault) {
+    speedStatusLabel->setText(tr("(Default)"));
+    speedStatusLabel->setStyleSheet("font-size: 32px; color: #999999;");
+  } else {
+    speedStatusLabel->setText(tr("(Modified)"));
+    speedStatusLabel->setStyleSheet("font-size: 32px; color: #FFC107;");
+  }
+  
+  speedMinusBtn->setEnabled(customSpeed > 0);
+  speedPlusBtn->setEnabled(customSpeed < 30);
+  speedResetBtn->setEnabled(!isDefault);
+}
+
+void RTISpeedReductionControl::incrementSpeed() {
+  customSpeed = std::min(customSpeed + 1, 30);
+  float kmh = customSpeed * MPH_TO_KMH;
+  params.put("RTISpeedReduction", QString::number(kmh, 'f', 0).toStdString());
+  updateCustomValue();
+}
+
+void RTISpeedReductionControl::decrementSpeed() {
+  customSpeed = std::max(customSpeed - 1, 0);
+  float kmh = customSpeed * MPH_TO_KMH;
+  params.put("RTISpeedReduction", QString::number(kmh, 'f', 0).toStdString());
+  updateCustomValue();
+}
+
+void RTISpeedReductionControl::resetSpeed() {
+  customSpeed = 10;
+  float kmh = customSpeed * MPH_TO_KMH;
+  params.put("RTISpeedReduction", QString::number(kmh, 'f', 0).toStdString());
+  updateCustomValue();
+}
+
+// ============================================================================
+// RTISettingsPanel Implementation
+// ============================================================================
+
+RTISettingsPanel::RTISettingsPanel(QWidget *parent) : QFrame(parent) {
+  setupMainLayout();
+  loadWazeApiKey();
+}
+
+void RTISettingsPanel::setupMainLayout() {
+  QVBoxLayout *mainLayout = new QVBoxLayout(this);
+  mainLayout->setContentsMargins(0, 0, 0, 0);
+  mainLayout->setSpacing(0);
+  
   // Back button
-  PanelBackButton *back = new PanelBackButton(tr("Back"));
-  connect(back, &QPushButton::clicked, [=]() { emit backPress(); });
-  subPanelLayout->addWidget(back, 0, Qt::AlignLeft);
-
-  subPanelLayout->addSpacing(20);
-
-  // Create a scroll area for vertical scrolling only
+  PanelBackButton *backBtn = new PanelBackButton(tr("Back"));
+  connect(backBtn, &QPushButton::clicked, this, &RTISettingsPanel::backPress);
+  mainLayout->addWidget(backBtn, 0, Qt::AlignLeft);
+  
+  mainLayout->addSpacing(20);
+  
+  // Create scroll area
   QScrollArea *scrollArea = new QScrollArea(this);
   scrollArea->setWidgetResizable(true);
   scrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
@@ -62,457 +424,243 @@ RTISettingsPanel::RTISettingsPanel(QWidget *parent) : QStackedWidget(parent) {
   scrollArea->setStyleSheet("QScrollArea { background-color: transparent; border: none; }");
   
   QWidget *scrollWidget = new QWidget();
+  scrollWidget->setMaximumWidth(1300); // Prevent horizontal scrolling
   QVBoxLayout *scrollLayout = new QVBoxLayout(scrollWidget);
   scrollLayout->setContentsMargins(50, 20, 50, 20);
-  
-  // Enforce maximum width constraint to prevent horizontal scrolling
-  scrollWidget->setMaximumWidth(1300); // Leave 100px margin from 1400px limit
   scrollLayout->setSpacing(30);
-
+  
   // Title
   QLabel *title = new QLabel(tr("Real-time Traffic Intelligence"));
-  title->setStyleSheet("font-size: 48px; font-weight: 600; color: #E4E4E4; padding-bottom: 10px;");
+  title->setStyleSheet("font-size: 50px; font-weight: 600; color: #E4E4E4; padding-bottom: 10px;");
   title->setAlignment(Qt::AlignCenter);
   scrollLayout->addWidget(title);
   
   // Description
-  QLabel *description = new QLabel(tr("Monitor traffic ahead and adjust speed automatically for safer driving"));
-  description->setStyleSheet("font-size: 32px; color: #999999; padding-bottom: 30px;");
+  QLabel *description = new QLabel(tr("RTI uses Waze traffic data to automatically adjust your speed for safer driving"));
+  description->setStyleSheet("font-size: 34px; color: #999999; padding-bottom: 30px;");
   description->setWordWrap(true);
   description->setAlignment(Qt::AlignCenter);
   scrollLayout->addWidget(description);
   
-  // Data Source Dropdown
-  QPair<QFrame*, QVBoxLayout*> sourcePair = createSettingsFrame();
-  QFrame *sourceFrame = sourcePair.first;
-  QVBoxLayout *sourceLayout = sourcePair.second;
-  createSectionLabel(tr("Data Source"), sourceLayout);
+  // Threat Filter Section
+  QFrame *filterFrame = createSectionFrame();
+  QVBoxLayout *filterLayout = new QVBoxLayout(filterFrame);
   
-  rti_source_combo = new QComboBox();
-  rti_source_combo->setStyleSheet(R"(
+  QLabel *filterLabel = new QLabel(tr("Threat Filter"));
+  filterLabel->setStyleSheet("font-size: 42px; font-weight: 500; color: #E4E4E4; padding-bottom: 15px;");
+  filterLayout->addWidget(filterLabel);
+  
+  threatFilterCombo = new QComboBox();
+  threatFilterCombo->setStyleSheet(R"(
     QComboBox {
       font-size: 36px;
-      padding: 20px;
+      padding: 15px;
       background-color: #393939;
       color: white;
       border: 2px solid #555;
       border-radius: 15px;
       min-height: 60px;
     }
+    QComboBox::drop-down {
+      width: 50px;
+      border: none;
+    }
+    QComboBox::down-arrow {
+      image: none;
+      border-left: 10px solid transparent;
+      border-right: 10px solid transparent;
+      border-top: 15px solid #E4E4E4;
+      margin-right: 10px;
+    }
     QComboBox QAbstractItemView {
       font-size: 36px;
       background-color: #393939;
       selection-background-color: #4a90e2;
       border: 2px solid #555;
-      border-radius: 5px;
       padding: 10px;
-      outline: none;
-    }
-    QComboBox QAbstractItemView::item {
-      padding: 8px;
-      border: none;
     }
   )");
   
-  // Fix popup positioning issue with QStackedWidget + QScrollArea
-  // Ensure popup uses correct parent for coordinate calculations
-  auto *rti_source_view = rti_source_combo->view();
-  rti_source_view->setParent(nullptr);
-  rti_source_view->setWindowFlags(Qt::Popup | Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint);
+  threatFilterCombo->addItem(tr("All Threats"));
+  threatFilterCombo->addItem(tr("Police Only"));
+  threatFilterCombo->addItem(tr("Speed Cameras Only"));
+  threatFilterCombo->addItem(tr("Hazards Only"));
+  threatFilterCombo->addItem(tr("Custom"));
   
-  rti_source_combo->addItem(tr("Disabled"));
-  rti_source_combo->addItem(tr("Waze"));
-  // Commented out non-functional data sources for now
-  // rti_source_combo->addItem(tr("TomTom"));
-  // rti_source_combo->addItem(tr("INRIX"));
-  // rti_source_combo->addItem(tr("Manual API"));
+  int filterVal = QString::fromStdString(params.get("RTIThreatFilter")).toInt();
+  threatFilterCombo->setCurrentIndex(filterVal);
   
-  int source_val = SunnypilotUtils::safeStringToInt(params.get("RTIDataSource"), 0);
-  rti_source_combo->setCurrentIndex(source_val);
-  
-  connect(rti_source_combo, QOverload<int>::of(&QComboBox::currentIndexChanged), [this](int index) {
-    params.put("RTIDataSource", std::to_string(index));
-    if (index == 1) { // Waze selected
-      loadWazeApiKey();
-    }
-    refresh();
-  });
-  
-  sourceLayout->addWidget(rti_source_combo);
-  scrollLayout->addWidget(sourceFrame);
-
-  // Threat Filter Dropdown
-  QPair<QFrame*, QVBoxLayout*> filterPair = createSettingsFrame();
-  QFrame *filterFrame = filterPair.first;
-  QVBoxLayout *filterLayout = filterPair.second;
-  createSectionLabel(tr("Threat Filter"), filterLayout);
-  
-  rti_filter_combo = new QComboBox();
-  rti_filter_combo->setStyleSheet(rti_source_combo->styleSheet());
-  
-  // Fix popup positioning issue with QStackedWidget + QScrollArea
-  auto *rti_filter_view = rti_filter_combo->view();
-  rti_filter_view->setParent(nullptr);
-  rti_filter_view->setWindowFlags(Qt::Popup | Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint);
-  
-  rti_filter_combo->addItem(tr("All Threats"));
-  rti_filter_combo->addItem(tr("Police Only"));
-  rti_filter_combo->addItem(tr("Speed Cameras Only"));
-  rti_filter_combo->addItem(tr("Hazards Only"));
-  rti_filter_combo->addItem(tr("Custom"));
-  
-  int filter_val = SunnypilotUtils::safeStringToInt(params.get("RTIThreatFilter"), 0);
-  rti_filter_combo->setCurrentIndex(filter_val);
-  
-  connect(rti_filter_combo, QOverload<int>::of(&QComboBox::currentIndexChanged), [this](int index) {
+  connect(threatFilterCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), [this](int index) {
     params.put("RTIThreatFilter", std::to_string(index));
-    refresh();
   });
   
-  filterLayout->addWidget(rti_filter_combo);
+  filterLayout->addWidget(threatFilterCombo);
   scrollLayout->addWidget(filterFrame);
-
-  // Response Style Dropdown
-  QPair<QFrame*, QVBoxLayout*> aggrPair = createSettingsFrame();
-  QFrame *aggrFrame = aggrPair.first;
-  QVBoxLayout *aggrLayout = aggrPair.second;
-  createSectionLabel(tr("Response Style"), aggrLayout);
   
-  rti_aggr_combo = new QComboBox();
-  rti_aggr_combo->setStyleSheet(rti_source_combo->styleSheet());
+  // Detection & Response Settings Section
+  QFrame *rangeFrame = createSectionFrame();
+  QVBoxLayout *rangeLayout = new QVBoxLayout(rangeFrame);
   
-  // Fix popup positioning issue with QStackedWidget + QScrollArea
-  auto *rti_aggr_view = rti_aggr_combo->view();
-  rti_aggr_view->setParent(nullptr);
-  rti_aggr_view->setWindowFlags(Qt::Popup | Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint);
+  QLabel *rangeLabel = new QLabel(tr("Detection & Response Settings"));
+  rangeLabel->setStyleSheet("font-size: 42px; font-weight: 500; color: #E4E4E4; padding-bottom: 15px;");
+  rangeLayout->addWidget(rangeLabel);
   
-  rti_aggr_combo->addItem(tr("Conservative - Early, gentle braking"));
-  rti_aggr_combo->addItem(tr("Balanced - Optimal comfort"));
-  rti_aggr_combo->addItem(tr("Aggressive - Later, quicker response"));
+  // Detection Radius - for HUD awareness display
+  detectionRadiusControl = new RTIRangeControl(
+    tr("Detection Radius"),
+    tr("Display threats within this radius around your vehicle for situational awareness (360° coverage)"),
+    "RTIDetectionRadius",
+    0.25f, 3.0f, 0.25f, 2.0f, "mi",
+    this
+  );
+  rangeLayout->addWidget(detectionRadiusControl);
   
-  int aggr_val = SunnypilotUtils::safeStringToInt(params.get("RTIAggressiveness"), 1);
-  rti_aggr_combo->setCurrentIndex(aggr_val);
+  rangeLayout->addSpacing(20);
   
-  connect(rti_aggr_combo, QOverload<int>::of(&QComboBox::currentIndexChanged), [this](int index) {
-    params.put("RTIAggressiveness", std::to_string(index));
-    refresh();
-  });
+  // Forward Slowdown Range - when to start slowing for threats ahead
+  forwardSlowdownControl = new RTIRangeControl(
+    tr("Forward Slowdown Distance"),
+    tr("Begin slowing when approaching a threat ahead on your route at this distance"),
+    "RTIForwardSlowdownRange",
+    0.0f, 2.0f, 0.25f, 0.75f, "mi",
+    this
+  );
+  rangeLayout->addWidget(forwardSlowdownControl);
   
-  aggrLayout->addWidget(rti_aggr_combo);
-  scrollLayout->addWidget(aggrFrame);
-
-  // Distance Settings
-  QPair<QFrame*, QVBoxLayout*> distancePair = createSettingsFrame();
-  QFrame *distanceFrame = distancePair.first;
-  QVBoxLayout *distanceLayout = distancePair.second;
-  createSectionLabel(tr("Detection Range"), distanceLayout);
+  rangeLayout->addSpacing(20);
   
-  // Min distance slider
-  QLabel *minDistLabel = new QLabel(tr("Minimum: 0.5 km"));
-  minDistLabel->setStyleSheet("font-size: 32px; color: #999999;");
-  distanceLayout->addWidget(minDistLabel);
+  // Resume Speed Distance - when to resume normal speed after passing
+  resumeSpeedControl = new RTIRangeControl(
+    tr("Resume Speed Distance"),
+    tr("Resume normal cruise speed after passing a threat by this distance"),
+    "RTIResumeSpeedDistance",
+    0.0f, 2.0f, 0.25f, 0.5f, "mi",
+    this
+  );
+  rangeLayout->addWidget(resumeSpeedControl);
   
-  rti_min_slider = new QSlider(Qt::Horizontal);
-  rti_min_slider->setStyleSheet(R"(
-    QSlider::groove:horizontal {
-      height: 10px;
-      background: #393939;
-      border-radius: 5px;
-    }
-    QSlider::handle:horizontal {
-      width: 40px;
-      height: 40px;
-      background: #4a90e2;
-      border-radius: 20px;
-      margin: -15px 0;
-    }
-    QSlider::sub-page:horizontal {
-      background: #4a90e2;
-      border-radius: 5px;
-    }
-  )");
-  connect(rti_min_slider, &QSlider::valueChanged, [this, minDistLabel](int value) {
-    minDistLabel->setText(formatDistanceLabel(value, true));
-    params.put("RTIMinDistance", std::to_string(value));
-  });
-  distanceLayout->addWidget(rti_min_slider);
+  scrollLayout->addWidget(rangeFrame);
   
-  distanceLayout->addSpacing(20);
+  // Speed Reduction Section
+  QFrame *speedFrame = createSectionFrame();
+  QVBoxLayout *speedLayout = new QVBoxLayout(speedFrame);
   
-  // Max distance slider
-  QLabel *maxDistLabel = new QLabel(tr("Maximum: 2.0 km"));
-  maxDistLabel->setStyleSheet("font-size: 32px; color: #999999;");
-  distanceLayout->addWidget(maxDistLabel);
-  
-  rti_max_slider = new QSlider(Qt::Horizontal);
-  rti_max_slider->setStyleSheet(rti_min_slider->styleSheet());
-  connect(rti_max_slider, &QSlider::valueChanged, [this, maxDistLabel](int value) {
-    maxDistLabel->setText(formatDistanceLabel(value, false));
-    params.put("RTIMaxDistance", std::to_string(value));
-  });
-  distanceLayout->addWidget(rti_max_slider);
-  
-  scrollLayout->addWidget(distanceFrame);
-  
-  // Speed Reduction
-  QPair<QFrame*, QVBoxLayout*> speedPair = createSettingsFrame();
-  QFrame *speedFrame = speedPair.first;
-  QVBoxLayout *speedLayout = speedPair.second;
-  createSectionLabel(tr("Speed Reduction"), speedLayout);
-  
-  QLabel *speedLabel = new QLabel(tr("Max reduction: 15 km/h"));
-  speedLabel->setStyleSheet("font-size: 32px; color: #999999;");
-  speedLayout->addWidget(speedLabel);
-  
-  rti_speed_slider = new QSlider(Qt::Horizontal);
-  rti_speed_slider->setRange(5, 50);
-  rti_speed_slider->setSingleStep(5);
-  rti_speed_slider->setValue(SunnypilotUtils::safeStringToInt(params.get("RTISpeedReduction"), 15));
-  rti_speed_slider->setStyleSheet(rti_min_slider->styleSheet());
-  connect(rti_speed_slider, &QSlider::valueChanged, [this, speedLabel](int value) {
-    speedLabel->setText(QString(tr("Max reduction: %1 km/h")).arg(value));
-    params.put("RTISpeedReduction", std::to_string(value));
-  });
-  speedLayout->addWidget(rti_speed_slider);
+  speedReductionControl = new RTISpeedReductionControl(this);
+  speedLayout->addWidget(speedReductionControl);
   
   scrollLayout->addWidget(speedFrame);
-
-  // Visual & Audio Settings
-  QPair<QFrame*, QVBoxLayout*> alertsPair = createSettingsFrame();
-  QFrame *alertsFrame = alertsPair.first;
-  QVBoxLayout *alertsLayout = alertsPair.second;
-  createSectionLabel(tr("Alerts & Display"), alertsLayout);
   
-  // HUD toggle
-  rti_hud_toggle = new ToggleSP();
-  createToggleRow(tr("HUD Display"), rti_hud_toggle, "RTIHUDEnabled", params, alertsLayout);
+  // Alerts & Display Section
+  QFrame *alertsFrame = createSectionFrame();
+  QVBoxLayout *alertsLayout = new QVBoxLayout(alertsFrame);
+  
+  QLabel *alertsLabel = new QLabel(tr("Alerts & Display"));
+  alertsLabel->setStyleSheet("font-size: 42px; font-weight: 500; color: #E4E4E4; padding-bottom: 15px;");
+  alertsLayout->addWidget(alertsLabel);
+  
+  // HUD Display toggle
+  QHBoxLayout *hudLayout = new QHBoxLayout();
+  QLabel *hudLabel = new QLabel(tr("Show HUD Display"));
+  hudLabel->setStyleSheet("font-size: 36px; color: #E4E4E4;");
+  hudLayout->addWidget(hudLabel);
+  hudLayout->addStretch();
+  
+  hudToggle = new ToggleSP();
+  hudToggle->setFixedSize(150, 80);
+  hudToggle->setChecked(params.getBool("RTIHUDEnabled"));
+  connect(hudToggle, &ToggleSP::stateChanged, [this](bool checked) {
+    params.putBool("RTIHUDEnabled", checked);
+  });
+  hudLayout->addWidget(hudToggle);
+  alertsLayout->addLayout(hudLayout);
   
   alertsLayout->addSpacing(15);
   
-  // Audio toggle
-  rti_audio_toggle = new ToggleSP();
-  createToggleRow(tr("Audio Alerts"), rti_audio_toggle, "RTIAudioAlerts", params, alertsLayout);
+  // Audio Alerts toggle
+  QHBoxLayout *audioLayout = new QHBoxLayout();
+  QLabel *audioLabel = new QLabel(tr("Audio Alerts"));
+  audioLabel->setStyleSheet("font-size: 36px; color: #E4E4E4;");
+  audioLayout->addWidget(audioLabel);
+  audioLayout->addStretch();
+  
+  audioToggle = new ToggleSP();
+  audioToggle->setFixedSize(150, 80);
+  audioToggle->setChecked(params.getBool("RTIAudioAlerts"));
+  connect(audioToggle, &ToggleSP::stateChanged, [this](bool checked) {
+    params.putBool("RTIAudioAlerts", checked);
+  });
+  audioLayout->addWidget(audioToggle);
+  alertsLayout->addLayout(audioLayout);
   
   scrollLayout->addWidget(alertsFrame);
-
-  // Advanced settings button - commented out until other data sources are implemented
-  // QPushButton *advanced_btn = new QPushButton(tr("Advanced Settings"));
-  // advanced_btn->setFixedHeight(100);
-  // advanced_btn->setStyleSheet(R"(
-  //   QPushButton {
-  //     font-size: 38px;
-  //     font-weight: 500;
-  //     background-color: #4a90e2;
-  //     color: white;
-  //     border-radius: 20px;
-  //     margin: 20px 0;
-  //   }
-  //   QPushButton:pressed {
-  //     background-color: #357abd;
-  //   }
-  // )");
-  // connect(advanced_btn, &QPushButton::clicked, [=]() {
-  //   emit advancedSettingsRequested();
-  // });
-  // scrollLayout->addWidget(advanced_btn);
   
+  // Add stretch at the end
   scrollLayout->addStretch();
   
   scrollArea->setWidget(scrollWidget);
-  subPanelLayout->addWidget(scrollArea);
-  
-  // Configure sliders with proper unit-aware settings
-  configureDistanceSliders();
-  
-  refresh();
-  addWidget(subPanelFrame);
-  setCurrentWidget(subPanelFrame);
+  mainLayout->addWidget(scrollArea);
+}
+
+QFrame* RTISettingsPanel::createSectionFrame() {
+  QFrame *frame = new QFrame();
+  frame->setStyleSheet("QFrame { background-color: #292929; border-radius: 20px; padding: 25px; }");
+  return frame;
 }
 
 void RTISettingsPanel::loadWazeApiKey() {
-  // Try to load API key from various locations in priority order
-  const std::vector<std::string> api_key_paths = {
-    "/data/persist/rapidapi_key",
-    "/persist/rapidapi_key",
-    "/data/openpilot/persist/rapidapi_key",
-    "/data/openpilot/rapidapi_key"
-  };
+  // Try to load the Waze API key from the JSON file
+  std::string apiKeyPath = "/persist/waze/rapidapi_key.json";
+  std::string apiKey;
   
-  std::string api_key;
-  
-  // First check environment variables
-  const char* env_key = std::getenv("RAPIDAPI_KEY");
-  if (env_key && strlen(env_key) > 0) {
-    api_key = env_key;
+  // First check environment variable
+  const char* envKey = std::getenv("RAPIDAPI_KEY");
+  if (envKey && strlen(envKey) > 0) {
+    apiKey = envKey;
   } else {
-    // Try each file location
-    for (const auto& path : api_key_paths) {
-      std::ifstream file(path);
-      if (file.is_open()) {
-        std::getline(file, api_key);
-        file.close();
-        // Trim whitespace
-        api_key.erase(0, api_key.find_first_not_of(" \n\r\t"));
-        api_key.erase(api_key.find_last_not_of(" \n\r\t") + 1);
-        if (!api_key.empty()) {
-          break;
+    // Try to read the JSON file
+    std::ifstream file(apiKeyPath);
+    if (file.is_open()) {
+      std::string jsonContent;
+      std::string line;
+      while (std::getline(file, line)) {
+        jsonContent += line;
+      }
+      file.close();
+      
+      // Simple JSON parsing for "api_key" field
+      // Looking for pattern: "api_key": "value" or "apiKey": "value" or "key": "value"
+      size_t keyPos = jsonContent.find("\"api_key\"");
+      if (keyPos == std::string::npos) {
+        keyPos = jsonContent.find("\"apiKey\"");
+      }
+      if (keyPos == std::string::npos) {
+        keyPos = jsonContent.find("\"key\"");
+      }
+      
+      if (keyPos != std::string::npos) {
+        // Find the colon after the key
+        size_t colonPos = jsonContent.find(":", keyPos);
+        if (colonPos != std::string::npos) {
+          // Find the opening quote of the value
+          size_t startQuote = jsonContent.find("\"", colonPos);
+          if (startQuote != std::string::npos) {
+            // Find the closing quote of the value
+            size_t endQuote = jsonContent.find("\"", startQuote + 1);
+            if (endQuote != std::string::npos) {
+              apiKey = jsonContent.substr(startQuote + 1, endQuote - startQuote - 1);
+            }
+          }
         }
       }
     }
   }
   
-  // If we found a key, configure Waze parameters
-  if (!api_key.empty()) {
-    params.put("RTIManualApiKey", api_key);
+  // Store the API key and configure Waze endpoint
+  if (!apiKey.empty()) {
+    params.put("RTIManualApiKey", apiKey);
     params.put("RTIManualApiEndpoint", "https://waze.p.rapidapi.com/alerts-and-jams");
     params.put("RTIManualApiFormat", "waze_rapid");
-    params.put("RTIApiConfigured", "1");
-  } else {
-    // No API key found - mark as not configured
-    params.put("RTIApiConfigured", "0");
-  }
-}
-
-void RTISettingsPanel::refresh() {
-  // Check if metric setting changed and reconfigure sliders if needed
-  static bool last_metric_state = isMetricSystem();
-  bool current_metric_state = isMetricSystem();
-  
-  if (current_metric_state != last_metric_state) {
-    // Metric setting changed - reconfigure sliders
-    configureDistanceSliders();
-    last_metric_state = current_metric_state;
-  }
-  
-  // Check if RTI is enabled
-  int source_val = SunnypilotUtils::safeStringToInt(params.get("RTIDataSource"), 0);
-  bool sourceEnabled = (source_val != 0);
-  
-  // Enable/disable controls based on source selection
-  if (rti_filter_combo) rti_filter_combo->setEnabled(sourceEnabled);
-  if (rti_aggr_combo) rti_aggr_combo->setEnabled(sourceEnabled);
-  if (rti_min_slider) rti_min_slider->setEnabled(sourceEnabled);
-  if (rti_max_slider) rti_max_slider->setEnabled(sourceEnabled);
-  if (rti_speed_slider) rti_speed_slider->setEnabled(sourceEnabled);
-  if (rti_hud_toggle) rti_hud_toggle->setEnabled(sourceEnabled);
-  if (rti_audio_toggle) rti_audio_toggle->setEnabled(sourceEnabled);
-}
-
-void RTISettingsPanel::showEvent(QShowEvent *event) {
-  // Validate parameters and update sliders when panel is shown
-  validateAndMigrateParameters();
-  configureDistanceSliders();
-  refresh();
-}
-
-// Helper method to check if system is in metric mode
-bool RTISettingsPanel::isMetricSystem() {
-  return params.getBool("IsMetric");
-}
-
-// Configure distance sliders based on metric/imperial setting
-void RTISettingsPanel::configureDistanceSliders() {
-  const bool is_metric = isMetricSystem();
-  
-  int min_range_m, max_range_m, step_m;
-  int default_min, default_max;
-  
-  if (is_metric) {
-    // Metric: 0.5km - 5km in 0.5km increments
-    min_range_m = static_cast<int>(METRIC_INCREMENT_KM * KM_TO_METERS);  // 500m
-    max_range_m = static_cast<int>(5.0 * KM_TO_METERS);                // 5000m
-    step_m = min_range_m;                                               // 500m
-    default_min = 500;
-    default_max = 2000;
-  } else {
-    // Imperial: 0.25mi - 2mi in 0.25mi increments
-    min_range_m = static_cast<int>(IMPERIAL_INCREMENT_MI * MILES_TO_METERS);  // ~402m
-    max_range_m = static_cast<int>(2.0 * MILES_TO_METERS);                   // ~3219m
-    step_m = min_range_m;                                                     // ~402m
-    default_min = min_range_m;
-    default_max = static_cast<int>(1.0 * MILES_TO_METERS);  // 1 mile
-  }
-  
-  rti_min_slider->setRange(min_range_m, max_range_m);
-  rti_min_slider->setSingleStep(step_m);
-  rti_max_slider->setRange(min_range_m, max_range_m);
-  rti_max_slider->setSingleStep(step_m);
-  
-  // Update current values from params, snapping to valid increments
-  int current_min = SunnypilotUtils::safeStringToInt(params.get("RTIMinDistance"), default_min);
-  int current_max = SunnypilotUtils::safeStringToInt(params.get("RTIMaxDistance"), default_max);
-  
-  // Snap to nearest valid increment and enforce range limits
-  current_min = snapToValidIncrement(current_min);
-  current_max = snapToValidIncrement(current_max);
-  
-  // Ensure min < max
-  if (current_min >= current_max) {
-    current_min = default_min;
-    current_max = default_max;
-  }
-  
-  rti_min_slider->setValue(current_min);
-  rti_max_slider->setValue(current_max);
-}
-
-// Validate parameters and migrate if needed
-void RTISettingsPanel::validateAndMigrateParameters() {
-  // Get current values
-  int current_min = SunnypilotUtils::safeStringToInt(params.get("RTIMinDistance"), 500);
-  int current_max = SunnypilotUtils::safeStringToInt(params.get("RTIMaxDistance"), 2000);
-  
-  // Ensure they meet new constraints
-  int valid_min = snapToValidIncrement(current_min);
-  int valid_max = snapToValidIncrement(current_max);
-  
-  const bool is_metric = isMetricSystem();
-  const int min_limit = is_metric ? 500 : static_cast<int>(0.25 * MILES_TO_METERS);
-  const int max_limit = is_metric ? 5000 : static_cast<int>(2.0 * MILES_TO_METERS);
-  
-  // Enforce range limits
-  valid_min = std::max(min_limit, std::min(max_limit, valid_min));
-  valid_max = std::max(min_limit, std::min(max_limit, valid_max));
-  
-  // Ensure min < max
-  if (valid_min >= valid_max) {
-    valid_min = is_metric ? 500 : static_cast<int>(0.25 * MILES_TO_METERS);
-    valid_max = is_metric ? 1000 : static_cast<int>(0.5 * MILES_TO_METERS);
-  }
-  
-  // Update params if values changed
-  if (valid_min != current_min) {
-    params.put("RTIMinDistance", std::to_string(valid_min));
-  }
-  if (valid_max != current_max) {
-    params.put("RTIMaxDistance", std::to_string(valid_max));
-  }
-}
-
-// Format distance labels with appropriate units
-QString RTISettingsPanel::formatDistanceLabel(int meters_value, bool is_minimum) {
-  const bool is_metric = isMetricSystem();
-  const QString prefix = is_minimum ? tr("Minimum: ") : tr("Maximum: ");
-  
-  if (is_metric) {
-    const double km = meters_value * METERS_TO_KM;
-    return QString("%1%2 km").arg(prefix).arg(km, 0, 'f', 1);
-  } else {
-    const double miles = meters_value * METERS_TO_MILES;
-    return QString("%1%2 mi").arg(prefix).arg(miles, 0, 'f', 2);
-  }
-}
-
-// Snap meter values to valid increments based on current unit system
-int RTISettingsPanel::snapToValidIncrement(int meters) {
-  const bool is_metric = isMetricSystem();
-  
-  if (is_metric) {
-    // Round to nearest 0.5km (500m)
-    return ((meters + 250) / 500) * 500;
-  } else {
-    // Round to nearest 0.25mi (≈402m)
-    const int increment_m = static_cast<int>(IMPERIAL_INCREMENT_MI * MILES_TO_METERS);
-    return ((meters + increment_m/2) / increment_m) * increment_m;
+    // Force Waze as the data source
+    params.put("RTIDataSource", "1");
   }
 }

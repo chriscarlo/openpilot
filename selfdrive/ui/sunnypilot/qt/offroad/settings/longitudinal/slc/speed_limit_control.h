@@ -10,7 +10,7 @@
 #include "selfdrive/ui/sunnypilot/ui.h"
 #include "selfdrive/ui/sunnypilot/qt/offroad/settings/settings.h"
 #include "selfdrive/ui/sunnypilot/qt/widgets/controls.h"
-#include "selfdrive/ui/sunnypilot/qt/widgets/expandable_row.h"
+#include "selfdrive/ui/sunnypilot/qt/widgets/controls.h"
 
 enum class SLCEngageType {
   AUTO,
@@ -62,16 +62,22 @@ inline const char *SLCSourcePolicyText[]{
   QT_TR_NOOP("Combined\nData")
 };
 
-class SpeedLimitControl : public ExpandableToggleRow {
+class SpeedLimitControl : public AbstractControlSP {
   Q_OBJECT
 
 public:
-  SpeedLimitControl(const QString &param, const QString &title, const QString &desc, const QString &icon, QWidget *parent = nullptr);
+  SpeedLimitControl(QWidget *parent = nullptr);
+  void refresh();
+  void showEvent(QShowEvent *event) override;
 
 signals:
-  void slcSettingsButtonClicked();
+  void toggleFlipped(bool state);
+  void settingsClicked();
 
 private:
+  void setupSettingsButton();
+  
   Params params;
-  PushButtonSP *slcSettings;
+  ToggleSP *toggle;
+  QPushButton *settings_btn;
 };

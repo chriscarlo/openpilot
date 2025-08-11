@@ -50,14 +50,14 @@ void VisionTurnControlWithSettings::showEvent(QShowEvent *event) {
 void VisionTurnControlWithSettings::setupSettingsButton() {
   settings_btn = new QPushButton(this);
   settings_btn->setObjectName("vtsc_settings_btn");
-  settings_btn->setFixedSize(100, 100);
+  settings_btn->setFixedSize(120, 120);  // 20% larger than original 100x100
   
   // Style the button with a gear icon
   settings_btn->setStyleSheet(R"(
     QPushButton {
       background-color: #393939;
-      border-radius: 50px;
-      font-size: 40px;
+      border-radius: 60px;
+      font-size: 63px;
       font-weight: 500;
       border: 2px solid #696969;
     }

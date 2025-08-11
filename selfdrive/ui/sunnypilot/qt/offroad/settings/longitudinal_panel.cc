@@ -79,44 +79,16 @@ LongitudinalPanel::LongitudinalPanel(QWidget *parent) : QWidget(parent) {
   main_layout->setCurrentWidget(cruisePanelScreen);
   // Moved refresh() call to end of constructor after all controls are initialized
 
-  slcControl = new SpeedLimitControl(
-    "SpeedLimitControl",
-    tr("Speed Limit Control (SLC)"),
-    tr("When you engage ACC, you will be prompted to set the cruising speed to the speed limit of the road adjusted by the Offset and Source Policy specified, or the current driving speed. "
-      "The maximum cruising speed will always be the MAX set speed."),
-    "",
-    this);
+  slcControl = new SpeedLimitControl(this);
   list->addItem(slcControl);
 
   // RTI Control
-  rtiControl = new RTIControl(
-    "RTIEnabled",
-    tr("Realtime Traffic Intelligence (RTI)"),
-    tr("Advanced traffic intelligence system that uses real-time data to detect threats like police, speed cameras, accidents, and hazards ahead. "
-      "Automatically adjusts speed when threats are detected to help maintain safe and legal driving."),
-    "",
-    this);
+  rtiControl = new RTIControl(this);
   list->addItem(rtiControl);
 
-  dynamicExperimentalControl = new ParamControlSP("DynamicExperimentalControl",
-    tr("Enable Dynamic Experimental Control"),
-    tr("Enable toggle to allow the model to determine when to use sunnypilot ACC or sunnypilot End to End Longitudinal."),
-    "../assets/offroad/icon_blank.png");
-  list->addItem(dynamicExperimentalControl);
-  PushButtonSP *decManageRectBtn = new PushButtonSP(tr("Customize DEC"), 800, this);
-  list->addItem(decManageRectBtn);
-
-  connect(decManageRectBtn, &QPushButton::clicked, [=]() {
-    cruisePanelScroller->setLastScrollPosition();
-    main_layout->setCurrentWidget(decScreen);
-  });
-
-  connect(dynamicExperimentalControl, &ParamControlSP::toggleFlipped, [=](bool enabled) {
-    decManageRectBtn->setVisible(enabled);
-  });
-
-  bool decEnabled = params.getBool("DynamicExperimentalControl");
-  decManageRectBtn->setVisible(decEnabled);
+  // DEC Control
+  decControl = new DecControl(this);
+  list->addItem(decControl);
 
   visionTurnSpeedControl = new VisionTurnControlWithSettings("VisionTurnSpeedControl",
     tr("Vision Turn Speed Controller"),
@@ -131,14 +103,19 @@ LongitudinalPanel::LongitudinalPanel(QWidget *parent) : QWidget(parent) {
     main_layout->setCurrentWidget(vtscSettingsScreen);
   });
 
-  connect(slcControl, &SpeedLimitControl::slcSettingsButtonClicked, [=]() {
+  connect(slcControl, &SpeedLimitControl::settingsClicked, [=]() {
     cruisePanelScroller->setLastScrollPosition();
     main_layout->setCurrentWidget(slcScreen);
   });
 
-  connect(rtiControl, &RTIControl::rtiSettingsButtonClicked, [=]() {
+  connect(rtiControl, &RTIControl::settingsClicked, [=]() {
     cruisePanelScroller->setLastScrollPosition();
     main_layout->setCurrentWidget(rtiSettingsScreen);
+  });
+  
+  connect(decControl, &DecControl::settingsClicked, [=]() {
+    cruisePanelScroller->setLastScrollPosition();
+    main_layout->setCurrentWidget(decScreen);
   });
 
   slcScreen = new SpeedLimitControlSubpanel(this);
@@ -151,17 +128,6 @@ LongitudinalPanel::LongitudinalPanel(QWidget *parent) : QWidget(parent) {
   connect(rtiSettingsScreen, &RTISettingsPanel::backPress, [=]() {
     cruisePanelScroller->restoreScrollPosition();
     main_layout->setCurrentWidget(cruisePanelScreen);
-  });
-  
-  // Connect RTI advanced settings navigation
-  connect(rtiSettingsScreen, &RTISettingsPanel::advancedSettingsRequested, [=]() {
-    main_layout->setCurrentWidget(rtiAdvancedScreen);
-  });
-
-  // Create RTI Advanced Configuration Panel
-  rtiAdvancedScreen = new RTIAdvancedPanel(this);
-  connect(rtiAdvancedScreen, &RTIAdvancedPanel::backPress, [=]() {
-    main_layout->setCurrentWidget(rtiSettingsScreen);
   });
 
   decScreen = new DecControllerSubpanel(this);
@@ -190,7 +156,6 @@ LongitudinalPanel::LongitudinalPanel(QWidget *parent) : QWidget(parent) {
   main_layout->addWidget(cruisePanelScreen);
   main_layout->addWidget(slcScreen);
   main_layout->addWidget(rtiSettingsScreen);
-  main_layout->addWidget(rtiAdvancedScreen);
   main_layout->addWidget(decScreen);
   main_layout->addWidget(vtscSettingsScreen);
   main_layout->addWidget(anticipationDistanceScreen);
@@ -265,12 +230,6 @@ void LongitudinalPanel::refresh(bool _offroad) {
   vibePersonalityControl->refresh();
   vibeAccelPersonalityControl->refresh();
   vibeFollowPersonalityControl->refresh();
-
-  // Refresh DEC manage button
-  if (decManageBtn) {
-    bool decEnabled = params.getBool("DynamicExperimentalControl");
-    decManageBtn->setVisible(decEnabled);
-  }
 
   offroad = _offroad;
 }
