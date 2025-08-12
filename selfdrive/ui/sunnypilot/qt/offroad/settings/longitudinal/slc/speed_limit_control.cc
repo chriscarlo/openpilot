@@ -27,7 +27,7 @@ SpeedLimitControl::SpeedLimitControl(QWidget *parent) : AbstractControlSP(
   QWidget *controls_container = new QWidget(this);
   QHBoxLayout *controls_layout = new QHBoxLayout(controls_container);
   controls_layout->setContentsMargins(0, 0, 0, 0);
-  controls_layout->setSpacing(30);  // Increased from 20px to 30px (50% increase)
+  controls_layout->setSpacing(40);  // Increased spacing for better visual separation
   
   // Add settings button first, then toggle (swapped positions)
   controls_layout->addWidget(settings_btn);
