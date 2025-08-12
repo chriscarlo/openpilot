@@ -148,6 +148,8 @@ inline static std::unordered_map<std::string, uint32_t> keys = {
     {"MaxTimeOffroad", PERSISTENT | BACKUP},
     {"ModelRunnerTypeCache", CLEAR_ON_ONROAD_TRANSITION},
     {"OffroadMode", CLEAR_ON_MANAGER_START},
+    {"ForceOnroad", CLEAR_ON_MANAGER_START | DEVELOPMENT_ONLY},
+    {"ForceOnroadActive", CLEAR_ON_MANAGER_START | DEVELOPMENT_ONLY},
     {"QuickBootToggle", PERSISTENT | BACKUP},
     {"QuietMode", PERSISTENT | BACKUP},
     {"RainbowMode", PERSISTENT},

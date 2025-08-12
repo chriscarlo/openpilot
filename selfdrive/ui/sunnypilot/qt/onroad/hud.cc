@@ -104,8 +104,9 @@ void HudRendererSP::draw(QPainter &p, const QRect &surface_rect) {
   // Draw base HUD elements
   HudRenderer::draw(p, surface_rect);
   
-  // Draw RTI threat indicator if both master switch and HUD display are enabled
-  if (rti_enabled && rti_hud_enabled && rti_threat_ahead && rti_has_threat) {
+  // Always draw RTI widget frame when HUD display is enabled
+  // Shows placeholder when no threat, actual threat info when detected
+  if (rti_enabled && rti_hud_enabled) {
     drawRTIThreatIndicator(p, surface_rect);
   }
 }
@@ -119,52 +120,60 @@ void HudRendererSP::drawRTIThreatIndicator(QPainter &p, const QRect &surface_rec
   
   QRect rti_rect(x_offset, y_offset, widget_width, widget_height);
   
-  // Get threat color based on distance
-  QColor threat_color = getRTIThreatColor(rti_threat_distance);
+  // Determine widget state and colors
+  bool has_active_threat = rti_threat_ahead && rti_has_threat;
+  QColor threat_color = has_active_threat ? getRTIThreatColor(rti_threat_distance) : QColor(100, 100, 100, 200);
   
-  // Draw background box with semi-transparent fill
+  // Always draw background box with semi-transparent fill
   p.setPen(QPen(threat_color, 3));
   p.setBrush(QColor(0, 0, 0, 150));
   p.drawRoundedRect(rti_rect, 20, 20);
   
-  // Draw threat icon
-  QRect icon_rect(rti_rect.x() + 40, rti_rect.y() + 20, 100, 80);
-  drawRTIThreatIcon(p, icon_rect, rti_threat_type);
-  
-  // Draw threat type text
-  p.setFont(threat_text_font);
-  p.setPen(threat_color);
-  QString threat_text = getRTIThreatText(rti_threat_type);
-  p.drawText(rti_rect.adjusted(0, 110, 0, 0), Qt::AlignTop | Qt::AlignHCenter, threat_text);
-  
-  // Draw distance
-  p.setFont(distance_font);
-  QString distance_text;
-  if (is_metric) {
-    if (rti_threat_distance < 1000) {
-      distance_text = QString("%1m").arg(static_cast<int>(rti_threat_distance));
+  if (has_active_threat) {
+    // Draw active threat information
+    QRect icon_rect(rti_rect.x() + 40, rti_rect.y() + 20, 100, 80);
+    drawRTIThreatIcon(p, icon_rect, rti_threat_type);
+    
+    // Draw threat type text
+    p.setFont(threat_text_font);
+    p.setPen(threat_color);
+    QString threat_text = getRTIThreatText(rti_threat_type);
+    p.drawText(rti_rect.adjusted(0, 110, 0, 0), Qt::AlignTop | Qt::AlignHCenter, threat_text);
+    
+    // Draw distance
+    p.setFont(distance_font);
+    QString distance_text;
+    if (is_metric) {
+      if (rti_threat_distance < 1000) {
+        distance_text = QString("%1m").arg(static_cast<int>(rti_threat_distance));
+      } else {
+        distance_text = QString("%1km").arg(rti_threat_distance / 1000.0, 0, 'f', 1);
+      }
     } else {
-      distance_text = QString("%1km").arg(rti_threat_distance / 1000.0, 0, 'f', 1);
+      float distance_ft = rti_threat_distance * 3.28084;
+      if (distance_ft < 1000) {
+        distance_text = QString("%1ft").arg(static_cast<int>(distance_ft));
+      } else {
+        float distance_mi = distance_ft / 5280.0;
+        distance_text = QString("%1mi").arg(distance_mi, 0, 'f', 1);
+      }
+    }
+    p.drawText(rti_rect.adjusted(0, 155, 0, 0), Qt::AlignTop | Qt::AlignHCenter, distance_text);
+    
+    // Draw speed recommendation if different from current
+    if (rti_active && std::abs(rti_recommended_speed - speed / (is_metric ? 3.6 : 2.237)) > 1.0) {
+      p.setFont(speed_rec_font);
+      p.setPen(QColor(255, 255, 255, 200));
+      
+      float rec_speed_display = rti_recommended_speed * (is_metric ? 3.6 : 2.237);
+      QString speed_text = QString("↓ %1").arg(static_cast<int>(rec_speed_display));
+      p.drawText(rti_rect.adjusted(0, 200, 0, 0), Qt::AlignTop | Qt::AlignHCenter, speed_text);
     }
   } else {
-    float distance_ft = rti_threat_distance * 3.28084;
-    if (distance_ft < 1000) {
-      distance_text = QString("%1ft").arg(static_cast<int>(distance_ft));
-    } else {
-      float distance_mi = distance_ft / 5280.0;
-      distance_text = QString("%1mi").arg(distance_mi, 0, 'f', 1);
-    }
-  }
-  p.drawText(rti_rect.adjusted(0, 155, 0, 0), Qt::AlignTop | Qt::AlignHCenter, distance_text);
-  
-  // Draw speed recommendation if different from current
-  if (rti_active && std::abs(rti_recommended_speed - speed / (is_metric ? 3.6 : 2.237)) > 1.0) {
-    p.setFont(speed_rec_font);
-    p.setPen(QColor(255, 255, 255, 200));
-    
-    float rec_speed_display = rti_recommended_speed * (is_metric ? 3.6 : 2.237);
-    QString speed_text = QString("↓ %1").arg(static_cast<int>(rec_speed_display));
-    p.drawText(rti_rect.adjusted(0, 200, 0, 0), Qt::AlignTop | Qt::AlignHCenter, speed_text);
+    // Draw placeholder when no threat detected
+    p.setFont(threat_text_font);
+    p.setPen(QColor(150, 150, 150, 200));
+    p.drawText(rti_rect, Qt::AlignCenter, tr("RTI\nMONITORING"));
   }
 }
 
