@@ -173,9 +173,9 @@ public:
     controls_layout->setSpacing(40);  // Increased spacing for better visual separation
     
     // Add alignment widget to match controls that have settings buttons
-    // Widget width = settings button width (120px), spacing handled by layout (40px)
+    // Widget width = settings button width (120px) + 3px offset for perfect alignment
     QWidget *alignment_widget = new QWidget(this);
-    alignment_widget->setFixedSize(120, 1);  // Same width as settings button, minimal height
+    alignment_widget->setFixedSize(123, 1);  // 3px wider than settings button for perfect toggle alignment
     controls_layout->addWidget(alignment_widget);
     
     // Add toggle to the container
