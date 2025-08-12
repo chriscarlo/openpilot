@@ -170,7 +170,12 @@ public:
     controls_container = new QWidget(this);
     controls_layout = new QHBoxLayout(controls_container);
     controls_layout->setContentsMargins(0, 0, 0, 0);
-    controls_layout->setSpacing(20);
+    controls_layout->setSpacing(30);  // Increased from 20px to 30px (50% increase)
+    
+    // Add spacer to align toggle with controls that have settings buttons
+    // Spacer width = settings button width (120px) + spacing (30px) = 150px
+    QSpacerItem *alignment_spacer = new QSpacerItem(150, 1, QSizePolicy::Fixed, QSizePolicy::Minimum);
+    controls_layout->addSpacerItem(alignment_spacer);
     
     // Add toggle to the container
     toggle.setFixedSize(150, 100);

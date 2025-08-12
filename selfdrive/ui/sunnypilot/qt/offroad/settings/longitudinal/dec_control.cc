@@ -22,14 +22,15 @@ DecControl::DecControl(QWidget *parent) : AbstractControlSP(
   // Setup settings button
   setupSettingsButton();
   
-  // Create a container for toggle and settings button
+  // Create a container for settings button and toggle (swapped order)
   QWidget *controls_container = new QWidget(this);
   QHBoxLayout *controls_layout = new QHBoxLayout(controls_container);
   controls_layout->setContentsMargins(0, 0, 0, 0);
-  controls_layout->setSpacing(20);
+  controls_layout->setSpacing(30);  // Increased from 20px to 30px (50% increase)
   
-  controls_layout->addWidget(toggle);
+  // Add settings button first, then toggle (swapped positions)
   controls_layout->addWidget(settings_btn);
+  controls_layout->addWidget(toggle);
   
   hlayout->addWidget(controls_container);
   
