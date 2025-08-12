@@ -43,7 +43,7 @@ LongitudinalPanel::LongitudinalPanel(QWidget *parent) : QWidget(parent) {
     tr("Blend chill to experimental mode transition"),
     tr("Enable to blend braking desires when switching from chill to experimental in a smoother, more natural way. "
       "This allows for a gradual transition when switching from ACC to E2E longitudinal control."),
-    "../assets/offroad/icon_shell.png", nullptr, true);
+    "../assets/offroad/icon_shell.png", nullptr, true, false);
   accToE2ETransitionControl->showDescription();
   list->addItem(accToE2ETransitionControl);
 
@@ -52,7 +52,7 @@ LongitudinalPanel::LongitudinalPanel(QWidget *parent) : QWidget(parent) {
     tr("Vibe Personality Controller"),
     tr("Advanced driving personality system with separate controls for acceleration behavior (Eco/Normal/Sport) and following distance/braking (Relaxed/Standard/Aggressive). "
       "Customize your driving experience with independent acceleration and distance personalities."),
-    "../assets/offroad/icon_shell.png");
+    "../assets/offroad/icon_shell.png", nullptr, false, false);
   list->addItem(vibePersonalityControl);
 
   connect(vibePersonalityControl, &ParamControlSP::toggleFlipped, [=]() {
@@ -64,7 +64,7 @@ LongitudinalPanel::LongitudinalPanel(QWidget *parent) : QWidget(parent) {
     tr("Acceleration Personality"),
     tr("Controls acceleration behavior: Eco (efficient), Normal (balanced), Sport (responsive). "
       "Adjust how aggressively the vehicle accelerates while maintaining smooth operation."),
-    "../assets/offroad/icon_shell.png");
+    "../assets/offroad/icon_shell.png", nullptr, false, false);
   list->addItem(vibeAccelPersonalityControl);
 
   // Vibe Following Distance Personality
@@ -72,7 +72,7 @@ LongitudinalPanel::LongitudinalPanel(QWidget *parent) : QWidget(parent) {
     tr("Following Distance Personality"),
     tr("Controls following distance and braking behavior: Relaxed (longer distance, gentler braking), Standard (balanced), Aggressive (shorter distance, firmer braking). "
       "Fine-tune your comfort level in traffic situations."),
-    "../assets/offroad/icon_shell.png");
+    "../assets/offroad/icon_shell.png", nullptr, false, false);
   list->addItem(vibeFollowPersonalityControl);
 
   main_layout->addWidget(cruisePanelScreen);

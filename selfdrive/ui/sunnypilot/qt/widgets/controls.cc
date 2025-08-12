@@ -240,18 +240,13 @@ void ElidedLabelSP::paintEvent(QPaintEvent *event) {
 
 // ParamControlSP
 
-ParamControlSP::ParamControlSP(const QString &param, const QString &title, const QString &desc, const QString &icon, QWidget *parent, bool advancedControl)
-    : ToggleControlSP(title, desc, icon, false, parent, advancedControl){
+ParamControlSP::ParamControlSP(const QString &param, const QString &title, const QString &desc, const QString &icon, QWidget *parent, bool advancedControl, bool needsAlignment)
+    : ToggleControlSP(title, desc, icon, false, parent, advancedControl, needsAlignment){
 
   key = param.toStdString();
   QObject::connect(this, &ParamControlSP::toggleFlipped, this, &ParamControlSP::toggleClicked);
   
-  // The ToggleControlSP constructor already added a container with the toggle
-  // We just need to add a spacer to that existing container to match controls with settings buttons
-  // Settings button is 120px wide
-  QWidget *spacer = new QWidget();
-  spacer->setFixedWidth(120);
-  controls_layout->addWidget(spacer);
+  // Alignment is now handled in ToggleControlSP constructor based on needsAlignment parameter
 }
 
 void ParamControlSP::toggleClicked(bool state) {
