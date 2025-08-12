@@ -231,11 +231,27 @@ class SpeedRecommendationEngine:
     """Generates speed recommendations based on threat analysis."""
 
     def __init__(self):
-        # Load user-configurable thresholds
-        # These would be loaded from Params in a full implementation
-        self.ahead_distance_threshold_m = 1600  # 1 mile = ~1609m
-        self.behind_distance_threshold_m = 800   # 0.5 mile
-        self.default_speed_limit_ms = 25         # 55 mph default when unknown
+        # Load user-configurable thresholds from Params
+        from openpilot.common.params import Params
+        params = Params()
+
+        # Get forward slowdown range (when to start slowing for threats ahead)
+        forward_range = params.get("RTIForwardSlowdownRange")
+        self.ahead_distance_threshold_m = float(forward_range) if forward_range else 1207  # Default 0.75 miles
+
+        # Get resume speed distance (when to resume normal speed after passing)
+        resume_distance = params.get("RTIResumeSpeedDistance")
+        self.behind_distance_threshold_m = float(resume_distance) if resume_distance else 805  # Default 0.5 miles
+
+        # Get speed reduction settings
+        self.speed_reduction_mode = params.get("RTISpeedReductionMode")
+        self.speed_reduction_mode = self.speed_reduction_mode.decode('utf-8') if self.speed_reduction_mode else "posted"
+
+        speed_reduction = params.get("RTISpeedReduction")
+        speed_reduction_kmh = float(speed_reduction) if speed_reduction else 16  # Default 10 mph
+        self.speed_reduction_ms = speed_reduction_kmh / 3.6  # Convert km/h to m/s
+
+        self.default_speed_limit_ms = 25  # 55 mph default when unknown
 
     def calculate_recommendation(self, threats: list[ProcessedThreat],
                                current_speed_ms: float,
@@ -273,12 +289,17 @@ class SpeedRecommendationEngine:
         closest_threat = min(ahead_threats, key=lambda t: t.distance)
 
         # Determine target speed based on threat type and current conditions
-        if closest_threat.speed_limit_ms > 0:
-            # For police/speed traps, recommend speed at or below limit
-            target_speed = closest_threat.speed_limit_ms
+        if self.speed_reduction_mode == "posted":
+            # Use posted speed limit (if available) or default
+            if closest_threat.speed_limit_ms > 0:
+                target_speed = closest_threat.speed_limit_ms
+            else:
+                target_speed = self.default_speed_limit_ms
         else:
-            # Fall back to conservative default
-            target_speed = self.default_speed_limit_ms
+            # Custom mode: reduce by fixed amount
+            target_speed = current_speed_ms - self.speed_reduction_ms
+            # But never go below a reasonable minimum (e.g. 10 m/s = 22 mph)
+            target_speed = max(target_speed, 10.0)
 
         # Safety validation: recommended speed must never exceed current speed
         # This ensures we're always recommending deceleration or maintaining speed
@@ -303,6 +324,19 @@ class ThreatDetector:
         self.clusterer = ThreatClusterer()
         self.road_matcher = RoadMatcher()
         self.speed_engine = SpeedRecommendationEngine()
+
+        # Load user-configurable params
+        from openpilot.common.params import Params
+        params = Params()
+
+        # Get detection radius (for HUD display of all threats within radius)
+        detection_radius = params.get("RTIDetectionRadius")
+        self.detection_radius_m = float(detection_radius) if detection_radius else 3218  # Default 2 miles
+
+        # Get threat filter settings
+        # 0 = All, 1 = Police Only, 2 = Speed Cameras Only, 3 = Hazards Only, 4 = Custom
+        threat_filter = params.get("RTIThreatFilter")
+        self.threat_filter = int(threat_filter) if threat_filter else 0
 
         # Performance tracking
         self.last_process_time = 0
@@ -332,10 +366,13 @@ class ThreatDetector:
             threat_ahead = False
 
             if traffic_data:
-                # Step 1: Deduplicate threats
-                deduplicated_threats = self.clusterer.deduplicate_threats(traffic_data)
+                # Step 1: Apply threat filter
+                filtered_threats = self._apply_threat_filter(traffic_data)
 
-                # Step 2: Process each threat
+                # Step 2: Deduplicate threats
+                deduplicated_threats = self.clusterer.deduplicate_threats(filtered_threats)
+
+                # Step 3: Process each threat
                 for threat in deduplicated_threats:
                     processed_threat = self._process_single_threat(
                         threat, current_location, current_speed
@@ -378,6 +415,19 @@ class ThreatDetector:
             cloudlog.error(f"RTI threat processing failed: {e}")
             return self._create_safe_state(timestamp)
 
+    def _apply_threat_filter(self, threats: list[WazeAlert]) -> list[WazeAlert]:
+        """Apply user-configured threat filter."""
+        if self.threat_filter == 0:  # All threats
+            return threats
+        elif self.threat_filter == 1:  # Police only
+            return [t for t in threats if t.type in ['police', 'policeHiding']]
+        elif self.threat_filter == 2:  # Speed cameras only
+            return [t for t in threats if t.type in ['speedTrap', 'speedCamera']]
+        elif self.threat_filter == 3:  # Hazards only
+            return [t for t in threats if t.type in ['hazard', 'shoulderHazard', 'roadHazard']]
+        else:  # Custom (currently same as all)
+            return threats
+
     def _process_single_threat(self, threat: WazeAlert,
                              current_location: tuple[float, float],
                              current_speed: float) -> ProcessedThreat | None:
@@ -390,8 +440,8 @@ class ThreatDetector:
                 ego_lat, ego_lon, threat.latitude, threat.longitude
             )
 
-            # Skip threats that are too far away
-            if distance > 3000:  # 3km max
+            # Skip threats that are outside detection radius
+            if distance > self.detection_radius_m:
                 return None
 
             # Determine if on same road

@@ -11,23 +11,12 @@
 #include <QString>
 #include <vector>
 
+#include "cereal/gen/cpp/custom.capnp.h"
 #include "selfdrive/ui/qt/onroad/hud.h"
 
-// RTI threat types matching the capnp enum
-enum class RTIThreatType {
-  NONE = 0,
-  POLICE = 1,
-  SPEED_TRAP = 2,
-  ACCIDENT = 3,
-  TRAFFIC_JAM = 4,
-  CONSTRUCTION = 5,
-  OBJECT_HAZARD = 6,
-  WEATHER_HAZARD = 7,
-  ANIMAL_HAZARD = 8,
-  ROAD_CLOSED = 9,
-  ROAD_HAZARD = 10,
-  OTHER = 11,
-};
+// Use cereal threat types directly instead of duplicating the enum
+// This ensures we stay in sync with the capnp definitions
+using RTIThreatType = cereal::RtiStateSP::ThreatType;
 
 class HudRendererSP : public HudRenderer {
   Q_OBJECT
@@ -45,11 +34,13 @@ protected:
   QColor getRTIThreatColor(float distance) const;
   
   // RTI state variables
-  bool rti_enabled = false;
+  bool rti_enabled = false;  // Master RTI enabled switch
+  bool rti_hud_enabled = false;  // HUD display enabled switch
   bool rti_threat_ahead = false;
   float rti_threat_distance = 0.0;  // meters
   float rti_recommended_speed = 0.0;  // m/s
-  RTIThreatType rti_threat_type = RTIThreatType::NONE;
+  RTIThreatType rti_threat_type = RTIThreatType::POLICE;  // Default to first enum value
+  bool rti_has_threat = false;  // Whether we have a valid threat
   float rti_threat_confidence = 0.0;
   bool rti_active = false;  // RTI is actively controlling speed
   

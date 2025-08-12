@@ -49,13 +49,23 @@ class RTIDaemon:
         self.last_update_time = 0
         self.loop_count = 0
 
-        cloudlog.info("RTI Daemon initialized")
+        # API fetch control - CRITICAL: Only fetch every 30-60 seconds!
+        self.last_api_fetch_time = 0
+        # 30 second interval = 120 calls/hour max
+        self.api_fetch_interval = 30  # seconds between API calls
+        self.cached_traffic_data = None
+        self.cached_data_location = None
+        self.cached_data_timestamp = 0
+        self.max_data_age = 300  # 5 minutes max staleness
+
+        api_calls_per_hour = 3600 / self.api_fetch_interval
+        cloudlog.info(f"RTI Daemon initialized - API interval: {self.api_fetch_interval}s ({api_calls_per_hour:.0f} calls/hr max)")
 
     def _load_api_key(self) -> str | None:
         """Load Waze API key from environment-aware location."""
         key_paths = [
-            '/persist/waze_api_key.json',  # Production TICI
-            '/data/persist/waze_api_key.json',  # Development
+            '/persist/waze/waze_rapidapi.json',  # Production TICI
+            '/data/persist/waze/waze_rapidapi.json',  # Development fallback
         ]
 
         for key_path in key_paths:
@@ -117,19 +127,51 @@ class RTIDaemon:
                 self._publish_offline_state()
                 return
 
-            # Fetch traffic data if API available
+            # Check if we need to fetch new API data (rate limited!)
             traffic_data = None
             api_status = 'offline'
+            data_age = current_time - self.cached_data_timestamp
 
             if self.waze_client:
-                try:
-                    traffic_data = await self.waze_client.get_traffic_alerts(
-                        location[0], location[1]
-                    )
-                    api_status = 'connected'
-                except Exception as e:
-                    cloudlog.error(f"RTI API error: {e}")
-                    api_status = 'error'
+                # Only fetch if:
+                # 1. We haven't fetched recently (respect interval)
+                # 2. We have no cached data OR data is stale
+                should_fetch = (
+                    (current_time - self.last_api_fetch_time) >= self.api_fetch_interval and
+                    (self.cached_traffic_data is None or data_age > self.max_data_age)
+                )
+
+                if should_fetch:
+                    try:
+                        cloudlog.info(f"RTI fetching new API data (last fetch {current_time - self.last_api_fetch_time:.1f}s ago)")
+                        traffic_data = await self.waze_client.get_traffic_alerts(
+                            location[0], location[1]
+                        )
+                        # Update cache
+                        self.cached_traffic_data = traffic_data
+                        self.cached_data_location = location
+                        self.cached_data_timestamp = current_time
+                        self.last_api_fetch_time = current_time
+                        api_status = 'connected'
+                    except Exception as e:
+                        cloudlog.error(f"RTI API error: {e}")
+                        api_status = 'error'
+                        # Keep using cached data if available
+                        traffic_data = self.cached_traffic_data
+                else:
+                    # Use cached data
+                    traffic_data = self.cached_traffic_data
+                    if traffic_data is not None:  # Check for None, not truthiness (empty list is valid)
+                        if data_age < 60:
+                            # Fresh cached data - still report as connected
+                            api_status = 'connected'
+                        elif data_age < self.max_data_age:
+                            # Older cached data - we're disconnected but have data
+                            api_status = 'disconnected'
+                        else:
+                            # Data too old - effectively offline
+                            api_status = 'offline'
+                            cloudlog.warning(f"RTI data is stale ({data_age:.0f}s old)")
 
             # Process threats and determine recommendations
             rti_state = self.threat_detector.process_threats(
@@ -152,8 +194,10 @@ class RTIDaemon:
                 cache_stats = self.waze_client.cache.get_stats() if self.waze_client else {}
                 cache_info = f", Cache: {cache_stats.get('entries', 0)} items, {cache_stats.get('memory_mb', 0):.1f}MB" if cache_stats else ""
 
+                api_calls_per_hour = 3600 / self.api_fetch_interval if self.api_fetch_interval > 0 else 0
                 cloudlog.info(f"RTI processed {self.loop_count} cycles, "
-                             f"API: {api_status}, Location: {location}{cache_info}")
+                             f"API: {api_status}, Location: {location}, "
+                             f"Data age: {data_age:.0f}s, API calls/hr: {api_calls_per_hour:.0f}{cache_info}")
 
         except Exception as e:
             cloudlog.error(f"RTI cycle error: {e}")

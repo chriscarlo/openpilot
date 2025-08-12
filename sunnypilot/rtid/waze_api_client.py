@@ -80,12 +80,12 @@ class LRUCache:
         self.max_size = max_size
         self.max_memory_bytes = int(max_memory_mb * 1024 * 1024)
         self.current_memory_bytes = 0
-        
+
         # OrderedDict provides O(1) move_to_end and popitem operations
         from collections import OrderedDict
         self.cache = OrderedDict()
         self.size_map = {}  # Track size of each cached item
-        
+
         # Statistics for monitoring
         self.hits = 0
         self.misses = 0
@@ -94,27 +94,27 @@ class LRUCache:
     def _estimate_size(self, obj: Any) -> int:
         """Estimate memory size of an object in bytes."""
         import sys
-        
+
         if obj is None:
             return 0
-        
+
         # For basic types, use sys.getsizeof
         if isinstance(obj, (str, int, float, bool, bytes)):
             return sys.getsizeof(obj)
-        
+
         # For collections, recursively estimate
         if isinstance(obj, dict):
             size = sys.getsizeof(obj)
             for k, v in obj.items():
                 size += self._estimate_size(k) + self._estimate_size(v)
             return size
-        
+
         if isinstance(obj, (list, tuple)):
             size = sys.getsizeof(obj)
             for item in obj:
                 size += self._estimate_size(item)
             return size
-        
+
         # For other objects, use a conservative estimate
         try:
             # Try to get actual size
@@ -131,7 +131,7 @@ class LRUCache:
             self.cache.move_to_end(key)
             # Return a deep copy to prevent mutation of cached data
             return copy.deepcopy(self.cache[key])
-        
+
         self.misses += 1
         return None
 
@@ -139,12 +139,12 @@ class LRUCache:
         """Store value in cache, evicting items if necessary to stay within limits."""
         # Estimate size of new value
         new_size = self._estimate_size(value)
-        
+
         # If single item exceeds memory limit, don't cache it
         if new_size > self.max_memory_bytes:
             cloudlog.warning(f"RTI cache item too large ({new_size/1024:.1f}KB), skipping")
             return
-        
+
         # If key exists, update it
         if key in self.cache:
             old_size = self.size_map.get(key, 0)
@@ -155,18 +155,18 @@ class LRUCache:
             self.current_memory_bytes += new_size
         else:
             # Evict items until we have space (both count and memory)
-            while (len(self.cache) >= self.max_size or 
+            while (len(self.cache) >= self.max_size or
                    self.current_memory_bytes + new_size > self.max_memory_bytes):
-                
+
                 if not self.cache:
                     break
-                    
+
                 # Evict LRU (first item) - O(1) operation
                 evicted_key, _ = self.cache.popitem(last=False)
                 evicted_size = self.size_map.pop(evicted_key, 0)
                 self.current_memory_bytes -= evicted_size
                 self.evictions += 1
-            
+
             # Add new item (becomes most recent) - O(1) operation
             self.cache[key] = value
             self.size_map[key] = new_size
@@ -181,7 +181,7 @@ class LRUCache:
     def get_stats(self) -> dict:
         """Get cache statistics for monitoring."""
         hit_rate = self.hits / (self.hits + self.misses) if (self.hits + self.misses) > 0 else 0
-        
+
         return {
             'entries': len(self.cache),
             'memory_mb': self.current_memory_bytes / (1024 * 1024),
@@ -255,13 +255,14 @@ class WazeAPIClient:
             self.session = None
 
     def _get_cache_key(self, lat: float, lon: float) -> str:
-        """Generate cache key for location and current minute."""
+        """Generate cache key for location and 30-second window."""
         # Round to ~1km tiles for caching efficiency
         tile_lat = round(lat, 2)
         tile_lon = round(lon, 2)
-        minute = int(time.time() // 60)  # Current minute
+        # 30-second cache windows to align with fetch interval
+        cache_window = int(time.time() // 30)
 
-        return f"{tile_lat}:{tile_lon}:{minute}"
+        return f"{tile_lat}:{tile_lon}:{cache_window}"
 
     def _scrub_logs(self, data: str) -> str:
         """Remove API key from log data for security."""

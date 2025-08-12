@@ -73,8 +73,8 @@ class RTIDMonitor:
     def _load_api_key(self) -> str | None:
         """Load API key for direct testing."""
         key_paths = [
-            '/persist/waze_api_key.json',
-            '/data/persist/waze_api_key.json',
+            '/persist/waze/waze_rapidapi.json',
+            '/data/persist/waze/waze_rapidapi.json',
         ]
 
         for path in key_paths:

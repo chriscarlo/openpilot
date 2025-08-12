@@ -46,16 +46,17 @@ void HudRendererSP::updateState(const UIState &s) {
   // Update base HUD state
   HudRenderer::updateState(s);
   
-  // Update RTI enabled parameter periodically (once per second)
+  // Update RTI parameters periodically (once per second)
   if (s.sm && s.sm->frame % UI_FREQ == 0) {
-    rti_enabled = Params().getBool("RTIEnabled");
+    rti_enabled = Params().getBool("RTIEnabled");  // Master switch
+    rti_hud_enabled = Params().getBool("RTIHUDEnabled");  // HUD display switch
   }
   
   // Check for stale RTI data (1Hz message, timeout after 3 seconds)
   if (s.sm && (s.sm->frame - s.sm->rcv_frame("rtiStateSP")) > 3 * UI_FREQ) {
     rti_threat_ahead = false;
     rti_active = false;
-    rti_threat_type = RTIThreatType::NONE;
+    rti_has_threat = false;
   }
   
   // Update RTI state from messages
@@ -78,38 +79,16 @@ void HudRendererSP::updateState(const UIState &s) {
       // Use the first (closest) threat
       auto threat = threats[0];
       
-      // Map threat type enum to our local enum using direct mapping
-      auto threat_type_enum = threat.getType();
-      switch (threat_type_enum) {
-        case cereal::RtiStateSP::ThreatType::POLICE:
-        case cereal::RtiStateSP::ThreatType::POLICE_HIDING:
-          rti_threat_type = RTIThreatType::POLICE; break;
-        case cereal::RtiStateSP::ThreatType::SPEED_TRAP:
-        case cereal::RtiStateSP::ThreatType::SPEED_CAMERA:
-          rti_threat_type = RTIThreatType::SPEED_TRAP; break;
-        case cereal::RtiStateSP::ThreatType::ACCIDENT:
-          rti_threat_type = RTIThreatType::ACCIDENT; break;
-        case cereal::RtiStateSP::ThreatType::JAM:
-          rti_threat_type = RTIThreatType::TRAFFIC_JAM; break;
-        case cereal::RtiStateSP::ThreatType::CONSTRUCTION:
-          rti_threat_type = RTIThreatType::CONSTRUCTION; break;
-        case cereal::RtiStateSP::ThreatType::HAZARD:
-        case cereal::RtiStateSP::ThreatType::SHOULDER_HAZARD:
-          rti_threat_type = RTIThreatType::OBJECT_HAZARD; break;
-        case cereal::RtiStateSP::ThreatType::ROAD_CLOSED:
-          rti_threat_type = RTIThreatType::ROAD_CLOSED; break;
-        case cereal::RtiStateSP::ThreatType::ROAD_HAZARD:
-          rti_threat_type = RTIThreatType::ROAD_HAZARD; break;
-        default:
-          rti_threat_type = RTIThreatType::OTHER; break;
-      }
+      // Use threat type directly from capnp - no mapping needed
+      rti_threat_type = threat.getType();
+      rti_has_threat = true;
       
       // Validate and set confidence with bounds checking
       float raw_confidence = threat.getConfidence();
       rti_threat_confidence = (std::isfinite(raw_confidence) && raw_confidence >= 0.0 && raw_confidence <= 1.0) ?
                               raw_confidence : 0.0;
     } else {
-      rti_threat_type = RTIThreatType::NONE;
+      rti_has_threat = false;
       rti_threat_confidence = 0.0;
     }
   }
@@ -125,8 +104,8 @@ void HudRendererSP::draw(QPainter &p, const QRect &surface_rect) {
   // Draw base HUD elements
   HudRenderer::draw(p, surface_rect);
   
-  // Draw RTI threat indicator if enabled and threat present
-  if (rti_enabled && rti_threat_ahead) {
+  // Draw RTI threat indicator if both master switch and HUD display are enabled
+  if (rti_enabled && rti_hud_enabled && rti_threat_ahead && rti_has_threat) {
     drawRTIThreatIndicator(p, surface_rect);
   }
 }
@@ -200,7 +179,8 @@ void HudRendererSP::drawRTIThreatIcon(QPainter &p, const QRect &icon_rect, RTITh
   
   // Draw simple vector icons based on threat type
   switch (type) {
-    case RTIThreatType::POLICE: {
+    case cereal::RtiStateSP::ThreatType::POLICE:
+    case cereal::RtiStateSP::ThreatType::POLICE_HIDING: {
       // Draw police car silhouette using cached polygon
       p.save();
       p.translate(icon_rect.topLeft());
@@ -212,7 +192,8 @@ void HudRendererSP::drawRTIThreatIcon(QPainter &p, const QRect &icon_rect, RTITh
       break;
     }
     
-    case RTIThreatType::SPEED_TRAP: {
+    case cereal::RtiStateSP::ThreatType::SPEED_TRAP:
+    case cereal::RtiStateSP::ThreatType::SPEED_CAMERA: {
       // Draw camera icon
       p.drawRect(icon_rect.x() + 25, icon_rect.y() + 30, 50, 35);
       p.drawEllipse(QPoint(icon_rect.x() + 50, icon_rect.y() + 47), 12, 12);
@@ -221,7 +202,7 @@ void HudRendererSP::drawRTIThreatIcon(QPainter &p, const QRect &icon_rect, RTITh
       break;
     }
     
-    case RTIThreatType::ACCIDENT: {
+    case cereal::RtiStateSP::ThreatType::ACCIDENT: {
       // Draw warning triangle using cached polygon
       p.save();
       p.translate(icon_rect.topLeft());
@@ -234,7 +215,7 @@ void HudRendererSP::drawRTIThreatIcon(QPainter &p, const QRect &icon_rect, RTITh
       break;
     }
     
-    case RTIThreatType::CONSTRUCTION: {
+    case cereal::RtiStateSP::ThreatType::CONSTRUCTION: {
       // Draw traffic cone using cached polygon
       p.save();
       p.translate(icon_rect.topLeft());
@@ -247,7 +228,7 @@ void HudRendererSP::drawRTIThreatIcon(QPainter &p, const QRect &icon_rect, RTITh
       break;
     }
     
-    case RTIThreatType::TRAFFIC_JAM: {
+    case cereal::RtiStateSP::ThreatType::JAM: {
       // Draw multiple cars
       for (int i = 0; i < 3; i++) {
         int y_pos = icon_rect.y() + 20 + i * 20;
@@ -271,26 +252,25 @@ void HudRendererSP::drawRTIThreatIcon(QPainter &p, const QRect &icon_rect, RTITh
 
 QString HudRendererSP::getRTIThreatText(RTIThreatType type) const {
   switch (type) {
-    case RTIThreatType::POLICE:
+    case cereal::RtiStateSP::ThreatType::POLICE:
+    case cereal::RtiStateSP::ThreatType::POLICE_HIDING:
       return tr("POLICE");
-    case RTIThreatType::SPEED_TRAP:
+    case cereal::RtiStateSP::ThreatType::SPEED_TRAP:
+    case cereal::RtiStateSP::ThreatType::SPEED_CAMERA:
       return tr("CAMERA");
-    case RTIThreatType::ACCIDENT:
+    case cereal::RtiStateSP::ThreatType::ACCIDENT:
       return tr("ACCIDENT");
-    case RTIThreatType::TRAFFIC_JAM:
+    case cereal::RtiStateSP::ThreatType::JAM:
       return tr("TRAFFIC");
-    case RTIThreatType::CONSTRUCTION:
+    case cereal::RtiStateSP::ThreatType::CONSTRUCTION:
       return tr("WORK ZONE");
-    case RTIThreatType::OBJECT_HAZARD:
+    case cereal::RtiStateSP::ThreatType::HAZARD:
+    case cereal::RtiStateSP::ThreatType::SHOULDER_HAZARD:
       return tr("HAZARD");
-    case RTIThreatType::WEATHER_HAZARD:
-      return tr("WEATHER");
-    case RTIThreatType::ANIMAL_HAZARD:
-      return tr("ANIMAL");
-    case RTIThreatType::ROAD_CLOSED:
-      return tr("CLOSED");
-    case RTIThreatType::ROAD_HAZARD:
+    case cereal::RtiStateSP::ThreatType::ROAD_HAZARD:
       return tr("ROAD");
+    case cereal::RtiStateSP::ThreatType::ROAD_CLOSED:
+      return tr("CLOSED");
     default:
       return tr("ALERT");
   }
