@@ -129,9 +129,9 @@ void HudRendererSP::draw(QPainter &p, const QRect &surface_rect) {
 void HudRendererSP::drawRTIThreatIndicator(QPainter &p, const QRect &surface_rect) {
   // Position: bottom left corner of the display
   const int x_offset = 50;  // Left margin from edge
-  const int y_offset = surface_rect.height() - 350;  // Position from bottom (increased to avoid overlap)
-  const int widget_width = 200;
-  const int widget_height = 260;
+  const int y_offset = surface_rect.height() - 317;  // Position from bottom (adjusted for new height)
+  const int widget_width = 400;
+  const int widget_height = 267;
   
   QRect rti_rect(x_offset, y_offset, widget_width, widget_height);
   
@@ -150,7 +150,7 @@ void HudRendererSP::drawRTIThreatIndicator(QPainter &p, const QRect &surface_rec
     drawRTIThreatIcon(p, icon_rect, rti_threat_type);
     
     // Draw threat type text
-    p.setFont(threat_text_font);
+    p.setFont(InterFont(35, QFont::Normal));
     p.setPen(threat_color);
     QString threat_text = getRTIThreatText(rti_threat_type);
     p.drawText(rti_rect.adjusted(0, 110, 0, 0), Qt::AlignTop | Qt::AlignHCenter, threat_text);
@@ -186,9 +186,9 @@ void HudRendererSP::drawRTIThreatIndicator(QPainter &p, const QRect &surface_rec
     }
   } else {
     // Draw placeholder when no threat detected
-    p.setFont(threat_text_font);
+    p.setFont(InterFont(40, QFont::DemiBold));
     p.setPen(QColor(150, 150, 150, 200));
-    p.drawText(rti_rect, Qt::AlignCenter, tr("RTI\nMONITORING"));
+    p.drawText(rti_rect.adjusted(0, 20, 0, 0), Qt::AlignTop | Qt::AlignHCenter, tr("RTI"));
   }
 }
 
