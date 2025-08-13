@@ -64,6 +64,7 @@ RTIRangeControl::RTIRangeControl(const QString &title, const QString &descriptio
       color: #666666;
     }
   )");
+  minusBtn->setFocusPolicy(Qt::NoFocus);  // Prevent focus stealing during touch scrolling
   controlLayout->addWidget(minusBtn);
   
   // Value display
@@ -87,6 +88,7 @@ RTIRangeControl::RTIRangeControl(const QString &title, const QString &descriptio
   plusBtn = new QPushButton("+");
   plusBtn->setFixedSize(100, 100);
   plusBtn->setStyleSheet(minusBtn->styleSheet());
+  plusBtn->setFocusPolicy(Qt::NoFocus);  // Prevent focus stealing during touch scrolling
   controlLayout->addWidget(plusBtn);
   
   controlLayout->addStretch();
@@ -110,6 +112,7 @@ RTIRangeControl::RTIRangeControl(const QString &title, const QString &descriptio
       color: #666666;
     }
   )");
+  resetBtn->setFocusPolicy(Qt::NoFocus);  // Prevent focus stealing during touch scrolling
   controlLayout->addWidget(resetBtn);
   
   mainLayout->addLayout(controlLayout);
@@ -274,6 +277,7 @@ RTISpeedReductionControl::RTISpeedReductionControl(QWidget *parent) : QFrame(par
       color: #666666;
     }
   )");
+  speedMinusBtn->setFocusPolicy(Qt::NoFocus);  // Prevent focus stealing during touch scrolling
   speedControlLayout->addWidget(speedMinusBtn);
   
   // Value display
@@ -297,6 +301,7 @@ RTISpeedReductionControl::RTISpeedReductionControl(QWidget *parent) : QFrame(par
   speedPlusBtn = new QPushButton("+");
   speedPlusBtn->setFixedSize(100, 100);
   speedPlusBtn->setStyleSheet(speedMinusBtn->styleSheet());
+  speedPlusBtn->setFocusPolicy(Qt::NoFocus);  // Prevent focus stealing during touch scrolling
   speedControlLayout->addWidget(speedPlusBtn);
   
   speedControlLayout->addStretch();
@@ -320,6 +325,7 @@ RTISpeedReductionControl::RTISpeedReductionControl(QWidget *parent) : QFrame(par
       color: #666666;
     }
   )");
+  speedResetBtn->setFocusPolicy(Qt::NoFocus);  // Prevent focus stealing during touch scrolling
   speedControlLayout->addWidget(speedResetBtn);
   
   customLayout->addLayout(speedControlLayout);
