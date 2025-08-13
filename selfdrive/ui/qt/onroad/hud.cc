@@ -59,6 +59,12 @@ void HudRenderer::updateState(const UIState &s) {
     return;
   }
 
+  // Only access messages if they're valid to prevent crash during startup
+  if (!sm.valid("controlsState") || !sm.valid("carState") || 
+      !sm.valid("longitudinalPlanSP") || !sm.valid("liveMapDataSP")) {
+    return;
+  }
+  
   const auto &controls_state = sm["controlsState"].getControlsState();
   const auto &car_state = sm["carState"].getCarState();
   const auto lp_sp = sm["longitudinalPlanSP"].getLongitudinalPlanSP();

@@ -52,51 +52,66 @@ void HudRendererSP::updateState(const UIState &s) {
     rti_hud_enabled = Params().getBool("RTIHUDEnabled");  // HUD display switch
   }
   
-  // Check for stale RTI data (1Hz message, timeout after 3 seconds)
-  if (s.sm && (s.sm->frame - s.sm->rcv_frame("rtiStateSP")) > 3 * UI_FREQ) {
-    rti_threat_ahead = false;
-    rti_active = false;
-    rti_has_threat = false;
-  }
-  
-  // Update RTI state from messages
-  if (s.sm && s.sm->updated("rtiStateSP")) {
-    const auto rti_state = (*s.sm)["rtiStateSP"].getRtiStateSP();
-    
-    rti_threat_ahead = rti_state.getThreatAhead();
-    
-    // Validate and set threat distance with bounds checking
-    float raw_distance = rti_state.getThreatDistanceM();
-    rti_threat_distance = (std::isfinite(raw_distance) && raw_distance >= 0) ? raw_distance : 0.0;
-    
-    // Validate and set recommended speed with bounds checking
-    float raw_speed = rti_state.getRecommendedSpeed();
-    rti_recommended_speed = (std::isfinite(raw_speed) && raw_speed >= 0) ? raw_speed : 0.0;
-    
-    // Get threat details if available
-    auto threats = rti_state.getThreats();
-    if (threats.size() > 0) {
-      // Use the first (closest) threat
-      auto threat = threats[0];
+  // Safe RTI message access with multiple layers of protection
+  if (s.sm) {
+    try {
+      // Check for stale RTI data (1Hz message, timeout after 3 seconds)
+      // Only check if the message is valid AND has been received at least once
+      if (s.sm->valid("rtiStateSP")) {
+        // Additional safety: check if rcv_frame > 0 to ensure message was actually received
+        uint64_t rti_rcv_frame = s.sm->rcv_frame("rtiStateSP");
+        if (rti_rcv_frame > 0 && (s.sm->frame - rti_rcv_frame) > 3 * UI_FREQ) {
+          // Mark as stale/inactive but don't reset all data immediately
+          rti_active = false;
+        }
+      }
       
-      // Use threat type directly from capnp - no mapping needed
-      rti_threat_type = threat.getType();
-      rti_has_threat = true;
+      // Update RTI state from messages - only if message is valid and updated
+      if (s.sm->valid("rtiStateSP") && s.sm->updated("rtiStateSP")) {
+        const auto rti_state = (*s.sm)["rtiStateSP"].getRtiStateSP();
+        
+        rti_threat_ahead = rti_state.getThreatAhead();
+        
+        // Validate and set threat distance with bounds checking
+        float raw_distance = rti_state.getThreatDistanceM();
+        rti_threat_distance = (std::isfinite(raw_distance) && raw_distance >= 0) ? raw_distance : 0.0;
+        
+        // Validate and set recommended speed with bounds checking
+        float raw_speed = rti_state.getRecommendedSpeed();
+        rti_recommended_speed = (std::isfinite(raw_speed) && raw_speed >= 0) ? raw_speed : 0.0;
+        
+        // Get threat details if available
+        auto threats = rti_state.getThreats();
+        if (threats.size() > 0) {
+          // Use the first (closest) threat
+          auto threat = threats[0];
+          
+          // Use threat type directly from capnp - no mapping needed
+          rti_threat_type = threat.getType();
+          rti_has_threat = true;
+          
+          // Validate and set confidence with bounds checking
+          float raw_confidence = threat.getConfidence();
+          rti_threat_confidence = (std::isfinite(raw_confidence) && raw_confidence >= 0.0 && raw_confidence <= 1.0) ?
+                                  raw_confidence : 0.0;
+        } else {
+          rti_has_threat = false;
+          rti_threat_confidence = 0.0;
+        }
+      }
       
-      // Validate and set confidence with bounds checking
-      float raw_confidence = threat.getConfidence();
-      rti_threat_confidence = (std::isfinite(raw_confidence) && raw_confidence >= 0.0 && raw_confidence <= 1.0) ?
-                              raw_confidence : 0.0;
-    } else {
+      // Check if RTI is actively controlling speed (from longitudinal planner)
+      if (s.sm->valid("longitudinalPlanSP") && s.sm->updated("longitudinalPlanSP")) {
+        // RTI is active if threat is ahead and we have a valid speed recommendation
+        rti_active = rti_threat_ahead && rti_recommended_speed > 0;
+      }
+      
+    } catch (const std::exception& e) {
+      // Handle any exceptions from message access safely - reset to safe state
       rti_has_threat = false;
-      rti_threat_confidence = 0.0;
+      rti_threat_ahead = false;
+      rti_active = false;
     }
-  }
-  
-  // Check if RTI is actively controlling speed (from longitudinal planner)
-  if (s.sm && s.sm->updated("longitudinalPlanSP")) {
-    // RTI is active if the controller is engaged and providing speed recommendations
-    rti_active = rti_threat_ahead && rti_recommended_speed > 0;
   }
 }
 
@@ -104,7 +119,7 @@ void HudRendererSP::draw(QPainter &p, const QRect &surface_rect) {
   // Draw base HUD elements
   HudRenderer::draw(p, surface_rect);
   
-  // Always draw RTI widget frame when HUD display is enabled
+  // Draw RTI widget when enabled
   // Shows placeholder when no threat, actual threat info when detected
   if (rti_enabled && rti_hud_enabled) {
     drawRTIThreatIndicator(p, surface_rect);

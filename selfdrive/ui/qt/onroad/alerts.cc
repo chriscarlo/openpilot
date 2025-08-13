@@ -19,6 +19,11 @@ void OnroadAlerts::clear() {
 }
 
 OnroadAlerts::Alert OnroadAlerts::getAlert(const SubMaster &sm, uint64_t started_frame) {
+  // Only access selfdriveState if it's valid to prevent crash during startup
+  if (!sm.valid("selfdriveState")) {
+    return {};
+  }
+  
   const cereal::SelfdriveState::Reader &ss = sm["selfdriveState"].getSelfdriveState();
   const uint64_t selfdrive_frame = sm.rcv_frame("selfdriveState");
 
