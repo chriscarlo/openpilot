@@ -33,6 +33,7 @@ class RTIDaemon:
         self.sm = messaging.SubMaster([
             'gpsLocationExternal',
             'gpsLocation',
+            'liveLocationKalman',
             'carState'
         ], ignore_avg_freq=True)
         self.pm = messaging.PubMaster(['rtiStateSP'])
@@ -103,6 +104,12 @@ class RTIDaemon:
             if gps_loc.hasFix:
                 return (gps_loc.latitude, gps_loc.longitude)
 
+        # Fall back to Kalman filter location
+        if self.sm.updated['liveLocationKalman']:
+            kalman_loc = self.sm['liveLocationKalman']
+            if hasattr(kalman_loc, 'status') and kalman_loc.status == 'valid':
+                return (kalman_loc.lat, kalman_loc.lon)
+
         return None
 
     def _get_current_speed(self) -> float:
@@ -162,12 +169,9 @@ class RTIDaemon:
                     # Use cached data
                     traffic_data = self.cached_traffic_data
                     if traffic_data is not None:  # Check for None, not truthiness (empty list is valid)
-                        if data_age < 60:
-                            # Fresh cached data - still report as connected
+                        if data_age < self.max_data_age:
+                            # Cached data is still usable - keep reporting as connected
                             api_status = 'connected'
-                        elif data_age < self.max_data_age:
-                            # Older cached data - we're disconnected but have data
-                            api_status = 'disconnected'
                         else:
                             # Data too old - effectively offline
                             api_status = 'offline'
@@ -186,7 +190,11 @@ class RTIDaemon:
             rti_state.source = 'waze'
 
             # Publish RTI state
-            self._publish_rti_state(rti_state)
+            try:
+                self._publish_rti_state(rti_state)
+            except Exception as msg_e:
+                cloudlog.error(f"RTI failed to publish state: {msg_e}")
+                raise  # Re-raise to trigger offline state handling
 
             self.loop_count += 1
             if self.loop_count % 60 == 0:  # Log status every minute
@@ -201,7 +209,10 @@ class RTIDaemon:
 
         except Exception as e:
             cloudlog.error(f"RTI cycle error: {e}")
-            self._publish_offline_state()
+            try:
+                self._publish_offline_state()
+            except Exception as msg_e:
+                cloudlog.error(f"RTI failed to publish offline state: {msg_e}")
 
     def _publish_rti_state(self, rti_state):
         """Publish RTI state message."""
@@ -263,7 +274,10 @@ class RTIDaemon:
 
                 if not self.enabled:
                     # Publish disabled state and sleep
-                    self._publish_offline_state()
+                    try:
+                        self._publish_offline_state()
+                    except Exception as msg_e:
+                        cloudlog.error(f"RTI failed to publish disabled state: {msg_e}")
                     await asyncio.sleep(1.0)
                     continue
 

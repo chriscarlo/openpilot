@@ -127,11 +127,11 @@ void HudRendererSP::draw(QPainter &p, const QRect &surface_rect) {
 }
 
 void HudRendererSP::drawRTIThreatIndicator(QPainter &p, const QRect &surface_rect) {
-  // Position: bottom left corner of the display
-  const int x_offset = 50;  // Left margin from edge
-  const int y_offset = surface_rect.height() - 317;  // Position from bottom (adjusted for new height)
-  const int widget_width = 400;
-  const int widget_height = 267;
+  // Size increased by 20% and left-aligned with Max Speed widget
+  const int x_offset = 60;  // Left-align with Max Speed widget
+  const int y_offset = surface_rect.height() - 381;  // Position from bottom (adjusted for new height)
+  const int widget_width = 480;  // 400 * 1.2 = 480
+  const int widget_height = 320;  // 267 * 1.2 = 320
   
   QRect rti_rect(x_offset, y_offset, widget_width, widget_height);
   
@@ -139,21 +139,28 @@ void HudRendererSP::drawRTIThreatIndicator(QPainter &p, const QRect &surface_rec
   bool has_active_threat = rti_threat_ahead && rti_has_threat;
   QColor threat_color = has_active_threat ? getRTIThreatColor(rti_threat_distance) : QColor(100, 100, 100, 200);
   
-  // Always draw background box with semi-transparent fill
-  p.setPen(QPen(threat_color, 3));
-  p.setBrush(QColor(0, 0, 0, 150));
-  p.drawRoundedRect(rti_rect, 20, 20);
+  // Match Max Speed widget styling - draw border then background
+  p.setPen(QPen(QColor(255, 255, 255, 75), 6));
+  p.setBrush(QColor(0, 0, 0, 166));
+  p.drawRoundedRect(rti_rect, 32, 32);
+  
+  // Draw threat-colored inner border if active
+  if (has_active_threat) {
+    p.setPen(QPen(threat_color, 3));
+    p.setBrush(Qt::NoBrush);
+    p.drawRoundedRect(rti_rect.adjusted(3, 3, -3, -3), 29, 29);
+  }
   
   if (has_active_threat) {
-    // Draw active threat information
-    QRect icon_rect(rti_rect.x() + 40, rti_rect.y() + 20, 100, 80);
+    // Draw active threat information - proportionally scaled
+    QRect icon_rect(rti_rect.x() + 48, rti_rect.y() + 24, 120, 96);
     drawRTIThreatIcon(p, icon_rect, rti_threat_type);
     
-    // Draw threat type text
-    p.setFont(InterFont(35, QFont::Normal));
+    // Draw threat type text - increased font size
+    p.setFont(InterFont(42, QFont::Normal));
     p.setPen(threat_color);
     QString threat_text = getRTIThreatText(rti_threat_type);
-    p.drawText(rti_rect.adjusted(0, 110, 0, 0), Qt::AlignTop | Qt::AlignHCenter, threat_text);
+    p.drawText(rti_rect.adjusted(0, 132, 0, 0), Qt::AlignTop | Qt::AlignHCenter, threat_text);
     
     // Draw distance
     p.setFont(distance_font);
@@ -173,7 +180,7 @@ void HudRendererSP::drawRTIThreatIndicator(QPainter &p, const QRect &surface_rec
         distance_text = QString("%1mi").arg(distance_mi, 0, 'f', 1);
       }
     }
-    p.drawText(rti_rect.adjusted(0, 155, 0, 0), Qt::AlignTop | Qt::AlignHCenter, distance_text);
+    p.drawText(rti_rect.adjusted(0, 186, 0, 0), Qt::AlignTop | Qt::AlignHCenter, distance_text);
     
     // Draw speed recommendation if different from current
     if (rti_active && std::abs(rti_recommended_speed - speed / (is_metric ? 3.6 : 2.237)) > 1.0) {
@@ -182,13 +189,13 @@ void HudRendererSP::drawRTIThreatIndicator(QPainter &p, const QRect &surface_rec
       
       float rec_speed_display = rti_recommended_speed * (is_metric ? 3.6 : 2.237);
       QString speed_text = QString("↓ %1").arg(static_cast<int>(rec_speed_display));
-      p.drawText(rti_rect.adjusted(0, 200, 0, 0), Qt::AlignTop | Qt::AlignHCenter, speed_text);
+      p.drawText(rti_rect.adjusted(0, 240, 0, 0), Qt::AlignTop | Qt::AlignHCenter, speed_text);
     }
   } else {
-    // Draw placeholder when no threat detected
-    p.setFont(InterFont(40, QFont::DemiBold));
+    // Draw placeholder when no threat detected - proportionally scaled
+    p.setFont(InterFont(48, QFont::DemiBold));
     p.setPen(QColor(150, 150, 150, 200));
-    p.drawText(rti_rect.adjusted(0, 20, 0, 0), Qt::AlignTop | Qt::AlignHCenter, tr("RTI"));
+    p.drawText(rti_rect.adjusted(0, 24, 0, 0), Qt::AlignTop | Qt::AlignHCenter, tr("RTI"));
   }
 }
 

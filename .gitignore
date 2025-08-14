@@ -121,3 +121,9 @@ third_party/libjson11.a
 
 # Claude Code settings
 .claude/
+
+# Development artifacts
+.ssh/
+tmux
+*.local.md
+GIT_SSH_PERSISTENCE_FIX.md

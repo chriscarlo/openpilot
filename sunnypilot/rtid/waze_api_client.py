@@ -211,6 +211,9 @@ class WazeAPIClient:
         self.consecutive_failures = 0
         self.last_success_time = 0
 
+        # Cache TTL in seconds (default 30 seconds for production)
+        self.CACHE_TTL_SECONDS = 30
+
     @classmethod
     def from_persistent_key(cls) -> 'WazeAPIClient':
         """
@@ -255,12 +258,12 @@ class WazeAPIClient:
             self.session = None
 
     def _get_cache_key(self, lat: float, lon: float) -> str:
-        """Generate cache key for location and 30-second window."""
+        """Generate cache key for location and configurable time window."""
         # Round to ~1km tiles for caching efficiency
         tile_lat = round(lat, 2)
         tile_lon = round(lon, 2)
-        # 30-second cache windows to align with fetch interval
-        cache_window = int(time.time() // 30)
+        # Configurable cache windows based on TTL setting
+        cache_window = int(time.time() // self.CACHE_TTL_SECONDS)
 
         return f"{tile_lat}:{tile_lon}:{cache_window}"
 

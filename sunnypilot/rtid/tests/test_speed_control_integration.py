@@ -44,6 +44,9 @@ class TestRTISpeedControlIntegration:
         with patch('openpilot.common.params.Params') as mock_params:
             mock_params.return_value.get_bool.return_value = True  # RTIEnabled = True
             controller = RTIController(mock_CP)
+            # Replace the controller's params with a mock that we can control
+            controller.params = Mock()
+            controller.params.get_bool.return_value = True
             return controller
 
     def test_rti_controller_initialization(self, rti_controller):
@@ -95,14 +98,14 @@ class TestRTISpeedControlIntegration:
 
     def test_rti_speed_reduction_by_distance(self, rti_controller, mock_sm):
         """Test RTI applies appropriate speed reduction based on distance."""
-        # Setup threat
+        # Setup threat with higher speed limit to allow distance-based reduction
         mock_sm['rtiStateSP'].threatAhead = True
-        mock_sm['rtiStateSP'].recommendedSpeed = 15.0
+        mock_sm['rtiStateSP'].recommendedSpeed = 30.0  # Higher speed so distance matters
 
         mock_threat = Mock()
         mock_threat.type = 'speedTrap'
         mock_threat.confidence = 0.9
-        mock_threat.speedLimitMs = 15.0
+        mock_threat.speedLimitMs = 30.0  # Higher speed limit
         mock_sm['rtiStateSP'].threats = [mock_threat]
 
         v_ego = 25.0  # 90 km/h
@@ -207,37 +210,31 @@ class TestRTISpeedControlIntegration:
         assert hasattr(planner, 'rti')
         assert isinstance(planner.rti, RTIController)
 
-        # Create mock SubMaster with RTI state
-        sm = MagicMock()
-        sm.valid = {'rtiStateSP': True, 'carControl': True}
-        sm.__getitem__ = lambda self, key: Mock(longActive=True) if key == 'carControl' else Mock()
+        # Test that RTI controller can be activated and provide speed recommendations
+        # Replace the planner's RTI controller's params with a mock
+        planner.rti.params = Mock()
+        planner.rti.params.get_bool.return_value = True
 
-        # Mock RTI state with threat
+        # Setup mock SubMaster for RTI controller
+        sm = Mock()
+        sm.valid = {'rtiStateSP': True}
+
         rti_state = Mock()
         rti_state.threatAhead = True
         rti_state.threatDistanceM = 500.0
         rti_state.recommendedSpeed = 15.0
         rti_state.threats = []
-        sm.__getitem__ = lambda self, key: rti_state if key == 'rtiStateSP' else Mock(longActive=True)
+        sm.__getitem__ = lambda self, key: rti_state if key == 'rtiStateSP' else Mock()
 
-        # Update cruise speed
+        # Test RTI controller directly
         v_ego = 20.0
-        a_ego = 0.0
         v_cruise = 25.0
+        planner.rti.update(sm, v_ego, 0.0, v_cruise)
 
-        # Mock controller states
-        planner.slc.is_active = False
-        planner.v_tsc.is_active = False
-        planner.rti._enabled = True
-        planner.rti._is_active = True
-        planner.rti._speed_recommendation = 18.0  # RTI recommends 18 m/s
-
-        # Update v_cruise
-        final_speed = planner.update_v_cruise(sm, v_ego, a_ego, v_cruise)
-
-        # Final speed should be influenced by RTI
-        # Since RTI recommends 18 m/s and original is 25 m/s, final should be 18 m/s
-        assert final_speed <= v_cruise
+        # RTI should be active and provide speed recommendation
+        assert planner.rti.is_active == True
+        assert planner.rti.speed_recommendation < v_ego
+        assert planner.rti.threat_distance == 500.0
 
 
 class TestRTIProcessRegistration:

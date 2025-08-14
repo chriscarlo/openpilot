@@ -236,7 +236,9 @@ class TestRTISystemIntegration:
     async def test_disabled_rti_publishes_offline_state(self, mock_messaging, mock_params):
         """Test that disabled RTI still publishes offline state."""
 
-        with patch('sunnypilot.rtid.rtid.WazeAPIClient'), \
+        mock_waze_client = AsyncMock()
+        mock_waze_client.close = AsyncMock()
+        with patch('sunnypilot.rtid.rtid.WazeAPIClient', return_value=mock_waze_client), \
              patch('sunnypilot.rtid.rtid.ThreatDetector'):
             daemon = RTIDaemon()
 
@@ -299,8 +301,8 @@ class TestRTISystemIntegration:
                 performance_timer.stop()
 
                 # Should complete within reasonable time even with many threats
-                from conftest import assert_performance_budget
-                assert_performance_budget(performance_timer.elapsed_ms, 100.0)  # 100ms budget for full cycle
+                assert performance_timer.elapsed_ms <= 100.0, \
+                    f"Performance budget exceeded: {performance_timer.elapsed_ms:.1f}ms > 100.0ms"
 
                 daemon.pm.send.assert_called_once()
 
@@ -417,7 +419,9 @@ class TestRTISystemSafetyIntegration:
     async def test_system_recovery_from_exceptions(self, mock_messaging, mock_params):
         """Test that system recovers gracefully from various exception scenarios."""
 
-        with patch('sunnypilot.rtid.rtid.WazeAPIClient'), \
+        mock_waze_client = AsyncMock()
+        mock_waze_client.close = AsyncMock()
+        with patch('sunnypilot.rtid.rtid.WazeAPIClient', return_value=mock_waze_client), \
              patch('sunnypilot.rtid.rtid.ThreatDetector'):
             daemon = RTIDaemon()
             daemon._check_enabled = MagicMock(return_value=True)

@@ -54,7 +54,7 @@ class TestRTIDaemon:
              patch('sunnypilot.rtid.rtid.ThreatDetector'):
 
             # Mock /persist path exists, /data/persist doesn't
-            mock_exists.side_effect = lambda path: path == '/persist/waze_api_key.json'
+            mock_exists.side_effect = lambda path: path == '/persist/waze/waze_rapidapi.json'
 
             daemon = RTIDaemon()
 
@@ -72,7 +72,7 @@ class TestRTIDaemon:
              patch('sunnypilot.rtid.rtid.ThreatDetector'):
 
             # Mock /data/persist path exists, /persist doesn't
-            mock_exists.side_effect = lambda path: path == '/data/persist/waze_api_key.json'
+            mock_exists.side_effect = lambda path: path == '/data/persist/waze/waze_rapidapi.json'
 
             daemon = RTIDaemon()
 
@@ -139,7 +139,7 @@ class TestRTIDaemon:
         mock_kalman.lon = -122.0841
         mock_kalman.status = 'valid'
 
-        daemon.sm.updated = {'gpsLocationExternal': False, 'liveLocationKalman': True}
+        daemon.sm.updated = {'gpsLocationExternal': False, 'gpsLocation': False, 'liveLocationKalman': True}
         daemon.sm.__getitem__.side_effect = lambda key: mock_kalman if key == 'liveLocationKalman' else None
 
         location = daemon._get_current_location()
@@ -148,7 +148,7 @@ class TestRTIDaemon:
 
     def test_get_current_location_no_valid_data(self, daemon):
         """Test location retrieval with no valid GPS data."""
-        daemon.sm.updated = {'gpsLocationExternal': False, 'liveLocationKalman': False}
+        daemon.sm.updated = {'gpsLocationExternal': False, 'gpsLocation': False, 'liveLocationKalman': False}
 
         location = daemon._get_current_location()
 
@@ -162,7 +162,7 @@ class TestRTIDaemon:
         mock_gps.longitude = -122.0841
         mock_gps.accuracy = 50.0  # Poor accuracy
 
-        daemon.sm.updated = {'gpsLocationExternal': True, 'liveLocationKalman': False}
+        daemon.sm.updated = {'gpsLocationExternal': True, 'gpsLocation': False, 'liveLocationKalman': False}
         daemon.sm.__getitem__.side_effect = lambda key: mock_gps if key == 'gpsLocationExternal' else None
 
         location = daemon._get_current_location()
@@ -331,14 +331,16 @@ class TestRTIDaemon:
         )
         daemon.threat_detector.process_threats = MagicMock(return_value=mock_state)
 
-        await daemon._process_cycle()
+        # Mock time.time() to return predictable timestamp
+        with patch('sunnypilot.rtid.rtid.time.time', return_value=1234.567890):
+            await daemon._process_cycle()
 
         # Should process without API data
         daemon.threat_detector.process_threats.assert_called_once_with(
             traffic_data=None,
             current_location=(37.4221, -122.0841),
             current_speed=25.0,
-            timestamp=pytest.approx(1234567890, abs=1000000000)  # Allow timestamp variance
+            timestamp=1234567890000  # 1234.567890 * 1e9 = 1234567890000 (nanoseconds)
         )
 
         # Published state should be offline
@@ -371,6 +373,10 @@ class TestRTIDaemonIntegration:
              patch('sunnypilot.rtid.rtid.ThreatDetector'):
             daemon = RTIDaemon()
 
+            # Mock waze_client.close() to be awaitable
+            if daemon.waze_client:
+                daemon.waze_client.close = AsyncMock()
+
             # Mock RTI disabled
             daemon._check_enabled = MagicMock(return_value=False)
 
@@ -398,6 +404,10 @@ class TestRTIDaemonIntegration:
         with patch('sunnypilot.rtid.rtid.WazeAPIClient'), \
              patch('sunnypilot.rtid.rtid.ThreatDetector'):
             daemon = RTIDaemon()
+
+            # Mock waze_client.close() to be awaitable
+            if daemon.waze_client:
+                daemon.waze_client.close = AsyncMock()
 
             # Mock RTI enabled
             daemon._check_enabled = MagicMock(return_value=True)
@@ -456,6 +466,10 @@ class TestRTIDaemonIntegration:
              patch('sunnypilot.rtid.rtid.ThreatDetector'), \
              patch('sunnypilot.rtid.rtid.cloudlog') as mock_log:
             daemon = RTIDaemon()
+
+            # Mock waze_client.close() to be awaitable
+            if daemon.waze_client:
+                daemon.waze_client.close = AsyncMock()
 
             # Mock slow processing cycle
             async def slow_process():
@@ -543,11 +557,12 @@ class TestRTIDaemonHelpers:
             daemon = RTIDaemon()
 
             # Initialization should log
-            mock_log.info.assert_called_with("RTI Daemon initialized")
+            mock_log.info.assert_called_with("RTI Daemon initialized - API interval: 30s (120 calls/hr max)")
 
-            # Test warning for missing API key
-            daemon.api_key = None
-            daemon._load_api_key()
+            # Test warning for missing API key by creating a new daemon with no key files
+            with patch("os.path.exists", return_value=False):
+                daemon2 = RTIDaemon()
 
-            # Should have logged offline mode warning
-            assert any('offline mode' in str(call) for call in mock_log.warning.call_args_list)
+            # Should have logged offline mode warning during daemon2 initialization
+            warning_calls = [str(call) for call in mock_log.warning.call_args_list]
+            assert any('offline mode' in call for call in warning_calls), f"Expected 'offline mode' in warnings: {warning_calls}"

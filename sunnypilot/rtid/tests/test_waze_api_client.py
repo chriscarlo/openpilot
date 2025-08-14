@@ -143,24 +143,33 @@ class TestWazeAPIClient:
 
     @pytest.mark.asyncio
     async def test_api_caching(self, api_client, mock_waze_api_response):
-        # Test the caching logic directly by putting data in cache
+        # Test cache behavior by making two requests and ensuring the second uses cache
         fixed_time = 1640000000
+
+        # Mock the HTTP session to control responses
+        mock_session = AsyncMock()
+        mock_response = AsyncMock()
+        mock_response.status = 200
+        mock_response.json = AsyncMock(return_value=mock_waze_api_response)
+        mock_session.get.return_value.__aenter__.return_value = mock_response
+
         with patch('time.time', return_value=fixed_time):
-            # Generate the cache key manually
-            cache_key = api_client._get_cache_key(37.4221, -122.0841)
+            # Set up the session
+            api_client.session = mock_session
 
-            # Put mock data in cache
-            api_client.cache.put(cache_key, mock_waze_api_response)
+            # First request - should hit the API
+            alerts1 = await api_client.get_traffic_alerts(37.4221, -122.0841)
+            assert len(alerts1) > 0
+            assert mock_session.get.call_count == 1
 
-            # Mock _make_request to verify it's not called when cache hits
-            with patch.object(api_client, '_make_request', new_callable=AsyncMock) as mock_request:
-                alerts = await api_client.get_traffic_alerts(37.4221, -122.0841)
+            # Second request with same parameters - should use cache
+            alerts2 = await api_client.get_traffic_alerts(37.4221, -122.0841)
+            assert len(alerts2) > 0
+            # Should still be only 1 call (cached)
+            assert mock_session.get.call_count == 1
 
-                # Should not call _make_request due to cache hit
-                mock_request.assert_not_called()
-
-                # Should return parsed alerts from cached data
-                assert len(alerts) > 0
+            # Results should be the same
+            assert alerts1 == alerts2
 
     @pytest.mark.asyncio
     async def test_api_error_handling(self, api_client):
@@ -266,7 +275,7 @@ class TestWazeAPIIntegration:
                 for alert in alerts:
                     # Validate alert structure
                     assert alert.id
-                    assert alert.type in ['police', 'speedTrap', 'accident', 'hazard', 'jam']
+                    assert alert.type in ['police', 'policeHiding', 'speedTrap', 'speedCamera', 'accident', 'hazard', 'roadHazard', 'shoulderHazard', 'jam']
                     assert -90 <= alert.latitude <= 90
                     assert -180 <= alert.longitude <= 180
                     assert 0 <= alert.confidence <= 1

@@ -286,6 +286,68 @@ struct LiveMapDataSP @0xf416ec09499d9d19 {
   speedLimitAhead @3 :Float32;
   speedLimitAheadDistance @4 :Float32;
   roadName @5 :Text;
+  
+  # Road geometry and lane information for RTI integration
+  roadGeometryValid @6 :Bool;
+  currentRoadSegment @7 :RoadSegment;
+  nearbyRoadSegments @8 :List(RoadSegment);  # Road segments within ~500m
+  
+  struct RoadSegment {
+    wayId @0 :UInt64;  # OSM way ID for identification
+    roadClass @1 :RoadClass;  # Highway type classification
+    centerline @2 :List(Coordinate);  # Road centerline geometry
+    lanes @3 :List(Lane);  # Lane information
+    barriers @4 :List(Barrier);  # Barriers, medians, etc.
+    levelSeparation @5 :Int8;  # Bridge/underpass level (-1=under, 0=ground, 1=bridge)
+    maxSpeed @6 :Float32;  # Speed limit in m/s
+    roadDirection @7 :Float32;  # Road bearing at current position in degrees
+    
+    struct Coordinate {
+      latitude @0 :Float64;
+      longitude @1 :Float64;
+      distanceFromStart @2 :Float32;  # Distance along road from segment start
+    }
+    
+    struct Lane {
+      laneIndex @0 :UInt8;  # Lane number (0 = rightmost)
+      width @1 :Float32;  # Lane width in meters
+      type @2 :LaneType;
+      centerline @3 :List(Coordinate);  # Lane centerline if available
+      
+      enum LaneType {
+        driving @0;
+        bus @1;
+        bicycle @2;
+        parking @3;
+        shoulder @4;
+        median @5;
+      }
+    }
+    
+    struct Barrier {
+      type @0 :BarrierType;
+      coordinates @1 :List(Coordinate);
+      
+      enum BarrierType {
+        median @0;
+        guardrail @1;
+        wall @2;
+        fence @3;
+        curb @4;
+      }
+    }
+    
+    enum RoadClass {
+      motorway @0;      # Highway/freeway
+      trunk @1;         # Major arterial
+      primary @2;       # Primary road
+      secondary @3;     # Secondary road
+      tertiary @4;      # Local major road
+      residential @5;   # Local residential
+      service @6;       # Service road
+      unclassified @7;  # Unclassified road
+    }
+  }
 }
 
 struct RtiStateSP @0xa1680744031fdb2d {

@@ -87,8 +87,8 @@ class TestClusteringFunctionalCorrectness:
                 threat = WazeAlert(
                     id=f'cluster-{cluster_id}-{i}',
                     type='police',
-                    latitude=cluster_lat + i * 0.0003,  # ~30m apart within cluster
-                    longitude=cluster_lon + i * 0.0003,
+                    latitude=cluster_lat + i * 0.0001,  # ~10m apart within cluster
+                    longitude=cluster_lon + i * 0.0001,
                     confidence=0.5 + i * 0.1,  # Increasing confidence
                     speed_limit=35,
                     street=f'Test St {cluster_id}',

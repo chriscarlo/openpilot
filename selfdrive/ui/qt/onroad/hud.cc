@@ -59,43 +59,53 @@ void HudRenderer::updateState(const UIState &s) {
     return;
   }
 
-  // Only access messages if they're valid to prevent crash during startup
-  if (!sm.valid("controlsState") || !sm.valid("carState") || 
-      !sm.valid("longitudinalPlanSP") || !sm.valid("liveMapDataSP")) {
+  // Only access core messages if they're valid to prevent crash during startup
+  if (!sm.valid("controlsState") || !sm.valid("carState")) {
     return;
   }
   
   const auto &controls_state = sm["controlsState"].getControlsState();
   const auto &car_state = sm["carState"].getCarState();
-  const auto lp_sp = sm["longitudinalPlanSP"].getLongitudinalPlanSP();
-  const auto slc = lp_sp.getSlc();
-  const auto live_map_data = sm["liveMapDataSP"].getLiveMapDataSP();
 
-  // SLC state variables
-  slc_speed_limit = slc.getSpeedLimit() * (is_metric ? MS_TO_KPH : MS_TO_MPH);
-  slc_speed_offset = slc.getSpeedLimitOffset() * (is_metric ? MS_TO_KPH : MS_TO_MPH);
-  slc_state = slc.getState();
-  show_slc = slc_speed_limit > 0.0;
-
-  // Distance to speed limit change
-  dist_to_speed_limit = slc.getDistToSpeedLimit();
-
-  // Live map data for upcoming speed limits
-  speed_limit_ahead_valid = live_map_data.getSpeedLimitAheadValid();
-  if (speed_limit_ahead_valid) {
-    speed_limit_ahead = live_map_data.getSpeedLimitAhead() * (is_metric ? MS_TO_KPH : MS_TO_MPH);
-    speed_limit_ahead_distance = live_map_data.getSpeedLimitAheadDistance();
+  // SLC state variables - only if longitudinalPlanSP is valid
+  if (sm.valid("longitudinalPlanSP")) {
+    const auto lp_sp = sm["longitudinalPlanSP"].getLongitudinalPlanSP();
+    const auto slc = lp_sp.getSlc();
+    
+    slc_speed_limit = slc.getSpeedLimit() * (is_metric ? MS_TO_KPH : MS_TO_MPH);
+    slc_speed_offset = slc.getSpeedLimitOffset() * (is_metric ? MS_TO_KPH : MS_TO_MPH);
+    slc_state = slc.getState();
+    show_slc = slc_speed_limit > 0.0;
+    dist_to_speed_limit = slc.getDistToSpeedLimit();
+    
+    // Vision Turn Speed Control
+    const auto vtsc = lp_sp.getVisionTurnSpeedControl();
+    vtsc_state = static_cast<int>(vtsc.getState());
+    vtsc_velocity = vtsc.getVelocity() * (is_metric ? MS_TO_KPH : MS_TO_MPH);
+    vtsc_current_lateral_accel = vtsc.getCurrentLateralAccel();
+    vtsc_max_predicted_lateral_accel = vtsc.getMaxPredictedLateralAccel();
+  } else {
+    // Reset SLC/VTSC state if longitudinalPlanSP not valid
+    show_slc = false;
+    vtsc_state = 0;
+    vtsc_velocity = 0.0;
   }
 
-  // Road name
-  road_name = QString::fromStdString(live_map_data.getRoadName());
-
-  // Vision Turn Speed Control
-  const auto vtsc = lp_sp.getVisionTurnSpeedControl();
-  vtsc_state = static_cast<int>(vtsc.getState());
-  vtsc_velocity = vtsc.getVelocity() * (is_metric ? MS_TO_KPH : MS_TO_MPH);
-  vtsc_current_lateral_accel = vtsc.getCurrentLateralAccel();
-  vtsc_max_predicted_lateral_accel = vtsc.getMaxPredictedLateralAccel();
+  // Live map data for upcoming speed limits - only if liveMapDataSP is valid
+  if (sm.valid("liveMapDataSP")) {
+    const auto live_map_data = sm["liveMapDataSP"].getLiveMapDataSP();
+    
+    speed_limit_ahead_valid = live_map_data.getSpeedLimitAheadValid();
+    if (speed_limit_ahead_valid) {
+      speed_limit_ahead = live_map_data.getSpeedLimitAhead() * (is_metric ? MS_TO_KPH : MS_TO_MPH);
+      speed_limit_ahead_distance = live_map_data.getSpeedLimitAheadDistance();
+    }
+    road_name = QString::fromStdString(live_map_data.getRoadName());
+  } else {
+    // Reset map data if liveMapDataSP not valid
+    speed_limit_ahead_valid = false;
+    road_name = "";
+  }
 
   // Handle older routes where vCruiseCluster is not set
   set_speed = car_state.getVCruiseCluster() == 0.0 ? controls_state.getVCruiseDEPRECATED() : car_state.getVCruiseCluster();
@@ -537,26 +547,28 @@ void HudRenderer::drawText(QPainter &p, int x, int y, const QString &text, int a
 }
 
 void HudRenderer::drawVisionTurnControl(QPainter &p, const QRect &surface_rect) {
-  // Position as close to bottom as possible with minimal margin
-  const int vtsc_width = 1100;
-  const int vtsc_height = 60;  // Reduced height for cleaner look
-  const int vtsc_x = (surface_rect.width() - vtsc_width) / 2;
-  const int vtsc_y = surface_rect.height() - vtsc_height - 15; // Only 15px from bottom
+  // Reduced width to 80% of original but keep styling and scaling
+  const int vtsc_width = 880;   // 1100 * 0.8 = 880
+  const int vtsc_height = 72;   // Keep height for styling
+  const int vtsc_x = (surface_rect.width() - vtsc_width) / 2;  // Center-aligned
+  const int vtsc_y = surface_rect.height() - vtsc_height - 15;
 
   QRect vtsc_rect(vtsc_x, vtsc_y, vtsc_width, vtsc_height);
 
-  // 100% transparent - no background, no border
-  // Only the meter bars themselves will be visible
+  // Match Max Speed widget styling
+  p.setPen(QPen(QColor(255, 255, 255, 75), 6));
+  p.setBrush(QColor(0, 0, 0, 166));
+  p.drawRoundedRect(vtsc_rect, 32, 32);
 
   // Draw bidirectional lateral acceleration meter - always visible
   drawLateralAccelMeter(p, vtsc_rect, vtsc_current_lateral_accel);
 }
 
 void HudRenderer::drawLateralAccelMeter(QPainter &p, const QRect &widget_rect, float lateral_accel) {
-  // Meter fills the entire widget height with minimal margins
-  const int meter_margin = 50; // 50px margin on each side
-  const int meter_top = 10; // Minimal top margin
-  const int meter_height = 40; // Taller bars for better visibility
+  // Adjust for the widget border and background, with proportional spacing
+  const int meter_margin = 60; // Increased margin for larger widget
+  const int meter_top = 15; // Account for border
+  const int meter_height = 42; // Proportionally taller bars
   
   QRect meter_rect = widget_rect.adjusted(meter_margin, meter_top, -meter_margin, -(widget_rect.height() - meter_top - meter_height));
   
@@ -569,23 +581,23 @@ void HudRenderer::drawLateralAccelMeter(QPainter &p, const QRect &widget_rect, f
   p.setPen(Qt::NoPen);
   
   // Left side static bar (for right turns) - always visible as inactive
-  QRect left_static_rect(meter_rect.x() + 10, meter_rect.top() + 2, 
-                        center_x - meter_rect.x() - 15, meter_rect.height() - 4);
-  p.setBrush(QColor(200, 200, 200, 60)); // More visible white-gray
-  p.drawRoundedRect(left_static_rect, 5, 5);
+  QRect left_static_rect(meter_rect.x() + 12, meter_rect.top() + 3, 
+                        center_x - meter_rect.x() - 18, meter_rect.height() - 6);
+  p.setBrush(QColor(114, 114, 114, 75)); // Match Max Speed widget gray tone
+  p.drawRoundedRect(left_static_rect, 6, 6);
   
   // Right side static bar (for left turns) - always visible as inactive
-  QRect right_static_rect(center_x + 5, meter_rect.top() + 2, 
-                         meter_rect.right() - center_x - 15, meter_rect.height() - 4);
-  p.setBrush(QColor(200, 200, 200, 60)); // More visible white-gray
-  p.drawRoundedRect(right_static_rect, 5, 5);
+  QRect right_static_rect(center_x + 6, meter_rect.top() + 3, 
+                         meter_rect.right() - center_x - 18, meter_rect.height() - 6);
+  p.setBrush(QColor(114, 114, 114, 75)); // Match Max Speed widget gray tone
+  p.drawRoundedRect(right_static_rect, 6, 6);
   
   // Draw center line (zero point) 
-  p.setPen(QPen(QColor(255, 255, 255, 200), 2));
+  p.setPen(QPen(QColor(255, 255, 255, 150), 3));
   p.drawLine(center_x, meter_rect.top(), center_x, meter_rect.bottom());
   
   // Draw reference marks at ±1.0 and ±2.0 m/s²
-  p.setPen(QPen(QColor(200, 200, 200, 80), 1));
+  p.setPen(QPen(QColor(255, 255, 255, 100), 1));
   for (float ref_accel : {-2.0f, -1.0f, 1.0f, 2.0f}) {
     int mark_x = center_x + static_cast<int>((ref_accel / max_accel) * max_bar_width);
     if (mark_x > meter_rect.left() && mark_x < meter_rect.right()) {
@@ -632,28 +644,28 @@ void HudRenderer::drawLateralAccelMeter(QPainter &p, const QRect &widget_rect, f
     
     p.setPen(Qt::NoPen);
     p.setBrush(bar_color);
-    p.drawRoundedRect(active_bar_rect, 5, 5); // Match static bar corner radius
+    p.drawRoundedRect(active_bar_rect, 6, 6); // Match static bar corner radius
     }
   }
   
-  // Draw scale labels (smaller, more subtle)
-  p.setFont(InterFont(11, QFont::Normal));
-  p.setPen(QColor(180, 180, 180, 120));
+  // Draw scale labels (proportional to widget size)
+  p.setFont(InterFont(24, QFont::Normal));
+  p.setPen(QColor(166, 166, 166, 180));
   
   // Left side: -3
-  p.drawText(QRect(meter_rect.left(), meter_rect.bottom() + 2, 30, 12), 
+  p.drawText(QRect(meter_rect.left(), meter_rect.bottom() + 5, 40, 20), 
              Qt::AlignLeft, "-3");
   
   // Center: 0
-  p.drawText(QRect(center_x - 10, meter_rect.bottom() + 2, 20, 12), 
+  p.drawText(QRect(center_x - 15, meter_rect.bottom() + 5, 30, 20), 
              Qt::AlignCenter, "0");
   
   // Right side: +3
-  p.drawText(QRect(meter_rect.right() - 30, meter_rect.bottom() + 2, 30, 12), 
+  p.drawText(QRect(meter_rect.right() - 40, meter_rect.bottom() + 5, 40, 20), 
              Qt::AlignRight, "+3");
   
-  // Units label (smaller)
-  p.setFont(InterFont(10, QFont::Normal));
-  p.drawText(QRect(meter_rect.right() + 5, meter_rect.top(), 35, meter_rect.height()),
+  // Units label
+  p.setFont(InterFont(20, QFont::Normal));
+  p.drawText(QRect(meter_rect.right() + 10, meter_rect.top(), 50, meter_rect.height()),
              Qt::AlignLeft | Qt::AlignVCenter, "m/s²");
 }

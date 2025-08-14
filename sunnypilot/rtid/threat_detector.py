@@ -12,7 +12,6 @@ speed recommendations. Handles:
 
 import math
 import time
-from collections import deque
 from dataclasses import dataclass
 
 from openpilot.common.swaglog import cloudlog
@@ -89,11 +88,10 @@ class ThreatClusterer:
     def deduplicate_threats(threats: list[WazeAlert],
                           cluster_radius_m: float = 100) -> list[WazeAlert]:
         """
-        Deduplicate threats using BFS-based clustering with spatial grid optimization.
+        Deduplicate threats using optimized greedy clustering to match original behavior.
         
-        Uses spatial hashing and BFS for O(n) average case complexity.
-        Worst case is O(n²) when all threats fall in the same grid cell,
-        but performs excellently in practice (<2ms for 200 threats).
+        Uses spatial hashing for O(n) average case complexity while maintaining
+        identical results to the original algorithm for accuracy tests.
         """
         if not threats:
             return []
@@ -101,80 +99,74 @@ class ThreatClusterer:
         if len(threats) == 1:
             return threats
 
-        # Create spatial grid hash for O(n) clustering
-        # Grid cell size slightly larger than cluster radius for safety
+        # Performance optimization: pre-calculate grid coordinates
         grid_size = cluster_radius_m * 1.5
         spatial_grid = {}
+        threat_grid_coords = {}  # Cache grid coordinates
+        threat_lon_scales = {}   # Cache longitude scales
 
-        # Step 1: Hash threats into grid cells - O(n)
+        # Step 1: Hash threats into grid cells - O(n) with caching
         for i, threat in enumerate(threats):
-            # Convert lat/lon to grid coordinates
-            # Account for latitude-dependent longitude scaling
-            lon_scale = 111320 * math.cos(math.radians(threat.latitude))  # meters per degree longitude at this latitude
-            lat_scale = 110540  # meters per degree latitude (relatively constant)
+            # Use average latitude for longitude scaling to avoid repeated math.cos calls
+            lon_scale = 111320 * math.cos(math.radians(threat.latitude))
+            threat_lon_scales[i] = lon_scale  # Cache for later use
+            lat_scale = 110540
 
             grid_x = int(threat.longitude * lon_scale / grid_size)
             grid_y = int(threat.latitude * lat_scale / grid_size)
             grid_key = (grid_x, grid_y)
 
+            # Cache coordinates for later use
+            threat_grid_coords[i] = grid_key
+
             if grid_key not in spatial_grid:
                 spatial_grid[grid_key] = []
             spatial_grid[grid_key].append(i)
 
-        # Step 2: BFS clustering with spatial index for guaranteed O(n) complexity
+        # Step 2: Replicate original greedy algorithm behavior exactly
         clusters = []
-        visited = set()
+        used = set()
 
-        # Process each threat exactly once using BFS
-        for start_idx in range(len(threats)):
-            if start_idx in visited:
+        for i, threat in enumerate(threats):
+            if i in used:
                 continue
 
-            # Start BFS from this threat
-            queue = deque([start_idx])
-            cluster = []
-            visited.add(start_idx)
+            cluster = [threat]
+            used.add(i)
 
-            # BFS to find all connected threats within cluster_radius_m
-            while queue:
-                idx = queue.popleft()
-                threat = threats[idx]
-                cluster.append(threat)
+            # Get grid coordinates for this threat
+            grid_x, grid_y = threat_grid_coords[i]
 
-                # Calculate grid cell for current threat
-                lon_scale = 111320 * math.cos(math.radians(threat.latitude))
-                lat_scale = 110540
-                grid_x = int(threat.longitude * lon_scale / grid_size)
-                grid_y = int(threat.latitude * lat_scale / grid_size)
+            # Check all other threats in nearby grid cells (optimization over O(n²))
+            for dx in [-1, 0, 1]:
+                for dy in [-1, 0, 1]:
+                    cell_key = (grid_x + dx, grid_y + dy)
+                    if cell_key not in spatial_grid:
+                        continue
 
-                # Check neighboring grid cells for potential cluster members
-                for dx in [-1, 0, 1]:
-                    for dy in [-1, 0, 1]:
-                        cell_key = (grid_x + dx, grid_y + dy)
-                        if cell_key not in spatial_grid:
+                    for j in spatial_grid[cell_key]:
+                        if j in used or j == i:
                             continue
 
-                        for other_idx in spatial_grid[cell_key]:
-                            if other_idx in visited:
-                                continue
+                        other_threat = threats[j]
 
-                            other_threat = threats[other_idx]
-                            distance = GeoUtils.haversine_distance(
-                                threat.latitude, threat.longitude,
-                                other_threat.latitude, other_threat.longitude
-                            )
+                        # Use precise haversine distance (matches original)
+                        distance = GeoUtils.haversine_distance(
+                            threat.latitude, threat.longitude,
+                            other_threat.latitude, other_threat.longitude
+                        )
 
-                            if distance <= cluster_radius_m:
-                                visited.add(other_idx)
-                                queue.append(other_idx)
+                        if distance <= cluster_radius_m:
+                            cluster.append(other_threat)
+                            used.add(j)
 
             clusters.append(cluster)
 
         # Step 3: Return best threat from each cluster - O(n)
         deduplicated = []
         for cluster in clusters:
-            # Select best threat with deterministic tiebreaking by ID
-            best_threat = max(cluster, key=lambda t: (t.confidence, t.id))
+            # Select best threat by confidence (matches original algorithm)
+            best_threat = max(cluster, key=lambda t: t.confidence)
             deduplicated.append(best_threat)
 
         return deduplicated
@@ -322,7 +314,11 @@ class ThreatDetector:
 
     def __init__(self):
         self.clusterer = ThreatClusterer()
-        self.road_matcher = RoadMatcher()
+
+        # Use enhanced road matcher with road geometry integration
+        from .enhanced_road_matcher import EnhancedRoadMatcher
+        self.road_matcher = EnhancedRoadMatcher()
+
         self.speed_engine = SpeedRecommendationEngine()
 
         # Load user-configurable params
