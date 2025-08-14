@@ -33,7 +33,6 @@ class RTIDaemon:
         self.sm = messaging.SubMaster([
             'gpsLocationExternal',
             'gpsLocation',
-            'liveLocationKalman',
             'carState'
         ], ignore_avg_freq=True)
         self.pm = messaging.PubMaster(['rtiStateSP'])
@@ -103,12 +102,6 @@ class RTIDaemon:
             gps_loc = self.sm['gpsLocation']
             if gps_loc.hasFix:
                 return (gps_loc.latitude, gps_loc.longitude)
-
-        # Fall back to Kalman filter location
-        if self.sm.updated['liveLocationKalman']:
-            kalman_loc = self.sm['liveLocationKalman']
-            if hasattr(kalman_loc, 'status') and kalman_loc.status == 'valid':
-                return (kalman_loc.lat, kalman_loc.lon)
 
         return None
 
