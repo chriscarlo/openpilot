@@ -68,6 +68,7 @@ longitudinal_panel_qt_src = [
   "sunnypilot/qt/offroad/settings/longitudinal/dec_control.cc",
   "sunnypilot/qt/offroad/settings/longitudinal/rti_control.cc",
   "sunnypilot/qt/offroad/settings/longitudinal/rti_settings_panel.cc",
+  "sunnypilot/qt/offroad/settings/longitudinal/horizontal_carousel.cc",
   "sunnypilot/qt/offroad/settings/longitudinal/slc/speed_limit_control.cc",
   "sunnypilot/qt/offroad/settings/longitudinal/slc/speed_limit_control_policy.cc",
   "sunnypilot/qt/offroad/settings/longitudinal/slc/speed_limit_control_subpanel.cc",

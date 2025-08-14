@@ -3,6 +3,10 @@
 #include <cmath>
 #include <QPainterPath>
 
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 #include "selfdrive/ui/qt/util.h"
 
 constexpr int SET_SPEED_NA = 255;
@@ -555,12 +559,54 @@ void HudRenderer::drawVisionTurnControl(QPainter &p, const QRect &surface_rect) 
 
   QRect vtsc_rect(vtsc_x, vtsc_y, vtsc_width, vtsc_height);
 
-  // Match Max Speed widget styling
-  p.setPen(QPen(QColor(255, 255, 255, 75), 6));
-  p.setBrush(QColor(0, 0, 0, 166));
-  p.drawRoundedRect(vtsc_rect, 32, 32);
+  // Calculate the actual meter dimensions for precise alignment
+  const int meter_margin = 60;
+  const int meter_top = 15;
+  const int meter_height = 42;
+  
+  // Calculate where the actual meter bars will be
+  QRect meter_rect = vtsc_rect.adjusted(meter_margin, meter_top, -meter_margin, -(vtsc_rect.height() - meter_top - meter_height));
+  
+  // Create background that VERY tightly hugs the meter bars
+  const int bg_padding = 4;  // Minimal padding - just 4px around the meter bars
+  QRect tight_rect = meter_rect.adjusted(-bg_padding, -bg_padding, bg_padding, bg_padding);
+  
+  // Gradient extends exactly 50% of bar height (21px) from all sides
+  const int gradient_extend = 21;  // Exactly 50% of 42px bar height
+  
+  p.setPen(Qt::NoPen);  // No border
+  
+  // Draw shadow layers for gradient effect with more aggressive initial fade
+  const int shadow_layers = 15;  // More layers for smoother gradient
+  
+  for (int i = shadow_layers - 1; i >= 0; --i) {
+    float t = static_cast<float>(i) / (shadow_layers - 1);
+    
+    // Ultra-aggressive initial falloff for tight gradient
+    float fade = 1.0f - t;
+    // Use power of 6 for even more aggressive falloff
+    fade = fade * fade * fade * fade * fade * fade;
+    
+    // Calculate this layer's expansion (exactly up to 21px)
+    float blur = t * gradient_extend;
+    
+    // Calculate alpha with ultra-aggressive falloff
+    int base_alpha = 180;  // Slightly darker base
+    int layer_alpha = static_cast<int>(base_alpha * fade * 0.3f);  // More opacity per layer
+    
+    if (layer_alpha > 1) {
+      QRect shadow_rect = tight_rect.adjusted(-blur, -blur, blur, blur);
+      p.setBrush(QColor(0, 0, 0, layer_alpha));
+      // Smaller corner radius for tighter look
+      p.drawRoundedRect(shadow_rect, 12 + blur * 0.3f, 12 + blur * 0.3f);
+    }
+  }
+  
+  // Draw the main background - very tightly hugging the meter
+  p.setBrush(QColor(0, 0, 0, 180));  // Slightly darker for better contrast
+  p.drawRoundedRect(tight_rect, 12, 12);  // Smaller corner radius
 
-  // Draw bidirectional lateral acceleration meter - always visible
+  // Draw bidirectional lateral acceleration meter - use original vtsc_rect for positioning
   drawLateralAccelMeter(p, vtsc_rect, vtsc_current_lateral_accel);
 }
 
@@ -648,24 +694,5 @@ void HudRenderer::drawLateralAccelMeter(QPainter &p, const QRect &widget_rect, f
     }
   }
   
-  // Draw scale labels (proportional to widget size)
-  p.setFont(InterFont(24, QFont::Normal));
-  p.setPen(QColor(166, 166, 166, 180));
-  
-  // Left side: -3
-  p.drawText(QRect(meter_rect.left(), meter_rect.bottom() + 5, 40, 20), 
-             Qt::AlignLeft, "-3");
-  
-  // Center: 0
-  p.drawText(QRect(center_x - 15, meter_rect.bottom() + 5, 30, 20), 
-             Qt::AlignCenter, "0");
-  
-  // Right side: +3
-  p.drawText(QRect(meter_rect.right() - 40, meter_rect.bottom() + 5, 40, 20), 
-             Qt::AlignRight, "+3");
-  
-  // Units label
-  p.setFont(InterFont(20, QFont::Normal));
-  p.drawText(QRect(meter_rect.right() + 10, meter_rect.top(), 50, meter_rect.height()),
-             Qt::AlignLeft | Qt::AlignVCenter, "m/s²");
+  // No labels - clean minimalist look
 }

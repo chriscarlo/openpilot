@@ -196,57 +196,11 @@ RTISpeedReductionControl::RTISpeedReductionControl(QWidget *parent) : QFrame(par
   descLabel->setStyleSheet("font-size: 32px; color: #999999; margin-top: 5px; margin-bottom: 15px;");
   mainLayout->addWidget(descLabel);
   
-  // Mode selector
-  QHBoxLayout *modeLayout = new QHBoxLayout();
-  
-  modeSelector = new QComboBox();
-  modeSelector->setStyleSheet(R"(
-    QComboBox {
-      font-size: 36px;
-      padding: 15px;
-      background-color: #393939;
-      color: white;
-      border: 2px solid #555;
-      border-radius: 15px;
-      min-height: 60px;
-    }
-    QComboBox::drop-down {
-      width: 50px;
-      border: none;
-    }
-    QComboBox::down-arrow {
-      image: none;
-      border-left: 10px solid transparent;
-      border-right: 10px solid transparent;
-      border-top: 15px solid #E4E4E4;
-      margin-right: 10px;
-    }
-    QComboBox QAbstractItemView {
-      font-size: 36px;
-      background-color: #393939;
-      selection-background-color: #4a90e2;
-      border: 2px solid #555;
-      padding: 10px;
-    }
-  )");
-  
-  modeSelector->addItem(tr("Posted Speed Limit"));
-  modeSelector->addItem(tr("Custom"));
-  
-  // Load current setting
-  QString speedMode = QString::fromStdString(params.get("RTISpeedReductionMode"));
-  if (speedMode == "custom") {
-    modeSelector->setCurrentIndex(1);
-  } else {
-    modeSelector->setCurrentIndex(0);
-  }
-  
-  connect(modeSelector, QOverload<int>::of(&QComboBox::currentIndexChanged), 
+  // Mode selector carousel
+  modeSelector = new RTISpeedModeCarousel(this);
+  connect(modeSelector, &HorizontalCarousel::currentIndexChanged, 
           this, &RTISpeedReductionControl::updateMode);
-  
-  modeLayout->addWidget(modeSelector);
-  modeLayout->addStretch();
-  mainLayout->addLayout(modeLayout);
+  mainLayout->addWidget(modeSelector);
   
   // Custom speed control (initially hidden)
   customFrame = new QFrame();
@@ -412,8 +366,8 @@ RTISettingsPanel::RTISettingsPanel(QWidget *parent) : QFrame(parent) {
 
 void RTISettingsPanel::setupMainLayout() {
   QVBoxLayout *mainLayout = new QVBoxLayout(this);
-  mainLayout->setContentsMargins(0, 0, 0, 0);
-  mainLayout->setSpacing(0);
+  mainLayout->setContentsMargins(50, 20, 50, 20);
+  mainLayout->setSpacing(30);
   
   // Back button
   PanelBackButton *backBtn = new PanelBackButton(tr("Back"));
@@ -422,31 +376,18 @@ void RTISettingsPanel::setupMainLayout() {
   
   mainLayout->addSpacing(20);
   
-  // Create scroll area
-  QScrollArea *scrollArea = new QScrollArea(this);
-  scrollArea->setWidgetResizable(true);
-  scrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-  scrollArea->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-  scrollArea->setStyleSheet("QScrollArea { background-color: transparent; border: none; }");
-  
-  QWidget *scrollWidget = new QWidget();
-  scrollWidget->setMaximumWidth(1300); // Prevent horizontal scrolling
-  QVBoxLayout *scrollLayout = new QVBoxLayout(scrollWidget);
-  scrollLayout->setContentsMargins(50, 20, 50, 20);
-  scrollLayout->setSpacing(30);
-  
   // Title
   QLabel *title = new QLabel(tr("Real-time Traffic Intelligence"));
   title->setStyleSheet("font-size: 50px; font-weight: 600; color: #E4E4E4; padding-bottom: 10px;");
   title->setAlignment(Qt::AlignCenter);
-  scrollLayout->addWidget(title);
+  mainLayout->addWidget(title);
   
   // Description
   QLabel *description = new QLabel(tr("RTI uses Waze traffic data to automatically adjust your speed for safer driving"));
   description->setStyleSheet("font-size: 34px; color: #999999; padding-bottom: 30px;");
   description->setWordWrap(true);
   description->setAlignment(Qt::AlignCenter);
-  scrollLayout->addWidget(description);
+  mainLayout->addWidget(description);
   
   // Threat Filter Section
   QFrame *filterFrame = createSectionFrame();
@@ -456,52 +397,15 @@ void RTISettingsPanel::setupMainLayout() {
   filterLabel->setStyleSheet("font-size: 42px; font-weight: 500; color: #E4E4E4; padding-bottom: 15px;");
   filterLayout->addWidget(filterLabel);
   
-  threatFilterCombo = new QComboBox();
-  threatFilterCombo->setStyleSheet(R"(
-    QComboBox {
-      font-size: 36px;
-      padding: 15px;
-      background-color: #393939;
-      color: white;
-      border: 2px solid #555;
-      border-radius: 15px;
-      min-height: 60px;
-    }
-    QComboBox::drop-down {
-      width: 50px;
-      border: none;
-    }
-    QComboBox::down-arrow {
-      image: none;
-      border-left: 10px solid transparent;
-      border-right: 10px solid transparent;
-      border-top: 15px solid #E4E4E4;
-      margin-right: 10px;
-    }
-    QComboBox QAbstractItemView {
-      font-size: 36px;
-      background-color: #393939;
-      selection-background-color: #4a90e2;
-      border: 2px solid #555;
-      padding: 10px;
-    }
-  )");
+  QLabel *filterDesc = new QLabel(tr("Select which types of traffic alerts to monitor"));
+  filterDesc->setStyleSheet("font-size: 32px; color: #999999; padding-bottom: 20px;");
+  filterDesc->setWordWrap(true);
+  filterLayout->addWidget(filterDesc);
   
-  threatFilterCombo->addItem(tr("All Threats"));
-  threatFilterCombo->addItem(tr("Police Only"));
-  threatFilterCombo->addItem(tr("Speed Cameras Only"));
-  threatFilterCombo->addItem(tr("Hazards Only"));
-  threatFilterCombo->addItem(tr("Custom"));
-  
-  int filterVal = QString::fromStdString(params.get("RTIThreatFilter")).toInt();
-  threatFilterCombo->setCurrentIndex(filterVal);
-  
-  connect(threatFilterCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), [this](int index) {
-    params.put("RTIThreatFilter", std::to_string(index));
-  });
-  
-  filterLayout->addWidget(threatFilterCombo);
-  scrollLayout->addWidget(filterFrame);
+  // Use the new carousel widget
+  threatFilterCarousel = new RTIThreatFilterCarousel(this);
+  filterLayout->addWidget(threatFilterCarousel);
+  mainLayout->addWidget(filterFrame);
   
   // Detection & Response Settings Section
   QFrame *rangeFrame = createSectionFrame();
@@ -545,7 +449,7 @@ void RTISettingsPanel::setupMainLayout() {
   );
   rangeLayout->addWidget(resumeSpeedControl);
   
-  scrollLayout->addWidget(rangeFrame);
+  mainLayout->addWidget(rangeFrame);
   
   // Speed Reduction Section
   QFrame *speedFrame = createSectionFrame();
@@ -554,7 +458,7 @@ void RTISettingsPanel::setupMainLayout() {
   speedReductionControl = new RTISpeedReductionControl(this);
   speedLayout->addWidget(speedReductionControl);
   
-  scrollLayout->addWidget(speedFrame);
+  mainLayout->addWidget(speedFrame);
   
   // Alerts & Display Section
   QFrame *alertsFrame = createSectionFrame();
@@ -598,13 +502,10 @@ void RTISettingsPanel::setupMainLayout() {
   audioLayout->addWidget(audioToggle);
   alertsLayout->addLayout(audioLayout);
   
-  scrollLayout->addWidget(alertsFrame);
+  mainLayout->addWidget(alertsFrame);
   
   // Add stretch at the end
-  scrollLayout->addStretch();
-  
-  scrollArea->setWidget(scrollWidget);
-  mainLayout->addWidget(scrollArea);
+  mainLayout->addStretch();
 }
 
 QFrame* RTISettingsPanel::createSectionFrame() {

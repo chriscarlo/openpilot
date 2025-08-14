@@ -175,6 +175,14 @@ Use these tools to **prove your work is correct.**
 - Use `SIMULATION` environment variable for testing.
 - Enable debug outputs with various environment variables.
 
+### UI Testing
+
+To launch the onroad HUD for testing without cameras:
+```bash
+FORCE_ONROAD_UI=1 ./selfdrive/ui/ui &
+```
+The `FORCE_ONROAD_UI=1` environment variable bypasses camera requirements and forces the UI into onroad mode.
+
 ## Claude Code Memory
 
 These are **binding operational rules.** Failure to follow them is a failure to complete the task.

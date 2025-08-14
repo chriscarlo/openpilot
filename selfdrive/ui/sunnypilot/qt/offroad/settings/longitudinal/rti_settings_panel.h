@@ -19,6 +19,7 @@
 
 #include "selfdrive/ui/sunnypilot/qt/offroad/settings/settings.h"
 #include "selfdrive/ui/sunnypilot/qt/widgets/controls.h"
+#include "selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/horizontal_carousel.h"
 #include "common/params.h"
 
 // Range control widget based on Live Steering Ratio pattern
@@ -68,7 +69,7 @@ private:
   void resetSpeed();
   
   Params params;
-  QComboBox *modeSelector;
+  RTISpeedModeCarousel *modeSelector;
   QFrame *customFrame;
   RTIRangeControl *customSpeedControl;
   
@@ -98,7 +99,7 @@ private:
   Params params;
   
   // UI controls
-  QComboBox *threatFilterCombo;
+  RTIThreatFilterCarousel *threatFilterCarousel;
   RTIRangeControl *detectionRadiusControl;
   RTIRangeControl *forwardSlowdownControl;
   RTIRangeControl *resumeSpeedControl;
