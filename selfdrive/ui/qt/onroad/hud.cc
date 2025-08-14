@@ -591,7 +591,7 @@ void HudRenderer::drawVisionTurnControl(QPainter &p, const QRect &surface_rect) 
     float blur = t * gradient_extend;
     
     // Calculate alpha with ultra-aggressive falloff
-    int base_alpha = 180;  // Slightly darker base
+    int base_alpha = 115;  // Match header shade opacity
     int layer_alpha = static_cast<int>(base_alpha * fade * 0.3f);  // More opacity per layer
     
     if (layer_alpha > 1) {
@@ -602,8 +602,8 @@ void HudRenderer::drawVisionTurnControl(QPainter &p, const QRect &surface_rect) 
     }
   }
   
-  // Draw the main background - very tightly hugging the meter
-  p.setBrush(QColor(0, 0, 0, 180));  // Slightly darker for better contrast
+  // Draw the main background - match header shade opacity (0.45 → 115 alpha)
+  p.setBrush(QColor(0, 0, 0, 115));  // Match header shade opacity
   p.drawRoundedRect(tight_rect, 12, 12);  // Smaller corner radius
 
   // Draw bidirectional lateral acceleration meter - use original vtsc_rect for positioning

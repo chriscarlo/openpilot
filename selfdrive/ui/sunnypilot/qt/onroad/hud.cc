@@ -127,11 +127,19 @@ void HudRendererSP::draw(QPainter &p, const QRect &surface_rect) {
 }
 
 void HudRendererSP::drawRTIThreatIndicator(QPainter &p, const QRect &surface_rect) {
-  // Size increased by 20% and left-aligned with Max Speed widget
-  const int x_offset = 60;  // Left-align with Max Speed widget
-  const int y_offset = surface_rect.height() - 381;  // Position from bottom (adjusted for new height)
-  const int widget_width = 480;  // 400 * 1.2 = 480
-  const int widget_height = 320;  // 267 * 1.2 = 320
+  // Position to bottom-align with lateral accel widget which is at (height - 72 - 15)
+  // Lateral accel widget bottom = surface_rect.height() - 15
+  // RTI widget should have same bottom position
+  const int bottom_margin = 15;  // Same as lateral accel widget
+  const int left_margin = 15;    // Same spacing from left as bottom
+  
+  // Increased size: moved left by 45px and down by 45px, so increase size by 45px each dimension
+  const int widget_width = 525;  // 480 + 45 = 525
+  const int widget_height = 365;  // 320 + 45 = 365
+  
+  // Position with bottom alignment to lateral accel widget
+  const int x_offset = left_margin;
+  const int y_offset = surface_rect.height() - widget_height - bottom_margin;
   
   QRect rti_rect(x_offset, y_offset, widget_width, widget_height);
   
@@ -139,9 +147,9 @@ void HudRendererSP::drawRTIThreatIndicator(QPainter &p, const QRect &surface_rec
   bool has_active_threat = rti_threat_ahead && rti_has_threat;
   QColor threat_color = has_active_threat ? getRTIThreatColor(rti_threat_distance) : QColor(100, 100, 100, 200);
   
-  // Match Max Speed widget styling - draw border then background
+  // Match header shade opacity (0.45 → 115 alpha) for consistency
   p.setPen(QPen(QColor(255, 255, 255, 75), 6));
-  p.setBrush(QColor(0, 0, 0, 166));
+  p.setBrush(QColor(0, 0, 0, 115));  // Changed from 166 to 115 to match header shade
   p.drawRoundedRect(rti_rect, 32, 32);
   
   // Draw threat-colored inner border if active
