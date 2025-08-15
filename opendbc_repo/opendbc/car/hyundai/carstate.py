@@ -340,6 +340,27 @@ class CarState(CarStateBase, EsccCarStateBase, MadsCarState, CarStateExt):
     if self.CP.openpilotLongitudinalControl:
       ret.cruiseState.available = self.get_main_cruise(ret)
 
+    # Dashboard speed limit reading for CANFD cars
+    # For CANFD cars, dashboard speed limit messages are on ECAN bus (pt parser)
+    # EV6 uses FR_CMR_02_100ms (0x1FA), other vehicles may use CCNC_0x162
+    if "FR_CMR_02_100ms" in cp.vl:
+      # ISLW_SpdCluMainDis signal from FR_CMR_02_100ms
+      speed_limit_raw = cp.vl["FR_CMR_02_100ms"]["ISLW_SpdCluMainDis"]
+      # Convert from km/h to m/s, 0 and 255 indicate no speed limit detected
+      if speed_limit_raw != 0 and speed_limit_raw != 255:
+        ret_sp.speedLimit = speed_limit_raw * speed_factor
+      else:
+        ret_sp.speedLimit = 0.0
+    elif "CCNC_0x162" in cp.vl:
+      speed_limit_raw = cp.vl["CCNC_0x162"]["SPEEDLIMIT"]
+      # Convert from km/h to m/s, 0 and 255 indicate no speed limit detected
+      if speed_limit_raw != 0 and speed_limit_raw != 255:
+        ret_sp.speedLimit = speed_limit_raw * speed_factor
+      else:
+        ret_sp.speedLimit = 0.0
+    else:
+      ret_sp.speedLimit = 0.0
+
     CarStateExt.update_canfd_ext(self, ret, can_parsers)
 
     ret.blockPcmEnable = not self.recent_button_interaction()
@@ -383,15 +404,16 @@ class CarState(CarStateBase, EsccCarStateBase, MadsCarState, CarStateExt):
         ("SCC_CONTROL", 50),
       ]
 
-    cam_messages = []
-
     # Only add dashboard speed limit messages that are actually present in the fingerprint
+    # For CANFD cars, dashboard speed limit messages are on ECAN bus (pt), not CAM bus
     # EV6 uses FR_CMR_02_100ms (0x1FA) for ISLW speed limit data
     if CP.flags & HyundaiFlags.HAS_DASHBOARD_SPEED_LIMIT_FR_CMR:
-      cam_messages.append(("FR_CMR_02_100ms", 10))  # ISLW speed limit data at 10Hz
+      pt_messages.append(("FR_CMR_02_100ms", 10))  # ISLW speed limit data at 10Hz
     # Some models use CCNC_0x162 (0x162) as an alternative speed limit source
     if CP.flags & HyundaiFlags.HAS_DASHBOARD_SPEED_LIMIT_CCNC:
-      cam_messages.append(("CCNC_0x162", 20))  # Alternative speed limit source at 20Hz
+      pt_messages.append(("CCNC_0x162", 20))  # Alternative speed limit source at 20Hz
+
+    cam_messages = []
     if CP.flags & HyundaiFlags.CANFD_LKA_STEERING:
       block_lfa_msg = "CAM_0x362" if CP.flags & HyundaiFlags.CANFD_LKA_STEERING_ALT else "CAM_0x2a4"
       cam_messages += [(block_lfa_msg, 20)]
