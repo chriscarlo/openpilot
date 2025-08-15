@@ -113,6 +113,17 @@ class RTIDaemon:
             return self.sm['carState'].vEgo
         return 0.0
 
+    def _get_cruise_cluster_speed(self) -> float:
+        """Get driver's originally set cruise speed (as shown on cluster) in m/s."""
+        self.sm.update(0)
+        if self.sm.updated['carState']:
+            cruise_state = self.sm['carState'].cruiseState
+            # speedCluster is the driver's set speed shown on the instrument cluster
+            # This is the original driver-set maximum, unmodified by controllers
+            if cruise_state.enabled and cruise_state.speedCluster > 0:
+                return cruise_state.speedCluster
+        return 0.0
+
     async def _process_cycle(self):
         """Main processing cycle: fetch → detect → publish."""
         current_time = time.time()
@@ -121,6 +132,7 @@ class RTIDaemon:
             # Get current vehicle state
             location = self._get_current_location()
             current_speed = self._get_current_speed()
+            cruise_cluster_speed = self._get_cruise_cluster_speed()
 
             if location is None:
                 # No valid GPS - publish offline state
@@ -175,7 +187,8 @@ class RTIDaemon:
                 traffic_data=traffic_data,
                 current_location=location,
                 current_speed=current_speed,
-                timestamp=int(current_time * 1e9)  # Convert to nanoseconds
+                timestamp=int(current_time * 1e9),  # Convert to nanoseconds
+                v_cruise=cruise_cluster_speed  # Driver's original set speed from cluster
             )
 
             # Update API status

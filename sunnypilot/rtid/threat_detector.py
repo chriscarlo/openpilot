@@ -247,9 +247,16 @@ class SpeedRecommendationEngine:
 
     def calculate_recommendation(self, threats: list[ProcessedThreat],
                                current_speed_ms: float,
-                               current_location: tuple[float, float]) -> tuple[float, bool]:
+                               current_location: tuple[float, float],
+                               v_cruise_ms: float = None) -> tuple[float, bool]:
         """
         Calculate speed recommendation based on processed threats.
+        
+        Args:
+            threats: List of processed threats
+            current_speed_ms: Current vehicle speed in m/s
+            current_location: Current GPS location
+            v_cruise_ms: Driver's set cruise speed in m/s (for no-limit scenarios)
         
         Returns:
             Tuple of (recommended_speed_ms, threat_ahead_bool)
@@ -280,16 +287,24 @@ class SpeedRecommendationEngine:
 
         closest_threat = min(ahead_threats, key=lambda t: t.distance)
 
+        # CRITICAL SAFETY: RTI only operates when cruise control is enabled
+        # If cruise is not set, RTI must NOT make any speed recommendations
+        # This prevents dangerous accelerations when resuming cruise
+        if not v_cruise_ms or v_cruise_ms <= 0:
+            # No cruise speed set - RTI is inactive
+            return 0.0, False
+        
         # Determine target speed based on threat type and current conditions
         if self.speed_reduction_mode == "posted":
-            # Use posted speed limit (if available) or default
+            # Use posted speed limit (if available)
             if closest_threat.speed_limit_ms > 0:
                 target_speed = closest_threat.speed_limit_ms
             else:
-                target_speed = self.default_speed_limit_ms
+                # No posted speed limit - reduce by 20% of driver's set maximum
+                target_speed = v_cruise_ms * 0.8  # 20% reduction from set cruise
         else:
-            # Custom mode: reduce by fixed amount
-            target_speed = current_speed_ms - self.speed_reduction_ms
+            # Custom mode: reduce by fixed amount from cruise speed
+            target_speed = v_cruise_ms - self.speed_reduction_ms
             # But never go below a reasonable minimum (e.g. 10 m/s = 22 mph)
             target_speed = max(target_speed, 10.0)
 
@@ -297,11 +312,6 @@ class SpeedRecommendationEngine:
         # This ensures we're always recommending deceleration or maintaining speed
         # Never recommend acceleration toward a threat
         target_speed = min(target_speed, current_speed_ms)
-
-        # Additional safety: For very close threats, recommend more conservative speed
-        if closest_threat.distance < 300:  # Within 300m
-            # Recommend 10% below current speed or speed limit, whichever is lower
-            target_speed = min(target_speed, current_speed_ms * 0.9)
 
         # Ensure non-negative speed
         target_speed = max(0.0, target_speed)
@@ -340,7 +350,8 @@ class ThreatDetector:
     def process_threats(self, traffic_data: list[WazeAlert] | None,
                        current_location: tuple[float, float],
                        current_speed: float,
-                       timestamp: int) -> RTIState:
+                       timestamp: int,
+                       v_cruise: float = None) -> RTIState:
         """
         Main threat processing pipeline.
         
@@ -349,6 +360,7 @@ class ThreatDetector:
             current_location: (lat, lon) of ego vehicle
             current_speed: Current speed in m/s
             timestamp: Current timestamp in nanoseconds
+            v_cruise: Driver's set cruise speed in m/s (optional)
             
         Returns:
             RTIState for publishing
@@ -378,7 +390,7 @@ class ThreatDetector:
 
                 # Step 3: Generate speed recommendation
                 recommended_speed, threat_ahead = self.speed_engine.calculate_recommendation(
-                    processed_threats, current_speed, current_location
+                    processed_threats, current_speed, current_location, v_cruise
                 )
 
             # Step 4: Safety validation
