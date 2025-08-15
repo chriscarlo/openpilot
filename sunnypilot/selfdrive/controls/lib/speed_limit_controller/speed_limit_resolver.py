@@ -109,28 +109,34 @@ class SpeedLimitResolver:
         if self._limit_solutions[source] > 0.:
           return Source(source)
     else:
-      # Combined mode: take the MAXIMUM of both sources (highest speed limit)
-      # Filter out zero values (no limit detected)
-      valid_limits = []
-      valid_sources = []
-      for source in sources_for_policy:
-        if self._limit_solutions[source] > 0.:
-          valid_limits.append(self._limit_solutions[source])
-          valid_sources.append(source.value)
-
-      # Handle three cases explicitly:
-      # 1. Multiple sources available: choose the highest speed limit
-      # 2. Single source available: choose that source
-      # 3. No sources available: return None
-      if len(valid_limits) > 1:
-        # Multiple sources: choose the highest
-        limits = np.array(valid_limits, dtype=float)
-        sources = np.array(valid_sources, dtype=int)
-        max_idx = np.argmax(limits)  # Take the HIGHER speed limit
-        return Source(sources[max_idx])
-      elif len(valid_limits) == 1:
-        # Single source: use that source
-        return Source(valid_sources[0])
-      # else: No valid sources, will return None below
+      # Combined mode: 
+      # 1. If both values are same AND non-zero, prefer map_data
+      # 2. If values differ, use the HIGHER one
+      # 3. If only one is available, use that one
+      # 4. If none available, return None
+      
+      car_state_limit = self._limit_solutions[Source.car_state]
+      map_data_limit = self._limit_solutions[Source.map_data]
+      
+      # Case: Both are zero - no valid sources
+      if car_state_limit == 0 and map_data_limit == 0:
+        return None
+      
+      # Case: Only one source has data
+      if car_state_limit > 0 and map_data_limit == 0:
+        return Source.car_state
+      if map_data_limit > 0 and car_state_limit == 0:
+        return Source.map_data
+      
+      # Case: Both sources have data
+      if car_state_limit > 0 and map_data_limit > 0:
+        # If equal, prefer map_data
+        if abs(car_state_limit - map_data_limit) < 0.01:  # Use small epsilon for float comparison
+          return Source.map_data
+        # Otherwise, return the higher one
+        elif car_state_limit > map_data_limit:
+          return Source.car_state
+        else:
+          return Source.map_data
 
     return None
