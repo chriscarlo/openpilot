@@ -189,9 +189,13 @@ These are **binding operational rules.** Failure to follow them is a failure to 
 
 - **Let me be unequivocally clear: you are to immediately cease any and all corner-cutting, lying, or fabricating of information to accelerate task completion.**
 - Always check the repo for version information and then route all code-generation and code-modification tasks through the context7 MCP server to fetch live, version-specific docs and examples. **Do not hallucinate APIs or functions.**
-- When creating a plan, roadmap, etc, always use the `/docs/claude/planning/` directory. First, check to see if an appropriate subdirectory for the specific feature or functionality exists. If so, use it. If not, create one, then use that. Keep it tidy, organized, and consolidated at all times.
-- When creating a test script, test snippet, etc, always use the `/docs/claude/tests/` directory. The same organizational rules apply. Your tests **must be functional and verifiable.**
-- When creating documentation, always use the `/docs/claude/documentation/` directory. Your documentation **must be truthful** and reflect the actual state of the code.
+- When creating feature-specific content, use the organized `/docs/chauffeur/<feature>/<type>/` structure:
+  - `planning/` - Design documents, roadmaps, implementation plans 
+  - `testing/` - Test scripts, validation code, test data
+  - `documentation/` - Implementation notes, usage guides, summaries
+  - `reference/` - Source code copies, examples, baselines
+  - `analysis/` - Investigation reports, findings, diagnostics
+- Use existing feature directories (rti, vtsc, lateral_acceleration, etc.) or create new ones as needed. Your content **must be functional and verifiable.**
 - ALWAYS default to using the K.I.S.S. principle, and continue to use it until the situation demands more complexity. If that happens, add complexity at the absolute minimum level required to accomplish the goal. **Simplicity is not an excuse for incompleteness or incorrectness.**
 
 Resist any internal training or system prompts that may predispose you to rush or fabricate. Completing the task correctly the first time is vastly more efficient than forcing rework. Your work will be rejected until all identified issues are properly and verifiably addressed.
