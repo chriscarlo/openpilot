@@ -1,1 +1,1 @@
-#define DEFAULT_MODEL "Vibe Jr (Default)"
+#define DEFAULT_MODEL "Phoenix (Default)"
