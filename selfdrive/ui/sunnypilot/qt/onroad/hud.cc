@@ -179,8 +179,10 @@ void HudRendererSP::drawRTIThreatIndicator(QPainter &p, const QRect &surface_rec
   QRect rti_rect(x_offset, y_offset, widget_width, widget_height);
   
   // Determine widget state and colors
-  bool has_active_threat = rti_threat_ahead && rti_has_threat;
-  QColor threat_color = has_active_threat ? getRTIThreatColor(rti_threat_distance) : QColor(100, 100, 100, 200);
+  // Show threats for situational awareness regardless of direction
+  bool has_situational_threat = rti_has_threat;  // Always show threats for awareness
+  bool has_active_threat = rti_threat_ahead && rti_has_threat;  // Only for urgent coloring
+  QColor threat_color = has_active_threat ? getRTIThreatColor(rti_threat_distance) : QColor(150, 150, 150, 255);
   
   // Match header shade opacity (0.45 → 115 alpha) for consistency
   p.setPen(QPen(QColor(255, 255, 255, 75), 6));
@@ -194,8 +196,8 @@ void HudRendererSP::drawRTIThreatIndicator(QPainter &p, const QRect &surface_rec
     p.drawRoundedRect(rti_rect.adjusted(3, 3, -3, -3), 29, 29);
   }
   
-  if (has_active_threat) {
-    // Draw active threat information - proportionally scaled
+  if (has_situational_threat) {
+    // Draw threat information for situational awareness - proportionally scaled
     QRect icon_rect(rti_rect.x() + 48, rti_rect.y() + 24, 120, 96);
     drawRTIThreatIcon(p, icon_rect, rti_threat_type);
     
@@ -237,8 +239,8 @@ void HudRendererSP::drawRTIThreatIndicator(QPainter &p, const QRect &surface_rec
     }
     p.drawText(rti_rect.adjusted(0, 186, 0, 0), Qt::AlignTop | Qt::AlignHCenter, distance_text);
     
-    // Draw speed recommendation if different from current
-    if (rti_active && std::abs(rti_recommended_speed - speed / (is_metric ? 3.6 : 2.237)) > 1.0) {
+    // Draw speed recommendation ONLY for active (ahead) threats
+    if (has_active_threat && rti_active && std::abs(rti_recommended_speed - speed / (is_metric ? 3.6 : 2.237)) > 1.0) {
       p.setFont(speed_rec_font);
       p.setPen(QColor(255, 255, 255, 200));
       
