@@ -226,9 +226,16 @@ def fill_pose_msg(msg: capnp._DynamicStructBuilder, net_output_data: dict[str, n
 
   cameraOdometry.trans = net_output_data['pose'][0,:3].tolist()
   cameraOdometry.rot = net_output_data['pose'][0,3:].tolist()
-  cameraOdometry.wideFromDeviceEuler = net_output_data['wide_from_device_euler'][0,:].tolist()
+  # v12 models may not output wide_from_device_euler - use zeros if missing
+  if 'wide_from_device_euler' in net_output_data:
+    cameraOdometry.wideFromDeviceEuler = net_output_data['wide_from_device_euler'][0,:].tolist()
+  else:
+    cameraOdometry.wideFromDeviceEuler = [0.0, 0.0, 0.0]  # Default to no rotation
   cameraOdometry.roadTransformTrans = net_output_data['road_transform'][0,:3].tolist()
   cameraOdometry.transStd = net_output_data['pose_stds'][0,:3].tolist()
   cameraOdometry.rotStd = net_output_data['pose_stds'][0,3:].tolist()
-  cameraOdometry.wideFromDeviceEulerStd = net_output_data['wide_from_device_euler_stds'][0,:].tolist()
+  if 'wide_from_device_euler_stds' in net_output_data:
+    cameraOdometry.wideFromDeviceEulerStd = net_output_data['wide_from_device_euler_stds'][0,:].tolist()
+  else:
+    cameraOdometry.wideFromDeviceEulerStd = [0.1, 0.1, 0.1]  # Default uncertainty
   cameraOdometry.roadTransformTransStd = net_output_data['road_transform_stds'][0,:3].tolist()
