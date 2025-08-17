@@ -64,7 +64,7 @@ void HudRendererSP::updateState(const UIState &s) {
   // Safe RTI message access with multiple layers of protection
   if (s.sm) {
     try {
-      // Check for stale RTI data (1Hz message, timeout after 3 seconds)
+      // Check for stale RTI data (20Hz message, timeout after 3 seconds)
       // Only check if the message is valid AND has been received at least once
       if (s.sm->valid("rtiStateSP")) {
         // Additional safety: check if rcv_frame > 0 to ensure message was actually received

@@ -222,7 +222,7 @@ class RTIDaemon:
 
     def _publish_rti_state(self, rti_state):
         """Publish RTI state message."""
-        msg = messaging.new_message('rtiStateSP')
+        msg = messaging.new_message('rtiStateSP', valid=True)
 
         # Copy state data to message
         msg.rtiStateSP.timeStamp = rti_state.timestamp
@@ -251,7 +251,7 @@ class RTIDaemon:
 
     def _publish_offline_state(self):
         """Publish offline/disabled RTI state."""
-        msg = messaging.new_message('rtiStateSP')
+        msg = messaging.new_message('rtiStateSP', valid=True)
         msg.rtiStateSP.timeStamp = int(time.time() * 1e9)
         msg.rtiStateSP.threatAhead = False
         msg.rtiStateSP.threatDistanceM = 0.0
@@ -268,7 +268,7 @@ class RTIDaemon:
             cloudlog.info("RTI Daemon cleaned up resources")
 
     async def run(self):
-        """Main daemon loop running at 1Hz."""
+        """Main daemon loop running at 20Hz."""
         cloudlog.info("RTI Daemon starting main loop")
 
         try:
@@ -284,17 +284,17 @@ class RTIDaemon:
                         self._publish_offline_state()
                     except Exception as msg_e:
                         cloudlog.error(f"RTI failed to publish disabled state: {msg_e}")
-                    await asyncio.sleep(1.0)
+                    await asyncio.sleep(0.05)
                     continue
 
                 # Process RTI cycle
                 await self._process_cycle()
 
-                # Maintain 1Hz loop timing
+                # Maintain 20Hz loop timing
                 loop_duration = time.time() - loop_start
-                sleep_time = max(0.0, 1.0 - loop_duration)
+                sleep_time = max(0.0, 0.05 - loop_duration)
 
-                if loop_duration > 0.1:  # Warn if processing takes > 100ms
+                if loop_duration > 0.025:  # Warn if processing takes > 25ms (half of 50ms cycle)
                     cloudlog.warning(f"RTI cycle took {loop_duration:.3f}s")
 
                 await asyncio.sleep(sleep_time)
