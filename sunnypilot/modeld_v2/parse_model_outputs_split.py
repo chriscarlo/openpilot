@@ -109,9 +109,7 @@ class Parser:
                        out_shape=(SplitModelConstants.LEAD_TRAJ_LEN, SplitModelConstants.LEAD_WIDTH))
     if 'plan' in outs:
       if ((self.generation >= 12) or self.dynamic_outputs_enabled) and \
-        outs['plan'].shape[1] > 2 * SplitModelConstants.PLAN_WIDTH * SplitModelConstants.IDX_N:
-        self._parse_plan_mhp(outs)
-      elif (self.generation >= 12) or self.dynamic_outputs_enabled:
+        outs['plan'].shape[1] == 2 * SplitModelConstants.IDX_N * SplitModelConstants.PLAN_WIDTH:
         self.parse_mdn('plan', outs, in_N=0, out_N=0,
                        out_shape=(SplitModelConstants.IDX_N, SplitModelConstants.PLAN_WIDTH))
       else:
@@ -142,8 +140,18 @@ class Parser:
       self.parse_mdn('sim_pose', outs, in_N=0, out_N=0, out_shape=(SplitModelConstants.POSE_WIDTH,))
 
   def parse_vision_outputs(self, outs: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    # Debug: Log available keys for v12 model
+    if self.generation == 12 and not hasattr(self, '_keys_logged'):
+      with open('/tmp/model_keys.txt', 'w') as f:
+        f.write(f"Generation {self.generation} model outputs:\n")
+        f.write(f"Keys: {sorted(outs.keys())}\n")
+        for k, v in outs.items():
+          f.write(f"  {k}: shape={v.shape if hasattr(v, 'shape') else 'N/A'}\n")
+      self._keys_logged = True
+
     self.parse_mdn('pose', outs, in_N=0, out_N=0, out_shape=(SplitModelConstants.POSE_WIDTH,))
-    self.parse_mdn('wide_from_device_euler', outs, in_N=0, out_N=0, out_shape=(SplitModelConstants.WIDE_FROM_DEVICE_WIDTH,))
+    if 'wide_from_device_euler' in outs:
+      self.parse_mdn('wide_from_device_euler', outs, in_N=0, out_N=0, out_shape=(SplitModelConstants.WIDE_FROM_DEVICE_WIDTH,))
     self.parse_mdn('road_transform', outs, in_N=0, out_N=0, out_shape=(SplitModelConstants.POSE_WIDTH,))
     self.parse_dynamic_outputs(outs)
     self.split_outputs(outs)
