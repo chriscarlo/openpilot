@@ -332,14 +332,14 @@ class WazeAPIClient:
             return None
 
     async def get_traffic_alerts(self, latitude: float, longitude: float,
-                               radius_km: float = 5.0) -> list[WazeAlert]:
+                               radius_km: float = 16.0) -> list[WazeAlert]:
         """
         Fetch traffic alerts from Waze API.
         
         Args:
             latitude: Current GPS latitude
             longitude: Current GPS longitude
-            radius_km: Search radius in kilometers
+            radius_km: Search radius in kilometers (default 16.0 = ~10 miles)
             
         Returns:
             List of WazeAlert objects
