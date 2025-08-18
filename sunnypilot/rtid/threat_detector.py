@@ -229,7 +229,7 @@ class SpeedRecommendationEngine:
 
         # Get forward slowdown range (when to start slowing for threats ahead)
         forward_range = params.get("RTIForwardSlowdownRange")
-        self.ahead_distance_threshold_m = float(forward_range) if forward_range else 1207  # Default 0.75 miles
+        self.ahead_distance_threshold_m = float(forward_range) if forward_range else 10000  # Temp 10km for testing
 
         # Get resume speed distance (when to resume normal speed after passing)
         resume_distance = params.get("RTIResumeSpeedDistance")
@@ -271,9 +271,9 @@ class SpeedRecommendationEngine:
             # Apply distance thresholds based on direction
             max_distance = (self.ahead_distance_threshold_m if threat.direction == 'ahead'
                           else self.behind_distance_threshold_m if threat.direction == 'behind'
-                          else 0)  # Don't consider left/right threats for speed control
+                          else 10000)  # Temp: allow left/right threats for testing
 
-            if threat.distance <= max_distance and threat.direction in ['ahead', 'behind']:
+            if threat.distance <= max_distance and threat.direction in ['ahead', 'behind', 'left', 'right']:
                 relevant_threats.append(threat)
 
         if not relevant_threats:
@@ -293,7 +293,7 @@ class SpeedRecommendationEngine:
         if not v_cruise_ms or v_cruise_ms <= 0:
             # No cruise speed set - RTI is inactive
             return 0.0, False
-        
+
         # Determine target speed based on threat type and current conditions
         if self.speed_reduction_mode == "posted":
             # Use posted speed limit (if available)

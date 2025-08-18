@@ -157,7 +157,7 @@ class RTIDaemon:
                     try:
                         cloudlog.info(f"RTI fetching new API data (last fetch {current_time - self.last_api_fetch_time:.1f}s ago)")
                         traffic_data = await self.waze_client.get_traffic_alerts(
-                            location[0], location[1]
+                            location[0], location[1], 16.0  # 10 mile radius
                         )
                         # Update cache
                         self.cached_traffic_data = traffic_data
@@ -268,7 +268,7 @@ class RTIDaemon:
             cloudlog.info("RTI Daemon cleaned up resources")
 
     async def run(self):
-        """Main daemon loop running at 20Hz."""
+        """Main daemon loop running at 50Hz to match test script."""
         cloudlog.info("RTI Daemon starting main loop")
 
         try:
@@ -284,17 +284,17 @@ class RTIDaemon:
                         self._publish_offline_state()
                     except Exception as msg_e:
                         cloudlog.error(f"RTI failed to publish disabled state: {msg_e}")
-                    await asyncio.sleep(0.05)
+                    await asyncio.sleep(0.02)
                     continue
 
                 # Process RTI cycle
                 await self._process_cycle()
 
-                # Maintain 20Hz loop timing
+                # Maintain 50Hz loop timing to match test script
                 loop_duration = time.time() - loop_start
-                sleep_time = max(0.0, 0.05 - loop_duration)
+                sleep_time = max(0.0, 0.02 - loop_duration)
 
-                if loop_duration > 0.025:  # Warn if processing takes > 25ms (half of 50ms cycle)
+                if loop_duration > 0.01:  # Warn if processing takes > 10ms (half of 20ms cycle)
                     cloudlog.warning(f"RTI cycle took {loop_duration:.3f}s")
 
                 await asyncio.sleep(sleep_time)

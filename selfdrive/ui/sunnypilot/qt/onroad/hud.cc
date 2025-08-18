@@ -52,14 +52,21 @@ void HudRendererSP::updateState(const UIState &s) {
   // Update base HUD state
   HudRenderer::updateState(s);
   
-  // Update RTI parameters periodically (once per second)
-  if (s.sm && s.sm->frame % UI_FREQ == 0) {
+  // Update RTI parameters more frequently (every 5 frames = 250ms) to reduce race condition
+  if (s.sm && s.sm->frame % 5 == 0) {
     rti_enabled = Params().getBool("RTIEnabled");  // Master switch
     rti_hud_enabled = Params().getBool("RTIHUDEnabled");  // HUD display switch
   }
   
-  // Update multiple threats
-  updateRTIThreats(s);
+  // Update multiple threats only if RTI HUD is enabled
+  if (rti_enabled && rti_hud_enabled) {
+    updateRTIThreats(s);
+  } else {
+    // Clear threat data when disabled
+    rti_threats.clear();
+    rti_has_threat = false;
+    rti_threat_ahead = false;
+  }
   
   // Safe RTI message access with multiple layers of protection
   if (s.sm) {
@@ -75,8 +82,8 @@ void HudRendererSP::updateState(const UIState &s) {
         }
       }
       
-      // Update RTI state from messages - only if message is valid and updated
-      if (s.sm->valid("rtiStateSP") && s.sm->updated("rtiStateSP")) {
+      // Update RTI state from messages - only if enabled and message is valid and updated
+      if (rti_enabled && rti_hud_enabled && s.sm->valid("rtiStateSP") && s.sm->updated("rtiStateSP")) {
         const auto rti_state = (*s.sm)["rtiStateSP"].getRtiStateSP();
         
         rti_threat_ahead = rti_state.getThreatAhead();
