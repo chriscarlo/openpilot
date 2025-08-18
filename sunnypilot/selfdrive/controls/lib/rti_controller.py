@@ -15,7 +15,7 @@ from openpilot.common.swaglog import cloudlog
 # Speed safety constants
 MIN_OPERATING_SPEED = 2.24  # 5 mph in m/s - minimum speed for RTI operation
 MAX_DECEL_RATE = -2.0  # Maximum deceleration rate in m/s² for threat response
-THREAT_ACTIVATION_DISTANCE = 1000  # Maximum distance to consider threats (meters)
+# Note: THREAT_ACTIVATION_DISTANCE now uses RTIForwardSlowdownRange parameter
 THREAT_NEAR_DISTANCE = 300  # Distance threshold for near threats (meters)
 THREAT_CRITICAL_DISTANCE = 100  # Distance threshold for critical threats (meters)
 
@@ -49,10 +49,53 @@ class RTIController:
         self._a_ego = 0.0
         self._v_cruise = V_CRUISE_UNSET
 
+        # Load user-configured parameters
+        self._load_user_params()
+
         # Update counters for logging
         self._update_counter = 0
 
         cloudlog.info("RTI Controller initialized")
+
+    def _load_user_params(self) -> None:
+        """Load user-configured RTI parameters."""
+        # Get forward slowdown range (when to activate RTI for threats ahead)
+        forward_range = self.params.get("RTIForwardSlowdownRange")
+        if forward_range:
+            try:
+                self._threat_activation_distance = float(forward_range)
+            except (ValueError, TypeError):
+                self._threat_activation_distance = 1207  # Default 0.75 miles
+        else:
+            self._threat_activation_distance = 1207  # Default 0.75 miles
+
+        # Get resume speed distance (when to stop slowing after passing threat)
+        resume_distance = self.params.get("RTIResumeSpeedDistance")
+        if resume_distance:
+            try:
+                self._resume_speed_distance = float(resume_distance)
+            except (ValueError, TypeError):
+                self._resume_speed_distance = 805  # Default 0.5 miles
+        else:
+            self._resume_speed_distance = 805  # Default 0.5 miles
+
+        # Get speed reduction settings
+        speed_mode = self.params.get("RTISpeedReductionMode")
+        if speed_mode:
+            self._speed_reduction_mode = speed_mode.decode('utf-8') if isinstance(speed_mode, bytes) else str(speed_mode)
+        else:
+            self._speed_reduction_mode = "posted"
+
+        # Get custom speed reduction amount
+        speed_reduction = self.params.get("RTISpeedReduction")
+        if speed_reduction:
+            try:
+                speed_reduction_kmh = float(speed_reduction)
+                self._custom_speed_reduction_ms = speed_reduction_kmh / 3.6  # Convert km/h to m/s
+            except (ValueError, TypeError):
+                self._custom_speed_reduction_ms = 4.4  # Default 10 mph in m/s
+        else:
+            self._custom_speed_reduction_ms = 4.4  # Default 10 mph in m/s
 
     def update(self, sm: messaging.SubMaster, v_ego: float, a_ego: float, v_cruise: float) -> None:
         """
@@ -102,36 +145,53 @@ class RTIController:
         Args:
             rti_state: RTI state message from rtiStateSP service
         """
-        # Check if there's a valid threat ahead
-        if not rti_state.threatAhead or rti_state.threatDistanceM <= 0:
+        # Process all threats to handle both ahead and behind cases
+        if len(rti_state.threats) == 0:
+            self._reset_state()
+            return
+
+        # Find relevant threats based on direction and distance
+        relevant_threat = None
+        for threat in rti_state.threats:
+            threat_distance = threat.distance
+            threat_direction = threat.direction
+            
+            # Check threats ahead within activation distance
+            if threat_direction == 'ahead' and threat_distance <= self._threat_activation_distance:
+                if relevant_threat is None or threat_distance < relevant_threat.distance:
+                    relevant_threat = threat
+            
+            # Check threats behind within resume distance (continue slowing until past resume distance)
+            elif threat_direction == 'behind' and threat_distance <= self._resume_speed_distance:
+                # We recently passed this threat, continue speed control
+                if relevant_threat is None or threat_distance < relevant_threat.distance:
+                    relevant_threat = threat
+
+        # No relevant threats found
+        if relevant_threat is None:
             self._reset_state()
             return
 
         # Store threat information
-        self._threat_ahead = True
-        self._threat_distance = rti_state.threatDistanceM
+        self._threat_ahead = (relevant_threat.direction == 'ahead')
+        self._threat_distance = relevant_threat.distance
+        self._threat_direction = relevant_threat.direction
+        self._threat_type = relevant_threat.type
+        self._confidence = relevant_threat.confidence
 
-        # Only activate if threat is within activation distance
-        if self._threat_distance > THREAT_ACTIVATION_DISTANCE:
-            self._reset_state()
-            return
-
-        # Get threat details if available
-        if len(rti_state.threats) > 0:
-            closest_threat = rti_state.threats[0]  # First threat is closest
-            self._threat_type = closest_threat.type
-            self._confidence = closest_threat.confidence
-
-            # Use threat's speed limit if available
-            if closest_threat.speedLimitMs > 0:
-                target_speed = closest_threat.speedLimitMs
+        # Determine target speed based on threat and user settings
+        if self._speed_reduction_mode == "posted" and relevant_threat.speedLimitMs > 0:
+            # Use posted speed limit from threat
+            target_speed = relevant_threat.speedLimitMs
+        elif self._speed_reduction_mode == "custom":
+            # Apply custom speed reduction from current cruise speed
+            if self._v_cruise > 0:
+                target_speed = self._v_cruise - self._custom_speed_reduction_ms
             else:
-                # Fall back to RTI's recommended speed
                 target_speed = rti_state.recommendedSpeed
         else:
-            # Use general recommendation if no detailed threats
+            # Fall back to RTI's recommended speed
             target_speed = rti_state.recommendedSpeed
-            self._confidence = 0.8  # Default confidence
 
         # Calculate safe speed based on threat distance
         safe_speed = self._calculate_safe_speed(target_speed)

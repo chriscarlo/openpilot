@@ -124,8 +124,8 @@ class RTIDaemon:
                 return cruise_state.speedCluster
         return 0.0
 
-    async def _process_cycle(self):
-        """Main processing cycle: fetch → detect → publish."""
+    async def _process_cycle_async(self):
+        """Non-blocking version of process cycle that stores state for continuous publishing."""
         current_time = time.time()
 
         try:
@@ -135,8 +135,8 @@ class RTIDaemon:
             cruise_cluster_speed = self._get_cruise_cluster_speed()
 
             if location is None:
-                # No valid GPS - publish offline state
-                self._publish_offline_state()
+                # No valid GPS - store offline state
+                self._last_processed_state = None
                 return
 
             # Check if we need to fetch new API data (rate limited!)
@@ -156,8 +156,21 @@ class RTIDaemon:
                 if should_fetch:
                     try:
                         cloudlog.info(f"RTI fetching new API data (last fetch {current_time - self.last_api_fetch_time:.1f}s ago)")
+                        # Use user-configured detection radius for API fetch
+                        # Convert meters to km for API call
+                        detection_radius = self.params.get("RTIDetectionRadius")
+                        if detection_radius:
+                            try:
+                                radius_m = float(detection_radius)
+                            except (ValueError, TypeError):
+                                radius_m = 3218  # Default 2 miles in meters
+                        else:
+                            radius_m = 3218  # Default 2 miles in meters
+                        
+                        radius_km = radius_m / 1000.0  # Convert to km
+                        
                         traffic_data = await self.waze_client.get_traffic_alerts(
-                            location[0], location[1], 16.0  # 10 mile radius
+                            location[0], location[1], radius_km
                         )
                         # Update cache
                         self.cached_traffic_data = traffic_data
@@ -195,30 +208,12 @@ class RTIDaemon:
             rti_state.api_status = api_status
             rti_state.source = 'waze'
 
-            # Publish RTI state
-            try:
-                self._publish_rti_state(rti_state)
-            except Exception as msg_e:
-                cloudlog.error(f"RTI failed to publish state: {msg_e}")
-                raise  # Re-raise to trigger offline state handling
-
-            self.loop_count += 1
-            if self.loop_count % 60 == 0:  # Log status every minute
-                # Get cache statistics if available
-                cache_stats = self.waze_client.cache.get_stats() if self.waze_client else {}
-                cache_info = f", Cache: {cache_stats.get('entries', 0)} items, {cache_stats.get('memory_mb', 0):.1f}MB" if cache_stats else ""
-
-                api_calls_per_hour = 3600 / self.api_fetch_interval if self.api_fetch_interval > 0 else 0
-                cloudlog.info(f"RTI processed {self.loop_count} cycles, "
-                             f"API: {api_status}, Location: {location}, "
-                             f"Data age: {data_age:.0f}s, API calls/hr: {api_calls_per_hour:.0f}{cache_info}")
+            # Store the processed state for continuous republishing
+            self._last_processed_state = rti_state
 
         except Exception as e:
             cloudlog.error(f"RTI cycle error: {e}")
-            try:
-                self._publish_offline_state()
-            except Exception as msg_e:
-                cloudlog.error(f"RTI failed to publish offline state: {msg_e}")
+            self._last_processed_state = None
 
     def _publish_rti_state(self, rti_state):
         """Publish RTI state message."""
@@ -270,6 +265,10 @@ class RTIDaemon:
     async def run(self):
         """Main daemon loop running at 50Hz to match test script."""
         cloudlog.info("RTI Daemon starting main loop")
+        
+        # Initialize last published state to ensure continuous publishing
+        last_rti_state = None
+        last_publish_time = 0
 
         try:
             while True:
@@ -279,7 +278,7 @@ class RTIDaemon:
                 self.enabled = self._check_enabled()
 
                 if not self.enabled:
-                    # Publish disabled state and sleep
+                    # Publish disabled state continuously at 50Hz
                     try:
                         self._publish_offline_state()
                     except Exception as msg_e:
@@ -287,8 +286,34 @@ class RTIDaemon:
                     await asyncio.sleep(0.02)
                     continue
 
-                # Process RTI cycle
-                await self._process_cycle()
+                # Process RTI cycle (non-blocking)
+                current_time = time.time()
+                
+                # CRITICAL FIX: Always publish something at 50Hz to keep updated() flag true
+                # This matches the continuous_rti_test.py behavior that works 100%
+                
+                # If we have cached state and haven't processed recently, republish last state
+                if last_rti_state and (current_time - last_publish_time) >= 0.019:  # ~50Hz
+                    # Update timestamp to current time for freshness
+                    last_rti_state.timestamp = int(current_time * 1e9)
+                    try:
+                        self._publish_rti_state(last_rti_state)
+                        last_publish_time = current_time
+                    except Exception as msg_e:
+                        cloudlog.error(f"RTI failed to republish state: {msg_e}")
+
+                # Process new data if it's time (separate from publishing)
+                await self._process_cycle_async()
+                
+                # If we got new state from processing, update our cache
+                if hasattr(self, '_last_processed_state') and self._last_processed_state:
+                    last_rti_state = self._last_processed_state
+                    # Publish the new state immediately
+                    try:
+                        self._publish_rti_state(last_rti_state)
+                        last_publish_time = time.time()
+                    except Exception as msg_e:
+                        cloudlog.error(f"RTI failed to publish new state: {msg_e}")
 
                 # Maintain 50Hz loop timing to match test script
                 loop_duration = time.time() - loop_start

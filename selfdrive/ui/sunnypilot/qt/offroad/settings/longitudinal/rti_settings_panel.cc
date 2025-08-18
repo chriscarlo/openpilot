@@ -420,7 +420,7 @@ void RTISettingsPanel::setupMainLayout() {
     tr("Detection Radius"),
     tr("Display threats within this radius around your vehicle for situational awareness (360° coverage)"),
     "RTIDetectionRadius",
-    0.25f, 3.0f, 0.25f, 2.0f, "mi",
+    0.25f, 5.0f, 0.25f, 2.0f, "mi",  // Changed max from 3.0 to 5.0 miles
     this
   );
   rangeLayout->addWidget(detectionRadiusControl);

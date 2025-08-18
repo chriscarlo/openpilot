@@ -228,19 +228,43 @@ class SpeedRecommendationEngine:
         params = Params()
 
         # Get forward slowdown range (when to start slowing for threats ahead)
+        # Stored in meters in params, default 0.75 miles = 1207 meters
         forward_range = params.get("RTIForwardSlowdownRange")
-        self.ahead_distance_threshold_m = float(forward_range) if forward_range else 10000  # Temp 10km for testing
+        if forward_range:
+            try:
+                self.ahead_distance_threshold_m = float(forward_range)
+            except (ValueError, TypeError):
+                self.ahead_distance_threshold_m = 1207  # Default 0.75 miles
+        else:
+            self.ahead_distance_threshold_m = 1207  # Default 0.75 miles
 
         # Get resume speed distance (when to resume normal speed after passing)
+        # Stored in meters in params, default 0.5 miles = 805 meters
         resume_distance = params.get("RTIResumeSpeedDistance")
-        self.behind_distance_threshold_m = float(resume_distance) if resume_distance else 805  # Default 0.5 miles
+        if resume_distance:
+            try:
+                self.behind_distance_threshold_m = float(resume_distance)
+            except (ValueError, TypeError):
+                self.behind_distance_threshold_m = 805  # Default 0.5 miles
+        else:
+            self.behind_distance_threshold_m = 805  # Default 0.5 miles
 
         # Get speed reduction settings
         self.speed_reduction_mode = params.get("RTISpeedReductionMode")
-        self.speed_reduction_mode = self.speed_reduction_mode.decode('utf-8') if self.speed_reduction_mode else "posted"
+        if self.speed_reduction_mode:
+            self.speed_reduction_mode = self.speed_reduction_mode.decode('utf-8') if isinstance(self.speed_reduction_mode, bytes) else str(self.speed_reduction_mode)
+        else:
+            self.speed_reduction_mode = "posted"
 
+        # Get custom speed reduction (stored in km/h, default 16 km/h = ~10 mph)
         speed_reduction = params.get("RTISpeedReduction")
-        speed_reduction_kmh = float(speed_reduction) if speed_reduction else 16  # Default 10 mph
+        if speed_reduction:
+            try:
+                speed_reduction_kmh = float(speed_reduction)
+            except (ValueError, TypeError):
+                speed_reduction_kmh = 16  # Default 10 mph
+        else:
+            speed_reduction_kmh = 16  # Default 10 mph
         self.speed_reduction_ms = speed_reduction_kmh / 3.6  # Convert km/h to m/s
 
         self.default_speed_limit_ms = 25  # 55 mph default when unknown
@@ -271,7 +295,7 @@ class SpeedRecommendationEngine:
             # Apply distance thresholds based on direction
             max_distance = (self.ahead_distance_threshold_m if threat.direction == 'ahead'
                           else self.behind_distance_threshold_m if threat.direction == 'behind'
-                          else 10000)  # Temp: allow left/right threats for testing
+                          else self.detection_radius_m)  # Use detection radius for left/right threats (situational awareness)
 
             if threat.distance <= max_distance and threat.direction in ['ahead', 'behind', 'left', 'right']:
                 relevant_threats.append(threat)
@@ -336,13 +360,26 @@ class ThreatDetector:
         params = Params()
 
         # Get detection radius (for HUD display of all threats within radius)
+        # Stored in meters in params, default 2 miles = 3218 meters
         detection_radius = params.get("RTIDetectionRadius")
-        self.detection_radius_m = float(detection_radius) if detection_radius else 3218  # Default 2 miles
+        if detection_radius:
+            try:
+                self.detection_radius_m = float(detection_radius)
+            except (ValueError, TypeError):
+                self.detection_radius_m = 3218  # Default 2 miles
+        else:
+            self.detection_radius_m = 3218  # Default 2 miles
 
         # Get threat filter settings
         # 0 = All, 1 = Police Only, 2 = Speed Cameras Only, 3 = Hazards Only, 4 = Custom
         threat_filter = params.get("RTIThreatFilter")
-        self.threat_filter = int(threat_filter) if threat_filter else 0
+        if threat_filter:
+            try:
+                self.threat_filter = int(threat_filter)
+            except (ValueError, TypeError):
+                self.threat_filter = 0  # Default to all threats
+        else:
+            self.threat_filter = 0  # Default to all threats
 
         # Performance tracking
         self.last_process_time = 0
