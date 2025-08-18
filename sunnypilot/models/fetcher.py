@@ -5,7 +5,6 @@ This file is part of sunnypilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 """
 
-import json
 import time
 
 import requests
@@ -63,7 +62,9 @@ class ModelParser:
     model_bundle.status = 0
     model_bundle.generation = int(bundle["generation"])
     model_bundle.environment = bundle["environment"]
-    model_bundle.runner = bundle.get("runner", custom.ModelManagerSP.Runner.snpe)
+    # Default to stock runner when unspecified to match chubbs-ssh-only behavior
+    # Using SNPE as a default can start the wrong modeld and break calibration.
+    model_bundle.runner = bundle.get("runner", custom.ModelManagerSP.Runner.stock)
     model_bundle.is20hz = bundle.get("is_20hz", False)
     model_bundle.minimumSelectorVersion = int(bundle["minimum_selector_version"])
     model_bundle.overrides = ModelParser._parse_overrides(bundle.get("overrides", {}))
@@ -88,8 +89,8 @@ class ModelCache:
   def _is_expired(self) -> bool:
     """Checks if the cache has expired"""
     current_time = int(time.monotonic() * 1e9)
-    last_sync = int(self.params.get(self._LAST_SYNC_KEY, encoding="utf-8") or 0)
-    return last_sync == 0 or (current_time - last_sync) >= self.cache_timeout
+    last_sync = self.params.get(self._LAST_SYNC_KEY) or 0
+    return bool(last_sync == 0) or (current_time - last_sync) >= self.cache_timeout
 
   def get(self) -> tuple[dict, bool]:
     """
@@ -98,19 +99,19 @@ class ModelCache:
     If no cached data exists or on error, returns an empty dict
     """
     try:
-      cached_data = self.params.get(self._CACHE_KEY, encoding="utf-8")
+      cached_data = self.params.get(self._CACHE_KEY)
       if not cached_data:
         cloudlog.warning("No cached model data available")
         return {}, True
-      return json.loads(cached_data), self._is_expired()
+      return cached_data, self._is_expired()
     except Exception as e:
       cloudlog.exception(f"Error retrieving cached model data: {str(e)}")
       return {}, True
 
   def set(self, data: dict) -> None:
     """Updates the cache with new model data"""
-    self.params.put(self._CACHE_KEY, json.dumps(data))
-    self.params.put(self._LAST_SYNC_KEY, str(int(time.monotonic() * 1e9)))
+    self.params.put(self._CACHE_KEY, data)
+    self.params.put(self._LAST_SYNC_KEY, int(time.monotonic() * 1e9))
 
 
 class ModelFetcher:

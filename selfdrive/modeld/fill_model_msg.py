@@ -177,21 +177,7 @@ def fill_model_msg(base_msg: capnp._DynamicStructBuilder, extended_msg: capnp._D
 
 def fill_pose_msg(msg: capnp._DynamicStructBuilder, net_output_data: dict[str, np.ndarray],
                   vipc_frame_id: int, vipc_dropped_frames: int, timestamp_eof: int, live_calib_seen: bool) -> None:
-  # v12+ models don't require traditional calibration - bypass live_calib_seen requirement
-  bypass_calibration = False
-  try:
-    from openpilot.common.params import Params
-    params = Params()
-    if params.get_bool("DynamicModeldOutputs"):
-      bypass_calibration = True
-  except:
-    pass
-
-  # Fallback: check if model outputs indicate v12+ format (missing calibration data)
-  if not bypass_calibration:
-    bypass_calibration = 'wide_from_device_euler' not in net_output_data
-
-  msg.valid = (live_calib_seen or bypass_calibration) & (vipc_dropped_frames < 1)
+  msg.valid = live_calib_seen & (vipc_dropped_frames < 1)
   cameraOdometry = msg.cameraOdometry
 
   cameraOdometry.frameId = vipc_frame_id
@@ -199,16 +185,9 @@ def fill_pose_msg(msg: capnp._DynamicStructBuilder, net_output_data: dict[str, n
 
   cameraOdometry.trans = net_output_data['pose'][0,:3].tolist()
   cameraOdometry.rot = net_output_data['pose'][0,3:].tolist()
-  # v12 models may not output wide_from_device_euler - use zeros if missing
-  if 'wide_from_device_euler' in net_output_data:
-    cameraOdometry.wideFromDeviceEuler = net_output_data['wide_from_device_euler'][0,:].tolist()
-  else:
-    cameraOdometry.wideFromDeviceEuler = [0.0, 0.0, 0.0]  # Default to no rotation
+  cameraOdometry.wideFromDeviceEuler = net_output_data['wide_from_device_euler'][0,:].tolist()
   cameraOdometry.roadTransformTrans = net_output_data['road_transform'][0,:3].tolist()
   cameraOdometry.transStd = net_output_data['pose_stds'][0,:3].tolist()
   cameraOdometry.rotStd = net_output_data['pose_stds'][0,3:].tolist()
-  if 'wide_from_device_euler_stds' in net_output_data:
-    cameraOdometry.wideFromDeviceEulerStd = net_output_data['wide_from_device_euler_stds'][0,:].tolist()
-  else:
-    cameraOdometry.wideFromDeviceEulerStd = [0.1, 0.1, 0.1]  # Default uncertainty
+  cameraOdometry.wideFromDeviceEulerStd = net_output_data['wide_from_device_euler_stds'][0,:].tolist()
   cameraOdometry.roadTransformTransStd = net_output_data['road_transform_stds'][0,:3].tolist()
