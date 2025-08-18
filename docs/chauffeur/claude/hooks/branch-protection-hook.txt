@@ -1,0 +1,48 @@
+# Branch Protection Hook for Chauffeur Development
+# This hook prevents accidental branch switches during development
+
+## Hook Configuration (add to .claude/settings.json):
+
+```json
+{
+  "hooks": {
+    "tool-invocation": {
+      "bash": {
+        "script": "#!/bin/bash\ncommand=\"$1\"\nif [[ \"$command\" =~ ^git[[:space:]]+(checkout|switch|merge|rebase|pull|fetch.*--set-upstream|branch.*-[mM]) ]] && \n   [[ ! \"$command\" =~ ^git[[:space:]]+(checkout[[:space:]]+-[bB]|branch[[:space:]]+-[dD]|branch[[:space:]]+(--list|-l|-a|-r)) ]]; then\n  echo \"🚫 BRANCH PROTECTION ACTIVE: This command would change the current branch.\"\n  echo \"\"\n  echo \"The Chauffeur project is locked to branch 'chauffeur-dev2' to maintain:\"\n  echo \"• Feature development consistency\"\n  echo \"• Codebase integrity\"\n  echo \"• Prevention of accidental branch switches\"\n  echo \"\"\n  echo \"Blocked command: $command\"\n  echo \"\"\n  echo \"If you need to view other branches, use:\"\n  echo \"• git log origin/<branch> --oneline\"\n  echo \"• git diff chauffeur-dev2..origin/<branch>\"\n  echo \"• git show origin/<branch>:path/to/file\"\n  echo \"\"\n  echo \"To disable this protection, remove the hook from .claude/settings.json\"\n  exit 1\nfi\nexit 0",
+        "blocking": true
+      }
+    }
+  }
+}
+```
+
+## What This Hook Does:
+
+1. **Blocks these git commands:**
+   - `git checkout` (except with -b for new branches)
+   - `git switch`
+   - `git merge`
+   - `git rebase`
+   - `git pull`
+   - `git fetch` with --set-upstream
+   - `git branch` with -m or -M (rename/move)
+
+2. **Allows these git commands:**
+   - `git checkout -b` (creating new branches)
+   - `git branch -d` (deleting branches)
+   - `git branch --list` (listing branches)
+   - All read-only operations (log, diff, show, status, etc.)
+
+## Installation:
+
+1. Create or edit `.claude/settings.json` in your project root
+2. Add the hook configuration shown above
+3. The hook will immediately prevent branch switches
+
+## Testing:
+
+Try running `git checkout <any-branch>` and you should see the protection message.
+
+## Disabling:
+
+Remove the hook section from `.claude/settings.json` to disable protection.
