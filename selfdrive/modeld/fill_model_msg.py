@@ -177,7 +177,21 @@ def fill_model_msg(base_msg: capnp._DynamicStructBuilder, extended_msg: capnp._D
 
 def fill_pose_msg(msg: capnp._DynamicStructBuilder, net_output_data: dict[str, np.ndarray],
                   vipc_frame_id: int, vipc_dropped_frames: int, timestamp_eof: int, live_calib_seen: bool) -> None:
-  msg.valid = live_calib_seen & (vipc_dropped_frames < 1)
+  # v12+ models don't require traditional calibration - bypass live_calib_seen requirement
+  bypass_calibration = False
+  try:
+    from openpilot.common.params import Params
+    params = Params()
+    if params.get_bool("DynamicModeldOutputs"):
+      bypass_calibration = True
+  except:
+    pass
+
+  # Fallback: check if model outputs indicate v12+ format (missing calibration data)
+  if not bypass_calibration:
+    bypass_calibration = 'wide_from_device_euler' not in net_output_data
+
+  msg.valid = (live_calib_seen or bypass_calibration) & (vipc_dropped_frames < 1)
   cameraOdometry = msg.cameraOdometry
 
   cameraOdometry.frameId = vipc_frame_id
