@@ -5,6 +5,7 @@ This file is part of sunnypilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 """
 
+import json
 import time
 
 import requests
@@ -89,7 +90,8 @@ class ModelCache:
   def _is_expired(self) -> bool:
     """Checks if the cache has expired"""
     current_time = int(time.monotonic() * 1e9)
-    last_sync = self.params.get(self._LAST_SYNC_KEY) or 0
+    last_sync_str = self.params.get(self._LAST_SYNC_KEY)
+    last_sync = int(last_sync_str) if last_sync_str else 0
     return bool(last_sync == 0) or (current_time - last_sync) >= self.cache_timeout
 
   def get(self) -> tuple[dict, bool]:
@@ -99,10 +101,11 @@ class ModelCache:
     If no cached data exists or on error, returns an empty dict
     """
     try:
-      cached_data = self.params.get(self._CACHE_KEY)
-      if not cached_data:
+      cached_data_str = self.params.get(self._CACHE_KEY)
+      if not cached_data_str:
         cloudlog.warning("No cached model data available")
         return {}, True
+      cached_data = json.loads(cached_data_str)
       return cached_data, self._is_expired()
     except Exception as e:
       cloudlog.exception(f"Error retrieving cached model data: {str(e)}")
@@ -110,8 +113,8 @@ class ModelCache:
 
   def set(self, data: dict) -> None:
     """Updates the cache with new model data"""
-    self.params.put(self._CACHE_KEY, data)
-    self.params.put(self._LAST_SYNC_KEY, int(time.monotonic() * 1e9))
+    self.params.put(self._CACHE_KEY, json.dumps(data))
+    self.params.put(self._LAST_SYNC_KEY, str(int(time.monotonic() * 1e9)))
 
 
 class ModelFetcher:
