@@ -25,7 +25,7 @@ LOW_ACTIVE_SPEED = 10.0
 
 
 class VehicleParamsLearner:
-  def __init__(self, CP: car.CarParams, steer_ratio: float, stiffness_factor: float, angle_offset: float, P_initial: np.ndarray | None = None):
+  def __init__(self, CP: car.CarParams, steer_ratio: float, stiffness_factor: float, angle_offset: float, P_initial: np.ndarray | None = None, base_steer_ratio: float | None = None):
     self.kf = CarKalman(GENERATED_DIR)
 
     self.x_initial = CarKalman.initial_x.copy()
@@ -43,7 +43,9 @@ class VehicleParamsLearner:
       stiffness_rear=CP.tireStiffnessRear
     )
 
-    self.min_sr, self.max_sr = 0.5 * CP.steerRatio, 2.0 * CP.steerRatio
+    # Use base_steer_ratio for bounds if provided, otherwise use CP.steerRatio
+    bounds_steer_ratio = base_steer_ratio if base_steer_ratio is not None else CP.steerRatio
+    self.min_sr, self.max_sr = 0.5 * bounds_steer_ratio, 2.0 * bounds_steer_ratio
 
     self.calibrator = PoseCalibrator()
 
@@ -221,7 +223,18 @@ def retrieve_initial_vehicle_params(params: Params, CP: car.CarParams, replay: b
   last_parameters_data = params.get("LiveParametersV2")
   last_carparams_data = params.get("CarParamsPrevRoute")
 
-  steer_ratio, stiffness_factor, angle_offset_deg, p_initial = CP.steerRatio, 1.0, 0.0, None
+  # Check for live steering ratio override from GUI
+  live_steer_ratio_param = params.get("LiveSteerRatio")
+  live_steer_ratio = 0.0
+  if live_steer_ratio_param:
+    try:
+      live_steer_ratio = float(live_steer_ratio_param.decode('utf-8'))
+    except (ValueError, AttributeError):
+      live_steer_ratio = 0.0
+
+  # Use live steering ratio if set (non-zero), otherwise use car default
+  base_steer_ratio = live_steer_ratio if live_steer_ratio > 0.0 else CP.steerRatio
+  steer_ratio, stiffness_factor, angle_offset_deg, p_initial = base_steer_ratio, 1.0, 0.0, None
 
   retrieve_success = False
   if last_parameters_data is not None and last_carparams_data is not None:
@@ -233,7 +246,7 @@ def retrieve_initial_vehicle_params(params: Params, CP: car.CarParams, replay: b
           raise Exception("Car model mismatch")
 
         # Check if starting values are sane
-        min_sr, max_sr = 0.5 * CP.steerRatio, 2.0 * CP.steerRatio
+        min_sr, max_sr = 0.5 * base_steer_ratio, 2.0 * base_steer_ratio
         steer_ratio_sane = min_sr <= lp.steerRatio <= max_sr
         if not steer_ratio_sane:
           raise Exception(f"Invalid starting values found {lp}")
@@ -256,7 +269,7 @@ def retrieve_initial_vehicle_params(params: Params, CP: car.CarParams, replay: b
   if not retrieve_success:
     cloudlog.info("Parameter learner resetting to default values")
 
-  return steer_ratio, stiffness_factor, angle_offset_deg, p_initial
+  return steer_ratio, stiffness_factor, angle_offset_deg, p_initial, base_steer_ratio
 
 
 def main():
@@ -273,8 +286,8 @@ def main():
 
   migrate_cached_vehicle_params_if_needed(params)
 
-  steer_ratio, stiffness_factor, angle_offset_deg, pInitial = retrieve_initial_vehicle_params(params, CP, REPLAY, DEBUG)
-  learner = VehicleParamsLearner(CP, steer_ratio, stiffness_factor, np.radians(angle_offset_deg), pInitial)
+  steer_ratio, stiffness_factor, angle_offset_deg, pInitial, base_steer_ratio = retrieve_initial_vehicle_params(params, CP, REPLAY, DEBUG)
+  learner = VehicleParamsLearner(CP, steer_ratio, stiffness_factor, np.radians(angle_offset_deg), pInitial, base_steer_ratio)
 
   while True:
     sm.update()

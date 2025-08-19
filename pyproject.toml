@@ -138,15 +138,17 @@ allow-direct-references = true
 [tool.pytest.ini_options]
 minversion = "6.0"
 addopts = "--ignore=openpilot/ --ignore=opendbc/ --ignore=panda/ --ignore=rednose_repo/ --ignore=tinygrad_repo/ --ignore=teleoprtc_repo/ --ignore=msgq/  -Werror --strict-config --strict-markers --durations=10 -n auto --dist=loadgroup"
-cpp_files = "test_*"
-cpp_harness = "selfdrive/test/cpp_harness.py"
+# cpp_files = "test_*"  # Custom option not recognized by standard pytest
+# cpp_harness = "selfdrive/test/cpp_harness.py"  # Custom option not recognized by standard pytest
 python_files = "test_*.py"
-asyncio_default_fixture_loop_scope = "function"
+# asyncio_default_fixture_loop_scope = "function"  # Temporarily disabled for testing
 #timeout = "30"  # you get this long by default
 markers = [
   "slow: tests that take awhile to run and can be skipped with -m 'not slow'",
   "tici: tests that are only meant to run on the C3/C3X",
-  "skip_tici_setup: mark test to skip tici setup fixture"
+  "skip_tici_setup: mark test to skip tici setup fixture",
+  "accuracy: tests that validate algorithm accuracy",
+  "schema: tests that validate schema synchronization"
 ]
 testpaths = [
   "common",

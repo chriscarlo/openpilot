@@ -64,6 +64,11 @@ class Soundd(QuietMode):
 
     self.selfdrive_timeout_alert = False
 
+    # RTI audio alert state
+    self.rti_audio_enabled = False
+    self.rti_threat_alerted = False
+    self.last_rti_check = 0
+
     self.spl_filter_weighted = FirstOrderFilter(0, 2.5, FILTER_DT, initialized=False)
 
   def load_sounds(self):
@@ -114,6 +119,26 @@ class Soundd(QuietMode):
       self.current_sound_frame = 0
 
   def get_audible_alert(self, sm):
+    # Check RTI audio alerts first (only once per second)
+    current_time = time.monotonic()
+    if current_time - self.last_rti_check >= 1.0:
+      self.last_rti_check = current_time
+      self.rti_audio_enabled = self.params.get_bool("RTIAudioAlerts")
+
+    # Process RTI threats if enabled
+    if self.rti_audio_enabled and sm.updated.get('rtiStateSP', False):
+      try:
+        rti_state = sm['rtiStateSP']
+        # Alert when a new threat appears ahead
+        if rti_state.threatAhead and not self.rti_threat_alerted:
+          self.update_alert(AudibleAlert.promptDistracted)  # Use a noticeable alert
+          self.rti_threat_alerted = True
+        elif not rti_state.threatAhead and self.rti_threat_alerted:
+          self.rti_threat_alerted = False
+      except Exception as e:
+        cloudlog.error(f"RTI audio alert error: {e}")
+
+    # Regular alert processing
     if sm.updated['selfdriveState']:
       new_alert = sm['selfdriveState'].alertSound.raw
       self.update_alert(new_alert)
@@ -139,7 +164,7 @@ class Soundd(QuietMode):
     # sounddevice must be imported after forking processes
     import sounddevice as sd
 
-    sm = messaging.SubMaster(['selfdriveState', 'soundPressure'])
+    sm = messaging.SubMaster(['selfdriveState', 'soundPressure', 'rtiStateSP'])
 
     with self.get_stream(sd) as stream:
       rk = Ratekeeper(20)

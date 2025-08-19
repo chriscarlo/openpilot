@@ -23,6 +23,7 @@ protected:
   void drawText(QPainter &p, int x, int y, const QString &text, int alpha = 255);
   void drawSpeedLimitSigns(QPainter &p, const QRect &rect);
   void drawVisionTurnControl(QPainter &p, const QRect &surface_rect);
+  void drawLateralAccelMeter(QPainter &p, const QRect &widget_rect, float lateral_accel);
   QColor interpColor(float x, const std::vector<float> &x_vals, const std::vector<QColor> &colors);
 
   // Additional drawing methods from implementation
@@ -57,6 +58,7 @@ protected:
   float vtsc_current_lateral_accel = 0.0;
   float vtsc_max_predicted_lateral_accel = 0.0;
   bool show_vtsc = false;
+  bool show_vtsc_prev = false;  // For hysteresis
 
   float speed = 0;
   float set_speed = 0;

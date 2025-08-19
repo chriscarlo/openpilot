@@ -240,17 +240,13 @@ void ElidedLabelSP::paintEvent(QPaintEvent *event) {
 
 // ParamControlSP
 
-ParamControlSP::ParamControlSP(const QString &param, const QString &title, const QString &desc, const QString &icon, QWidget *parent, bool advancedControl)
-    : ToggleControlSP(title, desc, icon, false, parent, advancedControl){
+ParamControlSP::ParamControlSP(const QString &param, const QString &title, const QString &desc, const QString &icon, QWidget *parent, bool advancedControl, bool needsAlignment)
+    : ToggleControlSP(title, desc, icon, false, parent, advancedControl, needsAlignment){
 
   key = param.toStdString();
   QObject::connect(this, &ParamControlSP::toggleFlipped, this, &ParamControlSP::toggleClicked);
-
-  hlayout->removeWidget(&toggle);
-  hlayout->insertWidget(0, &toggle);
-
-  hlayout->removeWidget(this->icon_label);
-  hlayout->insertWidget(1, this->icon_label);
+  
+  // Alignment is now handled in ToggleControlSP constructor based on needsAlignment parameter
 }
 
 void ParamControlSP::toggleClicked(bool state) {

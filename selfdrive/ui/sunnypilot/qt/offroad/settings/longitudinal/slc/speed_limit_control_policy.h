@@ -32,7 +32,7 @@ private:
     QString map_only = tr("⦿ Map Only: Use Speed Limit data only from OpenStreetMaps");
     QString car_first = tr("⦿ Car First: Use Speed Limit data from Car if available, else use from OpenStreetMaps");
     QString map_first = tr("⦿ Map First: Use Speed Limit data from OpenStreetMaps if available, else use from Car");
-    QString combined = tr("⦿ Combined: Use combined Speed Limit data from Car & OpenStreetMaps");
+    QString combined = tr("⦿ Combined: Use HIGHER Speed Limit between Car & OpenStreetMaps data");
 
     if (type == SLCSourcePolicy::CAR_ONLY) {
       car_only = "<font color='white'><b>" + car_only + "</b></font>";

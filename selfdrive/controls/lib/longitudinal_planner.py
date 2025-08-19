@@ -138,13 +138,14 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
         else:
           # Fallback to stock if vibe controller returns None
           accel_clip = [ACCEL_MIN, get_max_accel(v_ego)]
-        # Recalculate limit turn according to the new max limit
-        steer_angle_without_offset = sm['carState'].steeringAngleDeg - sm['liveParameters'].angleOffsetDeg
-        accel_clip = limit_accel_in_turns(v_ego, steer_angle_without_offset, accel_clip, self.CP)
+        # VTSC: Disabled turn acceleration limiting - conflicts with Vision Turn Speed Controller
+        # steer_angle_without_offset = sm['carState'].steeringAngleDeg - sm['liveParameters'].angleOffsetDeg
+        # accel_clip = limit_accel_in_turns(v_ego, steer_angle_without_offset, accel_clip, self.CP)
       else:
         accel_clip = [ACCEL_MIN, get_max_accel(v_ego)]
-        steer_angle_without_offset = sm['carState'].steeringAngleDeg - sm['liveParameters'].angleOffsetDeg
-        accel_clip = limit_accel_in_turns(v_ego, steer_angle_without_offset, accel_clip, self.CP)
+        # VTSC: Disabled turn acceleration limiting - conflicts with Vision Turn Speed Controller
+        # steer_angle_without_offset = sm['carState'].steeringAngleDeg - sm['liveParameters'].angleOffsetDeg
+        # accel_clip = limit_accel_in_turns(v_ego, steer_angle_without_offset, accel_clip, self.CP)
     else:
       # For mode != 'acc' ('blended')
       if self.vibe_controller.is_accel_enabled():

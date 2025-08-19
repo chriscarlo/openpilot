@@ -12,6 +12,8 @@
 #include <string>
 #include <vector>
 
+#include <QHBoxLayout>
+
 #include "common/params.h"
 #include "selfdrive/ui/qt/widgets/controls.h"
 #include "selfdrive/ui/qt/widgets/input.h"
@@ -160,17 +162,33 @@ class ToggleControlSP : public AbstractControlSP {
   Q_OBJECT
 
 public:
-  ToggleControlSP(const QString &title, const QString &desc = "", const QString &icon = "", const bool state = false, QWidget *parent = nullptr, bool advancedControl = false) : AbstractControlSP(title, desc, icon, parent, advancedControl) {
-    // space between toggle and title
+  ToggleControlSP(const QString &title, const QString &desc = "", const QString &icon = "", const bool state = false, QWidget *parent = nullptr, bool advancedControl = false, bool needsAlignment = false) : AbstractControlSP(title, desc, icon, parent, advancedControl) {
+    // Create icon label for compatibility
     icon_label = new QLabel(this);
-    hlayout->addWidget(icon_label);
-
+    
+    // Create a container for toggle (matches layout of controls with settings buttons)
+    controls_container = new QWidget(this);
+    controls_layout = new QHBoxLayout(controls_container);
+    controls_layout->setContentsMargins(0, 0, 0, 0);
+    controls_layout->setSpacing(40);  // Increased spacing for better visual separation
+    
+    // Only add alignment widget for controls that need to align with settings buttons
+    if (needsAlignment) {
+      // Widget width = settings button width (120px) + 3px offset for perfect alignment
+      QWidget *alignment_widget = new QWidget(this);
+      alignment_widget->setFixedSize(123, 1);  // 3px wider than settings button for perfect toggle alignment
+      controls_layout->addWidget(alignment_widget);
+    }
+    
+    // Add toggle to the container
     toggle.setFixedSize(150, 100);
     if (state) {
       toggle.togglePosition();
     }
-    hlayout->insertWidget(0, &toggle);
-    hlayout->insertWidget(1, this->icon_label);
+    controls_layout->addWidget(&toggle);
+    
+    // Add the container to the main layout
+    hlayout->addWidget(controls_container);
     QObject::connect(&toggle, &ToggleSP::stateChanged, this, &ToggleControlSP::toggleFlipped);
   }
 
@@ -184,6 +202,9 @@ signals:
 
 protected:
   ToggleSP toggle;
+  QLabel *icon_label;
+  QWidget *controls_container;
+  QHBoxLayout *controls_layout;
 };
 
 // widget to toggle params
@@ -191,7 +212,7 @@ class ParamControlSP : public ToggleControlSP {
   Q_OBJECT
 
 public:
-  ParamControlSP(const QString &param, const QString &title, const QString &desc, const QString &icon, QWidget *parent = nullptr, bool advancedControl = false);
+  ParamControlSP(const QString &param, const QString &title, const QString &desc, const QString &icon, QWidget *parent = nullptr, bool advancedControl = false, bool needsAlignment = true);
   void setConfirmation(bool _confirm, bool _store_confirm) {
     confirm = _confirm;
     store_confirm = _store_confirm;

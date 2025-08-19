@@ -16,10 +16,19 @@
 #define BACKLIGHT_TS 10.00
 
 void update_sockets(UIState *s) {
+  // Skip socket updates if running locally
+  if (getenv("OPENPILOT_UI_LOCAL")) {
+    return;
+  }
   s->sm->update(0);
 }
 
 void update_state(UIState *s) {
+  // Skip state updates if running locally
+  if (getenv("OPENPILOT_UI_LOCAL") || !s->sm) {
+    return;
+  }
+  
   SubMaster &sm = *(s->sm);
   UIScene &scene = s->scene;
 
@@ -119,7 +128,7 @@ UIState::UIState(QObject *parent) : QObject(parent) {
     "modelV2", "controlsState", "liveCalibration", "radarState", "deviceState",
     "pandaStates", "carParams", "driverMonitoringState", "carState", "driverStateV2",
     "wideRoadCameraState", "managerState", "selfdriveState", "longitudinalPlan",
-    "liveMapDataSP","longitudinalPlanSP",
+    "liveMapDataSP", "longitudinalPlanSP", "rtiStateSP",
   });
   prime_state = new PrimeState(this);
   language = QString::fromStdString(Params().get("LanguageSetting"));
@@ -137,6 +146,12 @@ void UIState::update() {
   update_sockets(this);
   update_state(this);
   updateStatus();
+
+  // Force onroad mode if environment variable is set
+  if (getenv("FORCE_ONROAD_UI") && !scene.started) {
+    scene.started = true;
+    scene.started_frame = sm->frame;
+  }
 
   if (sm->frame % UI_FREQ == 0) {
     watchdog_kick(nanos_since_boot());

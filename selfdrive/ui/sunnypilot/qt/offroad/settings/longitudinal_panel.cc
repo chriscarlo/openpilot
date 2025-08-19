@@ -43,7 +43,7 @@ LongitudinalPanel::LongitudinalPanel(QWidget *parent) : QWidget(parent) {
     tr("Vibe Personality Controller"),
     tr("Advanced driving personality system with separate controls for acceleration behavior (Eco/Normal/Sport) and following distance/braking (Relaxed/Standard/Aggressive). "
       "Customize your driving experience with independent acceleration and distance personalities."),
-    "../assets/offroad/icon_shell.png");
+    "../assets/offroad/icon_shell.png", nullptr, false, false);
   list->addItem(vibePersonalityControl);
 
   connect(vibePersonalityControl, &ParamControlSP::toggleFlipped, [=]() {
@@ -55,7 +55,7 @@ LongitudinalPanel::LongitudinalPanel(QWidget *parent) : QWidget(parent) {
     tr("Acceleration Personality"),
     tr("Controls acceleration behavior: Eco (efficient), Normal (balanced), Sport (responsive). "
       "Adjust how aggressively the vehicle accelerates while maintaining smooth operation."),
-    "../assets/offroad/icon_shell.png");
+    "../assets/offroad/icon_shell.png", nullptr, false, false);
   list->addItem(vibeAccelPersonalityControl);
 
   // Vibe Following Distance Personality
@@ -63,55 +63,60 @@ LongitudinalPanel::LongitudinalPanel(QWidget *parent) : QWidget(parent) {
     tr("Following Distance Personality"),
     tr("Controls following distance and braking behavior: Relaxed (longer distance, gentler braking), Standard (balanced), Aggressive (shorter distance, firmer braking). "
       "Fine-tune your comfort level in traffic situations."),
-    "../assets/offroad/icon_shell.png");
+    "../assets/offroad/icon_shell.png", nullptr, false, false);
   list->addItem(vibeFollowPersonalityControl);
 
   main_layout->addWidget(cruisePanelScreen);
   main_layout->setCurrentWidget(cruisePanelScreen);
-  refresh(offroad);
+  // Moved refresh() call to end of constructor after all controls are initialized
 
-  slcControl = new SpeedLimitControl(
-    "SpeedLimitControl",
-    tr("Speed Limit Control (SLC)"),
-    tr("When you engage ACC, you will be prompted to set the cruising speed to the speed limit of the road adjusted by the Offset and Source Policy specified, or the current driving speed. "
-      "The maximum cruising speed will always be the MAX set speed."),
-    "",
-    this);
+  slcControl = new SpeedLimitControl(this);
   list->addItem(slcControl);
 
-  dynamicExperimentalControl = new ParamControlSP("DynamicExperimentalControl",
-    tr("Enable Dynamic Experimental Control"),
-    tr("Enable toggle to allow the model to determine when to use sunnypilot ACC or sunnypilot End to End Longitudinal."),
-    "../assets/offroad/icon_blank.png");
-  list->addItem(dynamicExperimentalControl);
-  PushButtonSP *decManageRectBtn = new PushButtonSP(tr("Customize DEC"), 800, this);
-  list->addItem(decManageRectBtn);
+  // RTI Control
+  rtiControl = new RTIControl(this);
+  list->addItem(rtiControl);
 
-  connect(decManageRectBtn, &QPushButton::clicked, [=]() {
-    cruisePanelScroller->setLastScrollPosition();
-    main_layout->setCurrentWidget(decScreen);
-  });
+  // DEC Control
+  decControl = new DecControl(this);
+  list->addItem(decControl);
 
-  connect(dynamicExperimentalControl, &ParamControlSP::toggleFlipped, [=](bool enabled) {
-    decManageRectBtn->setVisible(enabled);
-  });
-
-  bool decEnabled = params.getBool("DynamicExperimentalControl");
-  decManageRectBtn->setVisible(decEnabled);
-
-  visionTurnSpeedControl = new ParamControlSP("VisionTurnSpeedControl",
+  visionTurnSpeedControl = new VisionTurnControlWithSettings("VisionTurnSpeedControl",
     tr("Vision Turn Speed Controller"),
     tr("Also known as V-TSC, this controller automatically slows down for curvature while OP longitudinal is engaged."),
     "../assets/offroad/icon_shell.png");
+  visionTurnSpeedControl->showDescription();
   list->addItem(visionTurnSpeedControl);
+  
+  // Connect VTSC settings button
+  connect(visionTurnSpeedControl, &VisionTurnControlWithSettings::settingsClicked, [=]() {
+    cruisePanelScroller->setLastScrollPosition();
+    main_layout->setCurrentWidget(vtscSettingsScreen);
+  });
 
-  connect(slcControl, &SpeedLimitControl::slcSettingsButtonClicked, [=]() {
+  connect(slcControl, &SpeedLimitControl::settingsClicked, [=]() {
     cruisePanelScroller->setLastScrollPosition();
     main_layout->setCurrentWidget(slcScreen);
   });
 
+  connect(rtiControl, &RTIControl::settingsClicked, [=]() {
+    cruisePanelScroller->setLastScrollPosition();
+    main_layout->setCurrentWidget(rtiSettingsScreen);
+  });
+  
+  connect(decControl, &DecControl::settingsClicked, [=]() {
+    cruisePanelScroller->setLastScrollPosition();
+    main_layout->setCurrentWidget(decScreen);
+  });
+
   slcScreen = new SpeedLimitControlSubpanel(this);
   connect(slcScreen, &SpeedLimitControlSubpanel::backPress, [=]() {
+    cruisePanelScroller->restoreScrollPosition();
+    main_layout->setCurrentWidget(cruisePanelScreen);
+  });
+
+  rtiSettingsScreen = new RTISettingsPanel(this);
+  connect(rtiSettingsScreen, &RTISettingsPanel::backPress, [=]() {
     cruisePanelScroller->restoreScrollPosition();
     main_layout->setCurrentWidget(cruisePanelScreen);
   });
@@ -121,11 +126,34 @@ LongitudinalPanel::LongitudinalPanel(QWidget *parent) : QWidget(parent) {
     cruisePanelScroller->restoreScrollPosition();
     main_layout->setCurrentWidget(cruisePanelScreen);
   });
+  
+  // Create VTSC settings screens
+  vtscSettingsScreen = new VTSCSettingsPanel(this);
+  connect(vtscSettingsScreen, &VTSCSettingsPanel::backPress, [=]() {
+    cruisePanelScroller->restoreScrollPosition();
+    main_layout->setCurrentWidget(cruisePanelScreen);
+  });
+  
+  anticipationDistanceScreen = new AnticipationConfigPanel(this);
+  connect(anticipationDistanceScreen, &AnticipationConfigPanel::backPress, [=]() {
+    main_layout->setCurrentWidget(vtscSettingsScreen);
+  });
+  
+  // Connect VTSC settings panel to anticipation distance screen
+  connect(vtscSettingsScreen, &VTSCSettingsPanel::anticipationSettingsClicked, [=]() {
+    main_layout->setCurrentWidget(anticipationDistanceScreen);
+  });
 
   main_layout->addWidget(cruisePanelScreen);
   main_layout->addWidget(slcScreen);
+  main_layout->addWidget(rtiSettingsScreen);
   main_layout->addWidget(decScreen);
+  main_layout->addWidget(vtscSettingsScreen);
+  main_layout->addWidget(anticipationDistanceScreen);
   main_layout->setCurrentWidget(cruisePanelScreen);
+  
+  // Call refresh after all controls are initialized to avoid null pointer dereference
+  refresh(offroad);
 }
 
 void LongitudinalPanel::showEvent(QShowEvent *event) {
@@ -187,15 +215,12 @@ void LongitudinalPanel::refresh(bool _offroad) {
   vibePersonalityControl->setEnabled(true);
   vibeAccelPersonalityControl->setEnabled(true);
   vibeFollowPersonalityControl->setEnabled(true);
+  
+  // Refresh VTSC toggle state
+  visionTurnSpeedControl->refresh();
   vibePersonalityControl->refresh();
   vibeAccelPersonalityControl->refresh();
   vibeFollowPersonalityControl->refresh();
-
-  // Refresh DEC manage button
-  if (decManageBtn) {
-    bool decEnabled = params.getBool("DynamicExperimentalControl");
-    decManageBtn->setVisible(decEnabled);
-  }
 
   offroad = _offroad;
 }

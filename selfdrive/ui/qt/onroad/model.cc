@@ -1,6 +1,11 @@
 #include "selfdrive/ui/qt/onroad/model.h"
 
 void ModelRenderer::draw(QPainter &painter, const QRect &surface_rect) {
+  // Skip model drawing if in local mode
+  if (getenv("OPENPILOT_UI_LOCAL")) {
+    return;
+  }
+  
   auto *s = uiState();
   auto &sm = *(s->sm);
   // Check if data is up-to-date
@@ -10,13 +15,34 @@ void ModelRenderer::draw(QPainter &painter, const QRect &surface_rect) {
   }
 
   clip_region = surface_rect.adjusted(-CLIP_MARGIN, -CLIP_MARGIN, CLIP_MARGIN, CLIP_MARGIN);
-  experimental_mode = sm["selfdriveState"].getSelfdriveState().getExperimentalMode();
-  longitudinal_control = sm["carParams"].getCarParams().getOpenpilotLongitudinalControl();
-  path_offset_z = sm["liveCalibration"].getLiveCalibration().getHeight()[0];
+  // Only access selfdriveState if it's valid to prevent crash during startup
+  if (sm.valid("selfdriveState")) {
+    experimental_mode = sm["selfdriveState"].getSelfdriveState().getExperimentalMode();
+  }
+  // Only access carParams and liveCalibration if they're valid
+  if (sm.valid("carParams")) {
+    longitudinal_control = sm["carParams"].getCarParams().getOpenpilotLongitudinalControl();
+  }
+  if (sm.valid("liveCalibration")) {
+    path_offset_z = sm["liveCalibration"].getLiveCalibration().getHeight()[0];
+  }
 
   painter.save();
 
+  // Only access modelV2 if it's valid to prevent crash during startup
+  if (!sm.valid("modelV2")) {
+    painter.restore();
+    return;
+  }
+  
   const auto &model = sm["modelV2"].getModelV2();
+  
+  // Only access radarState if it's valid
+  if (!sm.valid("radarState")) {
+    painter.restore();
+    return;
+  }
+  
   const auto &radar_state = sm["radarState"].getRadarState();
   const auto &lead_one = radar_state.getLeadOne();
 

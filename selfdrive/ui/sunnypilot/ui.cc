@@ -19,6 +19,7 @@ UIStateSP::UIStateSP(QObject *parent) : UIState(parent) {
     "pandaStates", "carParams", "driverMonitoringState", "carState", "driverStateV2",
     "wideRoadCameraState", "managerState", "selfdriveState", "longitudinalPlan",
     "modelManagerSP", "selfdriveStateSP", "longitudinalPlanSP", "backupManagerSP", "carControl", "liveMapDataSP",
+    "rtiStateSP",  // RTI (Realtime Traffic Intelligence) state for threat display
   });
 
   // update timer
@@ -32,6 +33,12 @@ void UIStateSP::update() {
   update_sockets(this);
   update_state(this);
   updateStatus();
+
+  // Force onroad mode if environment variable is set
+  if (getenv("FORCE_ONROAD_UI") && !scene.started) {
+    scene.started = true;
+    scene.started_frame = sm->frame;
+  }
 
   if (sm->frame % UI_FREQ == 0) {
     watchdog_kick(nanos_since_boot());

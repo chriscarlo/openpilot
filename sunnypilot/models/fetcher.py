@@ -62,7 +62,9 @@ class ModelParser:
     model_bundle.status = 0
     model_bundle.generation = int(bundle["generation"])
     model_bundle.environment = bundle["environment"]
-    model_bundle.runner = bundle.get("runner", custom.ModelManagerSP.Runner.snpe)
+    # Default to stock runner when unspecified to match chubbs-ssh-only behavior
+    # Using SNPE as a default can start the wrong modeld and break calibration.
+    model_bundle.runner = bundle.get("runner", custom.ModelManagerSP.Runner.stock)
     model_bundle.is20hz = bundle.get("is_20hz", False)
     model_bundle.minimumSelectorVersion = int(bundle["minimum_selector_version"])
     model_bundle.overrides = ModelParser._parse_overrides(bundle.get("overrides", {}))

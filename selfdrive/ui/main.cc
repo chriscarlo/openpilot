@@ -3,6 +3,7 @@
 #include <QApplication>
 #include <QTranslator>
 
+#include "common/params.h"
 #include "system/hardware/hw.h"
 #include "selfdrive/ui/qt/util.h"
 #include "selfdrive/ui/qt/window.h"

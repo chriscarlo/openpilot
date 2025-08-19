@@ -2,7 +2,6 @@
 
 #include <QVBoxLayout>
 #include <memory>
-#include "selfdrive/ui/qt/onroad/driver_monitoring.h"
 #include "selfdrive/ui/qt/onroad/model.h"
 #include "selfdrive/ui/qt/widgets/cameraview.h"
 
@@ -28,7 +27,6 @@ public:
 private:
   QVBoxLayout *main_layout;
   ExperimentalButton *experimental_btn;
-  DriverMonitorRenderer dmon;
   HudRenderer hud;
   ModelRenderer model;
   std::unique_ptr<PubMaster> pm;

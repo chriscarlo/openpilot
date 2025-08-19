@@ -8,6 +8,12 @@ DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null && pwd )"
 ROOT="$DIR"/../
 cd "$ROOT"
 
+# On AGNOS/TICI, dependencies are pre-installed in /usr/local/venv
+if [ -f /AGNOS ]; then
+  echo "Running on AGNOS device - using pre-installed dependencies"
+  exit 0
+fi
+
 if ! command -v "uv" > /dev/null 2>&1; then
   echo "installing uv..."
   curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -20,6 +26,13 @@ echo "updating uv..."
 uv self update || true
 
 echo "installing python packages..."
+# Ensure we use Python 3.12 specifically for Cython module compatibility
+if command -v python3.12 > /dev/null 2>&1; then
+  echo "Using Python 3.12 for virtual environment..."
+  uv venv --python python3.12
+else
+  echo "WARNING: Python 3.12 not found, using default Python. This may cause Cython module compatibility issues."
+fi
 uv sync --frozen --all-extras
 source .venv/bin/activate
 

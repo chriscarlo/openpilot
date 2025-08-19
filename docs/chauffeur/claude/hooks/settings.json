@@ -1,0 +1,129 @@
+{
+  "env": {
+    "CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR": "true"
+  },
+  "model": "opus",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash /home/chris/.claude/prompt_inject.sh"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash /home/chris/.claude/session_start.sh"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /home/chris/.claude/track_tool.py"
+          },
+          {
+            "type": "command",
+            "command": "python3 /home/chris/.claude/behavioral_tracker_hook.py"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|MultiEdit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -c \"import sys, json; data = json.load(sys.stdin); dir = data['tool_input'].get('file_path', '.').rsplit('/', 1)[0]; import os; claude_md = os.path.join(dir, 'claude.md'); os.path.exists(claude_md) or open(claude_md, 'w').write('# Claude Instructions\\n\\nThis directory contains: [describe]\\n\\n## Key files:\\n- [list]\\n\\n## Patterns:\\n- [patterns]\\n'); os.path.exists(claude_md) and print(open(claude_md).read())\""
+          },
+          {
+            "type": "command",
+            "command": "python3 /home/chris/.claude/check_edit_read.py",
+            "blocking": true
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -c \"import sys, json; data = json.load(sys.stdin); cmd = data['tool_input'].get('command', ''); print(f'DEBUG: Bash hook running for command: {cmd}'); 'git commit' in cmd and print('\\n=== GIT COMMIT DETECTED ===\\nConsider running tests before committing!')\""
+          }
+        ]
+      },
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -c \"import sys, json, os; data = json.load(sys.stdin); file_path = data['tool_input'].get('file_path', ''); os.path.exists(file_path) and (print(f'STOP! File already exists: {file_path}\\nUse Edit or MultiEdit to modify existing files', file=sys.stderr), sys.exit(2))\""
+          }
+        ]
+      },
+      {
+        "matcher": "Read|Grep|LS|Glob",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /home/chris/.claude/track_read.py"
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__context7__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -c \"import sys, json, os, time; open(f'/tmp/claude_last_context7_{os.getppid()}', 'w').write(str(time.time())); print('✓ Context7 lookup recorded', file=sys.stderr)\""
+          }
+        ]
+      },
+      {
+        "matcher": "TodoWrite",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "touch /tmp/claude_session_plan_${PPID}.txt"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|MultiEdit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -c \"import sys, json, subprocess, os; data = json.load(sys.stdin); file = data['tool_input'].get('file_path', ''); print(f'HOOK RUNNING FOR: {file}', file=sys.stderr); os.environ['PATH'] += ':/home/chris/.local/bin'; file.endswith('.py') and subprocess.run(['bash', '-c', f'echo \\\"=== LINTING {file} ===\\\" >&2 && ruff check {file} 2>&1 && echo \\\"RUFF: OK\\\" >&2 || echo \\\"RUFF: ISSUES\\\" >&2'])\""
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -c \"import sys, json, subprocess; data = json.load(sys.stdin); file_path = data['tool_input'].get('file_path', ''); result = subprocess.run(['grep', '-E', '^[[:space:]]*(def |class )', file_path], capture_output=True, text=True); lines = result.stdout.strip().split('\\n') if result.stdout else []; from collections import Counter; funcs = [line.strip().split()[1].split('(')[0] for line in lines if line.strip()]; dups = [(name, count) for name, count in Counter(funcs).items() if count > 1]; dups and print(f'\\n=== DUPLICATE DEFINITIONS in {file_path} ===', file=sys.stderr) or None; [print(f'  {name} defined {count} times', file=sys.stderr) for name, count in dups]\""
+          }
+        ]
+      }
+    ]
+  },
+  "feedbackSurveyState": {
+    "lastShownTime": 1754496682639
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "bash /home/chris/.claude/statusline-command.sh"
+  }
+}

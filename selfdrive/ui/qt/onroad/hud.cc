@@ -3,6 +3,10 @@
 #include <cmath>
 #include <QPainterPath>
 
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 #include "selfdrive/ui/qt/util.h"
 
 constexpr int SET_SPEED_NA = 255;
@@ -37,6 +41,20 @@ void HudRenderer::updateState(const UIState &s) {
   is_metric = s.scene.is_metric;
   status = s.status;
 
+  // In local mode, provide default values
+  if (getenv("OPENPILOT_UI_LOCAL") || !s.sm) {
+    is_cruise_set = true;
+    set_speed = 60;  // Default cruise speed
+    speed = 55.5;    // Default current speed  
+    is_cruise_available = true;
+    v_ego_cluster_seen = true;
+    show_slc = false;
+    show_vtsc = false;
+    speed_limit_ahead_valid = false;
+    road_name = "Local Test Mode";
+    return;
+  }
+
   const SubMaster &sm = *(s.sm);
   if (sm.rcv_frame("carState") < s.scene.started_frame) {
     is_cruise_set = false;
@@ -45,43 +63,82 @@ void HudRenderer::updateState(const UIState &s) {
     return;
   }
 
+  // Only access core messages if they're valid to prevent crash during startup
+  if (!sm.valid("controlsState") || !sm.valid("carState")) {
+    return;
+  }
+  
   const auto &controls_state = sm["controlsState"].getControlsState();
   const auto &car_state = sm["carState"].getCarState();
-  const auto lp_sp = sm["longitudinalPlanSP"].getLongitudinalPlanSP();
-  const auto slc = lp_sp.getSlc();
-  const auto live_map_data = sm["liveMapDataSP"].getLiveMapDataSP();
 
-  // SLC state variables
-  slc_speed_limit = slc.getSpeedLimit() * (is_metric ? MS_TO_KPH : MS_TO_MPH);
-  slc_speed_offset = slc.getSpeedLimitOffset() * (is_metric ? MS_TO_KPH : MS_TO_MPH);
-  slc_state = slc.getState();
-  show_slc = slc_speed_limit > 0.0;
-
-  // Distance to speed limit change
-  dist_to_speed_limit = slc.getDistToSpeedLimit();
-
-  // Live map data for upcoming speed limits
-  speed_limit_ahead_valid = live_map_data.getSpeedLimitAheadValid();
-  if (speed_limit_ahead_valid) {
-    speed_limit_ahead = live_map_data.getSpeedLimitAhead() * (is_metric ? MS_TO_KPH : MS_TO_MPH);
-    speed_limit_ahead_distance = live_map_data.getSpeedLimitAheadDistance();
+  // SLC state variables - only if longitudinalPlanSP is valid
+  if (sm.valid("longitudinalPlanSP")) {
+    const auto lp_sp = sm["longitudinalPlanSP"].getLongitudinalPlanSP();
+    const auto slc = lp_sp.getSlc();
+    
+    slc_speed_limit = slc.getSpeedLimit() * (is_metric ? MS_TO_KPH : MS_TO_MPH);
+    slc_speed_offset = slc.getSpeedLimitOffset() * (is_metric ? MS_TO_KPH : MS_TO_MPH);
+    slc_state = slc.getState();
+    show_slc = slc_speed_limit > 0.0;
+    dist_to_speed_limit = slc.getDistToSpeedLimit();
+    
+    // Vision Turn Speed Control
+    const auto vtsc = lp_sp.getVisionTurnSpeedControl();
+    vtsc_state = static_cast<int>(vtsc.getState());
+    vtsc_velocity = vtsc.getVelocity() * (is_metric ? MS_TO_KPH : MS_TO_MPH);
+    vtsc_current_lateral_accel = vtsc.getCurrentLateralAccel();
+    vtsc_max_predicted_lateral_accel = vtsc.getMaxPredictedLateralAccel();
+  } else {
+    // Reset SLC/VTSC state if longitudinalPlanSP not valid
+    show_slc = false;
+    vtsc_state = 0;
+    vtsc_velocity = 0.0;
   }
 
-  // Road name
-  road_name = QString::fromStdString(live_map_data.getRoadName());
-
-  // Vision Turn Speed Control
-  const auto vtsc = lp_sp.getVisionTurnSpeedControl();
-  vtsc_state = static_cast<int>(vtsc.getState());
-  vtsc_velocity = vtsc.getVelocity() * (is_metric ? MS_TO_KPH : MS_TO_MPH);
-  vtsc_current_lateral_accel = vtsc.getCurrentLateralAccel();
-  vtsc_max_predicted_lateral_accel = vtsc.getMaxPredictedLateralAccel();
-  show_vtsc = vtsc_state != 0; // Show when not disabled
+  // Live map data for upcoming speed limits - only if liveMapDataSP is valid
+  if (sm.valid("liveMapDataSP")) {
+    const auto live_map_data = sm["liveMapDataSP"].getLiveMapDataSP();
+    
+    speed_limit_ahead_valid = live_map_data.getSpeedLimitAheadValid();
+    if (speed_limit_ahead_valid) {
+      speed_limit_ahead = live_map_data.getSpeedLimitAhead() * (is_metric ? MS_TO_KPH : MS_TO_MPH);
+      speed_limit_ahead_distance = live_map_data.getSpeedLimitAheadDistance();
+    }
+    road_name = QString::fromStdString(live_map_data.getRoadName());
+  } else {
+    // Reset map data if liveMapDataSP not valid
+    speed_limit_ahead_valid = false;
+    road_name = "";
+  }
 
   // Handle older routes where vCruiseCluster is not set
   set_speed = car_state.getVCruiseCluster() == 0.0 ? controls_state.getVCruiseDEPRECATED() : car_state.getVCruiseCluster();
   is_cruise_set = set_speed > 0 && set_speed != SET_SPEED_NA;
   is_cruise_available = set_speed != -1;
+
+  // Show VTSC widget with hysteresis to prevent flicker
+  // Entry threshold: 1 kph / 0.5 mph to activate
+  // Exit threshold: 0.2 kph / 0.1 mph to deactivate
+  float entry_threshold = is_metric ? 1.0f : 0.5f;
+  float exit_threshold = is_metric ? 0.2f : 0.1f;
+  
+  bool below_entry = (vtsc_velocity < set_speed - entry_threshold);
+  bool above_exit = (vtsc_velocity > set_speed - exit_threshold);
+  
+  // Apply hysteresis logic
+  if (!show_vtsc_prev && below_entry) {
+    // Entering: require larger delta to activate
+    show_vtsc = (vtsc_state != 0) && (vtsc_velocity > 0) && is_cruise_set;
+  } else if (show_vtsc_prev && !above_exit) {
+    // Staying active: maintain visibility with smaller threshold
+    show_vtsc = (vtsc_state != 0) && (vtsc_velocity > 0) && is_cruise_set;
+  } else {
+    // Exiting: deactivate when speed rises above exit threshold
+    show_vtsc = false;
+  }
+  
+  // Store current state for next frame
+  show_vtsc_prev = show_vtsc;
 
   if (is_cruise_set && !is_metric) {
     set_speed *= KM_TO_MILE;
@@ -143,10 +200,8 @@ void HudRenderer::draw(QPainter &p, const QRect &surface_rect) {
     drawRoadName(p, surface_rect);
   }
 
-  // Draw Vision Turn Speed Control if active
-  if (show_vtsc) {
-    drawVisionTurnControl(p, surface_rect);
-  }
+  // Always draw Vision Turn Speed Control widget (static bars always visible)
+  drawVisionTurnControl(p, surface_rect);
 
   drawCurrentSpeed(p, surface_rect);
 
@@ -496,76 +551,148 @@ void HudRenderer::drawText(QPainter &p, int x, int y, const QString &text, int a
 }
 
 void HudRenderer::drawVisionTurnControl(QPainter &p, const QRect &surface_rect) {
-  // Position below the current speed display
-  const int vtsc_width = 280;
-  const int vtsc_height = 120;
-  const int vtsc_x = (surface_rect.width() - vtsc_width) / 2;
-  const int vtsc_y = 350; // Below speed display
+  // Reduced width to 80% of original but keep styling and scaling
+  const int vtsc_width = 880;   // 1100 * 0.8 = 880
+  const int vtsc_height = 72;   // Keep height for styling
+  const int vtsc_x = (surface_rect.width() - vtsc_width) / 2;  // Center-aligned
+  const int vtsc_y = surface_rect.height() - vtsc_height - 15;
 
   QRect vtsc_rect(vtsc_x, vtsc_y, vtsc_width, vtsc_height);
 
-  // Determine state colors and text
-  QColor state_color;
-  QString state_text;
-  QColor bg_color = QColor(0, 0, 0, 180);
-
-  switch (vtsc_state) {
-    case 1: // entering
-      state_color = QColor(255, 200, 0, 255); // Orange
-      state_text = tr("TURN AHEAD");
-      bg_color = QColor(40, 30, 0, 200); // Dark orange tint
-      break;
-    case 2: // turning
-      state_color = QColor(255, 100, 100, 255); // Light red
-      state_text = tr("TURNING");
-      bg_color = QColor(40, 20, 20, 200); // Dark red tint
-      break;
-    case 3: // leaving
-      state_color = QColor(100, 255, 100, 255); // Light green
-      state_text = tr("TURN EXIT");
-      bg_color = QColor(20, 40, 20, 200); // Dark green tint
-      break;
-    default:
-      return; // Don't draw if disabled
-  }
-
-  // Draw background with subtle border
-  p.setPen(QPen(state_color, 2));
-  p.setBrush(bg_color);
-  p.drawRoundedRect(vtsc_rect, 16, 16);
-
-  // Draw state text
-  p.setFont(InterFont(32, QFont::Bold));
-  p.setPen(state_color);
-  p.drawText(vtsc_rect.adjusted(0, 10, 0, 0), Qt::AlignTop | Qt::AlignHCenter, state_text);
-
-  // Draw target velocity if significantly different from current speed
-  if (vtsc_velocity > 0 && std::abs(vtsc_velocity - speed) > 2.0) {
-    QString velocity_text = QString::number(std::nearbyint(vtsc_velocity)) + (is_metric ? " km/h" : " mph");
-    p.setFont(InterFont(24, QFont::DemiBold));
-    p.setPen(QColor(255, 255, 255, 200));
-    p.drawText(vtsc_rect.adjusted(0, 50, 0, 0), Qt::AlignTop | Qt::AlignHCenter, velocity_text);
-  }
-
-  // Draw lateral acceleration indicator (simplified)
-  if (vtsc_max_predicted_lateral_accel > 0.5) { // Only show for significant turns
-    QRect accel_rect = vtsc_rect.adjusted(10, vtsc_rect.height() - 25, -10, -10);
-
-    // Background bar
-    p.setPen(Qt::NoPen);
-    p.setBrush(QColor(60, 60, 60, 150));
-    p.drawRoundedRect(accel_rect, 4, 4);
-
-    // Current acceleration indicator
-    float accel_ratio = std::min(1.0f, std::abs(vtsc_current_lateral_accel) / 4.0f); // Scale to 4 m/s²
-    int current_width = static_cast<int>(accel_rect.width() * accel_ratio);
-    if (current_width > 0) {
-      QRect current_rect = accel_rect;
-      current_rect.setWidth(current_width);
-      QColor accel_color = interpColor(accel_ratio, {0.0f, 0.7f, 1.0f},
-                                      {QColor(100, 255, 100), QColor(255, 255, 100), QColor(255, 100, 100)});
-      p.setBrush(accel_color);
-      p.drawRoundedRect(current_rect, 4, 4);
+  // Calculate the actual meter dimensions for precise alignment
+  const int meter_margin = 60;
+  const int meter_top = 15;
+  const int meter_height = 42;
+  
+  // Calculate where the actual meter bars will be
+  QRect meter_rect = vtsc_rect.adjusted(meter_margin, meter_top, -meter_margin, -(vtsc_rect.height() - meter_top - meter_height));
+  
+  // Create background that VERY tightly hugs the meter bars
+  const int bg_padding = 4;  // Minimal padding - just 4px around the meter bars
+  QRect tight_rect = meter_rect.adjusted(-bg_padding, -bg_padding, bg_padding, bg_padding);
+  
+  // Gradient extends exactly 50% of bar height (21px) from all sides
+  const int gradient_extend = 21;  // Exactly 50% of 42px bar height
+  
+  p.setPen(Qt::NoPen);  // No border
+  
+  // Draw shadow layers for gradient effect with more aggressive initial fade
+  const int shadow_layers = 15;  // More layers for smoother gradient
+  
+  for (int i = shadow_layers - 1; i >= 0; --i) {
+    float t = static_cast<float>(i) / (shadow_layers - 1);
+    
+    // Ultra-aggressive initial falloff for tight gradient
+    float fade = 1.0f - t;
+    // Use power of 6 for even more aggressive falloff
+    fade = fade * fade * fade * fade * fade * fade;
+    
+    // Calculate this layer's expansion (exactly up to 21px)
+    float blur = t * gradient_extend;
+    
+    // Calculate alpha with ultra-aggressive falloff
+    int base_alpha = 115;  // Match header shade opacity
+    int layer_alpha = static_cast<int>(base_alpha * fade * 0.3f);  // More opacity per layer
+    
+    if (layer_alpha > 1) {
+      QRect shadow_rect = tight_rect.adjusted(-blur, -blur, blur, blur);
+      p.setBrush(QColor(0, 0, 0, layer_alpha));
+      // Smaller corner radius for tighter look
+      p.drawRoundedRect(shadow_rect, 12 + blur * 0.3f, 12 + blur * 0.3f);
     }
   }
+  
+  // Draw the main background - match header shade opacity (0.45 → 115 alpha)
+  p.setBrush(QColor(0, 0, 0, 115));  // Match header shade opacity
+  p.drawRoundedRect(tight_rect, 12, 12);  // Smaller corner radius
+
+  // Draw bidirectional lateral acceleration meter - use original vtsc_rect for positioning
+  drawLateralAccelMeter(p, vtsc_rect, vtsc_current_lateral_accel);
+}
+
+void HudRenderer::drawLateralAccelMeter(QPainter &p, const QRect &widget_rect, float lateral_accel) {
+  // Adjust for the widget border and background, with proportional spacing
+  const int meter_margin = 60; // Increased margin for larger widget
+  const int meter_top = 15; // Account for border
+  const int meter_height = 42; // Proportionally taller bars
+  
+  QRect meter_rect = widget_rect.adjusted(meter_margin, meter_top, -meter_margin, -(widget_rect.height() - meter_top - meter_height));
+  
+  const int meter_width = meter_rect.width();
+  const int center_x = meter_rect.x() + meter_width / 2;
+  const float max_accel = 3.0f; // Maximum lateral acceleration for display
+  const int max_bar_width = meter_width / 2 - 10; // Leave 10px margin from edges
+  
+  // Always draw static inactive bars on BOTH sides - these are ALWAYS visible
+  p.setPen(Qt::NoPen);
+  
+  // Left side static bar (for right turns) - always visible as inactive
+  QRect left_static_rect(meter_rect.x() + 12, meter_rect.top() + 3, 
+                        center_x - meter_rect.x() - 18, meter_rect.height() - 6);
+  p.setBrush(QColor(114, 114, 114, 75)); // Match Max Speed widget gray tone
+  p.drawRoundedRect(left_static_rect, 6, 6);
+  
+  // Right side static bar (for left turns) - always visible as inactive
+  QRect right_static_rect(center_x + 6, meter_rect.top() + 3, 
+                         meter_rect.right() - center_x - 18, meter_rect.height() - 6);
+  p.setBrush(QColor(114, 114, 114, 75)); // Match Max Speed widget gray tone
+  p.drawRoundedRect(right_static_rect, 6, 6);
+  
+  // Draw center line (zero point) 
+  p.setPen(QPen(QColor(255, 255, 255, 150), 3));
+  p.drawLine(center_x, meter_rect.top(), center_x, meter_rect.bottom());
+  
+  // Draw reference marks at ±1.0 and ±2.0 m/s²
+  p.setPen(QPen(QColor(255, 255, 255, 100), 1));
+  for (float ref_accel : {-2.0f, -1.0f, 1.0f, 2.0f}) {
+    int mark_x = center_x + static_cast<int>((ref_accel / max_accel) * max_bar_width);
+    if (mark_x > meter_rect.left() && mark_x < meter_rect.right()) {
+      p.drawLine(mark_x, meter_rect.top() + 5, mark_x, meter_rect.bottom() - 5);
+    }
+  }
+  
+  // Only draw active bar overlay when there's actual lateral acceleration
+  float clamped_accel = std::max(-max_accel, std::min(max_accel, lateral_accel));
+  float accel_magnitude = std::abs(clamped_accel);
+  
+  // Only show active bar when acceleration exceeds minimum threshold (0.1 m/s²)
+  if (accel_magnitude > 0.1f) {
+    float accel_ratio = accel_magnitude / max_accel;
+    int bar_width = static_cast<int>(accel_ratio * max_bar_width);
+    
+    if (bar_width > 3) { // Only draw if meaningful width
+    // FIX: INVERT the direction logic
+    // Left turn (positive accel) = passenger pushed RIGHT = bar on RIGHT side
+    // Right turn (negative accel) = passenger pushed LEFT = bar on LEFT side
+    // BUT the sign convention is inverted, so we need to flip it
+    bool draw_on_right = (clamped_accel < 0); // INVERTED: negative accel = left turn = right bar
+    
+    int bar_x = draw_on_right ? center_x + 5 : (center_x - bar_width - 5);
+    QRect active_bar_rect(bar_x, meter_rect.top() + 2, bar_width, meter_rect.height() - 4);
+    
+    // New color gradient: green -> yellow -> orange -> red
+    QColor bar_color;
+    if (accel_magnitude <= 1.0f) { // 0-1.0 m/s² = Green
+      bar_color = QColor(0, 255, 0, 200);
+    } else if (accel_magnitude <= 1.5f) { // 1.0-1.5 m/s² = Yellow
+      float t = (accel_magnitude - 1.0f) / 0.5f;
+      bar_color = interpColor(t, {0.0f, 1.0f},
+                             {QColor(0, 255, 0, 200), QColor(255, 255, 0, 200)});
+    } else if (accel_magnitude <= 2.0f) { // 1.5-2.0 m/s² = Orange
+      float t = (accel_magnitude - 1.5f) / 0.5f;
+      bar_color = interpColor(t, {0.0f, 1.0f},
+                             {QColor(255, 255, 0, 200), QColor(255, 165, 0, 200)});
+    } else { // 2.0+ m/s² = Red
+      float t = std::min(1.0f, (accel_magnitude - 2.0f) / 1.0f);
+      bar_color = interpColor(t, {0.0f, 1.0f},
+                             {QColor(255, 165, 0, 200), QColor(255, 0, 0, 220)});
+    }
+    
+    p.setPen(Qt::NoPen);
+    p.setBrush(bar_color);
+    p.drawRoundedRect(active_bar_rect, 6, 6); // Match static bar corner radius
+    }
+  }
+  
+  // No labels - clean minimalist look
 }

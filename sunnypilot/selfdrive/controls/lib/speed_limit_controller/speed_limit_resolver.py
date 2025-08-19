@@ -108,12 +108,35 @@ class SpeedLimitResolver:
       for source in sources_for_policy:
         if self._limit_solutions[source] > 0.:
           return Source(source)
-
-    limits = np.array([self._limit_solutions[source] for source in sources_for_policy], dtype=float)
-    sources = np.array([source.value for source in sources_for_policy], dtype=int)
-
-    if len(limits) > 0:
-      min_idx = np.argmin(limits)
-      return Source(sources[min_idx])
+    else:
+      # Combined mode: 
+      # 1. If both values are same AND non-zero, prefer map_data
+      # 2. If values differ, use the HIGHER one
+      # 3. If only one is available, use that one
+      # 4. If none available, return None
+      
+      car_state_limit = self._limit_solutions[Source.car_state]
+      map_data_limit = self._limit_solutions[Source.map_data]
+      
+      # Case: Both are zero - no valid sources
+      if car_state_limit == 0 and map_data_limit == 0:
+        return None
+      
+      # Case: Only one source has data
+      if car_state_limit > 0 and map_data_limit == 0:
+        return Source.car_state
+      if map_data_limit > 0 and car_state_limit == 0:
+        return Source.map_data
+      
+      # Case: Both sources have data
+      if car_state_limit > 0 and map_data_limit > 0:
+        # If equal, prefer map_data
+        if abs(car_state_limit - map_data_limit) < 0.01:  # Use small epsilon for float comparison
+          return Source.map_data
+        # Otherwise, return the higher one
+        elif car_state_limit > map_data_limit:
+          return Source.car_state
+        else:
+          return Source.map_data
 
     return None

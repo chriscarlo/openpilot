@@ -69,6 +69,19 @@ function launch {
   ln -sfn $(pwd) /data/pythonpath
   export PYTHONPATH="$PWD"
 
+  # ensure we have the correct Python environment set up
+  # On TICI, use the system venv at /usr/local/venv
+  if [ -f /AGNOS ] && [ -d /usr/local/venv ]; then
+    export VIRTUAL_ENV=/usr/local/venv
+    export PATH="$VIRTUAL_ENV/bin:$PATH"
+  elif [ ! -f "$DIR/.venv/bin/activate" ]; then
+    echo "Setting up Python environment..."
+    $DIR/tools/install_python_dependencies.sh
+    source "$DIR/.venv/bin/activate"
+  else
+    source "$DIR/.venv/bin/activate"
+  fi
+
   # hardware specific init
   if [ -f /AGNOS ]; then
     agnos_init
