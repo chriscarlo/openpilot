@@ -7,8 +7,8 @@
   .max_torque = (steer), \
   .max_rate_up = (rate_up), \
   .max_rate_down = (rate_down), \
-  .max_rt_delta = (rt_delta), \
-  .driver_torque_allowance = (driver_allowance), \
+  .max_rt_delta = 336, \
+  .driver_torque_allowance = 50, \
   .driver_torque_multiplier = 2, \
   .type = TorqueDriverLimited, \
    /* the EPS faults when the steering angle is above a certain threshold for too long. to prevent this, */ \
@@ -21,8 +21,8 @@
 
 extern const LongitudinalLimits HYUNDAI_LONG_LIMITS;
 const LongitudinalLimits HYUNDAI_LONG_LIMITS = {
-  .max_accel = 200,   // 1/100 m/s2
-  .min_accel = -350,  // 1/100 m/s2
+  .max_accel = 550,   // 1/100 m/s2 (= 5.5 m/s^2)
+  .min_accel = -650,  // 1/100 m/s2 (= -6.5 m/s^2)
 };
 
 #define HYUNDAI_COMMON_TX_MSGS(scc_bus) \

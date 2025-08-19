@@ -14,8 +14,8 @@ Ecu = CarParams.Ecu
 
 
 class CarControllerParams:
-  ACCEL_MIN = -3.5 # m/s
-  ACCEL_MAX = 2.0 # m/s
+  ACCEL_MIN = -6.0 # m/s
+  ACCEL_MAX = 5.0 # m/s
 
   def __init__(self, CP):
     self.STEER_DELTA_UP = 4
@@ -27,19 +27,19 @@ class CarControllerParams:
     self.STEER_STEP = 1  # 100 Hz
 
     if CP.flags & HyundaiFlags.CANFD:
-      self.STEER_MAX = 330
-      self.STEER_DRIVER_ALLOWANCE = 350
+      self.STEER_MAX = 409
+      self.STEER_DRIVER_ALLOWANCE = 250
       self.STEER_DRIVER_MULTIPLIER = 2
-      self.STEER_THRESHOLD = 300
-      self.STEER_DELTA_UP = 3
-      self.STEER_DELTA_DOWN = 3
+      self.STEER_THRESHOLD = 250
+      self.STEER_DELTA_UP = 7
+      self.STEER_DELTA_DOWN = 9
 
     # To determine the limit for your car, find the maximum value that the stock LKAS will request.
     # If the max stock LKAS request is <384, add your car to this list.
     elif CP.carFingerprint in (CAR.GENESIS_G80, CAR.HYUNDAI_ELANTRA, CAR.HYUNDAI_ELANTRA_GT_I30, CAR.HYUNDAI_IONIQ,
                                CAR.HYUNDAI_IONIQ_EV_LTD, CAR.HYUNDAI_SANTA_FE_PHEV_2022, CAR.HYUNDAI_SONATA_LF, CAR.KIA_FORTE, CAR.KIA_NIRO_PHEV,
                                CAR.KIA_OPTIMA_H, CAR.KIA_OPTIMA_H_G4_FL, CAR.KIA_SORENTO):
-      self.STEER_MAX = 330
+      self.STEER_MAX = 255
 
     # these cars have significantly more torque than most HKG; limit to 70% of max
     elif CP.flags & HyundaiFlags.ALT_LIMITS:
@@ -94,6 +94,8 @@ class HyundaiFlags(IntFlag):
   # these cars use a different gas signal
   HYBRID = 2 ** 10
   EV = 2 ** 11
+
+  # (Speed limit dashboard flags omitted here to avoid bit conflicts in this fork)
 
   # Static flags
 
@@ -529,7 +531,7 @@ class CAR(Platforms):
       HyundaiCarDocs("Kia EV6 (without HDA II) 2022-24", "Highway Driving Assist", car_parts=CarParts.common([CarHarness.hyundai_l])),
       HyundaiCarDocs("Kia EV6 (with HDA II) 2022-24", "Highway Driving Assist II", car_parts=CarParts.common([CarHarness.hyundai_p]))
     ],
-    CarSpecs(mass=2055, wheelbase=2.9, steerRatio=16, tireStiffnessFactor=0.65),
+    CarSpecs(mass=2055, wheelbase=2.9, steerRatio=13.43, tireStiffnessFactor=0.65),
     flags=HyundaiFlags.EV,
   )
   KIA_CARNIVAL_4TH_GEN = HyundaiCanFDPlatformConfig(
