@@ -2,3 +2,10 @@
 
 # LFS tracking removed - all files are now vendored directly in the repository
 # Previously tracked file types: onnx, svg, png, gif, ttf, wav, and various binaries
+# Integration assist: prefer A's vendored repos during merges
+# Keep A (chubbs-ssh-nosubmodules) versions for vendored subtrees
+opendbc_repo/** merge=ours
+rednose_repo/** merge=ours
+teleoprtc_repo/** merge=ours
+tinygrad_repo/** merge=ours
+msgq_repo/** merge=ours
