@@ -5,6 +5,7 @@
 #include <vector>
 
 #include <QDebug>
+#include <QTimer>
 
 #include "common/watchdog.h"
 #include "common/util.h"
@@ -177,7 +178,9 @@ void TogglesPanel::scrollToToggle(const QString &param) {
 }
 
 void TogglesPanel::showEvent(QShowEvent *event) {
-  updateToggles();
+  qInfo() << "TogglesPanel::showEvent - scheduling update";
+  // Defer heavy param parsing to avoid blocking tab switch on UI thread
+  QTimer::singleShot(0, this, &TogglesPanel::updateToggles);
 }
 
 void TogglesPanel::updateToggles() {
@@ -195,44 +198,61 @@ void TogglesPanel::updateToggles() {
                                   .arg(tr("New Driving Visualization"))
                                   .arg(tr("The driving visualization will transition to the road-facing wide-angle camera at low speeds to better show some turns. The Experimental mode logo will also be shown in the top right corner."));
 
+  qInfo() << "TogglesPanel::updateToggles - begin";
   const bool is_release = params.getBool("IsReleaseBranch");
+
+  // On desktop preview sessions, avoid heavy parsing of CarParams
+  if (getenv("OPENPILOT_UI_LOCAL")) {
+    experimental_mode_toggle->setDescription(e2e_description);
+    experimental_mode_toggle->setEnabled(false);
+    long_personality_setting->setEnabled(false);
+    accel_personality_setting->setEnabled(true);
+    qInfo() << "TogglesPanel::updateToggles - OPENPILOT_UI_LOCAL, skipping CarParams parsing";
+    return;
+  }
   auto cp_bytes = params.get("CarParamsPersistent");
   if (!cp_bytes.empty()) {
-    AlignedBuffer aligned_buf;
-    capnp::FlatArrayMessageReader cmsg(aligned_buf.align(cp_bytes.data(), cp_bytes.size()));
-    cereal::CarParams::Reader CP = cmsg.getRoot<cereal::CarParams>();
+    try {
+      AlignedBuffer aligned_buf;
+      capnp::FlatArrayMessageReader cmsg(aligned_buf.align(cp_bytes.data(), cp_bytes.size()));
+      cereal::CarParams::Reader CP = cmsg.getRoot<cereal::CarParams>();
 
-    if (hasLongitudinalControl(CP)) {
-      // normal description and toggle
-      experimental_mode_toggle->setEnabled(true);
-      experimental_mode_toggle->setDescription(e2e_description);
-      long_personality_setting->setEnabled(true);
-      accel_personality_setting->setEnabled(true);
-    } else {
-      // no long for now
-      experimental_mode_toggle->setEnabled(false);
-      long_personality_setting->setEnabled(false);
-      accel_personality_setting->setEnabled(true);
-      params.remove("ExperimentalMode");
+      if (hasLongitudinalControl(CP)) {
+        // normal description and toggle
+        experimental_mode_toggle->setEnabled(true);
+        experimental_mode_toggle->setDescription(e2e_description);
+        long_personality_setting->setEnabled(true);
+        accel_personality_setting->setEnabled(true);
+      } else {
+        // no long for now
+        experimental_mode_toggle->setEnabled(false);
+        long_personality_setting->setEnabled(false);
+        accel_personality_setting->setEnabled(true);
+        params.remove("ExperimentalMode");
 
-      const QString unavailable = tr("Experimental mode is currently unavailable on this car since the car's stock ACC is used for longitudinal control.");
+        const QString unavailable = tr("Experimental mode is currently unavailable on this car since the car's stock ACC is used for longitudinal control.");
 
-      QString long_desc = unavailable + " " + \
-                          tr("openpilot longitudinal control may come in a future update.");
-      if (CP.getAlphaLongitudinalAvailable()) {
-        if (is_release) {
-          long_desc = unavailable + " " + tr("An alpha version of sunnypilot longitudinal control can be tested, along with Experimental mode, on non-release branches.");
-        } else {
-          long_desc = tr("Enable the sunnypilot longitudinal control (alpha) toggle to allow Experimental mode.");
+        QString long_desc = unavailable + " " + \
+                            tr("openpilot longitudinal control may come in a future update.");
+        if (CP.getAlphaLongitudinalAvailable()) {
+          if (is_release) {
+            long_desc = unavailable + " " + tr("An alpha version of sunnypilot longitudinal control can be tested, along with Experimental mode, on non-release branches.");
+          } else {
+            long_desc = tr("Enable the sunnypilot longitudinal control (alpha) toggle to allow Experimental mode.");
+          }
         }
+        experimental_mode_toggle->setDescription("<b>" + long_desc + "</b><br><br>" + e2e_description);
       }
-      experimental_mode_toggle->setDescription("<b>" + long_desc + "</b><br><br>" + e2e_description);
-    }
 
-    experimental_mode_toggle->refresh();
+      experimental_mode_toggle->refresh();
+      qInfo() << "TogglesPanel::updateToggles - finished with CarParamsPersistent";
+    } catch (const kj::Exception &e) {
+      qWarning() << "Failed to parse CarParamsPersistent in TogglesPanel::updateToggles:" << e.getDescription().cStr();
+    }
   } else {
     experimental_mode_toggle->setDescription(e2e_description);
   }
+  qInfo() << "TogglesPanel::updateToggles - end";
 }
 
 DevicePanel::DevicePanel(SettingsWindow *parent) : ListWidget(parent) {
