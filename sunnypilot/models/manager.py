@@ -168,33 +168,10 @@ class ModelManagerSP:
         self.available_models = self.model_fetcher.get_available_bundles()
         self.active_bundle = get_active_bundle(self.params)
 
-        # Robustly read the requested download index and log what we see
-        idx_raw = self.params.get("ModelManager_DownloadIndex")
-        index_to_download = None
-        if isinstance(idx_raw, (bytes, bytearray)):
-          try:
-            idx_raw = idx_raw.decode("utf-8")
-          except Exception:
-            pass
-        if isinstance(idx_raw, str):
-          idx_str = idx_raw.strip()
-          if idx_str.isdigit():
-            index_to_download = int(idx_str)
-        elif isinstance(idx_raw, int):
-          index_to_download = idx_raw
-
-        if index_to_download:
-          cloudlog.info(f"ModelManagerSP: download requested for index={index_to_download}")
-          model_to_download = next((m for m in self.available_models if m.index == index_to_download), None)
-          if model_to_download is None:
-            cloudlog.error(f"ModelManagerSP: requested index not found in available models: {index_to_download}")
-            # Clear the request to avoid being stuck on a bad index
-            self.params.remove("ModelManager_DownloadIndex")
-          else:
+        if index_to_download := self.params.get("ModelManager_DownloadIndex"):
+          if model_to_download := next((model for model in self.available_models if model.index == index_to_download), None):
             try:
-              cloudlog.info(f"ModelManagerSP: starting download of bundle '{model_to_download.displayName}' (idx={model_to_download.index})")
               self.download(model_to_download, Paths.model_root())
-              cloudlog.info("ModelManagerSP: download completed")
             except Exception as e:
               cloudlog.exception(e)
             finally:
