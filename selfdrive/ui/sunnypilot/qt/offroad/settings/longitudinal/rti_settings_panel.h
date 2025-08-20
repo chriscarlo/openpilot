@@ -13,6 +13,7 @@
 #include <QPushButton>
 #include <QComboBox>
 #include <QScrollArea>
+#include <QShowEvent>
 #include <fstream>
 #include <vector>
 #include <string>
@@ -87,6 +88,9 @@ class RTISettingsPanel : public QFrame {
   
 public:
   RTISettingsPanel(QWidget *parent = nullptr);
+  
+protected:
+  void showEvent(QShowEvent *event) override;
   
 signals:
   void backPress();

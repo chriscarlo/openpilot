@@ -420,7 +420,7 @@ void RTISettingsPanel::setupMainLayout() {
     tr("Detection Radius"),
     tr("Display threats within this radius around your vehicle for situational awareness (360° coverage)"),
     "RTIDetectionRadius",
-    0.25f, 5.0f, 0.25f, 2.0f, "mi",  // Changed max from 3.0 to 5.0 miles
+    0.25f, 5.0f, 0.25f, 3.0f, "mi",  // Default now 3.0 miles
     this
   );
   rangeLayout->addWidget(detectionRadiusControl);
@@ -444,7 +444,7 @@ void RTISettingsPanel::setupMainLayout() {
     tr("Resume Speed Distance"),
     tr("Resume normal cruise speed after passing a threat by this distance"),
     "RTIResumeSpeedDistance",
-    0.0f, 2.0f, 0.25f, 0.5f, "mi",
+    0.0f, 2.0f, 0.25f, 0.75f, "mi",
     this
   );
   rangeLayout->addWidget(resumeSpeedControl);
@@ -477,7 +477,13 @@ void RTISettingsPanel::setupMainLayout() {
   
   hudToggle = new ToggleSP();
   hudToggle->setFixedSize(150, 80);
-  hudToggle->setChecked(params.getBool("RTIHUDEnabled"));
+  // Initialize from Params: Toggle uses its own `on` state, not QAbstractButton's checked state
+  {
+    bool hud_on = params.getBool("RTIHUDEnabled");
+    if (hudToggle->on != hud_on) {
+      hudToggle->togglePosition();
+    }
+  }
   connect(hudToggle, &ToggleSP::stateChanged, [this](bool checked) {
     params.putBool("RTIHUDEnabled", checked);
   });
@@ -495,7 +501,13 @@ void RTISettingsPanel::setupMainLayout() {
   
   audioToggle = new ToggleSP();
   audioToggle->setFixedSize(150, 80);
-  audioToggle->setChecked(params.getBool("RTIAudioAlerts"));
+  // Initialize from Params (see note above about Toggle's internal state)
+  {
+    bool audio_on = params.getBool("RTIAudioAlerts");
+    if (audioToggle->on != audio_on) {
+      audioToggle->togglePosition();
+    }
+  }
   connect(audioToggle, &ToggleSP::stateChanged, [this](bool checked) {
     params.putBool("RTIAudioAlerts", checked);
   });
@@ -512,6 +524,19 @@ QFrame* RTISettingsPanel::createSectionFrame() {
   QFrame *frame = new QFrame();
   frame->setStyleSheet("QFrame { background-color: #292929; border-radius: 20px; padding: 25px; }");
   return frame;
+}
+
+void RTISettingsPanel::showEvent(QShowEvent *event) {
+  QFrame::showEvent(event);
+  // Refresh toggles from Params whenever the panel is shown
+  if (hudToggle) {
+    bool hud_on = params.getBool("RTIHUDEnabled");
+    if (hudToggle->on != hud_on) hudToggle->togglePosition();
+  }
+  if (audioToggle) {
+    bool audio_on = params.getBool("RTIAudioAlerts");
+    if (audioToggle->on != audio_on) audioToggle->togglePosition();
+  }
 }
 
 void RTISettingsPanel::loadWazeApiKey() {

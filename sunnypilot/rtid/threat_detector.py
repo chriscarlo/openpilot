@@ -227,6 +227,17 @@ class SpeedRecommendationEngine:
         from openpilot.common.params import Params
         params = Params()
 
+        # Detection radius used for situational (left/right) threats in recommendations
+        # Keep in sync with ThreatDetector default (3 miles = ~4828 m)
+        detection_radius = params.get("RTIDetectionRadius")
+        if detection_radius:
+            try:
+                self.detection_radius_m = float(detection_radius)
+            except (ValueError, TypeError):
+                self.detection_radius_m = 4828  # Default 3 miles
+        else:
+            self.detection_radius_m = 4828  # Default 3 miles
+
         # Get forward slowdown range (when to start slowing for threats ahead)
         # Stored in meters in params, default 0.75 miles = 1207 meters
         forward_range = params.get("RTIForwardSlowdownRange")
@@ -245,9 +256,9 @@ class SpeedRecommendationEngine:
             try:
                 self.behind_distance_threshold_m = float(resume_distance)
             except (ValueError, TypeError):
-                self.behind_distance_threshold_m = 805  # Default 0.5 miles
+                self.behind_distance_threshold_m = 1207  # Default 0.75 miles
         else:
-            self.behind_distance_threshold_m = 805  # Default 0.5 miles
+            self.behind_distance_threshold_m = 1207  # Default 0.75 miles
 
         # Get speed reduction settings
         self.speed_reduction_mode = params.get("RTISpeedReductionMode")
@@ -366,9 +377,9 @@ class ThreatDetector:
             try:
                 self.detection_radius_m = float(detection_radius)
             except (ValueError, TypeError):
-                self.detection_radius_m = 3218  # Default 2 miles
+                self.detection_radius_m = 4828  # Default 3 miles
         else:
-            self.detection_radius_m = 3218  # Default 2 miles
+            self.detection_radius_m = 4828  # Default 3 miles
 
         # Get threat filter settings
         # 0 = All, 1 = Police Only, 2 = Speed Cameras Only, 3 = Hazards Only, 4 = Custom
