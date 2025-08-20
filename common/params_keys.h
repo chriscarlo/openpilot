@@ -162,6 +162,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"RainbowMode", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"ShowAdvancedControls", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"VisionTurnSpeedControl", {PERSISTENT | BACKUP, BOOL, "0"}},
+    {"VisionTurnSpeedControlAggressiveness", {PERSISTENT | BACKUP, INT, "1"}},
     {"VibePersonalityEnabled", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"VibeAccelPersonalityEnabled", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"VibeFollowPersonalityEnabled", {PERSISTENT | BACKUP, BOOL, "0"}},
@@ -200,6 +201,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"HyundaiLongitudinalTuning", {PERSISTENT | BACKUP, INT, "0"}},
 
     // Hyundai Longitudinal Tuning Live Parameters
+    {"LiveSteerRatio", {PERSISTENT | BACKUP, FLOAT, "0"}},
     {"LongTuningCustomToggle", {PERSISTENT | BACKUP, INT, "0"}},
     {"LongTuningAccelMin", {PERSISTENT | BACKUP, FLOAT, "-3.5"}},
     {"LongTuningAccelMax", {PERSISTENT | BACKUP, FLOAT, "2.0"}},
@@ -257,4 +259,21 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"SpeedLimitWarningType", {PERSISTENT | BACKUP, STRING, "0"}},
     {"SpeedLimitWarningOffsetType", {PERSISTENT | BACKUP, STRING, "0"}},
     {"SpeedLimitWarningValueOffset", {PERSISTENT | BACKUP, STRING, "0"}},
+
+    // Realtime Traffic Intelligence (RTI)
+    {"RTIEnabled", {PERSISTENT | BACKUP, BOOL}},
+    {"RTIDataSource", {PERSISTENT | BACKUP, STRING}},
+    {"RTIThreatFilter", {PERSISTENT | BACKUP, STRING}},
+    {"RTIAggressiveness", {PERSISTENT | BACKUP, INT}},
+    {"RTIMinDistance", {PERSISTENT | BACKUP, INT}},
+    {"RTIMaxDistance", {PERSISTENT | BACKUP, INT}},
+    {"RTISpeedReduction", {PERSISTENT | BACKUP, INT}},
+    {"RTISpeedReductionMode", {PERSISTENT | BACKUP, STRING}},
+    {"RTIDetectionRadius", {PERSISTENT | BACKUP, INT}},
+    {"RTIForwardSlowdownRange", {PERSISTENT | BACKUP, INT}},
+    {"RTIResumeSpeedDistance", {PERSISTENT | BACKUP, INT}},
+    {"RTIHUDEnabled", {PERSISTENT | BACKUP, BOOL}},
+    {"RTIAudioAlerts", {PERSISTENT | BACKUP, BOOL}},
+    {"RTIManualApiEndpoint", {PERSISTENT | BACKUP, STRING}},
+    {"RTIManualApiKey", {PERSISTENT | BACKUP | DONT_LOG, STRING}},
 };

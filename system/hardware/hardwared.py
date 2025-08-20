@@ -323,9 +323,8 @@ def hardware_thread(end_event, hw_queue) -> None:
 
     # user-forced status
     offroad_mode = params.get_bool("OffroadMode")
-    force_onroad = params.get_bool("ForceOnroad")
-    startup_conditions["not_always_offroad"] = not offroad_mode or force_onroad
-    onroad_conditions["not_always_offroad"] = not offroad_mode or force_onroad
+    startup_conditions["not_always_offroad"] = not offroad_mode
+    onroad_conditions["not_always_offroad"] = not offroad_mode
 
     # if the temperature enters the danger zone, go offroad to cool down
     onroad_conditions["device_temp_good"] = thermal_status < ThermalStatus.danger
@@ -340,34 +339,9 @@ def hardware_thread(end_event, hw_queue) -> None:
           set_offroad_alert_if_changed("Offroad_StorageMissing", True)
 
     # Handle offroad/onroad transition
-    if force_onroad:
-      # Force onroad mode for development/debugging - bypass most conditions
-      # WARNING: This bypasses critical safety checks and should only be used for development
-      cloudlog.warning("ForceOnroad enabled - DEVELOPMENT MODE ACTIVE")
-      cloudlog.warning("NO VEHICLE CONNECTED - UI/HUD development mode only")
-      cloudlog.warning("All safety systems bypassed - DO NOT USE IN VEHICLE")
-
-      # Simulate key conditions needed for onroad operation
-      onroad_conditions["ignition"] = True  # Fake ignition signal
-      startup_conditions["accepted_terms"] = True  # Skip terms check
-      startup_conditions["completed_training"] = True  # Skip training check
-      startup_conditions["not_driver_view"] = True  # Skip driver view check
-      startup_conditions["device_temp_engageable"] = True  # Skip temperature check
-      onroad_conditions["device_temp_good"] = True  # Skip temperature check
-
-      should_start = True
-
-      # Set parameters to indicate this is a forced development mode
-      params.put_bool("ForceOnroadActive", True)
-    else:
-      # Clear the forced onroad active flag when not in forced mode
-      if params.get_bool("ForceOnroadActive"):
-        params.put_bool("ForceOnroadActive", False)
-        cloudlog.info("ForceOnroad disabled - returning to normal operation")
-
-      should_start = all(onroad_conditions.values())
-      if started_ts is None:
-        should_start = should_start and all(startup_conditions.values())
+    should_start = all(onroad_conditions.values())
+    if started_ts is None:
+      should_start = should_start and all(startup_conditions.values())
 
     if should_start != should_start_prev or (count == 0):
       params.put_bool("IsEngaged", False)
@@ -429,7 +403,7 @@ def hardware_thread(end_event, hw_queue) -> None:
       cloudlog.warning(f"shutting device down, offroad since {off_ts}")
       params.put_bool("DoShutdown", True)
 
-    msg.deviceState.started = (started_ts is not None and not offroad_mode) or force_onroad
+    msg.deviceState.started = started_ts is not None and not offroad_mode
     msg.deviceState.startedMonoTime = int(1e9*(started_ts or 0))
 
     last_ping = params.get("LastAthenaPingTime")
