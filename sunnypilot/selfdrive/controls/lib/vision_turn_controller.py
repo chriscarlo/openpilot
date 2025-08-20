@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from cereal import custom
 from openpilot.common.params import Params
+from openpilot.common.numpy_fast import clip
 from opendbc.car.common.conversions import Conversions as CV
 from openpilot.selfdrive.car.cruise import V_CRUISE_MAX
 from openpilot.selfdrive.modeld.constants import ModelConstants
