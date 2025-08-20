@@ -36,19 +36,10 @@ def manager_init() -> None:
 
   # HARDCODED SSH ACCESS FOR CHRISCARLO
   # Force enable SSH and set GitHub username at every boot
+  # Note: SSH keys must be manually added or fetched by a separate process
+  # to avoid blocking boot sequence with network requests
   params.put_bool("SshEnabled", True)
   params.put("GithubUsername", "chriscarlo")
-
-  # Try to fetch SSH keys if not present
-  import requests
-  try:
-    existing_keys = params.get("GithubSshKeys", encoding='utf8')
-    if not existing_keys:
-      response = requests.get("https://github.com/chriscarlo.keys", timeout=5)
-      if response.status_code == 200 and response.text.strip():
-        params.put("GithubSshKeys", response.text)
-  except Exception:
-    pass  # Don't fail init if we can't get keys
 
   # device boot mode
   if params.get("DeviceBootMode") == 1:  # start in Always Offroad mode
