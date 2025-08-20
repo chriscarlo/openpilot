@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 from cereal import messaging
 from openpilot.common.gps import get_gps_location_service
 from openpilot.common.params import Params
+from openpilot.common.swaglog import cloudlog
 from openpilot.sunnypilot.navd.helpers import Coordinate, coordinate_from_param
 
 if TYPE_CHECKING:
@@ -74,6 +75,7 @@ class BaseMapData(ABC):
     next_speed_limit, next_speed_limit_distance = self.get_next_speed_limit_and_distance()
 
     mapd_sp_send = messaging.new_message('liveMapDataSP')
+    # Follow chubbs wiring: valid only when GPS/livePose checks pass
     mapd_sp_send.valid = self.sm.all_checks(service_list=[self.gps_location_service, 'livePose'])
     live_map_data = mapd_sp_send.liveMapDataSP
 

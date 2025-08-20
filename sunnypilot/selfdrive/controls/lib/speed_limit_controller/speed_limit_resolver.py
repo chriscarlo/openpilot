@@ -1,5 +1,4 @@
 import time
-import numpy as np
 
 from cereal import messaging
 from openpilot.common.gps import get_gps_location_service
@@ -49,6 +48,8 @@ class SpeedLimitResolver:
     """Get limit solutions from each data source"""
     self._get_from_car_state(sm)
     self._get_from_map_data(sm)
+    # Debug current readings for diagnosis
+    debug(f"SL: sources car={self._limit_solutions[Source.car_state]:.3f} m/s, map={self._limit_solutions[Source.map_data]:.3f} m/s")
 
   def _get_from_car_state(self, sm: messaging.SubMaster) -> None:
     self._reset_limit_sources(Source.car_state)
@@ -70,6 +71,10 @@ class SpeedLimitResolver:
 
     speed_limit = map_data.speedLimit if map_data.speedLimitValid else 0.
     next_speed_limit = map_data.speedLimitAhead if map_data.speedLimitAheadValid else 0.
+
+    # Extra visibility into map ingestion
+    debug(f"SL: map_data speed_limit={speed_limit:.3f} m/s valid={map_data.speedLimitValid} "
+          f"next={next_speed_limit:.3f} m/s valid={map_data.speedLimitAheadValid}")
 
     self._calculate_map_data_limits(sm, speed_limit, next_speed_limit)
 
@@ -109,25 +114,25 @@ class SpeedLimitResolver:
         if self._limit_solutions[source] > 0.:
           return Source(source)
     else:
-      # Combined mode: 
+      # Combined mode:
       # 1. If both values are same AND non-zero, prefer map_data
       # 2. If values differ, use the HIGHER one
       # 3. If only one is available, use that one
       # 4. If none available, return None
-      
+
       car_state_limit = self._limit_solutions[Source.car_state]
       map_data_limit = self._limit_solutions[Source.map_data]
-      
+
       # Case: Both are zero - no valid sources
       if car_state_limit == 0 and map_data_limit == 0:
         return None
-      
+
       # Case: Only one source has data
       if car_state_limit > 0 and map_data_limit == 0:
         return Source.car_state
       if map_data_limit > 0 and car_state_limit == 0:
         return Source.map_data
-      
+
       # Case: Both sources have data
       if car_state_limit > 0 and map_data_limit > 0:
         # If equal, prefer map_data

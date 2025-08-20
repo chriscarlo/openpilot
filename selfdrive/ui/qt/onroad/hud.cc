@@ -105,10 +105,16 @@ void HudRenderer::updateState(const UIState &s) {
       speed_limit_ahead_distance = live_map_data.getSpeedLimitAheadDistance();
     }
     road_name = QString::fromStdString(live_map_data.getRoadName());
+
+    // Track current map speed limit in display units for source detection
+    map_speed_limit_valid = live_map_data.getSpeedLimitValid();
+    map_speed_limit_display = live_map_data.getSpeedLimit() * (is_metric ? MS_TO_KPH : MS_TO_MPH);
   } else {
     // Reset map data if liveMapDataSP not valid
     speed_limit_ahead_valid = false;
     road_name = "";
+    map_speed_limit_valid = false;
+    map_speed_limit_display = 0.0f;
   }
 
   // Handle older routes where vCruiseCluster is not set
@@ -161,6 +167,16 @@ void HudRenderer::updateState(const UIState &s) {
   } else {
     speed_violation_level = 0;
     over_speed_limit = false;
+  }
+
+  // Heuristic: decide SLC source icon (OSM vs Car) by comparing current SLC limit to current map limit
+  // If both are present and nearly equal, assume OSM (combined prefers map when equal)
+  // Otherwise, assume Car when SLC is active.
+  if (show_slc && slc_speed_limit > 0 && map_speed_limit_valid) {
+    float eps = is_metric ? 0.5f : 0.3f;  // tolerance in kph/mph
+    slc_source_is_map = (std::fabs(slc_speed_limit - map_speed_limit_display) <= eps);
+  } else {
+    slc_source_is_map = false;
   }
 }
 
@@ -330,6 +346,9 @@ void HudRenderer::drawSpeedLimitSigns(QPainter &p, const QRect &surface_rect) {
       p.setPen(QColor(255, 255, 255, 255));
       p.drawText(offset_box_rect, Qt::AlignCenter, slcSubText);
     }
+
+    // Draw SLC source badge (OSM/EV6) at bottom center of sign (US style)
+    drawSLCSourceBadge(p, sign_rect);
   } else {
     // EU (Vienna style) sign
     QRect vienna_rect = sign_rect;
@@ -390,6 +409,8 @@ void HudRenderer::drawSpeedLimitSigns(QPainter &p, const QRect &surface_rect) {
       p.setPen(QColor(255, 255, 255, 255));
       p.drawText(offset_circle_rect, Qt::AlignCenter, slcSubText);
     }
+    // Draw SLC source badge (OSM/EV6) at bottom center of sign (EU style)
+    drawSLCSourceBadge(p, circle_rect);
   }
 }
 
@@ -695,4 +716,55 @@ void HudRenderer::drawLateralAccelMeter(QPainter &p, const QRect &widget_rect, f
   }
   
   // No labels - clean minimalist look
+}
+
+
+void HudRenderer::drawSLCSourceBadge(QPainter &p, const QRect &sign_rect) {
+  // Badge dimensions and placement (anchor to sign bottom edge, no gap)
+  const int badge_w = 64;
+  const int badge_h = 24;
+  const int badge_x = sign_rect.center().x() - badge_w / 2;
+  const int badge_y = sign_rect.bottom() - (badge_h / 2); // 50% overlap: half above, half below
+  const QRect badge_rect(badge_x, badge_y, badge_w, badge_h);
+
+  // Draw background card matching osm_badge.svg
+  QLinearGradient g(badge_rect.topLeft(), badge_rect.bottomLeft());
+  g.setColorAt(0.0, QColor(0x22, 0x22, 0x22));
+  g.setColorAt(1.0, QColor(0x00, 0x00, 0x00));
+
+  QPen pen(QColor(0x44, 0x44, 0x44));
+  pen.setWidth(2);
+  p.setPen(pen);
+  p.setBrush(QBrush(g));
+  p.setRenderHint(QPainter::Antialiasing, true);
+  p.drawRoundedRect(badge_rect, 10, 10);
+
+  // Content: either text "OSM" or EV6 silhouette
+  if (slc_source_is_map) {
+    p.setPen(Qt::NoPen);
+    p.setPen(QPen(Qt::white));
+    p.setFont(InterFont(14, QFont::Black));
+    p.drawText(badge_rect, Qt::AlignCenter, QObject::tr("OSM"));
+  } else {
+    // Lazy-load EV6 silhouette (white on transparent)
+    if (ev6_badge_pix.isNull()) {
+      ev6_badge_pix = loadPixmap("../assets/icons/ev6_white.svg", QSize(badge_w - 8, badge_h - 6));
+    }
+    if (!ev6_badge_pix.isNull()) {
+      // Center the silhouette within the badge_rect
+      QSize sz = ev6_badge_pix.size();
+      // If high-DPI, size() returns device pixels; scale down to fit logical size
+      if (sz.width() > badge_w || sz.height() > badge_h) {
+        QPixmap scaled = ev6_badge_pix.scaled(badge_w - 8, badge_h - 6, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+        sz = scaled.size();
+        int px = badge_rect.center().x() - sz.width() / 2;
+        int py = badge_rect.center().y() - sz.height() / 2;
+        p.drawPixmap(px, py, scaled);
+      } else {
+        int px = badge_rect.center().x() - sz.width() / 2;
+        int py = badge_rect.center().y() - sz.height() / 2;
+        p.drawPixmap(px, py, ev6_badge_pix);
+      }
+    }
+  }
 }

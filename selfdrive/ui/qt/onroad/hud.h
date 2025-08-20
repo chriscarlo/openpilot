@@ -30,6 +30,7 @@ protected:
   void drawUpcomingSpeedLimit(QPainter &p, const QRect &surface_rect);
   void drawSLCStateIndicator(QPainter &p, const QRect &surface_rect);
   void drawRoadName(QPainter &p, const QRect &surface_rect);
+  void drawSLCSourceBadge(QPainter &p, const QRect &sign_rect);
 
   // Display flags
   bool show_slc = false;
@@ -48,6 +49,13 @@ protected:
   bool speed_limit_ahead_valid = false;
   float speed_limit_ahead = 0.0;
   float speed_limit_ahead_distance = 0.0;
+  // Map current speed limit (display units) for source detection
+  bool map_speed_limit_valid = false;
+  float map_speed_limit_display = 0.0f;
+  // Selected source indicator for SLC (heuristic): true if OSM, false if car
+  bool slc_source_is_map = false;
+  QPixmap osm_badge_pix;
+  QPixmap ev6_badge_pix;
 
   // Road information
   QString road_name;
