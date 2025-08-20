@@ -8,7 +8,7 @@ longitudinal planner for proactive speed management.
 
 from cereal import messaging
 from openpilot.common.params import Params
-from openpilot.common.conversions import Conversions as CV
+from opendbc.car.common.conversions import Conversions as CV
 from openpilot.selfdrive.car.cruise import V_CRUISE_UNSET, V_CRUISE_MAX
 from openpilot.common.swaglog import cloudlog
 
