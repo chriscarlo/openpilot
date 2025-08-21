@@ -87,7 +87,7 @@ class RTIDaemon:
         """Check if RTI is enabled via params."""
         return self.params.get_bool("RTIEnabled")
 
-  def _get_current_location(self) -> tuple[float, float] | None:
+    def _get_current_location(self) -> tuple[float, float] | None:
         """Get current GPS coordinates from location services."""
         self.sm.update(0)  # Non-blocking update
 
