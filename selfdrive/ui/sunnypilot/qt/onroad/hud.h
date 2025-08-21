@@ -26,6 +26,7 @@ struct RTIThreatInfo {
   float distance;  // meters
   double relative_bearing;  // degrees
   bool has_location;
+  cereal::RtiStateSP::Direction direction;  // coarse direction fallback
 };
 
 class HudRendererSP : public HudRenderer {
@@ -51,6 +52,7 @@ protected:
                                  double threat_latitude, double threat_longitude, 
                                  double ego_heading_deg) const;
   void updateRTIThreats(const UIState &s);
+  double angleForDirection(cereal::RtiStateSP::Direction dir) const;
   
   // RTI state variables
   bool rti_enabled = false;  // Master RTI enabled switch
@@ -70,6 +72,7 @@ protected:
   double rti_threat_lat = 0.0;
   double rti_threat_lon = 0.0;
   double rti_relative_bearing = 0.0;  // Relative bearing to threat in degrees
+  cereal::RtiStateSP::Direction rti_direction = cereal::RtiStateSP::Direction::UNKNOWN;
   
   // Ego position and heading  
   double ego_lat = 0.0;
