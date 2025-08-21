@@ -23,16 +23,16 @@ VERIFICATION_STATUS=""
 
 # Check if edits were made without tests
 if [ "$FILES_EDITED" -gt 0 ] && [ "$TESTS_RUN" = "false" ]; then
-    VERIFICATION_STATUS="⚠️ REMINDER: You've edited $FILES_EDITED file(s) but haven't run tests. Run: pytest\n"
+    VERIFICATION_STATUS="REMINDER: You've edited $FILES_EDITED file(s) but haven't run tests. Run: pytest\n"
 fi
 
 # Check if edits were made without linting
 if [ "$FILES_EDITED" -gt 0 ] && [ "$LINTER_RUN" = "false" ]; then
-    VERIFICATION_STATUS="${VERIFICATION_STATUS}⚠️ REMINDER: You've edited files but haven't run the linter. Run: ./scripts/lint/lint.sh\n"
+    VERIFICATION_STATUS="${VERIFICATION_STATUS}REMINDER: You've edited files but haven't run the linter. Run: ./scripts/lint/lint.sh\n"
 fi
 
 # Add session stats
-SESSION_INFO="📊 Session: Read $FILES_READ files, Edited $FILES_EDITED files"
+SESSION_INFO="Session: Read $FILES_READ files, Edited $FILES_EDITED files"
 
 # Output the injected context
 if [ -n "$VERIFICATION_STATUS" ]; then

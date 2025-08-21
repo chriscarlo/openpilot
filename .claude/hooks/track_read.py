@@ -44,10 +44,10 @@ def main():
                 json.dump(session_data, f, indent=2)
             
             # Log the read operation
-            print(f"📖 Tracked read: {file_path}")
+            print(f"Tracked read: {file_path}")
     
     except Exception as e:
-        print(f"⚠️ Failed to track read: {e}", file=sys.stderr)
+        print(f"Failed to track read: {e}", file=sys.stderr)
     
     return 0
 

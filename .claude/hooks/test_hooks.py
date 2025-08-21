@@ -20,13 +20,13 @@ def test_session_start():
     )
     
     if result.returncode == 0:
-        print("✅ session_start.sh executed successfully")
+        print("session_start.sh executed successfully")
         if "Openpilot development session initialized" in result.stdout:
-            print("✅ Session initialization message found")
+            print("Session initialization message found")
         else:
-            print("⚠️ Expected initialization message not found")
+            print("Expected initialization message not found")
     else:
-        print(f"❌ session_start.sh failed: {result.stderr}")
+        print(f"session_start.sh failed: {result.stderr}")
     print()
 
 def test_track_read():
@@ -46,13 +46,13 @@ def test_track_read():
     )
     
     if result.returncode == 0:
-        print("✅ track_read.py executed successfully")
+        print("track_read.py executed successfully")
         if "Tracked read:" in result.stdout:
-            print("✅ Read tracking message found")
+            print("Read tracking message found")
         else:
-            print("⚠️ Expected tracking message not found")
+            print("Expected tracking message not found")
     else:
-        print(f"❌ track_read.py failed: {result.stderr}")
+        print(f"track_read.py failed: {result.stderr}")
     print()
 
 def test_check_edit_read():
@@ -73,11 +73,11 @@ def test_check_edit_read():
     
     # This should block or warn since we haven't read the file
     if "BLOCKED" in result.stderr or "must use the Read tool" in result.stderr:
-        print("✅ check_edit_read.py correctly blocked unread file edit")
+        print("check_edit_read.py correctly blocked unread file edit")
     elif "No session data" in result.stderr:
-        print("⚠️ No session data, hook allowed edit")
+        print("No session data, hook allowed edit")
     else:
-        print("✅ check_edit_read.py executed")
+        print("check_edit_read.py executed")
     print()
 
 def test_run_linters():
@@ -102,11 +102,11 @@ def test_run_linters():
         )
         
         if result.returncode == 0:
-            print("✅ run_linters.py executed successfully")
+            print("run_linters.py executed successfully")
             if "Running linters" in result.stdout:
-                print("✅ Linter execution message found")
+                print("Linter execution message found")
         else:
-            print(f"⚠️ run_linters.py had issues: {result.stderr}")
+            print(f"run_linters.py had issues: {result.stderr}")
     finally:
         os.unlink(test_file)
     print()
@@ -124,13 +124,13 @@ def test_prompt_inject():
     )
     
     if result.returncode == 0:
-        print("✅ prompt_inject.sh executed successfully")
+        print("prompt_inject.sh executed successfully")
         if "Test prompt" in result.stdout:
-            print("✅ Original prompt passed through")
+            print("Original prompt passed through")
         else:
-            print("⚠️ Original prompt not found in output")
+            print("Original prompt not found in output")
     else:
-        print(f"❌ prompt_inject.sh failed: {result.stderr}")
+        print(f"prompt_inject.sh failed: {result.stderr}")
     print()
 
 def main():

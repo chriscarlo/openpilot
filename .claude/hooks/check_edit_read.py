@@ -33,12 +33,12 @@ def main():
             
             # Check if file has been read
             if file_path not in files_read:
-                print(f"❌ BLOCKED: Cannot edit {file_path} without reading it first!", file=sys.stderr)
-                print(f"⚠️  You must use the Read tool on this file before editing.", file=sys.stderr)
-                print(f"📚 Files read in this session: {len(files_read)}", file=sys.stderr)
+                print(f"BLOCKED: Cannot edit {file_path} without reading it first!", file=sys.stderr)
+                print(f"You must use the Read tool on this file before editing.", file=sys.stderr)
+                print(f"Files read in this session: {len(files_read)}", file=sys.stderr)
                 return 1  # Block the operation
             else:
-                print(f"✅ Edit verified: {file_path} was read")
+                print(f"Edit verified: {file_path} was read")
                 
                 # Track the edit
                 if "files_edited" not in session_data:
@@ -49,10 +49,10 @@ def main():
                 with open(session_file, 'w') as f:
                     json.dump(session_data, f, indent=2)
         else:
-            print("⚠️ No session data found, allowing edit", file=sys.stderr)
+            print("No session data found, allowing edit", file=sys.stderr)
     
     except Exception as e:
-        print(f"⚠️ Error checking read status: {e}", file=sys.stderr)
+        print(f"Error checking read status: {e}", file=sys.stderr)
         # Don't block on errors
         return 0
     

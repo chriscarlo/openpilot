@@ -18,9 +18,9 @@ cat > "$SESSION_FILE" << EOF
 }
 EOF
 
-echo "✅ Openpilot development session initialized"
-echo "📍 Branch: $(cd $PROJECT_ROOT && git branch --show-current 2>/dev/null)"
-echo "📋 Remember to:"
+echo "Openpilot development session initialized"
+echo "Branch: $(cd $PROJECT_ROOT && git branch --show-current 2>/dev/null)"
+echo "Remember to:"
 echo "   - Run tests after changes: pytest"
 echo "   - Run linter: ./scripts/lint/lint.sh"
 echo "   - Build with: scons -u -j\$(nproc)"

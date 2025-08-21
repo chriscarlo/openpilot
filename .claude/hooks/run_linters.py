@@ -37,18 +37,18 @@ def main():
         )
         
         if result.returncode != 0:
-            print(f"⚠️ Ruff found issues in {file_path}:")
+            print(f"Ruff found issues in {file_path}:")
             print(result.stdout)
             if result.stderr:
                 print(result.stderr)
         else:
-            print(f"✅ Ruff: No issues found")
+            print(f"Ruff: No issues found")
     except FileNotFoundError:
-        print("ℹ️ Ruff not found, skipping ruff check")
+        print("Ruff not found, skipping ruff check")
     except subprocess.TimeoutExpired:
-        print("⚠️ Ruff check timed out")
+        print("Ruff check timed out")
     except Exception as e:
-        print(f"⚠️ Error running ruff: {e}")
+        print(f"Error running ruff: {e}")
     
     # Run mypy for type checking (if available)
     try:
@@ -64,18 +64,18 @@ def main():
             lines = result.stdout.strip().split('\n')
             errors = [line for line in lines if 'error:' in line]
             if errors:
-                print(f"⚠️ MyPy type issues in {file_path}:")
+                print(f"MyPy type issues in {file_path}:")
                 for error in errors[:5]:  # Show first 5 errors
                     print(f"  {error}")
         else:
-            print(f"✅ MyPy: No type errors found")
+            print(f"MyPy: No type errors found")
     except FileNotFoundError:
         # MyPy not installed is common, don't warn
         pass
     except subprocess.TimeoutExpired:
-        print("⚠️ MyPy check timed out")
+        print("MyPy check timed out")
     except Exception as e:
-        print(f"⚠️ Error running mypy: {e}")
+        print(f"Error running mypy: {e}")
     
     # Update session to mark that linter was run
     session_file = f"/tmp/openpilot_session_{os.getppid()}.json"
