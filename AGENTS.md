@@ -27,7 +27,8 @@
 
 ## Commit & Pull Request Guidelines
 - Commits: imperative mood with scoped prefix, e.g., `selfdrive: fix MPC latency`.
-- Branch policy: work only on `chauffeur-dev2` in this workspace. PRs target `chauffeur-dev2`.
+- Branch policy: work only on `chubbs-merge` in this workspace. PRs target `chubbs-merge`.
+  - Note: `chauffeur-dev2` is deprecated. We will still reference it to port custom features into `chubbs-merge` and for debugging comparisons when needed.
 - PRs: include rationale, verification steps (routes/logs for car changes), linked issues, and tests. Use templates in `.github/pull_request_template.md`.
 
 ## Chauffeur Porting Rules
@@ -40,4 +41,3 @@
 - Do not commit private keys, large binaries, or personal drive logs. Use Git LFS when needed.
 - Changes to controls/safety require clear justification and tests.
 - Do not modify `.claude/` or `docs/chauffeur/claude/`.
-

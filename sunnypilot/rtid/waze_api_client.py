@@ -434,26 +434,63 @@ class WazeAPIClient:
         return alerts
 
     def _parse_jams(self, data: dict) -> list[WazeAlert]:
-        """Parse traffic jams from Waze API response."""
+        """Parse traffic jams from Waze API response (supports multiple schemas)."""
         alerts = []
 
         raw_jams = data.get('jams', [])
 
         for jam in raw_jams:
             try:
-                # Convert jam to alert format
+                # Prefer new schema keys; fall back to older ones if necessary
+                # ID
+                jam_id = jam.get('jam_id') or jam.get('uuid') or jam.get('id') or ''
+                jam_id = str(jam_id)
+                if not jam_id:
+                    continue
+
+                # Line coordinates (new schema: line_coordinates[{lat, lon}],
+                # old schema: line[{x, y}] or coordinates
+                lat, lon = 0.0, 0.0
+                if isinstance(jam.get('line_coordinates'), list) and jam['line_coordinates']:
+                    first = jam['line_coordinates'][0]
+                    lat = float(first.get('lat', 0.0))
+                    lon = float(first.get('lon', 0.0))
+                elif isinstance(jam.get('line'), list) and jam['line']:
+                    first = jam['line'][0]
+                    # Some variants use x/y; others lon/lat
+                    lat = float(first.get('y', first.get('lat', 0.0)))
+                    lon = float(first.get('x', first.get('lon', 0.0)))
+                elif isinstance(jam.get('coordinates'), list) and jam['coordinates']:
+                    first = jam['coordinates'][0]
+                    lat = float(first.get('lat', 0.0))
+                    lon = float(first.get('lon', 0.0))
+
+                # Confidence from 'level' (1..5) normalized to 0..1
+                level = jam.get('level')
+                if level is None and jam.get('severity') is not None:
+                    level = jam.get('severity')  # some payloads emit 'severity'
+                try:
+                    confidence = float(level) / 5.0 if level is not None else 0.5
+                except Exception:
+                    confidence = 0.5
+
+                # Speed km/h field name normalization
+                speed_kmh = jam.get('speed_kmh')
+                if speed_kmh is None:
+                    speed_kmh = jam.get('speedKMH')
+
                 waze_alert = WazeAlert(
-                    id=str(jam.get('uuid', jam.get('id', ''))),
+                    id=jam_id,
                     type='jam',
-                    latitude=float(jam.get('line', [{}])[0].get('y', 0)),
-                    longitude=float(jam.get('line', [{}])[0].get('x', 0)),
-                    confidence=float(jam.get('level', 1) / 5.0),  # Normalize to 0-1
-                    speed_limit=jam.get('speedKMH'),
+                    latitude=lat,
+                    longitude=lon,
+                    confidence=confidence,
+                    speed_limit=speed_kmh,
                     street=jam.get('street'),
                     raw_data=jam
                 )
 
-                if waze_alert.latitude != 0 and waze_alert.longitude != 0:
+                if -90 <= waze_alert.latitude <= 90 and -180 <= waze_alert.longitude <= 180:
                     alerts.append(waze_alert)
 
             except (KeyError, ValueError, TypeError) as e:

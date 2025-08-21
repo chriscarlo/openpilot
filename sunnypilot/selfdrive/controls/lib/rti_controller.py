@@ -65,9 +65,9 @@ class RTIController:
             try:
                 self._threat_activation_distance = float(forward_range)
             except (ValueError, TypeError):
-                self._threat_activation_distance = 1207  # Default 0.75 miles
+                self._threat_activation_distance = 1609  # Default 1.0 miles
         else:
-            self._threat_activation_distance = 1207  # Default 0.75 miles
+            self._threat_activation_distance = 1609  # Default 1.0 miles
 
         # Get resume speed distance (when to stop slowing after passing threat)
         resume_distance = self.params.get("RTIResumeSpeedDistance")
@@ -75,9 +75,9 @@ class RTIController:
             try:
                 self._resume_speed_distance = float(resume_distance)
             except (ValueError, TypeError):
-                self._resume_speed_distance = 805  # Default 0.5 miles
+                self._resume_speed_distance = 1609  # Default 1.0 miles
         else:
-            self._resume_speed_distance = 805  # Default 0.5 miles
+            self._resume_speed_distance = 1609  # Default 1.0 miles
 
         # Get speed reduction settings
         speed_mode = self.params.get("RTISpeedReductionMode")

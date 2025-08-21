@@ -11,6 +11,7 @@
 #include <cmath>
 #include <QPainterPath>
 #include <QTransform>
+#include <limits>
 
 #include "common/params.h"
 #include "selfdrive/ui/qt/util.h"
@@ -38,11 +39,12 @@ HudRendererSP::HudRendererSP() {
   // rti_enabled will be updated periodically in updateState()
   
   // Initialize cached font objects for performance
-  threat_text_font = InterFont(35, QFont::DemiBold);
-  distance_font = InterFont(45, QFont::Bold);
-  speed_rec_font = InterFont(30, QFont::Normal);
-  icon_font_small = InterFont(40, QFont::Bold);
-  icon_font_large = InterFont(45, QFont::Bold);
+  // Increase base fonts ~50% for better readability in RTI widget
+  threat_text_font = InterFont(53, QFont::DemiBold);   // was 35
+  distance_font = InterFont(68, QFont::Bold);          // was 45
+  speed_rec_font = InterFont(45, QFont::Normal);       // was 30
+  icon_font_small = InterFont(60, QFont::Bold);        // was 40
+  icon_font_large = InterFont(68, QFont::Bold);        // was 45
   
   // Create arrow pixmap once at startup
   createArrowPixmap();
@@ -175,9 +177,9 @@ void HudRendererSP::drawRTIThreatIndicator(QPainter &p, const QRect &surface_rec
   const int bottom_margin = 15;  // Same as lateral accel widget
   const int left_margin = 15;    // Same spacing from left as bottom
   
-  // Increased size: moved left by 45px and down by 45px, so increase size by 45px each dimension
-  const int widget_width = 525;  // 480 + 45 = 525
-  const int widget_height = 548;  // +50% height for larger RTI widget
+  // Increased size: enlarge widget to accommodate bigger fonts/arrows
+  const int widget_width = 600;
+  const int widget_height = 620;
   
   // Position with bottom alignment to lateral accel widget
   const int x_offset = left_margin;
@@ -208,20 +210,21 @@ void HudRendererSP::drawRTIThreatIndicator(QPainter &p, const QRect &surface_rec
     QRect icon_rect(rti_rect.x() + 48, rti_rect.y() + 24, 120, 96);
     drawRTIThreatIcon(p, icon_rect, rti_threat_type);
     
-    // Draw arrow and threat type text - increased font size
-    p.setFont(InterFont(42, QFont::Normal));
+    // Draw arrow and threat type text - increased font size (+50%)
+    p.setFont(InterFont(63, QFont::Normal));
     p.setPen(threat_color);
     QString threat_text = getRTIThreatText(rti_threat_type);
-    
-    // Always draw directional arrow; use GPS when available, else Direction fallback
+
+    // Always draw directional arrow; compute bearing every frame when GPS available
     double arrow_angle = 0.0;
-    if (has_gps && std::isfinite(rti_relative_bearing)) {
-      arrow_angle = rti_relative_bearing;
+    if (has_gps && std::isfinite(rti_threat_lat) && std::isfinite(rti_threat_lon) &&
+        std::isfinite(ego_lat) && std::isfinite(ego_lon)) {
+      arrow_angle = calculateRelativeBearing(ego_lat, ego_lon, rti_threat_lat, rti_threat_lon, ego_bearing);
     } else {
       arrow_angle = angleForDirection(rti_direction);
     }
     // Draw arrow to the left of the threat text
-    QRect arrow_rect(rti_rect.x() + 180, rti_rect.y() + 125, 48, 48);
+    QRect arrow_rect(rti_rect.x() + 180, rti_rect.y() + 125, 96, 96);  // doubled from 48
     drawRTIArrow(p, arrow_rect, arrow_angle);
     // Draw threat text shifted to the right
     p.drawText(rti_rect.adjusted(50, 132, 0, 0), Qt::AlignTop | Qt::AlignHCenter, threat_text);
@@ -257,7 +260,7 @@ void HudRendererSP::drawRTIThreatIndicator(QPainter &p, const QRect &surface_rec
     }
   } else {
     // Draw placeholder same as header: top-left, same font/weight
-    p.setFont(InterFont(39, QFont::DemiBold));
+    p.setFont(InterFont(59, QFont::DemiBold));  // +50%
     p.setPen(QColor(150, 150, 150, 200));
     p.drawText(rti_rect.adjusted(20, 15, -20, 0), Qt::AlignTop | Qt::AlignLeft, tr("RTI"));
   }
@@ -389,7 +392,7 @@ QColor HudRendererSP::getRTIThreatColor(float distance) const {
 
 void HudRendererSP::createArrowPixmap() {
   // Create arrow pointing up (0° = ahead)
-  const int arrow_size = 48;
+  const int arrow_size = 96;  // doubled
   arrow_pixmap = QPixmap(arrow_size, arrow_size);
   arrow_pixmap.fill(Qt::transparent);
   
@@ -529,14 +532,8 @@ void HudRendererSP::updateRTIThreats(const UIState &s) {
       info.has_location = std::isfinite(info.latitude) && std::isfinite(info.longitude);
       info.direction = threat.getDirection();
       
-      // Calculate relative bearing if we have GPS
-      if (has_gps && info.has_location) {
-        info.relative_bearing = calculateRelativeBearing(
-          ego_lat, ego_lon, info.latitude, info.longitude, ego_bearing
-        );
-      } else {
-        info.relative_bearing = 0.0;  // Default to ahead
-      }
+      // Do not cache relative bearing here; it will be computed per-frame in draw
+      info.relative_bearing = std::numeric_limits<double>::quiet_NaN();
       
       rti_threats.push_back(info);
     }
@@ -571,24 +568,34 @@ void HudRendererSP::drawRTIThreatIndicatorMulti(QPainter &p, const QRect &surfac
   const int bottom_margin = 15;
   const int left_margin = 15;
   
-  // Expanded size to accommodate multiple threats
-  const int widget_width = 580;  // Increased width
-  const int widget_height = 420;  // +50% height for multi-threat view
+  // Expanded size to accommodate larger fonts/arrows
+  const int widget_width = 620;   // slightly wider
+  const int widget_height = 520;  // taller to fit 4 lines with 50% larger text
   
   const int x_offset = left_margin;
   const int y_offset = surface_rect.height() - widget_height - bottom_margin;
   
   QRect rti_rect(x_offset, y_offset, widget_width, widget_height);
   
-  // Draw widget background
-  p.setPen(QPen(QColor(255, 255, 255, 75), 6));
+  // Determine if any police threat is present to color the border red
+  bool police_present = false;
+  for (const auto &t : rti_threats) {
+    if (t.type == cereal::RtiStateSP::ThreatType::POLICE ||
+        t.type == cereal::RtiStateSP::ThreatType::POLICE_HIDING) {
+      police_present = true;
+      break;
+    }
+  }
+
+  // Draw widget background with conditional border color
+  p.setPen(QPen(police_present ? QColor(255, 0, 0, 200) : QColor(255, 255, 255, 75), 6));
   p.setBrush(QColor(0, 0, 0, 115));
   p.drawRoundedRect(rti_rect, 32, 32);
   
   // Check if we have active threats
   if (!rti_threats.empty()) {
-    // Draw header (font +1pt)
-    p.setFont(InterFont(39, QFont::DemiBold));
+    // Draw header (+50%)
+    p.setFont(InterFont(59, QFont::DemiBold));
     p.setPen(QColor(255, 255, 255, 200));
     p.drawText(rti_rect.adjusted(20, 15, -20, 0), Qt::AlignTop | Qt::AlignLeft, "RTI");
     
@@ -598,8 +605,8 @@ void HudRendererSP::drawRTIThreatIndicatorMulti(QPainter &p, const QRect &surfac
     //   Line 2:          Second closest threat  
     //   Line 3:          Third closest threat
     //   Line 4 (bottom): Furthest threat (if 4 threats present)
-    const int line_height = 55;  // Height per threat line
-    const int start_y = rti_rect.y() + 60;  // Start below header
+    const int line_height = 84;  // ~55 * 1.5
+    const int start_y = rti_rect.y() + 90;  // Start below bigger header
     const int max_threats = 4;  // Maximum threats to display
     
     int displayed = 0;
@@ -614,18 +621,22 @@ void HudRendererSP::drawRTIThreatIndicatorMulti(QPainter &p, const QRect &surfac
       // Draw compact single line: [arrow] TYPE • 0.5mi
       QRect line_rect(rti_rect.x() + 20, y_pos, widget_width - 40, line_height);
       
-      // Draw arrow (smaller for multi-threat view). Use GPS if available, else Direction fallback.
+      // Draw arrow (larger; doubled). Compute bearing every frame using GPS when available.
       {
         double arrow_angle = 0.0;
-        bool can_use_gps = has_gps && threat.has_location && std::isfinite(threat.relative_bearing);
-        arrow_angle = can_use_gps ? threat.relative_bearing : angleForDirection(threat.direction);
-        QRect arrow_rect(line_rect.x(), line_rect.y() + 8, 32, 32);
+        bool can_use_gps = has_gps && threat.has_location &&
+                           std::isfinite(ego_lat) && std::isfinite(ego_lon) &&
+                           std::isfinite(threat.latitude) && std::isfinite(threat.longitude);
+        arrow_angle = can_use_gps ?
+          calculateRelativeBearing(ego_lat, ego_lon, threat.latitude, threat.longitude, ego_bearing) :
+          angleForDirection(threat.direction);
+        QRect arrow_rect(line_rect.x(), line_rect.y() + 8, 64, 64);  // doubled from 32
         drawRTIArrowCompact(p, arrow_rect, arrow_angle, threat_color);
-        line_rect.adjust(40, 0, 0, 0);
+        line_rect.adjust(80, 0, 0, 0);  // shift text to accommodate larger arrow
       }
-      
+
       // Draw threat type and distance on same line
-      p.setFont(InterFont(36, QFont::Normal));
+      p.setFont(InterFont(54, QFont::Normal));  // +50%
       p.setPen(threat_color);
       
       QString threat_line = QString("%1 • %2")
@@ -639,7 +650,7 @@ void HudRendererSP::drawRTIThreatIndicatorMulti(QPainter &p, const QRect &surfac
     
     // If RTI is actively controlling speed, show recommendation at bottom
     if (rti_active && rti_recommended_speed > 0) {
-      p.setFont(InterFont(32, QFont::Normal));
+      p.setFont(InterFont(48, QFont::Normal));  // +50%
       p.setPen(QColor(255, 255, 255, 180));
       
       float rec_speed_display = rti_recommended_speed * (is_metric ? 3.6 : 2.237);
@@ -652,7 +663,7 @@ void HudRendererSP::drawRTIThreatIndicatorMulti(QPainter &p, const QRect &surfac
     }
   } else {
     // Draw placeholder as top-left title identical to header style
-    p.setFont(InterFont(39, QFont::DemiBold));
+    p.setFont(InterFont(59, QFont::DemiBold));  // +50%
     p.setPen(QColor(150, 150, 150, 200));
     p.drawText(rti_rect.adjusted(20, 15, -20, 0), Qt::AlignTop | Qt::AlignLeft, tr("RTI"));
   }

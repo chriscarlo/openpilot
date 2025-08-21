@@ -239,26 +239,26 @@ class SpeedRecommendationEngine:
             self.detection_radius_m = 4828  # Default 3 miles
 
         # Get forward slowdown range (when to start slowing for threats ahead)
-        # Stored in meters in params, default 0.75 miles = 1207 meters
+        # Stored in meters in params, default 1.0 miles = 1609 meters
         forward_range = params.get("RTIForwardSlowdownRange")
         if forward_range:
             try:
                 self.ahead_distance_threshold_m = float(forward_range)
             except (ValueError, TypeError):
-                self.ahead_distance_threshold_m = 1207  # Default 0.75 miles
+                self.ahead_distance_threshold_m = 1609  # Default 1.0 miles
         else:
-            self.ahead_distance_threshold_m = 1207  # Default 0.75 miles
+            self.ahead_distance_threshold_m = 1609  # Default 1.0 miles
 
         # Get resume speed distance (when to resume normal speed after passing)
-        # Stored in meters in params, default 0.5 miles = 805 meters
+        # Stored in meters in params, default 1.0 miles = 1609 meters
         resume_distance = params.get("RTIResumeSpeedDistance")
         if resume_distance:
             try:
                 self.behind_distance_threshold_m = float(resume_distance)
             except (ValueError, TypeError):
-                self.behind_distance_threshold_m = 1207  # Default 0.75 miles
+                self.behind_distance_threshold_m = 1609  # Default 1.0 miles
         else:
-            self.behind_distance_threshold_m = 1207  # Default 0.75 miles
+            self.behind_distance_threshold_m = 1609  # Default 1.0 miles
 
         # Get speed reduction settings
         self.speed_reduction_mode = params.get("RTISpeedReductionMode")
@@ -399,7 +399,8 @@ class ThreatDetector:
                        current_location: tuple[float, float],
                        current_speed: float,
                        timestamp: int,
-                       v_cruise: float = None) -> RTIState:
+                       v_cruise: float = None,
+                       current_heading_deg: float | None = None) -> RTIState:
         """
         Main threat processing pipeline.
         
@@ -431,7 +432,7 @@ class ThreatDetector:
                 # Step 3: Process each threat
                 for threat in deduplicated_threats:
                     processed_threat = self._process_single_threat(
-                        threat, current_location, current_speed
+                        threat, current_location, current_speed, current_heading_deg
                     )
                     if processed_threat:
                         processed_threats.append(processed_threat)
@@ -486,7 +487,8 @@ class ThreatDetector:
 
     def _process_single_threat(self, threat: WazeAlert,
                              current_location: tuple[float, float],
-                             current_speed: float) -> ProcessedThreat | None:
+                             current_speed: float,
+                             current_heading_deg: float | None = None) -> ProcessedThreat | None:
         """Process a single threat for relevance and direction."""
         try:
             ego_lat, ego_lon = current_location
@@ -507,7 +509,8 @@ class ThreatDetector:
 
             # Determine direction relative to ego
             direction = self.road_matcher.get_direction_relative_to_ego(
-                ego_lat, ego_lon, threat.latitude, threat.longitude
+                ego_lat, ego_lon, threat.latitude, threat.longitude,
+                ego_heading=(current_heading_deg if current_heading_deg is not None else 0.0)
             )
 
             # Note: Real Waze API doesn't provide speed_limit in alerts

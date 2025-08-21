@@ -87,14 +87,14 @@ class RTIDaemon:
         """Check if RTI is enabled via params."""
         return self.params.get_bool("RTIEnabled")
 
-    def _get_current_location(self) -> tuple[float, float] | None:
+  def _get_current_location(self) -> tuple[float, float] | None:
         """Get current GPS coordinates from location services."""
         self.sm.update(0)  # Non-blocking update
 
         # Prefer external GPS if available
         if self.sm.updated['gpsLocationExternal']:
             gps_ext = self.sm['gpsLocationExternal']
-            if gps_ext.accuracy < 10.0:  # Only use if accuracy is reasonable
+            if getattr(gps_ext, 'accuracy', 99.9) < 10.0:  # Only use if accuracy is reasonable
                 return (gps_ext.latitude, gps_ext.longitude)
 
         # Fall back to regular GPS location
@@ -102,6 +102,32 @@ class RTIDaemon:
             gps_loc = self.sm['gpsLocation']
             if gps_loc.hasFix:
                 return (gps_loc.latitude, gps_loc.longitude)
+
+        return None
+
+    def _get_current_heading_deg(self) -> float | None:
+        """Get current ego heading in degrees from GPS if available."""
+        self.sm.update(0)
+        # Prefer external GPS bearing if available and plausible
+        if self.sm.updated['gpsLocationExternal']:
+            gps_ext = self.sm['gpsLocationExternal']
+            try:
+                bearing = getattr(gps_ext, 'bearingDeg')
+                # Validate numeric and finite
+                if bearing is not None and 0.0 <= float(bearing) <= 360.0:
+                    return float(bearing)
+            except Exception:
+                pass
+
+        # Fall back to internal GPS if it exposes bearing
+        if self.sm.updated['gpsLocation']:
+            gps_loc = self.sm['gpsLocation']
+            try:
+                bearing = getattr(gps_loc, 'bearingDeg')
+                if bearing is not None and 0.0 <= float(bearing) <= 360.0:
+                    return float(bearing)
+            except Exception:
+                pass
 
         return None
 
@@ -163,9 +189,9 @@ class RTIDaemon:
                             try:
                                 radius_m = float(detection_radius)
                             except (ValueError, TypeError):
-                                radius_m = 3218  # Default 2 miles in meters
+                                radius_m = 4828  # Default 3 miles in meters
                         else:
-                            radius_m = 3218  # Default 2 miles in meters
+                            radius_m = 4828  # Default 3 miles in meters
                         
                         radius_km = radius_m / 1000.0  # Convert to km
                         
@@ -201,7 +227,8 @@ class RTIDaemon:
                 current_location=location,
                 current_speed=current_speed,
                 timestamp=int(current_time * 1e9),  # Convert to nanoseconds
-                v_cruise=cruise_cluster_speed  # Driver's original set speed from cluster
+                v_cruise=cruise_cluster_speed,  # Driver's original set speed from cluster
+                current_heading_deg=self._get_current_heading_deg(),
             )
 
             # Update API status
