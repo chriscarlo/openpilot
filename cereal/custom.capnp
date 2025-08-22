@@ -419,6 +419,10 @@ struct RtiStateSP @0xa1680744031fdb2d {
     
     # Speed limit at threat location (m/s)
     speedLimitMs @7 :Float32;
+
+    # True if threat is determined to be on the same road as ego
+    # Published from backend ThreatDetector; used by HUD for visual indicator
+    onSameRoad @8 :Bool;
   }
   
   enum ThreatType {

@@ -8,7 +8,10 @@
 #pragma once
 
 #include <QPainter>
+#include <unordered_map>
+#include <string>
 #include <QString>
+#include <QMutex>
 #include <vector>
 
 #include "cereal/gen/cpp/custom.capnp.h"
@@ -20,6 +23,7 @@ using RTIThreatType = cereal::RtiStateSP::ThreatType;
 
 // Structure to hold info for each threat
 struct RTIThreatInfo {
+  std::string id;
   RTIThreatType type;
   double latitude;
   double longitude;
@@ -27,6 +31,8 @@ struct RTIThreatInfo {
   double relative_bearing;  // degrees
   bool has_location;
   cereal::RtiStateSP::Direction direction;  // coarse direction fallback
+  float speed_limit_ms;  // optional; provided by backend
+  bool on_same_road;     // provided by backend (no inference)
 };
 
 class HudRendererSP : public HudRenderer {
@@ -48,11 +54,13 @@ protected:
   QString getRTIThreatTextShort(RTIThreatType type) const;
   QString formatDistance(float distance_m) const;
   QColor getRTIThreatColor(float distance) const;
+  QColor getRTIThreatBgColorByType(RTIThreatType type) const;
   double calculateRelativeBearing(double ego_latitude, double ego_longitude, 
                                  double threat_latitude, double threat_longitude, 
                                  double ego_heading_deg) const;
   void updateRTIThreats(const UIState &s);
   double angleForDirection(cereal::RtiStateSP::Direction dir) const;
+  double smoothAngleForThreat(const std::string &id, double raw_angle_deg) const;
   
   // RTI state variables
   bool rti_enabled = false;  // Master RTI enabled switch
@@ -95,4 +103,8 @@ protected:
   int compact_arrow_size = 0;
   void createArrowPixmap();
   void createCompactArrowPixmap(int size);
+
+  // Smoothed angles per threat id
+  mutable std::unordered_map<std::string, double> smoothed_angles_deg_;
+  mutable QMutex smoothed_angles_mutex_;
 };

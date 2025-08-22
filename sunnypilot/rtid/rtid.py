@@ -268,6 +268,11 @@ class RTIDaemon:
                 threat_msg.direction = threat.direction
                 threat_msg.confidence = threat.confidence
                 threat_msg.speedLimitMs = threat.speed_limit_ms
+                # Publish same-road determination explicitly (no inference)
+                try:
+                    threat_msg.onSameRoad = bool(threat.on_same_road)
+                except Exception:
+                    threat_msg.onSameRoad = False
 
         self.pm.send('rtiStateSP', msg)
 

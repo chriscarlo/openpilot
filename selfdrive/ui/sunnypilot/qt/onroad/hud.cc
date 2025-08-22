@@ -11,6 +11,9 @@
 #include <cmath>
 #include <QPainterPath>
 #include <QTransform>
+#include <QTime>
+#include <QMutexLocker>
+#include <unordered_set>
 #include <limits>
 
 #include "common/params.h"
@@ -391,51 +394,10 @@ QColor HudRendererSP::getRTIThreatColor(float distance) const {
 }
 
 void HudRendererSP::createArrowPixmap() {
-  // Create arrow pointing up (0° = ahead)
-  const int arrow_size = 96;  // doubled
-  arrow_pixmap = QPixmap(arrow_size, arrow_size);
-  arrow_pixmap.fill(Qt::transparent);
-  
-  QPainter painter(&arrow_pixmap);
-  painter.setRenderHint(QPainter::Antialiasing);
-  painter.setRenderHint(QPainter::SmoothPixmapTransform);
-  
-  // Create arrow path (pointing up)
-  QPainterPath arrow;
-  int center = arrow_size / 2;
-  int arrow_length = arrow_size * 0.8;
-  int arrow_width = arrow_size * 0.5;
-  
-  // Arrow tip (top)
-  arrow.moveTo(center, center - arrow_length/2);
-  
-  // Right side of arrowhead
-  arrow.lineTo(center + arrow_width/3, center - arrow_length/6);
-  
-  // Right side of shaft
-  arrow.lineTo(center + arrow_width/6, center - arrow_length/6);
-  arrow.lineTo(center + arrow_width/6, center + arrow_length/3);
-  
-  // Bottom of arrow
-  arrow.lineTo(center - arrow_width/6, center + arrow_length/3);
-  
-  // Left side of shaft
-  arrow.lineTo(center - arrow_width/6, center - arrow_length/6);
-  
-  // Left side of arrowhead
-  arrow.lineTo(center - arrow_width/3, center - arrow_length/6);
-  
-  // Close path back to tip
-  arrow.closeSubpath();
-  
-  // Fill with white (will be tinted when drawn)
-  painter.fillPath(arrow, Qt::white);
-  
-  // Add border for better visibility
-  painter.setPen(QPen(QColor(0, 0, 0, 100), 2));
-  painter.drawPath(arrow);
-  
-  arrow_pixmap_cached = true;
+  // Load SVG arrow asset and rasterize to base size
+  const int arrow_size = 96;  // large arrow size
+  arrow_pixmap = loadPixmap("../assets/icons/arrow_simple.svg", QSize(arrow_size, arrow_size));
+  arrow_pixmap_cached = !arrow_pixmap.isNull();
 }
 
 void HudRendererSP::drawRTIArrow(QPainter &p, const QRect &arrow_rect, double relative_bearing) {
@@ -525,12 +487,20 @@ void HudRendererSP::updateRTIThreats(const UIState &s) {
       auto threat = threats[i];
       
       RTIThreatInfo info;
+      if (threat.hasId()) {
+        auto idtxt = threat.getId();
+        info.id = std::string(idtxt.cStr());
+      } else {
+        info.id = std::to_string(i);
+      }
       info.type = threat.getType();
       info.distance = threat.getDistance();
       info.latitude = threat.getLatitude();
       info.longitude = threat.getLongitude();
       info.has_location = std::isfinite(info.latitude) && std::isfinite(info.longitude);
       info.direction = threat.getDirection();
+      info.speed_limit_ms = threat.getSpeedLimitMs();
+      info.on_same_road = threat.getOnSameRoad();
       
       // Do not cache relative bearing here; it will be computed per-frame in draw
       info.relative_bearing = std::numeric_limits<double>::quiet_NaN();
@@ -560,6 +530,21 @@ void HudRendererSP::updateRTIThreats(const UIState &s) {
     } else {
       rti_has_threat = false;
     }
+
+    // Prune smoothed angle cache to only keep active threats
+    {
+      QMutexLocker lock(&smoothed_angles_mutex_);
+      std::unordered_set<std::string> live_ids;
+      live_ids.reserve(rti_threats.size());
+      for (const auto &t : rti_threats) live_ids.insert(t.id);
+      for (auto it = smoothed_angles_deg_.begin(); it != smoothed_angles_deg_.end(); ) {
+        if (live_ids.find(it->first) == live_ids.end()) {
+          it = smoothed_angles_deg_.erase(it);
+        } else {
+          ++it;
+        }
+      }
+    }
   }
 }
 
@@ -567,105 +552,101 @@ void HudRendererSP::drawRTIThreatIndicatorMulti(QPainter &p, const QRect &surfac
   // Position to bottom-align with lateral accel widget
   const int bottom_margin = 15;
   const int left_margin = 15;
-  
-  // Expanded size to accommodate larger fonts/arrows
-  const int widget_width = 620;   // slightly wider
-  const int widget_height = 520;  // taller to fit 4 lines with 50% larger text
-  
+
+  // Transparent container; just a reserved area to stack mini-widgets
+  const int widget_width = 620;
+  const int widget_height = 520;
+
   const int x_offset = left_margin;
   const int y_offset = surface_rect.height() - widget_height - bottom_margin;
-  
-  QRect rti_rect(x_offset, y_offset, widget_width, widget_height);
-  
-  // Determine if any police threat is present to color the border red
-  bool police_present = false;
-  for (const auto &t : rti_threats) {
-    if (t.type == cereal::RtiStateSP::ThreatType::POLICE ||
-        t.type == cereal::RtiStateSP::ThreatType::POLICE_HIDING) {
-      police_present = true;
-      break;
-    }
-  }
 
-  // Draw widget background with conditional border color
-  p.setPen(QPen(police_present ? QColor(255, 0, 0, 200) : QColor(255, 255, 255, 75), 6));
-  p.setBrush(QColor(0, 0, 0, 115));
-  p.drawRoundedRect(rti_rect, 32, 32);
-  
-  // Check if we have active threats
+  QRect rti_rect(x_offset, y_offset, widget_width, widget_height);
+
   if (!rti_threats.empty()) {
-    // Draw header (+50%)
-    p.setFont(InterFont(59, QFont::DemiBold));
-    p.setPen(QColor(255, 255, 255, 200));
-    p.drawText(rti_rect.adjusted(20, 15, -20, 0), Qt::AlignTop | Qt::AlignLeft, "RTI");
-    
-    // Draw each threat on a single line in SORTED ORDER (closest to furthest)
-    // Layout from top to bottom:
-    //   Line 1 (top):    Closest/most urgent threat
-    //   Line 2:          Second closest threat  
-    //   Line 3:          Third closest threat
-    //   Line 4 (bottom): Furthest threat (if 4 threats present)
-    const int line_height = 84;  // ~55 * 1.5
-    const int start_y = rti_rect.y() + 90;  // Start below bigger header
-    const int max_threats = 4;  // Maximum threats to display
-    
+    // Small header label
+    p.setFont(InterFont(46, QFont::DemiBold));
+    p.setPen(QColor(255, 255, 255, 180));
+    p.drawText(rti_rect.adjusted(4, 0, -4, 0), Qt::AlignTop | Qt::AlignLeft, "RTI");
+
+    const int line_height = 66;
+    const int start_y = rti_rect.y() + 36;
+    const int max_threats = 4;
+
     int displayed = 0;
-    for (const auto& threat : rti_threats) {  // Iterating in sorted order (closest first)
+    for (const auto &threat : rti_threats) {
       if (displayed >= max_threats) break;
-      
-      int y_pos = start_y + (displayed * line_height);  // Each threat gets next line down
-      
-      // Get threat color based on distance
+      int y_pos = start_y + (displayed * line_height);
+
       QColor threat_color = getRTIThreatColor(threat.distance);
-      
-      // Draw compact single line: [arrow] TYPE • 0.5mi
-      QRect line_rect(rti_rect.x() + 20, y_pos, widget_width - 40, line_height);
-      
-      // Draw arrow (larger; doubled). Compute bearing every frame using GPS when available.
-      {
-        double arrow_angle = 0.0;
-        bool can_use_gps = has_gps && threat.has_location &&
-                           std::isfinite(ego_lat) && std::isfinite(ego_lon) &&
-                           std::isfinite(threat.latitude) && std::isfinite(threat.longitude);
-        arrow_angle = can_use_gps ?
-          calculateRelativeBearing(ego_lat, ego_lon, threat.latitude, threat.longitude, ego_bearing) :
-          angleForDirection(threat.direction);
-        QRect arrow_rect(line_rect.x(), line_rect.y() + 8, 64, 64);  // doubled from 32
-        drawRTIArrowCompact(p, arrow_rect, arrow_angle, threat_color);
-        line_rect.adjust(80, 0, 0, 0);  // shift text to accommodate larger arrow
+      QColor bg_color = getRTIThreatBgColorByType(threat.type);
+      bg_color.setAlpha(115);
+      QColor border_color(255, 255, 255, 90);
+
+      QRect line_rect(rti_rect.x() + 12, y_pos, widget_width - 24, line_height);
+      const int arrow_sz = 40;
+      const int padding_x = 12;
+      const int padding_y = 8;
+
+      // Prepare text and compute compact box width
+      p.setFont(InterFont(42, QFont::Normal));
+      QString threat_line = QString("%1 • %2").arg(getRTIThreatTextShort(threat.type)).arg(formatDistance(threat.distance));
+      QFontMetrics fm(p.font());
+      int text_w = fm.horizontalAdvance(threat_line);
+      int box_w = padding_x + arrow_sz + 8 + text_w + 28 + padding_x; // 28px for same-road dot
+      int box_h = padding_y * 2 + std::max(arrow_sz, fm.height());
+      QRect box_rect(line_rect.x(), line_rect.y() + (line_height - box_h) / 2, box_w, box_h);
+
+      // Mini-widget background + thin border
+      p.setPen(QPen(border_color, 2));
+      p.setBrush(bg_color);
+      p.drawRoundedRect(box_rect, 10, 10);
+
+      // Compute arrow angle (smoothed) and draw
+      double arrow_angle = 0.0;
+      bool can_use_gps = has_gps && threat.has_location &&
+                         std::isfinite(ego_lat) && std::isfinite(ego_lon) &&
+                         std::isfinite(threat.latitude) && std::isfinite(threat.longitude);
+      arrow_angle = can_use_gps ?
+        calculateRelativeBearing(ego_lat, ego_lon, threat.latitude, threat.longitude, ego_bearing) :
+        angleForDirection(threat.direction);
+      arrow_angle = smoothAngleForThreat(threat.id, arrow_angle);
+      QRect arrow_rect(box_rect.x() + padding_x, box_rect.y() + (box_rect.height() - arrow_sz) / 2, arrow_sz, arrow_sz);
+      drawRTIArrowCompact(p, arrow_rect, arrow_angle, threat_color);
+
+      // Draw text
+      p.setPen(threat_color);
+      int text_x = arrow_rect.right() + 8;
+      QRect text_rect(text_x, box_rect.y(), box_rect.right() - text_x - 20, box_rect.height());
+      p.drawText(text_rect, Qt::AlignVCenter | Qt::AlignLeft, threat_line);
+
+      // Same-road indicator dot (500ms blink)
+      if (threat.on_same_road) {
+        bool blink_on = (QTime::currentTime().msec() % 1000) < 500;
+        QColor dot_a = QColor(255, 255, 255, 230);
+        QColor dot_b = QColor(0, 0, 0, 230);
+        QColor dot_color = blink_on ? dot_a : dot_b;
+        int r = 6;
+        int cx = box_rect.right() - padding_x - r;
+        int cy = box_rect.center().y();
+        p.setPen(Qt::NoPen);
+        p.setBrush(dot_color);
+        p.drawEllipse(QPoint(cx, cy), r, r);
       }
 
-      // Draw threat type and distance on same line
-      p.setFont(InterFont(54, QFont::Normal));  // +50%
-      p.setPen(threat_color);
-      
-      QString threat_line = QString("%1 • %2")
-        .arg(getRTIThreatTextShort(threat.type))
-        .arg(formatDistance(threat.distance));
-      
-      p.drawText(line_rect, Qt::AlignVCenter | Qt::AlignLeft, threat_line);
-      
       displayed++;
     }
-    
-    // If RTI is actively controlling speed, show recommendation at bottom
+
     if (rti_active && rti_recommended_speed > 0) {
-      p.setFont(InterFont(48, QFont::Normal));  // +50%
+      p.setFont(InterFont(42, QFont::Normal));
       p.setPen(QColor(255, 255, 255, 180));
-      
       float rec_speed_display = rti_recommended_speed * (is_metric ? 3.6 : 2.237);
-      QString speed_text = QString("Target: %1 %2")
-        .arg(static_cast<int>(rec_speed_display))
-        .arg(is_metric ? "km/h" : "mph");
-      
-      p.drawText(rti_rect.adjusted(20, -40, -20, -10), 
-                 Qt::AlignBottom | Qt::AlignLeft, speed_text);
+      QString speed_text = QString("Target: %1 %2").arg(static_cast<int>(rec_speed_display)).arg(is_metric ? "km/h" : "mph");
+      p.drawText(rti_rect.adjusted(12, -34, -12, -6), Qt::AlignBottom | Qt::AlignLeft, speed_text);
     }
   } else {
-    // Draw placeholder as top-left title identical to header style
-    p.setFont(InterFont(59, QFont::DemiBold));  // +50%
+    p.setFont(InterFont(46, QFont::DemiBold));
     p.setPen(QColor(150, 150, 150, 200));
-    p.drawText(rti_rect.adjusted(20, 15, -20, 0), Qt::AlignTop | Qt::AlignLeft, tr("RTI"));
+    p.drawText(rti_rect.adjusted(4, 0, -4, 0), Qt::AlignTop | Qt::AlignLeft, tr("RTI"));
   }
 }
 
@@ -701,49 +682,8 @@ void HudRendererSP::drawRTIArrowCompact(QPainter &p, const QRect &arrow_rect,
 }
 
 void HudRendererSP::createCompactArrowPixmap(int size) {
-  compact_arrow_pixmap = QPixmap(size, size);
-  compact_arrow_pixmap.fill(Qt::transparent);
-  
-  QPainter painter(&compact_arrow_pixmap);
-  painter.setRenderHint(QPainter::Antialiasing);
-  painter.setRenderHint(QPainter::SmoothPixmapTransform);
-  
-  // Create arrow path (pointing up) - same proportions as main arrow
-  QPainterPath arrow;
-  int center = size / 2;
-  int arrow_length = size * 0.8;
-  int arrow_width = size * 0.5;
-  
-  // Arrow tip (top)
-  arrow.moveTo(center, center - arrow_length/2);
-  
-  // Right side of arrowhead
-  arrow.lineTo(center + arrow_width/3, center - arrow_length/6);
-  
-  // Right side of shaft
-  arrow.lineTo(center + arrow_width/6, center - arrow_length/6);
-  arrow.lineTo(center + arrow_width/6, center + arrow_length/3);
-  
-  // Bottom of arrow
-  arrow.lineTo(center - arrow_width/6, center + arrow_length/3);
-  
-  // Left side of shaft
-  arrow.lineTo(center - arrow_width/6, center - arrow_length/6);
-  
-  // Left side of arrowhead
-  arrow.lineTo(center - arrow_width/3, center - arrow_length/6);
-  
-  // Close path back to tip
-  arrow.closeSubpath();
-  
-  // Fill with white (will be tinted when drawn)
-  painter.fillPath(arrow, Qt::white);
-  
-  // Add border for better visibility
-  painter.setPen(QPen(QColor(0, 0, 0, 100), 2));
-  painter.drawPath(arrow);
-  
-  compact_arrow_cached = true;
+  compact_arrow_pixmap = loadPixmap("../assets/icons/arrow_simple.svg", QSize(size, size));
+  compact_arrow_cached = !compact_arrow_pixmap.isNull();
   compact_arrow_size = size;
 }
 
@@ -801,4 +741,55 @@ double HudRendererSP::angleForDirection(cereal::RtiStateSP::Direction dir) const
     case D::UNKNOWN:
     default:         return 0.0;    // default to ahead
   }
+}
+
+QColor HudRendererSP::getRTIThreatBgColorByType(RTIThreatType type) const {
+  switch (type) {
+    case cereal::RtiStateSP::ThreatType::POLICE:
+    case cereal::RtiStateSP::ThreatType::POLICE_HIDING:
+      return QColor(200, 30, 30);
+    case cereal::RtiStateSP::ThreatType::SPEED_TRAP:
+    case cereal::RtiStateSP::ThreatType::SPEED_CAMERA:
+      return QColor(40, 120, 230);
+    case cereal::RtiStateSP::ThreatType::ACCIDENT:
+      return QColor(240, 140, 0);
+    case cereal::RtiStateSP::ThreatType::CONSTRUCTION:
+      return QColor(215, 130, 0);
+    case cereal::RtiStateSP::ThreatType::HAZARD:
+    case cereal::RtiStateSP::ThreatType::SHOULDER_HAZARD:
+    case cereal::RtiStateSP::ThreatType::ROAD_HAZARD:
+      return QColor(220, 200, 0);
+    case cereal::RtiStateSP::ThreatType::JAM:
+      return QColor(160, 80, 200);
+    case cereal::RtiStateSP::ThreatType::ROAD_CLOSED:
+      return QColor(100, 100, 100);
+    default:
+      return QColor(80, 80, 80);
+  }
+}
+
+static inline double normalize180(double a) {
+  while (a > 180.0) a -= 360.0;
+  while (a < -180.0) a += 360.0;
+  return a;
+}
+
+static inline double shortestDelta(double from_deg, double to_deg) {
+  return normalize180(to_deg - from_deg);
+}
+
+double HudRendererSP::smoothAngleForThreat(const std::string &id, double raw_angle_deg) const {
+  QMutexLocker lock(&smoothed_angles_mutex_);
+  double target = normalize180(raw_angle_deg);
+  auto it = smoothed_angles_deg_.find(id);
+  if (it == smoothed_angles_deg_.end()) {
+    smoothed_angles_deg_.emplace(id, target);
+    return target;
+  }
+  double current = it->second;
+  double delta = shortestDelta(current, target);
+  const double alpha = 0.2;  // tuned for smooth yet responsive motion
+  double next = normalize180(current + alpha * delta);
+  it->second = next;
+  return next;
 }
