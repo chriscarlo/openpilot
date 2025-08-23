@@ -98,70 +98,75 @@ class RoadSegment:
   max_speed: float  # m/s
   road_direction: float  # bearing in degrees
 
-    def get_length(self) -> float:
-        """Calculate total road segment length in meters."""
-        if len(self.centerline) < 2:
-            return 0.0
-        return self.centerline[-1].distance_from_start
+  def get_length(self) -> float:
+    """Calculate total road segment length in meters."""
+    if len(self.centerline) < 2:
+      return 0.0
+    return self.centerline[-1].distance_from_start
 
-    def get_closest_point(self, position: Coordinate) -> tuple[RoadCoordinate, float]:
-        """
-        Find closest point on road centerline to given position.
-        Returns (closest_point, distance_to_road).
-        """
-        if not self.centerline:
-            return RoadCoordinate(0, 0), float('inf')
+  def get_closest_point(self, position: Coordinate) -> tuple[RoadCoordinate, float]:
+    """
+    Find closest point on road centerline to given position.
+    Returns (closest_point, distance_to_road).
+    """
+    if not self.centerline:
+      return RoadCoordinate(0, 0), float('inf')
 
-        min_distance = float('inf')
-        closest_point = self.centerline[0]
+    min_distance = float('inf')
+    closest_point = self.centerline[0]
 
-        # Check distance to each segment
-        for i in range(len(self.centerline) - 1):
-            p1 = self.centerline[i].to_coordinate()
-            p2 = self.centerline[i + 1].to_coordinate()
+    # Check distance to each segment
+    for i in range(len(self.centerline) - 1):
+      p1 = self.centerline[i].to_coordinate()
+      p2 = self.centerline[i + 1].to_coordinate()
 
-            distance = minimum_distance(p1, p2, position)
-            if distance < min_distance:
-                min_distance = distance
-                # Calculate projection point
-                closest_point = self._project_to_segment(position,
-                                                       self.centerline[i],
-                                                       self.centerline[i + 1])
+      distance = minimum_distance(p1, p2, position)
+      if distance < min_distance:
+        min_distance = distance
+        # Calculate projection point
+        closest_point = self._project_to_segment(
+          position,
+          self.centerline[i],
+          self.centerline[i + 1],
+        )
 
-        return closest_point, min_distance
+    return closest_point, min_distance
 
-    def _project_to_segment(self, point: Coordinate,
-                           seg_start: RoadCoordinate,
-                           seg_end: RoadCoordinate) -> RoadCoordinate:
-        """Project point onto road segment and calculate distance along road."""
-        p1 = seg_start.to_coordinate()
-        p2 = seg_end.to_coordinate()
+  def _project_to_segment(
+    self,
+    point: Coordinate,
+    seg_start: RoadCoordinate,
+    seg_end: RoadCoordinate,
+  ) -> RoadCoordinate:
+    """Project point onto road segment and calculate distance along road."""
+    p1 = seg_start.to_coordinate()
+    p2 = seg_end.to_coordinate()
 
-        # Vector from p1 to p2
-        dx = p2.longitude - p1.longitude
-        dy = p2.latitude - p1.latitude
+    # Vector from p1 to p2
+    dx = p2.longitude - p1.longitude
+    dy = p2.latitude - p1.latitude
 
-        # Vector from p1 to point
-        px = point.longitude - p1.longitude
-        py = point.latitude - p1.latitude
+    # Vector from p1 to point
+    px = point.longitude - p1.longitude
+    py = point.latitude - p1.latitude
 
-        # Calculate projection parameter t
-        segment_length_sq = dx * dx + dy * dy
-        if segment_length_sq == 0:
-            # Degenerate segment
-            return seg_start
+    # Calculate projection parameter t
+    segment_length_sq = dx * dx + dy * dy
+    if segment_length_sq == 0:
+      # Degenerate segment
+      return seg_start
 
-        t = max(0, min(1, (px * dx + py * dy) / segment_length_sq))
+    t = max(0, min(1, (px * dx + py * dy) / segment_length_sq))
 
-        # Calculate projected point
-        proj_lat = p1.latitude + t * dy
-        proj_lon = p1.longitude + t * dx
+    # Calculate projected point
+    proj_lat = p1.latitude + t * dy
+    proj_lon = p1.longitude + t * dx
 
-        # Calculate distance along road
-        segment_distance = seg_end.distance_from_start - seg_start.distance_from_start
-        distance_along = seg_start.distance_from_start + t * segment_distance
+    # Calculate distance along road
+    segment_distance = seg_end.distance_from_start - seg_start.distance_from_start
+    distance_along = seg_start.distance_from_start + t * segment_distance
 
-        return RoadCoordinate(proj_lat, proj_lon, distance_along)
+    return RoadCoordinate(proj_lat, proj_lon, distance_along)
 
 
 class GeoUtils:
