@@ -85,7 +85,7 @@ void HudRenderer::updateState(const UIState &s) {
     // Selected source for SLC (exact)
     // Use explicit source when available instead of any heuristics
     auto slc_src = slc.getSource();
-    slc_source_is_map = (slc_src == cereal::LongitudinalPlanSP::SlcSource::map);
+    slc_source_is_map = (slc_src == cereal::LongitudinalPlanSP::SlcSource::MAP);
     
     // Vision Turn Speed Control
     const auto vtsc = lp_sp.getVisionTurnSpeedControl();
