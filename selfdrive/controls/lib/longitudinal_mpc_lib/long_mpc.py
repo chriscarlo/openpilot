@@ -57,8 +57,8 @@ FCW_IDXS = T_IDXS < 5.0
 T_DIFFS = np.diff(T_IDXS, prepend=[0.])
 COMFORT_BRAKE = 2.5
 STOP_DISTANCE = 6.0
-CRUISE_MIN_ACCEL = -1.2
-CRUISE_MAX_ACCEL = 1.6
+CRUISE_MIN_ACCEL = -6.0
+CRUISE_MAX_ACCEL = 5.0
 
 def get_jerk_factor(personality=log.LongitudinalPersonality.standard):
   if personality==log.LongitudinalPersonality.relaxed:
@@ -186,7 +186,7 @@ def gen_long_ocp():
 
   x0 = np.zeros(X_DIM)
   ocp.constraints.x0 = x0
-  ocp.parameter_values = np.array([-1.2, 1.2, 0.0, 0.0, get_T_FOLLOW(), LEAD_DANGER_FACTOR])
+  ocp.parameter_values = np.array([CRUISE_MIN_ACCEL, CRUISE_MAX_ACCEL, 0.0, 0.0, get_T_FOLLOW(), LEAD_DANGER_FACTOR])
 
 
   # We put all constraint cost weights to 0 and only set them at runtime

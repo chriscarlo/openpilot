@@ -25,8 +25,10 @@ ALLOW_THROTTLE_THRESHOLD = 0.4
 MIN_ALLOW_THROTTLE_SPEED = 2.5
 
 # Lookup table for turns
-_A_TOTAL_MAX_V = [1.7, 3.2]
-_A_TOTAL_MAX_BP = [20., 40.]
+# Allow higher total accel (lateral+longitudinal) at low speeds and taper with speed
+# Shape: 0 m/s -> 4.0 m/s^2, 20 m/s -> 2.0 m/s^2, 40 m/s+ -> 1.2 m/s^2
+_A_TOTAL_MAX_V = [4.0, 2.0, 1.2]
+_A_TOTAL_MAX_BP = [0., 20., 40.]
 
 
 def get_max_accel(v_ego):
