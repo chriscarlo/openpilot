@@ -45,12 +45,8 @@ public:
 
 protected:
   // RTI drawing methods
-  void drawRTIThreatIndicator(QPainter &p, const QRect &surface_rect);
   void drawRTIThreatIndicatorMulti(QPainter &p, const QRect &surface_rect);
-  void drawRTIThreatIcon(QPainter &p, const QRect &icon_rect, RTIThreatType type);
-  void drawRTIArrow(QPainter &p, const QRect &arrow_rect, double relative_bearing);
   void drawRTIArrowCompact(QPainter &p, const QRect &arrow_rect, double relative_bearing, const QColor &color);
-  QString getRTIThreatText(RTIThreatType type) const;
   QString getRTIThreatTextShort(RTIThreatType type) const;
   QString formatDistance(float distance_m) const;
   QColor getRTIThreatColor(float distance) const;
@@ -95,20 +91,9 @@ protected:
   enum class GPSSource { UNKNOWN = 0, EXTERNAL = 1, INTERNAL = 2 };
   GPSSource last_gps_source = GPSSource::UNKNOWN;
   
-  // Cached font objects for performance
-  QFont threat_text_font;
-  QFont distance_font;
-  QFont speed_rec_font;
-  QFont icon_font_small;
-  QFont icon_font_large;
-  
-  // Cached arrow pixmaps for performance
-  QPixmap arrow_pixmap;
-  bool arrow_pixmap_cached = false;
   QPixmap compact_arrow_pixmap;
   bool compact_arrow_cached = false;
   int compact_arrow_size = 0;
-  void createArrowPixmap();
   void createCompactArrowPixmap(int size);
 
   // Smoothed angles per threat id

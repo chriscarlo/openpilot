@@ -14,22 +14,14 @@
 #include <QTime>
 #include <QMutexLocker>
 #include <unordered_set>
+#include <unordered_map>
 #include <limits>
 
 #include "common/params.h"
 #include "selfdrive/ui/qt/util.h"
 #include "selfdrive/ui/ui.h"  // For UI_FREQ
 
-// Static polygons for threat icons to avoid per-frame creation
-static const QPolygon police_car_body = QPolygon()
-    << QPoint(10, 50) << QPoint(30, 30) << QPoint(70, 30)
-    << QPoint(90, 50) << QPoint(90, 70) << QPoint(10, 70);
-
-static const QPolygon accident_triangle = QPolygon()
-    << QPoint(50, 20) << QPoint(80, 70) << QPoint(20, 70);
-
-static const QPolygon construction_cone = QPolygon()
-    << QPoint(40, 20) << QPoint(60, 20) << QPoint(70, 70) << QPoint(30, 70);
+// (Removed) legacy static polygons used by the deprecated single-threat widget icons
 
 // Static color constants for performance
 static const QColor kRtiColorCritical(255, 0, 0, 255);    // Red
@@ -37,20 +29,66 @@ static const QColor kRtiColorNear(255, 165, 0, 255);      // Orange
 static const QColor kRtiColorNormal(255, 255, 0, 255);    // Yellow
 static const QColor kRtiColorFar(150, 150, 150, 255);     // Gray
 
+// Helper functions
+// GPS validation helpers
+static inline bool isValidCoordinate(double lat, double lon) {
+  return std::isfinite(lat) && std::isfinite(lon);
+}
+
+static inline bool isValidGPSPair(double lat1, double lon1, double lat2, double lon2) {
+  return isValidCoordinate(lat1, lon1) && isValidCoordinate(lat2, lon2);
+}
+
+// Distance comparator helpers
+static inline bool compareByDistance(const RTIThreatInfo& a, const RTIThreatInfo& b) {
+  return a.distance < b.distance;  // ascending (closest first)
+}
+
+static inline bool compareByDistancePtr(const RTIThreatInfo* a, const RTIThreatInfo* b) {
+  return a->distance < b->distance;  // ascending (closest first)
+}
+
+static inline bool comparePolicePriority(const RTIThreatInfo* a, const RTIThreatInfo* b) {
+  // Police on same road have highest priority, then by distance
+  if (a->on_same_road != b->on_same_road) return a->on_same_road && !b->on_same_road;
+  return a->distance < b->distance;
+}
+
+static inline double normalize180(double a) {
+  while (a > 180.0) a -= 360.0;
+  while (a < -180.0) a += 360.0;
+  return a;
+}
+
+// Numeric validation and conversion helpers
+static inline int roundToInt(double value) {
+  return static_cast<int>(std::lround(value));
+}
+
+static inline int clampToByteRange(int value) {
+  return std::min(255, std::max(0, value));
+}
+
+static inline int scaleAndClampByte(int value, double scale) {
+  return clampToByteRange(roundToInt(value * scale));
+}
+
+// Template function for pruning caches based on active IDs
+template<typename CacheType>
+static void pruneCacheByActiveIds(CacheType& cache, QMutex& mutex, const std::unordered_set<std::string>& active_ids) {
+  QMutexLocker lock(&mutex);
+  for (auto it = cache.begin(); it != cache.end(); ) {
+    if (active_ids.find(it->first) == active_ids.end()) {
+      it = cache.erase(it);
+    } else {
+      ++it;
+    }
+  }
+}
+
 HudRendererSP::HudRendererSP() {
   // RTI state initialized with safe defaults
   // rti_enabled will be updated periodically in updateState()
-  
-  // Initialize cached font objects for performance
-  // Increase base fonts ~50% for better readability in RTI widget
-  threat_text_font = InterFont(53, QFont::DemiBold);   // was 35
-  distance_font = InterFont(68, QFont::Bold);          // was 45
-  speed_rec_font = InterFont(45, QFont::Normal);       // was 30
-  icon_font_small = InterFont(60, QFont::Bold);        // was 40
-  icon_font_large = InterFont(68, QFont::Bold);        // was 45
-  
-  // Create arrow pixmap once at startup
-  createArrowPixmap();
 }
 
 void HudRendererSP::updateState(const UIState &s) {
@@ -143,8 +181,7 @@ void HudRendererSP::updateState(const UIState &s) {
         
         // Calculate relative bearing to threat if we have both positions
         if (has_gps && rti_has_threat && 
-            std::isfinite(rti_threat_lat) && std::isfinite(rti_threat_lon) &&
-            std::isfinite(ego_lat) && std::isfinite(ego_lon)) {
+            isValidGPSPair(ego_lat, ego_lon, rti_threat_lat, rti_threat_lon)) {
           rti_relative_bearing = calculateRelativeBearing(
             ego_lat, ego_lon, rti_threat_lat, rti_threat_lon, ego_bearing
           );
@@ -165,214 +202,12 @@ void HudRendererSP::draw(QPainter &p, const QRect &surface_rect) {
   // Draw base HUD elements
   HudRenderer::draw(p, surface_rect);
   
-  // Draw RTI widget when enabled
-  // Shows placeholder when no threat, actual threat info when detected
+  // Draw RTI widget when enabled (multi-threat only)
   if (rti_enabled && rti_hud_enabled) {
-    // Use multi-threat view
     drawRTIThreatIndicatorMulti(p, surface_rect);
   }
 }
 
-void HudRendererSP::drawRTIThreatIndicator(QPainter &p, const QRect &surface_rect) {
-  // Position to bottom-align with lateral accel widget which is at (height - 72 - 15)
-  // Lateral accel widget bottom = surface_rect.height() - 15
-  // RTI widget should have same bottom position
-  const int bottom_margin = 15;  // Same as lateral accel widget
-  const int left_margin = 15;    // Same spacing from left as bottom
-  
-  // Increased size: enlarge widget to accommodate bigger fonts/arrows
-  const int widget_width = 600;
-  const int widget_height = 620;
-  
-  // Position with bottom alignment to lateral accel widget
-  const int x_offset = left_margin;
-  const int y_offset = surface_rect.height() - widget_height - bottom_margin;
-  
-  QRect rti_rect(x_offset, y_offset, widget_width, widget_height);
-  
-  // Determine widget state and colors
-  // Show threats for situational awareness regardless of direction
-  bool has_situational_threat = rti_has_threat;  // Always show threats for awareness
-  bool has_active_threat = rti_threat_ahead && rti_has_threat;  // Only for urgent coloring
-  QColor threat_color = has_active_threat ? getRTIThreatColor(rti_threat_distance) : QColor(150, 150, 150, 255);
-  
-  // Match header shade opacity (0.45 → 115 alpha) for consistency
-  p.setPen(QPen(QColor(255, 255, 255, 75), 6));
-  p.setBrush(QColor(0, 0, 0, 115));  // Changed from 166 to 115 to match header shade
-  p.drawRoundedRect(rti_rect, 32, 32);
-  
-  // Draw threat-colored inner border if active
-  if (has_active_threat) {
-    p.setPen(QPen(threat_color, 3));
-    p.setBrush(Qt::NoBrush);
-    p.drawRoundedRect(rti_rect.adjusted(3, 3, -3, -3), 29, 29);
-  }
-  
-  if (has_situational_threat) {
-    // Draw threat information for situational awareness - proportionally scaled
-    QRect icon_rect(rti_rect.x() + 48, rti_rect.y() + 24, 120, 96);
-    drawRTIThreatIcon(p, icon_rect, rti_threat_type);
-    
-    // Draw arrow and threat type text - increased font size (+50%)
-    p.setFont(InterFont(63, QFont::Normal));
-    p.setPen(threat_color);
-    QString threat_text = getRTIThreatText(rti_threat_type);
-
-    // Always draw directional arrow; compute bearing every frame when GPS available
-    double arrow_angle = 0.0;
-    if (has_gps && std::isfinite(rti_threat_lat) && std::isfinite(rti_threat_lon) &&
-        std::isfinite(ego_lat) && std::isfinite(ego_lon)) {
-      arrow_angle = calculateRelativeBearing(ego_lat, ego_lon, rti_threat_lat, rti_threat_lon, ego_bearing);
-    } else {
-      arrow_angle = angleForDirection(rti_direction);
-    }
-    // Draw arrow to the left of the threat text
-    QRect arrow_rect(rti_rect.x() + 180, rti_rect.y() + 125, 96, 96);  // doubled from 48
-    drawRTIArrow(p, arrow_rect, arrow_angle);
-    // Draw threat text shifted to the right
-    p.drawText(rti_rect.adjusted(50, 132, 0, 0), Qt::AlignTop | Qt::AlignHCenter, threat_text);
-    
-    // Draw distance
-    p.setFont(distance_font);
-    QString distance_text;
-    if (is_metric) {
-      if (rti_threat_distance < 1000) {
-        distance_text = QString("%1m").arg(static_cast<int>(rti_threat_distance));
-      } else {
-        distance_text = QString("%1km").arg(rti_threat_distance / 1000.0, 0, 'f', 1);
-      }
-    } else {
-      float distance_ft = rti_threat_distance * 3.28084;
-      if (distance_ft < 1000) {
-        distance_text = QString("%1ft").arg(static_cast<int>(distance_ft));
-      } else {
-        float distance_mi = distance_ft / 5280.0;
-        distance_text = QString("%1mi").arg(distance_mi, 0, 'f', 1);
-      }
-    }
-    p.drawText(rti_rect.adjusted(0, 186, 0, 0), Qt::AlignTop | Qt::AlignHCenter, distance_text);
-    
-    // Draw speed recommendation ONLY for active (ahead) threats
-    if (has_active_threat && rti_active && std::abs(rti_recommended_speed - speed / (is_metric ? 3.6 : 2.237)) > 1.0) {
-      p.setFont(speed_rec_font);
-      p.setPen(QColor(255, 255, 255, 200));
-      
-      float rec_speed_display = rti_recommended_speed * (is_metric ? 3.6 : 2.237);
-      QString speed_text = QString("↓ %1").arg(static_cast<int>(rec_speed_display));
-      p.drawText(rti_rect.adjusted(0, 240, 0, 0), Qt::AlignTop | Qt::AlignHCenter, speed_text);
-    }
-  } else {
-    // No placeholder text when no threats
-  }
-}
-
-void HudRendererSP::drawRTIThreatIcon(QPainter &p, const QRect &icon_rect, RTIThreatType type) {
-  // Save painter state
-  p.save();
-  
-  // Set icon color
-  QColor icon_color = getRTIThreatColor(rti_threat_distance);
-  p.setPen(QPen(icon_color, 3));
-  p.setBrush(Qt::NoBrush);
-  
-  // Draw simple vector icons based on threat type
-  switch (type) {
-    case cereal::RtiStateSP::ThreatType::POLICE:
-    case cereal::RtiStateSP::ThreatType::POLICE_HIDING: {
-      // Draw police car silhouette using cached polygon
-      p.save();
-      p.translate(icon_rect.topLeft());
-      p.drawPolygon(police_car_body);
-      
-      // Draw light bar on top
-      p.fillRect(35, 20, 30, 8, icon_color);
-      p.restore();
-      break;
-    }
-    
-    case cereal::RtiStateSP::ThreatType::SPEED_TRAP:
-    case cereal::RtiStateSP::ThreatType::SPEED_CAMERA: {
-      // Draw camera icon
-      p.drawRect(icon_rect.x() + 25, icon_rect.y() + 30, 50, 35);
-      p.drawEllipse(QPoint(icon_rect.x() + 50, icon_rect.y() + 47), 12, 12);
-      // Draw mount
-      p.drawLine(icon_rect.x() + 50, icon_rect.y() + 65, icon_rect.x() + 50, icon_rect.y() + 75);
-      break;
-    }
-    
-    case cereal::RtiStateSP::ThreatType::ACCIDENT: {
-      // Draw warning triangle using cached polygon
-      p.save();
-      p.translate(icon_rect.topLeft());
-      p.drawPolygon(accident_triangle);
-      p.restore();
-      
-      // Draw exclamation mark
-      p.setFont(icon_font_small);
-      p.drawText(icon_rect, Qt::AlignCenter, "!");
-      break;
-    }
-    
-    case cereal::RtiStateSP::ThreatType::CONSTRUCTION: {
-      // Draw traffic cone using cached polygon
-      p.save();
-      p.translate(icon_rect.topLeft());
-      p.drawPolygon(construction_cone);
-      
-      // Draw stripes
-      p.drawLine(35, 35, 65, 35);
-      p.drawLine(37, 50, 63, 50);
-      p.restore();
-      break;
-    }
-    
-    case cereal::RtiStateSP::ThreatType::JAM: {
-      // Draw multiple cars
-      for (int i = 0; i < 3; i++) {
-        int y_pos = icon_rect.y() + 20 + i * 20;
-        p.drawRect(icon_rect.x() + 30, y_pos, 40, 15);
-      }
-      break;
-    }
-    
-    default: {
-      // Draw generic warning icon (circle with exclamation)
-      p.drawEllipse(icon_rect.center(), 35, 35);
-      p.setFont(icon_font_large);
-      p.drawText(icon_rect, Qt::AlignCenter, "!");
-      break;
-    }
-  }
-  
-  // Restore painter state
-  p.restore();
-}
-
-QString HudRendererSP::getRTIThreatText(RTIThreatType type) const {
-  switch (type) {
-    case cereal::RtiStateSP::ThreatType::POLICE:
-    case cereal::RtiStateSP::ThreatType::POLICE_HIDING:
-      return tr("POLICE");
-    case cereal::RtiStateSP::ThreatType::SPEED_TRAP:
-    case cereal::RtiStateSP::ThreatType::SPEED_CAMERA:
-      return tr("CAMERA");
-    case cereal::RtiStateSP::ThreatType::ACCIDENT:
-      return tr("ACCIDENT");
-    case cereal::RtiStateSP::ThreatType::JAM:
-      return tr("TRAFFIC");
-    case cereal::RtiStateSP::ThreatType::CONSTRUCTION:
-      return tr("WORK ZONE");
-    case cereal::RtiStateSP::ThreatType::HAZARD:
-    case cereal::RtiStateSP::ThreatType::SHOULDER_HAZARD:
-      return tr("HAZARD");
-    case cereal::RtiStateSP::ThreatType::ROAD_HAZARD:
-      return tr("ROAD");
-    case cereal::RtiStateSP::ThreatType::ROAD_CLOSED:
-      return tr("CLOSED");
-    default:
-      return tr("ALERT");
-  }
-}
 
 QColor HudRendererSP::getRTIThreatColor(float distance) const {
   if (distance < 100) {
@@ -390,45 +225,6 @@ QColor HudRendererSP::getRTIThreatColor(float distance) const {
   }
 }
 
-void HudRendererSP::createArrowPixmap() {
-  // Load SVG arrow asset and rasterize to base size
-  const int arrow_size = 96;  // large arrow size
-  arrow_pixmap = loadPixmap("../assets/icons/arrow_simple.svg", QSize(arrow_size, arrow_size));
-  arrow_pixmap_cached = !arrow_pixmap.isNull();
-}
-
-void HudRendererSP::drawRTIArrow(QPainter &p, const QRect &arrow_rect, double relative_bearing) {
-  if (!arrow_pixmap_cached) {
-    createArrowPixmap();
-  }
-  
-  p.save();
-  
-  // Set color based on threat distance
-  QColor arrow_color = getRTIThreatColor(rti_threat_distance);
-  
-  // Apply rotation around center
-  QTransform transform;
-  transform.translate(arrow_rect.center().x(), arrow_rect.center().y());
-  transform.rotate(relative_bearing);
-  transform.translate(-arrow_rect.width()/2.0, -arrow_rect.height()/2.0);
-  
-  p.setTransform(transform, true);
-  
-  // Tint the arrow with threat color
-  p.setCompositionMode(QPainter::CompositionMode_SourceOver);
-  
-  // Draw the arrow
-  QPixmap tinted_arrow = arrow_pixmap;
-  QPainter tint_painter(&tinted_arrow);
-  tint_painter.setCompositionMode(QPainter::CompositionMode_SourceIn);
-  tint_painter.fillRect(tinted_arrow.rect(), arrow_color);
-  tint_painter.end();
-  
-  p.drawPixmap(0, 0, arrow_rect.width(), arrow_rect.height(), tinted_arrow);
-  
-  p.restore();
-}
 
 double HudRendererSP::calculateRelativeBearing(double ego_latitude, double ego_longitude, 
                                               double threat_latitude, double threat_longitude, 
@@ -465,10 +261,7 @@ double HudRendererSP::calculateRelativeBearing(double ego_latitude, double ego_l
   double rel_bearing = world_bearing - ego_heading_deg;
   
   // Normalize to [-180, 180]
-  while (rel_bearing > 180.0) rel_bearing -= 360.0;
-  while (rel_bearing < -180.0) rel_bearing += 360.0;
-  
-  return rel_bearing;
+  return normalize180(rel_bearing);
 }
 
 void HudRendererSP::updateRTIThreats(const UIState &s) {
@@ -494,7 +287,7 @@ void HudRendererSP::updateRTIThreats(const UIState &s) {
       info.distance = threat.getDistance();
       info.latitude = threat.getLatitude();
       info.longitude = threat.getLongitude();
-      info.has_location = std::isfinite(info.latitude) && std::isfinite(info.longitude);
+      info.has_location = isValidCoordinate(info.latitude, info.longitude);
       info.direction = threat.getDirection();
       info.speed_limit_ms = threat.getSpeedLimitMs();
       info.on_same_road = threat.getOnSameRoad();
@@ -510,10 +303,7 @@ void HudRendererSP::updateRTIThreats(const UIState &s) {
     //   Top:    Closest threat (most urgent)
     //   Middle: Medium distance threats
     //   Bottom: Furthest threat (least urgent)
-    std::sort(rti_threats.begin(), rti_threats.end(), 
-              [](const RTIThreatInfo& a, const RTIThreatInfo& b) {
-                return a.distance < b.distance;  // a < b means ascending (smallest/closest first)
-              });
+    std::sort(rti_threats.begin(), rti_threats.end(), compareByDistance);
     
     // Update legacy single-threat variables with closest threat
     if (!rti_threats.empty()) {
@@ -533,26 +323,9 @@ void HudRendererSP::updateRTIThreats(const UIState &s) {
       std::unordered_set<std::string> live_ids;
       live_ids.reserve(rti_threats.size());
       for (const auto &t : rti_threats) live_ids.insert(t.id);
-      {
-        QMutexLocker lock(&smoothed_angles_mutex_);
-        for (auto it = smoothed_angles_deg_.begin(); it != smoothed_angles_deg_.end(); ) {
-          if (live_ids.find(it->first) == live_ids.end()) {
-            it = smoothed_angles_deg_.erase(it);
-          } else {
-            ++it;
-          }
-        }
-      }
-      {
-        QMutexLocker lock(&smoothed_y_mutex_);
-        for (auto it = smoothed_y_top_.begin(); it != smoothed_y_top_.end(); ) {
-          if (live_ids.find(it->first) == live_ids.end()) {
-            it = smoothed_y_top_.erase(it);
-          } else {
-            ++it;
-          }
-        }
-      }
+      
+      pruneCacheByActiveIds(smoothed_angles_deg_, smoothed_angles_mutex_, live_ids);
+      pruneCacheByActiveIds(smoothed_y_top_, smoothed_y_mutex_, live_ids);
     }
   }
 }
@@ -575,8 +348,10 @@ void HudRendererSP::drawRTIThreatIndicatorMulti(QPainter &p, const QRect &surfac
     const int outer_pad_y = 3;  // 3px top/bottom per widget => 6px total between
     const int padding_x = 12;
     const int padding_y = 8;
-    const int arrow_sz = int(std::lround(40 * 0.8)); // 32
+    // Bigger arrow for better readability and parity with legacy single
+    const int arrow_sz = 48; // increased from ~38
     const int left_x = rti_rect.x() + 12;
+    const int right_margin = 12;
     const int label_margin_px = 34;  // reserve space at bottom for Target label
 
     // Build selection with POLICE priority for display occupancy
@@ -590,14 +365,9 @@ void HudRendererSP::drawRTIThreatIndicatorMulti(QPainter &p, const QRect &surfac
       (is_police ? police : others).push_back(&t);
     }
     // Sort police by same-road first, then distance asc
-    std::sort(police.begin(), police.end(), [](const RTIThreatInfo* a, const RTIThreatInfo* b){
-      if (a->on_same_road != b->on_same_road) return a->on_same_road && !b->on_same_road;
-      return a->distance < b->distance;
-    });
+    std::sort(police.begin(), police.end(), comparePolicePriority);
     // Sort others by distance asc
-    std::sort(others.begin(), others.end(), [](const RTIThreatInfo* a, const RTIThreatInfo* b){
-      return a->distance < b->distance;
-    });
+    std::sort(others.begin(), others.end(), compareByDistancePtr);
 
     // Candidates in priority order: all POLICE (same-road then distance), then others (distance)
     std::vector<const RTIThreatInfo*> candidates;
@@ -605,8 +375,8 @@ void HudRendererSP::drawRTIThreatIndicatorMulti(QPainter &p, const QRect &surfac
     for (auto *t : police) candidates.push_back(t);
     for (auto *t : others) candidates.push_back(t);
 
-    // Use compact font (scaled down ~20%) to compute uniform row height
-    QFont row_font = InterFont(int(std::lround(42 * 0.8)), QFont::Normal);
+    // Use compact font; slightly larger for readability
+    QFont row_font = InterFont(roundToInt(42 * 1.0), QFont::Normal);
     p.setFont(row_font);
     QFontMetrics fm(row_font);
     const int row_h = padding_y * 2 + std::max(arrow_sz, fm.height());
@@ -623,39 +393,59 @@ void HudRendererSP::drawRTIThreatIndicatorMulti(QPainter &p, const QRect &surfac
     }
 
     // Final ordering for display: ascending distance (closest first)
-    std::sort(selected.begin(), selected.end(), [](const RTIThreatInfo* a, const RTIThreatInfo* b){
-      return a->distance < b->distance;
-    });
+    std::sort(selected.begin(), selected.end(), compareByDistancePtr);
 
     // Build row objects with measured width/height per selection
     struct Row { const RTIThreatInfo* t; QString text; int w; int h; };
     std::vector<Row> rows;
     rows.reserve(selected.size());
+    int max_natural_w = 0;
     for (auto *t : selected) {
       QString line = QString("%1 • %2").arg(getRTIThreatTextShort(t->type)).arg(formatDistance(t->distance));
       int text_w = fm.horizontalAdvance(line);
-      int box_w_unscaled = padding_x + arrow_sz + 8 + text_w + 28 + padding_x; // 28px for same-road dot
-      int box_w = int(std::lround(box_w_unscaled * 1.35));                    // +35% width
-      int box_h = row_h;                                                      // uniform height
+      // Natural width based on contents (used to compute uniform width below)
+      int box_w_unscaled = padding_x + arrow_sz + 8 + text_w + padding_x;
+      int box_w = box_w_unscaled;                                            // natural width
+      int box_h = row_h;                                                      // uniform height per row
+      max_natural_w = std::max(max_natural_w, box_w);
       rows.push_back({t, line, box_w, box_h});
     }
+
+    // Change 4: enforce uniform width for all rows, clamped to container width
+    int allowable_max_w = rti_rect.width() - (left_x - rti_rect.x()) - right_margin; // fit within transparent box
+    int uniform_box_w = std::min(max_natural_w, allowable_max_w);
 
     // Place from bottom-up with Y smoothing
     int y_cursor = rti_rect.y() + rti_rect.height() - label_margin_px;  // reserve space for bottom label
     for (int i = (int)rows.size() - 1; i >= 0; --i) {
       const auto &row = rows[i];
       // Colors
-      QColor threat_color = getRTIThreatColor(row.t->distance);
-      QColor bg_color = getRTIThreatBgColorByType(row.t->type);
+      QColor threat_color = getRTIThreatColor(row.t->distance);       // distance-based hue
+      QColor bg_color = getRTIThreatBgColorByType(row.t->type);       // type-based hue (background)
       bg_color.setAlpha(115);
-      QColor border_color(255, 255, 255, 90);
+      QColor border_color(255, 255, 255, 90);                         // default border
+
+      // For 'on same road', derive a brighter/saturated variant from the background hue,
+      // and use it for both border and text to match the observed design.
+      QColor bright_text_color = QColor(255, 255, 255, 245);          // default text (white)
+      if (row.t->on_same_road) {
+        QColor hsl = bg_color.toHsl();
+        int h, s, l, a; hsl.getHsl(&h, &s, &l, &a);
+        s = scaleAndClampByte(s, 1.25); // more saturated
+        l = scaleAndClampByte(l, 1.10); // slightly lighter
+        QColor bright; bright.setHsl(h, s, l, 255);
+        border_color = bright;
+        border_color.setAlpha(240);
+        bright_text_color = bright;
+        bright_text_color.setAlpha(245);
+      }
 
       // Target top position using outer breathing
       int target_top = y_cursor - outer_pad_y - row.h;
       // Initial position starts just above reserved label area for a clean slide-up
       double initial_top = rti_rect.y() + rti_rect.height() - label_margin_px + outer_pad_y;
-      int draw_top = int(std::lround(smoothYForThreat(row.t->id, target_top, initial_top)));
-      QRect box_rect(left_x, draw_top, row.w, row.h);
+      int draw_top = roundToInt(smoothYForThreat(row.t->id, target_top, initial_top));
+      QRect box_rect(left_x, draw_top, uniform_box_w, row.h);
 
       // Update cursor for next (higher) row placement
       y_cursor = target_top - outer_pad_y;
@@ -668,8 +458,7 @@ void HudRendererSP::drawRTIThreatIndicatorMulti(QPainter &p, const QRect &surfac
       // Compute arrow angle (smoothed) and draw
       double arrow_angle = 0.0;
       bool can_use_gps = has_gps && row.t->has_location &&
-                         std::isfinite(ego_lat) && std::isfinite(ego_lon) &&
-                         std::isfinite(row.t->latitude) && std::isfinite(row.t->longitude);
+                         isValidGPSPair(ego_lat, ego_lon, row.t->latitude, row.t->longitude);
       arrow_angle = can_use_gps ?
         calculateRelativeBearing(ego_lat, ego_lon, row.t->latitude, row.t->longitude, ego_bearing) :
         angleForDirection(row.t->direction);
@@ -677,25 +466,12 @@ void HudRendererSP::drawRTIThreatIndicatorMulti(QPainter &p, const QRect &surfac
       QRect arrow_rect(box_rect.x() + padding_x, box_rect.y() + (box_rect.height() - arrow_sz) / 2, arrow_sz, arrow_sz);
       drawRTIArrowCompact(p, arrow_rect, arrow_angle, threat_color);
 
-      // Draw text
-      p.setPen(threat_color);
+      // Draw text: baseline white, or brighter color if on same road
+      p.setPen(bright_text_color);
       int text_x = arrow_rect.right() + 8;
       QRect text_rect(text_x, box_rect.y(), box_rect.right() - text_x - 20, box_rect.height());
       p.drawText(text_rect, Qt::AlignVCenter | Qt::AlignLeft, row.text);
-
-      // Same-road indicator dot (500ms blink)
-      if (row.t->on_same_road) {
-        bool blink_on = (QTime::currentTime().msec() % 1000) < 500;
-        QColor dot_a = QColor(255, 255, 255, 230);
-        QColor dot_b = QColor(0, 0, 0, 230);
-        QColor dot_color = blink_on ? dot_a : dot_b;
-        int r = 6;
-        int cx = box_rect.right() - padding_x - r;
-        int cy = box_rect.center().y();
-        p.setPen(Qt::NoPen);
-        p.setBrush(dot_color);
-        p.drawEllipse(QPoint(cx, cy), r, r);
-      }
+      // (Removed) previous same-road blinking dot per Change 3
     }
 
     if (rti_active && rti_recommended_speed > 0) {
@@ -747,30 +523,31 @@ void HudRendererSP::createCompactArrowPixmap(int size) {
   compact_arrow_size = size;
 }
 
+// Centralized threat type mapping
+struct ThreatTypeInfo {
+  const char* text;
+  QColor bg_color;
+};
+
+static const std::unordered_map<RTIThreatType, ThreatTypeInfo> kThreatTypeMap = {
+  {cereal::RtiStateSP::ThreatType::POLICE,          {"POLICE", QColor(200, 30, 30)}},
+  {cereal::RtiStateSP::ThreatType::POLICE_HIDING,   {"POLICE", QColor(200, 30, 30)}},
+  {cereal::RtiStateSP::ThreatType::SPEED_TRAP,      {"CAMERA", QColor(40, 120, 230)}},
+  {cereal::RtiStateSP::ThreatType::SPEED_CAMERA,    {"CAMERA", QColor(40, 120, 230)}},
+  {cereal::RtiStateSP::ThreatType::ACCIDENT,        {"ACCIDENT", QColor(240, 140, 0)}},
+  {cereal::RtiStateSP::ThreatType::JAM,             {"TRAFFIC", QColor(160, 80, 200)}},
+  {cereal::RtiStateSP::ThreatType::CONSTRUCTION,    {"CONSTRUCTION", QColor(215, 130, 0)}},
+  {cereal::RtiStateSP::ThreatType::HAZARD,          {"HAZARD", QColor(220, 200, 0)}},
+  {cereal::RtiStateSP::ThreatType::SHOULDER_HAZARD, {"HAZARD", QColor(220, 200, 0)}},
+  {cereal::RtiStateSP::ThreatType::ROAD_HAZARD,     {"HAZARD", QColor(220, 200, 0)}},
+  {cereal::RtiStateSP::ThreatType::ROAD_CLOSED,     {"CLOSED", QColor(100, 100, 100)}},
+};
+
+static const ThreatTypeInfo kDefaultThreatInfo = {"ALERT", QColor(80, 80, 80)};
+
 QString HudRendererSP::getRTIThreatTextShort(RTIThreatType type) const {
-  // Shorter labels for compact multi-threat view
-  switch (type) {
-    case cereal::RtiStateSP::ThreatType::POLICE:
-    case cereal::RtiStateSP::ThreatType::POLICE_HIDING:
-      return tr("POLICE");
-    case cereal::RtiStateSP::ThreatType::SPEED_TRAP:
-    case cereal::RtiStateSP::ThreatType::SPEED_CAMERA:
-      return tr("CAMERA");
-    case cereal::RtiStateSP::ThreatType::ACCIDENT:
-      return tr("ACCIDENT");
-    case cereal::RtiStateSP::ThreatType::JAM:
-      return tr("TRAFFIC");
-    case cereal::RtiStateSP::ThreatType::CONSTRUCTION:
-      return tr("CONSTRUCTION");
-    case cereal::RtiStateSP::ThreatType::HAZARD:
-    case cereal::RtiStateSP::ThreatType::SHOULDER_HAZARD:
-    case cereal::RtiStateSP::ThreatType::ROAD_HAZARD:
-      return tr("HAZARD");
-    case cereal::RtiStateSP::ThreatType::ROAD_CLOSED:
-      return tr("CLOSED");
-    default:
-      return tr("ALERT");
-  }
+  auto it = kThreatTypeMap.find(type);
+  return tr(it != kThreatTypeMap.end() ? it->second.text : kDefaultThreatInfo.text);
 }
 
 QString HudRendererSP::formatDistance(float distance_m) const {
@@ -782,7 +559,8 @@ QString HudRendererSP::formatDistance(float distance_m) const {
     }
   } else {
     float distance_ft = distance_m * 3.28084;
-    if (distance_ft < 1000) {
+    // Use feet for distances under 0.25 miles (1320 ft), then miles beyond
+    if (distance_ft < 1320) {
       return QString("%1ft").arg(static_cast<int>(distance_ft));
     } else {
       float distance_mi = distance_ft / 5280.0;
@@ -804,34 +582,8 @@ double HudRendererSP::angleForDirection(cereal::RtiStateSP::Direction dir) const
 }
 
 QColor HudRendererSP::getRTIThreatBgColorByType(RTIThreatType type) const {
-  switch (type) {
-    case cereal::RtiStateSP::ThreatType::POLICE:
-    case cereal::RtiStateSP::ThreatType::POLICE_HIDING:
-      return QColor(200, 30, 30);
-    case cereal::RtiStateSP::ThreatType::SPEED_TRAP:
-    case cereal::RtiStateSP::ThreatType::SPEED_CAMERA:
-      return QColor(40, 120, 230);
-    case cereal::RtiStateSP::ThreatType::ACCIDENT:
-      return QColor(240, 140, 0);
-    case cereal::RtiStateSP::ThreatType::CONSTRUCTION:
-      return QColor(215, 130, 0);
-    case cereal::RtiStateSP::ThreatType::HAZARD:
-    case cereal::RtiStateSP::ThreatType::SHOULDER_HAZARD:
-    case cereal::RtiStateSP::ThreatType::ROAD_HAZARD:
-      return QColor(220, 200, 0);
-    case cereal::RtiStateSP::ThreatType::JAM:
-      return QColor(160, 80, 200);
-    case cereal::RtiStateSP::ThreatType::ROAD_CLOSED:
-      return QColor(100, 100, 100);
-    default:
-      return QColor(80, 80, 80);
-  }
-}
-
-static inline double normalize180(double a) {
-  while (a > 180.0) a -= 360.0;
-  while (a < -180.0) a += 360.0;
-  return a;
+  auto it = kThreatTypeMap.find(type);
+  return it != kThreatTypeMap.end() ? it->second.bg_color : kDefaultThreatInfo.bg_color;
 }
 
 static inline double shortestDelta(double from_deg, double to_deg) {
