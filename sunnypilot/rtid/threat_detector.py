@@ -278,8 +278,6 @@ class SpeedRecommendationEngine:
             speed_reduction_kmh = 16  # Default 10 mph
         self.speed_reduction_ms = speed_reduction_kmh / 3.6  # Convert km/h to m/s
 
-        self.default_speed_limit_ms = 25  # 55 mph default when unknown
-
     def calculate_recommendation(self, threats: list[ProcessedThreat],
                                current_speed_ms: float,
                                current_location: tuple[float, float],
@@ -335,8 +333,9 @@ class SpeedRecommendationEngine:
             if closest_threat.speed_limit_ms > 0:
                 target_speed = closest_threat.speed_limit_ms
             else:
-                # No posted speed limit - reduce by 20% of driver's set maximum
-                target_speed = v_cruise_ms * 0.8  # 20% reduction from set cruise
+                # No speed limit = no speed recommendation
+                # Threat will still appear on HUD for visual awareness
+                return 0.0, False
         else:
             # Custom mode: reduce by fixed amount from cruise speed
             target_speed = v_cruise_ms - self.speed_reduction_ms
@@ -535,19 +534,15 @@ class ThreatDetector:
                 # Handle legacy test data or future integration
                 speed_limit_ms = threat.speed_limit / 3.6
             else:
-                # Use actual posted speed limit from map data when available
-                if threat.type in ['police', 'policeHiding', 'speedTrap']:
-                    if posted_speed_limit > 0:
-                        # Use actual posted speed limit from map data
-                        speed_limit_ms = posted_speed_limit
-                        cloudlog.debug(f"RTI: Using actual posted speed limit {speed_limit_ms:.1f} m/s for {threat.type}")
-                    else:
-                        # Fall back to conservative default when no speed limit available
-                        speed_limit_ms = self.speed_engine.default_speed_limit_ms
-                        cloudlog.debug(f"RTI: No posted speed limit, using default {speed_limit_ms:.1f} m/s")
+                # Apply same logic to all threat types - use posted speed if available
+                if posted_speed_limit > 0:
+                    # Use actual posted speed limit from map data
+                    speed_limit_ms = posted_speed_limit
+                    cloudlog.debug(f"RTI: Using posted speed limit {speed_limit_ms:.1f} m/s for {threat.type}")
                 else:
-                    # For other alerts, don't make speed recommendations
+                    # No speed limit available - visual alert only, no slowing
                     speed_limit_ms = 0.0
+                    cloudlog.debug(f"RTI: No posted speed limit for {threat.type}, visual alert only")
 
             return ProcessedThreat(
                 id=threat.id,

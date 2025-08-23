@@ -86,6 +86,28 @@ static void pruneCacheByActiveIds(CacheType& cache, QMutex& mutex, const std::un
   }
 }
 
+// Centralized threat type mapping - must be defined before first use
+struct ThreatTypeInfo {
+  const char* text;
+  QColor bg_color;
+};
+
+static const std::unordered_map<RTIThreatType, ThreatTypeInfo> kThreatTypeMap = {
+  {cereal::RtiStateSP::ThreatType::POLICE,          {"POLICE", QColor(200, 30, 30)}},
+  {cereal::RtiStateSP::ThreatType::POLICE_HIDING,   {"POLICE", QColor(200, 30, 30)}},
+  {cereal::RtiStateSP::ThreatType::SPEED_TRAP,      {"CAMERA", QColor(40, 120, 230)}},
+  {cereal::RtiStateSP::ThreatType::SPEED_CAMERA,    {"CAMERA", QColor(40, 120, 230)}},
+  {cereal::RtiStateSP::ThreatType::ACCIDENT,        {"ACCIDENT", QColor(240, 140, 0)}},
+  {cereal::RtiStateSP::ThreatType::JAM,             {"TRAFFIC", QColor(160, 80, 200)}},
+  {cereal::RtiStateSP::ThreatType::CONSTRUCTION,    {"CONSTRUCTION", QColor(215, 130, 0)}},
+  {cereal::RtiStateSP::ThreatType::HAZARD,          {"HAZARD", QColor(220, 200, 0)}},
+  {cereal::RtiStateSP::ThreatType::SHOULDER_HAZARD, {"HAZARD", QColor(220, 200, 0)}},
+  {cereal::RtiStateSP::ThreatType::ROAD_HAZARD,     {"HAZARD", QColor(220, 200, 0)}},
+  {cereal::RtiStateSP::ThreatType::ROAD_CLOSED,     {"CLOSED", QColor(100, 100, 100)}},
+};
+
+static const ThreatTypeInfo kDefaultThreatInfo = {"ALERT", QColor(80, 80, 80)};
+
 HudRendererSP::HudRendererSP() {
   // RTI state initialized with safe defaults
   // rti_enabled will be updated periodically in updateState()
@@ -522,28 +544,6 @@ void HudRendererSP::createCompactArrowPixmap(int size) {
   compact_arrow_cached = !compact_arrow_pixmap.isNull();
   compact_arrow_size = size;
 }
-
-// Centralized threat type mapping
-struct ThreatTypeInfo {
-  const char* text;
-  QColor bg_color;
-};
-
-static const std::unordered_map<RTIThreatType, ThreatTypeInfo> kThreatTypeMap = {
-  {cereal::RtiStateSP::ThreatType::POLICE,          {"POLICE", QColor(200, 30, 30)}},
-  {cereal::RtiStateSP::ThreatType::POLICE_HIDING,   {"POLICE", QColor(200, 30, 30)}},
-  {cereal::RtiStateSP::ThreatType::SPEED_TRAP,      {"CAMERA", QColor(40, 120, 230)}},
-  {cereal::RtiStateSP::ThreatType::SPEED_CAMERA,    {"CAMERA", QColor(40, 120, 230)}},
-  {cereal::RtiStateSP::ThreatType::ACCIDENT,        {"ACCIDENT", QColor(240, 140, 0)}},
-  {cereal::RtiStateSP::ThreatType::JAM,             {"TRAFFIC", QColor(160, 80, 200)}},
-  {cereal::RtiStateSP::ThreatType::CONSTRUCTION,    {"CONSTRUCTION", QColor(215, 130, 0)}},
-  {cereal::RtiStateSP::ThreatType::HAZARD,          {"HAZARD", QColor(220, 200, 0)}},
-  {cereal::RtiStateSP::ThreatType::SHOULDER_HAZARD, {"HAZARD", QColor(220, 200, 0)}},
-  {cereal::RtiStateSP::ThreatType::ROAD_HAZARD,     {"HAZARD", QColor(220, 200, 0)}},
-  {cereal::RtiStateSP::ThreatType::ROAD_CLOSED,     {"CLOSED", QColor(100, 100, 100)}},
-};
-
-static const ThreatTypeInfo kDefaultThreatInfo = {"ALERT", QColor(80, 80, 80)};
 
 QString HudRendererSP::getRTIThreatTextShort(RTIThreatType type) const {
   auto it = kThreatTypeMap.find(type);
