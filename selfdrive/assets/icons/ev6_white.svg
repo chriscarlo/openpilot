@@ -9,6 +9,10 @@
    viewBox="0 0 620 325"
    xmlns="http://www.w3.org/2000/svg"
    xmlns:svg="http://www.w3.org/2000/svg">
+  <style>
+    /* Fatten strokes by ~25% and improve legibility at small sizes */
+    path { stroke-width: 1.25; stroke-linecap: round; stroke-linejoin: round; }
+  </style>
   <defs
      id="defs6" />
   <g

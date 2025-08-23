@@ -129,5 +129,16 @@ class LongitudinalPlannerSP:
     slc.speedLimit = float(self.slc.speed_limit)
     slc.speedLimitOffset = float(self.slc.speed_limit_offset)
     slc.distToSpeedLimit = float(self.slc.distance)
+    # Publish selected SLC source explicitly (avoid UI heuristics)
+    try:
+      if self.slc.source == 1:  # Source.car_state
+        slc.source = custom.LongitudinalPlanSP.SlcSource.car
+      elif self.slc.source == 2:  # Source.map_data
+        slc.source = custom.LongitudinalPlanSP.SlcSource.map
+      else:
+        slc.source = custom.LongitudinalPlanSP.SlcSource.none
+    except Exception:
+      # Backward compatibility if older custom.capnp without source field
+      pass
 
     pm.send('longitudinalPlanSP', plan_sp_send)

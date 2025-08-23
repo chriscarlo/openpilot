@@ -81,6 +81,11 @@ void HudRenderer::updateState(const UIState &s) {
     slc_state = slc.getState();
     show_slc = slc_speed_limit > 0.0;
     dist_to_speed_limit = slc.getDistToSpeedLimit();
+
+    // Selected source for SLC (exact)
+    // Use explicit source when available instead of any heuristics
+    auto slc_src = slc.getSource();
+    slc_source_is_map = (slc_src == cereal::LongitudinalPlanSP::SlcSource::map);
     
     // Vision Turn Speed Control
     const auto vtsc = lp_sp.getVisionTurnSpeedControl();
@@ -169,15 +174,7 @@ void HudRenderer::updateState(const UIState &s) {
     over_speed_limit = false;
   }
 
-  // Heuristic: decide SLC source icon (OSM vs Car) by comparing current SLC limit to current map limit
-  // If both are present and nearly equal, assume OSM (combined prefers map when equal)
-  // Otherwise, assume Car when SLC is active.
-  if (show_slc && slc_speed_limit > 0 && map_speed_limit_valid) {
-    float eps = is_metric ? 0.5f : 0.3f;  // tolerance in kph/mph
-    slc_source_is_map = (std::fabs(slc_speed_limit - map_speed_limit_display) <= eps);
-  } else {
-    slc_source_is_map = false;
-  }
+  // No fallback heuristics: rely on explicit source published by planner
 }
 
 void HudRenderer::draw(QPainter &p, const QRect &surface_rect) {
@@ -204,6 +201,11 @@ void HudRenderer::draw(QPainter &p, const QRect &surface_rect) {
   // Draw upcoming speed limit if available
   if (speed_limit_ahead_valid && speed_limit_ahead != slc_speed_limit) {
     drawUpcomingSpeedLimit(p, surface_rect);
+  }
+
+  // Draw SLC source badge last so it sits on top of the signs/widgets below
+  if (slc_sign_anchor_valid) {
+    drawSLCSourceBadge(p, slc_sign_anchor_rect);
   }
 
   // Draw SLC state indicator
@@ -278,6 +280,9 @@ void HudRenderer::drawSpeedLimitSigns(QPainter &p, const QRect &surface_rect) {
 
   if (display_speed <= 0) return;
 
+  // Reset anchor validity for this frame; will be set when sign is laid out
+  slc_sign_anchor_valid = false;
+
   QString speedLimitStr = QString::number(std::nearbyint(display_speed));
 
   // Create sub-text for offset
@@ -347,8 +352,9 @@ void HudRenderer::drawSpeedLimitSigns(QPainter &p, const QRect &surface_rect) {
       p.drawText(offset_box_rect, Qt::AlignCenter, slcSubText);
     }
 
-    // Draw SLC source badge (OSM/EV6) at bottom center of sign (US style)
-    drawSLCSourceBadge(p, sign_rect);
+    // Anchor for SLC source badge to bottom center of the sign
+    slc_sign_anchor_rect = sign_rect;
+    slc_sign_anchor_valid = true;
   } else {
     // EU (Vienna style) sign
     QRect vienna_rect = sign_rect;
@@ -409,8 +415,9 @@ void HudRenderer::drawSpeedLimitSigns(QPainter &p, const QRect &surface_rect) {
       p.setPen(QColor(255, 255, 255, 255));
       p.drawText(offset_circle_rect, Qt::AlignCenter, slcSubText);
     }
-    // Draw SLC source badge (OSM/EV6) at bottom center of sign (EU style)
-    drawSLCSourceBadge(p, circle_rect);
+    // Anchor for SLC source badge to bottom center of the circular sign
+    slc_sign_anchor_rect = circle_rect;
+    slc_sign_anchor_valid = true;
   }
 }
 
@@ -720,51 +727,29 @@ void HudRenderer::drawLateralAccelMeter(QPainter &p, const QRect &widget_rect, f
 
 
 void HudRenderer::drawSLCSourceBadge(QPainter &p, const QRect &sign_rect) {
-  // Badge dimensions and placement (anchor to sign bottom edge, no gap)
-  const int badge_w = 64;
-  const int badge_h = 24;
+  // Badge dimensions and placement (anchor to sign bottom edge midpoint)
+  // Double the height to 48px (from 24px) and use 128px width to match SVGs
+  const int badge_w = 128;
+  const int badge_h = 48;
   const int badge_x = sign_rect.center().x() - badge_w / 2;
   const int badge_y = sign_rect.bottom() - (badge_h / 2); // 50% overlap: half above, half below
   const QRect badge_rect(badge_x, badge_y, badge_w, badge_h);
-
-  // Draw background card matching osm_badge.svg
-  QLinearGradient g(badge_rect.topLeft(), badge_rect.bottomLeft());
-  g.setColorAt(0.0, QColor(0x22, 0x22, 0x22));
-  g.setColorAt(1.0, QColor(0x00, 0x00, 0x00));
-
-  QPen pen(QColor(0x44, 0x44, 0x44));
-  pen.setWidth(2);
-  p.setPen(pen);
-  p.setBrush(QBrush(g));
   p.setRenderHint(QPainter::Antialiasing, true);
-  p.drawRoundedRect(badge_rect, 10, 10);
 
-  // Content: either text "OSM" or EV6 silhouette
+  // Content: render the full badge SVGs that already include background + content
   if (slc_source_is_map) {
-    p.setPen(Qt::NoPen);
-    p.setPen(QPen(Qt::white));
-    p.setFont(InterFont(14, QFont::Black));
-    p.drawText(badge_rect, Qt::AlignCenter, QObject::tr("OSM"));
+    if (osm_badge_pix.isNull() || osm_badge_pix.size() != QSize(badge_w, badge_h)) {
+      osm_badge_pix = loadPixmap("../assets/icons/osm_badge.svg", QSize(badge_w, badge_h));
+    }
+    if (!osm_badge_pix.isNull()) {
+      p.drawPixmap(badge_rect.topLeft(), osm_badge_pix);
+    }
   } else {
-    // Lazy-load EV6 silhouette (white on transparent)
-    if (ev6_badge_pix.isNull()) {
-      ev6_badge_pix = loadPixmap("../assets/icons/ev6_white.svg", QSize(badge_w - 8, badge_h - 6));
+    if (ev6_badge_pix.isNull() || ev6_badge_pix.size() != QSize(badge_w, badge_h)) {
+      ev6_badge_pix = loadPixmap("../assets/icons/ev6_badge.svg", QSize(badge_w, badge_h));
     }
     if (!ev6_badge_pix.isNull()) {
-      // Center the silhouette within the badge_rect
-      QSize sz = ev6_badge_pix.size();
-      // If high-DPI, size() returns device pixels; scale down to fit logical size
-      if (sz.width() > badge_w || sz.height() > badge_h) {
-        QPixmap scaled = ev6_badge_pix.scaled(badge_w - 8, badge_h - 6, Qt::KeepAspectRatio, Qt::SmoothTransformation);
-        sz = scaled.size();
-        int px = badge_rect.center().x() - sz.width() / 2;
-        int py = badge_rect.center().y() - sz.height() / 2;
-        p.drawPixmap(px, py, scaled);
-      } else {
-        int px = badge_rect.center().x() - sz.width() / 2;
-        int py = badge_rect.center().y() - sz.height() / 2;
-        p.drawPixmap(px, py, ev6_badge_pix);
-      }
+      p.drawPixmap(badge_rect.topLeft(), ev6_badge_pix);
     }
   }
 }

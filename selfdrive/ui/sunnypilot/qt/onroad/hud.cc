@@ -262,10 +262,7 @@ void HudRendererSP::drawRTIThreatIndicator(QPainter &p, const QRect &surface_rec
       p.drawText(rti_rect.adjusted(0, 240, 0, 0), Qt::AlignTop | Qt::AlignHCenter, speed_text);
     }
   } else {
-    // Draw placeholder same as header: top-left, same font/weight
-    p.setFont(InterFont(59, QFont::DemiBold));  // +50%
-    p.setPen(QColor(150, 150, 150, 200));
-    p.drawText(rti_rect.adjusted(20, 15, -20, 0), Qt::AlignTop | Qt::AlignLeft, tr("RTI"));
+    // No placeholder text when no threats
   }
 }
 
@@ -481,8 +478,8 @@ void HudRendererSP::updateRTIThreats(const UIState &s) {
     const auto rti_state = (*s.sm)["rtiStateSP"].getRtiStateSP();
     auto threats = rti_state.getThreats();
     
-    // Process up to 4 threats, sorted by distance
-    size_t num_threats = std::min(static_cast<size_t>(threats.size()), static_cast<size_t>(4));
+    // Process all threats; display capping and prioritization occurs at draw time
+    size_t num_threats = static_cast<size_t>(threats.size());
     for (size_t i = 0; i < num_threats; i++) {
       auto threat = threats[i];
       
@@ -531,17 +528,29 @@ void HudRendererSP::updateRTIThreats(const UIState &s) {
       rti_has_threat = false;
     }
 
-    // Prune smoothed angle cache to only keep active threats
+    // Prune smoothed caches to only keep active threats
     {
-      QMutexLocker lock(&smoothed_angles_mutex_);
       std::unordered_set<std::string> live_ids;
       live_ids.reserve(rti_threats.size());
       for (const auto &t : rti_threats) live_ids.insert(t.id);
-      for (auto it = smoothed_angles_deg_.begin(); it != smoothed_angles_deg_.end(); ) {
-        if (live_ids.find(it->first) == live_ids.end()) {
-          it = smoothed_angles_deg_.erase(it);
-        } else {
-          ++it;
+      {
+        QMutexLocker lock(&smoothed_angles_mutex_);
+        for (auto it = smoothed_angles_deg_.begin(); it != smoothed_angles_deg_.end(); ) {
+          if (live_ids.find(it->first) == live_ids.end()) {
+            it = smoothed_angles_deg_.erase(it);
+          } else {
+            ++it;
+          }
+        }
+      }
+      {
+        QMutexLocker lock(&smoothed_y_mutex_);
+        for (auto it = smoothed_y_top_.begin(); it != smoothed_y_top_.end(); ) {
+          if (live_ids.find(it->first) == live_ids.end()) {
+            it = smoothed_y_top_.erase(it);
+          } else {
+            ++it;
+          }
         }
       }
     }
@@ -563,38 +572,93 @@ void HudRendererSP::drawRTIThreatIndicatorMulti(QPainter &p, const QRect &surfac
   QRect rti_rect(x_offset, y_offset, widget_width, widget_height);
 
   if (!rti_threats.empty()) {
-    // Small header label
-    p.setFont(InterFont(46, QFont::DemiBold));
-    p.setPen(QColor(255, 255, 255, 180));
-    p.drawText(rti_rect.adjusted(4, 0, -4, 0), Qt::AlignTop | Qt::AlignLeft, "RTI");
+    const int outer_pad_y = 3;  // 3px top/bottom per widget => 6px total between
+    const int padding_x = 12;
+    const int padding_y = 8;
+    const int arrow_sz = int(std::lround(40 * 0.8)); // 32
+    const int left_x = rti_rect.x() + 12;
+    const int label_margin_px = 34;  // reserve space at bottom for Target label
 
-    const int line_height = 66;
-    const int start_y = rti_rect.y() + 36;
-    const int max_threats = 4;
+    // Build selection with POLICE priority for display occupancy
+    std::vector<const RTIThreatInfo*> police;
+    std::vector<const RTIThreatInfo*> others;
+    police.reserve(rti_threats.size());
+    others.reserve(rti_threats.size());
+    for (const auto &t : rti_threats) {
+      bool is_police = (t.type == cereal::RtiStateSP::ThreatType::POLICE) ||
+                       (t.type == cereal::RtiStateSP::ThreatType::POLICE_HIDING);
+      (is_police ? police : others).push_back(&t);
+    }
+    // Sort police by same-road first, then distance asc
+    std::sort(police.begin(), police.end(), [](const RTIThreatInfo* a, const RTIThreatInfo* b){
+      if (a->on_same_road != b->on_same_road) return a->on_same_road && !b->on_same_road;
+      return a->distance < b->distance;
+    });
+    // Sort others by distance asc
+    std::sort(others.begin(), others.end(), [](const RTIThreatInfo* a, const RTIThreatInfo* b){
+      return a->distance < b->distance;
+    });
 
-    int displayed = 0;
-    for (const auto &threat : rti_threats) {
-      if (displayed >= max_threats) break;
-      int y_pos = start_y + (displayed * line_height);
+    // Candidates in priority order: all POLICE (same-road then distance), then others (distance)
+    std::vector<const RTIThreatInfo*> candidates;
+    candidates.reserve(police.size() + others.size());
+    for (auto *t : police) candidates.push_back(t);
+    for (auto *t : others) candidates.push_back(t);
 
-      QColor threat_color = getRTIThreatColor(threat.distance);
-      QColor bg_color = getRTIThreatBgColorByType(threat.type);
+    // Use compact font (scaled down ~20%) to compute uniform row height
+    QFont row_font = InterFont(int(std::lround(42 * 0.8)), QFont::Normal);
+    p.setFont(row_font);
+    QFontMetrics fm(row_font);
+    const int row_h = padding_y * 2 + std::max(arrow_sz, fm.height());
+
+    // Dynamically select as many as fit within the block, reserving bottom margin
+    std::vector<const RTIThreatInfo*> selected;
+    selected.reserve(candidates.size());
+    int y_cursor_fit = rti_rect.y() + rti_rect.height() - label_margin_px;
+    for (auto *t : candidates) {
+      int next_top = y_cursor_fit - outer_pad_y - row_h;
+      if (next_top < rti_rect.y()) break;  // no more space
+      selected.push_back(t);
+      y_cursor_fit = next_top - outer_pad_y;
+    }
+
+    // Final ordering for display: ascending distance (closest first)
+    std::sort(selected.begin(), selected.end(), [](const RTIThreatInfo* a, const RTIThreatInfo* b){
+      return a->distance < b->distance;
+    });
+
+    // Build row objects with measured width/height per selection
+    struct Row { const RTIThreatInfo* t; QString text; int w; int h; };
+    std::vector<Row> rows;
+    rows.reserve(selected.size());
+    for (auto *t : selected) {
+      QString line = QString("%1 • %2").arg(getRTIThreatTextShort(t->type)).arg(formatDistance(t->distance));
+      int text_w = fm.horizontalAdvance(line);
+      int box_w_unscaled = padding_x + arrow_sz + 8 + text_w + 28 + padding_x; // 28px for same-road dot
+      int box_w = int(std::lround(box_w_unscaled * 1.35));                    // +35% width
+      int box_h = row_h;                                                      // uniform height
+      rows.push_back({t, line, box_w, box_h});
+    }
+
+    // Place from bottom-up with Y smoothing
+    int y_cursor = rti_rect.y() + rti_rect.height() - label_margin_px;  // reserve space for bottom label
+    for (int i = (int)rows.size() - 1; i >= 0; --i) {
+      const auto &row = rows[i];
+      // Colors
+      QColor threat_color = getRTIThreatColor(row.t->distance);
+      QColor bg_color = getRTIThreatBgColorByType(row.t->type);
       bg_color.setAlpha(115);
       QColor border_color(255, 255, 255, 90);
 
-      QRect line_rect(rti_rect.x() + 12, y_pos, widget_width - 24, line_height);
-      const int arrow_sz = 40;
-      const int padding_x = 12;
-      const int padding_y = 8;
+      // Target top position using outer breathing
+      int target_top = y_cursor - outer_pad_y - row.h;
+      // Initial position starts just above reserved label area for a clean slide-up
+      double initial_top = rti_rect.y() + rti_rect.height() - label_margin_px + outer_pad_y;
+      int draw_top = int(std::lround(smoothYForThreat(row.t->id, target_top, initial_top)));
+      QRect box_rect(left_x, draw_top, row.w, row.h);
 
-      // Prepare text and compute compact box width
-      p.setFont(InterFont(42, QFont::Normal));
-      QString threat_line = QString("%1 • %2").arg(getRTIThreatTextShort(threat.type)).arg(formatDistance(threat.distance));
-      QFontMetrics fm(p.font());
-      int text_w = fm.horizontalAdvance(threat_line);
-      int box_w = padding_x + arrow_sz + 8 + text_w + 28 + padding_x; // 28px for same-road dot
-      int box_h = padding_y * 2 + std::max(arrow_sz, fm.height());
-      QRect box_rect(line_rect.x(), line_rect.y() + (line_height - box_h) / 2, box_w, box_h);
+      // Update cursor for next (higher) row placement
+      y_cursor = target_top - outer_pad_y;
 
       // Mini-widget background + thin border
       p.setPen(QPen(border_color, 2));
@@ -603,13 +667,13 @@ void HudRendererSP::drawRTIThreatIndicatorMulti(QPainter &p, const QRect &surfac
 
       // Compute arrow angle (smoothed) and draw
       double arrow_angle = 0.0;
-      bool can_use_gps = has_gps && threat.has_location &&
+      bool can_use_gps = has_gps && row.t->has_location &&
                          std::isfinite(ego_lat) && std::isfinite(ego_lon) &&
-                         std::isfinite(threat.latitude) && std::isfinite(threat.longitude);
+                         std::isfinite(row.t->latitude) && std::isfinite(row.t->longitude);
       arrow_angle = can_use_gps ?
-        calculateRelativeBearing(ego_lat, ego_lon, threat.latitude, threat.longitude, ego_bearing) :
-        angleForDirection(threat.direction);
-      arrow_angle = smoothAngleForThreat(threat.id, arrow_angle);
+        calculateRelativeBearing(ego_lat, ego_lon, row.t->latitude, row.t->longitude, ego_bearing) :
+        angleForDirection(row.t->direction);
+      arrow_angle = smoothAngleForThreat(row.t->id, arrow_angle);
       QRect arrow_rect(box_rect.x() + padding_x, box_rect.y() + (box_rect.height() - arrow_sz) / 2, arrow_sz, arrow_sz);
       drawRTIArrowCompact(p, arrow_rect, arrow_angle, threat_color);
 
@@ -617,10 +681,10 @@ void HudRendererSP::drawRTIThreatIndicatorMulti(QPainter &p, const QRect &surfac
       p.setPen(threat_color);
       int text_x = arrow_rect.right() + 8;
       QRect text_rect(text_x, box_rect.y(), box_rect.right() - text_x - 20, box_rect.height());
-      p.drawText(text_rect, Qt::AlignVCenter | Qt::AlignLeft, threat_line);
+      p.drawText(text_rect, Qt::AlignVCenter | Qt::AlignLeft, row.text);
 
       // Same-road indicator dot (500ms blink)
-      if (threat.on_same_road) {
+      if (row.t->on_same_road) {
         bool blink_on = (QTime::currentTime().msec() % 1000) < 500;
         QColor dot_a = QColor(255, 255, 255, 230);
         QColor dot_b = QColor(0, 0, 0, 230);
@@ -632,8 +696,6 @@ void HudRendererSP::drawRTIThreatIndicatorMulti(QPainter &p, const QRect &surfac
         p.setBrush(dot_color);
         p.drawEllipse(QPoint(cx, cy), r, r);
       }
-
-      displayed++;
     }
 
     if (rti_active && rti_recommended_speed > 0) {
@@ -644,9 +706,7 @@ void HudRendererSP::drawRTIThreatIndicatorMulti(QPainter &p, const QRect &surfac
       p.drawText(rti_rect.adjusted(12, -34, -12, -6), Qt::AlignBottom | Qt::AlignLeft, speed_text);
     }
   } else {
-    p.setFont(InterFont(46, QFont::DemiBold));
-    p.setPen(QColor(150, 150, 150, 200));
-    p.drawText(rti_rect.adjusted(4, 0, -4, 0), Qt::AlignTop | Qt::AlignLeft, tr("RTI"));
+    // No placeholder text when no threats
   }
 }
 
@@ -790,6 +850,20 @@ double HudRendererSP::smoothAngleForThreat(const std::string &id, double raw_ang
   double delta = shortestDelta(current, target);
   const double alpha = 0.2;  // tuned for smooth yet responsive motion
   double next = normalize180(current + alpha * delta);
+  it->second = next;
+  return next;
+}
+
+double HudRendererSP::smoothYForThreat(const std::string &id, double target_y, double initial_y) const {
+  QMutexLocker lock(&smoothed_y_mutex_);
+  auto it = smoothed_y_top_.find(id);
+  if (it == smoothed_y_top_.end()) {
+    smoothed_y_top_.emplace(id, initial_y);
+    return initial_y;
+  }
+  double current = it->second;
+  const double alpha = 0.25;  // vertical position smoothing factor
+  double next = current + alpha * (target_y - current);
   it->second = next;
   return next;
 }

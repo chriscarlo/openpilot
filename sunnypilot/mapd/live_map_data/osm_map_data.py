@@ -103,6 +103,12 @@ class OsmMapData(BaseMapData):
     return float(self.mem_params.get("MapSpeedLimit") or 0.0)
 
   def get_current_road_name(self) -> str:
+    try:
+      if self.current_road_segment and getattr(self.current_road_segment, 'name', ""):
+        return str(self.current_road_segment.name)
+    except Exception:
+      pass
+    # Fallback to legacy shared memory param if available
     return str(self.mem_params.get("RoadName"))
 
   def get_next_speed_limit_and_distance(self) -> tuple[float, float]:

@@ -400,7 +400,8 @@ class ThreatDetector:
                        current_speed: float,
                        timestamp: int,
                        v_cruise: float = None,
-                       current_heading_deg: float | None = None) -> RTIState:
+                       current_heading_deg: float | None = None,
+                       posted_speed_limit: float = 0.0) -> RTIState:
         """
         Main threat processing pipeline.
         
@@ -410,6 +411,8 @@ class ThreatDetector:
             current_speed: Current speed in m/s
             timestamp: Current timestamp in nanoseconds
             v_cruise: Driver's set cruise speed in m/s (optional)
+            current_heading_deg: Current vehicle heading in degrees (optional)
+            posted_speed_limit: Posted speed limit in m/s from map data (optional)
             
         Returns:
             RTIState for publishing
@@ -429,20 +432,21 @@ class ThreatDetector:
                 # Step 2: Deduplicate threats
                 deduplicated_threats = self.clusterer.deduplicate_threats(filtered_threats)
 
-                # Step 3: Process each threat
+                # Step 3: Process each threat with actual speed limit
                 for threat in deduplicated_threats:
                     processed_threat = self._process_single_threat(
-                        threat, current_location, current_speed, current_heading_deg
+                        threat, current_location, current_speed, current_heading_deg,
+                        posted_speed_limit
                     )
                     if processed_threat:
                         processed_threats.append(processed_threat)
 
-                # Step 3: Generate speed recommendation
+                # Step 4: Generate speed recommendation
                 recommended_speed, threat_ahead = self.speed_engine.calculate_recommendation(
                     processed_threats, current_speed, current_location, v_cruise
                 )
 
-            # Step 4: Safety validation
+            # Step 5: Safety validation
             if recommended_speed > 0:
                 # Ensure recommendation is within safe bounds (never accelerate toward threats)
                 if not (0 <= recommended_speed <= current_speed):
@@ -488,8 +492,20 @@ class ThreatDetector:
     def _process_single_threat(self, threat: WazeAlert,
                              current_location: tuple[float, float],
                              current_speed: float,
-                             current_heading_deg: float | None = None) -> ProcessedThreat | None:
-        """Process a single threat for relevance and direction."""
+                             current_heading_deg: float | None = None,
+                             posted_speed_limit: float = 0.0) -> ProcessedThreat | None:
+        """Process a single threat for relevance and direction.
+        
+        Args:
+            threat: Raw threat from Waze API
+            current_location: (lat, lon) of ego vehicle
+            current_speed: Current speed in m/s
+            current_heading_deg: Current vehicle heading in degrees (optional)
+            posted_speed_limit: Posted speed limit in m/s from map data (optional)
+            
+        Returns:
+            ProcessedThreat if relevant, None otherwise
+        """
         try:
             ego_lat, ego_lon = current_location
 
@@ -513,18 +529,22 @@ class ThreatDetector:
                 ego_heading=(current_heading_deg if current_heading_deg is not None else 0.0)
             )
 
-            # Note: Real Waze API doesn't provide speed_limit in alerts
-            # Future: integrate with SLC (Speed Limit Controller) for actual speed limits
-            # For now, use conservative default for police/speed trap locations
+            # Determine speed limit for this threat location
             speed_limit_ms = 0.0
             if threat.speed_limit:
                 # Handle legacy test data or future integration
                 speed_limit_ms = threat.speed_limit / 3.6
             else:
-                # Use conservative speed limit estimates based on alert type
+                # Use actual posted speed limit from map data when available
                 if threat.type in ['police', 'policeHiding', 'speedTrap']:
-                    # Conservative estimate for enforcement locations
-                    speed_limit_ms = self.speed_engine.default_speed_limit_ms
+                    if posted_speed_limit > 0:
+                        # Use actual posted speed limit from map data
+                        speed_limit_ms = posted_speed_limit
+                        cloudlog.debug(f"RTI: Using actual posted speed limit {speed_limit_ms:.1f} m/s for {threat.type}")
+                    else:
+                        # Fall back to conservative default when no speed limit available
+                        speed_limit_ms = self.speed_engine.default_speed_limit_ms
+                        cloudlog.debug(f"RTI: No posted speed limit, using default {speed_limit_ms:.1f} m/s")
                 else:
                     # For other alerts, don't make speed recommendations
                     speed_limit_ms = 0.0

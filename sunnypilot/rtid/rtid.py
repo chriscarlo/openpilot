@@ -29,11 +29,13 @@ class RTIDaemon:
         """Initialize RTI daemon with messaging and configuration."""
         self.params = Params()
 
-        # Messaging setup
+        # Messaging setup - Now includes both map and dashboard speed limit data
         self.sm = messaging.SubMaster([
             'gpsLocationExternal',
             'gpsLocation',
-            'carState'
+            'carState',
+            'liveMapDataSP',  # Map-based speed limit data
+            'carStateSP'      # Dashboard-based speed limit data (from car's TSR camera)
         ], ignore_avg_freq=True)
         self.pm = messaging.PubMaster(['rtiStateSP'])
 
@@ -150,6 +152,58 @@ class RTIDaemon:
                 return cruise_state.speedCluster
         return 0.0
 
+    def _get_current_speed_limit(self) -> float:
+        """Get current posted speed limit from both map and dashboard sources.
+        
+        Uses CONSERVATIVE combination: When both sources have data, uses the LOWER value
+        for maximum safety in threat detection scenarios.
+        
+        Returns:
+            Speed limit in m/s, or 0.0 if not available
+        """
+        map_limit = 0.0
+        dashboard_limit = 0.0
+        
+        # Get map-based speed limit
+        try:
+            map_data = self.sm['liveMapDataSP']
+            if map_data.speedLimitValid:
+                map_limit = float(map_data.speedLimit)
+                cloudlog.debug(f"RTI: Map speed limit: {map_limit:.1f} m/s ({map_limit * 2.237:.0f} mph)")
+        except Exception as e:
+            cloudlog.debug(f"RTI: Could not get speed limit from map data: {e}")
+        
+        # Get dashboard-based speed limit (from car's traffic sign recognition)
+        try:
+            car_state_sp = self.sm['carStateSP']
+            if car_state_sp.speedLimit > 0:
+                dashboard_limit = float(car_state_sp.speedLimit)
+                cloudlog.debug(f"RTI: Dashboard speed limit: {dashboard_limit:.1f} m/s ({dashboard_limit * 2.237:.0f} mph)")
+        except Exception as e:
+            cloudlog.debug(f"RTI: Could not get speed limit from dashboard: {e}")
+        
+        # CONSERVATIVE COMBINATION: Use MIN instead of MAX for RTI safety
+        # This differs from SLC which uses MAX (higher) value
+        # RTI prefers the MORE CONSERVATIVE (lower) limit when sources disagree
+        if map_limit > 0 and dashboard_limit > 0:
+            # Both sources have data - use the LOWER value
+            combined_limit = min(map_limit, dashboard_limit)
+            source = "map" if map_limit <= dashboard_limit else "dashboard"
+            cloudlog.debug(f"RTI: Using {source} speed limit (conservative): {combined_limit:.1f} m/s")
+            return combined_limit
+        elif dashboard_limit > 0:
+            # Only dashboard has data
+            cloudlog.debug(f"RTI: Using dashboard-only speed limit: {dashboard_limit:.1f} m/s")
+            return dashboard_limit
+        elif map_limit > 0:
+            # Only map has data
+            cloudlog.debug(f"RTI: Using map-only speed limit: {map_limit:.1f} m/s")
+            return map_limit
+        else:
+            # No speed limit data available from either source
+            cloudlog.debug("RTI: No speed limit data available from map or dashboard")
+            return 0.0
+
     async def _process_cycle_async(self):
         """Non-blocking version of process cycle that stores state for continuous publishing."""
         current_time = time.time()
@@ -159,6 +213,7 @@ class RTIDaemon:
             location = self._get_current_location()
             current_speed = self._get_current_speed()
             cruise_cluster_speed = self._get_cruise_cluster_speed()
+            current_speed_limit = self._get_current_speed_limit()  # Get actual posted speed limit
 
             if location is None:
                 # No valid GPS - store offline state
@@ -229,6 +284,7 @@ class RTIDaemon:
                 timestamp=int(current_time * 1e9),  # Convert to nanoseconds
                 v_cruise=cruise_cluster_speed,  # Driver's original set speed from cluster
                 current_heading_deg=self._get_current_heading_deg(),
+                posted_speed_limit=current_speed_limit,  # Pass actual posted speed limit
             )
 
             # Update API status

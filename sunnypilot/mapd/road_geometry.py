@@ -87,15 +87,16 @@ class Barrier:
 
 @dataclass
 class RoadSegment:
-    """Complete road segment with geometry and lane data."""
-    way_id: int
-    road_class: RoadClass
-    centerline: list[RoadCoordinate]
-    lanes: list[Lane]
-    barriers: list[Barrier]
-    level_separation: int  # -1=under, 0=ground, 1=bridge
-    max_speed: float  # m/s
-    road_direction: float  # bearing in degrees
+  """Complete road segment with geometry and lane data."""
+  way_id: int
+  name: str
+  road_class: RoadClass
+  centerline: list[RoadCoordinate]
+  lanes: list[Lane]
+  barriers: list[Barrier]
+  level_separation: int  # -1=under, 0=ground, 1=bridge
+  max_speed: float  # m/s
+  road_direction: float  # bearing in degrees
 
     def get_length(self) -> float:
         """Calculate total road segment length in meters."""
@@ -296,15 +297,19 @@ class OSMRoadGeometryExtractor:
             # Calculate road direction at start
             road_direction = self._calculate_road_direction(centerline)
 
+            # Derive human-readable road name if available
+            name = tags.get('name') or tags.get('name:en') or tags.get('ref') or ""
+
             return RoadSegment(
                 way_id=way_id,
+                name=name,
                 road_class=road_class,
                 centerline=centerline,
                 lanes=lanes,
                 barriers=barriers,
                 level_separation=level_separation,
                 max_speed=max_speed,
-                road_direction=road_direction
+                road_direction=road_direction,
             )
 
         except Exception as e:

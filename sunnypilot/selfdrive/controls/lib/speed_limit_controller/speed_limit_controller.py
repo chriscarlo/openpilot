@@ -167,8 +167,24 @@ class SpeedLimitController:
       self._last_params_update = self._current_time
 
   def _read_policy_param(self) -> Policy:
+    # UI (SLCSourcePolicy) mapping differs in order from internal Policy enum.
+    # Map UI values to internal Policy explicitly to avoid mismatches:
+    # UI -> Internal:
+    #  0 (CAR_ONLY)      -> Policy.car_state_only
+    #  1 (MAP_ONLY)      -> Policy.map_data_only
+    #  2 (CAR_FIRST)     -> Policy.car_state_priority
+    #  3 (MAP_FIRST)     -> Policy.map_data_priority
+    #  4 (COMBINED)      -> Policy.combined
     try:
-      return Policy(int(self._params.get("SpeedLimitControlPolicy")))
+      raw = int(self._params.get("SpeedLimitControlPolicy"))
+      mapping = {
+        0: Policy.car_state_only,
+        1: Policy.map_data_only,
+        2: Policy.car_state_priority,
+        3: Policy.map_data_priority,
+        4: Policy.combined,
+      }
+      return mapping.get(raw, Policy.car_state_priority)
     except (ValueError, TypeError):
       return Policy.car_state_priority
 

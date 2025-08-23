@@ -57,6 +57,10 @@ protected:
   QPixmap osm_badge_pix;
   QPixmap ev6_badge_pix;
 
+  // Anchor for SLC badge placement (bottom center of sign)
+  QRect slc_sign_anchor_rect;
+  bool slc_sign_anchor_valid = false;
+
   // Road information
   QString road_name;
 

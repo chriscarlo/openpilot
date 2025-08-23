@@ -216,7 +216,25 @@ class RTIController:
         # Start with the target speed (typically posted speed limit)
         safe_speed = target_speed
 
-        # Apply distance-based reduction factors
+        # In "posted" mode, use the posted speed limit without reduction factors
+        # User expects RTI to recommend actual speed limit, not a fraction of it
+        if self._speed_reduction_mode == "posted":
+            # For posted mode, only apply minimal safety constraints
+            # Don't reduce based on distance - that's the longitudinal planner's job
+            
+            # Ensure we never recommend acceleration toward a threat
+            safe_speed = min(safe_speed, self._v_ego)
+            
+            # Ensure minimum speed
+            if safe_speed < MIN_OPERATING_SPEED:
+                safe_speed = MIN_OPERATING_SPEED
+                
+            # Ensure maximum reasonable speed
+            safe_speed = min(safe_speed, V_CRUISE_MAX)
+            
+            return safe_speed
+        
+        # For custom mode, apply distance-based reduction factors
         if self._threat_distance < THREAT_CRITICAL_DISTANCE:
             # Critical distance - significant speed reduction
             reduction_factor = SPEED_REDUCTION_FACTORS['critical']

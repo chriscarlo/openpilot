@@ -61,6 +61,7 @@ protected:
   void updateRTIThreats(const UIState &s);
   double angleForDirection(cereal::RtiStateSP::Direction dir) const;
   double smoothAngleForThreat(const std::string &id, double raw_angle_deg) const;
+  double smoothYForThreat(const std::string &id, double target_y, double initial_y) const;
   
   // RTI state variables
   bool rti_enabled = false;  // Master RTI enabled switch
@@ -87,6 +88,12 @@ protected:
   double ego_lon = 0.0;
   double ego_bearing = 0.0;  // True heading in degrees
   bool has_gps = false;
+  uint64_t last_gps_rcv_frame = 0;  // Track last GPS update frame for staleness check
+  // Track GPS freshness transitions for logging and robustness
+  bool gps_fresh_prev = false;
+  uint64_t last_gps_log_frame = 0;  // rate-limit logs
+  enum class GPSSource { UNKNOWN = 0, EXTERNAL = 1, INTERNAL = 2 };
+  GPSSource last_gps_source = GPSSource::UNKNOWN;
   
   // Cached font objects for performance
   QFont threat_text_font;
@@ -107,4 +114,8 @@ protected:
   // Smoothed angles per threat id
   mutable std::unordered_map<std::string, double> smoothed_angles_deg_;
   mutable QMutex smoothed_angles_mutex_;
+
+  // Smoothed Y positions (top of box) per threat id
+  mutable std::unordered_map<std::string, double> smoothed_y_top_;
+  mutable QMutex smoothed_y_mutex_;
 };

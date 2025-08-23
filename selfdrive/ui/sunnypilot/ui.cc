@@ -20,7 +20,8 @@ UIStateSP::UIStateSP(QObject *parent) : UIState(parent) {
     "wideRoadCameraState", "managerState", "selfdriveState", "longitudinalPlan",
     "modelManagerSP", "selfdriveStateSP", "longitudinalPlanSP", "backupManagerSP", "carControl", "liveMapDataSP",
     "rtiStateSP",  // RTI (Realtime Traffic Intelligence) state for threat display
-    "gpsLocationExternal",  // Needed for RTI arrow bearings (lat/lon + heading)
+    "gpsLocationExternal",  // Primary GPS source for RTI arrow bearings (lat/lon + heading)
+    "gpsLocation",  // Fallback GPS source (internal QCOM) when external unavailable
   });
 
   // update timer

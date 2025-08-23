@@ -315,6 +315,23 @@ class CarState(CarStateBase, EsccCarStateBase, MadsCarState, CarStateExt):
 
     ret.blockPcmEnable = not self.recent_button_interaction()
 
+    # Dashboard speed limit (FR_CMR_02_100ms -> ISLW_SpdCluMainDis)
+    # Populate CarStateSP.speedLimit in m/s for SLC consumption
+    try:
+      # Determine units: DISTANCE_UNIT == 1 typically indicates imperial
+      is_metric = self.is_metric  # already computed above from CRUISE_BUTTONS_ALT.DISTANCE_UNIT
+      speed_factor = CV.KPH_TO_MS if is_metric else CV.MPH_TO_MS
+      if "FR_CMR_02_100ms" in cp.vl:
+        raw = cp.vl["FR_CMR_02_100ms"].get("ISLW_SpdCluMainDis", 0)
+        # 0 = no recognition, 255 = invalid, 253 = unlimited
+        if raw not in (0, 255, 253):
+          ret_sp.speedLimit = float(raw) * speed_factor
+        else:
+          ret_sp.speedLimit = 0.0
+    except Exception:
+      # Don't let parsing issues break other functionality
+      ret_sp.speedLimit = ret_sp.speedLimit if hasattr(ret_sp, 'speedLimit') else 0.0
+
     return ret, ret_sp
 
   def get_can_parsers_canfd(self, CP):
@@ -324,6 +341,10 @@ class CarState(CarStateBase, EsccCarStateBase, MadsCarState, CarStateExt):
       msgs += [
         ("CRUISE_BUTTONS", 50)
       ]
+    # Dashboard speed limit for CAN-FD platforms (e.g., EV6) on ECAN bus
+    msgs += [
+      ("FR_CMR_02_100ms", 10),
+    ]
     return {
       Bus.pt: CANParser(DBC[CP.carFingerprint][Bus.pt], msgs, CanBus(CP).ECAN),
       Bus.cam: CANParser(DBC[CP.carFingerprint][Bus.pt], [], CanBus(CP).CAM),

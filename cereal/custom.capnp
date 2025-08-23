@@ -159,6 +159,7 @@ struct LongitudinalPlanSP @0xf35cc4560bbf6ec2 {
     speedLimit @3 :Float32;
     speedLimitOffset @4 :Float32;
     distToSpeedLimit @5 :Float32;
+    source @6 :SlcSource;  # Selected source of current speed limit
   }
 
   enum SpeedLimitControlState {
@@ -173,6 +174,13 @@ struct LongitudinalPlanSP @0xf35cc4560bbf6ec2 {
     sport @0;
     normal @1;
     eco @2;
+  }
+
+  # Source for Speed Limit Control selection
+  enum SlcSource {
+    none @0;
+    car @1;
+    map @2;
   }
 }
 
