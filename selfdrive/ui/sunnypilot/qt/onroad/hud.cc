@@ -287,9 +287,10 @@ double HudRendererSP::calculateRelativeBearing(double ego_latitude, double ego_l
 }
 
 void HudRendererSP::updateRTIThreats(const UIState &s) {
-  rti_threats.clear();
-  
+  // Only clear and update threats when we have new data to avoid flicker
   if (s.sm && s.sm->valid("rtiStateSP") && s.sm->updated("rtiStateSP")) {
+    rti_threats.clear();  // Clear only when we have new data
+    
     const auto rti_state = (*s.sm)["rtiStateSP"].getRtiStateSP();
     auto threats = rti_state.getThreats();
     
@@ -358,7 +359,8 @@ void HudRendererSP::drawRTIThreatIndicatorMulti(QPainter &p, const QRect &surfac
   const int left_margin = 15;
 
   // Transparent container; just a reserved area to stack mini-widgets
-  const int widget_width = 620;
+  // Increased width by 20% for better widget breathing room
+  const int widget_width = 744;  // 620 * 1.2
   const int widget_height = 520;
 
   const int x_offset = left_margin;
@@ -435,7 +437,8 @@ void HudRendererSP::drawRTIThreatIndicatorMulti(QPainter &p, const QRect &surfac
 
     // Change 4: enforce uniform width for all rows, clamped to container width
     int allowable_max_w = rti_rect.width() - (left_x - rti_rect.x()) - right_margin; // fit within transparent box
-    int uniform_box_w = std::min(max_natural_w, allowable_max_w);
+    // Add 20% more width for better breathing room
+    int uniform_box_w = std::min(roundToInt(max_natural_w * 1.2), allowable_max_w);
 
     // Place from bottom-up with Y smoothing
     int y_cursor = rti_rect.y() + rti_rect.height() - label_margin_px;  // reserve space for bottom label
