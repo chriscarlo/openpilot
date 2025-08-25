@@ -117,6 +117,11 @@ void HudRendererSP::updateState(const UIState &s) {
   // Update base HUD state
   HudRenderer::updateState(s);
   
+  // Store current frame for arrow update tracking
+  if (s.sm) {
+    current_frame_ = s.sm->frame;
+  }
+  
   // Update RTI parameters more frequently (every 5 frames = 250ms) to reduce race condition
   if (s.sm && s.sm->frame % 5 == 0) {
     rti_enabled = Params().getBool("RTIEnabled");  // Master switch
@@ -257,32 +262,30 @@ double HudRendererSP::calculateRelativeBearing(double ego_latitude, double ego_l
     return 0.0;  // Default to ahead
   }
   
-  // Earth radius in meters
-  const double kEarthRadiusM = 6371000.0;
-  
   // Convert to radians
-  double phi1 = ego_latitude * M_PI / 180.0;
-  double phi2 = threat_latitude * M_PI / 180.0;
-  double lam1 = ego_longitude * M_PI / 180.0;
-  double lam2 = threat_longitude * M_PI / 180.0;
+  double lat1 = ego_latitude * M_PI / 180.0;
+  double lat2 = threat_latitude * M_PI / 180.0;
+  double lon1 = ego_longitude * M_PI / 180.0;
+  double lon2 = threat_longitude * M_PI / 180.0;
+  double dLon = lon2 - lon1;
   
-  // Calculate differences
-  double dphi = phi2 - phi1;
-  double dlam = lam2 - lam1;
+  // Calculate bearing from ego to threat using forward azimuth formula
+  // This gives us the compass bearing from our position to the threat
+  double y = std::sin(dLon) * std::cos(lat2);
+  double x = std::cos(lat1) * std::sin(lat2) - 
+             std::sin(lat1) * std::cos(lat2) * std::cos(dLon);
   
-  // Local tangent plane approximation (accurate for < 10km)
-  double avg_lat = (phi1 + phi2) / 2.0;
-  double north = dphi * kEarthRadiusM;
-  double east = dlam * kEarthRadiusM * std::cos(avg_lat);
+  // Calculate absolute bearing in degrees (0° = north, clockwise positive)
+  double bearing_deg = std::atan2(y, x) * 180.0 / M_PI;
   
-  // Calculate world bearing (0° = north, clockwise positive)
-  double world_bearing = std::atan2(east, north) * 180.0 / M_PI;
-  if (world_bearing < 0) world_bearing += 360.0;
+  // Normalize bearing to [0, 360)
+  if (bearing_deg < 0) bearing_deg += 360.0;
   
-  // Calculate relative bearing
-  double rel_bearing = world_bearing - ego_heading_deg;
+  // Calculate relative bearing (threat bearing - ego heading)
+  // This gives us the angle we need to rotate from our current heading
+  double rel_bearing = bearing_deg - ego_heading_deg;
   
-  // Normalize to [-180, 180]
+  // Normalize to [-180, 180] for shortest rotation
   return normalize180(rel_bearing);
 }
 
@@ -349,6 +352,22 @@ void HudRendererSP::updateRTIThreats(const UIState &s) {
       
       pruneCacheByActiveIds(smoothed_angles_deg_, smoothed_angles_mutex_, live_ids);
       pruneCacheByActiveIds(smoothed_y_top_, smoothed_y_mutex_, live_ids);
+      
+      // Also prune arrow update tracking caches
+      for (auto it = arrow_last_update_frame_.begin(); it != arrow_last_update_frame_.end(); ) {
+        if (live_ids.find(it->first) == live_ids.end()) {
+          it = arrow_last_update_frame_.erase(it);
+        } else {
+          ++it;
+        }
+      }
+      for (auto it = arrow_cached_angle_deg_.begin(); it != arrow_cached_angle_deg_.end(); ) {
+        if (live_ids.find(it->first) == live_ids.end()) {
+          it = arrow_cached_angle_deg_.erase(it);
+        } else {
+          ++it;
+        }
+      }
     }
   }
 }
@@ -480,14 +499,53 @@ void HudRendererSP::drawRTIThreatIndicatorMulti(QPainter &p, const QRect &surfac
       p.setBrush(bg_color);
       p.drawRoundedRect(box_rect, 10, 10);
 
-      // Compute arrow angle (smoothed) and draw
+      // Compute arrow angle with 1-degree resolution and 1Hz update rate
       double arrow_angle = 0.0;
       bool can_use_gps = has_gps && row.t->has_location &&
                          isValidGPSPair(ego_lat, ego_lon, row.t->latitude, row.t->longitude);
-      arrow_angle = can_use_gps ?
-        calculateRelativeBearing(ego_lat, ego_lon, row.t->latitude, row.t->longitude, ego_bearing) :
-        angleForDirection(row.t->direction);
+      
+      // Check if we need to update the bearing (1Hz = every 20 frames at 20Hz UI rate)
+      bool should_update_bearing = false;
+      
+      auto last_update_it = arrow_last_update_frame_.find(row.t->id);
+      if (last_update_it == arrow_last_update_frame_.end() || 
+          (current_frame_ - last_update_it->second) >= 20) {  // 20 frames = 1 second at 20Hz
+        should_update_bearing = true;
+        arrow_last_update_frame_[row.t->id] = current_frame_;
+      }
+      
+      if (should_update_bearing) {
+        // Calculate new bearing
+        if (can_use_gps) {
+          // Use precise GPS-based bearing with 1-degree resolution
+          arrow_angle = calculateRelativeBearing(ego_lat, ego_lon, row.t->latitude, row.t->longitude, ego_bearing);
+        } else {
+          // Enhanced fallback: use direction with slight variation for visual distinction
+          double base_angle = angleForDirection(row.t->direction);
+          
+          // Add small variation based on threat properties to distinguish multiple threats
+          std::hash<std::string> hasher;
+          size_t hash_val = hasher(row.t->id);
+          double variation = ((hash_val % 21) - 10) * 0.5;  // ±5 degree variation
+          arrow_angle = base_angle + variation;
+        }
+        
+        // Cache the calculated angle
+        arrow_cached_angle_deg_[row.t->id] = arrow_angle;
+      } else {
+        // Use cached angle between updates
+        auto cached_it = arrow_cached_angle_deg_.find(row.t->id);
+        if (cached_it != arrow_cached_angle_deg_.end()) {
+          arrow_angle = cached_it->second;
+        } else {
+          // Fallback if no cached value (shouldn't happen)
+          arrow_angle = angleForDirection(row.t->direction);
+        }
+      }
+      
+      // Apply smoothing for visual stability with adaptive rate
       arrow_angle = smoothAngleForThreat(row.t->id, arrow_angle);
+      
       QRect arrow_rect(box_rect.x() + padding_x, box_rect.y() + (box_rect.height() - arrow_sz) / 2, arrow_sz, arrow_sz);
       drawRTIArrowCompact(p, arrow_rect, arrow_angle, threat_color);
 
@@ -603,8 +661,23 @@ double HudRendererSP::smoothAngleForThreat(const std::string &id, double raw_ang
   }
   double current = it->second;
   double delta = shortestDelta(current, target);
-  const double alpha = 0.2;  // tuned for smooth yet responsive motion
+  
+  // Adaptive smoothing: faster for large changes, slower for small ones
+  // This ensures 1-degree precision while maintaining smooth motion
+  double alpha = 0.15;  // base smoothing factor
+  if (std::abs(delta) > 45.0) {
+    alpha = 0.3;  // faster response for large changes
+  } else if (std::abs(delta) < 5.0) {
+    alpha = 0.1;  // slower for fine adjustments (1-degree precision)
+  }
+  
   double next = normalize180(current + alpha * delta);
+  
+  // Snap to target if very close (within 1 degree) for precise pointing
+  if (std::abs(delta) < 1.0) {
+    next = target;
+  }
+  
   it->second = next;
   return next;
 }

@@ -103,4 +103,9 @@ protected:
   // Smoothed Y positions (top of box) per threat id
   mutable std::unordered_map<std::string, double> smoothed_y_top_;
   mutable QMutex smoothed_y_mutex_;
+  
+  // Arrow update rate control (1Hz target for bearing updates)
+  mutable std::unordered_map<std::string, uint64_t> arrow_last_update_frame_;
+  mutable std::unordered_map<std::string, double> arrow_cached_angle_deg_;
+  uint64_t current_frame_ = 0;  // Current frame number for update tracking
 };
