@@ -91,41 +91,56 @@ class RTIDaemon:
 
     def _get_current_location(self) -> tuple[float, float] | None:
         """Get current GPS coordinates from location services."""
-        self.sm.update(0)  # Non-blocking update
+        # Update with small timeout to ensure we get fresh data
+        self.sm.update(100)  # 100ms timeout to get fresh GPS
 
         # Prefer external GPS if available
-        if self.sm.updated['gpsLocationExternal']:
-            gps_ext = self.sm['gpsLocationExternal']
-            if getattr(gps_ext, 'accuracy', 99.9) < 10.0:  # Only use if accuracy is reasonable
-                return (gps_ext.latitude, gps_ext.longitude)
+        # NOTE: Don't check updated flag - we want current value even if not "new"
+        gps_ext = self.sm['gpsLocationExternal']
+        if gps_ext:
+            lat = getattr(gps_ext, 'latitude', 0.0)
+            lon = getattr(gps_ext, 'longitude', 0.0)
+            # Check for valid coordinates (not 0,0) and reasonable accuracy
+            if lat != 0.0 and lon != 0.0:
+                accuracy = getattr(gps_ext, 'horizontalAccuracy', 0.0)
+                # Accept if accuracy is reasonable (0 might mean unset or perfect)
+                if accuracy <= 10.0:
+                    return (lat, lon)
 
         # Fall back to regular GPS location
-        if self.sm.updated['gpsLocation']:
-            gps_loc = self.sm['gpsLocation']
-            if gps_loc.hasFix:
-                return (gps_loc.latitude, gps_loc.longitude)
+        # NOTE: Don't check updated flag - we want current value even if not "new"
+        gps_loc = self.sm['gpsLocation']
+        if gps_loc and getattr(gps_loc, 'hasFix', False):
+            lat = getattr(gps_loc, 'latitude', 0.0)
+            lon = getattr(gps_loc, 'longitude', 0.0)
+            # Check for valid coordinates (not 0,0)
+            if lat != 0.0 and lon != 0.0:
+                return (lat, lon)
 
         return None
 
     def _get_current_heading_deg(self) -> float | None:
         """Get current ego heading in degrees from GPS if available."""
-        self.sm.update(0)
-        # Prefer external GPS bearing if available and plausible
-        if self.sm.updated['gpsLocationExternal']:
-            gps_ext = self.sm['gpsLocationExternal']
+        # Update with small timeout to ensure we get fresh data
+        self.sm.update(100)  # 100ms timeout to get fresh GPS
+
+        # Check internal GPS first (usually more reliable)
+        # NOTE: Don't check updated flag - we want current value even if not "new"
+        gps_loc = self.sm['gpsLocation']
+        if gps_loc and getattr(gps_loc, 'hasFix', False):
             try:
-                bearing = getattr(gps_ext, 'bearingDeg')
-                # Validate numeric and finite
+                bearing = getattr(gps_loc, 'bearingDeg', None)
                 if bearing is not None and 0.0 <= float(bearing) <= 360.0:
                     return float(bearing)
             except Exception:
                 pass
 
-        # Fall back to internal GPS if it exposes bearing
-        if self.sm.updated['gpsLocation']:
-            gps_loc = self.sm['gpsLocation']
+        # Fall back to external GPS if internal doesn't have bearing
+        gps_ext = self.sm['gpsLocationExternal']
+        if gps_ext and getattr(gps_ext, 'hasFix', False):
             try:
-                bearing = getattr(gps_loc, 'bearingDeg')
+                bearing = getattr(gps_ext, 'bearingDeg', None)
+                # Validate numeric and finite
                 if bearing is not None and 0.0 <= float(bearing) <= 360.0:
                     return float(bearing)
             except Exception:
@@ -163,7 +178,7 @@ class RTIDaemon:
         """
         map_limit = 0.0
         dashboard_limit = 0.0
-        
+
         # Get map-based speed limit
         try:
             map_data = self.sm['liveMapDataSP']
@@ -172,7 +187,7 @@ class RTIDaemon:
                 cloudlog.debug(f"RTI: Map speed limit: {map_limit:.1f} m/s ({map_limit * 2.237:.0f} mph)")
         except Exception as e:
             cloudlog.debug(f"RTI: Could not get speed limit from map data: {e}")
-        
+
         # Get dashboard-based speed limit (from car's traffic sign recognition)
         try:
             car_state_sp = self.sm['carStateSP']
@@ -181,7 +196,7 @@ class RTIDaemon:
                 cloudlog.debug(f"RTI: Dashboard speed limit: {dashboard_limit:.1f} m/s ({dashboard_limit * 2.237:.0f} mph)")
         except Exception as e:
             cloudlog.debug(f"RTI: Could not get speed limit from dashboard: {e}")
-        
+
         # CONSERVATIVE COMBINATION: Use MIN instead of MAX for RTI safety
         # This differs from SLC which uses MAX (higher) value
         # RTI prefers the MORE CONSERVATIVE (lower) limit when sources disagree
@@ -247,9 +262,9 @@ class RTIDaemon:
                                 radius_m = 4828  # Default 3 miles in meters
                         else:
                             radius_m = 4828  # Default 3 miles in meters
-                        
+
                         radius_km = radius_m / 1000.0  # Convert to km
-                        
+
                         traffic_data = await self.waze_client.get_traffic_alerts(
                             location[0], location[1], radius_km
                         )
@@ -320,35 +335,35 @@ class RTIDaemon:
             Relative bearing in degrees [-180, 180] where 0 is ahead
         """
         import math
-        
+
         # Check if threat is at same position as ego
         if abs(ego_lat - threat_lat) < 1e-9 and abs(ego_lon - threat_lon) < 1e-9:
             return 0.0  # Default to ahead
-        
+
         # Convert to radians
         lat1 = math.radians(ego_lat)
         lat2 = math.radians(threat_lat)
         lon1 = math.radians(ego_lon)
         lon2 = math.radians(threat_lon)
         dLon = lon2 - lon1
-        
+
         # Calculate bearing from ego to threat using forward azimuth formula
         y = math.sin(dLon) * math.cos(lat2)
         x = math.cos(lat1) * math.sin(lat2) - math.sin(lat1) * math.cos(lat2) * math.cos(dLon)
-        
+
         # Calculate absolute bearing in degrees (0° = north, clockwise positive)
         bearing_deg = math.degrees(math.atan2(y, x))
-        
+
         # Normalize bearing to [0, 360)
         if bearing_deg < 0:
             bearing_deg += 360.0
-        
+
         # Calculate relative bearing (threat bearing - ego heading)
         rel_bearing = bearing_deg - ego_heading_deg
-        
+
         # Normalize to [-180, 180] for shortest rotation
         return self._normalize_180(rel_bearing)
-    
+
     def _angle_for_direction(self, direction):
         """Convert discrete direction to angle for fallback display.
         
@@ -360,17 +375,17 @@ class RTIDaemon:
         """
         from cereal import custom
         D = custom.RtiStateSP.Direction
-        
+
         direction_angles = {
             D.ahead: 0.0,     # forward
             D.right: 90.0,    # right
-            D.behind: 180.0,  # behind  
+            D.behind: 180.0,  # behind
             D.left: -90.0,    # left
             D.unknown: 0.0,   # default to ahead
         }
-        
+
         return direction_angles.get(direction, 0.0)
-    
+
     def _is_valid_gps_pair(self, lat1, lon1, lat2, lon2):
         """Check if two GPS coordinate pairs are valid.
         
@@ -384,18 +399,18 @@ class RTIDaemon:
         # Check latitude bounds (-90 to 90)
         if not (-90 <= lat1 <= 90 and -90 <= lat2 <= 90):
             return False
-            
+
         # Check longitude bounds (-180 to 180)
         if not (-180 <= lon1 <= 180 and -180 <= lon2 <= 180):
             return False
-            
+
         # Check for invalid (0,0) coordinates
         if (abs(lat1) < 0.001 and abs(lon1) < 0.001) or \
            (abs(lat2) < 0.001 and abs(lon2) < 0.001):
             return False
-            
+
         return True
-    
+
     def _calculate_threat_display_data(self, threat, ego_location, ego_heading_deg):
         """Calculate display angle for a threat.
         
@@ -410,18 +425,18 @@ class RTIDaemon:
         # Check if we have valid GPS data for both ego and threat
         has_valid_location = False
         display_angle = 0.0
-        
+
         if ego_location and hasattr(threat, 'latitude') and hasattr(threat, 'longitude'):
             ego_lat, ego_lon = ego_location
             if self._is_valid_gps_pair(ego_lat, ego_lon, threat.latitude, threat.longitude):
                 has_valid_location = True
                 # Calculate precise bearing
                 display_angle = self._calculate_relative_bearing(
-                    ego_lat, ego_lon, 
+                    ego_lat, ego_lon,
                     threat.latitude, threat.longitude,
                     ego_heading_deg
                 )
-        
+
         if not has_valid_location:
             # Fallback to discrete direction with slight variation
             base_angle = self._angle_for_direction(threat.direction)
@@ -430,7 +445,7 @@ class RTIDaemon:
             hash_val = int(hashlib.md5(threat.id.encode()).hexdigest()[:8], 16)
             variation = ((hash_val % 21) - 10) * 0.5  # ±5 degree variation
             display_angle = base_angle + variation
-        
+
         return display_angle, has_valid_location
 
     def _publish_rti_state(self, rti_state):
@@ -463,13 +478,13 @@ class RTIDaemon:
                 threat_msg.direction = threat.direction
                 threat_msg.confidence = threat.confidence
                 threat_msg.speedLimitMs = threat.speed_limit_ms
-                
+
                 # Publish same-road determination explicitly (no inference)
                 try:
                     threat_msg.onSameRoad = bool(threat.on_same_road)
                 except Exception:
                     threat_msg.onSameRoad = False
-                
+
                 # Calculate and add display angle for HUD arrow
                 display_angle, has_location = self._calculate_threat_display_data(
                     threat, ego_location, ego_heading_deg
@@ -500,7 +515,7 @@ class RTIDaemon:
     async def run(self):
         """Main daemon loop running at 50Hz to match test script."""
         cloudlog.info("RTI Daemon starting main loop")
-        
+
         # Initialize last published state to ensure continuous publishing
         last_rti_state = None
         last_publish_time = 0
@@ -523,10 +538,10 @@ class RTIDaemon:
 
                 # Process RTI cycle (non-blocking)
                 current_time = time.time()
-                
+
                 # CRITICAL FIX: Always publish something at 50Hz to keep updated() flag true
                 # This matches the continuous_rti_test.py behavior that works 100%
-                
+
                 # If we have cached state and haven't processed recently, republish last state
                 if last_rti_state and (current_time - last_publish_time) >= 0.019:  # ~50Hz
                     # Update timestamp to current time for freshness
@@ -539,7 +554,7 @@ class RTIDaemon:
 
                 # Process new data if it's time (separate from publishing)
                 await self._process_cycle_async()
-                
+
                 # If we got new state from processing, update our cache
                 if hasattr(self, '_last_processed_state') and self._last_processed_state:
                     last_rti_state = self._last_processed_state
