@@ -239,26 +239,26 @@ class SpeedRecommendationEngine:
             self.detection_radius_m = 4828  # Default 3 miles
 
         # Get forward slowdown range (when to start slowing for threats ahead)
-        # Stored in meters in params, default 1.0 miles = 1609 meters
+        # Stored in meters in params, default 0.75 miles = 1207 meters
         forward_range = params.get("RTIForwardSlowdownRange")
         if forward_range:
             try:
                 self.ahead_distance_threshold_m = float(forward_range)
             except (ValueError, TypeError):
-                self.ahead_distance_threshold_m = 1609  # Default 1.0 miles
+                self.ahead_distance_threshold_m = 1207  # Default 0.75 miles
         else:
-            self.ahead_distance_threshold_m = 1609  # Default 1.0 miles
+            self.ahead_distance_threshold_m = 1207  # Default 0.75 miles
 
         # Get resume speed distance (when to resume normal speed after passing)
-        # Stored in meters in params, default 1.0 miles = 1609 meters
+        # Stored in meters in params, default 0.75 miles = 1207 meters
         resume_distance = params.get("RTIResumeSpeedDistance")
         if resume_distance:
             try:
                 self.behind_distance_threshold_m = float(resume_distance)
             except (ValueError, TypeError):
-                self.behind_distance_threshold_m = 1609  # Default 1.0 miles
+                self.behind_distance_threshold_m = 1207  # Default 0.75 miles
         else:
-            self.behind_distance_threshold_m = 1609  # Default 1.0 miles
+            self.behind_distance_threshold_m = 1207  # Default 0.75 miles
 
         # Get speed reduction settings
         self.speed_reduction_mode = params.get("RTISpeedReductionMode")

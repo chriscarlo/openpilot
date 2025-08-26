@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <chrono>
 #include <QPainterPath>
 #include <QTransform>
 #include <QTime>
@@ -24,10 +25,18 @@
 // (Removed) legacy static polygons used by the deprecated single-threat widget icons
 
 // Static color constants for performance
-static const QColor kRtiColorCritical(255, 0, 0, 255);    // Red
-static const QColor kRtiColorNear(255, 165, 0, 255);      // Orange
-static const QColor kRtiColorNormal(255, 255, 0, 255);    // Yellow
-static const QColor kRtiColorFar(150, 150, 150, 255);     // Gray
+static const QColor kRtiColorWhite(255, 255, 255, 245);    // Default white for text/arrows
+static const QColor kRtiColorNeonYellow(255, 255, 0, 255); // Neon yellow for on_same_road arrows
+
+// Helper function to create neon color from base color
+static QColor createNeonColor(const QColor& baseColor) {
+  QColor neonColor = baseColor.toHsl();
+  int h, s, l, a;
+  neonColor.getHsl(&h, &s, &l, &a);
+  // Neon effect: max saturation, medium-high lightness
+  neonColor.setHsl(h, 255, 160, 255);
+  return neonColor;
+}
 
 // Helper functions
 // Distance comparator helpers
@@ -61,13 +70,7 @@ static inline int roundToInt(double value) {
   return static_cast<int>(std::lround(value));
 }
 
-static inline int clampToByteRange(int value) {
-  return std::min(255, std::max(0, value));
-}
 
-static inline int scaleAndClampByte(int value, double scale) {
-  return clampToByteRange(roundToInt(value * scale));
-}
 
 // Template function for pruning caches based on active IDs
 template<typename CacheType>
@@ -210,19 +213,9 @@ void HudRendererSP::draw(QPainter &p, const QRect &surface_rect) {
 
 
 QColor HudRendererSP::getRTIThreatColor(float distance) const {
-  if (distance < 100) {
-    // Critical - bright red
-    return kRtiColorCritical;
-  } else if (distance < 300) {
-    // Near - orange
-    return kRtiColorNear;
-  } else if (distance < 1000) {
-    // Normal - yellow
-    return kRtiColorNormal;
-  } else {
-    // Far - gray (shouldn't normally display)
-    return kRtiColorFar;
-  }
+  // Arrows are always white by default
+  // Color changes happen based on on_same_road, not distance
+  return kRtiColorWhite;
 }
 
 
@@ -386,25 +379,50 @@ void HudRendererSP::drawRTIThreatIndicatorMulti(QPainter &p, const QRect &surfac
     for (int i = (int)rows.size() - 1; i >= 0; --i) {
       const auto &row = rows[i];
       // Colors
-      QColor threat_color = getRTIThreatColor(row.t->distance);       // distance-based hue
+      QColor arrow_color = row.t->on_same_road ? kRtiColorNeonYellow : kRtiColorWhite;
       QColor bg_color = getRTIThreatBgColorByType(row.t->type);       // type-based hue (background)
       bg_color.setAlpha(115);
       QColor border_color(255, 255, 255, 90);                         // default border
-
-      // For 'on same road', derive a brighter/saturated variant from the background hue,
-      // and use it for both border and text to match the observed design.
-      QColor bright_text_color = QColor(255, 255, 255, 245);          // default text (white)
-      if (row.t->on_same_road) {
-        QColor hsl = bg_color.toHsl();
-        int h, s, l, a; hsl.getHsl(&h, &s, &l, &a);
-        s = scaleAndClampByte(s, 1.25); // more saturated
-        l = scaleAndClampByte(l, 1.10); // slightly lighter
-        QColor bright; bright.setHsl(h, s, l, 255);
-        border_color = bright;
-        border_color.setAlpha(240);
-        bright_text_color = bright;
-        bright_text_color.setAlpha(245);
+      
+      // Check if this threat is the one causing speed recommendation
+      bool is_active_threat = false;
+      if (rti_threat_ahead && rti_recommended_speed > 0 && row.t->on_same_road && 
+          row.t->direction == cereal::RtiStateSP::Direction::AHEAD) {
+        // This is likely the threat causing the speed recommendation
+        // Find the closest ahead same-road threat
+        is_active_threat = true;
+        for (const auto& other_row : rows) {
+          if (other_row.t->on_same_road && other_row.t->direction == cereal::RtiStateSP::Direction::AHEAD && 
+              other_row.t->distance < row.t->distance) {
+            is_active_threat = false;  // There's a closer threat
+            break;
+          }
+        }
       }
+      
+      // Animate border for active threat
+      if (is_active_threat) {
+        // Create neon version of the threat color
+        QColor neon_border = createNeonColor(bg_color);
+        // Use time-based animation (toggles every ~500ms)
+        static auto last_toggle = std::chrono::steady_clock::now();
+        static bool pulse_state = false;
+        auto now = std::chrono::steady_clock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_toggle).count();
+        if (elapsed >= 500) {
+          pulse_state = !pulse_state;
+          last_toggle = now;
+        }
+        if (pulse_state) {
+          border_color = neon_border;
+          border_color.setAlpha(240);
+        } else {
+          border_color.setAlpha(0);  // Transparent
+        }
+      }
+      
+      // Text is always white
+      QColor text_color = kRtiColorWhite;
 
       // Target top position using outer breathing
       int target_top = y_cursor - outer_pad_y - row.h;
@@ -429,10 +447,10 @@ void HudRendererSP::drawRTIThreatIndicatorMulti(QPainter &p, const QRect &surfac
       arrow_angle = smoothAngleForThreat(row.t->id, arrow_angle);
       
       QRect arrow_rect(box_rect.x() + padding_x, box_rect.y() + (box_rect.height() - arrow_sz) / 2, arrow_sz, arrow_sz);
-      drawRTIArrowCompact(p, arrow_rect, arrow_angle, threat_color);
+      drawRTIArrowCompact(p, arrow_rect, arrow_angle, arrow_color);
 
-      // Draw text: baseline white, or brighter color if on same road
-      p.setPen(bright_text_color);
+      // Draw text: always white
+      p.setPen(text_color);
       int text_x = arrow_rect.right() + 8;
       QRect text_rect(text_x, box_rect.y(), box_rect.right() - text_x - 20, box_rect.height());
       p.drawText(text_rect, Qt::AlignVCenter | Qt::AlignLeft, row.text);
@@ -501,12 +519,12 @@ QString HudRendererSP::formatDistance(float distance_m) const {
       return QString("%1km").arg(distance_m / 1000.0, 0, 'f', 1);
     }
   } else {
-    float distance_ft = distance_m * 3.28084;
-    // Use feet for distances under 0.25 miles (1320 ft), then miles beyond
-    if (distance_ft < 1320) {
-      return QString("%1ft").arg(static_cast<int>(distance_ft));
+    float distance_yd = distance_m * 1.09361;  // Convert meters to yards
+    // Use yards for distances under 500 yards (~0.28 miles), then miles beyond
+    if (distance_yd < 500) {
+      return QString("%1yd").arg(static_cast<int>(distance_yd));
     } else {
-      float distance_mi = distance_ft / 5280.0;
+      float distance_mi = distance_yd / 1760.0;  // 1760 yards = 1 mile
       return QString("%1mi").arg(distance_mi, 0, 'f', 1);
     }
   }

@@ -170,8 +170,8 @@ class RTIDaemon:
     def _get_current_speed_limit(self) -> float:
         """Get current posted speed limit from both map and dashboard sources.
         
-        Uses CONSERVATIVE combination: When both sources have data, uses the LOWER value
-        for maximum safety in threat detection scenarios.
+        Uses SLC-ALIGNED combination: When both sources have data, uses the HIGHER value
+        to match what SLC displays on the HUD, avoiding confusion from discrepancies.
         
         Returns:
             Speed limit in m/s, or 0.0 if not available
@@ -197,14 +197,14 @@ class RTIDaemon:
         except Exception as e:
             cloudlog.debug(f"RTI: Could not get speed limit from dashboard: {e}")
 
-        # CONSERVATIVE COMBINATION: Use MIN instead of MAX for RTI safety
-        # This differs from SLC which uses MAX (higher) value
-        # RTI prefers the MORE CONSERVATIVE (lower) limit when sources disagree
+        # SLC-ALIGNED COMBINATION: Use MAX instead of MIN to match SLC behavior
+        # This matches SLC which uses MAX (higher) value, ensuring RTI slowdown
+        # targets match what's displayed on the HUD via SLC
         if map_limit > 0 and dashboard_limit > 0:
-            # Both sources have data - use the LOWER value
-            combined_limit = min(map_limit, dashboard_limit)
-            source = "map" if map_limit <= dashboard_limit else "dashboard"
-            cloudlog.debug(f"RTI: Using {source} speed limit (conservative): {combined_limit:.1f} m/s")
+            # Both sources have data - use the HIGHER value (matching SLC)
+            combined_limit = max(map_limit, dashboard_limit)
+            source = "map" if map_limit >= dashboard_limit else "dashboard"
+            cloudlog.debug(f"RTI: Using {source} speed limit (SLC-aligned): {combined_limit:.1f} m/s")
             return combined_limit
         elif dashboard_limit > 0:
             # Only dashboard has data
