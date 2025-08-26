@@ -1,10 +1,19 @@
 #!/bin/bash
-# Status line display for openpilot development
-# Format: <branch> : <commit><git_status> | <model> | <output_style> | <tokens> | <gamification>
+# Status line display for openpilot development - REAL DATA VERSION
+# Format: <branch> • <commit><git_status> | <model> | <output_style> | <tokens> | <gamification>
+
+# Read JSON data from stdin (provided by Claude Code)
+CLAUDE_DATA=$(cat)
 
 # Get project directory
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-/projects/chauffeur/data/openpilot}"
 cd "$PROJECT_DIR" 2>/dev/null || true
+
+# Parse session data from JSON
+SESSION_ID=$(echo "$CLAUDE_DATA" | jq -r '.session_id // ""' 2>/dev/null)
+MODEL_ID=$(echo "$CLAUDE_DATA" | jq -r '.model.id // "unknown"' 2>/dev/null)
+OUTPUT_STYLE=$(echo "$CLAUDE_DATA" | jq -r '.output_style.name // "default"' 2>/dev/null)
+COST_USD=$(echo "$CLAUDE_DATA" | jq -r '.cost.total_cost_usd // 0' 2>/dev/null)
 
 # Get git information
 if [ -d .git ]; then
@@ -13,17 +22,23 @@ if [ -d .git ]; then
     
     # Check for unpushed/unpulled changes
     PUSH_STATUS=""
-    if git status 2>/dev/null | grep -q "ahead"; then
+    # Check if ahead of remote
+    AHEAD=$(git rev-list --count @{u}..HEAD 2>/dev/null || echo "0")
+    # Check if behind remote
+    BEHIND=$(git rev-list --count HEAD..@{u} 2>/dev/null || echo "0")
+    # Check for uncommitted changes
+    if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+        LOCAL_CHANGES=1
+    else
+        LOCAL_CHANGES=0
+    fi
+    
+    # Build status indicator
+    if [ "$AHEAD" -gt 0 ] || [ "$LOCAL_CHANGES" -eq 1 ]; then
         PUSH_STATUS="+"
     fi
-    if git status 2>/dev/null | grep -q "behind"; then
+    if [ "$BEHIND" -gt 0 ]; then
         PUSH_STATUS="${PUSH_STATUS}-"
-    fi
-    # If no push/pull status but there are local changes
-    if [ -z "$PUSH_STATUS" ]; then
-        if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
-            PUSH_STATUS="+"
-        fi
     fi
     
     GIT_INFO="${BRANCH} • ${COMMIT}${PUSH_STATUS}"
@@ -31,69 +46,58 @@ else
     GIT_INFO="no-git • none"
 fi
 
-# Get model info from input JSON or environment
-if [ -n "$CLAUDE_INPUT" ]; then
-    MODEL_INFO=$(echo "$CLAUDE_INPUT" 2>/dev/null | jq -r '.model // ""' 2>/dev/null)
-else
-    MODEL_INFO="${CLAUDE_MODEL:-}"
-fi
-# Default if empty
-if [ -z "$MODEL_INFO" ]; then
-    MODEL_INFO="claude-opus-4-1-20250805"  # Default based on current model
-fi
-# Map to full model names with release dates
-case "$MODEL_INFO" in
-    *"opus-4"*|*"opus"*) MODEL="claude-opus-4-1-20250805" ;;
-    *"sonnet-3.5"*|*"sonnet"*) MODEL="claude-3.5-sonnet-20241022" ;;
-    *"haiku"*) MODEL="claude-3-haiku-20240307" ;;
-    *"claude-3"*) MODEL="claude-3-20240229" ;;
-    *) MODEL="${MODEL_INFO}" ;;  # Use as-is if already full name
-esac
-
-# Get output style from input JSON or default
-if [ -n "$CLAUDE_INPUT" ]; then
-    OUTPUT_STYLE=$(echo "$CLAUDE_INPUT" 2>/dev/null | jq -r '.outputStyle // ""' 2>/dev/null)
-else
-    OUTPUT_STYLE=""
-fi
-# Default to rca if empty
-if [ -z "$OUTPUT_STYLE" ]; then
-    OUTPUT_STYLE="rca"
+# Calculate tokens from cost (Opus pricing estimate)
+# Track session start cost to calculate delta
+SESSION_COST_FILE="/tmp/claude_session_start_${SESSION_ID}.txt"
+if [ ! -f "$SESSION_COST_FILE" ] && [ -n "$COST_USD" ]; then
+    # First time seeing this session - record start cost
+    echo "$COST_USD" > "$SESSION_COST_FILE"
 fi
 
-# Get token count (estimate based on session)
-TOKEN_FILE="/tmp/claude_tokens_$PPID.txt"
-if [ -f "$TOKEN_FILE" ]; then
-    TOKENS=$(cat "$TOKEN_FILE" 2>/dev/null || echo "0")
+# Calculate session-specific token usage
+if [ -f "$SESSION_COST_FILE" ]; then
+    START_COST=$(cat "$SESSION_COST_FILE")
+    SESSION_COST=$(awk "BEGIN {printf \"%.6f\", $COST_USD - $START_COST}")
+    # Rough estimate: Average ~$45 per million tokens (blended input/output)
+    TOKENS=$(awk "BEGIN {printf \"%.0f\", $SESSION_COST * 22222}")
 else
-    # Estimate tokens from session activity
-    TOKENS=$(echo "$CLAUDE_INPUT" 2>/dev/null | jq -r '.usage.totalTokens // 0' 2>/dev/null || echo "0")
-fi
-# Handle empty or non-numeric tokens
-if [ -z "$TOKENS" ] || ! [[ "$TOKENS" =~ ^[0-9]+$ ]]; then
     TOKENS="0"
 fi
-# Format tokens for display (e.g., 1234 -> 1k, 12345 -> 12k)
-if [ "$TOKENS" -gt 999 ]; then
-    TOKENS=$((TOKENS / 1000))k
+# Format tokens for display (e.g., 245678 -> 246k)
+if [ "$TOKENS" -gt 999999 ]; then
+    TOKENS=$(echo "$TOKENS / 1000000" | bc 2>/dev/null || echo "$((TOKENS / 1000000))")M
+elif [ "$TOKENS" -gt 999 ]; then
+    TOKENS=$(echo "$TOKENS / 1000" | bc 2>/dev/null || echo "$((TOKENS / 1000))")k
 fi
 
-# Get gamification stats (clean format)
-BEHAVIOR_FILE="/tmp/claude_behavior_$PPID.json"
+# Get gamification stats from behavioral tracker
+# Use session ID to find the right behavioral tracking data
+if [ -n "$SESSION_ID" ]; then
+    # Look for behavioral data file based on session
+    BEHAVIOR_FILE="/tmp/claude_behavior_${SESSION_ID}.json"
+    if [ ! -f "$BEHAVIOR_FILE" ]; then
+        # Fallback to PPID-based file
+        BEHAVIOR_FILE="/tmp/claude_behavior_${PPID}.json"
+    fi
+else
+    BEHAVIOR_FILE="/tmp/claude_behavior_${PPID}.json"
+fi
+
 if [ -f "$BEHAVIOR_FILE" ]; then
-    LEVEL=$(jq -r '.scores.level // 1' "$BEHAVIOR_FILE" 2>/dev/null)
+    LEVEL=$(jq -r '.scores.level // 1' "$BEHAVIOR_FILE" 2>/dev/null || echo "1")
     TRUST=$(jq -r '.trust_metrics.trust_level // 100' "$BEHAVIOR_FILE" 2>/dev/null | xargs printf "%.0f")
-    VERIFICATIONS=$(jq -r '.verifications.total_count // 0' "$BEHAVIOR_FILE" 2>/dev/null)
-    VIOLATIONS=$(jq -r '.violations.total_count // 0' "$BEHAVIOR_FILE" 2>/dev/null)
+    VERIFICATIONS=$(jq -r '.verifications.total_count // 0' "$BEHAVIOR_FILE" 2>/dev/null || echo "0")
+    VIOLATIONS=$(jq -r '.violations.total_count // 0' "$BEHAVIOR_FILE" 2>/dev/null || echo "0")
     
     # Build clean gamification string: L2•T90•V5/1
     GAMIFICATION="L${LEVEL}•T${TRUST}•V${VERIFICATIONS}/${VIOLATIONS}"
 else
+    # Default values when no behavioral tracking
     GAMIFICATION="L1•T100•V0/0"
 fi
 
 # Combine all elements
-STATUS="${GIT_INFO} | ${MODEL} | ${OUTPUT_STYLE} | ${TOKENS} | ${GAMIFICATION}"
+STATUS="${GIT_INFO} | ${MODEL_ID} | ${OUTPUT_STYLE} | ${TOKENS} | ${GAMIFICATION}"
 
 # Output the status line
 echo "$STATUS"

@@ -19,9 +19,8 @@ UIStateSP::UIStateSP(QObject *parent) : UIState(parent) {
     "pandaStates", "carParams", "driverMonitoringState", "carState", "driverStateV2",
     "wideRoadCameraState", "managerState", "selfdriveState", "longitudinalPlan",
     "modelManagerSP", "selfdriveStateSP", "longitudinalPlanSP", "backupManagerSP", "carControl", "liveMapDataSP",
-    "rtiStateSP",  // RTI (Realtime Traffic Intelligence) state for threat display
-    "gpsLocationExternal",  // Primary GPS source for RTI arrow bearings (lat/lon + heading)
-    "gpsLocation",  // Fallback GPS source (internal QCOM) when external unavailable
+    "rtiStateSP",  // RTI (Realtime Traffic Intelligence) state with pre-computed threat display data
+    // GPS subscriptions removed - bearing calculations now handled by rtid
   });
 
   // update timer

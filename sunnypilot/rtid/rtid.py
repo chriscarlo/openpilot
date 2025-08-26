@@ -298,6 +298,141 @@ class RTIDaemon:
             cloudlog.error(f"RTI cycle error: {e}")
             self._last_processed_state = None
 
+    def _normalize_180(self, angle):
+        """Normalize angle to [-180, 180] range."""
+        while angle > 180.0:
+            angle -= 360.0
+        while angle < -180.0:
+            angle += 360.0
+        return angle
+
+    def _calculate_relative_bearing(self, ego_lat, ego_lon, threat_lat, threat_lon, ego_heading_deg):
+        """Calculate relative bearing from ego to threat.
+        
+        Args:
+            ego_lat: Ego vehicle latitude in degrees
+            ego_lon: Ego vehicle longitude in degrees  
+            threat_lat: Threat latitude in degrees
+            threat_lon: Threat longitude in degrees
+            ego_heading_deg: Ego vehicle heading in degrees (0=north, clockwise)
+            
+        Returns:
+            Relative bearing in degrees [-180, 180] where 0 is ahead
+        """
+        import math
+        
+        # Check if threat is at same position as ego
+        if abs(ego_lat - threat_lat) < 1e-9 and abs(ego_lon - threat_lon) < 1e-9:
+            return 0.0  # Default to ahead
+        
+        # Convert to radians
+        lat1 = math.radians(ego_lat)
+        lat2 = math.radians(threat_lat)
+        lon1 = math.radians(ego_lon)
+        lon2 = math.radians(threat_lon)
+        dLon = lon2 - lon1
+        
+        # Calculate bearing from ego to threat using forward azimuth formula
+        y = math.sin(dLon) * math.cos(lat2)
+        x = math.cos(lat1) * math.sin(lat2) - math.sin(lat1) * math.cos(lat2) * math.cos(dLon)
+        
+        # Calculate absolute bearing in degrees (0° = north, clockwise positive)
+        bearing_deg = math.degrees(math.atan2(y, x))
+        
+        # Normalize bearing to [0, 360)
+        if bearing_deg < 0:
+            bearing_deg += 360.0
+        
+        # Calculate relative bearing (threat bearing - ego heading)
+        rel_bearing = bearing_deg - ego_heading_deg
+        
+        # Normalize to [-180, 180] for shortest rotation
+        return self._normalize_180(rel_bearing)
+    
+    def _angle_for_direction(self, direction):
+        """Convert discrete direction to angle for fallback display.
+        
+        Args:
+            direction: RtiStateSP.Direction enum value
+            
+        Returns:
+            Angle in degrees for arrow display
+        """
+        from cereal import custom
+        D = custom.RtiStateSP.Direction
+        
+        direction_angles = {
+            D.ahead: 0.0,     # forward
+            D.right: 90.0,    # right
+            D.behind: 180.0,  # behind  
+            D.left: -90.0,    # left
+            D.unknown: 0.0,   # default to ahead
+        }
+        
+        return direction_angles.get(direction, 0.0)
+    
+    def _is_valid_gps_pair(self, lat1, lon1, lat2, lon2):
+        """Check if two GPS coordinate pairs are valid.
+        
+        Args:
+            lat1, lon1: First GPS coordinate pair
+            lat2, lon2: Second GPS coordinate pair
+            
+        Returns:
+            True if both pairs are valid GPS coordinates
+        """
+        # Check latitude bounds (-90 to 90)
+        if not (-90 <= lat1 <= 90 and -90 <= lat2 <= 90):
+            return False
+            
+        # Check longitude bounds (-180 to 180)
+        if not (-180 <= lon1 <= 180 and -180 <= lon2 <= 180):
+            return False
+            
+        # Check for invalid (0,0) coordinates
+        if (abs(lat1) < 0.001 and abs(lon1) < 0.001) or \
+           (abs(lat2) < 0.001 and abs(lon2) < 0.001):
+            return False
+            
+        return True
+    
+    def _calculate_threat_display_data(self, threat, ego_location, ego_heading_deg):
+        """Calculate display angle for a threat.
+        
+        Args:
+            threat: Threat object from threat detector
+            ego_location: Tuple of (latitude, longitude) or None
+            ego_heading_deg: Ego vehicle heading in degrees
+            
+        Returns:
+            Tuple of (display_arrow_angle, has_location)
+        """
+        # Check if we have valid GPS data for both ego and threat
+        has_valid_location = False
+        display_angle = 0.0
+        
+        if ego_location and hasattr(threat, 'latitude') and hasattr(threat, 'longitude'):
+            ego_lat, ego_lon = ego_location
+            if self._is_valid_gps_pair(ego_lat, ego_lon, threat.latitude, threat.longitude):
+                has_valid_location = True
+                # Calculate precise bearing
+                display_angle = self._calculate_relative_bearing(
+                    ego_lat, ego_lon, 
+                    threat.latitude, threat.longitude,
+                    ego_heading_deg
+                )
+        
+        if not has_valid_location:
+            # Fallback to discrete direction with slight variation
+            base_angle = self._angle_for_direction(threat.direction)
+            # Add small variation based on threat ID for visual distinction
+            import hashlib
+            hash_val = int(hashlib.md5(threat.id.encode()).hexdigest()[:8], 16)
+            variation = ((hash_val % 21) - 10) * 0.5  # ±5 degree variation
+            display_angle = base_angle + variation
+        
+        return display_angle, has_valid_location
+
     def _publish_rti_state(self, rti_state):
         """Publish RTI state message."""
         msg = messaging.new_message('rtiStateSP', valid=True)
@@ -310,7 +445,11 @@ class RTIDaemon:
         msg.rtiStateSP.source = rti_state.source
         msg.rtiStateSP.apiStatus = rti_state.api_status
 
-        # Add threat details for HUD
+        # Get current ego location and heading for bearing calculations
+        ego_location = self._get_current_location()
+        ego_heading_deg = self._get_current_heading_deg()
+
+        # Add threat details for HUD with pre-computed display angles
         threats_to_send = rti_state.threats[:5]  # Limit to 5 threats
         if threats_to_send:
             msg.rtiStateSP.init('threats', len(threats_to_send))
@@ -324,11 +463,19 @@ class RTIDaemon:
                 threat_msg.direction = threat.direction
                 threat_msg.confidence = threat.confidence
                 threat_msg.speedLimitMs = threat.speed_limit_ms
+                
                 # Publish same-road determination explicitly (no inference)
                 try:
                     threat_msg.onSameRoad = bool(threat.on_same_road)
                 except Exception:
                     threat_msg.onSameRoad = False
+                
+                # Calculate and add display angle for HUD arrow
+                display_angle, has_location = self._calculate_threat_display_data(
+                    threat, ego_location, ego_heading_deg
+                )
+                threat_msg.displayArrowAngle = display_angle
+                threat_msg.hasLocation = has_location
 
         self.pm.send('rtiStateSP', msg)
 
