@@ -55,9 +55,14 @@ static inline bool comparePolicePriority(const RTIThreatInfo* a, const RTIThreat
 }
 
 static inline double normalize180(double a) {
-  while (a > 180.0) a -= 360.0;
-  while (a < -180.0) a += 360.0;
-  return a;
+  // Bounds check for invalid values
+  if (!std::isfinite(a)) return 0.0;
+  if (std::abs(a) > 1e6) return 0.0;  // Sanity check for unreasonable angles
+  
+  // Use fmod for efficient normalization
+  a = std::fmod(a + 180.0, 360.0);
+  if (a < 0) a += 360.0;
+  return a - 180.0;
 }
 
 // Numeric validation and conversion helpers
