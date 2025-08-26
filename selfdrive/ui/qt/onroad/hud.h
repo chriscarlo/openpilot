@@ -55,7 +55,7 @@ protected:
   // Selected source indicator for SLC (heuristic): true if OSM, false if car
   bool slc_source_is_map = false;
   QPixmap osm_badge_pix;
-  QPixmap ev6_badge_pix;
+  QPixmap car_badge_pix;
 
   // Anchor for SLC badge placement (bottom center of sign)
   QRect slc_sign_anchor_rect;

@@ -728,11 +728,13 @@ void HudRenderer::drawLateralAccelMeter(QPainter &p, const QRect &widget_rect, f
 
 void HudRenderer::drawSLCSourceBadge(QPainter &p, const QRect &sign_rect) {
   // Badge dimensions and placement (anchor to sign bottom edge midpoint)
-  // Double the height to 48px (from 24px) and use 128px width to match SVGs
+  // Make badges a bit taller than before (from 48px to 56px)
   const int badge_w = 128;
-  const int badge_h = 48;
+  const int badge_h = 56;
   const int badge_x = sign_rect.center().x() - badge_w / 2;
-  const int badge_y = sign_rect.bottom() - (badge_h / 2); // 50% overlap: half above, half below
+  // Align the badge vertical centerline exactly to the very outermost
+  // bottom edge pixel row of the speed limit sign.
+  const int badge_y = sign_rect.bottom() - (badge_h / 2); // centerline on sign bottom
   const QRect badge_rect(badge_x, badge_y, badge_w, badge_h);
   p.setRenderHint(QPainter::Antialiasing, true);
 
@@ -745,11 +747,11 @@ void HudRenderer::drawSLCSourceBadge(QPainter &p, const QRect &sign_rect) {
       p.drawPixmap(badge_rect.topLeft(), osm_badge_pix);
     }
   } else {
-    if (ev6_badge_pix.isNull() || ev6_badge_pix.size() != QSize(badge_w, badge_h)) {
-      ev6_badge_pix = loadPixmap("../assets/icons/ev6_badge.svg", QSize(badge_w, badge_h));
+    if (car_badge_pix.isNull() || car_badge_pix.size() != QSize(badge_w, badge_h)) {
+      car_badge_pix = loadPixmap("../assets/icons/car_badge.svg", QSize(badge_w, badge_h));
     }
-    if (!ev6_badge_pix.isNull()) {
-      p.drawPixmap(badge_rect.topLeft(), ev6_badge_pix);
+    if (!car_badge_pix.isNull()) {
+      p.drawPixmap(badge_rect.topLeft(), car_badge_pix);
     }
   }
 }

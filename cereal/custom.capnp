@@ -431,6 +431,15 @@ struct RtiStateSP @0xa1680744031fdb2d {
     # True if threat is determined to be on the same road as ego
     # Published from backend ThreatDetector; used by HUD for visual indicator
     onSameRoad @8 :Bool;
+    
+    # Pre-computed display angle for HUD arrow (degrees, -180 to 180)
+    # Calculated by rtid based on GPS bearing or fallback direction
+    # UI can directly use this value for rendering without calculations
+    displayArrowAngle @9 :Float32;
+    
+    # Indicates if the threat has valid GPS coordinates
+    # When false, displayArrowAngle is based on discrete direction
+    hasLocation @10 :Bool;
   }
   
   enum ThreatType {
