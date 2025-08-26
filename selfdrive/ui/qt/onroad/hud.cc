@@ -734,7 +734,9 @@ void HudRenderer::drawSLCSourceBadge(QPainter &p, const QRect &sign_rect) {
   const int badge_x = sign_rect.center().x() - badge_w / 2;
   // Align the badge vertical centerline exactly to the very outermost
   // bottom edge pixel row of the speed limit sign.
-  const int badge_y = sign_rect.bottom() - (badge_h / 2); // centerline on sign bottom
+  // Add 1 pixel offset to account for Qt's coordinate system where bottom() is the last pixel inside the rect
+  // This ensures the badge is bisected by the actual outer edge of the white border
+  const int badge_y = sign_rect.bottom() + 1 - (badge_h / 2); // centerline on sign's outer edge
   const QRect badge_rect(badge_x, badge_y, badge_w, badge_h);
   p.setRenderHint(QPainter::Antialiasing, true);
 
