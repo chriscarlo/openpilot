@@ -49,6 +49,7 @@ def main():
         # Anti-sycophancy reminder on first tool use
         if tracker.session["verifications"]["total_count"] == 0 and tracker.session["violations"]["total_count"] == 0:
             print("TOOL USE REMINDER: Disagreement with evidence is helpful. Agreement without verification is harmful.", file=sys.stderr)
+            print("'I don't know, let me look it up,' is ALWAYS preferable to bullshitting.", file=sys.stderr)
             print("Never use 'You're absolutely right' or variants. Think critically, not sycophantically.", file=sys.stderr)
         
         # Track verification actions
