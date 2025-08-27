@@ -71,17 +71,14 @@ elif [ "$TOKENS" -gt 999 ]; then
 fi
 
 # Get gamification stats from behavioral tracker
-# Use session ID to find the right behavioral tracking data
-if [ -n "$SESSION_ID" ]; then
-    # Look for behavioral data file based on session
-    BEHAVIOR_FILE="/tmp/claude_behavior_${SESSION_ID}.json"
-    if [ ! -f "$BEHAVIOR_FILE" ]; then
-        # Fallback to PPID-based file
-        BEHAVIOR_FILE="/tmp/claude_behavior_${PPID}.json"
-    fi
-else
-    BEHAVIOR_FILE="/tmp/claude_behavior_${PPID}.json"
+# Find the actual Claude Code process PID  
+CLAUDE_PID=$(pgrep -f '^claude$' | head -1)
+if [ -z "$CLAUDE_PID" ]; then
+    CLAUDE_PID=$PPID
 fi
+
+# Use Claude Code PID to find the right behavioral tracking data
+BEHAVIOR_FILE="/tmp/claude_behavior_${CLAUDE_PID}.json"
 
 if [ -f "$BEHAVIOR_FILE" ]; then
     LEVEL=$(jq -r '.scores.level // 1' "$BEHAVIOR_FILE" 2>/dev/null || echo "1")
