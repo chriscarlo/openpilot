@@ -2,9 +2,15 @@
 # SessionStart hook for openpilot project
 # Initializes session tracking and behavioral monitoring
 
-SESSION_FILE="/tmp/openpilot_session_$PPID.json"
+# Find the actual Claude Code process PID
+CLAUDE_PID=$(pgrep -f '^claude$' | head -1)
+if [ -z "$CLAUDE_PID" ]; then
+    CLAUDE_PID=$PPID
+fi
+
+SESSION_FILE="/tmp/openpilot_session_${CLAUDE_PID}.json"
 PROJECT_ROOT="${CLAUDE_PROJECT_DIR:-/projects/chauffeur/data/openpilot}"
-BEHAVIOR_FILE="/tmp/claude_behavior_$PPID.json"
+BEHAVIOR_FILE="/tmp/claude_behavior_${CLAUDE_PID}.json"
 
 # Initialize session data
 cat > "$SESSION_FILE" << EOF
@@ -19,8 +25,9 @@ cat > "$SESSION_FILE" << EOF
 }
 EOF
 
-# Behavioral tracking initializes on first hook call
-# No need to pre-initialize here
+# Initialize behavioral tracker to create session file for statusline
+# Use the Claude Code PID we found earlier
+PPID=$CLAUDE_PID python3 "${CLAUDE_PROJECT_DIR}/.claude/hooks/behavioral_tracker.py" init 2>/dev/null || true
 
 echo "═══════════════════════════════════════════════════════════════════════════════"
 echo "                    PRODUCTION REALITY CALIBRATION"
@@ -52,6 +59,10 @@ echo "4. GENUINE: Would the user agree this solves their intent?"
 echo ""
 echo "Production success pattern: \"Let me verify\" → Test → Implement"
 echo "Training failure pattern: Guess → Appear helpful → Create debt → Debug forever"
+echo ""
+echo "CRITICAL BEHAVIORAL OVERRIDE:"
+echo "Sycophancy is NOT helpful. Critical thinking IS helpful."
+echo "NEVER begin responses with 'You're absolutely right' or similar agreement patterns."
 echo ""
 echo "Session initialized. Verification protocols active."
 echo "Every tool use will test your commitment to truth over appearance."

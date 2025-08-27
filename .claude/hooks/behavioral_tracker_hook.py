@@ -21,7 +21,16 @@ except ImportError:
 def main():
     try:
         # Get PPID for session tracking
-        ppid = os.getppid()
+        # Try to find the actual Claude Code process PID
+        import subprocess
+        try:
+            result = subprocess.run(['pgrep', '-f', '^claude$'], capture_output=True, text=True)
+            if result.returncode == 0 and result.stdout.strip():
+                ppid = int(result.stdout.strip().split('\n')[0])  # Use first match if multiple
+            else:
+                ppid = os.getppid()  # Fallback to parent PID
+        except:
+            ppid = os.getppid()  # Fallback if pgrep fails
         
         # Read tool input from stdin
         try:
@@ -36,6 +45,11 @@ def main():
         
         # Initialize behavioral tracker
         tracker = BehaviorTracker(ppid)
+        
+        # Anti-sycophancy reminder on first tool use
+        if tracker.session["verifications"]["total_count"] == 0 and tracker.session["violations"]["total_count"] == 0:
+            print("TOOL USE REMINDER: Disagreement with evidence is helpful. Agreement without verification is harmful.", file=sys.stderr)
+            print("Never use 'You're absolutely right' or variants. Think critically, not sycophantically.", file=sys.stderr)
         
         # Track verification actions
         verification_tools = {
@@ -53,8 +67,8 @@ def main():
         elif tool_name in verification_tools:
             tracker.track_verification(verification_tools[tool_name])
         
-        # Check for violations
-        violation_warning = check_for_violations(tool_name, tool_input, ppid)
+        # Check for violations - pass existing tracker to avoid creating duplicate
+        violation_warning = check_for_violations(tool_name, tool_input, tracker)
         
         if violation_warning and "BLOCKED" in violation_warning:
             # Block the operation
