@@ -196,6 +196,9 @@ void HudRenderer::draw(QPainter &p, const QRect &surface_rect) {
   // Always try to draw speed limit signs if we have any speed limit data
   if (show_slc && slc_speed_limit > 0) {
     drawSpeedLimitSigns(p, surface_rect);
+  } else {
+    // Reset anchor validity when sign is not shown
+    slc_sign_anchor_valid = false;
   }
 
   // Draw upcoming speed limit if available
@@ -204,7 +207,8 @@ void HudRenderer::draw(QPainter &p, const QRect &surface_rect) {
   }
 
   // Draw SLC source badge last so it sits on top of the signs/widgets below
-  if (slc_sign_anchor_valid) {
+  // Only draw badge when both the sign is visible AND anchor is valid
+  if (slc_sign_anchor_valid && show_slc && slc_speed_limit > 0) {
     drawSLCSourceBadge(p, slc_sign_anchor_rect);
   }
 
@@ -732,11 +736,12 @@ void HudRenderer::drawSLCSourceBadge(QPainter &p, const QRect &sign_rect) {
   const int badge_w = 128;
   const int badge_h = 56;
   const int badge_x = sign_rect.center().x() - badge_w / 2;
-  // Align the badge vertical centerline exactly to the very outermost
-  // bottom edge pixel row of the speed limit sign.
-  // Add 1 pixel offset to account for Qt's coordinate system where bottom() is the last pixel inside the rect
-  // This ensures the badge is bisected by the actual outer edge of the white border
-  const int badge_y = sign_rect.bottom() + 1 - (badge_h / 2); // centerline on sign's outer edge
+  // Align badge with the outermost edge of the black border/ring
+  // For US signs: inner rect is adjusted by 10px, border is 4px, so black border edge is at bottom - 6
+  // For EU signs: red ring is adjusted by 4px inward from circle_rect
+  // Using 6px offset works for both (US: 10-4=6, EU: we'll use 4px but 6px gives better visual alignment)
+  const int border_offset = is_metric ? 4 : 6; // Adjust based on sign style
+  const int badge_y = sign_rect.bottom() - border_offset - (badge_h / 2); // centerline on black border edge
   const QRect badge_rect(badge_x, badge_y, badge_w, badge_h);
   p.setRenderHint(QPainter::Antialiasing, true);
 

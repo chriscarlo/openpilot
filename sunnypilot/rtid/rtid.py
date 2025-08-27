@@ -268,6 +268,58 @@ class RTIDaemon:
                         traffic_data = await self.waze_client.get_traffic_alerts(
                             location[0], location[1], radius_km
                         )
+
+                        # CAPTURE ALL POLICE DATA TO FILE
+                        police_capture_file = "/data/openpilot/live_waze_police_capture.json"
+                        police_alerts = []
+                        all_alert_types = set()
+
+                        for alert in traffic_data:
+                            # Track all alert types
+                            all_alert_types.add(alert.type)
+
+                            # Capture police alerts with ALL data
+                            if alert.type in ['police', 'policeHiding', 'POLICE', 'POLICE_HIDING']:
+                                police_data = {
+                                    "timestamp": current_time,
+                                    "location": location,
+                                    "alert": {
+                                        "id": alert.id,
+                                        "type": alert.type,
+                                        "latitude": alert.latitude,
+                                        "longitude": alert.longitude,
+                                        "confidence": alert.confidence,
+                                        "speed_limit": alert.speed_limit,
+                                        "street": alert.street,
+                                        "country": alert.country,
+                                        "raw_data": alert.raw_data
+                                    }
+                                }
+                                police_alerts.append(police_data)
+
+                        # Log and save if we found police
+                        if police_alerts:
+                            cloudlog.warning(f"RTI: POLICE ALERTS FOUND! Count: {len(police_alerts)}")
+                            for pa in police_alerts:
+                                cloudlog.warning(f"RTI POLICE: {pa['alert']['type']} at {pa['alert']['street']} ({pa['alert']['latitude']:.5f}, {pa['alert']['longitude']:.5f})")
+                                if pa['alert']['raw_data']:
+                                    cloudlog.warning(f"RTI POLICE RAW: {json.dumps(pa['alert']['raw_data'])}")
+
+                            # Append to capture file
+                            try:
+                                existing_data = []
+                                if os.path.exists(police_capture_file):
+                                    with open(police_capture_file) as f:
+                                        existing_data = json.load(f)
+                                existing_data.extend(police_alerts)
+                                with open(police_capture_file, 'w') as f:
+                                    json.dump(existing_data, f, indent=2)
+                                cloudlog.warning(f"RTI: Saved {len(police_alerts)} police alerts to {police_capture_file}")
+                            except Exception as e:
+                                cloudlog.error(f"RTI: Failed to save police data: {e}")
+
+                        cloudlog.info(f"RTI: Found {len(traffic_data)} total alerts. Types: {all_alert_types}")
+
                         # Update cache
                         self.cached_traffic_data = traffic_data
                         self.cached_data_location = location

@@ -1,0 +1,13 @@
+{
+  "timestamp": "2025-08-27T01:19:47.145913",
+  "location": {
+    "latitude": 37.4419,
+    "longitude": -122.143,
+    "radius_km": 16.0
+  },
+  "police_alerts": [],
+  "all_raw_alerts": [],
+  "api_response_metadata": {},
+  "data_fields_found": [],
+  "error": "No API key found. Please set RAPIDAPI_KEY environment variable or save key to /data/persist/rapidapi_key"
+}
