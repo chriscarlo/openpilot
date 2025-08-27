@@ -1,0 +1,2428 @@
+{
+  "location": {
+    "lat": 37.4419,
+    "lon": -122.143
+  },
+  "total_alerts": 40,
+  "alert_types": {
+    "hazard": 16,
+    "police": 4,
+    "jam": 20
+  },
+  "police_alerts": [
+    {
+      "id": "764369559",
+      "type": "police",
+      "lat": 37.331822,
+      "lon": -121.995684,
+      "confidence": 0.0,
+      "speed_limit": null,
+      "street": "Lawrence Expwy",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "764369559",
+        "type": "POLICE",
+        "subtype": null,
+        "reported_by": null,
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2025-08-27T01:12:20.000Z",
+        "country": "US",
+        "city": "Santa Clara, CA",
+        "street": "Lawrence Expwy",
+        "latitude": 37.331822,
+        "longitude": -121.995684,
+        "num_thumbs_up": 3,
+        "alert_reliability": 10,
+        "alert_confidence": 0,
+        "near_by": null,
+        "comments": [],
+        "num_comments": 0
+      }
+    },
+    {
+      "id": "764322225",
+      "type": "police",
+      "lat": 37.483794,
+      "lon": -122.182371,
+      "confidence": 1.0,
+      "speed_limit": null,
+      "street": "US-101 S",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "764322225",
+        "type": "POLICE",
+        "subtype": null,
+        "reported_by": null,
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2025-08-27T01:01:32.000Z",
+        "country": "US",
+        "city": "Menlo Park, CA",
+        "street": "US-101 S",
+        "latitude": 37.483794,
+        "longitude": -122.182371,
+        "num_thumbs_up": 3,
+        "alert_reliability": 9,
+        "alert_confidence": 1,
+        "near_by": null,
+        "comments": [],
+        "num_comments": 0
+      }
+    },
+    {
+      "id": "764396614",
+      "type": "police",
+      "lat": 37.461223,
+      "lon": -122.1413,
+      "confidence": 0.0,
+      "speed_limit": null,
+      "street": "University Ave",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "764396614",
+        "type": "POLICE",
+        "subtype": null,
+        "reported_by": "RaptorsYYZ",
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2025-08-27T01:22:09.000Z",
+        "country": "US",
+        "city": "East Palo Alto, CA",
+        "street": "University Ave",
+        "latitude": 37.461223,
+        "longitude": -122.1413,
+        "num_thumbs_up": 1,
+        "alert_reliability": 6,
+        "alert_confidence": 0,
+        "near_by": null,
+        "comments": [],
+        "num_comments": 0
+      }
+    },
+    {
+      "id": "764386204",
+      "type": "police",
+      "lat": 37.532396,
+      "lon": -122.001341,
+      "confidence": 0.0,
+      "speed_limit": null,
+      "street": "Mowry Ave",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "764386204",
+        "type": "POLICE",
+        "subtype": null,
+        "reported_by": "baller6802",
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2025-08-27T01:19:41.000Z",
+        "country": "US",
+        "city": "Fremont, CA",
+        "street": "Mowry Ave",
+        "latitude": 37.532396,
+        "longitude": -122.001341,
+        "num_thumbs_up": 1,
+        "alert_reliability": 7,
+        "alert_confidence": 0,
+        "near_by": null,
+        "comments": [],
+        "num_comments": 0
+      }
+    }
+  ],
+  "all_alerts": [
+    {
+      "id": "764343953",
+      "type": "hazard",
+      "lat": 37.362166,
+      "lon": -121.967994,
+      "confidence": 0.0,
+      "speed_limit": null,
+      "street": "San Tomas Expwy",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "764343953",
+        "type": "JAM",
+        "subtype": "JAM_HEAVY_TRAFFIC",
+        "reported_by": "nim_pat",
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2025-08-27T01:11:26.000Z",
+        "country": "US",
+        "city": "Santa Clara, CA",
+        "street": "San Tomas Expwy",
+        "latitude": 37.362166,
+        "longitude": -121.967994,
+        "num_thumbs_up": 0,
+        "alert_reliability": 5,
+        "alert_confidence": 0,
+        "near_by": null,
+        "comments": [],
+        "num_comments": 0
+      }
+    },
+    {
+      "id": "764333154",
+      "type": "hazard",
+      "lat": 37.382291,
+      "lon": -121.965244,
+      "confidence": 0.0,
+      "speed_limit": null,
+      "street": "US-101 S",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "764333154",
+        "type": "JAM",
+        "subtype": "JAM_HEAVY_TRAFFIC",
+        "reported_by": null,
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2025-08-27T01:08:03.000Z",
+        "country": "US",
+        "city": "Santa Clara, CA",
+        "street": "US-101 S",
+        "latitude": 37.382291,
+        "longitude": -121.965244,
+        "num_thumbs_up": 0,
+        "alert_reliability": 5,
+        "alert_confidence": 0,
+        "near_by": null,
+        "comments": [],
+        "num_comments": 0
+      }
+    },
+    {
+      "id": "764380254",
+      "type": "hazard",
+      "lat": 37.430765,
+      "lon": -122.10415,
+      "confidence": 0.0,
+      "speed_limit": null,
+      "street": "US-101 S",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "764380254",
+        "type": "JAM",
+        "subtype": "JAM_HEAVY_TRAFFIC",
+        "reported_by": null,
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2025-08-27T01:15:37.000Z",
+        "country": "US",
+        "city": "Palo Alto, CA",
+        "street": "US-101 S",
+        "latitude": 37.430765,
+        "longitude": -122.10415,
+        "num_thumbs_up": 0,
+        "alert_reliability": 5,
+        "alert_confidence": 0,
+        "near_by": null,
+        "comments": [],
+        "num_comments": 0
+      }
+    },
+    {
+      "id": "764369559",
+      "type": "police",
+      "lat": 37.331822,
+      "lon": -121.995684,
+      "confidence": 0.0,
+      "speed_limit": null,
+      "street": "Lawrence Expwy",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "764369559",
+        "type": "POLICE",
+        "subtype": null,
+        "reported_by": null,
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2025-08-27T01:12:20.000Z",
+        "country": "US",
+        "city": "Santa Clara, CA",
+        "street": "Lawrence Expwy",
+        "latitude": 37.331822,
+        "longitude": -121.995684,
+        "num_thumbs_up": 3,
+        "alert_reliability": 10,
+        "alert_confidence": 0,
+        "near_by": null,
+        "comments": [],
+        "num_comments": 0
+      }
+    },
+    {
+      "id": "764374790",
+      "type": "hazard",
+      "lat": 37.410866,
+      "lon": -121.990857,
+      "confidence": 0.0,
+      "speed_limit": null,
+      "street": "CA-237 E",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "764374790",
+        "type": "JAM",
+        "subtype": "JAM_HEAVY_TRAFFIC",
+        "reported_by": null,
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2025-08-27T01:13:43.000Z",
+        "country": "US",
+        "city": "Sunnyvale, CA",
+        "street": "CA-237 E",
+        "latitude": 37.410866,
+        "longitude": -121.990857,
+        "num_thumbs_up": 0,
+        "alert_reliability": 5,
+        "alert_confidence": 0,
+        "near_by": null,
+        "comments": [],
+        "num_comments": 0
+      }
+    },
+    {
+      "id": "650947534",
+      "type": "hazard",
+      "lat": 37.309513,
+      "lon": -121.993412,
+      "confidence": 5.0,
+      "speed_limit": null,
+      "street": "Moorpark Ave",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "650947534",
+        "type": "HAZARD",
+        "subtype": "HAZARD_ON_ROAD_CONSTRUCTION",
+        "reported_by": "MTC-California",
+        "description": "Pavement resurfacing",
+        "image": null,
+        "publish_datetime_utc": "2025-07-18T14:00:00.000Z",
+        "country": "US",
+        "city": "San Jose, CA",
+        "street": "Moorpark Ave",
+        "latitude": 37.309513,
+        "longitude": -121.993412,
+        "num_thumbs_up": 68,
+        "alert_reliability": 10,
+        "alert_confidence": 5,
+        "near_by": null,
+        "comments": [],
+        "num_comments": 0
+      }
+    },
+    {
+      "id": "764395516",
+      "type": "hazard",
+      "lat": 37.326224,
+      "lon": -121.967465,
+      "confidence": 0.0,
+      "speed_limit": null,
+      "street": "Saratoga Ave",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "764395516",
+        "type": "HAZARD",
+        "subtype": "HAZARD_ON_ROAD_CONSTRUCTION",
+        "reported_by": "nim_pat",
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2025-08-27T01:18:14.000Z",
+        "country": "US",
+        "city": "Santa Clara, CA",
+        "street": "Saratoga Ave",
+        "latitude": 37.326224,
+        "longitude": -121.967465,
+        "num_thumbs_up": 0,
+        "alert_reliability": 5,
+        "alert_confidence": 0,
+        "near_by": null,
+        "comments": [],
+        "num_comments": 0
+      }
+    },
+    {
+      "id": "764322225",
+      "type": "police",
+      "lat": 37.483794,
+      "lon": -122.182371,
+      "confidence": 1.0,
+      "speed_limit": null,
+      "street": "US-101 S",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "764322225",
+        "type": "POLICE",
+        "subtype": null,
+        "reported_by": null,
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2025-08-27T01:01:32.000Z",
+        "country": "US",
+        "city": "Menlo Park, CA",
+        "street": "US-101 S",
+        "latitude": 37.483794,
+        "longitude": -122.182371,
+        "num_thumbs_up": 3,
+        "alert_reliability": 9,
+        "alert_confidence": 1,
+        "near_by": null,
+        "comments": [],
+        "num_comments": 0
+      }
+    },
+    {
+      "id": "764308488",
+      "type": "hazard",
+      "lat": 37.334191,
+      "lon": -122.043441,
+      "confidence": 2.0,
+      "speed_limit": null,
+      "street": "I-280 S",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "764308488",
+        "type": "JAM",
+        "subtype": "JAM_STAND_STILL_TRAFFIC",
+        "reported_by": "Kiloris",
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2025-08-27T00:57:43.000Z",
+        "country": "US",
+        "city": "Cupertino, CA",
+        "street": "I-280 S",
+        "latitude": 37.334191,
+        "longitude": -122.043441,
+        "num_thumbs_up": 0,
+        "alert_reliability": 9,
+        "alert_confidence": 2,
+        "near_by": null,
+        "comments": [],
+        "num_comments": 0
+      }
+    },
+    {
+      "id": "764361196",
+      "type": "hazard",
+      "lat": 37.333507,
+      "lon": -122.073191,
+      "confidence": 5.0,
+      "speed_limit": null,
+      "street": "I-280 S",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "764361196",
+        "type": "HAZARD",
+        "subtype": "HAZARD_ON_SHOULDER_CAR_STOPPED",
+        "reported_by": "thedementedshrew",
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2025-08-27T01:12:33.000Z",
+        "country": "US",
+        "city": "Los Altos, CA",
+        "street": "I-280 S",
+        "latitude": 37.333507,
+        "longitude": -122.073191,
+        "num_thumbs_up": 27,
+        "alert_reliability": 10,
+        "alert_confidence": 5,
+        "near_by": null,
+        "comments": [],
+        "num_comments": 0
+      }
+    },
+    {
+      "id": "764333804",
+      "type": "hazard",
+      "lat": 37.407466,
+      "lon": -122.006436,
+      "confidence": 0.0,
+      "speed_limit": null,
+      "street": "CA-237 E",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "764333804",
+        "type": "JAM",
+        "subtype": "JAM_HEAVY_TRAFFIC",
+        "reported_by": null,
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2025-08-27T01:09:56.000Z",
+        "country": "US",
+        "city": "Sunnyvale, CA",
+        "street": "CA-237 E",
+        "latitude": 37.407466,
+        "longitude": -122.006436,
+        "num_thumbs_up": 0,
+        "alert_reliability": 5,
+        "alert_confidence": 0,
+        "near_by": null,
+        "comments": [],
+        "num_comments": 0
+      }
+    },
+    {
+      "id": "764322975",
+      "type": "hazard",
+      "lat": 37.349604,
+      "lon": -121.966893,
+      "confidence": 0.0,
+      "speed_limit": null,
+      "street": "Barbara Dr",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "764322975",
+        "type": "JAM",
+        "subtype": null,
+        "reported_by": null,
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2025-08-27T01:02:55.000Z",
+        "country": "US",
+        "city": "Santa Clara, CA",
+        "street": "Barbara Dr",
+        "latitude": 37.349604,
+        "longitude": -121.966893,
+        "num_thumbs_up": 0,
+        "alert_reliability": 5,
+        "alert_confidence": 0,
+        "near_by": null,
+        "comments": [],
+        "num_comments": 0
+      }
+    },
+    {
+      "id": "764396614",
+      "type": "police",
+      "lat": 37.461223,
+      "lon": -122.1413,
+      "confidence": 0.0,
+      "speed_limit": null,
+      "street": "University Ave",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "764396614",
+        "type": "POLICE",
+        "subtype": null,
+        "reported_by": "RaptorsYYZ",
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2025-08-27T01:22:09.000Z",
+        "country": "US",
+        "city": "East Palo Alto, CA",
+        "street": "University Ave",
+        "latitude": 37.461223,
+        "longitude": -122.1413,
+        "num_thumbs_up": 1,
+        "alert_reliability": 6,
+        "alert_confidence": 0,
+        "near_by": null,
+        "comments": [],
+        "num_comments": 0
+      }
+    },
+    {
+      "id": "764354367",
+      "type": "hazard",
+      "lat": 37.527636,
+      "lon": -122.271493,
+      "confidence": 0.0,
+      "speed_limit": null,
+      "street": "US-101 N",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "764354367",
+        "type": "JAM",
+        "subtype": "JAM_HEAVY_TRAFFIC",
+        "reported_by": "echew355",
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2025-08-27T01:14:25.000Z",
+        "country": "US",
+        "city": "Belmont, CA",
+        "street": "US-101 N",
+        "latitude": 37.527636,
+        "longitude": -122.271493,
+        "num_thumbs_up": 0,
+        "alert_reliability": 5,
+        "alert_confidence": 0,
+        "near_by": null,
+        "comments": [],
+        "num_comments": 0
+      }
+    },
+    {
+      "id": "645651062",
+      "type": "hazard",
+      "lat": 37.300411,
+      "lon": -122.029542,
+      "confidence": 5.0,
+      "speed_limit": null,
+      "street": "Rainbow Dr",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "645651062",
+        "type": "HAZARD",
+        "subtype": "HAZARD_ON_ROAD_CONSTRUCTION",
+        "reported_by": "MTC-California",
+        "description": "Pavement resurfacing",
+        "image": null,
+        "publish_datetime_utc": "2025-07-21T14:00:00.000Z",
+        "country": "US",
+        "city": "San Jose, CA",
+        "street": "Rainbow Dr",
+        "latitude": 37.300411,
+        "longitude": -122.029542,
+        "num_thumbs_up": 32,
+        "alert_reliability": 10,
+        "alert_confidence": 5,
+        "near_by": null,
+        "comments": [],
+        "num_comments": 0
+      }
+    },
+    {
+      "id": "764371924",
+      "type": "hazard",
+      "lat": 37.343659,
+      "lon": -122.094146,
+      "confidence": 5.0,
+      "speed_limit": null,
+      "street": "I-280 S",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "764371924",
+        "type": "HAZARD",
+        "subtype": "HAZARD_ON_SHOULDER_CAR_STOPPED",
+        "reported_by": null,
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2025-08-27T01:20:09.000Z",
+        "country": "US",
+        "city": "Los Altos, CA",
+        "street": "I-280 S",
+        "latitude": 37.343659,
+        "longitude": -122.094146,
+        "num_thumbs_up": 11,
+        "alert_reliability": 10,
+        "alert_confidence": 5,
+        "near_by": null,
+        "comments": [],
+        "num_comments": 0
+      }
+    },
+    {
+      "id": "764404835",
+      "type": "hazard",
+      "lat": 37.439945,
+      "lon": -122.11382,
+      "confidence": 0.0,
+      "speed_limit": null,
+      "street": "US-101 S",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "764404835",
+        "type": "HAZARD",
+        "subtype": "HAZARD_ON_ROAD_OBJECT",
+        "reported_by": "usa_309g0dj0",
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2025-08-27T01:27:55.000Z",
+        "country": "US",
+        "city": "Palo Alto, CA",
+        "street": "US-101 S",
+        "latitude": 37.439945,
+        "longitude": -122.11382,
+        "num_thumbs_up": 1,
+        "alert_reliability": 8,
+        "alert_confidence": 0,
+        "near_by": null,
+        "comments": [],
+        "num_comments": 0
+      }
+    },
+    {
+      "id": "764359897",
+      "type": "hazard",
+      "lat": 37.575957,
+      "lon": -122.25976,
+      "confidence": 0.0,
+      "speed_limit": null,
+      "street": "San Mateo Bridge / CA-92 E",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "764359897",
+        "type": "JAM",
+        "subtype": "JAM_STAND_STILL_TRAFFIC",
+        "reported_by": null,
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2025-08-27T01:08:19.000Z",
+        "country": "US",
+        "city": "Foster City, CA",
+        "street": "San Mateo Bridge / CA-92 E",
+        "latitude": 37.575957,
+        "longitude": -122.25976,
+        "num_thumbs_up": 0,
+        "alert_reliability": 5,
+        "alert_confidence": 0,
+        "near_by": null,
+        "comments": [],
+        "num_comments": 0
+      }
+    },
+    {
+      "id": "764386204",
+      "type": "police",
+      "lat": 37.532396,
+      "lon": -122.001341,
+      "confidence": 0.0,
+      "speed_limit": null,
+      "street": "Mowry Ave",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "764386204",
+        "type": "POLICE",
+        "subtype": null,
+        "reported_by": "baller6802",
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2025-08-27T01:19:41.000Z",
+        "country": "US",
+        "city": "Fremont, CA",
+        "street": "Mowry Ave",
+        "latitude": 37.532396,
+        "longitude": -122.001341,
+        "num_thumbs_up": 1,
+        "alert_reliability": 7,
+        "alert_confidence": 0,
+        "near_by": null,
+        "comments": [],
+        "num_comments": 0
+      }
+    },
+    {
+      "id": "645665229",
+      "type": "hazard",
+      "lat": 37.300411,
+      "lon": -122.029542,
+      "confidence": 5.0,
+      "speed_limit": null,
+      "street": "Rainbow Dr",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "645665229",
+        "type": "HAZARD",
+        "subtype": "HAZARD_ON_ROAD_CONSTRUCTION",
+        "reported_by": "MTC-California",
+        "description": "Pavement resurfacing",
+        "image": null,
+        "publish_datetime_utc": "2025-07-21T14:00:00.000Z",
+        "country": "US",
+        "city": "San Jose, CA",
+        "street": "Rainbow Dr",
+        "latitude": 37.300411,
+        "longitude": -122.029542,
+        "num_thumbs_up": 75,
+        "alert_reliability": 10,
+        "alert_confidence": 5,
+        "near_by": null,
+        "comments": [],
+        "num_comments": 0
+      }
+    },
+    {
+      "id": "1876334164",
+      "type": "jam",
+      "lat": 37.337916,
+      "lon": -121.978842,
+      "confidence": 0.6,
+      "speed_limit": 10.56,
+      "street": "Homestead Rd",
+      "country": null,
+      "raw_data": {
+        "jam_id": "1876334164",
+        "type": "NONE",
+        "level": 3,
+        "severity": 5,
+        "line_coordinates": [
+          {
+            "lat": 37.337916,
+            "lon": -121.978842
+          },
+          {
+            "lat": 37.33792,
+            "lon": -121.978585
+          },
+          {
+            "lat": 37.337936,
+            "lon": -121.978332
+          },
+          {
+            "lat": 37.337966,
+            "lon": -121.978149
+          },
+          {
+            "lat": 37.338019,
+            "lon": -121.977944
+          },
+          {
+            "lat": 37.338188,
+            "lon": -121.977367
+          },
+          {
+            "lat": 37.338381,
+            "lon": -121.976769
+          },
+          {
+            "lat": 37.338565,
+            "lon": -121.976169
+          },
+          {
+            "lat": 37.338716,
+            "lon": -121.975673
+          },
+          {
+            "lat": 37.338922,
+            "lon": -121.975019
+          },
+          {
+            "lat": 37.339257,
+            "lon": -121.973954
+          }
+        ],
+        "start_location": null,
+        "end_location": null,
+        "speed_kmh": 10.56,
+        "length_meters": 459,
+        "delay_seconds": 122,
+        "block_alert_id": null,
+        "block_alert_type": null,
+        "block_alert_description": null,
+        "block_alert_update_datetime_utc": null,
+        "block_start_datetime_utc": null,
+        "publish_datetime_utc": "2025-08-27T01:30:45.329Z",
+        "update_datetime_utc": "2025-08-27T01:30:45.329Z",
+        "country": "US",
+        "city": "Santa Clara, CA",
+        "street": "Homestead Rd"
+      }
+    },
+    {
+      "id": "1876244916",
+      "type": "jam",
+      "lat": 37.539837,
+      "lon": -122.297631,
+      "confidence": 0.6,
+      "speed_limit": 11.14,
+      "street": "S Delaware St",
+      "country": null,
+      "raw_data": {
+        "jam_id": "1876244916",
+        "type": "NONE",
+        "level": 3,
+        "severity": 5,
+        "line_coordinates": [
+          {
+            "lat": 37.539837,
+            "lon": -122.297631
+          },
+          {
+            "lat": 37.540287,
+            "lon": -122.298021
+          },
+          {
+            "lat": 37.541309,
+            "lon": -122.298892
+          },
+          {
+            "lat": 37.542122,
+            "lon": -122.299585
+          },
+          {
+            "lat": 37.543061,
+            "lon": -122.300385
+          }
+        ],
+        "start_location": null,
+        "end_location": null,
+        "speed_kmh": 11.14,
+        "length_meters": 433,
+        "delay_seconds": 89,
+        "block_alert_id": null,
+        "block_alert_type": null,
+        "block_alert_description": null,
+        "block_alert_update_datetime_utc": null,
+        "block_start_datetime_utc": null,
+        "publish_datetime_utc": "2025-08-27T01:25:14.742Z",
+        "update_datetime_utc": "2025-08-27T01:30:44.869Z",
+        "country": "US",
+        "city": "San Mateo, CA",
+        "street": "S Delaware St"
+      }
+    },
+    {
+      "id": "1876280202",
+      "type": "jam",
+      "lat": 37.337783,
+      "lon": -122.002591,
+      "confidence": 0.6,
+      "speed_limit": 13.26,
+      "street": "Homestead Rd",
+      "country": null,
+      "raw_data": {
+        "jam_id": "1876280202",
+        "type": "NONE",
+        "level": 3,
+        "severity": 5,
+        "line_coordinates": [
+          {
+            "lat": 37.337783,
+            "lon": -122.002591
+          },
+          {
+            "lat": 37.337785,
+            "lon": -122.001028
+          },
+          {
+            "lat": 37.337733,
+            "lon": -122.000542
+          },
+          {
+            "lat": 37.337735,
+            "lon": -121.999822
+          },
+          {
+            "lat": 37.337712,
+            "lon": -121.998763
+          },
+          {
+            "lat": 37.337707,
+            "lon": -121.998036
+          },
+          {
+            "lat": 37.337717,
+            "lon": -121.997012
+          },
+          {
+            "lat": 37.337736,
+            "lon": -121.996601
+          },
+          {
+            "lat": 37.337756,
+            "lon": -121.996269
+          },
+          {
+            "lat": 37.337835,
+            "lon": -121.995846
+          }
+        ],
+        "start_location": null,
+        "end_location": null,
+        "speed_kmh": 13.26,
+        "length_meters": 599,
+        "delay_seconds": 103,
+        "block_alert_id": null,
+        "block_alert_type": null,
+        "block_alert_description": null,
+        "block_alert_update_datetime_utc": null,
+        "block_start_datetime_utc": null,
+        "publish_datetime_utc": "2025-08-27T01:28:01.172Z",
+        "update_datetime_utc": "2025-08-27T01:30:44.492Z",
+        "country": "US",
+        "city": "Santa Clara, CA",
+        "street": "Homestead Rd"
+      }
+    },
+    {
+      "id": "1876318982",
+      "type": "jam",
+      "lat": 37.382765,
+      "lon": -122.122446,
+      "confidence": 0.4,
+      "speed_limit": 30,
+      "street": "Foothill Expwy",
+      "country": null,
+      "raw_data": {
+        "jam_id": "1876318982",
+        "type": "NONE",
+        "level": 2,
+        "severity": 5,
+        "line_coordinates": [
+          {
+            "lat": 37.382765,
+            "lon": -122.122446
+          },
+          {
+            "lat": 37.38263,
+            "lon": -122.12234
+          },
+          {
+            "lat": 37.381328,
+            "lon": -122.121378
+          },
+          {
+            "lat": 37.377506,
+            "lon": -122.118419
+          },
+          {
+            "lat": 37.376262,
+            "lon": -122.117431
+          },
+          {
+            "lat": 37.375459,
+            "lon": -122.11675
+          },
+          {
+            "lat": 37.374208,
+            "lon": -122.115527
+          },
+          {
+            "lat": 37.373936,
+            "lon": -122.115225
+          },
+          {
+            "lat": 37.373663,
+            "lon": -122.114906
+          },
+          {
+            "lat": 37.373115,
+            "lon": -122.114215
+          }
+        ],
+        "start_location": null,
+        "end_location": null,
+        "speed_kmh": 30,
+        "length_meters": 1299,
+        "delay_seconds": 80,
+        "block_alert_id": null,
+        "block_alert_type": null,
+        "block_alert_description": null,
+        "block_alert_update_datetime_utc": null,
+        "block_start_datetime_utc": null,
+        "publish_datetime_utc": "2025-08-27T01:29:23.918Z",
+        "update_datetime_utc": "2025-08-27T01:30:45.145Z",
+        "country": "US",
+        "city": "Los Altos, CA",
+        "street": "Foothill Expwy"
+      }
+    },
+    {
+      "id": "1876057346",
+      "type": "jam",
+      "lat": 37.399495,
+      "lon": -122.100987,
+      "confidence": 0.6,
+      "speed_limit": 16.36,
+      "street": "California St",
+      "country": null,
+      "raw_data": {
+        "jam_id": "1876057346",
+        "type": "NONE",
+        "level": 3,
+        "severity": 5,
+        "line_coordinates": [
+          {
+            "lat": 37.399495,
+            "lon": -122.100987
+          },
+          {
+            "lat": 37.399358,
+            "lon": -122.100783
+          },
+          {
+            "lat": 37.39925,
+            "lon": -122.100575
+          },
+          {
+            "lat": 37.398982,
+            "lon": -122.099968
+          },
+          {
+            "lat": 37.398573,
+            "lon": -122.098924
+          },
+          {
+            "lat": 37.39838,
+            "lon": -122.098439
+          },
+          {
+            "lat": 37.397536,
+            "lon": -122.096281
+          },
+          {
+            "lat": 37.3967,
+            "lon": -122.094151
+          },
+          {
+            "lat": 37.395436,
+            "lon": -122.090938
+          },
+          {
+            "lat": 37.394861,
+            "lon": -122.089537
+          }
+        ],
+        "start_location": null,
+        "end_location": null,
+        "speed_kmh": 16.36,
+        "length_meters": 1138,
+        "delay_seconds": 114,
+        "block_alert_id": null,
+        "block_alert_type": null,
+        "block_alert_description": null,
+        "block_alert_update_datetime_utc": null,
+        "block_start_datetime_utc": null,
+        "publish_datetime_utc": "2025-08-27T01:12:46.260Z",
+        "update_datetime_utc": "2025-08-27T01:30:45.065Z",
+        "country": "US",
+        "city": "Mountain View, CA",
+        "street": "California St"
+      }
+    },
+    {
+      "id": "1876214852",
+      "type": "jam",
+      "lat": 37.382347,
+      "lon": -121.973076,
+      "confidence": 0.6,
+      "speed_limit": 9.83,
+      "street": "Augustine Dr",
+      "country": null,
+      "raw_data": {
+        "jam_id": "1876214852",
+        "type": "NONE",
+        "level": 3,
+        "severity": 5,
+        "line_coordinates": [
+          {
+            "lat": 37.382347,
+            "lon": -121.973076
+          },
+          {
+            "lat": 37.382345,
+            "lon": -121.974646
+          },
+          {
+            "lat": 37.382346,
+            "lon": -121.976558
+          },
+          {
+            "lat": 37.382347,
+            "lon": -121.97765
+          },
+          {
+            "lat": 37.382351,
+            "lon": -121.977844
+          }
+        ],
+        "start_location": null,
+        "end_location": null,
+        "speed_kmh": 9.83,
+        "length_meters": 422,
+        "delay_seconds": 106,
+        "block_alert_id": null,
+        "block_alert_type": null,
+        "block_alert_description": null,
+        "block_alert_update_datetime_utc": null,
+        "block_start_datetime_utc": null,
+        "publish_datetime_utc": "2025-08-27T01:22:29.259Z",
+        "update_datetime_utc": "2025-08-27T01:30:44.233Z",
+        "country": "US",
+        "city": "Santa Clara, CA",
+        "street": "Augustine Dr"
+      }
+    },
+    {
+      "id": "1872965518",
+      "type": "jam",
+      "lat": 37.375199,
+      "lon": -122.068034,
+      "confidence": 0.4,
+      "speed_limit": 52.5,
+      "street": "CA-85 S",
+      "country": null,
+      "raw_data": {
+        "jam_id": "1872965518",
+        "type": "NONE",
+        "level": 2,
+        "severity": 5,
+        "line_coordinates": [
+          {
+            "lat": 37.375199,
+            "lon": -122.068034
+          },
+          {
+            "lat": 37.374906,
+            "lon": -122.068038
+          },
+          {
+            "lat": 37.374636,
+            "lon": -122.068032
+          },
+          {
+            "lat": 37.374334,
+            "lon": -122.068004
+          },
+          {
+            "lat": 37.374083,
+            "lon": -122.067963
+          },
+          {
+            "lat": 37.373822,
+            "lon": -122.067906
+          },
+          {
+            "lat": 37.37338,
+            "lon": -122.067774
+          },
+          {
+            "lat": 37.373255,
+            "lon": -122.067725
+          },
+          {
+            "lat": 37.37292,
+            "lon": -122.067587
+          },
+          {
+            "lat": 37.372463,
+            "lon": -122.067337
+          },
+          {
+            "lat": 37.366764,
+            "lon": -122.063883
+          },
+          {
+            "lat": 37.366355,
+            "lon": -122.063653
+          },
+          {
+            "lat": 37.365761,
+            "lon": -122.063382
+          },
+          {
+            "lat": 37.36509,
+            "lon": -122.063168
+          },
+          {
+            "lat": 37.36446,
+            "lon": -122.063046
+          },
+          {
+            "lat": 37.363898,
+            "lon": -122.063
+          },
+          {
+            "lat": 37.359921,
+            "lon": -122.063079
+          },
+          {
+            "lat": 37.359089,
+            "lon": -122.063074
+          },
+          {
+            "lat": 37.358298,
+            "lon": -122.063
+          },
+          {
+            "lat": 37.357398,
+            "lon": -122.062851
+          },
+          {
+            "lat": 37.356737,
+            "lon": -122.06269
+          },
+          {
+            "lat": 37.356169,
+            "lon": -122.062522
+          },
+          {
+            "lat": 37.355551,
+            "lon": -122.062296
+          },
+          {
+            "lat": 37.355011,
+            "lon": -122.062065
+          },
+          {
+            "lat": 37.354184,
+            "lon": -122.061661
+          },
+          {
+            "lat": 37.35313,
+            "lon": -122.061122
+          },
+          {
+            "lat": 37.352551,
+            "lon": -122.060863
+          },
+          {
+            "lat": 37.351998,
+            "lon": -122.060648
+          },
+          {
+            "lat": 37.351541,
+            "lon": -122.060498
+          },
+          {
+            "lat": 37.351024,
+            "lon": -122.060347
+          },
+          {
+            "lat": 37.350548,
+            "lon": -122.060244
+          },
+          {
+            "lat": 37.349801,
+            "lon": -122.060107
+          },
+          {
+            "lat": 37.349311,
+            "lon": -122.060051
+          }
+        ],
+        "start_location": null,
+        "end_location": null,
+        "speed_kmh": 52.5,
+        "length_meters": 3004,
+        "delay_seconds": 108,
+        "block_alert_id": null,
+        "block_alert_type": null,
+        "block_alert_description": null,
+        "block_alert_update_datetime_utc": null,
+        "block_start_datetime_utc": null,
+        "publish_datetime_utc": "2025-08-26T23:13:02.260Z",
+        "update_datetime_utc": "2025-08-27T01:30:44.880Z",
+        "country": "US",
+        "city": "Sunnyvale, CA",
+        "street": "CA-85 S"
+      }
+    },
+    {
+      "id": "1873392484",
+      "type": "jam",
+      "lat": 37.41531,
+      "lon": -121.977462,
+      "confidence": 0.6,
+      "speed_limit": 15.1,
+      "street": "to CA-237 E",
+      "country": null,
+      "raw_data": {
+        "jam_id": "1873392484",
+        "type": "NONE",
+        "level": 3,
+        "severity": 5,
+        "line_coordinates": [
+          {
+            "lat": 37.41531,
+            "lon": -121.977462
+          },
+          {
+            "lat": 37.415812,
+            "lon": -121.976349
+          },
+          {
+            "lat": 37.416354,
+            "lon": -121.97515
+          },
+          {
+            "lat": 37.417054,
+            "lon": -121.97366
+          },
+          {
+            "lat": 37.418071,
+            "lon": -121.971417
+          },
+          {
+            "lat": 37.418159,
+            "lon": -121.971205
+          },
+          {
+            "lat": 37.418245,
+            "lon": -121.970961
+          },
+          {
+            "lat": 37.418339,
+            "lon": -121.970666
+          },
+          {
+            "lat": 37.418433,
+            "lon": -121.970316
+          },
+          {
+            "lat": 37.418488,
+            "lon": -121.970075
+          },
+          {
+            "lat": 37.418643,
+            "lon": -121.969566
+          }
+        ],
+        "start_location": null,
+        "end_location": null,
+        "speed_kmh": 15.1,
+        "length_meters": 793,
+        "delay_seconds": 149,
+        "block_alert_id": null,
+        "block_alert_type": null,
+        "block_alert_description": null,
+        "block_alert_update_datetime_utc": null,
+        "block_start_datetime_utc": null,
+        "publish_datetime_utc": "2025-08-26T23:27:03.451Z",
+        "update_datetime_utc": "2025-08-27T01:30:45.763Z",
+        "country": "US",
+        "city": "Santa Clara, CA",
+        "street": "to CA-237 E"
+      }
+    },
+    {
+      "id": "1876244922",
+      "type": "jam",
+      "lat": 37.524074,
+      "lon": -122.280281,
+      "confidence": 0.6,
+      "speed_limit": 11.7,
+      "street": "El Camino Real",
+      "country": null,
+      "raw_data": {
+        "jam_id": "1876244922",
+        "type": "NONE",
+        "level": 3,
+        "severity": 5,
+        "line_coordinates": [
+          {
+            "lat": 37.524074,
+            "lon": -122.280281
+          },
+          {
+            "lat": 37.522178,
+            "lon": -122.278102
+          },
+          {
+            "lat": 37.521441,
+            "lon": -122.277176
+          },
+          {
+            "lat": 37.521412,
+            "lon": -122.277141
+          },
+          {
+            "lat": 37.521357,
+            "lon": -122.277076
+          },
+          {
+            "lat": 37.520934,
+            "lon": -122.27657
+          },
+          {
+            "lat": 37.520773,
+            "lon": -122.276372
+          },
+          {
+            "lat": 37.520414,
+            "lon": -122.27593
+          },
+          {
+            "lat": 37.519742,
+            "lon": -122.275141
+          },
+          {
+            "lat": 37.519223,
+            "lon": -122.274493
+          },
+          {
+            "lat": 37.51866,
+            "lon": -122.273824
+          }
+        ],
+        "start_location": null,
+        "end_location": null,
+        "speed_kmh": 11.7,
+        "length_meters": 829,
+        "delay_seconds": 184,
+        "block_alert_id": null,
+        "block_alert_type": null,
+        "block_alert_description": null,
+        "block_alert_update_datetime_utc": null,
+        "block_start_datetime_utc": null,
+        "publish_datetime_utc": "2025-08-27T01:25:14.594Z",
+        "update_datetime_utc": "2025-08-27T01:30:44.328Z",
+        "country": "US",
+        "city": "Belmont, CA",
+        "street": "El Camino Real"
+      }
+    },
+    {
+      "id": "1876334158",
+      "type": "jam",
+      "lat": 37.41017,
+      "lon": -122.161026,
+      "confidence": 0.6,
+      "speed_limit": 17.6,
+      "street": "Junipero Serra Blvd",
+      "country": null,
+      "raw_data": {
+        "jam_id": "1876334158",
+        "type": "NONE",
+        "level": 3,
+        "severity": 5,
+        "line_coordinates": [
+          {
+            "lat": 37.41017,
+            "lon": -122.161026
+          },
+          {
+            "lat": 37.407729,
+            "lon": -122.15769
+          },
+          {
+            "lat": 37.407548,
+            "lon": -122.157457
+          },
+          {
+            "lat": 37.406359,
+            "lon": -122.156021
+          }
+        ],
+        "start_location": null,
+        "end_location": null,
+        "speed_kmh": 17.6,
+        "length_meters": 613,
+        "delay_seconds": 83,
+        "block_alert_id": null,
+        "block_alert_type": null,
+        "block_alert_description": null,
+        "block_alert_update_datetime_utc": null,
+        "block_start_datetime_utc": null,
+        "publish_datetime_utc": "2025-08-27T01:30:45.246Z",
+        "update_datetime_utc": "2025-08-27T01:30:45.246Z",
+        "country": "US",
+        "city": "Stanford, CA",
+        "street": "Junipero Serra Blvd"
+      }
+    },
+    {
+      "id": "1867002066",
+      "type": "jam",
+      "lat": 37.332543,
+      "lon": -122.056016,
+      "confidence": 0.6,
+      "speed_limit": 25.14,
+      "street": "CA-85 S",
+      "country": null,
+      "raw_data": {
+        "jam_id": "1867002066",
+        "type": "SMALL",
+        "level": 3,
+        "severity": 5,
+        "line_coordinates": [
+          {
+            "lat": 37.332543,
+            "lon": -122.056016
+          },
+          {
+            "lat": 37.329727,
+            "lon": -122.053134
+          },
+          {
+            "lat": 37.329201,
+            "lon": -122.052653
+          },
+          {
+            "lat": 37.328732,
+            "lon": -122.052291
+          },
+          {
+            "lat": 37.328184,
+            "lon": -122.051905
+          },
+          {
+            "lat": 37.327852,
+            "lon": -122.051702
+          },
+          {
+            "lat": 37.327396,
+            "lon": -122.051449
+          },
+          {
+            "lat": 37.326852,
+            "lon": -122.051196
+          },
+          {
+            "lat": 37.326385,
+            "lon": -122.051015
+          },
+          {
+            "lat": 37.325759,
+            "lon": -122.050821
+          },
+          {
+            "lat": 37.322693,
+            "lon": -122.050104
+          },
+          {
+            "lat": 37.32224,
+            "lon": -122.049982
+          },
+          {
+            "lat": 37.321855,
+            "lon": -122.049866
+          },
+          {
+            "lat": 37.321456,
+            "lon": -122.049728
+          },
+          {
+            "lat": 37.321089,
+            "lon": -122.049586
+          },
+          {
+            "lat": 37.320779,
+            "lon": -122.049461
+          },
+          {
+            "lat": 37.320442,
+            "lon": -122.049304
+          },
+          {
+            "lat": 37.318687,
+            "lon": -122.048448
+          },
+          {
+            "lat": 37.31298,
+            "lon": -122.04564
+          },
+          {
+            "lat": 37.312583,
+            "lon": -122.045423
+          },
+          {
+            "lat": 37.312265,
+            "lon": -122.045216
+          },
+          {
+            "lat": 37.311909,
+            "lon": -122.044973
+          },
+          {
+            "lat": 37.311563,
+            "lon": -122.044693
+          },
+          {
+            "lat": 37.3111,
+            "lon": -122.044275
+          },
+          {
+            "lat": 37.310684,
+            "lon": -122.043846
+          },
+          {
+            "lat": 37.303311,
+            "lon": -122.035191
+          }
+        ],
+        "start_location": null,
+        "end_location": null,
+        "speed_kmh": 25.14,
+        "length_meters": 3812,
+        "delay_seconds": 427,
+        "block_alert_id": null,
+        "block_alert_type": null,
+        "block_alert_description": null,
+        "block_alert_update_datetime_utc": null,
+        "block_start_datetime_utc": null,
+        "publish_datetime_utc": "2025-08-26T21:26:08.977Z",
+        "update_datetime_utc": "2025-08-27T01:30:44.457Z",
+        "country": "US",
+        "city": "Cupertino, CA",
+        "street": "CA-85 S"
+      }
+    },
+    {
+      "id": "1876204512",
+      "type": "jam",
+      "lat": 37.564237,
+      "lon": -122.039096,
+      "confidence": 0.4,
+      "speed_limit": 51.2,
+      "street": "I-880 N",
+      "country": null,
+      "raw_data": {
+        "jam_id": "1876204512",
+        "type": "NONE",
+        "level": 2,
+        "severity": 5,
+        "line_coordinates": [
+          {
+            "lat": 37.564237,
+            "lon": -122.039096
+          },
+          {
+            "lat": 37.566239,
+            "lon": -122.04122
+          },
+          {
+            "lat": 37.567549,
+            "lon": -122.042623
+          },
+          {
+            "lat": 37.568335,
+            "lon": -122.043382
+          },
+          {
+            "lat": 37.568923,
+            "lon": -122.043879
+          },
+          {
+            "lat": 37.569416,
+            "lon": -122.044276
+          },
+          {
+            "lat": 37.570292,
+            "lon": -122.044877
+          },
+          {
+            "lat": 37.571412,
+            "lon": -122.045485
+          },
+          {
+            "lat": 37.571942,
+            "lon": -122.045732
+          },
+          {
+            "lat": 37.575306,
+            "lon": -122.047003
+          },
+          {
+            "lat": 37.578256,
+            "lon": -122.048006
+          },
+          {
+            "lat": 37.580572,
+            "lon": -122.048761
+          },
+          {
+            "lat": 37.581382,
+            "lon": -122.049103
+          },
+          {
+            "lat": 37.582519,
+            "lon": -122.049585
+          }
+        ],
+        "start_location": null,
+        "end_location": null,
+        "speed_kmh": 51.2,
+        "length_meters": 2268,
+        "delay_seconds": 86,
+        "block_alert_id": null,
+        "block_alert_type": null,
+        "block_alert_description": null,
+        "block_alert_update_datetime_utc": null,
+        "block_start_datetime_utc": null,
+        "publish_datetime_utc": "2025-08-27T01:22:29.428Z",
+        "update_datetime_utc": "2025-08-27T01:30:44.407Z",
+        "country": "US",
+        "city": "Fremont, CA",
+        "street": "I-880 N"
+      }
+    },
+    {
+      "id": "1876306908",
+      "type": "jam",
+      "lat": 37.450886,
+      "lon": -122.119208,
+      "confidence": 0.8,
+      "speed_limit": 4.61,
+      "street": "Geng Rd",
+      "country": null,
+      "raw_data": {
+        "jam_id": "1876306908",
+        "type": "NONE",
+        "level": 4,
+        "severity": 5,
+        "line_coordinates": [
+          {
+            "lat": 37.450886,
+            "lon": -122.119208
+          },
+          {
+            "lat": 37.451068,
+            "lon": -122.119278
+          },
+          {
+            "lat": 37.45128,
+            "lon": -122.11936
+          },
+          {
+            "lat": 37.451599,
+            "lon": -122.119481
+          },
+          {
+            "lat": 37.452505,
+            "lon": -122.119844
+          },
+          {
+            "lat": 37.452722,
+            "lon": -122.119994
+          },
+          {
+            "lat": 37.452829,
+            "lon": -122.120171
+          }
+        ],
+        "start_location": null,
+        "end_location": null,
+        "speed_kmh": 4.61,
+        "length_meters": 236,
+        "delay_seconds": 155,
+        "block_alert_id": null,
+        "block_alert_type": null,
+        "block_alert_description": null,
+        "block_alert_update_datetime_utc": null,
+        "block_start_datetime_utc": null,
+        "publish_datetime_utc": "2025-08-27T01:29:22.980Z",
+        "update_datetime_utc": "2025-08-27T01:30:44.204Z",
+        "country": "US",
+        "city": "Palo Alto, CA",
+        "street": "Geng Rd"
+      }
+    },
+    {
+      "id": "1876062122",
+      "type": "jam",
+      "lat": 37.373927,
+      "lon": -121.996249,
+      "confidence": 0.4,
+      "speed_limit": 31.32,
+      "street": "Lawrence Expwy",
+      "country": null,
+      "raw_data": {
+        "jam_id": "1876062122",
+        "type": "NONE",
+        "level": 2,
+        "severity": 5,
+        "line_coordinates": [
+          {
+            "lat": 37.373927,
+            "lon": -121.996249
+          },
+          {
+            "lat": 37.373345,
+            "lon": -121.99637
+          },
+          {
+            "lat": 37.372955,
+            "lon": -121.996453
+          },
+          {
+            "lat": 37.372692,
+            "lon": -121.996496
+          },
+          {
+            "lat": 37.372429,
+            "lon": -121.996519
+          },
+          {
+            "lat": 37.372039,
+            "lon": -121.996526
+          },
+          {
+            "lat": 37.371099,
+            "lon": -121.996524
+          },
+          {
+            "lat": 37.370111,
+            "lon": -121.996516
+          },
+          {
+            "lat": 37.369458,
+            "lon": -121.996532
+          },
+          {
+            "lat": 37.369162,
+            "lon": -121.996545
+          },
+          {
+            "lat": 37.368919,
+            "lon": -121.996537
+          },
+          {
+            "lat": 37.368645,
+            "lon": -121.996519
+          },
+          {
+            "lat": 37.368189,
+            "lon": -121.996475
+          },
+          {
+            "lat": 37.367803,
+            "lon": -121.996428
+          },
+          {
+            "lat": 37.367392,
+            "lon": -121.996364
+          },
+          {
+            "lat": 37.366847,
+            "lon": -121.996279
+          },
+          {
+            "lat": 37.366086,
+            "lon": -121.996161
+          },
+          {
+            "lat": 37.365999,
+            "lon": -121.996152
+          },
+          {
+            "lat": 37.365423,
+            "lon": -121.996094
+          },
+          {
+            "lat": 37.364802,
+            "lon": -121.99607
+          },
+          {
+            "lat": 37.362842,
+            "lon": -121.996066
+          },
+          {
+            "lat": 37.360541,
+            "lon": -121.996087
+          }
+        ],
+        "start_location": null,
+        "end_location": null,
+        "speed_kmh": 31.32,
+        "length_meters": 1491,
+        "delay_seconds": 92,
+        "block_alert_id": null,
+        "block_alert_type": null,
+        "block_alert_description": null,
+        "block_alert_update_datetime_utc": null,
+        "block_start_datetime_utc": null,
+        "publish_datetime_utc": "2025-08-27T01:12:46.400Z",
+        "update_datetime_utc": "2025-08-27T01:30:44.757Z",
+        "country": "US",
+        "city": "Sunnyvale, CA",
+        "street": "Lawrence Expwy"
+      }
+    },
+    {
+      "id": "1873677760",
+      "type": "jam",
+      "lat": 37.420369,
+      "lon": -122.21588,
+      "confidence": 0.6,
+      "speed_limit": 12.96,
+      "street": "to I-280 N \u00bb San Francisco",
+      "country": null,
+      "raw_data": {
+        "jam_id": "1873677760",
+        "type": "NONE",
+        "level": 3,
+        "severity": 5,
+        "line_coordinates": [
+          {
+            "lat": 37.420369,
+            "lon": -122.21588
+          },
+          {
+            "lat": 37.419971,
+            "lon": -122.21744
+          },
+          {
+            "lat": 37.41991,
+            "lon": -122.21776
+          },
+          {
+            "lat": 37.4199,
+            "lon": -122.217954
+          },
+          {
+            "lat": 37.419909,
+            "lon": -122.21812
+          },
+          {
+            "lat": 37.419959,
+            "lon": -122.21833
+          },
+          {
+            "lat": 37.420134,
+            "lon": -122.218915
+          },
+          {
+            "lat": 37.420174,
+            "lon": -122.219107
+          },
+          {
+            "lat": 37.420206,
+            "lon": -122.21933
+          },
+          {
+            "lat": 37.420209,
+            "lon": -122.219624
+          },
+          {
+            "lat": 37.420067,
+            "lon": -122.221268
+          },
+          {
+            "lat": 37.420054,
+            "lon": -122.221459
+          },
+          {
+            "lat": 37.420061,
+            "lon": -122.221636
+          },
+          {
+            "lat": 37.420084,
+            "lon": -122.221795
+          },
+          {
+            "lat": 37.420134,
+            "lon": -122.221989
+          },
+          {
+            "lat": 37.420226,
+            "lon": -122.222238
+          },
+          {
+            "lat": 37.420301,
+            "lon": -122.22241
+          },
+          {
+            "lat": 37.420395,
+            "lon": -122.22264
+          }
+        ],
+        "start_location": "Menlo Park",
+        "end_location": "Menlo Park",
+        "speed_kmh": 12.96,
+        "length_meters": 620,
+        "delay_seconds": 137,
+        "block_alert_id": null,
+        "block_alert_type": null,
+        "block_alert_description": null,
+        "block_alert_update_datetime_utc": null,
+        "block_start_datetime_utc": null,
+        "publish_datetime_utc": "2025-08-26T23:35:29.879Z",
+        "update_datetime_utc": "2025-08-27T01:30:45.794Z",
+        "country": "US",
+        "city": "Menlo Park, CA",
+        "street": "to I-280 N \u00bb San Francisco"
+      }
+    },
+    {
+      "id": "1876260146",
+      "type": "jam",
+      "lat": 37.537762,
+      "lon": -122.298064,
+      "confidence": 0.6,
+      "speed_limit": 12.09,
+      "street": "S El Camino Real",
+      "country": null,
+      "raw_data": {
+        "jam_id": "1876260146",
+        "type": "NONE",
+        "level": 3,
+        "severity": 5,
+        "line_coordinates": [
+          {
+            "lat": 37.537762,
+            "lon": -122.298064
+          },
+          {
+            "lat": 37.538425,
+            "lon": -122.298854
+          },
+          {
+            "lat": 37.538994,
+            "lon": -122.29957
+          },
+          {
+            "lat": 37.539212,
+            "lon": -122.299976
+          },
+          {
+            "lat": 37.539842,
+            "lon": -122.300735
+          },
+          {
+            "lat": 37.540408,
+            "lon": -122.301372
+          },
+          {
+            "lat": 37.540456,
+            "lon": -122.301426
+          },
+          {
+            "lat": 37.540968,
+            "lon": -122.301952
+          },
+          {
+            "lat": 37.541153,
+            "lon": -122.302143
+          },
+          {
+            "lat": 37.541239,
+            "lon": -122.302231
+          },
+          {
+            "lat": 37.541344,
+            "lon": -122.302339
+          },
+          {
+            "lat": 37.541483,
+            "lon": -122.302482
+          }
+        ],
+        "start_location": null,
+        "end_location": null,
+        "speed_kmh": 12.09,
+        "length_meters": 570,
+        "delay_seconds": 129,
+        "block_alert_id": null,
+        "block_alert_type": null,
+        "block_alert_description": null,
+        "block_alert_update_datetime_utc": null,
+        "block_start_datetime_utc": null,
+        "publish_datetime_utc": "2025-08-27T01:26:37.682Z",
+        "update_datetime_utc": "2025-08-27T01:30:44.712Z",
+        "country": "US",
+        "city": "San Mateo, CA",
+        "street": "S El Camino Real"
+      }
+    },
+    {
+      "id": "1876329732",
+      "type": "jam",
+      "lat": 37.570421,
+      "lon": -122.317169,
+      "confidence": 0.4,
+      "speed_limit": 9.29,
+      "street": "S Humboldt St",
+      "country": null,
+      "raw_data": {
+        "jam_id": "1876329732",
+        "type": "NONE",
+        "level": 2,
+        "severity": 5,
+        "line_coordinates": [
+          {
+            "lat": 37.570421,
+            "lon": -122.317169
+          },
+          {
+            "lat": 37.569709,
+            "lon": -122.31641
+          },
+          {
+            "lat": 37.568912,
+            "lon": -122.315557
+          },
+          {
+            "lat": 37.56829,
+            "lon": -122.314879
+          }
+        ],
+        "start_location": null,
+        "end_location": null,
+        "speed_kmh": 9.29,
+        "length_meters": 311,
+        "delay_seconds": 70,
+        "block_alert_id": null,
+        "block_alert_type": null,
+        "block_alert_description": null,
+        "block_alert_update_datetime_utc": null,
+        "block_start_datetime_utc": null,
+        "publish_datetime_utc": "2025-08-27T01:30:44.228Z",
+        "update_datetime_utc": "2025-08-27T01:30:44.228Z",
+        "country": "US",
+        "city": "San Mateo, CA",
+        "street": "S Humboldt St"
+      }
+    },
+    {
+      "id": "1871696902",
+      "type": "jam",
+      "lat": 37.325531,
+      "lon": -122.004862,
+      "confidence": 0.6,
+      "speed_limit": 27.27,
+      "street": "I-280 S",
+      "country": null,
+      "raw_data": {
+        "jam_id": "1871696902",
+        "type": "NONE",
+        "level": 3,
+        "severity": 5,
+        "line_coordinates": [
+          {
+            "lat": 37.325531,
+            "lon": -122.004862
+          },
+          {
+            "lat": 37.324708,
+            "lon": -122.003272
+          },
+          {
+            "lat": 37.323908,
+            "lon": -122.001726
+          },
+          {
+            "lat": 37.322303,
+            "lon": -121.998628
+          },
+          {
+            "lat": 37.32068,
+            "lon": -121.995541
+          },
+          {
+            "lat": 37.319872,
+            "lon": -121.993992
+          },
+          {
+            "lat": 37.319468,
+            "lon": -121.993216
+          },
+          {
+            "lat": 37.319237,
+            "lon": -121.992776
+          },
+          {
+            "lat": 37.319051,
+            "lon": -121.992385
+          },
+          {
+            "lat": 37.318919,
+            "lon": -121.992094
+          },
+          {
+            "lat": 37.31876,
+            "lon": -121.991701
+          },
+          {
+            "lat": 37.318619,
+            "lon": -121.991308
+          }
+        ],
+        "start_location": null,
+        "end_location": null,
+        "speed_kmh": 27.27,
+        "length_meters": 1426,
+        "delay_seconds": 142,
+        "block_alert_id": null,
+        "block_alert_type": null,
+        "block_alert_description": null,
+        "block_alert_update_datetime_utc": null,
+        "block_start_datetime_utc": null,
+        "publish_datetime_utc": "2025-08-26T22:42:14.050Z",
+        "update_datetime_utc": "2025-08-27T01:30:44.743Z",
+        "country": "US",
+        "city": "Santa Clara, CA",
+        "street": "I-280 S"
+      }
+    },
+    {
+      "id": "1876291662",
+      "type": "jam",
+      "lat": 37.408765,
+      "lon": -122.027094,
+      "confidence": 0.6,
+      "speed_limit": 14.23,
+      "street": "N Mathilda Ave",
+      "country": null,
+      "raw_data": {
+        "jam_id": "1876291662",
+        "type": "NONE",
+        "level": 3,
+        "severity": 5,
+        "line_coordinates": [
+          {
+            "lat": 37.408765,
+            "lon": -122.027094
+          },
+          {
+            "lat": 37.408683,
+            "lon": -122.027098
+          },
+          {
+            "lat": 37.408526,
+            "lon": -122.027092
+          },
+          {
+            "lat": 37.408368,
+            "lon": -122.027078
+          },
+          {
+            "lat": 37.408193,
+            "lon": -122.027045
+          },
+          {
+            "lat": 37.407997,
+            "lon": -122.02697
+          },
+          {
+            "lat": 37.407366,
+            "lon": -122.026701
+          },
+          {
+            "lat": 37.407034,
+            "lon": -122.026563
+          },
+          {
+            "lat": 37.406469,
+            "lon": -122.026337
+          },
+          {
+            "lat": 37.40627,
+            "lon": -122.026261
+          },
+          {
+            "lat": 37.406069,
+            "lon": -122.026215
+          },
+          {
+            "lat": 37.405801,
+            "lon": -122.026171
+          },
+          {
+            "lat": 37.405521,
+            "lon": -122.026162
+          },
+          {
+            "lat": 37.405223,
+            "lon": -122.026184
+          },
+          {
+            "lat": 37.405036,
+            "lon": -122.026217
+          },
+          {
+            "lat": 37.404042,
+            "lon": -122.0265
+          }
+        ],
+        "start_location": null,
+        "end_location": null,
+        "speed_kmh": 14.23,
+        "length_meters": 539,
+        "delay_seconds": 87,
+        "block_alert_id": null,
+        "block_alert_type": null,
+        "block_alert_description": null,
+        "block_alert_update_datetime_utc": null,
+        "block_start_datetime_utc": null,
+        "publish_datetime_utc": "2025-08-27T01:28:01.532Z",
+        "update_datetime_utc": "2025-08-27T01:30:44.824Z",
+        "country": "US",
+        "city": "Sunnyvale, CA",
+        "street": "N Mathilda Ave"
+      }
+    },
+    {
+      "id": "1876211216",
+      "type": "jam",
+      "lat": 37.556591,
+      "lon": -122.031219,
+      "confidence": 0.2,
+      "speed_limit": 69.95,
+      "street": "I-880 S",
+      "country": null,
+      "raw_data": {
+        "jam_id": "1876211216",
+        "type": "NONE",
+        "level": 1,
+        "severity": 5,
+        "line_coordinates": [
+          {
+            "lat": 37.556591,
+            "lon": -122.031219
+          },
+          {
+            "lat": 37.5551,
+            "lon": -122.029636
+          },
+          {
+            "lat": 37.55421,
+            "lon": -122.028764
+          },
+          {
+            "lat": 37.553419,
+            "lon": -122.028094
+          },
+          {
+            "lat": 37.549935,
+            "lon": -122.025437
+          },
+          {
+            "lat": 37.545351,
+            "lon": -122.022005
+          },
+          {
+            "lat": 37.544385,
+            "lon": -122.021273
+          },
+          {
+            "lat": 37.542463,
+            "lon": -122.019849
+          },
+          {
+            "lat": 37.539016,
+            "lon": -122.017248
+          },
+          {
+            "lat": 37.538368,
+            "lon": -122.016703
+          },
+          {
+            "lat": 37.537633,
+            "lon": -122.015977
+          },
+          {
+            "lat": 37.537029,
+            "lon": -122.015286
+          },
+          {
+            "lat": 37.536643,
+            "lon": -122.014791
+          },
+          {
+            "lat": 37.53634,
+            "lon": -122.01435
+          },
+          {
+            "lat": 37.535914,
+            "lon": -122.013679
+          },
+          {
+            "lat": 37.535548,
+            "lon": -122.013035
+          },
+          {
+            "lat": 37.532173,
+            "lon": -122.006793
+          }
+        ],
+        "start_location": null,
+        "end_location": null,
+        "speed_kmh": 69.95,
+        "length_meters": 3518,
+        "delay_seconds": 71,
+        "block_alert_id": null,
+        "block_alert_type": null,
+        "block_alert_description": null,
+        "block_alert_update_datetime_utc": null,
+        "block_start_datetime_utc": null,
+        "publish_datetime_utc": "2025-08-27T01:22:30.226Z",
+        "update_datetime_utc": "2025-08-27T01:30:45.245Z",
+        "country": "US",
+        "city": "Newark, CA",
+        "street": "I-880 S"
+      }
+    }
+  ]
+}
