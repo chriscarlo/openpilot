@@ -115,15 +115,16 @@ class TestRoadMatcher:
         ego_lat, ego_lon = 37.4221, -122.0841
         threat_lat, threat_lon = 37.4222, -122.0842  # ~15m away
 
-        is_same = road_matcher.is_same_road(ego_lat, ego_lon, threat_lat, threat_lon, 15.0)
+        is_same, conf = road_matcher.is_same_road(ego_lat, ego_lon, threat_lat, threat_lon, 15.0)
         assert is_same  # Should be considered same road
+        assert 0.0 <= conf <= 1.0
 
     def test_same_road_detection_far_distance(self, road_matcher):
         # Test points far apart
         ego_lat, ego_lon = 37.4221, -122.0841
         threat_lat, threat_lon = 37.5000, -122.2000  # Several km away
 
-        is_same = road_matcher.is_same_road(ego_lat, ego_lon, threat_lat, threat_lon, 15.0)
+        is_same, _ = road_matcher.is_same_road(ego_lat, ego_lon, threat_lat, threat_lon, 15.0)
         assert not is_same  # Should not be considered same road
 
     def test_highway_threshold_adjustment(self, road_matcher):
@@ -132,11 +133,11 @@ class TestRoadMatcher:
         threat_lat, threat_lon = 37.4225, -122.0845  # ~60m away
 
         # At low speed, should not be same road
-        is_same_slow = road_matcher.is_same_road(ego_lat, ego_lon, threat_lat, threat_lon, 10.0)
+        is_same_slow, _ = road_matcher.is_same_road(ego_lat, ego_lon, threat_lat, threat_lon, 10.0)
         assert not is_same_slow
 
         # At highway speed, should be same road due to larger threshold
-        is_same_fast = road_matcher.is_same_road(ego_lat, ego_lon, threat_lat, threat_lon, 30.0)
+        is_same_fast, _ = road_matcher.is_same_road(ego_lat, ego_lon, threat_lat, threat_lon, 30.0)
         assert is_same_fast
 
     def test_direction_determination_ahead(self, road_matcher):
@@ -220,7 +221,7 @@ class TestSpeedRecommendationEngine:
         )
 
         recommendation, threat_ahead = speed_engine.calculate_recommendation(
-            threats=[threat], current_speed_ms=25.0, current_location=(37.4221, -122.0841)
+            threats=[threat], current_speed_ms=25.0, current_location=(37.4221, -122.0841), v_cruise_ms=30.0
         )
 
         assert recommendation == 11.18  # Should recommend speed limit

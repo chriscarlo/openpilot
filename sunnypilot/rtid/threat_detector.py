@@ -42,6 +42,7 @@ class ProcessedThreat:
     confidence: float
     speed_limit_ms: float  # m/s
     on_same_road: bool
+    road_match_confidence: float = 0.0  # Confidence in street name match (0.0-1.0)
 
 
 class GeoUtils:
@@ -89,7 +90,7 @@ class ThreatClusterer:
                           cluster_radius_m: float = 100) -> list[WazeAlert]:
         """
         Deduplicate threats using optimized greedy clustering to match original behavior.
-        
+
         Uses spatial hashing for O(n) average case complexity while maintaining
         identical results to the original algorithm for accuracy tests.
         """
@@ -101,9 +102,9 @@ class ThreatClusterer:
 
         # Performance optimization: pre-calculate grid coordinates
         grid_size = cluster_radius_m * 1.5
-        spatial_grid = {}
-        threat_grid_coords = {}  # Cache grid coordinates
-        threat_lon_scales = {}   # Cache longitude scales
+        spatial_grid: dict[tuple[int, int], list[int]] = {}
+        threat_grid_coords: dict[int, tuple[int, int]] = {}  # Cache grid coordinates
+        threat_lon_scales: dict[int, float] = {}   # Cache longitude scales
 
         # Step 1: Hash threats into grid cells - O(n) with caching
         for i, threat in enumerate(threats):
@@ -176,25 +177,90 @@ class RoadMatcher:
     """Handles road matching and same-road determination."""
 
     def __init__(self):
-        # Simple road matching based on distance thresholds
-        # In a full implementation, this would integrate with OSM data
+        # Import street name matcher
+        from .street_name_matcher import StreetNameMatcher
+        self.street_matcher = StreetNameMatcher()
+
+        # Distance thresholds for fallback when street names unavailable
         self.road_proximity_threshold_m = 50  # Assume same road if within 50m
         self.highway_proximity_threshold_m = 200  # Highways are wider
 
     def is_same_road(self, ego_lat: float, ego_lon: float,
                     threat_lat: float, threat_lon: float,
-                    ego_speed_ms: float) -> bool:
+                    ego_speed_ms: float,
+                    ego_street: str | None = None,
+                    threat_street: str | None = None) -> tuple[bool, float]:
         """
-        Determine if threat is on the same road as ego vehicle.
-        Uses distance-based heuristics with speed-aware thresholds.
+        Determine if threat is on the same road as ego vehicle with confidence.
+
+        Uses street name matching when available, falls back to distance heuristics.
+
+        Args:
+            ego_lat, ego_lon: Ego vehicle GPS coordinates
+            threat_lat, threat_lon: Threat GPS coordinates
+            ego_speed_ms: Current vehicle speed in m/s
+            ego_street: Current street name from map data (optional)
+            threat_street: Threat street name from Waze API (optional)
+
+        Returns:
+            Tuple of (is_same_road: bool, confidence: float)
+            confidence ranges from 0.0 to 1.0
         """
+        # First try street name matching if both names available
+        if ego_street and threat_street:
+            # Use strict direction matching for highways or expressways on either name
+            strict_direction = (
+                self.street_matcher.is_highway_or_expressway(ego_street)
+                or self.street_matcher.is_highway_or_expressway(threat_street)
+            )
+            match_result = self.street_matcher.match_street_names(
+                ego_street, threat_street, strict_direction
+            )
+
+            if match_result.confidence >= 0.7:
+                # High confidence match
+                cloudlog.debug(f"RTI street match: {match_result.reason}")
+                return match_result.is_match, match_result.confidence
+            elif match_result.confidence >= 0.5:
+                # Medium confidence - also check distance
+                distance = GeoUtils.haversine_distance(ego_lat, ego_lon, threat_lat, threat_lon)
+                threshold = (self.highway_proximity_threshold_m if ego_speed_ms > 25
+                           else self.road_proximity_threshold_m)
+
+                if match_result.is_match and distance <= threshold * 1.5:
+                    cloudlog.debug(f"RTI street+distance match: {match_result.reason}, distance={distance:.0f}m")
+                    # Boost confidence slightly when distance also matches
+                    return True, min(match_result.confidence + 0.1, 1.0)
+                elif match_result.is_match:
+                    # Street matches but distance doesn't confirm
+                    return match_result.is_match, match_result.confidence * 0.8
+                else:
+                    # No match with medium confidence
+                    return False, match_result.confidence
+
+        # Fall back to distance-based heuristics
         distance = GeoUtils.haversine_distance(ego_lat, ego_lon, threat_lat, threat_lon)
 
         # Use larger threshold for high-speed roads (likely highways)
         threshold = (self.highway_proximity_threshold_m if ego_speed_ms > 25  # >90 km/h
                     else self.road_proximity_threshold_m)
 
-        return distance <= threshold
+        is_same = distance <= threshold
+
+        # Calculate confidence based on distance proximity
+        if is_same:
+            # Confidence decreases with distance
+            confidence = max(0.3, 0.5 * (1.0 - distance / threshold))
+        else:
+            confidence = 0.2  # Low confidence when using distance alone
+
+        if ego_street or threat_street:
+            cloudlog.debug(
+                f"RTI fallback to distance: ego='{ego_street}', threat='{threat_street}', "
+                + f"distance={int(distance)}m, threshold={int(threshold)}m, same={is_same}, confidence={confidence:.2f}"
+            )
+
+        return is_same, confidence
 
     def get_direction_relative_to_ego(self, ego_lat: float, ego_lon: float,
                                      threat_lat: float, threat_lon: float,
@@ -263,7 +329,11 @@ class SpeedRecommendationEngine:
         # Get speed reduction settings
         self.speed_reduction_mode = params.get("RTISpeedReductionMode")
         if self.speed_reduction_mode:
-            self.speed_reduction_mode = self.speed_reduction_mode.decode('utf-8') if isinstance(self.speed_reduction_mode, bytes) else str(self.speed_reduction_mode)
+            self.speed_reduction_mode = (
+                self.speed_reduction_mode.decode('utf-8')
+                if isinstance(self.speed_reduction_mode, bytes)
+                else str(self.speed_reduction_mode)
+            )
         else:
             self.speed_reduction_mode = "posted"
 
@@ -284,13 +354,13 @@ class SpeedRecommendationEngine:
                                v_cruise_ms: float = None) -> tuple[float, bool]:
         """
         Calculate speed recommendation based on processed threats.
-        
+
         Args:
             threats: List of processed threats
             current_speed_ms: Current vehicle speed in m/s
             current_location: Current GPS location
             v_cruise_ms: Driver's set cruise speed in m/s (for no-limit scenarios)
-        
+
         Returns:
             Tuple of (recommended_speed_ms, threat_ahead_bool)
         """
@@ -359,9 +429,9 @@ class ThreatDetector:
     def __init__(self):
         self.clusterer = ThreatClusterer()
 
-        # Use enhanced road matcher with road geometry integration
-        from .enhanced_road_matcher import EnhancedRoadMatcher
-        self.road_matcher = EnhancedRoadMatcher()
+        # Use street-name-based road matcher by default
+        # This leverages Waze + mapd street names for same-road determination
+        self.road_matcher = RoadMatcher()
 
         self.speed_engine = SpeedRecommendationEngine()
 
@@ -400,10 +470,11 @@ class ThreatDetector:
                        timestamp: int,
                        v_cruise: float = None,
                        current_heading_deg: float | None = None,
-                       posted_speed_limit: float = 0.0) -> RTIState:
+                       posted_speed_limit: float = 0.0,
+                       current_road_name: str | None = None) -> RTIState:
         """
         Main threat processing pipeline.
-        
+
         Args:
             traffic_data: Raw traffic alerts from API
             current_location: (lat, lon) of ego vehicle
@@ -412,11 +483,12 @@ class ThreatDetector:
             v_cruise: Driver's set cruise speed in m/s (optional)
             current_heading_deg: Current vehicle heading in degrees (optional)
             posted_speed_limit: Posted speed limit in m/s from map data (optional)
-            
+            current_road_name: Current road name from map data (optional)
+
         Returns:
             RTIState for publishing
         """
-        process_start = time.time()
+        process_start = time.monotonic()
 
         try:
             # Initialize empty state
@@ -431,11 +503,11 @@ class ThreatDetector:
                 # Step 2: Deduplicate threats
                 deduplicated_threats = self.clusterer.deduplicate_threats(filtered_threats)
 
-                # Step 3: Process each threat with actual speed limit
+                # Step 3: Process each threat with actual speed limit and road name
                 for threat in deduplicated_threats:
                     processed_threat = self._process_single_threat(
                         threat, current_location, current_speed, current_heading_deg,
-                        posted_speed_limit
+                        posted_speed_limit, current_road_name
                     )
                     if processed_threat:
                         processed_threats.append(processed_threat)
@@ -449,15 +521,16 @@ class ThreatDetector:
             if recommended_speed > 0:
                 # Ensure recommendation is within safe bounds (never accelerate toward threats)
                 if not (0 <= recommended_speed <= current_speed):
-                    cloudlog.warning(f"RTI unsafe speed recommendation {recommended_speed:.1f} m/s "
-                                   f"for current speed {current_speed:.1f} m/s - ignoring")
+                    cloudlog.warning(
+                        f"RTI unsafe speed recommendation {recommended_speed:.1f} m/s for current speed {current_speed:.1f} m/s - ignoring"
+                    )
                     recommended_speed = 0.0
                     threat_ahead = False
 
             # Sort threats by distance for HUD display
             processed_threats.sort(key=lambda t: t.distance)
 
-            process_time = (time.time() - process_start) * 1000  # Convert to ms
+            process_time = (time.monotonic() - process_start) * 1000  # Convert to ms
             if process_time > 15:  # Warn if over performance budget
                 cloudlog.warning(f"RTI threat processing took {process_time:.1f}ms")
 
@@ -492,16 +565,18 @@ class ThreatDetector:
                              current_location: tuple[float, float],
                              current_speed: float,
                              current_heading_deg: float | None = None,
-                             posted_speed_limit: float = 0.0) -> ProcessedThreat | None:
+                             posted_speed_limit: float = 0.0,
+                             current_road_name: str | None = None) -> ProcessedThreat | None:
         """Process a single threat for relevance and direction.
-        
+
         Args:
             threat: Raw threat from Waze API
             current_location: (lat, lon) of ego vehicle
             current_speed: Current speed in m/s
             current_heading_deg: Current vehicle heading in degrees (optional)
             posted_speed_limit: Posted speed limit in m/s from map data (optional)
-            
+            current_road_name: Current road name from map data (optional)
+
         Returns:
             ProcessedThreat if relevant, None otherwise
         """
@@ -517,9 +592,10 @@ class ThreatDetector:
             if distance > self.detection_radius_m:
                 return None
 
-            # Determine if on same road
-            on_same_road = self.road_matcher.is_same_road(
-                ego_lat, ego_lon, threat.latitude, threat.longitude, current_speed
+            # Determine if on same road using street names when available
+            on_same_road, road_match_confidence = self.road_matcher.is_same_road(
+                ego_lat, ego_lon, threat.latitude, threat.longitude, current_speed,
+                ego_street=current_road_name, threat_street=threat.street
             )
 
             # Determine direction relative to ego
@@ -553,7 +629,8 @@ class ThreatDetector:
                 direction=direction,
                 confidence=threat.confidence,
                 speed_limit_ms=speed_limit_ms,
-                on_same_road=on_same_road
+                on_same_road=on_same_road,
+                road_match_confidence=road_match_confidence
             )
 
         except Exception as e:

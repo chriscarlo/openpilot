@@ -75,10 +75,10 @@ class RTIDaemon:
                 try:
                     with open(key_path) as f:
                         key_data = json.load(f)
-                        api_key = key_data.get('api_key')
-                        if api_key:
+                        api_key_val = key_data.get('api_key')
+                        if isinstance(api_key_val, str) and api_key_val:
                             cloudlog.info(f"RTI API key loaded from {key_path}")
-                            return api_key
+                            return api_key_val
                 except (OSError, json.JSONDecodeError, KeyError) as e:
                     cloudlog.error(f"RTI failed to load API key from {key_path}: {e}")
 
@@ -87,7 +87,7 @@ class RTIDaemon:
 
     def _check_enabled(self) -> bool:
         """Check if RTI is enabled via params."""
-        return self.params.get_bool("RTIEnabled")
+        return bool(self.params.get_bool("RTIEnabled"))
 
     def _get_current_location(self) -> tuple[float, float] | None:
         """Get current GPS coordinates from location services."""
@@ -153,7 +153,10 @@ class RTIDaemon:
         self.sm.update(0)
         if self.sm.updated['carState']:
             # vEgo is in m/s
-            return self.sm['carState'].vEgo
+            try:
+                return float(self.sm['carState'].vEgo)
+            except Exception:
+                return 0.0
         return 0.0
 
     def _get_cruise_cluster_speed(self) -> float:
@@ -164,15 +167,18 @@ class RTIDaemon:
             # speedCluster is the driver's set speed shown on the instrument cluster
             # This is the original driver-set maximum, unmodified by controllers
             if cruise_state.enabled and cruise_state.speedCluster > 0:
-                return cruise_state.speedCluster
+                try:
+                    return float(cruise_state.speedCluster)
+                except Exception:
+                    return 0.0
         return 0.0
 
     def _get_current_speed_limit(self) -> float:
         """Get current posted speed limit from both map and dashboard sources.
-        
-        Uses SLC-ALIGNED combination: When both sources have data, uses the HIGHER value
-        to match what SLC displays on the HUD, avoiding confusion from discrepancies.
-        
+
+        Conservative combination: when both sources have data, use the LOWER value to
+        avoid recommending speeds above a more restrictive posted limit (e.g. school zone).
+
         Returns:
             Speed limit in m/s, or 0.0 if not available
         """
@@ -197,14 +203,13 @@ class RTIDaemon:
         except Exception as e:
             cloudlog.debug(f"RTI: Could not get speed limit from dashboard: {e}")
 
-        # SLC-ALIGNED COMBINATION: Use MAX instead of MIN to match SLC behavior
-        # This matches SLC which uses MAX (higher) value, ensuring RTI slowdown
-        # targets match what's displayed on the HUD via SLC
+        # CONSERVATIVE COMBINATION: Use MIN when both sources are available.
+        # RTI errs on the side of safety to avoid recommending speeds above the
+        # lower posted limit (e.g., construction or school zones).
         if map_limit > 0 and dashboard_limit > 0:
-            # Both sources have data - use the HIGHER value (matching SLC)
-            combined_limit = max(map_limit, dashboard_limit)
-            source = "map" if map_limit >= dashboard_limit else "dashboard"
-            cloudlog.debug(f"RTI: Using {source} speed limit (SLC-aligned): {combined_limit:.1f} m/s")
+            combined_limit = min(map_limit, dashboard_limit)
+            source = "dashboard" if dashboard_limit <= map_limit else "map"
+            cloudlog.debug(f"RTI: Using {source} speed limit (conservative): {combined_limit:.1f} m/s")
             return combined_limit
         elif dashboard_limit > 0:
             # Only dashboard has data
@@ -221,7 +226,7 @@ class RTIDaemon:
 
     async def _process_cycle_async(self):
         """Non-blocking version of process cycle that stores state for continuous publishing."""
-        current_time = time.time()
+        current_time = time.monotonic()
 
         try:
             # Get current vehicle state
@@ -301,7 +306,11 @@ class RTIDaemon:
                         if police_alerts:
                             cloudlog.warning(f"RTI: POLICE ALERTS FOUND! Count: {len(police_alerts)}")
                             for pa in police_alerts:
-                                cloudlog.warning(f"RTI POLICE: {pa['alert']['type']} at {pa['alert']['street']} ({pa['alert']['latitude']:.5f}, {pa['alert']['longitude']:.5f})")
+                                msg = "RTI POLICE: {} at {} ({:.5f}, {:.5f})".format(
+                                    pa['alert']['type'], pa['alert']['street'],
+                                    pa['alert']['latitude'], pa['alert']['longitude']
+                                )
+                                cloudlog.warning(msg)
                                 if pa['alert']['raw_data']:
                                     cloudlog.warning(f"RTI POLICE RAW: {json.dumps(pa['alert']['raw_data'])}")
 
@@ -343,15 +352,26 @@ class RTIDaemon:
                             api_status = 'offline'
                             cloudlog.warning(f"RTI data is stale ({data_age:.0f}s old)")
 
+            # Get current road name from map data
+            current_road_name = None
+            try:
+                map_data = self.sm['liveMapDataSP']
+                if map_data and hasattr(map_data, 'roadName') and map_data.roadName:
+                    current_road_name = map_data.roadName
+                    cloudlog.debug(f"RTI: Current road name from mapd: '{current_road_name}'")
+            except Exception as e:
+                cloudlog.debug(f"RTI: Could not get road name from map data: {e}")
+
             # Process threats and determine recommendations
             rti_state = self.threat_detector.process_threats(
                 traffic_data=traffic_data,
                 current_location=location,
                 current_speed=current_speed,
-                timestamp=int(current_time * 1e9),  # Convert to nanoseconds
+                timestamp=time.monotonic_ns(),  # Monotonic nanoseconds since boot
                 v_cruise=cruise_cluster_speed,  # Driver's original set speed from cluster
                 current_heading_deg=self._get_current_heading_deg(),
                 posted_speed_limit=current_speed_limit,  # Pass actual posted speed limit
+                current_road_name=current_road_name,  # Pass current road name for street matching
             )
 
             # Update API status
@@ -375,14 +395,14 @@ class RTIDaemon:
 
     def _calculate_relative_bearing(self, ego_lat, ego_lon, threat_lat, threat_lon, ego_heading_deg):
         """Calculate relative bearing from ego to threat.
-        
+
         Args:
             ego_lat: Ego vehicle latitude in degrees
-            ego_lon: Ego vehicle longitude in degrees  
+            ego_lon: Ego vehicle longitude in degrees
             threat_lat: Threat latitude in degrees
             threat_lon: Threat longitude in degrees
             ego_heading_deg: Ego vehicle heading in degrees (0=north, clockwise)
-            
+
         Returns:
             Relative bearing in degrees [-180, 180] where 0 is ahead
         """
@@ -418,10 +438,10 @@ class RTIDaemon:
 
     def _angle_for_direction(self, direction):
         """Convert discrete direction to angle for fallback display.
-        
+
         Args:
             direction: RtiStateSP.Direction enum value
-            
+
         Returns:
             Angle in degrees for arrow display
         """
@@ -440,11 +460,11 @@ class RTIDaemon:
 
     def _is_valid_gps_pair(self, lat1, lon1, lat2, lon2):
         """Check if two GPS coordinate pairs are valid.
-        
+
         Args:
             lat1, lon1: First GPS coordinate pair
             lat2, lon2: Second GPS coordinate pair
-            
+
         Returns:
             True if both pairs are valid GPS coordinates
         """
@@ -465,12 +485,12 @@ class RTIDaemon:
 
     def _calculate_threat_display_data(self, threat, ego_location, ego_heading_deg):
         """Calculate display angle for a threat.
-        
+
         Args:
             threat: Threat object from threat detector
             ego_location: Tuple of (latitude, longitude) or None
             ego_heading_deg: Ego vehicle heading in degrees
-            
+
         Returns:
             Tuple of (display_arrow_angle, has_location)
         """
@@ -549,7 +569,7 @@ class RTIDaemon:
     def _publish_offline_state(self):
         """Publish offline/disabled RTI state."""
         msg = messaging.new_message('rtiStateSP', valid=True)
-        msg.rtiStateSP.timeStamp = int(time.time() * 1e9)
+        msg.rtiStateSP.timeStamp = time.monotonic_ns()
         msg.rtiStateSP.threatAhead = False
         msg.rtiStateSP.threatDistanceM = 0.0
         msg.rtiStateSP.recommendedSpeed = 0.0
@@ -574,7 +594,7 @@ class RTIDaemon:
 
         try:
             while True:
-                loop_start = time.time()
+                loop_start = time.monotonic()
 
                 # Check if RTI is enabled
                 self.enabled = self._check_enabled()
@@ -589,7 +609,7 @@ class RTIDaemon:
                     continue
 
                 # Process RTI cycle (non-blocking)
-                current_time = time.time()
+                current_time = time.monotonic()
 
                 # CRITICAL FIX: Always publish something at 50Hz to keep updated() flag true
                 # This matches the continuous_rti_test.py behavior that works 100%
@@ -597,7 +617,7 @@ class RTIDaemon:
                 # If we have cached state and haven't processed recently, republish last state
                 if last_rti_state and (current_time - last_publish_time) >= 0.019:  # ~50Hz
                     # Update timestamp to current time for freshness
-                    last_rti_state.timestamp = int(current_time * 1e9)
+                    last_rti_state.timestamp = time.monotonic_ns()
                     try:
                         self._publish_rti_state(last_rti_state)
                         last_publish_time = current_time
@@ -613,12 +633,12 @@ class RTIDaemon:
                     # Publish the new state immediately
                     try:
                         self._publish_rti_state(last_rti_state)
-                        last_publish_time = time.time()
+                        last_publish_time = time.monotonic()
                     except Exception as msg_e:
                         cloudlog.error(f"RTI failed to publish new state: {msg_e}")
 
                 # Maintain 50Hz loop timing to match test script
-                loop_duration = time.time() - loop_start
+                loop_duration = time.monotonic() - loop_start
                 sleep_time = max(0.0, 0.02 - loop_duration)
 
                 if loop_duration > 0.01:  # Warn if processing takes > 10ms (half of 20ms cycle)
