@@ -2,12 +2,15 @@ from cereal import log
 from openpilot.common.constants import CV
 from openpilot.common.realtime import DT_MDL
 from openpilot.sunnypilot.selfdrive.controls.lib.auto_lane_change import AutoLaneChangeController, AutoLaneChangeMode
+from openpilot.common.swaglog import cloudlog
 
 LaneChangeState = log.LaneChangeState
 LaneChangeDirection = log.LaneChangeDirection
 
 LANE_CHANGE_SPEED_MIN = 20 * CV.MPH_TO_MS
 LANE_CHANGE_TIME_MAX = 10.
+# Turn desires active below 35 mph
+TURN_DESIRE_SPEED_MAX = 35 * CV.MPH_TO_MS
 
 DESIRES = {
   LaneChangeDirection.none: {
@@ -41,6 +44,9 @@ class DesireHelper:
     self.prev_one_blinker = False
     self.desire = log.Desire.none
     self.alc = AutoLaneChangeController(self)
+    # Turn desire tracking
+    self.turn_desire_active = False
+    self.prev_turn_desire_logged = False
 
   def update(self, carstate, lateral_active, lane_change_prob):
     self.alc.update_params()
@@ -107,6 +113,28 @@ class DesireHelper:
     self.prev_one_blinker = one_blinker
 
     self.desire = DESIRES[self.lane_change_direction][self.lane_change_state]
+
+    # Turn desire logic: Override desire if below turn speed threshold
+    below_turn_speed = v_ego < TURN_DESIRE_SPEED_MAX
+    if lateral_active and below_turn_speed and one_blinker:
+      # Set turn desire based on blinker direction
+      if carstate.leftBlinker:
+        self.desire = log.Desire.turnLeft
+      else:  # rightBlinker must be true since one_blinker is true
+        self.desire = log.Desire.turnRight
+      
+      self.turn_desire_active = True
+      
+      # Log when turn desires activate (only on transition)
+      if not self.prev_turn_desire_logged:
+        speed_mph = v_ego * CV.MS_TO_MPH
+        cloudlog.info(f"Turn desire activated: {'LEFT' if carstate.leftBlinker else 'RIGHT'} at {speed_mph:.1f} mph")
+        self.prev_turn_desire_logged = True
+    else:
+      self.turn_desire_active = False
+      if self.prev_turn_desire_logged:
+        cloudlog.info("Turn desire deactivated")
+        self.prev_turn_desire_logged = False
 
     # Send keep pulse once per second during LaneChangeStart.preLaneChange
     if self.lane_change_state in (LaneChangeState.off, LaneChangeState.laneChangeStarting):

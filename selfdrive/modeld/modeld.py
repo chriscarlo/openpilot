@@ -313,6 +313,9 @@ def main(demo=False):
     vec_desire = np.zeros(ModelConstants.DESIRE_LEN, dtype=np.float32)
     if desire >= 0 and desire < ModelConstants.DESIRE_LEN:
       vec_desire[desire] = 1
+      # Log turn desires for debugging
+      if desire == log.Desire.turnLeft or desire == log.Desire.turnRight:
+        cloudlog.info(f"Sending turn desire to model: {'turnLeft' if desire == log.Desire.turnLeft else 'turnRight'} (index {desire})")
 
     # tracked dropped frames
     vipc_dropped_frames = max(0, meta_main.frame_id - last_vipc_frame_id - 1)
