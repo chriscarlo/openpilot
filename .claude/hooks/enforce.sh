@@ -15,10 +15,8 @@ mkdir -p "$HOME/.claude"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Enforcement activated for PPID $PPID_VAL" >> "$ENFORCEMENT_LOG"
 
 # Initialize behavioral tracking if not exists
-if [ ! -f "$BEHAVIOR_FILE" ]; then
-    # Run the behavioral tracker to initialize
-    python3 "$PROJECT_DIR/.claude/hooks/behavioral_tracker.py" 2>/dev/null || true
-fi
+# Note: Behavioral tracker auto-initializes on first tool use
+# No need to pre-initialize here
 
 # Check for previous violations
 if [ -f "$VIOLATIONS_FILE" ]; then
