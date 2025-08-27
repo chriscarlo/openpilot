@@ -736,12 +736,11 @@ void HudRenderer::drawSLCSourceBadge(QPainter &p, const QRect &sign_rect) {
   const int badge_w = 128;
   const int badge_h = 56;
   const int badge_x = sign_rect.center().x() - badge_w / 2;
-  // Align badge with the outermost edge of the black border/ring
-  // For US signs: inner rect is adjusted by 10px, border is 4px, so black border edge is at bottom - 6
-  // For EU signs: red ring is adjusted by 4px inward from circle_rect
-  // Using 6px offset works for both (US: 10-4=6, EU: we'll use 4px but 6px gives better visual alignment)
-  const int border_offset = is_metric ? 4 : 6; // Adjust based on sign style
-  const int badge_y = sign_rect.bottom() - border_offset - (badge_h / 2); // centerline on black border edge
+  // Position badge BELOW the sign rect to align with outer visual border
+  // User indicates there's an outer black border below the white sign rectangle
+  // that should bisect the badges vertically (center of badges on this border)
+  const int outer_border_offset = is_metric ? -8 : -10; // Negative moves badges DOWN from bottom edge
+  const int badge_y = sign_rect.bottom() - outer_border_offset - (badge_h / 2); // Badge center on outer border
   const QRect badge_rect(badge_x, badge_y, badge_w, badge_h);
   p.setRenderHint(QPainter::Antialiasing, true);
 
