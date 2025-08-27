@@ -440,6 +440,10 @@ struct RtiStateSP @0xa1680744031fdb2d {
     # Indicates if the threat has valid GPS coordinates
     # When false, displayArrowAngle is based on discrete direction
     hasLocation @10 :Bool;
+    
+    # True if this threat is actively causing the speed recommendation
+    # Set by threat_detector via RTID, consumed by HUD for visual feedback
+    isCausingRecommendation @11 :Bool;
   }
   
   enum ThreatType {

@@ -248,6 +248,7 @@ void HudRendererSP::updateRTIThreats(const UIState &s) {
       info.direction = threat.getDirection();
       info.speed_limit_ms = threat.getSpeedLimitMs();
       info.on_same_road = threat.getOnSameRoad();
+      info.is_causing_recommendation = threat.getIsCausingRecommendation();
       
       // Use pre-computed display angle from rtid
       info.relative_bearing = threat.getDisplayArrowAngle();
@@ -385,20 +386,8 @@ void HudRendererSP::drawRTIThreatIndicatorMulti(QPainter &p, const QRect &surfac
       QColor border_color(255, 255, 255, 90);                         // default border
       
       // Check if this threat is the one causing speed recommendation
-      bool is_active_threat = false;
-      if (rti_threat_ahead && rti_recommended_speed > 0 && row.t->on_same_road && 
-          row.t->direction == cereal::RtiStateSP::Direction::AHEAD) {
-        // This is likely the threat causing the speed recommendation
-        // Find the closest ahead same-road threat
-        is_active_threat = true;
-        for (const auto& other_row : rows) {
-          if (other_row.t->on_same_road && other_row.t->direction == cereal::RtiStateSP::Direction::AHEAD && 
-              other_row.t->distance < row.t->distance) {
-            is_active_threat = false;  // There's a closer threat
-            break;
-          }
-        }
-      }
+      // This is now determined by threat_detector and passed through RTID
+      bool is_active_threat = row.t->is_causing_recommendation;
       
       // Animate border for active threat
       if (is_active_threat) {

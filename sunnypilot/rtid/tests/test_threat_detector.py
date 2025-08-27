@@ -188,12 +188,13 @@ class TestSpeedRecommendationEngine:
         return SpeedRecommendationEngine()
 
     def test_no_threats_returns_no_recommendation(self, speed_engine):
-        recommendation, threat_ahead = speed_engine.calculate_recommendation(
+        recommendation, threat_ahead, active_threat_id = speed_engine.calculate_recommendation(
             threats=[], current_speed_ms=25.0, current_location=(37.4221, -122.0841)
         )
 
         assert recommendation == 0.0
         assert threat_ahead is False
+        assert active_threat_id is None
 
     def test_off_road_threats_ignored(self, speed_engine):
         # Create threat not on same road
@@ -204,12 +205,13 @@ class TestSpeedRecommendationEngine:
             speed_limit_ms=11.18, on_same_road=False
         )
 
-        recommendation, threat_ahead = speed_engine.calculate_recommendation(
+        recommendation, threat_ahead, active_threat_id = speed_engine.calculate_recommendation(
             threats=[threat], current_speed_ms=25.0, current_location=(37.4221, -122.0841)
         )
 
         assert recommendation == 0.0
         assert threat_ahead is False
+        assert active_threat_id is None
 
     def test_ahead_threat_generates_recommendation(self, speed_engine):
         # Create threat ahead on same road
@@ -220,12 +222,13 @@ class TestSpeedRecommendationEngine:
             speed_limit_ms=11.18, on_same_road=True  # 25 mph = 11.18 m/s
         )
 
-        recommendation, threat_ahead = speed_engine.calculate_recommendation(
+        recommendation, threat_ahead, active_threat_id = speed_engine.calculate_recommendation(
             threats=[threat], current_speed_ms=25.0, current_location=(37.4221, -122.0841), v_cruise_ms=30.0
         )
 
         assert recommendation == 11.18  # Should recommend speed limit
         assert threat_ahead is True
+        assert active_threat_id == 'ahead-threat'
 
     def test_behind_threat_within_threshold(self, speed_engine):
         # Create threat behind but within threshold
@@ -236,13 +239,14 @@ class TestSpeedRecommendationEngine:
             speed_limit_ms=11.18, on_same_road=True
         )
 
-        recommendation, threat_ahead = speed_engine.calculate_recommendation(
+        recommendation, threat_ahead, active_threat_id = speed_engine.calculate_recommendation(
             threats=[threat], current_speed_ms=25.0, current_location=(37.4221, -122.0841)
         )
 
         # Behind threats don't affect ahead recommendation
         assert recommendation == 0.0
         assert threat_ahead is False
+        assert active_threat_id is None
 
     def test_distance_threshold_filtering(self, speed_engine):
         # Create threat beyond distance threshold
@@ -253,12 +257,13 @@ class TestSpeedRecommendationEngine:
             speed_limit_ms=11.18, on_same_road=True
         )
 
-        recommendation, threat_ahead = speed_engine.calculate_recommendation(
+        recommendation, threat_ahead, active_threat_id = speed_engine.calculate_recommendation(
             threats=[threat], current_speed_ms=25.0, current_location=(37.4221, -122.0841)
         )
 
         assert recommendation == 0.0  # Too far away
         assert threat_ahead is False
+        assert active_threat_id is None
 
     @pytest.mark.safety
     def test_safety_validation_prevents_unsafe_recommendations(self, speed_engine):
@@ -271,14 +276,15 @@ class TestSpeedRecommendationEngine:
         )
 
         current_speed = 20.0
-        recommendation, threat_ahead = speed_engine.calculate_recommendation(
-            threats=[threat], current_speed_ms=current_speed, current_location=(37.4221, -122.0841)
+        recommendation, threat_ahead, active_threat_id = speed_engine.calculate_recommendation(
+            threats=[threat], current_speed_ms=current_speed, current_location=(37.4221, -122.0841),
+            v_cruise_ms=25.0  # Need cruise speed to activate RTI
         )
 
-        # Should be capped at safe maximum (1.1x current speed)
-        max_safe = current_speed * 1.1
-        assert recommendation <= max_safe
+        # Safety validation caps at current speed (never accelerate toward threat)
+        assert recommendation == current_speed  # Capped at 20.0 (current speed)
         assert threat_ahead is True
+        assert active_threat_id == 'unsafe-threat'
 
 
 @pytest.mark.unit

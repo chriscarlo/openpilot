@@ -28,6 +28,7 @@ class RTIState:
     source: str
     api_status: str
     threats: list['ProcessedThreat']
+    active_threat_id: str | None = None  # ID of threat causing speed recommendation
 
 
 @dataclass
@@ -351,7 +352,7 @@ class SpeedRecommendationEngine:
     def calculate_recommendation(self, threats: list[ProcessedThreat],
                                current_speed_ms: float,
                                current_location: tuple[float, float],
-                               v_cruise_ms: float = None) -> tuple[float, bool]:
+                               v_cruise_ms: float = None) -> tuple[float, bool, str | None]:
         """
         Calculate speed recommendation based on processed threats.
 
@@ -362,7 +363,7 @@ class SpeedRecommendationEngine:
             v_cruise_ms: Driver's set cruise speed in m/s (for no-limit scenarios)
 
         Returns:
-            Tuple of (recommended_speed_ms, threat_ahead_bool)
+            Tuple of (recommended_speed_ms, threat_ahead_bool, active_threat_id)
         """
         relevant_threats = []
 
@@ -380,13 +381,13 @@ class SpeedRecommendationEngine:
                 relevant_threats.append(threat)
 
         if not relevant_threats:
-            return 0.0, False  # No recommendation
+            return 0.0, False, None  # No recommendation
 
         # Find closest ahead threat for speed recommendation
         ahead_threats = [t for t in relevant_threats if t.direction == 'ahead']
 
         if not ahead_threats:
-            return 0.0, False
+            return 0.0, False, None
 
         closest_threat = min(ahead_threats, key=lambda t: t.distance)
 
@@ -395,7 +396,7 @@ class SpeedRecommendationEngine:
         # This prevents dangerous accelerations when resuming cruise
         if not v_cruise_ms or v_cruise_ms <= 0:
             # No cruise speed set - RTI is inactive
-            return 0.0, False
+            return 0.0, False, None
 
         # Determine target speed based on threat type and current conditions
         if self.speed_reduction_mode == "posted":
@@ -405,7 +406,7 @@ class SpeedRecommendationEngine:
             else:
                 # No speed limit = no speed recommendation
                 # Threat will still appear on HUD for visual awareness
-                return 0.0, False
+                return 0.0, False, None
         else:
             # Custom mode: reduce by fixed amount from cruise speed
             target_speed = v_cruise_ms - self.speed_reduction_ms
@@ -420,7 +421,8 @@ class SpeedRecommendationEngine:
         # Ensure non-negative speed
         target_speed = max(0.0, target_speed)
 
-        return target_speed, True
+        # Return the speed recommendation and the ID of the threat causing it
+        return target_speed, True, closest_threat.id
 
 
 class ThreatDetector:
@@ -495,6 +497,7 @@ class ThreatDetector:
             processed_threats = []
             recommended_speed = 0.0
             threat_ahead = False
+            active_threat_id = None
 
             if traffic_data:
                 # Step 1: Apply threat filter
@@ -513,7 +516,7 @@ class ThreatDetector:
                         processed_threats.append(processed_threat)
 
                 # Step 4: Generate speed recommendation
-                recommended_speed, threat_ahead = self.speed_engine.calculate_recommendation(
+                recommended_speed, threat_ahead, active_threat_id = self.speed_engine.calculate_recommendation(
                     processed_threats, current_speed, current_location, v_cruise
                 )
 
@@ -526,6 +529,7 @@ class ThreatDetector:
                     )
                     recommended_speed = 0.0
                     threat_ahead = False
+                    active_threat_id = None  # Clear active threat if recommendation is unsafe
 
             # Sort threats by distance for HUD display
             processed_threats.sort(key=lambda t: t.distance)
@@ -541,7 +545,8 @@ class ThreatDetector:
                 recommended_speed=recommended_speed,
                 source='rti',
                 api_status='unknown',  # Will be set by caller
-                threats=processed_threats[:5]  # Limit to 5 for HUD
+                threats=processed_threats[:5],  # Limit to 5 for HUD
+                active_threat_id=active_threat_id
             )
 
         except Exception as e:
@@ -646,5 +651,6 @@ class ThreatDetector:
             recommended_speed=0.0,
             source='rti',
             api_status='offline',
-            threats=[]
+            threats=[],
+            active_threat_id=None
         )

@@ -33,6 +33,7 @@ struct RTIThreatInfo {
   cereal::RtiStateSP::Direction direction;  // coarse direction fallback
   float speed_limit_ms;  // optional; provided by backend
   bool on_same_road;     // provided by backend (no inference)
+  bool is_causing_recommendation;  // true if this threat is causing speed recommendation
 };
 
 class HudRendererSP : public HudRenderer {

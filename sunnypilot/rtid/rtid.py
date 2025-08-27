@@ -563,6 +563,9 @@ class RTIDaemon:
                 )
                 threat_msg.displayArrowAngle = display_angle
                 threat_msg.hasLocation = has_location
+                
+                # Mark if this threat is causing the speed recommendation
+                threat_msg.isCausingRecommendation = (threat.id == rti_state.active_threat_id)
 
         self.pm.send('rtiStateSP', msg)
 
