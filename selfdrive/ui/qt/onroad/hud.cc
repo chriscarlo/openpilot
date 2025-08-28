@@ -554,7 +554,10 @@ void HudRenderer::drawRoadName(QPainter &p, const QRect &surface_rect) {
   QRect road_rect(surface_rect.width() / 2 - rect_width / 2, 5, rect_width, 60);
 
   p.setPen(QPen(QColor(255, 255, 255, 100), 1));
-  //p.setBrush(QColor(0, 0, 0, 120));
+  // Restore subtle black banner/shade behind the road name
+  // This was commented out, causing the road name to blend into video
+  // and appear "missing". Match header shade opacity for consistency.
+  p.setBrush(QColor(0, 0, 0, 115));
   p.drawRoundedRect(road_rect, 6, 6);
 
   p.setPen(QColor(255, 255, 255, 200));
