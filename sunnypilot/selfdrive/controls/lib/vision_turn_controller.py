@@ -1,7 +1,6 @@
 import numpy as np
 import time
 import math
-from enum import IntEnum
 from dataclasses import dataclass
 
 from cereal import custom
@@ -15,79 +14,55 @@ VisionTurnControllerState = custom.LongitudinalPlanSP.VisionTurnSpeedControl.Vis
 
 N_POINTS = int(min(33, len(ModelConstants.T_IDXS)))  # Use available trajectory points
 
-# ===== EMERGENCY ESCALATION SYSTEM FROM STOCK VTSC =====
-class EmergencyLevel(IntEnum):
-    """Emergency escalation levels for VTSC deceleration limits."""
-    NORMAL = 0      # -1.47 m/s² (0.15g)
-    CAUTION = 1     # -2.45 m/s² (0.25g)
-    WARNING = 2     # -3.92 m/s² (0.40g)
-    CRITICAL = 3    # -5.50 m/s² (0.56g)
-    INTERVENTION = 4 # -6.00 m/s² (0.61g) - System maximum
+# ===== ADAPTIVE DECELERATION SYSTEM =====
+# Physics-based deceleration management for vision update lag scenarios
+# Goal: Target comfort rates, but escalate to minimum decel/jerk needed to reach target speed at curve
 
-# Deceleration limits for each emergency level (m/s²)
-DECEL_LIMITS = {
-    EmergencyLevel.NORMAL: -1.47,
-    EmergencyLevel.CAUTION: -2.45,
-    EmergencyLevel.WARNING: -3.92,
-    EmergencyLevel.CRITICAL: -5.50,
-    EmergencyLevel.INTERVENTION: -6.00
-}
+# Comfort deceleration limits (m/s²) - primary targets
+COMFORT_DECEL_LIMIT = -1.47  # -0.15g - comfortable deceleration
+COMFORT_JERK_LIMIT = -2.0    # m/s³ - comfortable jerk
 
-# Jerk limits for smooth transitions between emergency levels (m/s³)
-JERK_LIMITS = {
-    EmergencyLevel.NORMAL: -2.0,
-    EmergencyLevel.CAUTION: -3.0,
-    EmergencyLevel.WARNING: -4.0,
-    EmergencyLevel.CRITICAL: -5.0,
-    EmergencyLevel.INTERVENTION: -6.0
-}
+# Safety limits for adaptive escalation (m/s²)
+MAX_ADAPTIVE_DECEL = -6.0    # System maximum deceleration
+MAX_ADAPTIVE_JERK = -6.0     # System maximum jerk
 
-# ===== VISION OCCLUSION HANDLING FROM STOCK VTSC =====
-class VisionStatus(IntEnum):
-    """Vision quality status for occlusion handling."""
-    FULL_VISIBILITY = 0
-    PARTIAL_OCCLUSION = 1
-    SEVERE_OCCLUSION = 2
-    VISION_LOST = 3
+# Default noise filtering parameters
+DEFAULT_FILTER_ALPHA = 0.3      # EMA filter coefficient (0.1-0.9)
+DEFAULT_HYSTERESIS_THRESHOLD = 0.2  # Hysteresis threshold (0.1-0.5)
+DEFAULT_SAFETY_BIAS = 0.1        # Safety bias factor (0.0-0.5)
+
+# ===== VISION OCCLUSION HANDLING (SIMPLIFIED) =====
+# Smoothed confidence with a small hysteresis band; hold last curvature during occlusion
+CONF_ALPHA = 0.1       # EMA smoothing factor for confidence
+CONF_GOOD_TH = 0.75    # Threshold to (re)enter good vision
+CONF_BAD_TH = 0.70     # Threshold to leave good vision
 
 @dataclass
 class VisionOcclusionState:
-    """State tracking for vision occlusion scenarios."""
+    """Smoothed confidence + hold last curvature while vision is not good."""
     last_valid_curvature: float = 0.0
-    vision_status: VisionStatus = VisionStatus.FULL_VISIBILITY
-    confidence_decay_factor: float = 1.0
-    extrapolated_curvature: float = 0.0
-    occlusion_start_time: float = 0.0
+    smoothed_confidence: float = 1.0
+    vision_good: bool = True
+    updated_once: bool = False
+    alpha: float = CONF_ALPHA
+    good_threshold: float = CONF_GOOD_TH
+    bad_threshold: float = CONF_BAD_TH
 
-    def update(self, current_curvature: float, vision_confidence: float, current_time: float):
-        """Update occlusion state based on current vision conditions."""
-        # Store previous status before updating
-        previous_status = self.vision_status
+    def update(self, current_curvature: float, vision_confidence: float):
+        # EMA smoothing of confidence
+        self.smoothed_confidence = (1.0 - self.alpha) * self.smoothed_confidence + self.alpha * vision_confidence
 
-        # Determine vision status from confidence
-        if vision_confidence > 0.8:
-            self.vision_status = VisionStatus.FULL_VISIBILITY
-            self.last_valid_curvature = current_curvature
-            self.confidence_decay_factor = 1.0
-        elif vision_confidence > 0.5:
-            self.vision_status = VisionStatus.PARTIAL_OCCLUSION
-        elif vision_confidence > 0.2:
-            self.vision_status = VisionStatus.SEVERE_OCCLUSION
+        if self.vision_good:
+            if self.smoothed_confidence < self.bad_threshold:
+                self.vision_good = False
+            else:
+                self.last_valid_curvature = current_curvature
+                self.updated_once = True
         else:
-            self.vision_status = VisionStatus.VISION_LOST
-
-        # Set occlusion start time when transitioning from full visibility to any occlusion
-        if previous_status == VisionStatus.FULL_VISIBILITY and self.vision_status != VisionStatus.FULL_VISIBILITY:
-            self.occlusion_start_time = current_time
-
-        # Update confidence decay factor based on occlusion duration
-        if self.vision_status != VisionStatus.FULL_VISIBILITY:
-            occlusion_duration = current_time - self.occlusion_start_time
-            # Exponential decay: starts at 1.0, decays to 0.3 over 5 seconds
-            self.confidence_decay_factor = max(0.3, math.exp(-occlusion_duration / 3.0))
-
-            # Extrapolate curvature during occlusion
-            self.extrapolated_curvature = self.last_valid_curvature * self.confidence_decay_factor
+            if self.smoothed_confidence > self.good_threshold:
+                self.vision_good = True
+                self.last_valid_curvature = current_curvature
+                self.updated_once = True
 
 # ===== ORIGINAL PHYSICS-BASED VTSC CONSTANTS =====
 _MIN_V = 2.24  # Do not operate under 5mph (was 5.6 m/s = 12.5mph)
@@ -120,8 +95,20 @@ _DEBUG = False
 
 # Constants for advanced curvature-based speed calculation
 CURV_CORR_FACTOR = (CV.MS_TO_MPH ** 2)  # Correction factor for lat accel function
-MAX_SPEED_DEFAULT = 70.0  # m/s, fallback for straight roads
-SPEED_INCREASE_FACTOR = 1.0
+MAX_SPEED_DEFAULT = 70.0  # m/s, fallback for straight roads (overridden by param)
+SPEED_INCREASE_FACTOR = 1.0  # Global multiplier on target speeds (overridden by param)
+
+# Physics sigmoid tunables (overridden by params)
+PHYSICS_A = -1.175100    # Amplitude
+PHYSICS_B = -2000.000000 # Steepness
+PHYSICS_C = 0.004778     # Transition center (1/m)
+PHYSICS_D = 3.144734     # Baseline (m/s²)
+PHYSICS_MIN_LAT_ACCEL = 1.8
+PHYSICS_MAX_LAT_ACCEL = 3.12
+
+# Low-speed bias (applied as +Δ mph under a taper)
+LOW_SPEED_BIAS_MPH = 0.0
+LOW_SPEED_BIAS_END_MPH = 50.0
 
 def _original_curvature_based_lat_accel(abs_curvature_scaled: float) -> float:
     """Internal function replicating the tuned lateral accel logic."""
@@ -147,22 +134,16 @@ def _physics_based_lateral_acceleration(curvature: float) -> float:
     Benefits: Perfect continuity, no discontinuous jumps, more aggressive low-speed cornering
     """
     curvature = max(1e-8, min(curvature, 1.0))
-
-    # Scipy-optimized parameters from parallel agent analysis
-    a = -1.175100    # Amplitude
-    b = -2000.000000 # Steepness
-    c = 0.004778     # Transition center
-    d = 3.144734     # Baseline
-
-    result = a / (1.0 + math.exp(b * (curvature - c))) + d
-    return max(1.8, min(result, 3.12))
+    # Use globally-tunable sigmoid parameters
+    result = PHYSICS_A / (1.0 + math.exp(PHYSICS_B * (curvature - PHYSICS_C))) + PHYSICS_D
+    return max(PHYSICS_MIN_LAT_ACCEL, min(result, PHYSICS_MAX_LAT_ACCEL))
 
 def curvature_to_speed(abs_curvature_meters: float) -> float:
     """FIXED: Calculates target speed (m/s) directly from curvature with NO SCALING HACK"""
     if abs_curvature_meters < 1e-7:  # Handle straight roads
         return MAX_SPEED_DEFAULT
 
-    # Get safe lateral acceleration using FIXED sigmoid (NO SCALING!)
+    # Get safe lateral acceleration using tuned sigmoid
     safe_lat_accel = _physics_based_lateral_acceleration(abs_curvature_meters)
 
     # Calculate speed using physics formula v = sqrt(a / k) with CONSISTENT curvature
@@ -170,6 +151,13 @@ def curvature_to_speed(abs_curvature_meters: float) -> float:
         base_speed_mps = math.sqrt(safe_lat_accel / abs_curvature_meters)
     except (ValueError, ZeroDivisionError):
         base_speed_mps = 0.0
+
+    # Apply simple low-speed bias in mph with taper
+    base_speed_mph = base_speed_mps * CV.MS_TO_MPH
+    if LOW_SPEED_BIAS_MPH != 0.0 and base_speed_mph < LOW_SPEED_BIAS_END_MPH:
+        taper = 1.0 - (base_speed_mph / max(LOW_SPEED_BIAS_END_MPH, 1e-3))
+        base_speed_mph = base_speed_mph + LOW_SPEED_BIAS_MPH * max(0.0, min(1.0, taper))
+        base_speed_mps = max(0.0, base_speed_mph * CV.MPH_TO_MS)
 
     # Apply speed increase factor and clip to reasonable maximum
     target_speed_mps = base_speed_mps * SPEED_INCREASE_FACTOR
@@ -378,6 +366,42 @@ class VisionTurnController:
       fixed_lead_time_val = 0.0
     # Clip to a sane range
     self._fixed_lead_time_s = clip(fixed_lead_time_val, 0.0, 10.0)
+    
+    # ===== ADAPTIVE DECELERATION PARAMETERS =====
+    # User-configurable noise filtering parameters
+    filter_alpha_bytes = self._params.get("VisionTurnSpeedControlFilterAlpha")
+    try:
+      if filter_alpha_bytes:
+        filter_alpha_str = filter_alpha_bytes.decode('utf-8') if isinstance(filter_alpha_bytes, bytes) else filter_alpha_bytes
+        filter_alpha_val = float(filter_alpha_str)
+      else:
+        filter_alpha_val = DEFAULT_FILTER_ALPHA
+    except (ValueError, TypeError, AttributeError):
+      filter_alpha_val = DEFAULT_FILTER_ALPHA
+    self._filter_alpha = clip(filter_alpha_val, 0.1, 0.9)
+    
+    hysteresis_threshold_bytes = self._params.get("VisionTurnSpeedControlHysteresisThreshold")
+    try:
+      if hysteresis_threshold_bytes:
+        hysteresis_threshold_str = hysteresis_threshold_bytes.decode('utf-8') if isinstance(hysteresis_threshold_bytes, bytes) else hysteresis_threshold_bytes
+        hysteresis_threshold_val = float(hysteresis_threshold_str)
+      else:
+        hysteresis_threshold_val = DEFAULT_HYSTERESIS_THRESHOLD
+    except (ValueError, TypeError, AttributeError):
+      hysteresis_threshold_val = DEFAULT_HYSTERESIS_THRESHOLD
+    self._hysteresis_threshold = clip(hysteresis_threshold_val, 0.1, 0.5)
+    
+    safety_bias_bytes = self._params.get("VisionTurnSpeedControlSafetyBias")
+    try:
+      if safety_bias_bytes:
+        safety_bias_str = safety_bias_bytes.decode('utf-8') if isinstance(safety_bias_bytes, bytes) else safety_bias_bytes
+        safety_bias_val = float(safety_bias_str)
+      else:
+        safety_bias_val = DEFAULT_SAFETY_BIAS
+    except (ValueError, TypeError, AttributeError):
+      safety_bias_val = DEFAULT_SAFETY_BIAS
+    self._safety_bias = clip(safety_bias_val, 0.0, 0.5)
+    
     self._last_params_update = 0.
     self._v_cruise_setpoint = 0.
     self._v_ego = 0.
@@ -386,11 +410,10 @@ class VisionTurnController:
     self._v_overshoot = 0.
     self._state = VisionTurnControllerState.disabled
 
-    # ===== EMERGENCY ESCALATION SYSTEM =====
-    self._emergency_level = EmergencyLevel.NORMAL
+    # ===== ADAPTIVE DECELERATION SYSTEM =====
     self._current_decel = 0.0
-    self._time_at_current_level = 0.0
-    self._last_emergency_update_time = 0.0
+    self._filtered_decel_requirement = 0.0
+    self._decel_hysteresis_state = False
 
     # ===== VISION OCCLUSION HANDLING =====
     self._occlusion_state = VisionOcclusionState()
@@ -403,13 +426,16 @@ class VisionTurnController:
     self._planned_speeds = np.zeros(N_POINTS, dtype=float)
     self._current_accel = 0.0
     self._prev_target_speed = 0.0
-    self._max_decel = 3.5
-    self._max_jerk = 6.0
-    self._max_accel = 1.3 * self._max_decel
-    self._max_jerk_accel = 2.0 * self._max_jerk
+    # Smoothing bounds (tunable)
+    self._max_decel = 3.5  # VisionTurnSpeedControlSmoothingMaxDecel
+    self._max_jerk = 6.0   # VisionTurnSpeedControlSmoothingMaxJerk
+    self._accel_to_decel_ratio = 1.3  # VisionTurnSpeedControlAccelToDecelRatio
+    self._jerk_accel_multiplier = 2.0 # VisionTurnSpeedControlJerkAccelMultiplier
+    self._max_accel = self._accel_to_decel_ratio * self._max_decel
+    self._max_jerk_accel = self._jerk_accel_multiplier * self._max_jerk
 
-    # EMA filtering for curvature
-    self._curvature_ema_ratio = 0.3
+    # EMA filtering for curvature (tunable)
+    self._curvature_ema_ratio = 0.3  # VisionTurnSpeedControlCurvatureEMAFactor
     self._filtered_curvature = 0.0
 
     # Anticipatory deceleration state
@@ -417,13 +443,35 @@ class VisionTurnController:
     self._anticipation_start_time = 0.0
     self._curve_detection_distance = 0.0
 
+    # Anticipation/Overshoot planning tunables
+    self._planning_decel_limit = 3.5            # VisionTurnSpeedControlPlanningDecelLimit (m/s²)
+    self._overshoot_safety_margin = 1.2         # VisionTurnSpeedControlOvershootSafetyMargin (multiplier)
+    self._overshoot_min_distance = 10.0         # VisionTurnSpeedControlOvershootMinDistance (m)
+    self._anticipation_target_reduction = 0.95  # VisionTurnSpeedControlAnticipationTargetReduction
+
     # Apex detection and tracking
     self._apex_indices = []  # Indices of detected apexes in trajectory
     self._last_apex_passed_time = 0.0  # For hysteresis
     self._distance_past_apex = 0.0  # Meters past most recent apex
-    self._apex_boost_distance = 50.0  # Configurable boost distance (meters)
-    self._apex_threshold = 5e-5  # Minimum curvature for apex
-    self._apex_prominence = 1e-4  # Minimum prominence for apex
+    # Detection
+    self._apex_threshold = 5e-5          # VisionTurnSpeedControlApexThreshold
+    self._apex_prominence = 1e-4         # VisionTurnSpeedControlApexProminence
+    self._apex_hysteresis_time = 2.0     # VisionTurnSpeedControlApexHysteresisTime (s)
+    self._apex_meters_per_index = 2.0    # VisionTurnSpeedControlApexMetersPerIndex (m)
+    self._apex_near_index = 3            # VisionTurnSpeedControlApexNearIndex (indices)
+    # Boost
+    self._apex_boost_distance = 50.0     # VisionTurnSpeedControlApexBoostDistance (m)
+    self._apex_boost_factor = 0.1        # VisionTurnSpeedControlApexBoostFactor (0..0.2)
+    self._apex_boost_min_lat_accel = 1.0 # VisionTurnSpeedControlApexBoostMinLatAccel (m/s²)
+    self._apex_boost_center = 2.0        # VisionTurnSpeedControlApexBoostCenter (m/s²)
+    self._apex_boost_width = 0.5         # VisionTurnSpeedControlApexBoostWidth (m/s²)
+    self._boost_safety_curvature_scale = 0.7 # VisionTurnSpeedControlBoostSafetyCurvatureScale
+
+    # Comfort/adaptive deceleration limits (tunable)
+    self._comfort_decel_limit = COMFORT_DECEL_LIMIT
+    self._comfort_jerk_limit = COMFORT_JERK_LIMIT
+    self._max_adaptive_decel = MAX_ADAPTIVE_DECEL
+    self._max_adaptive_jerk = MAX_ADAPTIVE_JERK
     self._curvature_trajectory = []  # Store curvature array for apex detection
 
     self._reset()
@@ -441,14 +489,14 @@ class VisionTurnController:
     self._state = value
 
   @property
-  def emergency_level(self):
-    """Emergency escalation level accessor for external monitoring."""
-    return self._emergency_level
+  def adaptive_decel_active(self):
+    """Adaptive deceleration system status for external monitoring."""
+    return abs(self._current_decel) > abs(self._comfort_decel_limit) * 1.1
 
   @property
-  def intervention_required(self):
-    """Intervention detection flag accessor for external monitoring."""
-    return self._intervention_required
+  def decel_requirement(self):
+    """Current deceleration requirement for external monitoring."""
+    return self._filtered_decel_requirement
 
   @property
   def a_target(self):
@@ -508,17 +556,13 @@ class VisionTurnController:
     self._v_overshoot_distance = 200.
     self._lat_acc_overshoot_ahead = False
 
-    # Reset emergency escalation system
-    self._emergency_level = EmergencyLevel.NORMAL
+    # Reset adaptive deceleration system
     self._current_decel = 0.0
-    self._time_at_current_level = 0.0
+    self._filtered_decel_requirement = 0.0
+    self._decel_hysteresis_state = False
 
     # Reset vision occlusion state
     self._occlusion_state = VisionOcclusionState()
-
-    # Reset intervention detection
-    self._intervention_required = False
-    self._critical_situation_time = 0.0
 
     # Reset apex tracking
     self._apex_indices = []
@@ -563,109 +607,428 @@ class VisionTurnController:
       except (ValueError, TypeError, AttributeError):
         fixed_lead_time_val = 0.0
       self._fixed_lead_time_s = clip(fixed_lead_time_val, 0.0, 10.0)
+      
+      # Update adaptive deceleration parameters
+      filter_alpha_bytes = self._params.get("VisionTurnSpeedControlFilterAlpha")
+      try:
+        if filter_alpha_bytes:
+          filter_alpha_str = filter_alpha_bytes.decode('utf-8') if isinstance(filter_alpha_bytes, bytes) else filter_alpha_bytes
+          filter_alpha_val = float(filter_alpha_str)
+        else:
+          filter_alpha_val = DEFAULT_FILTER_ALPHA
+      except (ValueError, TypeError, AttributeError):
+        filter_alpha_val = DEFAULT_FILTER_ALPHA
+      self._filter_alpha = clip(filter_alpha_val, 0.1, 0.9)
+      
+      hysteresis_threshold_bytes = self._params.get("VisionTurnSpeedControlHysteresisThreshold")
+      try:
+        if hysteresis_threshold_bytes:
+          hysteresis_threshold_str = hysteresis_threshold_bytes.decode('utf-8') if isinstance(hysteresis_threshold_bytes, bytes) else hysteresis_threshold_bytes
+          hysteresis_threshold_val = float(hysteresis_threshold_str)
+        else:
+          hysteresis_threshold_val = DEFAULT_HYSTERESIS_THRESHOLD
+      except (ValueError, TypeError, AttributeError):
+        hysteresis_threshold_val = DEFAULT_HYSTERESIS_THRESHOLD
+      self._hysteresis_threshold = clip(hysteresis_threshold_val, 0.1, 0.5)
+      
+      safety_bias_bytes = self._params.get("VisionTurnSpeedControlSafetyBias")
+      try:
+        if safety_bias_bytes:
+          safety_bias_str = safety_bias_bytes.decode('utf-8') if isinstance(safety_bias_bytes, bytes) else safety_bias_bytes
+          safety_bias_val = float(safety_bias_str)
+        else:
+          safety_bias_val = DEFAULT_SAFETY_BIAS
+      except (ValueError, TypeError, AttributeError):
+        safety_bias_val = DEFAULT_SAFETY_BIAS
+      self._safety_bias = clip(safety_bias_val, 0.0, 0.5)
+
+      # ===== Curvature EMA factor =====
+      ema_bytes = self._params.get("VisionTurnSpeedControlCurvatureEMAFactor")
+      try:
+        ema_val = float(ema_bytes.decode('utf-8') if isinstance(ema_bytes, bytes) else ema_bytes) if ema_bytes else self._curvature_ema_ratio
+      except (ValueError, TypeError, AttributeError):
+        ema_val = self._curvature_ema_ratio
+      self._curvature_ema_ratio = clip(ema_val, 0.1, 0.5)
+
+      # ===== Smoothing bounds =====
+      sm_max_decel_b = self._params.get("VisionTurnSpeedControlSmoothingMaxDecel")
+      try:
+        sm_max_decel = float(sm_max_decel_b.decode('utf-8') if isinstance(sm_max_decel_b, bytes) else sm_max_decel_b) if sm_max_decel_b else self._max_decel
+      except (ValueError, TypeError, AttributeError):
+        sm_max_decel = self._max_decel
+      self._max_decel = clip(sm_max_decel, 1.0, 7.0)
+
+      sm_max_jerk_b = self._params.get("VisionTurnSpeedControlSmoothingMaxJerk")
+      try:
+        sm_max_jerk = float(sm_max_jerk_b.decode('utf-8') if isinstance(sm_max_jerk_b, bytes) else sm_max_jerk_b) if sm_max_jerk_b else self._max_jerk
+      except (ValueError, TypeError, AttributeError):
+        sm_max_jerk = self._max_jerk
+      self._max_jerk = clip(sm_max_jerk, 1.0, 12.0)
+
+      accel_to_decel_b = self._params.get("VisionTurnSpeedControlAccelToDecelRatio")
+      try:
+        accel_to_decel = float(accel_to_decel_b.decode('utf-8') if isinstance(accel_to_decel_b, bytes) else accel_to_decel_b) if accel_to_decel_b else self._accel_to_decel_ratio
+      except (ValueError, TypeError, AttributeError):
+        accel_to_decel = self._accel_to_decel_ratio
+      self._accel_to_decel_ratio = clip(accel_to_decel, 1.0, 1.6)
+
+      jerk_accel_mult_b = self._params.get("VisionTurnSpeedControlJerkAccelMultiplier")
+      try:
+        jerk_accel_mult = float(jerk_accel_mult_b.decode('utf-8') if isinstance(jerk_accel_mult_b, bytes) else jerk_accel_mult_b) if jerk_accel_mult_b else self._jerk_accel_multiplier
+      except (ValueError, TypeError, AttributeError):
+        jerk_accel_mult = self._jerk_accel_multiplier
+      self._jerk_accel_multiplier = clip(jerk_accel_mult, 1.0, 3.0)
+
+      # Recompute derived smoothing bounds
+      self._max_accel = self._accel_to_decel_ratio * self._max_decel
+      self._max_jerk_accel = self._jerk_accel_multiplier * self._max_jerk
+
+      # ===== Anticipation & Overshoot =====
+      plan_decel_b = self._params.get("VisionTurnSpeedControlPlanningDecelLimit")
+      try:
+        plan_decel = float(plan_decel_b.decode('utf-8') if isinstance(plan_decel_b, bytes) else plan_decel_b) if plan_decel_b else self._planning_decel_limit
+      except (ValueError, TypeError, AttributeError):
+        plan_decel = self._planning_decel_limit
+      self._planning_decel_limit = clip(plan_decel, 1.0, 7.0)
+
+      overshoot_safety_b = self._params.get("VisionTurnSpeedControlOvershootSafetyMargin")
+      try:
+        overshoot_safety = float(overshoot_safety_b.decode('utf-8') if isinstance(overshoot_safety_b, bytes) else overshoot_safety_b) if overshoot_safety_b else self._overshoot_safety_margin
+      except (ValueError, TypeError, AttributeError):
+        overshoot_safety = self._overshoot_safety_margin
+      self._overshoot_safety_margin = clip(overshoot_safety, 1.0, 1.5)
+
+      overshoot_min_dist_b = self._params.get("VisionTurnSpeedControlOvershootMinDistance")
+      try:
+        overshoot_min_dist = float(overshoot_min_dist_b.decode('utf-8') if isinstance(overshoot_min_dist_b, bytes) else overshoot_min_dist_b) if overshoot_min_dist_b else self._overshoot_min_distance
+      except (ValueError, TypeError, AttributeError):
+        overshoot_min_dist = self._overshoot_min_distance
+      self._overshoot_min_distance = clip(overshoot_min_dist, 1.0, 200.0)
+
+      anticip_red_b = self._params.get("VisionTurnSpeedControlAnticipationTargetReduction")
+      try:
+        anticip_red = float(anticip_red_b.decode('utf-8') if isinstance(anticip_red_b, bytes) else anticip_red_b) if anticip_red_b else self._anticipation_target_reduction
+      except (ValueError, TypeError, AttributeError):
+        anticip_red = self._anticipation_target_reduction
+      self._anticipation_target_reduction = clip(anticip_red, 0.9, 1.0)
+
+      # ===== Apex detection & boost =====
+      apex_th_b = self._params.get("VisionTurnSpeedControlApexThreshold")
+      try:
+        apex_th = float(apex_th_b.decode('utf-8') if isinstance(apex_th_b, bytes) else apex_th_b) if apex_th_b else self._apex_threshold
+      except (ValueError, TypeError, AttributeError):
+        apex_th = self._apex_threshold
+      self._apex_threshold = clip(apex_th, 1e-6, 1e-3)
+
+      apex_prom_b = self._params.get("VisionTurnSpeedControlApexProminence")
+      try:
+        apex_prom = float(apex_prom_b.decode('utf-8') if isinstance(apex_prom_b, bytes) else apex_prom_b) if apex_prom_b else self._apex_prominence
+      except (ValueError, TypeError, AttributeError):
+        apex_prom = self._apex_prominence
+      self._apex_prominence = clip(apex_prom, 1e-6, 1e-2)
+
+      apex_hyst_b = self._params.get("VisionTurnSpeedControlApexHysteresisTime")
+      try:
+        apex_hyst = float(apex_hyst_b.decode('utf-8') if isinstance(apex_hyst_b, bytes) else apex_hyst_b) if apex_hyst_b else self._apex_hysteresis_time
+      except (ValueError, TypeError, AttributeError):
+        apex_hyst = self._apex_hysteresis_time
+      self._apex_hysteresis_time = clip(apex_hyst, 0.1, 10.0)
+
+      apex_mpi_b = self._params.get("VisionTurnSpeedControlApexMetersPerIndex")
+      try:
+        apex_mpi = float(apex_mpi_b.decode('utf-8') if isinstance(apex_mpi_b, bytes) else apex_mpi_b) if apex_mpi_b else self._apex_meters_per_index
+      except (ValueError, TypeError, AttributeError):
+        apex_mpi = self._apex_meters_per_index
+      self._apex_meters_per_index = clip(apex_mpi, 0.5, 5.0)
+
+      apex_near_idx_b = self._params.get("VisionTurnSpeedControlApexNearIndex")
+      try:
+        apex_near_idx = int(float(apex_near_idx_b.decode('utf-8') if isinstance(apex_near_idx_b, bytes) else apex_near_idx_b)) if apex_near_idx_b else self._apex_near_index
+      except (ValueError, TypeError, AttributeError):
+        apex_near_idx = self._apex_near_index
+      self._apex_near_index = int(clip(apex_near_idx, 1, 10))
+
+      apex_boost_dist_b = self._params.get("VisionTurnSpeedControlApexBoostDistance")
+      try:
+        apex_boost_dist = float(apex_boost_dist_b.decode('utf-8') if isinstance(apex_boost_dist_b, bytes) else apex_boost_dist_b) if apex_boost_dist_b else self._apex_boost_distance
+      except (ValueError, TypeError, AttributeError):
+        apex_boost_dist = self._apex_boost_distance
+      self._apex_boost_distance = clip(apex_boost_dist, 0.0, 300.0)
+
+      apex_boost_factor_b = self._params.get("VisionTurnSpeedControlApexBoostFactor")
+      try:
+        apex_boost_factor = float(apex_boost_factor_b.decode('utf-8') if isinstance(apex_boost_factor_b, bytes) else apex_boost_factor_b) if apex_boost_factor_b else self._apex_boost_factor
+      except (ValueError, TypeError, AttributeError):
+        apex_boost_factor = self._apex_boost_factor
+      self._apex_boost_factor = clip(apex_boost_factor, 0.0, 0.5)
+
+      apex_boost_min_lat_b = self._params.get("VisionTurnSpeedControlApexBoostMinLatAccel")
+      try:
+        apex_boost_min_lat = float(apex_boost_min_lat_b.decode('utf-8') if isinstance(apex_boost_min_lat_b, bytes) else apex_boost_min_lat_b) if apex_boost_min_lat_b else self._apex_boost_min_lat_accel
+      except (ValueError, TypeError, AttributeError):
+        apex_boost_min_lat = self._apex_boost_min_lat_accel
+      self._apex_boost_min_lat_accel = clip(apex_boost_min_lat, 0.0, 5.0)
+
+      apex_boost_center_b = self._params.get("VisionTurnSpeedControlApexBoostCenter")
+      try:
+        apex_boost_center = float(apex_boost_center_b.decode('utf-8') if isinstance(apex_boost_center_b, bytes) else apex_boost_center_b) if apex_boost_center_b else self._apex_boost_center
+      except (ValueError, TypeError, AttributeError):
+        apex_boost_center = self._apex_boost_center
+      self._apex_boost_center = clip(apex_boost_center, 0.0, 5.0)
+
+      apex_boost_width_b = self._params.get("VisionTurnSpeedControlApexBoostWidth")
+      try:
+        apex_boost_width = float(apex_boost_width_b.decode('utf-8') if isinstance(apex_boost_width_b, bytes) else apex_boost_width_b) if apex_boost_width_b else self._apex_boost_width
+      except (ValueError, TypeError, AttributeError):
+        apex_boost_width = self._apex_boost_width
+      self._apex_boost_width = clip(apex_boost_width, 0.05, 5.0)
+
+      boost_curv_scale_b = self._params.get("VisionTurnSpeedControlBoostSafetyCurvatureScale")
+      try:
+        boost_curv_scale = float(boost_curv_scale_b.decode('utf-8') if isinstance(boost_curv_scale_b, bytes) else boost_curv_scale_b) if boost_curv_scale_b else self._boost_safety_curvature_scale
+      except (ValueError, TypeError, AttributeError):
+        boost_curv_scale = self._boost_safety_curvature_scale
+      self._boost_safety_curvature_scale = clip(boost_curv_scale, 0.5, 1.0)
+
+      # ===== Comfort/Adaptive limits =====
+      comfort_decel_b = self._params.get("VisionTurnSpeedControlComfortDecelLimit")
+      try:
+        comfort_decel = float(comfort_decel_b.decode('utf-8') if isinstance(comfort_decel_b, bytes) else comfort_decel_b) if comfort_decel_b else self._comfort_decel_limit
+      except (ValueError, TypeError, AttributeError):
+        comfort_decel = self._comfort_decel_limit
+      # decel values are negative; clamp within safe negative range
+      self._comfort_decel_limit = -abs(clip(abs(comfort_decel), 1.0, 3.0))
+
+      comfort_jerk_b = self._params.get("VisionTurnSpeedControlComfortJerkLimit")
+      try:
+        comfort_jerk = float(comfort_jerk_b.decode('utf-8') if isinstance(comfort_jerk_b, bytes) else comfort_jerk_b) if comfort_jerk_b else self._comfort_jerk_limit
+      except (ValueError, TypeError, AttributeError):
+        comfort_jerk = self._comfort_jerk_limit
+      self._comfort_jerk_limit = -abs(clip(abs(comfort_jerk), 1.0, 4.0))
+
+      max_adapt_decel_b = self._params.get("VisionTurnSpeedControlMaxAdaptiveDecel")
+      try:
+        max_adapt_decel = float(max_adapt_decel_b.decode('utf-8') if isinstance(max_adapt_decel_b, bytes) else max_adapt_decel_b) if max_adapt_decel_b else self._max_adaptive_decel
+      except (ValueError, TypeError, AttributeError):
+        max_adapt_decel = self._max_adaptive_decel
+      self._max_adaptive_decel = -abs(clip(abs(max_adapt_decel), 3.0, 9.0))
+
+      max_adapt_jerk_b = self._params.get("VisionTurnSpeedControlMaxAdaptiveJerk")
+      try:
+        max_adapt_jerk = float(max_adapt_jerk_b.decode('utf-8') if isinstance(max_adapt_jerk_b, bytes) else max_adapt_jerk_b) if max_adapt_jerk_b else self._max_adaptive_jerk
+      except (ValueError, TypeError, AttributeError):
+        max_adapt_jerk = self._max_adaptive_jerk
+      self._max_adaptive_jerk = -abs(clip(abs(max_adapt_jerk), 3.0, 10.0))
+
+      # ===== Vision occlusion thresholds =====
+      conf_alpha_b = self._params.get("VisionTurnSpeedControlVisionConfAlpha")
+      try:
+        conf_alpha = float(conf_alpha_b.decode('utf-8') if isinstance(conf_alpha_b, bytes) else conf_alpha_b) if conf_alpha_b else self._occlusion_state.alpha
+      except (ValueError, TypeError, AttributeError):
+        conf_alpha = self._occlusion_state.alpha
+      self._occlusion_state.alpha = clip(conf_alpha, 0.01, 0.9)
+
+      conf_good_b = self._params.get("VisionTurnSpeedControlVisionConfGoodThreshold")
+      try:
+        conf_good = float(conf_good_b.decode('utf-8') if isinstance(conf_good_b, bytes) else conf_good_b) if conf_good_b else self._occlusion_state.good_threshold
+      except (ValueError, TypeError, AttributeError):
+        conf_good = self._occlusion_state.good_threshold
+      self._occlusion_state.good_threshold = clip(conf_good, 0.5, 0.99)
+
+      conf_bad_b = self._params.get("VisionTurnSpeedControlVisionConfBadThreshold")
+      try:
+        conf_bad = float(conf_bad_b.decode('utf-8') if isinstance(conf_bad_b, bytes) else conf_bad_b) if conf_bad_b else self._occlusion_state.bad_threshold
+      except (ValueError, TypeError, AttributeError):
+        conf_bad = self._occlusion_state.bad_threshold
+      self._occlusion_state.bad_threshold = clip(conf_bad, 0.1, self._occlusion_state.good_threshold)
+
+      # ===== Global speed scaling and caps =====
+      inc_factor_b = self._params.get("VisionTurnSpeedControlSpeedIncreaseFactor")
+      try:
+        inc_factor = float(inc_factor_b.decode('utf-8') if isinstance(inc_factor_b, bytes) else inc_factor_b) if inc_factor_b else SPEED_INCREASE_FACTOR
+      except (ValueError, TypeError, AttributeError):
+        inc_factor = SPEED_INCREASE_FACTOR
+      globals()['SPEED_INCREASE_FACTOR'] = clip(inc_factor, 0.5, 1.5)
+
+      max_speed_b = self._params.get("VisionTurnSpeedControlMaxSpeed")
+      try:
+        max_speed = float(max_speed_b.decode('utf-8') if isinstance(max_speed_b, bytes) else max_speed_b) if max_speed_b else MAX_SPEED_DEFAULT
+      except (ValueError, TypeError, AttributeError):
+        max_speed = MAX_SPEED_DEFAULT
+      globals()['MAX_SPEED_DEFAULT'] = clip(max_speed, 10.0, 90.0)
+
+      min_oper_b = self._params.get("VisionTurnSpeedControlMinOperatingSpeed")
+      try:
+        min_oper = float(min_oper_b.decode('utf-8') if isinstance(min_oper_b, bytes) else min_oper_b) if min_oper_b else _MIN_V
+      except (ValueError, TypeError, AttributeError):
+        min_oper = _MIN_V
+      globals()['_MIN_V'] = clip(min_oper, 0.5, 10.0)
+
+      # ===== Low-speed speed bias (mph) =====
+      low_bias_b = self._params.get("VisionTurnSpeedControlLowSpeedSpeedBiasMph")
+      try:
+        low_bias = float(low_bias_b.decode('utf-8') if isinstance(low_bias_b, bytes) else low_bias_b) if low_bias_b else LOW_SPEED_BIAS_MPH
+      except (ValueError, TypeError, AttributeError):
+        low_bias = LOW_SPEED_BIAS_MPH
+      globals()['LOW_SPEED_BIAS_MPH'] = clip(low_bias, -5.0, 5.0)
+
+      low_bias_end_b = self._params.get("VisionTurnSpeedControlLowSpeedBiasEndMph")
+      try:
+        low_bias_end = float(low_bias_end_b.decode('utf-8') if isinstance(low_bias_end_b, bytes) else low_bias_end_b) if low_bias_end_b else LOW_SPEED_BIAS_END_MPH
+      except (ValueError, TypeError, AttributeError):
+        low_bias_end = LOW_SPEED_BIAS_END_MPH
+      globals()['LOW_SPEED_BIAS_END_MPH'] = clip(low_bias_end, 10.0, 80.0)
+
+      # ===== Physics sigmoid knobs =====
+      phys_base_b = self._params.get("VisionTurnSpeedControlPhysicsBaseline")
+      try:
+        phys_base = float(phys_base_b.decode('utf-8') if isinstance(phys_base_b, bytes) else phys_base_b) if phys_base_b else PHYSICS_D
+      except (ValueError, TypeError, AttributeError):
+        phys_base = PHYSICS_D
+      globals()['PHYSICS_D'] = clip(phys_base, 2.0, 4.0)
+
+      phys_amp_b = self._params.get("VisionTurnSpeedControlPhysicsAmplitude")
+      try:
+        phys_amp = float(phys_amp_b.decode('utf-8') if isinstance(phys_amp_b, bytes) else phys_amp_b) if phys_amp_b else PHYSICS_A
+      except (ValueError, TypeError, AttributeError):
+        phys_amp = PHYSICS_A
+      # amplitude should remain negative for decreasing function
+      globals()['PHYSICS_A'] = -abs(clip(abs(phys_amp), 0.2, 2.5))
+
+      phys_steep_b = self._params.get("VisionTurnSpeedControlPhysicsSteepness")
+      try:
+        phys_steep = float(phys_steep_b.decode('utf-8') if isinstance(phys_steep_b, bytes) else phys_steep_b) if phys_steep_b else PHYSICS_B
+      except (ValueError, TypeError, AttributeError):
+        phys_steep = PHYSICS_B
+      # steepness should remain negative
+      globals()['PHYSICS_B'] = -abs(clip(abs(phys_steep), 100.0, 1e5))
+
+      phys_center_b = self._params.get("VisionTurnSpeedControlPhysicsCenter")
+      try:
+        phys_center = float(phys_center_b.decode('utf-8') if isinstance(phys_center_b, bytes) else phys_center_b) if phys_center_b else PHYSICS_C
+      except (ValueError, TypeError, AttributeError):
+        phys_center = PHYSICS_C
+      globals()['PHYSICS_C'] = clip(phys_center, 1e-5, 0.1)
+
+      phys_min_lat_b = self._params.get("VisionTurnSpeedControlPhysicsMinLatAccel")
+      try:
+        phys_min_lat = float(phys_min_lat_b.decode('utf-8') if isinstance(phys_min_lat_b, bytes) else phys_min_lat_b) if phys_min_lat_b else PHYSICS_MIN_LAT_ACCEL
+      except (ValueError, TypeError, AttributeError):
+        phys_min_lat = PHYSICS_MIN_LAT_ACCEL
+      globals()['PHYSICS_MIN_LAT_ACCEL'] = clip(phys_min_lat, 1.0, 3.0)
+
+      phys_max_lat_b = self._params.get("VisionTurnSpeedControlPhysicsMaxLatAccel")
+      try:
+        phys_max_lat = float(phys_max_lat_b.decode('utf-8') if isinstance(phys_max_lat_b, bytes) else phys_max_lat_b) if phys_max_lat_b else PHYSICS_MAX_LAT_ACCEL
+      except (ValueError, TypeError, AttributeError):
+        phys_max_lat = PHYSICS_MAX_LAT_ACCEL
+      globals()['PHYSICS_MAX_LAT_ACCEL'] = clip(phys_max_lat, 2.0, 4.0)
+
       self._last_params_update = tm
 
-  def _determine_emergency_level(self, required_decel: float, current_time: float) -> EmergencyLevel:
-    """Determine appropriate emergency level based on required deceleration."""
-    abs_decel = abs(required_decel)
-
-    # Emergency level thresholds based on absolute deceleration required
-    if abs_decel <= abs(DECEL_LIMITS[EmergencyLevel.NORMAL]):
-        return EmergencyLevel.NORMAL
-    elif abs_decel <= abs(DECEL_LIMITS[EmergencyLevel.CAUTION]):
-        return EmergencyLevel.CAUTION
-    elif abs_decel <= abs(DECEL_LIMITS[EmergencyLevel.WARNING]):
-        return EmergencyLevel.WARNING
-    elif abs_decel <= abs(DECEL_LIMITS[EmergencyLevel.CRITICAL]):
-        return EmergencyLevel.CRITICAL
-    else:
-        return EmergencyLevel.INTERVENTION
+  def _calculate_required_deceleration(self, v_current: float, v_target: float, distance: float) -> float:
+    """Calculate minimum deceleration required using physics: a = (v_f² - v_i²) / (2d)"""
+    if distance <= 0.1:  # Avoid division by zero
+      return self._max_adaptive_decel
+    
+    # Physics formula: a = (v_target² - v_current²) / (2 × distance)
+    required_decel = (v_target * v_target - v_current * v_current) / (2.0 * distance)
+    
+    # Apply safety bias - slightly more aggressive to ensure we reach target
+    safety_biased_decel = required_decel * (1.0 + self._safety_bias)
+    
+    # Clamp to system limits
+    return max(safety_biased_decel, self._max_adaptive_decel)
 
   def _get_optimal_deceleration(self, raw_decel: float, dt: float) -> float:
-    """Get optimal deceleration with emergency level limits and jerk limiting."""
-    current_time = time.time()
-
-    # Determine required emergency level
-    required_level = self._determine_emergency_level(raw_decel, current_time)
-
-    # Update emergency level with transition timing
-    if required_level != self._emergency_level:
-        if current_time != self._last_emergency_update_time:
-            self._time_at_current_level = 0.0
-        self._emergency_level = required_level
-        self._last_emergency_update_time = current_time
+    """Get optimal deceleration using adaptive physics-based approach with noise filtering."""
+    
+    # Step 1: Apply EMA filtering to smooth deceleration requirements
+    # Initialize filter to first value if not yet initialized (was 0)
+    if self._filtered_decel_requirement == 0.0 and raw_decel != 0.0:
+        self._filtered_decel_requirement = raw_decel
     else:
-        self._time_at_current_level += dt
-
-    # Get deceleration limit for current emergency level
-    decel_limit = DECEL_LIMITS[self._emergency_level]
-
-    # Apply emergency level limit
-    limited_decel = max(raw_decel, decel_limit)
-
-    # Apply jerk limiting for smooth transitions
-    jerk_limit = JERK_LIMITS[self._emergency_level]
-    max_decel_change = abs(jerk_limit) * dt
-
-    decel_change = limited_decel - self._current_decel
+        self._filtered_decel_requirement = ((1.0 - self._filter_alpha) * self._filtered_decel_requirement +
+                                           self._filter_alpha * raw_decel)
+    
+    # Step 2: Determine if we should use comfort or adaptive deceleration
+    comfort_sufficient = (abs(self._filtered_decel_requirement) <= abs(self._comfort_decel_limit))
+    
+    # Step 3: Apply hysteresis to prevent oscillation between comfort/adaptive modes
+    if comfort_sufficient and not self._decel_hysteresis_state:
+        # Comfort deceleration is sufficient and we're not in adaptive mode
+        target_decel = max(self._filtered_decel_requirement, self._comfort_decel_limit)
+        target_jerk_limit = abs(self._comfort_jerk_limit)
+    elif not comfort_sufficient and not self._decel_hysteresis_state:
+        # Need to switch to adaptive mode
+        self._decel_hysteresis_state = True
+        # Use physics-based calculation with system limits
+        target_decel = max(self._filtered_decel_requirement, self._max_adaptive_decel)
+        target_jerk_limit = abs(self._max_adaptive_jerk)
+    elif self._decel_hysteresis_state:
+        # Currently in adaptive mode - check if we can return to comfort with hysteresis
+        hysteresis_threshold = abs(self._comfort_decel_limit) * (1.0 - self._hysteresis_threshold)
+        if abs(self._filtered_decel_requirement) <= hysteresis_threshold:
+            self._decel_hysteresis_state = False
+            target_decel = max(self._filtered_decel_requirement, self._comfort_decel_limit)
+            target_jerk_limit = abs(self._comfort_jerk_limit)
+        else:
+            # Stay in adaptive mode
+            target_decel = max(self._filtered_decel_requirement, self._max_adaptive_decel)
+            target_jerk_limit = abs(self._max_adaptive_jerk)
+    else:
+        # Default case
+        target_decel = max(self._filtered_decel_requirement, self._comfort_decel_limit)
+        target_jerk_limit = abs(self._comfort_jerk_limit)
+    
+    # Step 4: Apply jerk limiting for smooth transitions
+    max_decel_change = abs(target_jerk_limit) * dt  # Ensure positive limit
+    decel_change = target_decel - self._current_decel
+    
     if abs(decel_change) > max_decel_change:
         if decel_change > 0:
             self._current_decel += max_decel_change
         else:
             self._current_decel -= max_decel_change
     else:
-        self._current_decel = limited_decel
-
+        self._current_decel = target_decel
+    
     return self._current_decel
 
   def _update_vision_occlusion(self, model_data, current_time: float):
-    """Update vision occlusion state and handle vision loss scenarios."""
+    """Update vision occlusion state and return curvature to use (hold on occlusion)."""
+    # Estimate vision confidence
     if model_data is None:
-        # Complete vision loss
         vision_confidence = 0.0
-        current_curvature = self._occlusion_state.extrapolated_curvature
     else:
-        # Estimate vision confidence from lane line probabilities
         if hasattr(model_data, 'laneLineProbs') and model_data.laneLineProbs:
-            vision_confidence = np.mean(model_data.laneLineProbs)
+            vision_confidence = float(np.mean(model_data.laneLineProbs))
         else:
-            vision_confidence = 1.0  # Assume good vision if no prob data
+            vision_confidence = 1.0
 
-        # Use current curvature from model
-        current_curvature = self._filtered_curvature
+    # Candidate current curvature is the filtered curvature we track
+    current_curvature = self._filtered_curvature
 
-    # Update occlusion state
-    self._occlusion_state.update(current_curvature, vision_confidence, current_time)
+    # Update simplified occlusion state
+    self._occlusion_state.update(current_curvature, vision_confidence)
 
-    # Return adjusted curvature based on vision status
-    if self._occlusion_state.vision_status == VisionStatus.FULL_VISIBILITY:
-        return current_curvature
-    else:
-        # Use extrapolated curvature during occlusion with confidence decay
-        return self._occlusion_state.extrapolated_curvature
+    # If vision is good, use current curvature; otherwise, hold last valid
+    return current_curvature if self._occlusion_state.vision_good else self._occlusion_state.last_valid_curvature
 
-  def _check_intervention_required(self, required_decel: float, remaining_distance: float) -> bool:
-    """Check if human intervention may be required for extreme scenarios."""
-    current_time = time.time()
-
-    # Critical situation criteria
-    is_critical_decel = abs(required_decel) > abs(DECEL_LIMITS[EmergencyLevel.CRITICAL]) * 1.05
-    is_close_distance = remaining_distance < 25.0  # meters
-
-    if is_critical_decel and is_close_distance:
-        if self._critical_situation_time == 0.0:
-            self._critical_situation_time = current_time
-
-        situation_duration = current_time - self._critical_situation_time
-        if situation_duration > 0.3:  # 300ms of critical situation
-            self._intervention_required = True
-            return True
-    else:
-        # Reset critical situation timing
-        self._critical_situation_time = 0.0
-        self._intervention_required = False
-
-    return False
+  def _monitor_adaptive_deceleration(self, required_decel: float, remaining_distance: float) -> bool:
+    """Monitor adaptive deceleration system performance and detect extreme scenarios."""
+    # Check if we're using maximum system deceleration
+    is_max_decel = abs(self._current_decel) >= abs(self._max_adaptive_decel) * 0.95
+    
+    # Check if distance is critically short
+    is_critical_distance = remaining_distance < 20.0  # meters
+    
+    # Log adaptive deceleration activation for debugging
+    if self._decel_hysteresis_state:
+        _debug(f'VTSC: Adaptive decel active - current: {self._current_decel:.2f}, required: {required_decel:.2f}, distance: {remaining_distance:.1f}m')
+    
+    # Return true if we're in a challenging scenario (for external monitoring)
+    return is_max_decel and is_critical_distance
 
   def _update_calculations(self, sm):
     """Advanced vision-based curvature calculation using direct model outputs."""
@@ -680,8 +1043,8 @@ class VisionTurnController:
     current_curvature = adjusted_curvature
     max_pred_curvature = adjusted_curvature
 
-    # Use advanced method: direct model data access
-    if (model_data is not None and
+    # Use advanced method: direct model data access only when vision is good
+    if (self._occlusion_state.vision_good and model_data is not None and
         hasattr(model_data, 'orientationRate') and hasattr(model_data, 'velocity') and
         model_data.orientationRate.z is not None and model_data.velocity.x is not None):
 
@@ -717,13 +1080,6 @@ class VisionTurnController:
           current_curvature = float(curvature_array_abs[0])  # Absolute value for calculations
           current_curvature_signed = float(curvature_array_signed[0])  # Signed value for lateral accel
 
-        # Apply vision occlusion adjustments if needed
-        if self._occlusion_state.vision_status != VisionStatus.FULL_VISIBILITY:
-            confidence_factor = self._occlusion_state.confidence_decay_factor
-            current_curvature *= confidence_factor
-            max_pred_curvature *= confidence_factor
-            current_curvature_signed *= confidence_factor
-
         # Update filtered curvature using EMA
         self._filtered_curvature = ((1 - self._curvature_ema_ratio) * self._filtered_curvature +
                                    self._curvature_ema_ratio * max_pred_curvature)
@@ -747,19 +1103,19 @@ class VisionTurnController:
           times = np.array(ModelConstants.T_IDXS[:n_points])
 
           # For each point that needs slowing, calculate if we need to start NOW
-          max_decel = 3.5  # m/s² (reasonable deceleration limit)
+          max_decel = max(0.1, float(self._planning_decel_limit))  # m/s² planning decel limit
           immediate_requirements = []
 
           for idx in overshoot_indices:
             # How much distance do we need to slow down to this point's safe speed?
             speed_diff_sq = safe_speeds[idx]**2 - self._v_ego**2
-            decel_distance_needed = abs(speed_diff_sq) / (2 * max_decel)
+            decel_distance_needed = abs(speed_diff_sq) / max(2e-3, (2 * max_decel))
 
             # How far away is this point?
             point_distance = times[idx] * self._v_ego
 
             # Do we need to start slowing NOW for this point?
-            if point_distance <= decel_distance_needed * 1.2:  # 20% safety margin
+            if point_distance <= decel_distance_needed * max(1.0, float(self._overshoot_safety_margin)):
               immediate_requirements.append((idx, safe_speeds[idx], point_distance))
 
           if immediate_requirements:
@@ -782,7 +1138,7 @@ class VisionTurnController:
           self._v_overshoot = min(safe_speeds[overshoot_idx], self._v_cruise_setpoint)
           # Distance already set above based on immediate requirements or tightest point
           # Ensure minimum distance for safety
-          self._v_overshoot_distance = max(self._v_overshoot_distance, 10.0)
+          self._v_overshoot_distance = max(self._v_overshoot_distance, float(self._overshoot_min_distance))
           # Calculate anticipation time for early deceleration
           anticipation_time = calculate_anticipation_time(
               self._v_ego,
@@ -798,20 +1154,33 @@ class VisionTurnController:
           # Adjust the overshoot distance to start deceleration earlier
           # This makes us reach target speed BEFORE the apex
           anticipation_distance = anticipation_time * self._v_ego
-          self._v_overshoot_distance = max(self._v_overshoot_distance - anticipation_distance, 10.0)
+          self._v_overshoot_distance = max(self._v_overshoot_distance - anticipation_distance, float(self._overshoot_min_distance))
 
           _debug(f'TVC: Advanced High LatAcc. Dist: {self._v_overshoot_distance:.2f}, v: {self._v_overshoot * CV.MS_TO_KPH:.2f}, anticipation: {anticipation_time:.1f}s')
 
         return  # Successfully processed vision data
 
-    # If model data is not available, use safe defaults
-    _debug('TVC: Model data not available, using safe defaults')
-    self._current_lat_acc = 0.0
-    self._max_pred_lat_acc = 0.0
-    self._max_v_for_current_curvature = V_CRUISE_MAX * CV.KPH_TO_MS
-    self._lat_acc_overshoot_ahead = False
-    self._filtered_curvature = 0.0
+    # Vision not good or model not available: use held curvature (adjusted_curvature)
+    current_curvature = max(0.0, float(adjusted_curvature))
+    current_curvature_signed = 0.0
+    max_pred_curvature = current_curvature
 
+    # Update filtered curvature and dependent quantities
+    self._filtered_curvature = ((1 - self._curvature_ema_ratio) * self._filtered_curvature +
+                               self._curvature_ema_ratio * max_pred_curvature)
+    self._current_lat_acc = current_curvature_signed * self._v_ego**2
+    self._max_pred_lat_acc = self._v_ego**2 * max_pred_curvature
+    self._max_v_for_current_curvature = curvature_to_speed(current_curvature) if current_curvature > 0 else V_CRUISE_MAX * CV.KPH_TO_MS
+    self._lat_acc_overshoot_ahead = (self._max_v_for_current_curvature < self._v_ego)
+    self._v_overshoot = min(self._max_v_for_current_curvature, self._v_cruise_setpoint)
+    # Conservative default distance handling
+    if self._lat_acc_overshoot_ahead:
+      # Default conservative distance handling when vision not good: ensure a reasonable floor
+      default_floor = max(20.0, 2.0 * float(self._overshoot_min_distance))
+      self._v_overshoot_distance = max(getattr(self, '_v_overshoot_distance', default_floor), default_floor)
+    else:
+      self._v_overshoot_distance = getattr(self, '_v_overshoot_distance', 200.0)
+    
   def _state_transition(self):
     """SIMPLIFIED: State machine kept only for UI/logging - doesn't affect activation anymore."""
     # System-level disable conditions
@@ -847,23 +1216,35 @@ class VisionTurnController:
     # Compute acceleration command
     accel_cmd = (raw_target - self._prev_target_speed) / dt
 
-    # ===== APPLY EMERGENCY ESCALATION SYSTEM =====
+    # ===== APPLY ADAPTIVE DECELERATION SYSTEM =====
     # Check if deceleration is required
     if accel_cmd < 0:
-        # Use emergency escalation system for deceleration limiting
+        # For curve scenarios, use physics-based calculation if needed
+        if self._lat_acc_overshoot_ahead:
+            remaining_distance = self._v_overshoot_distance
+            physics_required_decel = self._calculate_required_deceleration(
+                self._v_ego, self._v_overshoot, remaining_distance)
+            # Use the more conservative (more negative) of commanded or physics-required decel
+            accel_cmd = min(accel_cmd, physics_required_decel)
+        
+        # Apply adaptive deceleration system with noise filtering
         accel_cmd = self._get_optimal_deceleration(accel_cmd, dt)
 
-        # Check for intervention requirement
+        # Monitor adaptive deceleration performance
         remaining_distance = self._v_overshoot_distance if self._lat_acc_overshoot_ahead else 100.0
-        self._check_intervention_required(accel_cmd, remaining_distance)
+        self._monitor_adaptive_deceleration(accel_cmd, remaining_distance)
     else:
         # For acceleration, use normal limits
         pos_limit = self._max_accel
         accel_cmd = min(accel_cmd, pos_limit)
 
-        # Reset emergency state during acceleration
-        self._emergency_level = EmergencyLevel.NORMAL
+        # Gradually decay filter during acceleration instead of hard reset
+        # This preserves filter memory for smoother transitions
         self._current_decel = 0.0
+        self._filtered_decel_requirement *= 0.95  # Decay filter by 5% per update
+        # Only reset hysteresis state when filter is nearly zero
+        if abs(self._filtered_decel_requirement) < 0.1:
+            self._decel_hysteresis_state = False
 
     # Jerk-limit the change in acceleration
     accel_diff = accel_cmd - self._current_accel
@@ -922,14 +1303,12 @@ class VisionTurnController:
     lateral_accel = abs(self._current_lat_acc)  # Already calculated as curvature * v_ego^2
 
     # Smooth boost factor using sigmoid to avoid hard switching
-    # Industry standard: 2.0 m/s² indicates real curve (not just road crown)
-    boost_center = 2.0  # m/s² - curve detection threshold
-    boost_width = 0.5   # m/s² - transition smoothness
+    boost_center = float(self._apex_boost_center)
+    boost_width = max(1e-3, float(self._apex_boost_width))
+    boost_amp = max(0.0, float(self._apex_boost_factor))
 
-    # Sigmoid function: smoothly transitions from 1.0 to 1.1 based on lateral acceleration
-    # On straights (lat_accel ≈ 0): boost_factor ≈ 1.0
-    # In real curves (lat_accel > 2.5): boost_factor ≈ 1.1
-    boost_factor = 1.0 + 0.1 / (1 + np.exp(-(lateral_accel - boost_center) / boost_width))
+    # Sigmoid function: smoothly transitions based on lateral acceleration
+    boost_factor = 1.0 + boost_amp / (1 + np.exp(-(lateral_accel - boost_center) / boost_width))
 
     # IMPROVED APEX DETECTION: Use actual geometric apexes, not crude ratio
     is_past_apex = False
@@ -940,7 +1319,7 @@ class VisionTurnController:
       # Vehicle is always at index 0, apexes are ahead in trajectory
       # Estimate meters per index based on typical trajectory spacing (about 1-2m)
       # T_IDXS gives us time stamps, convert to distance using current speed
-      meters_per_index = 2.0  # Approximate spacing between trajectory points
+      meters_per_index = float(self._apex_meters_per_index)
 
       # Find the nearest apex
       nearest_apex_idx = self._apex_indices[0]
@@ -953,29 +1332,29 @@ class VisionTurnController:
       current_time = time.time()
 
       # Simple heuristic: if apex is in first few indices, we're very close or past it
-      if nearest_apex_idx < 3:  # Apex is within ~6 meters
+      if nearest_apex_idx < int(self._apex_near_index):
         # Check hysteresis - don't re-trigger same apex within 2 seconds
-        if current_time - self._last_apex_passed_time > 2.0:
+        if current_time - self._last_apex_passed_time > float(self._apex_hysteresis_time):
           is_past_apex = True
           self._last_apex_passed_time = current_time
-          self._distance_past_apex = (3 - nearest_apex_idx) * meters_per_index
+          self._distance_past_apex = (int(self._apex_near_index) - nearest_apex_idx) * meters_per_index
         else:
           # Still in boost window from previous detection
           is_past_apex = True
           self._distance_past_apex += self._v_ego * 0.05  # Update distance (20Hz update rate)
 
       # Apply boost if we're 0-50m past apex and in a real curve
-      if is_past_apex and self._distance_past_apex < self._apex_boost_distance:
+      if is_past_apex and self._distance_past_apex < float(self._apex_boost_distance):
         apply_boost = True
 
-    if apply_boost and lateral_accel > 1.0:  # Only boost if actually in a curve
+    if apply_boost and lateral_accel > float(self._apex_boost_min_lat_accel):  # Only boost if actually in a curve
       # Apply physics-based boost for acceleration out of apex
       # This creates the desired "kick" feeling without referencing cruise setpoint
-      target_speed = base_target * boost_factor  # Will be 1.0-1.1x based on lateral accel
+      target_speed = base_target * boost_factor
 
       # Clamp to reasonable physics limits, NOT cruise setpoint
       # Allow speed to naturally reach what physics permits
-      max_physics_speed = curvature_to_speed(self._filtered_curvature * 0.7)  # 30% safety margin
+      max_physics_speed = curvature_to_speed(self._filtered_curvature * float(self._boost_safety_curvature_scale))
       target_speed = clip(target_speed, _MIN_V, max_physics_speed)
 
       # Clear deceleration state when past apex
@@ -995,7 +1374,7 @@ class VisionTurnController:
       if self._is_decelerating_for_curve and self._v_ego > base_target + 0.5:
         # Apply slightly more aggressive deceleration to reach target early
         # This ensures we hit the target speed before the apex
-        reduction_factor = 0.95  # Reduce target by 5% to decelerate faster
+        reduction_factor = clip(float(self._anticipation_target_reduction), 0.9, 1.0)
         target_speed = base_target * reduction_factor
 
       target_speed = clip(target_speed, _MIN_V, self._v_cruise_setpoint)
