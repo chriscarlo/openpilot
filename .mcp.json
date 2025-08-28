@@ -1,3 +1,20 @@
 {
-  "mcpServers": {}
+  "mcpServers": {
+    "puppeteer": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-puppeteer"]
+    },
+    "zen": {
+      "command": "./zen-mcp-server/.zen_venv/bin/python",
+      "args": ["./zen-mcp-server/server.py"]
+    },
+    "serena": {
+      "command": "uvx",
+      "args": ["--from", "git+https://github.com/oraios/serena", "serena-mcp-server", "--context", "desktop-app", "--project", "."]
+    },
+    "context7": {
+      "command": "npx",
+      "args": ["-y", "@upstash/context7-mcp"]
+    }
+  }
 }
