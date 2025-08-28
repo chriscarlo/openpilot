@@ -573,6 +573,47 @@ void AnticipationConfigPanel::setupUI() {
   content_layout->addWidget(data_panel);
   
   main_layout->addWidget(content);
+
+  // Fixed lead time editor (exact seconds before apex)
+  ButtonControlSP *fixedLeadControl = new ButtonControlSP(tr("Fixed Lead Time (seconds)"), tr("Edit"));
+  fixedLeadControl->setDescription(tr("Set exact seconds before curve apex. 0 = Automatic (uses speed/curve)."));
+
+  auto updateFixedLeadLabel = [fixedLeadControl]() {
+    Params p;
+    std::string cur = p.get("VisionTurnSpeedControlFixedLeadTimeSeconds");
+    float secs = 0.0f;
+    if (!cur.empty()) {
+      try { secs = std::stof(cur); } catch (...) { secs = 0.0f; }
+    }
+    if (secs <= 0.0f) {
+      fixedLeadControl->setValue(QObject::tr("Automatic"));
+    } else {
+      fixedLeadControl->setValue(QString("%1 s").arg(secs, 0, 'f', 1));
+    }
+    fixedLeadControl->showDescription();
+  };
+
+  updateFixedLeadLabel();
+
+  QObject::connect(fixedLeadControl, &ButtonControlSP::clicked, this, [updateFixedLeadLabel]() {
+    Params p;
+    std::string cur = p.get("VisionTurnSpeedControlFixedLeadTimeSeconds");
+    QString cur_q = QString::fromStdString(cur.empty() ? std::string("0.0") : cur);
+    QString new_value = InputDialog::getText(QObject::tr("Fixed Lead Time (seconds)"), nullptr,
+      QObject::tr("Enter seconds (0.0–10.0)\n0 = Automatic timing"), false, -1, cur_q);
+    if (!new_value.isEmpty()) {
+      bool ok = false;
+      float value = new_value.toFloat(&ok);
+      if (ok && value >= 0.0f && value <= 10.0f) {
+        p.put("VisionTurnSpeedControlFixedLeadTimeSeconds", QString::number(value, 'f', 2).toStdString());
+        updateFixedLeadLabel();
+      } else {
+        ConfirmationDialog(QObject::tr("Value must be between 0.0 and 10.0"), QObject::tr("OK"), "", false, nullptr).exec();
+      }
+    }
+  });
+
+  main_layout->addWidget(fixedLeadControl);
   
   // Connect road widget to data panel
   connect(road_widget, &ProfessionalRoadWidget::aggressivenessChanged,

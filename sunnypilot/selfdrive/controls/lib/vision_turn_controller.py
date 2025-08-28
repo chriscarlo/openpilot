@@ -365,6 +365,19 @@ class VisionTurnController:
     except (ValueError, TypeError, AttributeError):
       aggressiveness_val = 1.0
     self._aggressiveness = clip(aggressiveness_val, 0.5, 2.0)
+
+    # Optional fixed lead time override (seconds). 0.0 = disabled
+    fixed_lead_time_bytes = self._params.get("VisionTurnSpeedControlFixedLeadTimeSeconds")
+    try:
+      if fixed_lead_time_bytes:
+        fixed_lead_time_str = fixed_lead_time_bytes.decode('utf-8') if isinstance(fixed_lead_time_bytes, bytes) else fixed_lead_time_bytes
+        fixed_lead_time_val = float(fixed_lead_time_str)
+      else:
+        fixed_lead_time_val = 0.0
+    except (ValueError, TypeError, AttributeError):
+      fixed_lead_time_val = 0.0
+    # Clip to a sane range
+    self._fixed_lead_time_s = clip(fixed_lead_time_val, 0.0, 10.0)
     self._last_params_update = 0.
     self._v_cruise_setpoint = 0.
     self._v_ego = 0.
@@ -538,6 +551,18 @@ class VisionTurnController:
       except (ValueError, TypeError, AttributeError):
         aggressiveness_val = 1.0
       self._aggressiveness = clip(aggressiveness_val, 0.5, 2.0)
+
+      # Update fixed lead time override
+      fixed_lead_time_bytes = self._params.get("VisionTurnSpeedControlFixedLeadTimeSeconds")
+      try:
+        if fixed_lead_time_bytes:
+          fixed_lead_time_str = fixed_lead_time_bytes.decode('utf-8') if isinstance(fixed_lead_time_bytes, bytes) else fixed_lead_time_bytes
+          fixed_lead_time_val = float(fixed_lead_time_str)
+        else:
+          fixed_lead_time_val = 0.0
+      except (ValueError, TypeError, AttributeError):
+        fixed_lead_time_val = 0.0
+      self._fixed_lead_time_s = clip(fixed_lead_time_val, 0.0, 10.0)
       self._last_params_update = tm
 
   def _determine_emergency_level(self, required_decel: float, current_time: float) -> EmergencyLevel:
@@ -765,6 +790,10 @@ class VisionTurnController:
               max_pred_curvature * self._v_ego**2,
               self._aggressiveness
           )
+
+          # Optional override: use fixed lead time in seconds if configured (> 0)
+          if getattr(self, '_fixed_lead_time_s', 0.0) > 0.0:
+            anticipation_time = clip(self._fixed_lead_time_s, 0.1, 10.0)
 
           # Adjust the overshoot distance to start deceleration earlier
           # This makes us reach target speed BEFORE the apex
