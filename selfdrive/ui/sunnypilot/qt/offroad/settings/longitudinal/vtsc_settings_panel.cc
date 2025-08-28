@@ -6,29 +6,31 @@
  */
 
 #include "selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/vtsc_settings_panel.h"
+#include "selfdrive/ui/sunnypilot/qt/widgets/scrollview.h"
 #include <QVBoxLayout>
 
 VTSCIconButton::VTSCIconButton(const QString &icon_path, const QString &text, QWidget *parent)
   : QPushButton(parent) {
-  
-  setFixedSize(200, 200);
+  // Compact tile size to reduce perceived gaps
+  setFixedSize(160, 160);
   setObjectName("vtsc_icon_button");
   
   QVBoxLayout *layout = new QVBoxLayout(this);
   layout->setAlignment(Qt::AlignCenter);
-  layout->setSpacing(10);
+  layout->setSpacing(4);
+  layout->setContentsMargins(0, 0, 0, 0);
   
   // Icon label (using emoji for now)
   QLabel *icon_label = new QLabel(this);
   icon_label->setText(icon_path);  // This will be an emoji
   icon_label->setAlignment(Qt::AlignCenter);
-  icon_label->setStyleSheet("font-size: 60px;");
+  icon_label->setStyleSheet("font-size: 48px;");
   
   // Text label
   QLabel *text_label = new QLabel(text, this);
   text_label->setAlignment(Qt::AlignCenter);
   text_label->setWordWrap(true);
-  text_label->setStyleSheet("font-size: 24px; color: #FFFFFF;");
+  text_label->setStyleSheet("font-size: 20px; color: #FFFFFF;");
   
   layout->addWidget(icon_label);
   layout->addWidget(text_label);
@@ -69,53 +71,48 @@ VTSCSettingsPanel::VTSCSettingsPanel(QWidget *parent) : QFrame(parent) {
   )");
   
   main_layout = new QStackedLayout(this);
+  main_layout->setContentsMargins(0, 0, 0, 0);
+  main_layout->setSpacing(0);
   setupUI();
 }
 
 void VTSCSettingsPanel::setupUI() {
-  icon_grid_screen = new QWidget(this);
-  QVBoxLayout *main_vlayout = new QVBoxLayout(icon_grid_screen);
-  main_vlayout->setContentsMargins(50, 30, 50, 30);
-  
+  // Offroad panels use ScrollViewSP + ListWidgetSP; mirror that to avoid panel-sized gaps
+  auto *list = new ListWidgetSP(this, false);
+  auto *scroll = new ScrollViewSP(list, this);
+  main_layout->addWidget(scroll);
+
   // Header with back button and title
-  QHBoxLayout *header_layout = new QHBoxLayout();
-  
-  back_btn = new QPushButton("◀", this);
+  QWidget *header = new QWidget(this);
+  QHBoxLayout *header_layout = new QHBoxLayout(header);
+  header_layout->setContentsMargins(16, 8, 16, 8);
+  header_layout->setSpacing(12);
+
+  back_btn = new QPushButton("◀", header);
   back_btn->setObjectName("back_btn");
   back_btn->setFixedSize(90, 90);
   connect(back_btn, &QPushButton::clicked, this, &VTSCSettingsPanel::backPress);
-  
-  QLabel *title = new QLabel(tr("Vision Turn Speed Control Settings"));
+
+  QLabel *title = new QLabel(tr("Vision Turn Speed Control Settings"), header);
   title->setStyleSheet("font-size: 48px; font-weight: 600; color: #FFFFFF;");
   title->setAlignment(Qt::AlignCenter);
-  
   header_layout->addWidget(back_btn);
   header_layout->addWidget(title, 1, Qt::AlignCenter);
-  header_layout->addSpacing(90); // Balance for back button
-  
-  main_vlayout->addLayout(header_layout);
-  main_vlayout->addSpacing(30);
-  
-  // Create centered layout for the grid
-  QHBoxLayout *center_layout = new QHBoxLayout();
-  center_layout->addStretch();  // Add stretch on left to center the grid
-  
-  // Create the icon grid
+
+  list->addItem(header);
+
+  // Icon grid directly under header
   QWidget *grid_container = createIconGrid();
-  center_layout->addWidget(grid_container);
-  
-  center_layout->addStretch();  // Add stretch on right to center the grid
-  
-  main_vlayout->addLayout(center_layout);
-  // Removed addStretch() to eliminate excessive bottom padding that causes unwanted scrolling
-  
-  main_layout->addWidget(icon_grid_screen);
+  list->addItem(grid_container);
 }
 
 QWidget* VTSCSettingsPanel::createIconGrid() {
   QWidget *grid_container = new QWidget();
   QGridLayout *grid_layout = new QGridLayout(grid_container);
-  grid_layout->setSpacing(30);
+  grid_container->setContentsMargins(0, 0, 0, 0);
+  grid_layout->setContentsMargins(0, 0, 0, 0);
+  grid_layout->setHorizontalSpacing(12);
+  grid_layout->setVerticalSpacing(6);
   
   // Create icon buttons
   struct IconInfo {
@@ -125,33 +122,40 @@ QWidget* VTSCSettingsPanel::createIconGrid() {
   };
   
   std::vector<IconInfo> icons = {
-    {"🛣️", tr("Anticipation\nDistance"), true},
-    {"🔧", tr("Placeholder"), false},
-    {"📊", tr("Placeholder"), false},
-    {"🎯", tr("Placeholder"), false},
-    {"⚡", tr("Placeholder"), false},
-    {"🔍", tr("Placeholder"), false},
-    {"📐", tr("Placeholder"), false},
-    {"🚦", tr("Placeholder"), false},
-    {"🏁", tr("Placeholder"), false},
+    {"🧭", tr("Driving\nStyle"), true},             // 0
+    {"🛣️", tr("Anticipation\n& Overshoot"), true},   // 1
+    {"🔎", tr("Curve\nDetection"), true},           // 2
+    {"🧪", tr("Adaptive\nFiltering"), true},        // 3
+    {"🎚️", tr("Smoothing\nLimits"), true},          // 4
+    {"🏁", tr("Apex &\nExit Boost"), true},         // 5
+    {"👁️", tr("Vision\nOcclusion"), true},         // 6
+    {"🚦", tr("Limits"), true},                      // 7
+    {"📐", tr("Curve\nPhysics"), true},             // 8 (Advanced)
+    {"⚙️", tr("Physics\nInternals"), true},        // 9 (Advanced)
   };
   
   int row = 0, col = 0;
+  const int columns = 5;  // target 5-wide grid for tighter layout
   for (size_t i = 0; i < icons.size(); ++i) {
     VTSCIconButton *btn = new VTSCIconButton(icons[i].emoji, icons[i].text, grid_container);
     btn->setEnabled(icons[i].enabled);
     
-    if (i == 0) {  // Anticipation Distance button
-      connect(btn, &VTSCIconButton::buttonClicked, this, &VTSCSettingsPanel::anticipationSettingsClicked);
+    switch (i) {
+      case 0: connect(btn, &VTSCIconButton::buttonClicked, this, &VTSCSettingsPanel::drivingStyleClicked); break;
+      case 1: connect(btn, &VTSCIconButton::buttonClicked, this, &VTSCSettingsPanel::anticipationSettingsClicked); break;
+      case 2: connect(btn, &VTSCIconButton::buttonClicked, this, &VTSCSettingsPanel::curveDetectionClicked); break;
+      case 3: connect(btn, &VTSCIconButton::buttonClicked, this, &VTSCSettingsPanel::adaptiveFilteringClicked); break;
+      case 4: connect(btn, &VTSCIconButton::buttonClicked, this, &VTSCSettingsPanel::smoothingLimitsClicked); break;
+      case 5: connect(btn, &VTSCIconButton::buttonClicked, this, &VTSCSettingsPanel::apexBoostClicked); break;
+      case 6: connect(btn, &VTSCIconButton::buttonClicked, this, &VTSCSettingsPanel::visionOcclusionClicked); break;
+      case 7: connect(btn, &VTSCIconButton::buttonClicked, this, &VTSCSettingsPanel::limitsClicked); break;
+      case 8: connect(btn, &VTSCIconButton::buttonClicked, this, &VTSCSettingsPanel::physicsClicked); break;
+      case 9: connect(btn, &VTSCIconButton::buttonClicked, this, &VTSCSettingsPanel::physicsInternalsClicked); break;
     }
     
-    grid_layout->addWidget(btn, row, col);
-    
+    grid_layout->addWidget(btn, row, col, Qt::AlignTop);
     col++;
-    if (col >= 3) {  // 3 columns
-      col = 0;
-      row++;
-    }
+    if (col >= columns) { col = 0; row++; }
   }
   
   return grid_container;

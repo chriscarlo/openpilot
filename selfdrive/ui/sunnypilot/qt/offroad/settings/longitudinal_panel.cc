@@ -127,21 +127,88 @@ LongitudinalPanel::LongitudinalPanel(QWidget *parent) : QWidget(parent) {
     main_layout->setCurrentWidget(cruisePanelScreen);
   });
   
-  // Create VTSC settings screens
+  // Create VTSC settings hub and subpanels
   vtscSettingsScreen = new VTSCSettingsPanel(this);
   connect(vtscSettingsScreen, &VTSCSettingsPanel::backPress, [=]() {
     cruisePanelScroller->restoreScrollPosition();
     main_layout->setCurrentWidget(cruisePanelScreen);
   });
   
-  anticipationDistanceScreen = new AnticipationConfigPanel(this);
-  connect(anticipationDistanceScreen, &AnticipationConfigPanel::backPress, [=]() {
+  anticipationDistanceScreen = new VTSCAnticipationPanel(this);
+  connect(anticipationDistanceScreen, &VTSCAnticipationPanel::backPress, [=]() {
     main_layout->setCurrentWidget(vtscSettingsScreen);
   });
-  
-  // Connect VTSC settings panel to anticipation distance screen
+
+  // Create VTSC subpanels
+  drivingStyleScreen = new VTSCDrivingStylePanel(this);
+  adaptiveFilteringScreen = new VTSCAdaptiveFilteringPanel(this);
+  smoothingLimitsScreen = new VTSCSmoothingLimitsPanel(this);
+  apexBoostScreen = new VTSCApexBoostPanel(this);
+  visionOcclusionScreen = new VTSCVisionOcclusionPanel(this);
+  limitsScreen = new VTSCLimitsPanel(this);
+  physicsScreen = new VTSCPhysicsPanel(this);
+  curveDetectionScreen = new VTSCCurveDetectionPanel(this);
+  physicsInternalsScreen = new VTSCPhysicsInternalsPanel(this);
+
+  // Wire VTSC menu to subpanels
   connect(vtscSettingsScreen, &VTSCSettingsPanel::anticipationSettingsClicked, [=]() {
     main_layout->setCurrentWidget(anticipationDistanceScreen);
+  });
+  connect(vtscSettingsScreen, &VTSCSettingsPanel::drivingStyleClicked, [=]() {
+    main_layout->setCurrentWidget(drivingStyleScreen);
+  });
+  connect(vtscSettingsScreen, &VTSCSettingsPanel::curveDetectionClicked, [=]() {
+    main_layout->setCurrentWidget(curveDetectionScreen);
+  });
+  connect(vtscSettingsScreen, &VTSCSettingsPanel::adaptiveFilteringClicked, [=]() {
+    main_layout->setCurrentWidget(adaptiveFilteringScreen);
+  });
+  connect(vtscSettingsScreen, &VTSCSettingsPanel::smoothingLimitsClicked, [=]() {
+    main_layout->setCurrentWidget(smoothingLimitsScreen);
+  });
+  connect(vtscSettingsScreen, &VTSCSettingsPanel::apexBoostClicked, [=]() {
+    main_layout->setCurrentWidget(apexBoostScreen);
+  });
+  connect(vtscSettingsScreen, &VTSCSettingsPanel::visionOcclusionClicked, [=]() {
+    main_layout->setCurrentWidget(visionOcclusionScreen);
+  });
+  connect(vtscSettingsScreen, &VTSCSettingsPanel::limitsClicked, [=]() {
+    main_layout->setCurrentWidget(limitsScreen);
+  });
+  connect(vtscSettingsScreen, &VTSCSettingsPanel::physicsClicked, [=]() {
+    main_layout->setCurrentWidget(physicsScreen);
+  });
+  connect(vtscSettingsScreen, &VTSCSettingsPanel::physicsInternalsClicked, [=]() {
+    main_layout->setCurrentWidget(physicsInternalsScreen);
+  });
+
+  // Back handlers for all VTSC subpanels (after instantiation)
+  connect(drivingStyleScreen, &VTSCDrivingStylePanel::backPress, [=]() {
+    main_layout->setCurrentWidget(vtscSettingsScreen);
+  });
+  connect(adaptiveFilteringScreen, &VTSCAdaptiveFilteringPanel::backPress, [=]() {
+    main_layout->setCurrentWidget(vtscSettingsScreen);
+  });
+  connect(smoothingLimitsScreen, &VTSCSmoothingLimitsPanel::backPress, [=]() {
+    main_layout->setCurrentWidget(vtscSettingsScreen);
+  });
+  connect(apexBoostScreen, &VTSCApexBoostPanel::backPress, [=]() {
+    main_layout->setCurrentWidget(vtscSettingsScreen);
+  });
+  connect(visionOcclusionScreen, &VTSCVisionOcclusionPanel::backPress, [=]() {
+    main_layout->setCurrentWidget(vtscSettingsScreen);
+  });
+  connect(limitsScreen, &VTSCLimitsPanel::backPress, [=]() {
+    main_layout->setCurrentWidget(vtscSettingsScreen);
+  });
+  connect(physicsScreen, &VTSCPhysicsPanel::backPress, [=]() {
+    main_layout->setCurrentWidget(vtscSettingsScreen);
+  });
+  connect(curveDetectionScreen, &VTSCCurveDetectionPanel::backPress, [=]() {
+    main_layout->setCurrentWidget(vtscSettingsScreen);
+  });
+  connect(physicsInternalsScreen, &VTSCPhysicsInternalsPanel::backPress, [=]() {
+    main_layout->setCurrentWidget(vtscSettingsScreen);
   });
 
   main_layout->addWidget(cruisePanelScreen);
@@ -150,6 +217,15 @@ LongitudinalPanel::LongitudinalPanel(QWidget *parent) : QWidget(parent) {
   main_layout->addWidget(decScreen);
   main_layout->addWidget(vtscSettingsScreen);
   main_layout->addWidget(anticipationDistanceScreen);
+  main_layout->addWidget(drivingStyleScreen);
+  main_layout->addWidget(adaptiveFilteringScreen);
+  main_layout->addWidget(smoothingLimitsScreen);
+  main_layout->addWidget(apexBoostScreen);
+  main_layout->addWidget(visionOcclusionScreen);
+  main_layout->addWidget(limitsScreen);
+  main_layout->addWidget(physicsScreen);
+  main_layout->addWidget(curveDetectionScreen);
+  main_layout->addWidget(physicsInternalsScreen);
   main_layout->setCurrentWidget(cruisePanelScreen);
   
   // Call refresh after all controls are initialized to avoid null pointer dereference

@@ -15,7 +15,16 @@
 #include "selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/dec_control.h"
 #include "selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/vision_turn_control_with_settings.h"
 #include "selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/vtsc_settings_panel.h"
-#include "selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/road_visualization_widget_v2.h"
+#include "selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/vtsc_anticipation_panel.h"
+#include "selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/vtsc_driving_style_panel.h"
+#include "selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/vtsc_adaptive_filtering_panel.h"
+#include "selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/vtsc_smoothing_limits_panel.h"
+#include "selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/vtsc_apex_boost_panel.h"
+#include "selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/vtsc_vision_occlusion_panel.h"
+#include "selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/vtsc_limits_panel.h"
+#include "selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/vtsc_physics_panel.h"
+#include "selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/vtsc_curve_detection_panel.h"
+#include "selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/vtsc_physics_internals_panel.h"
 #include "selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/rti_control.h"
 #include "selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/rti_settings_panel.h"
 #include "selfdrive/ui/sunnypilot/qt/offroad/settings/settings.h"
@@ -46,7 +55,16 @@ private:
   DecControl *decControl;
   VisionTurnControlWithSettings *visionTurnSpeedControl = nullptr;
   VTSCSettingsPanel *vtscSettingsScreen = nullptr;
-  AnticipationConfigPanel *anticipationDistanceScreen = nullptr;
+  VTSCAnticipationPanel *anticipationDistanceScreen = nullptr;
+  VTSCDrivingStylePanel *drivingStyleScreen = nullptr;
+  VTSCAdaptiveFilteringPanel *adaptiveFilteringScreen = nullptr;
+  VTSCSmoothingLimitsPanel *smoothingLimitsScreen = nullptr;
+  VTSCApexBoostPanel *apexBoostScreen = nullptr;
+  VTSCVisionOcclusionPanel *visionOcclusionScreen = nullptr;
+  VTSCLimitsPanel *limitsScreen = nullptr;
+  VTSCPhysicsPanel *physicsScreen = nullptr;
+  VTSCCurveDetectionPanel *curveDetectionScreen = nullptr;
+  VTSCPhysicsInternalsPanel *physicsInternalsScreen = nullptr;
 
   ParamControlSP *vibePersonalityControl;
   ParamControlSP *vibeAccelPersonalityControl;

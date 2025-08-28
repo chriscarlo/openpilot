@@ -35,6 +35,15 @@ public:
 signals:
   void backPress();
   void anticipationSettingsClicked();
+  void curveDetectionClicked();
+  void drivingStyleClicked();
+  void adaptiveFilteringClicked();
+  void smoothingLimitsClicked();
+  void apexBoostClicked();
+  void visionOcclusionClicked();
+  void limitsClicked();
+  void physicsClicked();
+  void physicsInternalsClicked();
   
 private:
   void setupUI();

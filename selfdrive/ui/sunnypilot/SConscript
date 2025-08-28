@@ -75,7 +75,16 @@ longitudinal_panel_qt_src = [
   "sunnypilot/qt/offroad/settings/longitudinal/slc/speed_limit_control_warning.cc",
   "sunnypilot/qt/offroad/settings/longitudinal/vision_turn_control_with_settings.cc",
   "sunnypilot/qt/offroad/settings/longitudinal/vtsc_settings_panel.cc",
-  "sunnypilot/qt/offroad/settings/longitudinal/road_visualization_widget_v2.cc",
+  "sunnypilot/qt/offroad/settings/longitudinal/vtsc_anticipation_panel.cc",
+  "sunnypilot/qt/offroad/settings/longitudinal/vtsc_driving_style_panel.cc",
+  "sunnypilot/qt/offroad/settings/longitudinal/vtsc_adaptive_filtering_panel.cc",
+  "sunnypilot/qt/offroad/settings/longitudinal/vtsc_smoothing_limits_panel.cc",
+  "sunnypilot/qt/offroad/settings/longitudinal/vtsc_apex_boost_panel.cc",
+  "sunnypilot/qt/offroad/settings/longitudinal/vtsc_vision_occlusion_panel.cc",
+  "sunnypilot/qt/offroad/settings/longitudinal/vtsc_limits_panel.cc",
+  "sunnypilot/qt/offroad/settings/longitudinal/vtsc_physics_panel.cc",
+  "sunnypilot/qt/offroad/settings/longitudinal/vtsc_curve_detection_panel.cc",
+  "sunnypilot/qt/offroad/settings/longitudinal/vtsc_physics_internals_panel.cc",
 ]
 
 vehicle_panel_qt_src = [
