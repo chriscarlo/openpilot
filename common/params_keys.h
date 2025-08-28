@@ -162,7 +162,11 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"RainbowMode", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"ShowAdvancedControls", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"VisionTurnSpeedControl", {PERSISTENT | BACKUP, BOOL, "0"}},
-    {"VisionTurnSpeedControlAggressiveness", {PERSISTENT | BACKUP, INT, "1"}},
+    // Default higher aggressiveness so VTSC begins slowing earlier by default
+    // 2.0 yields roughly double anticipation vs 1.0 and targets ~4s+ at typical speeds
+    {"VisionTurnSpeedControlAggressiveness", {PERSISTENT | BACKUP, INT, "2"}},
+    // Optional fixed lead time override in seconds (0 = disabled, use automatic timing)
+    {"VisionTurnSpeedControlFixedLeadTimeSeconds", {PERSISTENT | BACKUP, FLOAT, "0.0"}},
     {"VibePersonalityEnabled", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"VibeAccelPersonalityEnabled", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"VibeFollowPersonalityEnabled", {PERSISTENT | BACKUP, BOOL, "0"}},
