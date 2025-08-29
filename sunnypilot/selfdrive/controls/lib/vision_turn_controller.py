@@ -39,7 +39,13 @@ CONF_BAD_TH = 0.70     # Threshold to leave good vision
 
 @dataclass
 class VisionOcclusionState:
-    """Smoothed confidence + hold last curvature while vision is not good."""
+    """Smoothed confidence with monotonic-decay occlusion handling.
+
+    Behavior while occluded (vision_good == False):
+    - Pre-apex trend (tightening): grow curvature conservatively with distance using gamma_per_m.
+    - Post-apex trend (easing): bounded decay toward a fraction of entry curvature to avoid crawl.
+    Always maintains monotonic speed by blocking positive acceleration (enforced upstream).
+    """
     last_valid_curvature: float = 0.0
     smoothed_confidence: float = 1.0
     vision_good: bool = True
@@ -47,22 +53,79 @@ class VisionOcclusionState:
     alpha: float = CONF_ALPHA
     good_threshold: float = CONF_GOOD_TH
     bad_threshold: float = CONF_BAD_TH
+    # Monotonic occlusion model state
+    prev_curvature_good: float = 0.0
+    occluded_since_time: float = 0.0
+    entry_curvature: float = 0.0
+    est_curvature: float = 0.0
+    trend_sign: int = 0
+    last_time: float = 0.0
+    distance_since_m: float = 0.0
+    mode_monotonic: bool = True
+    gamma_per_m: float = 1e-4
+    decay_tau_s: float = 0.6
+    min_frac: float = 0.6
 
-    def update(self, current_curvature: float, vision_confidence: float):
+    def update(self, current_curvature: float, vision_confidence: float, v_ego: float, tm: float):
         # EMA smoothing of confidence
         self.smoothed_confidence = (1.0 - self.alpha) * self.smoothed_confidence + self.alpha * vision_confidence
 
+        # Track time and distance progression
+        dt = 0.0 if self.last_time == 0.0 else max(0.0, tm - self.last_time)
+        self.last_time = tm
+
         if self.vision_good:
             if self.smoothed_confidence < self.bad_threshold:
+                # Enter occlusion
                 self.vision_good = False
+                self.occluded_since_time = tm
+                self.distance_since_m = 0.0
+                # Establish entry curvature from last valid
+                base = self.last_valid_curvature if self.updated_once else current_curvature
+                self.entry_curvature = max(0.0, float(base))
+                self.est_curvature = self.entry_curvature
+                # Determine recent trend sign from last good update
+                dcur = current_curvature - self.prev_curvature_good
+                self.trend_sign = 1 if dcur > 0.0 else (-1 if dcur < 0.0 else 0)
             else:
+                # Stay good: update last valid and remember trend input
                 self.last_valid_curvature = current_curvature
+                self.prev_curvature_good = current_curvature
                 self.updated_once = True
         else:
             if self.smoothed_confidence > self.good_threshold:
+                # Exit occlusion
                 self.vision_good = True
                 self.last_valid_curvature = current_curvature
+                self.prev_curvature_good = current_curvature
                 self.updated_once = True
+                # Reset occlusion model state
+                self.occluded_since_time = 0.0
+                self.distance_since_m = 0.0
+                self.entry_curvature = 0.0
+                self.est_curvature = 0.0
+                self.trend_sign = 0
+            else:
+                # Remain occluded: update distance and estimate curvature under monotonic model
+                self.distance_since_m += v_ego * dt
+                if not self.mode_monotonic:
+                    # Legacy hold
+                    self.est_curvature = self.last_valid_curvature
+                else:
+                    # Two-phase envelope: conservative growth pre-apex, bounded decay post-apex
+                    if self.trend_sign >= 0:
+                        # Growth envelope, limit by gamma per meter
+                        self.est_curvature = max(0.0, self.entry_curvature + self.gamma_per_m * self.distance_since_m)
+                    else:
+                        # Bounded decay toward a floor fraction of entry
+                        if self.entry_curvature <= 0.0:
+                            self.est_curvature = 0.0
+                        else:
+                            floor_val = self.min_frac * self.entry_curvature
+                            # Exponential decay in time
+                            elapsed = max(0.0, tm - self.occluded_since_time)
+                            decay = math.exp(-elapsed / max(1e-3, self.decay_tau_s))
+                            self.est_curvature = max(floor_val, self.entry_curvature * decay)
 
 # ===== ORIGINAL PHYSICS-BASED VTSC CONSTANTS =====
 _MIN_V = 2.24  # Do not operate under 5mph (was 5.6 m/s = 12.5mph)
@@ -379,6 +442,7 @@ class VisionTurnController:
     except (ValueError, TypeError, AttributeError):
       filter_alpha_val = DEFAULT_FILTER_ALPHA
     self._filter_alpha = clip(filter_alpha_val, 0.1, 0.9)
+    self._base_filter_alpha = self._filter_alpha
     
     hysteresis_threshold_bytes = self._params.get("VisionTurnSpeedControlHysteresisThreshold")
     try:
@@ -417,6 +481,9 @@ class VisionTurnController:
 
     # ===== VISION OCCLUSION HANDLING =====
     self._occlusion_state = VisionOcclusionState()
+    # Fast reacquisition window management
+    self._base_filter_alpha = DEFAULT_FILTER_ALPHA
+    self._fast_reacq_until = 0.0
 
     # ===== INTERVENTION DETECTION =====
     self._intervention_required = False
@@ -641,6 +708,8 @@ class VisionTurnController:
       except (ValueError, TypeError, AttributeError):
         safety_bias_val = DEFAULT_SAFETY_BIAS
       self._safety_bias = clip(safety_bias_val, 0.0, 0.5)
+      # Update base alpha each param refresh
+      self._base_filter_alpha = self._filter_alpha
 
       # ===== Curvature EMA factor =====
       ema_bytes = self._params.get("VisionTurnSpeedControlCurvatureEMAFactor")
@@ -924,6 +993,16 @@ class VisionTurnController:
         phys_max_lat = PHYSICS_MAX_LAT_ACCEL
       globals()['PHYSICS_MAX_LAT_ACCEL'] = clip(phys_max_lat, 2.0, 4.0)
 
+      # Ensure cross-key constraint: min <= max
+      try:
+        _min = float(globals().get('PHYSICS_MIN_LAT_ACCEL', 1.8))
+        _max = float(globals().get('PHYSICS_MAX_LAT_ACCEL', 3.12))
+        if _min > _max:
+          # Swap to enforce a valid envelope
+          globals()['PHYSICS_MIN_LAT_ACCEL'], globals()['PHYSICS_MAX_LAT_ACCEL'] = _max, _min
+      except Exception:
+        pass
+
       self._last_params_update = tm
 
   def _calculate_required_deceleration(self, v_current: float, v_target: float, distance: float) -> float:
@@ -996,7 +1075,7 @@ class VisionTurnController:
     return self._current_decel
 
   def _update_vision_occlusion(self, model_data, current_time: float):
-    """Update vision occlusion state and return curvature to use (hold on occlusion)."""
+    """Update vision occlusion state and return curvature to use under monotonic occlusion mode."""
     # Estimate vision confidence
     if model_data is None:
         vision_confidence = 0.0
@@ -1009,11 +1088,19 @@ class VisionTurnController:
     # Candidate current curvature is the filtered curvature we track
     current_curvature = self._filtered_curvature
 
-    # Update simplified occlusion state
-    self._occlusion_state.update(current_curvature, vision_confidence)
+    # Remember vision_good before update to detect reacquisition
+    prev_good = self._occlusion_state.vision_good
 
-    # If vision is good, use current curvature; otherwise, hold last valid
-    return current_curvature if self._occlusion_state.vision_good else self._occlusion_state.last_valid_curvature
+    # Update occlusion state with vehicle speed and time
+    self._occlusion_state.update(current_curvature, vision_confidence, self._v_ego, current_time)
+
+    # On reacquisition, arm a fast filtering window to improve recovery time
+    if (not prev_good) and self._occlusion_state.vision_good:
+      # 0.6s fast window; effective alpha increased later when applied
+      self._fast_reacq_until = time.time() + 0.6
+
+    # If vision is good, use current curvature; otherwise, use estimated curvature under monotonic model
+    return current_curvature if self._occlusion_state.vision_good else self._occlusion_state.est_curvature
 
   def _monitor_adaptive_deceleration(self, required_decel: float, remaining_distance: float) -> bool:
     """Monitor adaptive deceleration system performance and detect extreme scenarios."""
@@ -1203,6 +1290,13 @@ class VisionTurnController:
     """SIMPLIFIED: Always run physics calculations - let longitudinal planner decide usage."""
     dt = 0.05  # 20Hz
 
+    # Apply temporary fast reacquisition filter alpha if armed
+    now = time.time()
+    if now < getattr(self, '_fast_reacq_until', 0.0):
+      self._filter_alpha = max(self._base_filter_alpha, 0.7)
+    else:
+      self._filter_alpha = self._base_filter_alpha
+
     # SIMPLIFIED: Always run advanced planning logic - no activation thresholds
     # On straight roads: will return cruise setpoint, longitudinal planner ignores (other sources lower)
     # On curves: will return physics speed, longitudinal planner uses it (lowest source)
@@ -1216,6 +1310,10 @@ class VisionTurnController:
     # Compute acceleration command
     accel_cmd = (raw_target - self._prev_target_speed) / dt
 
+    # Monotonic-while-occluded invariant: do not allow positive acceleration during occlusion
+    if not self._occlusion_state.vision_good:
+      accel_cmd = min(accel_cmd, 0.0)
+
     # ===== APPLY ADAPTIVE DECELERATION SYSTEM =====
     # Check if deceleration is required
     if accel_cmd < 0:
@@ -1226,7 +1324,11 @@ class VisionTurnController:
                 self._v_ego, self._v_overshoot, remaining_distance)
             # Use the more conservative (more negative) of commanded or physics-required decel
             accel_cmd = min(accel_cmd, physics_required_decel)
-        
+
+        # While occluded, avoid over-braking: cap to comfort decel limit
+        if not self._occlusion_state.vision_good:
+            accel_cmd = max(accel_cmd, self._comfort_decel_limit)
+
         # Apply adaptive deceleration system with noise filtering
         accel_cmd = self._get_optimal_deceleration(accel_cmd, dt)
 
@@ -1371,7 +1473,9 @@ class VisionTurnController:
       target_speed = base_target
 
       # If we're in anticipatory deceleration mode and haven't reached target yet
-      if self._is_decelerating_for_curve and self._v_ego > base_target + 0.5:
+      # Do not apply extra reduction when occluded to avoid over-braking
+      if (self._is_decelerating_for_curve and self._v_ego > base_target + 0.5
+          and self._occlusion_state.vision_good):
         # Apply slightly more aggressive deceleration to reach target early
         # This ensures we hit the target speed before the apex
         reduction_factor = clip(float(self._anticipation_target_reduction), 0.9, 1.0)

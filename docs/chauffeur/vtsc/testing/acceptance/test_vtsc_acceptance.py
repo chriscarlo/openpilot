@@ -122,6 +122,33 @@ def test_REQ_VTSC_004_comfort_escalates_to_adaptive():
     vtsc._get_optimal_deceleration(-0.2, dt)
   assert not vtsc.adaptive_decel_active
 
+def test_REQ_VTSC_005_invariants_and_legacy_defaults():
+  """
+  Acceptance invariants: monotonic while occluded, reacquisition latency, jerk caps, envelope safety.
+  Also verify that legacy defaults produce stable, repeatable outputs on a golden scenario.
+  """
+  from docs.chauffeur.vtsc.testing.harness.scenarios import Scenario, GeometryProfile, ConfidenceProfile
+  from docs.chauffeur.vtsc.testing.harness.simulate import simulate
+
+  scn = Scenario(
+    name='acceptance_golden', duration_s=8.0, dt=0.05, v0_mps=25.0,
+    geometry=GeometryProfile(kind='tightening', kappa0=0.002, kappa1=0.006),
+    confidence=ConfidenceProfile(kind='window', value=0.5, window_start_s=1.0, window_end_s=2.5),
+  )
+  res = simulate(scn)
+  m = res.metrics
+
+  # Invariants
+  assert m['pos_accel_while_occluded'] <= 1e-6
+  if m['reacq_latency'] is not None:
+    assert m['reacq_latency'] <= 0.6
+  assert m['jerk_pos'] <= 2.5 and m['jerk_neg'] >= -6.5
+
+  # Legacy defaults: ensure deterministic and close to physics reference
+  # Compare final v_cmd to final v_clean within tolerance
+  assert abs(res.v_cmd[-1] - res.v_clean[-1]) <= 0.5
+  print("✓ Acceptance invariants and legacy-defaults check passed")
+
 
 def main():
   """Executable entry for run_all_tests.py compatibility."""

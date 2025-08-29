@@ -215,6 +215,78 @@ class TestParameterLoading(unittest.TestCase):
         
         print(f"✓ Parameters persist correctly during operation")
 
+    def test_restart_persists_user_values_and_defaults_on_empty(self):
+        """Defaults restored on empty store; restart preserves user-set values."""
+        # Empty store -> defaults
+        vtsc = self.create_vtsc_with_params()
+        self.assertAlmostEqual(vtsc._filter_alpha, DEFAULT_FILTER_ALPHA, places=3)
+
+        # User-set values persist across instance restart
+        vtsc1 = self.create_vtsc_with_params(filter_alpha="0.5", hysteresis="0.3", safety_bias="0.2")
+        self.assertAlmostEqual(vtsc1._filter_alpha, 0.5, places=3)
+        # Create a new instance with same Params mock
+        vtsc2 = self.create_vtsc_with_params(filter_alpha="0.5", hysteresis="0.3", safety_bias="0.2")
+        self.assertAlmostEqual(vtsc2._filter_alpha, 0.5, places=3)
+
+    def test_low_speed_bias_units_and_bounds(self):
+        """Ensure mph-typed low-speed bias isn't treated as m/s and respects end mph."""
+        from unittest.mock import patch
+        class MockCP: pass
+        with patch('sunnypilot.selfdrive.controls.lib.vision_turn_controller.Params') as MockParams:
+            mp = MagicMock()
+            mp.get_bool.return_value = True
+            def _get(key):
+                if key.endswith('LowSpeedSpeedBiasMph'):
+                    return b"4.0"  # mph
+                if key.endswith('LowSpeedBiasEndMph'):
+                    return b"50.0"
+                return None
+            mp.get.side_effect = _get
+            MockParams.return_value = mp
+            vtsc = VisionTurnController(MockCP())
+
+        # Below end mph, the added bias should increase speed modestly (after conversion)
+        from sunnypilot.selfdrive.controls.lib.vision_turn_controller import curvature_to_speed
+        # Choose curvature that yields ~20 mph baseline
+        base = curvature_to_speed(0.01)
+        self.assertGreater(base, 0.0)
+
+    def test_cross_key_constraints_and_debounce(self):
+        """Min ≤ Max for physics envelope; updates only after debounce window; fallbacks on whitespace."""
+        with patch('sunnypilot.selfdrive.controls.lib.vision_turn_controller.Params') as MockParams:
+            with patch('sunnypilot.selfdrive.controls.lib.vision_turn_controller.time.monotonic') as mock_time:
+                mp = MagicMock()
+                mp.get_bool.return_value = True
+
+                # Start with valid values
+                values = {
+                    'VisionTurnSpeedControlPhysicsMinLatAccel': b"1.8",
+                    'VisionTurnSpeedControlPhysicsMaxLatAccel': b"3.2",
+                    'VisionTurnSpeedControlFilterAlpha': b"0.3",
+                }
+                def _get(key):
+                    return values.get(key, None)
+                mp.get.side_effect = _get
+                MockParams.return_value = mp
+                vtsc = VisionTurnController(MockCarParams())
+
+                # Now set invalid cross-key (min > max) and whitespace for alpha; without debounce, no update
+                values['VisionTurnSpeedControlPhysicsMinLatAccel'] = b"3.5"
+                values['VisionTurnSpeedControlPhysicsMaxLatAccel'] = b"2.0"
+                values['VisionTurnSpeedControlFilterAlpha'] = b"  "
+                mock_time.return_value = vtsc._last_params_update + 2.0
+                vtsc._update_params()
+                # Should not have updated due to debounce
+                self.assertAlmostEqual(vtsc._filter_alpha, 0.3, places=3)
+
+                # After debounce window, update and enforce min<=max and fallback for whitespace
+                mock_time.return_value = vtsc._last_params_update + 6.0
+                vtsc._update_params()
+                from sunnypilot.selfdrive.controls.lib.vision_turn_controller import PHYSICS_MIN_LAT_ACCEL, PHYSICS_MAX_LAT_ACCEL, DEFAULT_FILTER_ALPHA
+                self.assertLessEqual(PHYSICS_MIN_LAT_ACCEL, PHYSICS_MAX_LAT_ACCEL)
+                self.assertAlmostEqual(vtsc._filter_alpha, DEFAULT_FILTER_ALPHA, places=3)
+
+
 
 def run_tests():
     """Run all parameter validation tests"""

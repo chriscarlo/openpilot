@@ -268,6 +268,44 @@ class TestEMAFiltering(unittest.TestCase):
         print(f"✓ Rapid changes test: Input range={input_range:.1f}, "
               f"Filtered range={output_range:.1f}")
 
+    def test_fast_reacquisition_transient(self):
+        """After vision goes good, temporarily higher alpha should shorten recovery time."""
+        from docs.chauffeur.vtsc.testing.harness.scenarios import Scenario, GeometryProfile, ConfidenceProfile, VTSCParams
+        from docs.chauffeur.vtsc.testing.harness.simulate import simulate
+
+        scn = Scenario(
+            name='fast_reacq', duration_s=6.0, dt=0.05, v0_mps=22.0,
+            geometry=GeometryProfile(kind='constant', kappa0=0.004),
+            confidence=ConfidenceProfile(kind='window', value=0.5, window_start_s=1.0, window_end_s=2.0),
+        )
+        scn.params = VTSCParams(aggressiveness=1.0, alpha=0.3, hysteresis=0.2, safety_bias=0.1)
+
+        # Baseline
+        res_base = simulate(scn)
+        lat_base = res_base.metrics['reacq_latency'] or 1e9
+
+        # With alpha bump on reacquisition
+        res_bump = simulate(scn, alpha_bump_on_reacq=0.7)
+        lat_bump = res_bump.metrics['reacq_latency'] or 1e9
+
+        self.assertLess(lat_bump, lat_base, "Higher alpha on reacq should shorten recovery time")
+        print(f"✓ Fast reacquisition: baseline={lat_base:.3f}s, bump={lat_bump:.3f}s")
+
+    def test_chatter_immunity(self):
+        """Dither confidence near threshold at 2–3 Hz; commanded speed shouldn't limit-cycle >0.5 m/s."""
+        from docs.chauffeur.vtsc.testing.harness.scenarios import Scenario, GeometryProfile, ConfidenceProfile
+        from docs.chauffeur.vtsc.testing.harness.simulate import simulate
+
+        scn = Scenario(
+            name='chatter', duration_s=8.0, dt=0.05, v0_mps=22.0,
+            geometry=GeometryProfile(kind='constant', kappa0=0.004),
+            confidence=ConfidenceProfile(kind='borderline_lpf', low=0.68, high=0.76, freq_hz=2.5),
+        )
+        res = simulate(scn)
+        v = res.v_cmd
+        self.assertLess(np.max(v) - np.min(v), 0.5, "No limit-cycle oscillation >0.5 m/s")
+        print(f"✓ Chatter immunity: v_cmd range={np.max(v) - np.min(v):.3f} m/s")
+
 
 def run_tests():
     """Run all EMA filtering tests"""

@@ -1,0 +1,12 @@
+{
+  "name": "borderline_chatter_medium_turn",
+  "duration_s": 8.0,
+  "dt": 0.05,
+  "v0_mps": 22.0,
+  "geometry": { "kind": "constant", "kappa0": 0.004 },
+  "confidence": { "kind": "borderline_lpf", "low": 0.68, "high": 0.76, "freq_hz": 2.5 },
+  "speed_limit": { "kind": "none", "start_mps": 31.0 },
+  "latency_s": 0.0,
+  "params": { "aggressiveness": 1.0, "alpha": 0.3, "hysteresis": 0.2, "safety_bias": 0.1 }
+}
+

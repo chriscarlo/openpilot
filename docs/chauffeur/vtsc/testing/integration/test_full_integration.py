@@ -288,6 +288,44 @@ class TestFullIntegration(unittest.TestCase):
         
         print(f"Vision good: {vtsc._occlusion_state.vision_good}")
         print(f"Smoothed conf: {vtsc._occlusion_state.smoothed_confidence:.2f}")
+
+    def test_occlusion_subcases_with_metrics(self):
+        """Entry occlusion hovering, late-apex occlusion, and S-curve inflection with hard metrics."""
+        from docs.chauffeur.vtsc.testing.harness.scenarios import Scenario, GeometryProfile, ConfidenceProfile
+        from docs.chauffeur.vtsc.testing.harness.simulate import simulate
+
+        # Entry occlusion before apex with borderline confidence
+        scn_entry = Scenario(
+            name='entry_occ', duration_s=8.0, dt=0.05, v0_mps=25.0,
+            geometry=GeometryProfile(kind='tightening', kappa0=0.002, kappa1=0.006),
+            confidence=ConfidenceProfile(kind='borderline_lpf', low=0.68, high=0.76, freq_hz=2.5),
+        )
+        # Late-apex occlusion easing exit
+        scn_late = Scenario(
+            name='late_apex', duration_s=8.0, dt=0.05, v0_mps=25.0,
+            geometry=GeometryProfile(kind='easing', kappa0=0.002, kappa1=0.006),
+            confidence=ConfidenceProfile(kind='window', value=0.6, window_start_s=3.0, window_end_s=5.0),
+        )
+        # S-curve with short median straight
+        scn_s = Scenario(
+            name='s_curve', duration_s=9.0, dt=0.05, v0_mps=25.0,
+            geometry=GeometryProfile(kind='s_curve', kappa0=0.004, kappa1=0.004, mid_straight_s=10.0),
+            confidence=ConfidenceProfile(kind='borderline_lpf', low=0.68, high=0.76, freq_hz=2.5),
+        )
+
+        for scn in [scn_entry, scn_late, scn_s]:
+            res = simulate(scn)
+            m = res.metrics
+            # No positive acceleration while occluded
+            self.assertLessEqual(m['pos_accel_while_occluded'], 1e-6)
+            # Reacquisition within 0.6s when applicable
+            if m['reacq_latency'] is not None:
+                self.assertLessEqual(m['reacq_latency'], 0.6)
+            # Integrated overslow under budget
+            self.assertLessEqual(m['integrated_overslow'], 1.6)
+            # No overshoot > 0.5 m/s
+            self.assertLessEqual(m['overshoot_on_recovery'], 0.5)
+        print("✓ Occlusion subcases meet invariants")
     
     def test_complete_update_cycle(self):
         """Test complete update cycle with all subsystems"""

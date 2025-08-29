@@ -199,7 +199,50 @@ class TestAdaptiveDeceleration(unittest.TestCase):
         
         self.assertTrue(result, "Should detect challenging scenario")
         print(f"✓ Extreme scenario monitoring test passed")
-    
+
+    def test_occlusion_invariants_and_budget_sweep(self):
+        """Monotonic-while-occluded, overslow budget, and reacquisition latency across param sweep."""
+        from docs.chauffeur.vtsc.testing.harness.scenarios import Scenario, GeometryProfile, ConfidenceProfile, VTSCParams
+        from docs.chauffeur.vtsc.testing.harness.simulate import simulate
+
+        # Medium bend with an occlusion window pre-apex and borderline confidence
+        base_scn = Scenario(
+            name="occlusion_sweep_medium_bend",
+            duration_s=8.0,
+            dt=0.05,
+            v0_mps=25.0,
+            geometry=GeometryProfile(kind='tightening', kappa0=0.002, kappa1=0.006),
+            confidence=ConfidenceProfile(kind='borderline_lpf', low=0.68, high=0.76, freq_hz=2.5),
+        )
+
+        aggr_vals = [1.0, 1.5, 2.0]
+        alpha_vals = [0.2, 0.3, 0.5]
+
+        worst_overslow = 0.0
+        worst_reacq = 0.0
+        worst_pos_accel_occ = 0.0
+
+        for aggr in aggr_vals:
+            for alpha in alpha_vals:
+                scn = base_scn
+                scn.params = VTSCParams(aggressiveness=aggr, alpha=alpha, hysteresis=0.2, safety_bias=0.1)
+                res = simulate(scn)
+
+                m = res.metrics
+                worst_overslow = max(worst_overslow, m['integrated_overslow'])
+                worst_pos_accel_occ = max(worst_pos_accel_occ, m['pos_accel_while_occluded'])
+                if m['reacq_latency'] is not None:
+                    worst_reacq = max(worst_reacq, m['reacq_latency'])
+
+        # Invariants
+        self.assertLessEqual(worst_pos_accel_occ, 1e-6, "No positive accel while occluded")
+        # Reasonable overslow budget for medium bend
+        self.assertLessEqual(worst_overslow, 1.5, "Integrated overslow within budget (1.5 m/s·s)")
+        # Reacquisition within 0.6s (whenever reacquisition occurs)
+        if worst_reacq:
+            self.assertLessEqual(worst_reacq, 0.6, "Reacquisition latency within 0.6s")
+        print(f"✓ Occlusion invariants: worst overslow={worst_overslow:.3f}, worst reacq={worst_reacq:.3f}, pos_acc_occ={worst_pos_accel_occ:.3g}")
+
     def test_adaptive_property_accessors(self):
         """Test new property accessors for adaptive system"""
         # Test adaptive_decel_active property
