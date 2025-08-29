@@ -205,9 +205,20 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"VisionTurnSpeedControlMaxAdaptiveJerk", {PERSISTENT | BACKUP, FLOAT, "-6.0"}},
 
     // VTSC Vision Confidence
-    {"VisionTurnSpeedControlVisionConfAlpha", {PERSISTENT | BACKUP, FLOAT, "0.1"}},
-    {"VisionTurnSpeedControlVisionConfGoodThreshold", {PERSISTENT | BACKUP, FLOAT, "0.75"}},
-    {"VisionTurnSpeedControlVisionConfBadThreshold", {PERSISTENT | BACKUP, FLOAT, "0.70"}},
+    {"VisionTurnSpeedControlVisionConfAlpha", {PERSISTENT | BACKUP, FLOAT, "0.28"}},
+    {"VisionTurnSpeedControlVisionConfGoodThreshold", {PERSISTENT | BACKUP, FLOAT, "0.70"}},
+    {"VisionTurnSpeedControlVisionConfBadThreshold", {PERSISTENT | BACKUP, FLOAT, "0.65"}},
+
+    // VTSC Occlusion dwell & decay tunables
+    {"VisionTurnSpeedControlOcclEnterDwellS", {PERSISTENT | BACKUP, FLOAT, "0.20"}},
+    {"VisionTurnSpeedControlOcclExitDwellS", {PERSISTENT | BACKUP, FLOAT, "0.10"}},
+    {"VisionTurnSpeedControlCurvatureGrowthPerMeter", {PERSISTENT | BACKUP, FLOAT, "0.0005"}},
+    {"VisionTurnSpeedControlEnvelopeHorizonS", {PERSISTENT | BACKUP, FLOAT, "1.2"}},
+    {"VisionTurnSpeedControlOcclusionDecayTauFastS", {PERSISTENT | BACKUP, FLOAT, "1.2"}},
+    {"VisionTurnSpeedControlOcclusionDecayTauSlowS", {PERSISTENT | BACKUP, FLOAT, "2.0"}},
+    {"VisionTurnSpeedControlOcclusionMinFrac", {PERSISTENT | BACKUP, FLOAT, "0.20"}},
+    {"VisionTurnSpeedControlFastReacqAlpha", {PERSISTENT | BACKUP, FLOAT, "0.85"}},
+    {"VisionTurnSpeedControlFastReacqWindowS", {PERSISTENT | BACKUP, FLOAT, "0.90"}},
 
     // VTSC Occlusion Handling
     {"VisionTurnSpeedControlOcclEnterDwellS", {PERSISTENT | BACKUP, FLOAT, "0.5"}},
