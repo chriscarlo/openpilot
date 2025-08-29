@@ -34,20 +34,26 @@ VTSCSmoothingLimitsPanel::VTSCSmoothingLimitsPanel(QWidget *parent) : QWidget(pa
     emit jerkAccelMultiplier->updateLabels();
   });
 
+  // Initialize defaults if unset
+  if (QString::fromStdString(params.get("VisionTurnSpeedControlSmoothingMaxDecel")).isEmpty()) params.put("VisionTurnSpeedControlSmoothingMaxDecel", "3.50");
+  if (QString::fromStdString(params.get("VisionTurnSpeedControlSmoothingMaxJerk")).isEmpty()) params.put("VisionTurnSpeedControlSmoothingMaxJerk", "6.00");
+  if (QString::fromStdString(params.get("VisionTurnSpeedControlAccelToDecelRatio")).isEmpty()) params.put("VisionTurnSpeedControlAccelToDecelRatio", "1.30");
+  if (QString::fromStdString(params.get("VisionTurnSpeedControlJerkAccelMultiplier")).isEmpty()) params.put("VisionTurnSpeedControlJerkAccelMultiplier", "2.00");
+
   addFloatControl(smoothingMaxDecel, "VisionTurnSpeedControlSmoothingMaxDecel",
-                  tr("Max Decel (smoothing)"), tr("Bound negative accel changes in target updates."),
+                  tr("Max Decel (smoothing)"), tr("Clamp how quickly target accel can decrease per update. Lower feels smoother; too low can miss targets."),
                   1.0f, 7.0f, 0.10f, tr("m/s²"));
 
   addFloatControl(smoothingMaxJerk, "VisionTurnSpeedControlSmoothingMaxJerk",
-                  tr("Max Jerk (smoothing)"), tr("Bound jerk in target accel updates."),
+                  tr("Max Jerk (smoothing)"), tr("Clamp on how quickly target accel may change. Higher is snappier; lower is gentler."),
                   1.0f, 12.0f, 0.10f, tr("m/s³"));
 
   addFloatControl(accelToDecelRatio, "VisionTurnSpeedControlAccelToDecelRatio",
-                  tr("Accel to Decel Ratio"), tr("Positive accel limit relative to decel limit."),
+                  tr("Accel to Decel Ratio"), tr("Positive accel cap relative to decel cap. >1 lets you speed up faster than you slow down."),
                   1.0f, 1.6f, 0.05f);
 
   addFloatControl(jerkAccelMultiplier, "VisionTurnSpeedControlJerkAccelMultiplier",
-                  tr("Jerk Accel Multiplier"), tr("Positive vs negative jerk ratio for exits."),
+                  tr("Jerk Accel Multiplier"), tr("Ratio of positive to negative jerk (how quickly you can ramp accel after a curve)."),
                   1.0f, 3.0f, 0.10f);
 }
 
@@ -82,4 +88,3 @@ void VTSCSmoothingLimitsPanel::showEvent(QShowEvent *event) {
   QWidget::showEvent(event);
   showAllDescriptions();
 }
-

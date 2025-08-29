@@ -59,11 +59,18 @@ VTSCDrivingStylePanel::VTSCDrivingStylePanel(QWidget *parent) : QWidget(parent) 
     emit speedIncreaseFactor->updateLabels();
   });
 
+  // Initialize defaults if unset
+  if (QString::fromStdString(params.get("VisionTurnSpeedControlAggressiveness")).isEmpty()) params.put("VisionTurnSpeedControlAggressiveness", "1.00");
+  if (QString::fromStdString(params.get("VisionTurnSpeedControlFixedLeadTimeSeconds")).isEmpty()) params.put("VisionTurnSpeedControlFixedLeadTimeSeconds", "0.00");
+  if (QString::fromStdString(params.get("VisionTurnSpeedControlLowSpeedSpeedBiasMph")).isEmpty()) params.put("VisionTurnSpeedControlLowSpeedSpeedBiasMph", "0.00");
+  if (QString::fromStdString(params.get("VisionTurnSpeedControlLowSpeedBiasEndMph")).isEmpty()) params.put("VisionTurnSpeedControlLowSpeedBiasEndMph", "50.00");
+  if (QString::fromStdString(params.get("VisionTurnSpeedControlSpeedIncreaseFactor")).isEmpty()) params.put("VisionTurnSpeedControlSpeedIncreaseFactor", "1.00");
+
   addFloatControl(
     aggressiveness,
     "VisionTurnSpeedControlAggressiveness",
     tr("Anticipation Aggressiveness"),
-    tr("How early to start slowing for curves. Higher = earlier/more conservative."),
+    tr("How early to start slowing for curves. Higher = earlier/more conservative entry; lower = later, sportier feel."),
     0.50f, 2.00f, 0.05f, tr("×")
   );
 
@@ -71,7 +78,7 @@ VTSCDrivingStylePanel::VTSCDrivingStylePanel(QWidget *parent) : QWidget(parent) 
     fixedLeadTime,
     "VisionTurnSpeedControlFixedLeadTimeSeconds",
     tr("Fixed Lead Time"),
-    tr("Override dynamic timing with a fixed time buffer before curves. 0 disables."),
+    tr("Force a fixed time buffer before curves. 0 uses dynamic timing. Larger values start slowing sooner everywhere."),
     0.0f, 10.0f, 0.10f, tr("s")
   );
 
@@ -79,7 +86,7 @@ VTSCDrivingStylePanel::VTSCDrivingStylePanel(QWidget *parent) : QWidget(parent) 
     lowSpeedBiasMph,
     "VisionTurnSpeedControlLowSpeedSpeedBiasMph",
     tr("Low-Speed Speed Bias"),
-    tr("Add/subtract mph from physics target under the end speed."),
+    tr("Add/subtract mph from physics target when below the end speed. Positive makes neighborhood corners feel quicker; negative is safer."),
     -5.0f, 5.0f, 0.10f, tr("mph")
   );
 
@@ -87,7 +94,7 @@ VTSCDrivingStylePanel::VTSCDrivingStylePanel(QWidget *parent) : QWidget(parent) 
     lowSpeedBiasEndMph,
     "VisionTurnSpeedControlLowSpeedBiasEndMph",
     tr("Low-Speed Bias End"),
-    tr("Bias tapers to zero by this speed."),
+    tr("Speed (mph) where the low-speed bias fully tapers to zero."),
     10.0f, 80.0f, 1.0f, tr("mph")
   );
 
@@ -95,7 +102,7 @@ VTSCDrivingStylePanel::VTSCDrivingStylePanel(QWidget *parent) : QWidget(parent) 
     speedIncreaseFactor,
     "VisionTurnSpeedControlSpeedIncreaseFactor",
     tr("Global Speed Bias"),
-    tr("Multiply physics target speed globally. Keep near 1.0."),
+    tr("Multiply physics target speed everywhere. Keep near 1.0 to preserve tuning."),
     0.50f, 1.50f, 0.05f, tr("×")
   );
 }
@@ -156,4 +163,3 @@ void VTSCDrivingStylePanel::showEvent(QShowEvent *event) {
   QWidget::showEvent(event);
   showAllDescriptions();
 }
-

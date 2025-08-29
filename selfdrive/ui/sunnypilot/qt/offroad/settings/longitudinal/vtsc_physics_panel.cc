@@ -35,6 +35,13 @@ VTSCPhysicsPanel::VTSCPhysicsPanel(QWidget *parent) : QWidget(parent) {
     emit physMaxLat->updateLabels();
   });
 
+  // Initialize defaults if unset
+  auto ensure = [&](const char *k, const char *v){ if (QString::fromStdString(params.get(k)).isEmpty()) params.put(k, v); };
+  ensure("VisionTurnSpeedControlPhysicsBaseline", "3.1447");
+  ensure("VisionTurnSpeedControlPhysicsAmplitude", "-1.1751");
+  ensure("VisionTurnSpeedControlPhysicsMinLatAccel", "1.80");
+  ensure("VisionTurnSpeedControlPhysicsMaxLatAccel", "3.12");
+
   addFloatControl(physBaseline, "VisionTurnSpeedControlPhysicsBaseline",
                   tr("Baseline Lat Accel"), tr("Baseline lateral accel on easy curves."),
                   2.0f, 4.0f, 0.05f, tr("m/s²"));

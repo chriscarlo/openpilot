@@ -23,22 +23,27 @@ VTSCVisionOcclusionPanel::VTSCVisionOcclusionPanel(QWidget *parent) : QWidget(pa
   list_->addItem(reset_btn);
 
   QObject::connect(reset_btn, &QPushButton::clicked, [=]() {
-    params.put("VisionTurnSpeedControlVisionConfAlpha", "0.10");
-    params.put("VisionTurnSpeedControlVisionConfGoodThreshold", "0.75");
-    params.put("VisionTurnSpeedControlVisionConfBadThreshold", "0.70");
+    params.put("VisionTurnSpeedControlVisionConfAlpha", "0.28");
+    params.put("VisionTurnSpeedControlVisionConfGoodThreshold", "0.70");
+    params.put("VisionTurnSpeedControlVisionConfBadThreshold", "0.65");
     emit confAlpha->updateLabels();
     emit confGood->updateLabels();
     emit confBad->updateLabels();
   });
 
+  // Initialize defaults if unset to avoid empty labels and odd first steps
+  if (QString::fromStdString(params.get("VisionTurnSpeedControlVisionConfAlpha")).isEmpty()) params.put("VisionTurnSpeedControlVisionConfAlpha", "0.28");
+  if (QString::fromStdString(params.get("VisionTurnSpeedControlVisionConfGoodThreshold")).isEmpty()) params.put("VisionTurnSpeedControlVisionConfGoodThreshold", "0.70");
+  if (QString::fromStdString(params.get("VisionTurnSpeedControlVisionConfBadThreshold")).isEmpty()) params.put("VisionTurnSpeedControlVisionConfBadThreshold", "0.65");
+
   addFloatControl(confAlpha, "VisionTurnSpeedControlVisionConfAlpha",
-                  tr("Confidence EMA Alpha"), tr("Smoothing for vision confidence (0=slow, 1=fast)."),
+                  tr("Confidence EMA Alpha"), tr("How quickly VTSC trusts confidence changes. Higher exits occlusion faster but can chatter; lower holds longer and is more stable."),
                   0.01f, 0.90f, 0.01f);
   addFloatControl(confGood, "VisionTurnSpeedControlVisionConfGoodThreshold",
-                  tr("Good Threshold"), tr("Threshold to re-enter good-vision mode."),
+                  tr("Good Threshold"), tr("Confidence to exit occlusion and resume updates. Lower exits sooner; too low can accept noisy vision."),
                   0.50f, 0.99f, 0.01f);
   addFloatControl(confBad, "VisionTurnSpeedControlVisionConfBadThreshold",
-                  tr("Bad Threshold"), tr("Threshold to exit good-vision mode (hold curvature)."),
+                  tr("Bad Threshold"), tr("Confidence to enter occlusion and hold curvature. Higher enters earlier; too high can freeze too often."),
                   0.10f, 0.90f, 0.01f);
 }
 
@@ -72,4 +77,3 @@ void VTSCVisionOcclusionPanel::showEvent(QShowEvent *event) {
   QWidget::showEvent(event);
   showAllDescriptions();
 }
-

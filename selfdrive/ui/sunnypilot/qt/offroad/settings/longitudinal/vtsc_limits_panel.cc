@@ -29,12 +29,16 @@ VTSCLimitsPanel::VTSCLimitsPanel(QWidget *parent) : QWidget(parent) {
     emit minOperatingSpeed->updateLabels();
   });
 
+  // Initialize defaults if unset
+  if (QString::fromStdString(params.get("VisionTurnSpeedControlMaxSpeed")).isEmpty()) params.put("VisionTurnSpeedControlMaxSpeed", "70.00");
+  if (QString::fromStdString(params.get("VisionTurnSpeedControlMinOperatingSpeed")).isEmpty()) params.put("VisionTurnSpeedControlMinOperatingSpeed", "2.24");
+
   addFloatControl(maxSpeed, "VisionTurnSpeedControlMaxSpeed",
-                  tr("Straight-Road Ceiling"), tr("Speed ceiling when curvature is near zero (m/s)."),
+                  tr("Straight-Road Ceiling"), tr("Speed ceiling (m/s) when the road is effectively straight. Raising this won’t exceed car or map limits."),
                   10.0f, 90.0f, 1.0f, tr("m/s"));
 
   addFloatControl(minOperatingSpeed, "VisionTurnSpeedControlMinOperatingSpeed",
-                  tr("Min Operating Speed"), tr("Floor for speed clamps to avoid low-speed fighting (m/s)."),
+                  tr("Min Operating Speed"), tr("Floor (m/s) to avoid fighting at parking-lot speeds. VTSC backs off below this."),
                   0.5f, 10.0f, 0.10f, tr("m/s"));
 }
 
@@ -67,4 +71,3 @@ void VTSCLimitsPanel::showEvent(QShowEvent *event) {
   QWidget::showEvent(event);
   showAllDescriptions();
 }
-

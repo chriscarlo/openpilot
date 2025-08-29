@@ -37,28 +37,37 @@ VTSCApexBoostPanel::VTSCApexBoostPanel(QWidget *parent) : QWidget(parent) {
     params.put("VisionTurnSpeedControlApexNearIndex", "3");
   });
 
+  // Initialize defaults if unset
+  auto ensure = [&](const char *k, const char *v){ if (QString::fromStdString(params.get(k)).isEmpty()) params.put(k, v); };
+  ensure("VisionTurnSpeedControlApexBoostDistance", "50.0");
+  ensure("VisionTurnSpeedControlApexBoostFactor", "0.10");
+  ensure("VisionTurnSpeedControlApexBoostMinLatAccel", "1.00");
+  ensure("VisionTurnSpeedControlApexBoostCenter", "2.00");
+  ensure("VisionTurnSpeedControlApexBoostWidth", "0.50");
+  ensure("VisionTurnSpeedControlBoostSafetyCurvatureScale", "0.70");
+
   addFloatControl(apexBoostDistance, "VisionTurnSpeedControlApexBoostDistance",
-                  tr("Boost Distance"), tr("Apply exit boost within this distance past the apex."),
+                  tr("Boost Distance"), tr("Apply exit boost within this distance past the apex. Larger values keep boost longer; too large can feel pushy."),
                   0.0f, 300.0f, 5.0f, tr("m"));
 
   addFloatControl(apexBoostFactor, "VisionTurnSpeedControlApexBoostFactor",
-                  tr("Boost Factor"), tr("Multiply base target by this factor based on lateral accel."),
+                  tr("Boost Factor"), tr("How much to multiply the base target on exit (sigmoid-based). Start small (0.05–0.15) to avoid overshoot."),
                   0.0f, 0.5f, 0.01f, tr("×"));
 
   addFloatControl(apexBoostMinLat, "VisionTurnSpeedControlApexBoostMinLatAccel",
-                  tr("Min Lateral Accel"), tr("Only boost when actual lateral accel exceeds this."),
+                  tr("Min Lateral Accel"), tr("Only boost when actual lateral accel exceeds this (avoid boosting on straights)."),
                   0.0f, 5.0f, 0.10f, tr("m/s²"));
 
   addFloatControl(apexBoostCenter, "VisionTurnSpeedControlApexBoostCenter",
-                  tr("Boost Center"), tr("Lat accel center for boost sigmoid."),
+                  tr("Boost Center"), tr("Lateral accel where boost reaches mid-strength."),
                   0.0f, 5.0f, 0.10f, tr("m/s²"));
 
   addFloatControl(apexBoostWidth, "VisionTurnSpeedControlApexBoostWidth",
-                  tr("Boost Width"), tr("Sigmoid width for boost transition."),
+                  tr("Boost Width"), tr("How quickly boost ramps with lateral accel. Wider = smoother, narrower = punchier."),
                   0.05f, 5.0f, 0.05f, tr("m/s²"));
 
   addFloatControl(boostCurvScale, "VisionTurnSpeedControlBoostSafetyCurvatureScale",
-                  tr("Safety Curvature Scale"), tr("Scale on curvature when computing max physics speed during boost."),
+                  tr("Safety Curvature Scale"), tr("Safety scaling on curvature when computing physics max during boost. Lower is safer."),
                   0.50f, 1.00f, 0.05f);
 
   // Detection controls moved to Curve Detection panel

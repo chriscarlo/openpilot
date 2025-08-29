@@ -40,32 +40,37 @@ VTSCAdaptiveFilteringPanel::VTSCAdaptiveFilteringPanel(QWidget *parent) : QWidge
     emit maxAdaptiveJerk->updateLabels();
   });
 
+  // Initialize defaults if unset
+  if (QString::fromStdString(params.get("VisionTurnSpeedControlFilterAlpha")).isEmpty()) params.put("VisionTurnSpeedControlFilterAlpha", "0.30");
+  if (QString::fromStdString(params.get("VisionTurnSpeedControlHysteresisThreshold")).isEmpty()) params.put("VisionTurnSpeedControlHysteresisThreshold", "0.20");
+  if (QString::fromStdString(params.get("VisionTurnSpeedControlSafetyBias")).isEmpty()) params.put("VisionTurnSpeedControlSafetyBias", "0.10");
+
   addFloatControl(filterAlpha, "VisionTurnSpeedControlFilterAlpha",
-                  tr("Filter Alpha"), tr("EMA smoothing on decel demand (lower = smoother)."),
+                  tr("Filter Alpha"), tr("Smoothing on decel demand. Higher reacts faster; lower is calmer but can delay reaching target."),
                   0.10f, 0.90f, 0.05f);
 
   addFloatControl(hysteresis, "VisionTurnSpeedControlHysteresisThreshold",
-                  tr("Hysteresis"), tr("Band to return from adaptive back to comfort."),
+                  tr("Hysteresis"), tr("How far below the comfort limit decel must drop to leave adaptive mode. Higher reduces flapping; too high can linger."),
                   0.10f, 0.50f, 0.05f);
 
   addFloatControl(safetyBias, "VisionTurnSpeedControlSafetyBias",
-                  tr("Safety Bias"), tr("Slightly increase physics braking to hit target early."),
+                  tr("Safety Bias"), tr("Multiply physics decel to ensure target is reached before apex. Higher is safer but slower."),
                   0.00f, 0.50f, 0.05f);
 
   addFloatControl(comfortDecel, "VisionTurnSpeedControlComfortDecelLimit",
-                  tr("Comfort Decel Limit"), tr("Primary target decel (negative)."),
+                  tr("Comfort Decel Limit"), tr("Primary braking strength in normal operation (negative). More negative = stronger braking."),
                   -3.00f, -1.00f, 0.05f, tr("m/s²"), true);
 
   addFloatControl(comfortJerk, "VisionTurnSpeedControlComfortJerkLimit",
-                  tr("Comfort Jerk Limit"), tr("Jerk cap during normal braking (negative)."),
+                  tr("Comfort Jerk Limit"), tr("How quickly braking can change (negative). Higher magnitude feels snappier."),
                   -4.00f, -1.00f, 0.05f, tr("m/s³"), true);
 
   addFloatControl(maxAdaptiveDecel, "VisionTurnSpeedControlMaxAdaptiveDecel",
-                  tr("Max Adaptive Decel"), tr("Hard floor for adaptive decel (negative)."),
+                  tr("Max Adaptive Decel"), tr("Hard floor for emergency decel (negative). Larger magnitude = stronger emergency braking."),
                   -9.00f, -3.00f, 0.10f, tr("m/s²"), true);
 
   addFloatControl(maxAdaptiveJerk, "VisionTurnSpeedControlMaxAdaptiveJerk",
-                  tr("Max Adaptive Jerk"), tr("Hard floor for adaptive jerk (negative)."),
+                  tr("Max Adaptive Jerk"), tr("Hard floor on how quickly emergency braking can ramp (negative)."),
                   -10.00f, -3.00f, 0.10f, tr("m/s³"), true);
 }
 
@@ -103,4 +108,3 @@ void VTSCAdaptiveFilteringPanel::showEvent(QShowEvent *event) {
   QWidget::showEvent(event);
   showAllDescriptions();
 }
-

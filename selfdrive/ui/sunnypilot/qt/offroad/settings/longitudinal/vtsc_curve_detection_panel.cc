@@ -36,13 +36,16 @@ VTSCCurveDetectionPanel::VTSCCurveDetectionPanel(QWidget *parent) : QWidget(pare
     emit apexNearIndex->updateLabels();
   });
 
+  // Initialize defaults if unset
+  if (QString::fromStdString(params.get("VisionTurnSpeedControlCurvatureEMAFactor")).isEmpty()) params.put("VisionTurnSpeedControlCurvatureEMAFactor", "0.30");
+
   addFloatControl(curvEMA, "VisionTurnSpeedControlCurvatureEMAFactor",
-                  tr("Curvature EMA"), tr("Smoothing ratio for predicted curvature (0=smooth, 1=fast)."),
+                  tr("Curvature EMA"), tr("Smoothing on predicted curvature. Higher tracks quicker but is noisier; lower is steadier with more lag."),
                   0.10f, 0.50f, 0.05f);
 
   // Advanced small thresholds via edit dialogs for precision
   apexThresholdEdit = new ButtonControlSP(tr("Apex Threshold"), tr("Edit"),
-                                          tr("Minimum curvature to consider as apex (e.g., 5e-5)."), this, true);
+                                          tr("Minimum curvature to consider as apex (e.g., 5e-5). Raise if false positives; lower if missing apexes."), this, true);
   QObject::connect(apexThresholdEdit, &ButtonControlSP::clicked, [=]() {
     QString cur = QString::fromStdString(params.get("VisionTurnSpeedControlApexThreshold"));
     QString val = InputDialog::getText(tr("Apex Threshold"), nullptr, tr("Enter a small float (e.g., 5e-5)"), false, -1, cur.isEmpty() ? "5e-5" : cur);
@@ -51,7 +54,7 @@ VTSCCurveDetectionPanel::VTSCCurveDetectionPanel(QWidget *parent) : QWidget(pare
   list_->addItem(apexThresholdEdit);
 
   apexProminenceEdit = new ButtonControlSP(tr("Apex Prominence"), tr("Edit"),
-                                           tr("Minimum peak prominence (e.g., 1e-4)."), this, true);
+                                           tr("Minimum peak prominence (e.g., 1e-4). Filters out tiny wiggles in curvature."), this, true);
   QObject::connect(apexProminenceEdit, &ButtonControlSP::clicked, [=]() {
     QString cur = QString::fromStdString(params.get("VisionTurnSpeedControlApexProminence"));
     QString val = InputDialog::getText(tr("Apex Prominence"), nullptr, tr("Enter a small float (e.g., 1e-4)"), false, -1, cur.isEmpty() ? "1e-4" : cur);
@@ -60,7 +63,7 @@ VTSCCurveDetectionPanel::VTSCCurveDetectionPanel(QWidget *parent) : QWidget(pare
   list_->addItem(apexProminenceEdit);
 
   addFloatControl(apexHysteresisTime, "VisionTurnSpeedControlApexHysteresisTime",
-                  tr("Apex Cooldown"), tr("Don’t re-detect the same apex too soon."),
+                  tr("Apex Cooldown"), tr("Time window to avoid re-detecting the same apex. Increase if multiple boosts fire."),
                   0.1f, 10.0f, 0.10f, tr("s"), true);
 
   addFloatControl(apexMetersPerIndex, "VisionTurnSpeedControlApexMetersPerIndex",
@@ -121,4 +124,3 @@ void VTSCCurveDetectionPanel::showEvent(QShowEvent *event) {
   QWidget::showEvent(event);
   showAllDescriptions();
 }
-
