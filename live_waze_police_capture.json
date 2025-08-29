@@ -1,0 +1,39 @@
+[
+  {
+    "timestamp": 228.761857042,
+    "location": [
+      38.72129397703093,
+      -120.7881088475877
+    ],
+    "alert": {
+      "id": "770779444",
+      "type": "police",
+      "latitude": 38.746098,
+      "longitude": -120.760619,
+      "confidence": 0.0,
+      "speed_limit": null,
+      "street": "Carson Rd",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "770779444",
+        "type": "POLICE",
+        "subtype": null,
+        "reported_by": "feliniii",
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2025-08-29T00:00:16.000Z",
+        "country": "US",
+        "city": null,
+        "street": "Carson Rd",
+        "latitude": 38.746098,
+        "longitude": -120.760619,
+        "num_thumbs_up": 0,
+        "alert_reliability": 5,
+        "alert_confidence": 0,
+        "near_by": "Placerville",
+        "comments": [],
+        "num_comments": 0
+      }
+    }
+  }
+]
