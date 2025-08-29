@@ -100,6 +100,9 @@ def simulate(scn: Scenario, alpha_bump_on_reacq: Optional[float] = None) -> SimR
 
     # Track reacquisition event for optional alpha bump
     was_good = conf[0] >= 0.75
+    # Synthetic clock for time-based logic inside VTSC
+    sim_time = 0.0
+
     for i in range(len(t)):
         # Latency injected curvature
         k_in = kappa_buf[0] if latency_steps > 0 else kappa[i]
@@ -111,7 +114,12 @@ def simulate(scn: Scenario, alpha_bump_on_reacq: Optional[float] = None) -> SimR
         vref = v_limit[i]
 
         sm = _mk_sm(k_in, v_ego, c_in)
-        vtsc.update(sm, True, v_ego, a_ego, vref)
+        # Advance synthetic time (20 Hz)
+        sim_time = float(t[i])
+        # Patch time.time() and time.monotonic() inside the controller to use synthetic clock
+        with patch('sunnypilot.selfdrive.controls.lib.vision_turn_controller.time.time', lambda: sim_time), \
+             patch('sunnypilot.selfdrive.controls.lib.vision_turn_controller.time.monotonic', lambda: sim_time):
+            vtsc.update(sm, True, v_ego, a_ego, vref)
 
         # Optional alpha bump on reacquisition
         is_good = vtsc._occlusion_state.vision_good

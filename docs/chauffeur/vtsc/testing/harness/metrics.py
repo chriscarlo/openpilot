@@ -37,7 +37,8 @@ def compute_metrics(t, v_cmd, v_clean, a_cmd, conf, occluded, good_th=0.75, apex
         idx_good = int(idxs[0] + 1)
         for j in range(idx_good, len(t)):
             if abs(v_cmd[j] - v_clean[j]) <= 0.2:
-                reacq_latency = float(t[j] - t[idx_good])
+                # Round to nearest 10 ms to avoid floating point edge
+                reacq_latency = round(float(t[j] - t[idx_good]), 2)
                 break
 
     # Overshoot on recovery: post reacq

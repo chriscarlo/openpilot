@@ -63,6 +63,7 @@ class VisionOcclusionState:
     distance_since_m: float = 0.0
     mode_monotonic: bool = True
     gamma_per_m: float = 5e-4
+    vis_horizon_s: float = 1.2
     envelope_horizon_s: float = 1.2
     # Two-stage decay
     decay_tau_fast_s: float = 1.2
@@ -109,15 +110,15 @@ class VisionOcclusionState:
                 # reset enter dwell
                 self.below_bad_time_s = 0.0
             else:
-                # Not occluded yet (good or within dwell below bad): keep last_valid_curvature fresh
+                # Not occluded yet: keep last_valid_curvature fresh only if >= bad threshold
                 if self.smoothed_confidence >= self.good_threshold:
                     self.last_valid_curvature = current_curvature
                 elif self.smoothed_confidence > self.bad_threshold:
                     # Borderline: allow partial update; bias toward measured to avoid stickiness
                     self.last_valid_curvature = current_curvature
                 else:
-                    # Below bad but before enter dwell satisfied: still update to measured to capture latest
-                    self.last_valid_curvature = current_curvature
+                    # Below bad: freeze last_valid_curvature during enter dwell window
+                    pass
                 self.prev_curvature_good = current_curvature
                 self.updated_once = True
         else:
@@ -134,19 +135,23 @@ class VisionOcclusionState:
                 self.trend_sign = 0
                 self.above_good_time_s = 0.0
             else:
-                # Remain occluded: update distance and estimate curvature under monotonic model
+                # Remain occluded: update distance and estimate curvature for the tail only
                 self.distance_since_m += v_ego * dt
                 if not self.mode_monotonic:
                     self.est_curvature = self.last_valid_curvature
                 else:
                     elapsed = max(0.0, tm - self.occluded_since_time)
+                    # Visible horizon in meters
+                    s_vis = max(0.0, self.vis_horizon_s * max(0.0, v_ego))
+                    s_tail = max(0.0, self.distance_since_m - s_vis)
+
                     if self.trend_sign >= 0:
-                        # Growth envelope only during early occlusion horizon
+                        # Growth only beyond visible horizon and only within early envelope window
                         if elapsed <= self.envelope_horizon_s:
-                            self.est_curvature = max(0.0, self.entry_curvature + self.gamma_per_m * self.distance_since_m)
+                            self.est_curvature = max(0.0, self.entry_curvature + self.gamma_per_m * s_tail)
                         else:
-                            # Freeze growth beyond horizon
-                            self.est_curvature = self.est_curvature if self.est_curvature > 0.0 else self.entry_curvature
+                            # Freeze growth beyond horizon window
+                            self.est_curvature = max(0.0, self.entry_curvature + self.gamma_per_m * s_tail)
                     else:
                         # Two-stage decay, with time-to-floor behavior
                         if self.entry_curvature <= 0.0:
@@ -518,6 +523,25 @@ class VisionTurnController:
     self._fast_reacq_until = 0.0
     self._fast_reacq_alpha = 0.85
     self._fast_reacq_window_s = 0.90
+    # Visibility barrier params
+    try:
+      self._vis_horizon_s = float(self._params.get("VisionTurnSpeedControlVisHorizonS") or 1.4)
+    except Exception:
+      self._vis_horizon_s = 1.4
+    try:
+      self._vis_margin_m = float(self._params.get("VisionTurnSpeedControlVisMarginM") or 10.0)
+    except Exception:
+      self._vis_margin_m = 10.0
+    try:
+      self._gamma_per_meter = float(self._params.get("VisionTurnSpeedControlGammaPerMeter") or 0.00035)
+    except Exception:
+      self._gamma_per_meter = 0.00035
+    # Seed occlusion state's gamma if present
+    if hasattr(self._occlusion_state, 'gamma_per_m'):
+      self._occlusion_state.gamma_per_m = self._gamma_per_meter
+    # Pass vis horizon for tail estimation convenience
+    if hasattr(self._occlusion_state, 'vis_horizon_s'):
+      self._occlusion_state.vis_horizon_s = self._vis_horizon_s
     # Anticipation moderation state
     self._prev_smoothed_conf = 1.0
     self._prev_filtered_curvature = 0.0
@@ -1635,6 +1659,35 @@ class VisionTurnController:
         self._prev_smoothed_conf = conf
 
       target_speed = clip(target_speed, _MIN_V, self._v_cruise_setpoint)
+
+    # Distance-aware occlusion barrier: split visible vs occluded tail.
+    if not self._occlusion_state.vision_good:
+      # Visible segment bound from last_valid_curvature
+      v_vis = curvature_to_speed(max(1e-8, float(self._occlusion_state.last_valid_curvature)))
+      # Occluded tail bound from estimated curvature
+      v_occ = curvature_to_speed(max(1e-8, float(self._occlusion_state.est_curvature)))
+      # Base bound (physics + planner caps)
+      v_bound = min(base_target, v_vis, v_occ, self._v_cruise_setpoint)
+
+      # Compute visible distance and required braking distance to v_bound
+      s_vis = max(0.0, float(getattr(self, '_vis_horizon_s', 1.4)) * max(0.0, self._v_ego))
+      a_cap = abs(float(self._comfort_decel_limit))
+      v_now = max(self._prev_target_speed, self._v_ego)
+      d_req = max(0.0, (v_now * v_now - v_bound * v_bound) / max(2e-3, 2.0 * a_cap))
+
+      # Margin relative to visible horizon
+      margin = s_vis - float(getattr(self, '_vis_margin_m', 10.0)) - d_req
+
+      if margin > 0.0:
+        # Positive margin: safe to increase or hold; do not ratchet down below current when bound is lower
+        if v_bound >= v_now:
+          target_speed = min(v_bound, target_speed)
+        else:
+          # Hold current target to avoid chained occlusion downward drift
+          target_speed = max(min(target_speed, v_now), _MIN_V)
+      else:
+        # Insufficient visible distance: honor conservative bound; no increase above v_bound
+        target_speed = min(target_speed, v_bound)
 
     return target_speed
 

@@ -222,6 +222,11 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"VisionTurnSpeedControlFastReacqAlpha", {PERSISTENT | BACKUP, FLOAT, "0.85"}},
     {"VisionTurnSpeedControlFastReacqWindowS", {PERSISTENT | BACKUP, FLOAT, "0.90"}},
 
+    // VTSC Visibility barrier params
+    {"VisionTurnSpeedControlVisHorizonS", {PERSISTENT | BACKUP, FLOAT, "1.4"}},
+    {"VisionTurnSpeedControlVisMarginM", {PERSISTENT | BACKUP, FLOAT, "10.0"}},
+    {"VisionTurnSpeedControlGammaPerMeter", {PERSISTENT | BACKUP, FLOAT, "0.00035"}},
+
     // VTSC Speed Control
     {"VisionTurnSpeedControlSpeedIncreaseFactor", {PERSISTENT | BACKUP, FLOAT, "1.0"}},
     {"VisionTurnSpeedControlMaxSpeed", {PERSISTENT | BACKUP, FLOAT, "70.0"}},

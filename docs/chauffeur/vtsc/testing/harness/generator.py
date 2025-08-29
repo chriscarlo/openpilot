@@ -41,6 +41,23 @@ def generate_curvature(scn: Scenario, t: np.ndarray) -> np.ndarray:
         if rest > 0:
             k3 = np.concatenate([k3, np.ones(rest) * (-abs(g.kappa1))])
         return np.concatenate([k1, k2, k3])[:n]
+    if g.kind == 'multi_curve' and g.segments:
+        # Piecewise constant curvature according to segments
+        k = np.zeros_like(t)
+        elapsed = 0.0
+        idx = 0
+        for seg in g.segments:
+            dur = float(seg.get('duration_s', 0.0))
+            kappa = float(seg.get('kappa', 0.0))
+            end = elapsed + max(0.0, dur)
+            while idx < len(t) and t[idx] <= end + 1e-6:
+                k[idx] = kappa
+                idx += 1
+            elapsed = end
+        # Fill any remaining time with last kappa
+        if idx < len(t) and g.segments:
+            k[idx:] = float(g.segments[-1].get('kappa', 0.0))
+        return k
     return np.zeros_like(t)
 
 

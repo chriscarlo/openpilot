@@ -14,6 +14,8 @@ class GeometryProfile:
     length_s: float = 150.0  # meters horizon used for envelope checks
     # For S-curve
     mid_straight_s: float = 20.0
+    # For multi-curve piecewise profiles
+    segments: List[Dict[str, float]] = field(default_factory=list)  # [{"duration_s": float, "kappa": float}, ...]
 
 
 @dataclass
@@ -83,4 +85,3 @@ def load_scenario(path: str) -> Scenario:
         latency_s=float(data.get('latency_s', 0.0)),
         params=to_params(data.get('params', {})),
     )
-
