@@ -24,10 +24,12 @@ def generate_curvature(scn: Scenario, t: np.ndarray) -> np.ndarray:
         tail = np.ones(len(t) - half) * float(g.kappa1)
         return np.concatenate([k, tail])
     if g.kind == 'easing':
-        # Jump to kappa1 then decay to kappa0
-        half = int(len(t) * 0.5)
-        k = np.linspace(g.kappa1, g.kappa0, len(t))
-        return k
+        # Rise to kappa1, then ease down to kappa0 (apex near mid)
+        n = len(t)
+        half = max(1, n // 2)
+        up = np.linspace(g.kappa0, g.kappa1, half, endpoint=True)
+        down = np.linspace(g.kappa1, g.kappa0, n - half, endpoint=True)
+        return np.concatenate([up, down])[:n]
     if g.kind == 's_curve':
         # Right bend then short straight then left bend
         n = len(t)
@@ -77,8 +79,13 @@ def generate_speed_limit(scn: Scenario, t: np.ndarray) -> np.ndarray:
 
 
 def find_apex_index(kappa: np.ndarray) -> int:
-    # Approximate apex as peak abs curvature index
+    # Approximate apex as peak abs curvature index; handle flat/constant gracefully
     if len(kappa) == 0:
         return 0
-    return int(np.argmax(np.abs(kappa)))
-
+    abs_k = np.abs(kappa)
+    max_val = np.max(abs_k)
+    idxs = np.where(np.isclose(abs_k, max_val))[0]
+    if idxs.size == 0:
+        return int(np.argmax(abs_k))
+    # If many maxima (e.g., constant curvature), choose mid index
+    return int(idxs[len(idxs)//2])

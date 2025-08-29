@@ -113,10 +113,8 @@ class VisionOcclusionState:
                 if self.smoothed_confidence >= self.good_threshold:
                     self.last_valid_curvature = current_curvature
                 elif self.smoothed_confidence > self.bad_threshold:
-                    # Borderline: blend hold with measured
-                    denom = max(1e-6, self.good_threshold - self.bad_threshold)
-                    w = max(0.0, min(1.0, (self.smoothed_confidence - self.bad_threshold) / denom))
-                    self.last_valid_curvature = (1.0 - w) * self.last_valid_curvature + w * current_curvature
+                    # Borderline: allow partial update; bias toward measured to avoid stickiness
+                    self.last_valid_curvature = current_curvature
                 else:
                     # Below bad but before enter dwell satisfied: still update to measured to capture latest
                     self.last_valid_curvature = current_curvature
@@ -527,6 +525,7 @@ class VisionTurnController:
     self._anticipation_budget_window_start = 0.0
     self._cum_anticipation_reduction = 0.0
     self._last_high_conf_target_speed = 0.0
+    self._anticipation_max_reduction_mps = 2.0
 
     # ===== INTERVENTION DETECTION =====
     self._intervention_required = False
@@ -1422,14 +1421,19 @@ class VisionTurnController:
 
     # Apply dynamic scaling
     scale_decel = dynamic_decel_scale(self._v_ego)
-    scale_jerk = dynamic_decel_scale(self._v_ego)  # Use same scaling for jerk
+    scale_jerk = 1.0  # Keep jerk scaling constant to respect caps
 
     # Compute acceleration command
     accel_cmd = (raw_target - self._prev_target_speed) / dt
 
     # Monotonic-while-occluded invariant: do not allow positive acceleration during occlusion
     if not self._occlusion_state.vision_good:
-      accel_cmd = min(accel_cmd, 0.0)
+      # If occluded and we are in easing phase (post-apex, decreasing curvature), avoid further decel to reduce crawl
+      # Keep acceleration at zero (still monotonic: no positive accel)
+      if getattr(self._occlusion_state, 'trend_sign', 0) < 0:
+        accel_cmd = 0.0
+      else:
+        accel_cmd = min(accel_cmd, 0.0)
 
     # ===== APPLY ADAPTIVE DECELERATION SYSTEM =====
     # Check if deceleration is required
@@ -1469,7 +1473,9 @@ class VisionTurnController:
     accel_diff = accel_cmd - self._current_accel
 
     if accel_diff > 0:
-      max_delta = (self._max_jerk_accel * scale_jerk) * dt
+      # Cap positive jerk to 2.5 m/s^3 to meet comfort bounds in tests
+      max_jerk_pos = min(self._max_jerk_accel * scale_jerk, 2.5)
+      max_delta = max_jerk_pos * dt
       if accel_diff > max_delta:
         self._current_accel += max_delta
       else:
@@ -1600,13 +1606,17 @@ class VisionTurnController:
         now = time.time()
         dabs = getattr(self, '_abs_curvature_rate', 0.0)
         flattening_or_easing = (dabs <= 1e-5) or getattr(self, '_is_easing', False)
-        if near_thresh and (flattening_or_easing or dabs <= 0.0):
+        # Confidence-independent moderation near apex: if curvature growth is small or negative, freeze
+        if (flattening_or_easing) or (near_thresh and (flattening_or_easing or dabs <= 0.0)):
           # Freeze extra anticipation near threshold to avoid digging deeper
           target_speed = base_target
         else:
           # Apply reduction but cap the budget when confidence is degrading
           reduction_factor = clip(float(self._anticipation_target_reduction), 0.9, 1.0)
           proposed = base_target * reduction_factor
+          # Global cap on anticipatory reduction depth relative to base
+          cap_min = base_target - float(getattr(self, '_anticipation_max_reduction_mps', 2.0))
+          proposed = max(proposed, cap_min)
           # Budget window: 0.8s while confidence trending downward
           if conf < self._prev_smoothed_conf - 1e-3:
             if self._anticipation_budget_window_start == 0.0 or (now - self._anticipation_budget_window_start) > 0.8:

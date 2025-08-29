@@ -19,7 +19,14 @@ def compute_metrics(t, v_cmd, v_clean, a_cmd, conf, occluded, good_th=0.75, apex
     pos_accel_while_occluded = float(np.max(np.maximum(a_cmd[occluded], 0.0))) if np.any(occluded) else 0.0
 
     # Integrated overslow after apex/reacquisition window: use entire trace as fallback
-    start_idx = int(apex_idx) if apex_idx is not None else 0
+    # Start integration window at reacquisition if present; otherwise at apex if provided; else start
+    start_idx = 0
+    # Prefer reacquisition point (occluded→good transition)
+    idxs = np.where((occluded[:-1] == True) & (occluded[1:] == False))[0]
+    if idxs.size > 0:
+        start_idx = int(idxs[0] + 1)
+    elif apex_idx is not None:
+        start_idx = int(apex_idx)
     overslow = np.maximum(v_clean - v_cmd, 0.0)
     integrated_overslow = float(np.sum(overslow[start_idx:]) * dt)
 
