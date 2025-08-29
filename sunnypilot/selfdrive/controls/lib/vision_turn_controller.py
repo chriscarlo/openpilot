@@ -33,9 +33,9 @@ DEFAULT_SAFETY_BIAS = 0.1        # Safety bias factor (0.0-0.5)
 
 # ===== VISION OCCLUSION HANDLING (SIMPLIFIED) =====
 # Smoothed confidence with a small hysteresis band; hold last curvature during occlusion
-CONF_ALPHA = 0.1       # EMA smoothing factor for confidence
-CONF_GOOD_TH = 0.75    # Threshold to (re)enter good vision
-CONF_BAD_TH = 0.70     # Threshold to leave good vision
+CONF_ALPHA = 0.28       # Faster EMA to track recovery
+CONF_GOOD_TH = 0.70     # Threshold to (re)enter good vision
+CONF_BAD_TH = 0.65      # Threshold to enter occlusion
 
 @dataclass
 class VisionOcclusionState:
@@ -62,9 +62,18 @@ class VisionOcclusionState:
     last_time: float = 0.0
     distance_since_m: float = 0.0
     mode_monotonic: bool = True
-    gamma_per_m: float = 1e-4
-    decay_tau_s: float = 0.6
-    min_frac: float = 0.6
+    gamma_per_m: float = 5e-4
+    envelope_horizon_s: float = 1.2
+    # Two-stage decay
+    decay_tau_fast_s: float = 1.2
+    decay_tau_slow_s: float = 2.0
+    min_frac_initial: float = 0.6
+    min_frac: float = 0.20
+    # Dwell timers
+    enter_dwell_s: float = 0.20
+    exit_dwell_s: float = 0.10
+    below_bad_time_s: float = 0.0
+    above_good_time_s: float = 0.0
 
     def update(self, current_curvature: float, vision_confidence: float, v_ego: float, tm: float):
         # EMA smoothing of confidence
@@ -73,58 +82,83 @@ class VisionOcclusionState:
         # Track time and distance progression
         dt = 0.0 if self.last_time == 0.0 else max(0.0, tm - self.last_time)
         self.last_time = tm
+        # Dwell accumulation based on tri-state thresholds
+        if self.smoothed_confidence < self.bad_threshold:
+            self.below_bad_time_s += dt
+            self.above_good_time_s = 0.0
+        elif self.smoothed_confidence > self.good_threshold:
+            self.above_good_time_s += dt
+            self.below_bad_time_s = 0.0
+        else:
+            # Borderline band: reset both dwell timers
+            self.below_bad_time_s = 0.0
+            self.above_good_time_s = 0.0
 
+        # State transitions with dwell
         if self.vision_good:
-            if self.smoothed_confidence < self.bad_threshold:
-                # Enter occlusion
+            # Enter occlusion only after dwell below bad
+            if self.below_bad_time_s >= self.enter_dwell_s:
                 self.vision_good = False
                 self.occluded_since_time = tm
                 self.distance_since_m = 0.0
-                # Establish entry curvature from last valid
                 base = self.last_valid_curvature if self.updated_once else current_curvature
                 self.entry_curvature = max(0.0, float(base))
                 self.est_curvature = self.entry_curvature
-                # Determine recent trend sign from last good update
                 dcur = current_curvature - self.prev_curvature_good
                 self.trend_sign = 1 if dcur > 0.0 else (-1 if dcur < 0.0 else 0)
+                # reset enter dwell
+                self.below_bad_time_s = 0.0
             else:
-                # Stay good: update last valid and remember trend input
-                self.last_valid_curvature = current_curvature
+                # Not occluded yet (good or within dwell below bad): keep last_valid_curvature fresh
+                if self.smoothed_confidence >= self.good_threshold:
+                    self.last_valid_curvature = current_curvature
+                elif self.smoothed_confidence > self.bad_threshold:
+                    # Borderline: blend hold with measured
+                    denom = max(1e-6, self.good_threshold - self.bad_threshold)
+                    w = max(0.0, min(1.0, (self.smoothed_confidence - self.bad_threshold) / denom))
+                    self.last_valid_curvature = (1.0 - w) * self.last_valid_curvature + w * current_curvature
+                else:
+                    # Below bad but before enter dwell satisfied: still update to measured to capture latest
+                    self.last_valid_curvature = current_curvature
                 self.prev_curvature_good = current_curvature
                 self.updated_once = True
         else:
-            if self.smoothed_confidence > self.good_threshold:
-                # Exit occlusion
+            # Exit occlusion only after dwell above good
+            if self.above_good_time_s >= self.exit_dwell_s:
                 self.vision_good = True
                 self.last_valid_curvature = current_curvature
                 self.prev_curvature_good = current_curvature
                 self.updated_once = True
-                # Reset occlusion model state
                 self.occluded_since_time = 0.0
                 self.distance_since_m = 0.0
                 self.entry_curvature = 0.0
                 self.est_curvature = 0.0
                 self.trend_sign = 0
+                self.above_good_time_s = 0.0
             else:
                 # Remain occluded: update distance and estimate curvature under monotonic model
                 self.distance_since_m += v_ego * dt
                 if not self.mode_monotonic:
-                    # Legacy hold
                     self.est_curvature = self.last_valid_curvature
                 else:
-                    # Two-phase envelope: conservative growth pre-apex, bounded decay post-apex
+                    elapsed = max(0.0, tm - self.occluded_since_time)
                     if self.trend_sign >= 0:
-                        # Growth envelope, limit by gamma per meter
-                        self.est_curvature = max(0.0, self.entry_curvature + self.gamma_per_m * self.distance_since_m)
+                        # Growth envelope only during early occlusion horizon
+                        if elapsed <= self.envelope_horizon_s:
+                            self.est_curvature = max(0.0, self.entry_curvature + self.gamma_per_m * self.distance_since_m)
+                        else:
+                            # Freeze growth beyond horizon
+                            self.est_curvature = self.est_curvature if self.est_curvature > 0.0 else self.entry_curvature
                     else:
-                        # Bounded decay toward a floor fraction of entry
+                        # Two-stage decay, with time-to-floor behavior
                         if self.entry_curvature <= 0.0:
                             self.est_curvature = 0.0
                         else:
-                            floor_val = self.min_frac * self.entry_curvature
-                            # Exponential decay in time
-                            elapsed = max(0.0, tm - self.occluded_since_time)
-                            decay = math.exp(-elapsed / max(1e-3, self.decay_tau_s))
+                            # Floor ramps down after 0.7s occluded
+                            floor_frac = self.min_frac if elapsed >= 0.7 else self.min_frac_initial
+                            floor_val = floor_frac * self.entry_curvature
+                            tau = self.decay_tau_fast_s if elapsed <= 0.8 else self.decay_tau_slow_s
+                            decay = math.exp(-elapsed / max(1e-3, tau))
                             self.est_curvature = max(floor_val, self.entry_curvature * decay)
 
 # ===== ORIGINAL PHYSICS-BASED VTSC CONSTANTS =====
@@ -484,6 +518,15 @@ class VisionTurnController:
     # Fast reacquisition window management
     self._base_filter_alpha = DEFAULT_FILTER_ALPHA
     self._fast_reacq_until = 0.0
+    self._fast_reacq_alpha = 0.85
+    self._fast_reacq_window_s = 0.90
+    # Anticipation moderation state
+    self._prev_smoothed_conf = 1.0
+    self._prev_filtered_curvature = 0.0
+    self._prev_curv_time = 0.0
+    self._anticipation_budget_window_start = 0.0
+    self._cum_anticipation_reduction = 0.0
+    self._last_high_conf_target_speed = 0.0
 
     # ===== INTERVENTION DETECTION =====
     self._intervention_required = False
@@ -1003,6 +1046,71 @@ class VisionTurnController:
       except Exception:
         pass
 
+      # ===== Occlusion dwell and tuning =====
+      enter_dwell_b = self._params.get("VisionTurnSpeedControlOcclEnterDwellS")
+      try:
+        enter_dwell = float(enter_dwell_b.decode('utf-8') if isinstance(enter_dwell_b, bytes) else enter_dwell_b) if enter_dwell_b else self._occlusion_state.enter_dwell_s
+      except (ValueError, TypeError, AttributeError):
+        enter_dwell = self._occlusion_state.enter_dwell_s
+      self._occlusion_state.enter_dwell_s = clip(enter_dwell, 0.0, 2.0)
+
+      exit_dwell_b = self._params.get("VisionTurnSpeedControlOcclExitDwellS")
+      try:
+        exit_dwell = float(exit_dwell_b.decode('utf-8') if isinstance(exit_dwell_b, bytes) else exit_dwell_b) if exit_dwell_b else self._occlusion_state.exit_dwell_s
+      except (ValueError, TypeError, AttributeError):
+        exit_dwell = self._occlusion_state.exit_dwell_s
+      self._occlusion_state.exit_dwell_s = clip(exit_dwell, 0.0, 2.0)
+
+      gamma_b = self._params.get("VisionTurnSpeedControlCurvatureGrowthPerMeter")
+      try:
+        gamma = float(gamma_b.decode('utf-8') if isinstance(gamma_b, bytes) else gamma_b) if gamma_b else self._occlusion_state.gamma_per_m
+      except (ValueError, TypeError, AttributeError):
+        gamma = self._occlusion_state.gamma_per_m
+      self._occlusion_state.gamma_per_m = clip(gamma, 0.0, 0.01)
+
+      env_hor_b = self._params.get("VisionTurnSpeedControlEnvelopeHorizonS")
+      try:
+        env_hor = float(env_hor_b.decode('utf-8') if isinstance(env_hor_b, bytes) else env_hor_b) if env_hor_b else self._occlusion_state.envelope_horizon_s
+      except (ValueError, TypeError, AttributeError):
+        env_hor = self._occlusion_state.envelope_horizon_s
+      self._occlusion_state.envelope_horizon_s = clip(env_hor, 0.1, 5.0)
+
+      tau_fast_b = self._params.get("VisionTurnSpeedControlOcclusionDecayTauFastS")
+      try:
+        tau_fast = float(tau_fast_b.decode('utf-8') if isinstance(tau_fast_b, bytes) else tau_fast_b) if tau_fast_b else self._occlusion_state.decay_tau_fast_s
+      except (ValueError, TypeError, AttributeError):
+        tau_fast = self._occlusion_state.decay_tau_fast_s
+      self._occlusion_state.decay_tau_fast_s = clip(tau_fast, 0.1, 5.0)
+
+      tau_slow_b = self._params.get("VisionTurnSpeedControlOcclusionDecayTauSlowS")
+      try:
+        tau_slow = float(tau_slow_b.decode('utf-8') if isinstance(tau_slow_b, bytes) else tau_slow_b) if tau_slow_b else self._occlusion_state.decay_tau_slow_s
+      except (ValueError, TypeError, AttributeError):
+        tau_slow = self._occlusion_state.decay_tau_slow_s
+      self._occlusion_state.decay_tau_slow_s = clip(tau_slow, 0.1, 10.0)
+
+      min_frac_b = self._params.get("VisionTurnSpeedControlOcclusionMinFrac")
+      try:
+        min_frac = float(min_frac_b.decode('utf-8') if isinstance(min_frac_b, bytes) else min_frac_b) if min_frac_b else self._occlusion_state.min_frac
+      except (ValueError, TypeError, AttributeError):
+        min_frac = self._occlusion_state.min_frac
+      self._occlusion_state.min_frac = clip(min_frac, 0.05, 0.9)
+
+      # Fast reacquisition window tuning
+      fast_alpha_b = self._params.get("VisionTurnSpeedControlFastReacqAlpha")
+      try:
+        fast_alpha = float(fast_alpha_b.decode('utf-8') if isinstance(fast_alpha_b, bytes) else fast_alpha_b) if fast_alpha_b else self._fast_reacq_alpha
+      except (ValueError, TypeError, AttributeError):
+        fast_alpha = self._fast_reacq_alpha
+      self._fast_reacq_alpha = clip(fast_alpha, 0.3, 0.99)
+
+      fast_win_b = self._params.get("VisionTurnSpeedControlFastReacqWindowS")
+      try:
+        fast_win = float(fast_win_b.decode('utf-8') if isinstance(fast_win_b, bytes) else fast_win_b) if fast_win_b else self._fast_reacq_window_s
+      except (ValueError, TypeError, AttributeError):
+        fast_win = self._fast_reacq_window_s
+      self._fast_reacq_window_s = clip(fast_win, 0.1, 3.0)
+
       self._last_params_update = tm
 
   def _calculate_required_deceleration(self, v_current: float, v_target: float, distance: float) -> float:
@@ -1096,8 +1204,8 @@ class VisionTurnController:
 
     # On reacquisition, arm a fast filtering window to improve recovery time
     if (not prev_good) and self._occlusion_state.vision_good:
-      # 0.6s fast window; effective alpha increased later when applied
-      self._fast_reacq_until = time.time() + 0.6
+      # Fast window; effective alpha increased later when applied
+      self._fast_reacq_until = time.time() + float(getattr(self, '_fast_reacq_window_s', 0.9))
 
     # If vision is good, use current curvature; otherwise, use estimated curvature under monotonic model
     return current_curvature if self._occlusion_state.vision_good else self._occlusion_state.est_curvature
@@ -1268,6 +1376,15 @@ class VisionTurnController:
     else:
       self._v_overshoot_distance = getattr(self, '_v_overshoot_distance', 200.0)
     
+    # Track curvature change rate for anticipation moderation (20 Hz assumed)
+    try:
+      prev = self._prev_filtered_curvature
+    except AttributeError:
+      prev = self._filtered_curvature
+    rate = (abs(self._filtered_curvature) - abs(prev)) / 0.05
+    self._abs_curvature_rate = rate
+    self._is_easing = (rate <= 0.0)
+    self._prev_filtered_curvature = self._filtered_curvature
   def _state_transition(self):
     """SIMPLIFIED: State machine kept only for UI/logging - doesn't affect activation anymore."""
     # System-level disable conditions
@@ -1293,7 +1410,7 @@ class VisionTurnController:
     # Apply temporary fast reacquisition filter alpha if armed
     now = time.time()
     if now < getattr(self, '_fast_reacq_until', 0.0):
-      self._filter_alpha = max(self._base_filter_alpha, 0.7)
+      self._filter_alpha = max(self._base_filter_alpha, float(getattr(self, '_fast_reacq_alpha', 0.85)))
     else:
       self._filter_alpha = self._base_filter_alpha
 
@@ -1474,12 +1591,38 @@ class VisionTurnController:
 
       # If we're in anticipatory deceleration mode and haven't reached target yet
       # Do not apply extra reduction when occluded to avoid over-braking
+      # Also moderate reduction when confidence is near threshold or trending down
       if (self._is_decelerating_for_curve and self._v_ego > base_target + 0.5
           and self._occlusion_state.vision_good):
-        # Apply slightly more aggressive deceleration to reach target early
-        # This ensures we hit the target speed before the apex
-        reduction_factor = clip(float(self._anticipation_target_reduction), 0.9, 1.0)
-        target_speed = base_target * reduction_factor
+        conf = self._occlusion_state.smoothed_confidence
+        good = float(self._occlusion_state.good_threshold)
+        near_thresh = conf < (good + 0.02)
+        now = time.time()
+        dabs = getattr(self, '_abs_curvature_rate', 0.0)
+        flattening_or_easing = (dabs <= 1e-5) or getattr(self, '_is_easing', False)
+        if near_thresh and (flattening_or_easing or dabs <= 0.0):
+          # Freeze extra anticipation near threshold to avoid digging deeper
+          target_speed = base_target
+        else:
+          # Apply reduction but cap the budget when confidence is degrading
+          reduction_factor = clip(float(self._anticipation_target_reduction), 0.9, 1.0)
+          proposed = base_target * reduction_factor
+          # Budget window: 0.8s while confidence trending downward
+          if conf < self._prev_smoothed_conf - 1e-3:
+            if self._anticipation_budget_window_start == 0.0 or (now - self._anticipation_budget_window_start) > 0.8:
+              self._anticipation_budget_window_start = now
+              self._cum_anticipation_reduction = 0.0
+              self._last_high_conf_target_speed = base_target
+            # Remaining budget in m/s
+            remaining = max(0.0, 2.0 - self._cum_anticipation_reduction)
+            # Limit additional reduction
+            allowed_target = max(base_target - remaining, proposed)
+            actual_reduction = max(0.0, base_target - allowed_target)
+            self._cum_anticipation_reduction += actual_reduction
+            target_speed = allowed_target
+          else:
+            target_speed = proposed
+        self._prev_smoothed_conf = conf
 
       target_speed = clip(target_speed, _MIN_V, self._v_cruise_setpoint)
 
