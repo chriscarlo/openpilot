@@ -221,15 +221,15 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"VisionTurnSpeedControlFastReacqWindowS", {PERSISTENT | BACKUP, FLOAT, "0.90"}},
 
     // VTSC Occlusion Handling
-    {"VisionTurnSpeedControlOcclEnterDwellS", {PERSISTENT | BACKUP, FLOAT, "0.5"}},
-    {"VisionTurnSpeedControlOcclExitDwellS", {PERSISTENT | BACKUP, FLOAT, "0.3"}},
-    {"VisionTurnSpeedControlCurvatureGrowthPerMeter", {PERSISTENT | BACKUP, FLOAT, "0.1"}},
-    {"VisionTurnSpeedControlEnvelopeHorizonS", {PERSISTENT | BACKUP, FLOAT, "1.0"}},
-    {"VisionTurnSpeedControlOcclusionDecayTauFastS", {PERSISTENT | BACKUP, FLOAT, "0.5"}},
+    {"VisionTurnSpeedControlOcclEnterDwellS", {PERSISTENT | BACKUP, FLOAT, "0.20"}},
+    {"VisionTurnSpeedControlOcclExitDwellS", {PERSISTENT | BACKUP, FLOAT, "0.10"}},
+    {"VisionTurnSpeedControlCurvatureGrowthPerMeter", {PERSISTENT | BACKUP, FLOAT, "0.0005"}},
+    {"VisionTurnSpeedControlEnvelopeHorizonS", {PERSISTENT | BACKUP, FLOAT, "1.2"}},
+    {"VisionTurnSpeedControlOcclusionDecayTauFastS", {PERSISTENT | BACKUP, FLOAT, "1.2"}},
     {"VisionTurnSpeedControlOcclusionDecayTauSlowS", {PERSISTENT | BACKUP, FLOAT, "2.0"}},
-    {"VisionTurnSpeedControlOcclusionMinFrac", {PERSISTENT | BACKUP, FLOAT, "0.3"}},
-    {"VisionTurnSpeedControlFastReacqAlpha", {PERSISTENT | BACKUP, FLOAT, "0.3"}},
-    {"VisionTurnSpeedControlFastReacqWindowS", {PERSISTENT | BACKUP, FLOAT, "0.8"}},
+    {"VisionTurnSpeedControlOcclusionMinFrac", {PERSISTENT | BACKUP, FLOAT, "0.20"}},
+    {"VisionTurnSpeedControlFastReacqAlpha", {PERSISTENT | BACKUP, FLOAT, "0.85"}},
+    {"VisionTurnSpeedControlFastReacqWindowS", {PERSISTENT | BACKUP, FLOAT, "0.90"}},
 
     // VTSC Speed Control
     {"VisionTurnSpeedControlSpeedIncreaseFactor", {PERSISTENT | BACKUP, FLOAT, "1.0"}},
