@@ -162,68 +162,67 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"RainbowMode", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"ShowAdvancedControls", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"VisionTurnSpeedControl", {PERSISTENT | BACKUP, BOOL, "0"}},
-    // Default higher aggressiveness so VTSC begins slowing earlier by default
-    // 2.0 yields roughly double anticipation vs 1.0 and targets ~4s+ at typical speeds
-    {"VisionTurnSpeedControlAggressiveness", {PERSISTENT | BACKUP, INT, "2"}},
+    // Aggressiveness multiplier for anticipatory slowing before curves (legacy default = 1)
+    {"VisionTurnSpeedControlAggressiveness", {PERSISTENT | BACKUP, INT, "1"}},
     // Optional fixed lead time override in seconds (0 = disabled, use automatic timing)
     {"VisionTurnSpeedControlFixedLeadTimeSeconds", {PERSISTENT | BACKUP, FLOAT, "0.0"}},
-    
+
     // VTSC Adaptive Deceleration Parameters
     {"VisionTurnSpeedControlFilterAlpha", {PERSISTENT | BACKUP, FLOAT, "0.3"}},
     {"VisionTurnSpeedControlHysteresisThreshold", {PERSISTENT | BACKUP, FLOAT, "0.2"}},
     {"VisionTurnSpeedControlSafetyBias", {PERSISTENT | BACKUP, FLOAT, "0.1"}},
-    
+
     // VTSC Smoothing & Limits
     {"VisionTurnSpeedControlCurvatureEMAFactor", {PERSISTENT | BACKUP, FLOAT, "0.3"}},
     {"VisionTurnSpeedControlSmoothingMaxDecel", {PERSISTENT | BACKUP, FLOAT, "3.5"}},
-    {"VisionTurnSpeedControlSmoothingMaxJerk", {PERSISTENT | BACKUP, FLOAT, "2.0"}},
-    {"VisionTurnSpeedControlAccelToDecelRatio", {PERSISTENT | BACKUP, FLOAT, "0.8"}},
-    {"VisionTurnSpeedControlJerkAccelMultiplier", {PERSISTENT | BACKUP, FLOAT, "1.5"}},
-    
+    {"VisionTurnSpeedControlSmoothingMaxJerk", {PERSISTENT | BACKUP, FLOAT, "6.0"}},
+    {"VisionTurnSpeedControlAccelToDecelRatio", {PERSISTENT | BACKUP, FLOAT, "1.3"}},
+    {"VisionTurnSpeedControlJerkAccelMultiplier", {PERSISTENT | BACKUP, FLOAT, "2.0"}},
+
     // VTSC Planning & Safety
-    {"VisionTurnSpeedControlPlanningDecelLimit", {PERSISTENT | BACKUP, FLOAT, "2.5"}},
-    {"VisionTurnSpeedControlOvershootSafetyMargin", {PERSISTENT | BACKUP, FLOAT, "0.3"}},
-    {"VisionTurnSpeedControlOvershootMinDistance", {PERSISTENT | BACKUP, FLOAT, "50.0"}},
-    {"VisionTurnSpeedControlAnticipationTargetReduction", {PERSISTENT | BACKUP, FLOAT, "0.15"}},
-    
+    {"VisionTurnSpeedControlPlanningDecelLimit", {PERSISTENT | BACKUP, FLOAT, "3.5"}},
+    {"VisionTurnSpeedControlOvershootSafetyMargin", {PERSISTENT | BACKUP, FLOAT, "1.2"}},
+    {"VisionTurnSpeedControlOvershootMinDistance", {PERSISTENT | BACKUP, FLOAT, "10.0"}},
+    {"VisionTurnSpeedControlAnticipationTargetReduction", {PERSISTENT | BACKUP, FLOAT, "0.95"}},
+
     // VTSC Apex Detection & Boost
-    {"VisionTurnSpeedControlApexThreshold", {PERSISTENT | BACKUP, FLOAT, "0.1"}},
-    {"VisionTurnSpeedControlApexProminence", {PERSISTENT | BACKUP, FLOAT, "0.3"}},
-    {"VisionTurnSpeedControlApexHysteresisTime", {PERSISTENT | BACKUP, FLOAT, "1.5"}},
-    {"VisionTurnSpeedControlApexMetersPerIndex", {PERSISTENT | BACKUP, FLOAT, "2.5"}},
-    {"VisionTurnSpeedControlApexNearIndex", {PERSISTENT | BACKUP, INT, "20"}},
+    {"VisionTurnSpeedControlApexThreshold", {PERSISTENT | BACKUP, FLOAT, "0.00005"}},
+    {"VisionTurnSpeedControlApexProminence", {PERSISTENT | BACKUP, FLOAT, "0.0001"}},
+    {"VisionTurnSpeedControlApexHysteresisTime", {PERSISTENT | BACKUP, FLOAT, "2.0"}},
+    {"VisionTurnSpeedControlApexMetersPerIndex", {PERSISTENT | BACKUP, FLOAT, "2.0"}},
+    {"VisionTurnSpeedControlApexNearIndex", {PERSISTENT | BACKUP, INT, "3"}},
     {"VisionTurnSpeedControlApexBoostDistance", {PERSISTENT | BACKUP, FLOAT, "50.0"}},
-    {"VisionTurnSpeedControlApexBoostFactor", {PERSISTENT | BACKUP, FLOAT, "0.5"}},
-    {"VisionTurnSpeedControlApexBoostMinLatAccel", {PERSISTENT | BACKUP, FLOAT, "2.0"}},
-    {"VisionTurnSpeedControlApexBoostCenter", {PERSISTENT | BACKUP, FLOAT, "0.5"}},
-    {"VisionTurnSpeedControlApexBoostWidth", {PERSISTENT | BACKUP, FLOAT, "0.15"}},
-    {"VisionTurnSpeedControlBoostSafetyCurvatureScale", {PERSISTENT | BACKUP, FLOAT, "0.1"}},
-    
+    {"VisionTurnSpeedControlApexBoostFactor", {PERSISTENT | BACKUP, FLOAT, "0.1"}},
+    {"VisionTurnSpeedControlApexBoostMinLatAccel", {PERSISTENT | BACKUP, FLOAT, "1.0"}},
+    {"VisionTurnSpeedControlApexBoostCenter", {PERSISTENT | BACKUP, FLOAT, "2.0"}},
+    {"VisionTurnSpeedControlApexBoostWidth", {PERSISTENT | BACKUP, FLOAT, "0.5"}},
+    {"VisionTurnSpeedControlBoostSafetyCurvatureScale", {PERSISTENT | BACKUP, FLOAT, "0.7"}},
+
     // VTSC Comfort Limits
-    {"VisionTurnSpeedControlComfortDecelLimit", {PERSISTENT | BACKUP, FLOAT, "1.5"}},
-    {"VisionTurnSpeedControlComfortJerkLimit", {PERSISTENT | BACKUP, FLOAT, "1.0"}},
-    {"VisionTurnSpeedControlMaxAdaptiveDecel", {PERSISTENT | BACKUP, FLOAT, "4.0"}},
-    {"VisionTurnSpeedControlMaxAdaptiveJerk", {PERSISTENT | BACKUP, FLOAT, "3.0"}},
-    
+    {"VisionTurnSpeedControlComfortDecelLimit", {PERSISTENT | BACKUP, FLOAT, "-1.47"}},
+    {"VisionTurnSpeedControlComfortJerkLimit", {PERSISTENT | BACKUP, FLOAT, "-2.0"}},
+    {"VisionTurnSpeedControlMaxAdaptiveDecel", {PERSISTENT | BACKUP, FLOAT, "-6.0"}},
+    {"VisionTurnSpeedControlMaxAdaptiveJerk", {PERSISTENT | BACKUP, FLOAT, "-6.0"}},
+
     // VTSC Vision Confidence
-    {"VisionTurnSpeedControlVisionConfAlpha", {PERSISTENT | BACKUP, FLOAT, "0.95"}},
-    {"VisionTurnSpeedControlVisionConfGoodThreshold", {PERSISTENT | BACKUP, FLOAT, "0.7"}},
-    {"VisionTurnSpeedControlVisionConfBadThreshold", {PERSISTENT | BACKUP, FLOAT, "0.4"}},
-    
+    {"VisionTurnSpeedControlVisionConfAlpha", {PERSISTENT | BACKUP, FLOAT, "0.1"}},
+    {"VisionTurnSpeedControlVisionConfGoodThreshold", {PERSISTENT | BACKUP, FLOAT, "0.75"}},
+    {"VisionTurnSpeedControlVisionConfBadThreshold", {PERSISTENT | BACKUP, FLOAT, "0.70"}},
+
     // VTSC Speed Control
-    {"VisionTurnSpeedControlSpeedIncreaseFactor", {PERSISTENT | BACKUP, FLOAT, "1.2"}},
-    {"VisionTurnSpeedControlMaxSpeed", {PERSISTENT | BACKUP, FLOAT, "200.0"}},
-    {"VisionTurnSpeedControlMinOperatingSpeed", {PERSISTENT | BACKUP, FLOAT, "15.0"}},
-    {"VisionTurnSpeedControlLowSpeedSpeedBiasMph", {PERSISTENT | BACKUP, FLOAT, "4.0"}},
-    {"VisionTurnSpeedControlLowSpeedBiasEndMph", {PERSISTENT | BACKUP, FLOAT, "35.0"}},
-    
+    {"VisionTurnSpeedControlSpeedIncreaseFactor", {PERSISTENT | BACKUP, FLOAT, "1.0"}},
+    {"VisionTurnSpeedControlMaxSpeed", {PERSISTENT | BACKUP, FLOAT, "70.0"}},
+    {"VisionTurnSpeedControlMinOperatingSpeed", {PERSISTENT | BACKUP, FLOAT, "2.24"}},
+    {"VisionTurnSpeedControlLowSpeedSpeedBiasMph", {PERSISTENT | BACKUP, FLOAT, "0.0"}},
+    {"VisionTurnSpeedControlLowSpeedBiasEndMph", {PERSISTENT | BACKUP, FLOAT, "50.0"}},
+
     // VTSC Physics Model
-    {"VisionTurnSpeedControlPhysicsBaseline", {PERSISTENT | BACKUP, FLOAT, "10.0"}},
-    {"VisionTurnSpeedControlPhysicsAmplitude", {PERSISTENT | BACKUP, FLOAT, "1.0"}},
-    {"VisionTurnSpeedControlPhysicsSteepness", {PERSISTENT | BACKUP, FLOAT, "1.0"}},
-    {"VisionTurnSpeedControlPhysicsCenter", {PERSISTENT | BACKUP, FLOAT, "0.0"}},
-    {"VisionTurnSpeedControlPhysicsMinLatAccel", {PERSISTENT | BACKUP, FLOAT, "1.5"}},
-    {"VisionTurnSpeedControlPhysicsMaxLatAccel", {PERSISTENT | BACKUP, FLOAT, "4.5"}},
+    {"VisionTurnSpeedControlPhysicsBaseline", {PERSISTENT | BACKUP, FLOAT, "3.144734"}},
+    {"VisionTurnSpeedControlPhysicsAmplitude", {PERSISTENT | BACKUP, FLOAT, "-1.1751"}},
+    {"VisionTurnSpeedControlPhysicsSteepness", {PERSISTENT | BACKUP, FLOAT, "-2000.0"}},
+    {"VisionTurnSpeedControlPhysicsCenter", {PERSISTENT | BACKUP, FLOAT, "0.004778"}},
+    {"VisionTurnSpeedControlPhysicsMinLatAccel", {PERSISTENT | BACKUP, FLOAT, "1.8"}},
+    {"VisionTurnSpeedControlPhysicsMaxLatAccel", {PERSISTENT | BACKUP, FLOAT, "3.12"}},
     
     {"VibePersonalityEnabled", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"VibeAccelPersonalityEnabled", {PERSISTENT | BACKUP, BOOL, "0"}},

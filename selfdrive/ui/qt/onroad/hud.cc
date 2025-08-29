@@ -8,6 +8,7 @@
 #endif
 
 #include "selfdrive/ui/qt/util.h"
+#include "common/swaglog.h"
 
 constexpr int SET_SPEED_NA = 255;
 
@@ -100,26 +101,41 @@ void HudRenderer::updateState(const UIState &s) {
     vtsc_velocity = 0.0;
   }
 
-  // Live map data for upcoming speed limits - only if liveMapDataSP is valid
-  if (sm.valid("liveMapDataSP")) {
+  // Live map data for upcoming speed limits and road name
+  // NOTE: Don't require .valid() here. The mapd publisher sets the 'valid'
+  // flag conservatively (requires GPS + livePose). That made the road-name
+  // banner disappear even when we had a perfectly good name. Prefer reading
+  // whenever we've received at least one message after start, and keep the
+  // previous non-empty name if the current message is empty.
+  if (sm.rcv_frame("liveMapDataSP") > s.scene.started_frame) {
     const auto live_map_data = sm["liveMapDataSP"].getLiveMapDataSP();
-    
+
     speed_limit_ahead_valid = live_map_data.getSpeedLimitAheadValid();
     if (speed_limit_ahead_valid) {
       speed_limit_ahead = live_map_data.getSpeedLimitAhead() * (is_metric ? MS_TO_KPH : MS_TO_MPH);
       speed_limit_ahead_distance = live_map_data.getSpeedLimitAheadDistance();
+    } else {
+      speed_limit_ahead = 0.0f;
+      speed_limit_ahead_distance = 0.0f;
     }
-    road_name = QString::fromStdString(live_map_data.getRoadName());
+
+    const QString latest_road_name = QString::fromStdString(live_map_data.getRoadName());
+    if (!latest_road_name.isEmpty()) {
+      if (latest_road_name != road_name) {
+        LOGD("UI: road name updated: %s", latest_road_name.toStdString().c_str());
+      }
+      road_name = latest_road_name;
+    }
 
     // Track current map speed limit in display units for source detection
     map_speed_limit_valid = live_map_data.getSpeedLimitValid();
     map_speed_limit_display = live_map_data.getSpeedLimit() * (is_metric ? MS_TO_KPH : MS_TO_MPH);
-  } else {
-    // Reset map data if liveMapDataSP not valid
+  } else if (sm.rcv_frame("liveMapDataSP") == 0) {
+    // Before we've seen any map message this drive, keep defaults
     speed_limit_ahead_valid = false;
-    road_name = "";
     map_speed_limit_valid = false;
     map_speed_limit_display = 0.0f;
+    // leave road_name as-is; it may be set in local mode
   }
 
   // Handle older routes where vCruiseCluster is not set
@@ -564,6 +580,12 @@ void HudRenderer::drawRoadName(QPainter &p, const QRect &surface_rect) {
 
   // Truncate long road names if they still don't fit
   QString truncated = fm.elidedText(road_name, Qt::ElideRight, road_rect.width() - 20);
+  // Log when we're about to draw a new/changed road name (debugging aid)
+  static QString last_drawn_road_name;
+  if (truncated != last_drawn_road_name) {
+    LOGD("UI: drawing road name banner: %s", truncated.toStdString().c_str());
+    last_drawn_road_name = truncated;
+  }
   p.drawText(road_rect, Qt::AlignCenter, truncated);
 }
 

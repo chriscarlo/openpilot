@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# rgp: ripgrep with PCRE2 enabled by default
+# Usage examples:
+#   scripts/rgp -n 'LiveMapDataDEPRECATED|\bliveMapData(?!SP)\b' selfdrive cereal
+#   scripts/rgp -n -S '\bliveMapData\b' | scripts/rgp -v 'liveMapDataSP'
+
+set -euo pipefail
+
+RG_BIN="rg"
+
+# Prefer rg with PCRE2 support; fallback to normal rg if not available
+if $RG_BIN --pcre2 -V >/dev/null 2>&1; then
+  exec $RG_BIN --pcre2 "$@"
+else
+  echo "[rgp] Warning: ripgrep built without PCRE2; running without --pcre2." >&2
+  exec $RG_BIN "$@"
+fi

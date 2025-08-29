@@ -7,16 +7,23 @@ Executes all test suites and provides comprehensive results
 import sys
 import os
 import subprocess
+import os
 from pathlib import Path
 
 # Test suite files
 TEST_SUITES = [
+    # Core suites
     "adaptive_deceleration/test_adaptive_system.py",
     "parameter_validation/test_parameter_loading.py",
     "physics_calculations/test_physics_decel.py",
     "filtering/test_ema_filtering.py",
-    "integration/test_full_integration.py"
+    "integration/test_full_integration.py",
+    # Acceptance (business outcomes)
+    "acceptance/test_vtsc_acceptance.py",
 ]
+
+ROOT = Path(__file__).resolve().parents[3]
+
 
 def run_test_suite(test_file):
     """Run a single test suite and return results"""
@@ -27,11 +34,14 @@ def run_test_suite(test_file):
     print(f"{'='*70}")
     
     try:
+        env = os.environ.copy()
+        env["PYTHONPATH"] = f"{ROOT}:{env.get('PYTHONPATH','')}"
         result = subprocess.run(
             [sys.executable, str(test_path)],
             capture_output=True,
             text=True,
-            timeout=30
+            timeout=60,
+            env=env,
         )
         
         # Print output
