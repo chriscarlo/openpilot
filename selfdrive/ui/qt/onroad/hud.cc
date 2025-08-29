@@ -239,7 +239,8 @@ void HudRenderer::draw(QPainter &p, const QRect &surface_rect) {
   }
 
   // Always draw Vision Turn Speed Control widget (static bars always visible)
-  drawVisionTurnControl(p, surface_rect);
+  // Hide VTSC lateral acceleration widget (background + meter)
+  // drawVisionTurnControl(p, surface_rect);
 
   drawCurrentSpeed(p, surface_rect);
 
