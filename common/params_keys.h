@@ -209,6 +209,17 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"VisionTurnSpeedControlVisionConfGoodThreshold", {PERSISTENT | BACKUP, FLOAT, "0.75"}},
     {"VisionTurnSpeedControlVisionConfBadThreshold", {PERSISTENT | BACKUP, FLOAT, "0.70"}},
 
+    // VTSC Occlusion Handling
+    {"VisionTurnSpeedControlOcclEnterDwellS", {PERSISTENT | BACKUP, FLOAT, "0.5"}},
+    {"VisionTurnSpeedControlOcclExitDwellS", {PERSISTENT | BACKUP, FLOAT, "0.3"}},
+    {"VisionTurnSpeedControlCurvatureGrowthPerMeter", {PERSISTENT | BACKUP, FLOAT, "0.1"}},
+    {"VisionTurnSpeedControlEnvelopeHorizonS", {PERSISTENT | BACKUP, FLOAT, "1.0"}},
+    {"VisionTurnSpeedControlOcclusionDecayTauFastS", {PERSISTENT | BACKUP, FLOAT, "0.5"}},
+    {"VisionTurnSpeedControlOcclusionDecayTauSlowS", {PERSISTENT | BACKUP, FLOAT, "2.0"}},
+    {"VisionTurnSpeedControlOcclusionMinFrac", {PERSISTENT | BACKUP, FLOAT, "0.3"}},
+    {"VisionTurnSpeedControlFastReacqAlpha", {PERSISTENT | BACKUP, FLOAT, "0.3"}},
+    {"VisionTurnSpeedControlFastReacqWindowS", {PERSISTENT | BACKUP, FLOAT, "0.8"}},
+
     // VTSC Speed Control
     {"VisionTurnSpeedControlSpeedIncreaseFactor", {PERSISTENT | BACKUP, FLOAT, "1.0"}},
     {"VisionTurnSpeedControlMaxSpeed", {PERSISTENT | BACKUP, FLOAT, "70.0"}},
