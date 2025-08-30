@@ -18,8 +18,13 @@ TEST_SUITES = [
     "physics_calculations/test_physics_decel.py",
     "filtering/test_ema_filtering.py",
     "integration/test_full_integration.py",
+    "integration/test_full_integration_fov.py",
     "integration/test_high_value_scenarios.py",
+    "integration/test_high_value_scenarios_fov.py",
     "integration/test_multi_occluded_curves.py",
+    "integration/test_multi_occluded_curves_fov.py",
+    "integration/test_abrupt_hidden_turn.py",
+    "integration/test_abrupt_hidden_turn_fov.py",
     # Acceptance (business outcomes)
     "acceptance/test_vtsc_acceptance.py",
 ]
