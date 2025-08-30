@@ -11,7 +11,7 @@ from __future__ import annotations
 import math
 import time
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 
 import cereal.messaging as messaging
 from openpilot.common.gps import get_gps_location_service
@@ -19,6 +19,11 @@ from openpilot.common.params import Params
 from openpilot.common.realtime import Ratekeeper, config_realtime_process
 from openpilot.common.swaglog import cloudlog
 from openpilot.sunnypilot.navd.helpers import Coordinate, minimum_distance
+try:
+  # Reuse physics mapping from VTSC
+  from openpilot.sunnypilot.selfdrive.controls.lib.vision_turn_controller import curvature_to_speed
+except Exception:
+  curvature_to_speed = None  # type: ignore
 
 
 @dataclass
@@ -143,16 +148,242 @@ def publish_unavailable(pm: messaging.PubMaster, vis_horizon_m: float, diag: Inp
   out.confidence = compute_confidence(diag)
   out.targetSpeedMps = 0.0
   out.startDistanceM = 0.0
-  out.horizonCoverage = 0.0
-  out.minSpeedMps = 0.0
-  out.minSpeedAtDistanceM = 0.0
+  out.horizonCoverage = getattr(diag, 'horizon_coverage', 0.0)
+  out.minSpeedMps = getattr(diag, 'min_speed_mps', 0.0)
+  out.minSpeedAtDistanceM = getattr(diag, 'min_speed_at_m', 0.0)
   out.matchedWayId = int(diag.matched_way_id)
   out.roadClass = int(diag.road_class)
   out.levelSeparation = int(diag.level)
   out.headingErrorDeg = float(diag.heading_err_deg)
   out.distanceToCenterlineM = float(diag.d_center_m if math.isfinite(diag.d_center_m) else 0.0)
   out.visHorizonM = float(max(0.0, vis_horizon_m))
+  # Optional debug vectors if present on diag
+  if hasattr(diag, 'distances_m') and isinstance(diag.distances_m, list):
+    out.distancesM = [float(x) for x in diag.distances_m[:30]]
+  if hasattr(diag, 'kappas_per_m') and isinstance(diag.kappas_per_m, list):
+    out.kappasPerM = [float(x) for x in diag.kappas_per_m[:30]]
+  if hasattr(diag, 'vsafe_mps') and isinstance(diag.vsafe_mps, list):
+    out.vSafeMps = [float(x) for x in diag.vsafe_mps[:30]]
   pm.send('mapTurnSpeedControlSP', msg)
+
+
+# ===== M3: Horizon & Curvature helpers =====
+EARTH_R = 6371007.2
+
+
+def _xy_from_latlon(lat: float, lon: float, lat0: float, lon0: float) -> Tuple[float, float]:
+  # Equirectangular approximation in meters relative to (lat0, lon0)
+  dlat = math.radians(lat - lat0)
+  dlon = math.radians(lon - lon0)
+  x = EARTH_R * dlon * math.cos(math.radians(lat0))
+  y = EARTH_R * dlat
+  return x, y
+
+
+def _project_s_on_centerline(centerline: List, lat: float, lon: float) -> Tuple[float, float]:
+  """Return (s_proj, d_perp) where s is distanceFromStart at projection and d_perp is perp distance (m)."""
+  best_d = math.inf
+  best_s = 0.0
+  n = len(centerline)
+  if n == 0:
+    return 0.0, math.inf
+  # ensure distanceFromStart exists and is monotonic; if missing, synthesize
+  s_list = []
+  lat_list = []
+  lon_list = []
+  ok = True
+  for i in range(n):
+    try:
+      s_list.append(float(centerline[i].distanceFromStart))
+      lat_list.append(float(centerline[i].latitude))
+      lon_list.append(float(centerline[i].longitude))
+    except Exception:
+      ok = False
+      break
+  if not ok or any(s_list[i] > s_list[i+1] for i in range(len(s_list)-1)):
+    # synthesize cumulative distances
+    s_list = [0.0]
+    lat_list = [] if lat_list else [float(centerline[0].latitude)]
+    lon_list = [] if lon_list else [float(centerline[0].longitude)]
+    lat_list = [float(getattr(centerline[0], 'latitude', 0.0))]
+    lon_list = [float(getattr(centerline[0], 'longitude', 0.0))]
+    for i in range(1, n):
+      lat_i = float(getattr(centerline[i], 'latitude', 0.0))
+      lon_i = float(getattr(centerline[i], 'longitude', 0.0))
+      lat_prev = float(getattr(centerline[i-1], 'latitude', 0.0))
+      lon_prev = float(getattr(centerline[i-1], 'longitude', 0.0))
+      ds = Coordinate(lat_prev, lon_prev).distance_to(Coordinate(lat_i, lon_i))
+      s_list.append(s_list[-1] + ds)
+      lat_list.append(lat_i)
+      lon_list.append(lon_i)
+
+  for i in range(n - 1):
+    latA, lonA = lat_list[i], lon_list[i]
+    latB, lonB = lat_list[i+1], lon_list[i+1]
+    Ax, Ay = 0.0, 0.0
+    Bx, By = _xy_from_latlon(latB, lonB, latA, lonA)
+    Px, Py = _xy_from_latlon(lat, lon, latA, lonA)
+    ABx, ABy = Bx - Ax, By - Ay
+    AB2 = ABx*ABx + ABy*ABy
+    if AB2 <= 1e-6:
+      continue
+    t = max(0.0, min(1.0, (Px*ABx + Py*ABy) / AB2))
+    Qx, Qy = Ax + t*ABx, Ay + t*ABy
+    d = math.hypot(Px - Qx, Py - Qy)
+    if d < best_d:
+      best_d = d
+      sA, sB = s_list[i], s_list[i+1]
+      best_s = sA + t * (sB - sA)
+  return best_s, best_d
+
+
+def _interpolate_latlon_from_s(s_list: List[float], lat_list: List[float], lon_list: List[float], s_target: float) -> Tuple[float, float]:
+  if s_target <= s_list[0]:
+    return lat_list[0], lon_list[0]
+  if s_target >= s_list[-1]:
+    return lat_list[-1], lon_list[-1]
+  # binary search for segment
+  lo, hi = 0, len(s_list) - 1
+  while lo + 1 < hi:
+    mid = (lo + hi) // 2
+    if s_list[mid] <= s_target:
+      lo = mid
+    else:
+      hi = mid
+  s0, s1 = s_list[lo], s_list[lo+1]
+  t = 0.0 if s1 <= s0 else (s_target - s0) / (s1 - s0)
+  lat = lat_list[lo] + t * (lat_list[lo+1] - lat_list[lo])
+  lon = lon_list[lo] + t * (lon_list[lo+1] - lon_list[lo])
+  return lat, lon
+
+
+def _compute_curvature(xs: List[float], ys: List[float]) -> List[float]:
+  """Return |curvature| per middle point for triples (i,i+1,i+2)."""
+  k = []
+  for i in range(len(xs) - 2):
+    x1, y1 = xs[i], ys[i]
+    x2, y2 = xs[i+1], ys[i+1]
+    x3, y3 = xs[i+2], ys[i+2]
+    a = math.hypot(x2 - x1, y2 - y1)
+    b = math.hypot(x3 - x2, y3 - y2)
+    c = math.hypot(x3 - x1, y3 - y1)
+    if a <= 1e-3 or b <= 1e-3 or c <= 1e-3:
+      k.append(0.0)
+      continue
+    # triangle area via shoelace
+    A = abs(0.5 * ((x2 - x1)*(y3 - y1) - (x3 - x1)*(y2 - y1)))
+    try:
+      kappa = 4.0 * A / (a * b * c)
+    except ZeroDivisionError:
+      kappa = 0.0
+    k.append(float(max(0.0, kappa)))
+  return k
+
+
+def build_horizon_and_diagnostics(seg, lat: float, lon: float, v_ego: float,
+                                  resample_m: float = 3.0,
+                                  t_min_s: float = 15.0,
+                                  t_max_s: float = 30.0,
+                                  min_dist_m: float = 80.0,
+                                  max_dist_m: float = 450.0) -> dict:
+  # Extract centerline
+  pts = getattr(seg, 'centerline', [])
+  n = len(pts)
+  if n < 3:
+    return {'coverage': 0.0}
+  s_list = []
+  lat_list = []
+  lon_list = []
+  try:
+    for i in range(n):
+      s_list.append(float(pts[i].distanceFromStart))
+      lat_list.append(float(pts[i].latitude))
+      lon_list.append(float(pts[i].longitude))
+  except Exception:
+    # synthesize distances
+    s_list = [0.0]
+    lat_list = [float(getattr(pts[0], 'latitude', 0.0))]
+    lon_list = [float(getattr(pts[0], 'longitude', 0.0))]
+    for i in range(1, n):
+      lat_i = float(getattr(pts[i], 'latitude', 0.0))
+      lon_i = float(getattr(pts[i], 'longitude', 0.0))
+      ds = Coordinate(lat_list[-1], lon_list[-1]).distance_to(Coordinate(lat_i, lon_i))
+      s_list.append(s_list[-1] + ds)
+      lat_list.append(lat_i)
+      lon_list.append(lon_i)
+
+  s0, d_perp = _project_s_on_centerline(pts, lat, lon)
+  s_end = s_list[-1]
+
+  # Horizon length selection
+  # T scales from t_min to t_max by speed up to 30 m/s
+  sp = max(0.0, min(30.0, v_ego))
+  T = t_min_s + (t_max_s - t_min_s) * (sp / 30.0)
+  S = max(min_dist_m, min(max_dist_m, v_ego * T))
+  s_goal = min(s0 + S, s_end)
+  avail = max(0.0, s_goal - s0)
+  coverage = avail / S if S > 0 else 0.0
+
+  if avail < resample_m * 2:
+    return {'coverage': coverage}
+
+  # Resample lat/lon
+  num = int(avail // resample_m) + 3  # ensure at least 3 points
+  s_vals = [s0 + i * resample_m for i in range(num)]
+  if s_vals[-1] > s_goal:
+    s_vals[-1] = s_goal
+  lats = []
+  lons = []
+  lat_ref, lon_ref = _interpolate_latlon_from_s(s_list, lat_list, lon_list, s_vals[0])
+  xs: List[float] = []
+  ys: List[float] = []
+  for sv in s_vals:
+    la, lo = _interpolate_latlon_from_s(s_list, lat_list, lon_list, sv)
+    lats.append(la)
+    lons.append(lo)
+    x, y = _xy_from_latlon(la, lo, lat_ref, lon_ref)
+    xs.append(x)
+    ys.append(y)
+
+  # Curvature per middle sample
+  kappas = _compute_curvature(xs, ys)
+  # Map to distances aligned to middle points
+  d_mids = [i * resample_m + resample_m for i in range(len(kappas))]
+  # Physics speeds if function available
+  vsafe = []
+  if curvature_to_speed is not None:
+    for k in kappas:
+      try:
+        vsafe.append(float(curvature_to_speed(max(1e-8, float(k)))))
+      except Exception:
+        vsafe.append(0.0)
+  else:
+    vsafe = [0.0 for _ in kappas]
+
+  # Min speed stats
+  min_speed = 0.0
+  min_at = 0.0
+  if len(vsafe) > 0:
+    idx = int(min(range(len(vsafe)), key=lambda i: vsafe[i]))
+    min_speed = float(vsafe[idx])
+    min_at = float(d_mids[idx])
+
+  # Decimate vectors to ≤30 elements for message
+  def decimate(arr: List[float], maxn: int = 30) -> List[float]:
+    if len(arr) <= maxn:
+      return arr
+    step = len(arr) / maxn
+    return [arr[int(i * step)] for i in range(maxn)]
+
+  diag = {
+    'coverage': float(coverage),
+    'distances_m': [float(x) for x in decimate(d_mids)],
+    'kappas_per_m': [float(x) for x in decimate(kappas)],
+    'vsafe_mps': [float(x) for x in decimate(vsafe)],
+    'min_speed_mps': float(min_speed),
+    'min_speed_at_m': float(min_at),
+  }
+  return diag
 
 
 def main() -> None:
@@ -304,11 +535,41 @@ def main() -> None:
     except Exception:
       cloudlog.exception('mtscd: candidate selection failed')
 
-    # Skeleton behavior: publish unavailable unless onroad, gps fresh, and map valid
+    # Skeleton behavior with M3 diagnostics: publish unavailable unless onroad, gps fresh, and map valid
     if not (inp.onroad and inp.gps_fresh and inp.map_valid):
       publish_unavailable(pm, vis_horizon_m, inp)
     else:
-      # Placeholder: until M2–M4, do not provide recommendations
+      # Build M3 horizon diagnostics if we have a selected/diagnosed segment
+      try:
+        gps = sm[gps_service]
+        lat = float(getattr(gps, 'latitude'))
+        lon = float(getattr(gps, 'longitude'))
+      except Exception:
+        lat = lon = 0.0
+
+      # Find the segment whose wayId matches our current diagnostics (stable or best)
+      seg_use = None
+      try:
+        mapd = sm['liveMapDataSP']
+        if getattr(mapd, 'currentRoadSegment', None) is not None and int(getattr(mapd.currentRoadSegment, 'wayId', 0)) == inp.matched_way_id:
+          seg_use = mapd.currentRoadSegment
+        else:
+          for seg in getattr(mapd, 'nearbyRoadSegments', [])[:10]:
+            if int(getattr(seg, 'wayId', 0)) == inp.matched_way_id:
+              seg_use = seg
+              break
+      except Exception:
+        seg_use = None
+
+      if seg_use is not None:
+        diag = build_horizon_and_diagnostics(seg_use, lat, lon, inp.v_ego)
+        # Attach diagnostic fields to inp for publishing
+        inp.horizon_coverage = float(diag.get('coverage', 0.0))  # type: ignore[attr-defined]
+        inp.distances_m = list(diag.get('distances_m', []))      # type: ignore[attr-defined]
+        inp.kappas_per_m = list(diag.get('kappas_per_m', []))    # type: ignore[attr-defined]
+        inp.vsafe_mps = list(diag.get('vsafe_mps', []))          # type: ignore[attr-defined]
+        inp.min_speed_mps = float(diag.get('min_speed_mps', 0.0))# type: ignore[attr-defined]
+        inp.min_speed_at_m = float(diag.get('min_speed_at_m', 0.0))# type: ignore[attr-defined]
       publish_unavailable(pm, vis_horizon_m, inp)
 
     rk.keep_time()
