@@ -96,6 +96,10 @@ def rti_enabled(started: bool, params: Params, CP: car.CarParams) -> bool:
   """Check if RTI (Realtime Traffic Intelligence) is enabled."""
   return started and params.get_bool("RTIEnabled")
 
+def mtsc_enabled(started: bool, params: Params, CP: car.CarParams) -> bool:
+  """Check if MTSC (Map Turn Speed Controller) is enabled."""
+  return started and params.get_bool("MTSCEnabled")
+
 def or_(*fns):
   return lambda *args: operator.or_(*(fn(*args) for fn in fns))
 
@@ -175,6 +179,9 @@ procs += [
   # mapd
   NativeProcess("mapd", Paths.mapd_root(), ["bash", "-c", f"{MAPD_PATH} > /dev/null 2>&1"], mapd_ready),
   PythonProcess("mapd_manager", "sunnypilot.mapd.mapd_manager", always_run),
+
+  # MTSC (Map Turn Speed Controller)
+  PythonProcess("mtscd", "sunnypilot.selfdrive.controls.mtsc.mtscd", mtsc_enabled),
 
   # RTI (Realtime Traffic Intelligence)
   PythonProcess("rtid", "sunnypilot.rtid.rtid", rti_enabled),
