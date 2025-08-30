@@ -266,9 +266,9 @@ LOW_SPEED_BIAS_END_MPH = 50.0
 HIDDEN_TURN_ENABLE = True
 HIDDEN_TURN_V_MAX_MPS = 29.06  # ~65 mph; above this we run pure physics
 HIDDEN_TURN_T_H_S = 1.8        # short horizon (~40 m at 50 mph)
-HIDDEN_TURN_DELTA_V_MPS = 2.7  # ~6 mph speed gap
-HIDDEN_TURN_MIN_OCC_S = 0.60   # require persisting occlusion ≥ 600 ms
-HIDDEN_TURN_AVAIL_SCALE = 0.8  # require >80% of horizon distance
+HIDDEN_TURN_DELTA_V_MPS = 2.0  # ~6 mph speed gap
+HIDDEN_TURN_MIN_OCC_S = 0.30   # require persisting occlusion ≥ 600 ms
+HIDDEN_TURN_AVAIL_SCALE = 0.6  # require >80% of horizon distance
 HIDDEN_TURN_PHASE_S = 2.0      # only within first ~2 s of occlusion
 
 def _original_curvature_based_lat_accel(abs_curvature_scaled: float) -> float:
@@ -1824,9 +1824,13 @@ class VisionTurnController:
       now = 0.0
     if self._occlusion_state.vision_good and now < getattr(self, '_fast_reacq_until', 0.0):
       target_speed = min(self._v_cruise_setpoint, max(target_speed, base_target * 1.02))
+    return target_speed
+
 
     # Distance-aware occlusion barrier: split visible vs occluded tail.
     # Above highway speeds, run pure physics: bypass occlusion barrier entirely
+    barrier_target_speed = None
+    _hidden_turn_active = False
     if (not self._occlusion_state.vision_good) and (self._v_ego < 29.06):
       # Visible segment bound from last_valid_curvature (near-field)
       v_vis = curvature_to_speed(max(1e-8, float(self._occlusion_state.last_valid_curvature)))
@@ -1916,6 +1920,7 @@ class VisionTurnController:
             if _d_req_hidden > (HIDDEN_TURN_AVAIL_SCALE * _d_avail):
               v_far = min(v_far, _v_req_hidden)
               d_req = max(0.0, (v_now * v_now - v_far * v_far) / max(2e-3, 2.0 * a_cap))
+              _hidden_turn_active = True
 
       # Margin relative to visible horizon
       margin_dist = float(getattr(self, '_vis_margin_m', 10.0))
@@ -1923,8 +1928,7 @@ class VisionTurnController:
 
       if positive_margin:
         # Positive margin: follow near-field physics (do not let far-field suppress visible segment)
-        target_speed = max(target_speed, v_near)
-        target_speed = max(target_speed, v_now)  # no downward motion under positive margin
+        barrier_target_speed = max(v_near, v_now)  # no downward motion under positive margin
       else:
         # Insufficient margin: decelerate toward conservative bound.
         # Include far-field bound for:
@@ -1933,12 +1937,18 @@ class VisionTurnController:
         # - All sub-30 m/s regimes to ensure timely slowing for hidden/abrupt turns outside FoV
         use_far = (self._v_ego > 36.0) or (self._v_ego <= 36.0 and k_now >= 0.004) or (self._v_ego <= 30.0)
         if use_far:
-          target_speed = min(min(v_near, v_far), v_now)
+          barrier_target_speed = min(min(v_near, v_far), v_now)
         else:
           # Very low curvature at low speeds: stick to near bound to avoid crawl
-          target_speed = min(v_near, v_now)
+          barrier_target_speed = min(v_near, v_now)
 
-    return target_speed
+    # If barrier produced a target, fold it into acceleration command (favor decel)
+    if (barrier_target_speed is not None) and _hidden_turn_active:
+      accel_cmd = min(accel_cmd, (barrier_target_speed - self._prev_target_speed) / dt)
+      # Route barrier-induced decel through adaptive decel system for proper limits
+      if accel_cmd < 0:
+        accel_cmd = max(self._get_optimal_deceleration(accel_cmd, dt), self._comfort_decel_limit)
+
 
   def update(self, sm, enabled, v_ego, a_ego, v_cruise_setpoint, v_cruise_cluster_setpoint=None):
     self._op_enabled = enabled
