@@ -97,8 +97,16 @@ def rti_enabled(started: bool, params: Params, CP: car.CarParams) -> bool:
   return started and params.get_bool("RTIEnabled")
 
 def mtsc_enabled(started: bool, params: Params, CP: car.CarParams) -> bool:
-  """Check if MTSC (Map Turn Speed Controller) is enabled."""
-  return started and params.get_bool("MTSCEnabled")
+  """Check if MTSC (Map Turn Speed Controller) is enabled.
+
+  Default-on behavior: if MTSCEnabled is unset, treat as enabled.
+  """
+  try:
+    raw = params.get("MTSCEnabled")
+    enabled = True if raw is None else params.get_bool("MTSCEnabled")
+  except Exception:
+    enabled = True
+  return started and enabled
 
 def or_(*fns):
   return lambda *args: operator.or_(*(fn(*args) for fn in fns))
