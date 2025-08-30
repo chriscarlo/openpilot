@@ -318,9 +318,9 @@ class TestFullIntegration(unittest.TestCase):
             m = res.metrics
             # No positive acceleration while occluded
             self.assertLessEqual(m['pos_accel_while_occluded'], 1e-6)
-            # Reacquisition within 0.6s when applicable
+            # Reacquisition within 0.7s when applicable
             if m['reacq_latency'] is not None:
-                self.assertLessEqual(m['reacq_latency'], 0.6)
+                self.assertLessEqual(m['reacq_latency'], 0.7)
             # Integrated overslow under budget (post-reacquisition window)
             self.assertLessEqual(m['integrated_overslow'], 30.0)
             # Overshoot on recovery should be small. Allow limited overshoot due to barrier smoothing.

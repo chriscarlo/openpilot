@@ -60,7 +60,8 @@ class Scenario:
     vis_horizon_s: float = 1.4
     vis_margin_m: float = 10.0
     gamma_per_meter: float = 0.00035
-    lat_jerk_cap: float | None = None
+    lat_jerk_cap: float | None = 2.0
+    # Default to production-like lateral jerk cap
 
 
 def load_scenario(path: str) -> Scenario:
