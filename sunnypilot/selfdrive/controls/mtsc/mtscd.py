@@ -166,6 +166,19 @@ def main() -> None:
   rk = Ratekeeper(10, print_delay_threshold=None)
   cloudlog.info('mtscd: started')
 
+  # M2 continuity state
+  stable_way_id: Optional[int] = None
+  stable_score: float = 0.0
+  stable_since: float = 0.0
+  best_way_id: Optional[int] = None
+  best_since: float = 0.0
+
+  # M2 tunables (could be Params in later pass)
+  MIN_CONF = 0.70
+  DROP_CONF = 0.45
+  SWITCH_MARGIN = 0.08
+  SWITCH_DWELL_S = 0.40
+
   while True:
     sm.update(0)
 
@@ -175,6 +188,121 @@ def main() -> None:
     vis_horizon_m = max(0.0, v_ego * vis_horizon_s)
 
     inp = read_inputs(sm, gps_service)
+
+    # Candidate selection (M2): choose best segment based on distance/heading/class/level, apply continuity/hysteresis
+    try:
+      mapd = sm['liveMapDataSP']
+      gps = sm[gps_service]
+      candidates = []
+      if getattr(mapd, 'currentRoadSegment', None) is not None:
+        candidates.append(mapd.currentRoadSegment)
+      try:
+        for seg in getattr(mapd, 'nearbyRoadSegments', [])[:10]:
+          candidates.append(seg)
+      except Exception:
+        pass
+
+      def seg_metrics(seg) -> Tuple[float, float, int, int, int]:
+        try:
+          ego_bearing = float(getattr(gps, 'bearingDeg', 0.0))
+        except Exception:
+          ego_bearing = 0.0
+        road_dir = float(getattr(seg, 'roadDirection', 0.0))
+        heading_err = _heading_error_deg(ego_bearing, road_dir)
+        # Distance to centerline
+        dmin = math.inf
+        try:
+          lat = float(getattr(gps, 'latitude'))
+          lon = float(getattr(gps, 'longitude'))
+          ego = Coordinate(lat, lon)
+          pts = getattr(seg, 'centerline', [])
+          for i in range(0, max(0, len(pts) - 1)):
+            a = Coordinate(float(pts[i].latitude), float(pts[i].longitude))
+            b = Coordinate(float(pts[i+1].latitude), float(pts[i+1].longitude))
+            dmin = min(dmin, minimum_distance(a, b, ego))
+        except Exception:
+          dmin = math.inf
+        road_class = int(getattr(seg, 'roadClass', 7))
+        level = int(getattr(seg, 'levelSeparation', 0))
+        way_id = int(getattr(seg, 'wayId', 0))
+        return dmin, heading_err, road_class, level, way_id
+
+      def seg_score(dist_m: float, head_deg: float, rclass: int, level: int) -> float:
+        # Reuse confidence components
+        di = Inputs(d_center_m=dist_m, heading_err_deg=head_deg, road_class=rclass, level=level)
+        return compute_confidence(di)
+
+      best = None
+      best_sc = -1.0
+      best_metrics = None
+      # Evaluate candidates
+      for seg in candidates:
+        dmin, herr, rclass, lvl, wid = seg_metrics(seg)
+        sc = seg_score(dmin, herr, rclass, lvl)
+        if sc > best_sc:
+          best_sc = sc
+          best = seg
+          best_metrics = (dmin, herr, rclass, lvl, wid)
+
+      now = time.monotonic()
+
+      # Track who is best over time (for dwell logic)
+      if best is not None:
+        wid_best = int(getattr(best, 'wayId', 0))
+        if best_way_id != wid_best:
+          best_way_id = wid_best
+          best_since = now
+
+      # Initialize stable on first good candidate
+      if stable_way_id is None and best is not None and best_sc >= MIN_CONF:
+        stable_way_id = int(getattr(best, 'wayId', 0))
+        stable_score = best_sc
+        stable_since = now
+
+      # Consider switching if a new best persists and is meaningfully better
+      if best is not None and stable_way_id is not None:
+        wid_best = int(getattr(best, 'wayId', 0))
+        if wid_best != stable_way_id:
+          if (best_sc >= (stable_score + SWITCH_MARGIN)) and ((now - best_since) >= SWITCH_DWELL_S):
+            stable_way_id = wid_best
+            stable_score = best_sc
+            stable_since = now
+        else:
+          # Update stable score with some inertia
+          stable_score = 0.8 * stable_score + 0.2 * best_sc
+          stable_since = stable_since if stable_since > 0 else now
+
+      # Drop stable if confidence degraded significantly
+      if stable_way_id is not None and stable_score < DROP_CONF:
+        stable_way_id = None
+        stable_score = 0.0
+        stable_since = 0.0
+
+      # Expose selected (stable if set, else best) as diagnostics
+      active_metrics = best_metrics
+      if stable_way_id is not None and best_metrics is not None:
+        # if best is not stable, recompute metrics for stable to publish
+        if stable_way_id != best_metrics[4]:
+          # find stable seg among candidates
+          for seg in candidates:
+            if int(getattr(seg, 'wayId', 0)) == stable_way_id:
+              active_metrics = seg_metrics(seg)
+              break
+        # use stable score for confidence if stable exists
+        active_score = stable_score
+      else:
+        active_score = best_sc if best_sc >= 0.0 else 0.0
+
+      if active_metrics is not None:
+        dmin, herr, rclass, lvl, wid = active_metrics
+        inp.matched_way_id = wid
+        inp.road_class = rclass
+        inp.level = lvl
+        inp.heading_err_deg = herr
+        inp.d_center_m = dmin
+        # override confidence in publish by reflecting active score via compute_confidence(inp)
+    except Exception:
+      cloudlog.exception('mtscd: candidate selection failed')
 
     # Skeleton behavior: publish unavailable unless onroad, gps fresh, and map valid
     if not (inp.onroad and inp.gps_fresh and inp.map_valid):
