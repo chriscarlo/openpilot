@@ -19,6 +19,7 @@ TEST_SUITES = [
     "filtering/test_ema_filtering.py",
     "integration/test_full_integration.py",
     "integration/test_high_value_scenarios.py",
+    "integration/test_multi_occluded_curves.py",
     # Acceptance (business outcomes)
     "acceptance/test_vtsc_acceptance.py",
 ]

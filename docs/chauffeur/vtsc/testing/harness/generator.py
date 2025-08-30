@@ -48,7 +48,15 @@ def generate_curvature(scn: Scenario, t: np.ndarray) -> np.ndarray:
         idx = 0
         for seg in g.segments:
             dur = float(seg.get('duration_s', 0.0))
-            kappa = float(seg.get('kappa', 0.0))
+            # Allow either explicit curvature or radius-based specification
+            if 'kappa' in seg:
+                kappa = float(seg.get('kappa', 0.0))
+            elif 'radius_m' in seg:
+                r = max(1e-6, float(seg.get('radius_m', 1e6)))
+                sign = float(seg.get('sign', 1.0))
+                kappa = sign * (1.0 / r)
+            else:
+                kappa = 0.0
             end = elapsed + max(0.0, dur)
             while idx < len(t) and t[idx] <= end + 1e-6:
                 k[idx] = kappa

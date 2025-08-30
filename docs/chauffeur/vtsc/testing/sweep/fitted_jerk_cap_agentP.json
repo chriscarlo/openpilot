@@ -1,0 +1,32 @@
+{
+  "speeds_mps": [
+    0.0,
+    5.0,
+    10.0,
+    15.0,
+    20.0,
+    25.0,
+    30.0,
+    35.0,
+    40.0,
+    45.0
+  ],
+  "jerk_cap_mps3": [
+    2.5,
+    2.5,
+    2.5,
+    2.5,
+    2.5,
+    2.5,
+    2.5,
+    2.58509705371595,
+    3.858633154461581,
+    5.493883656230067
+  ],
+  "alpha": 0.5,
+  "bounds": [
+    2.5,
+    6.0
+  ],
+  "note": "fitted quick pass for agentP; choose to minimize underspeed broadly; see Eval B"
+}

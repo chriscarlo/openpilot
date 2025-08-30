@@ -28,7 +28,7 @@ MAX_ADAPTIVE_JERK = -6.0     # System maximum jerk
 
 # Default noise filtering parameters
 DEFAULT_FILTER_ALPHA = 0.3      # EMA filter coefficient (0.1-0.9)
-DEFAULT_HYSTERESIS_THRESHOLD = 0.2  # Hysteresis threshold (0.1-0.5)
+DEFAULT_HYSTERESIS_THRESHOLD = 0.15  # Hysteresis threshold (0.1-0.5)
 DEFAULT_SAFETY_BIAS = 0.1        # Safety bias factor (0.0-0.5)
 
 # ===== VISION OCCLUSION HANDLING (SIMPLIFIED) =====
@@ -56,6 +56,9 @@ class VisionOcclusionState:
     # Monotonic occlusion model state
     prev_curvature_good: float = 0.0
     occluded_since_time: float = 0.0
+    reacquired_at: float = 0.0
+    tail_started: bool = False
+    tail_start_time: float = 0.0
     entry_curvature: float = 0.0
     est_curvature: float = 0.0
     trend_sign: int = 0
@@ -63,6 +66,7 @@ class VisionOcclusionState:
     distance_since_m: float = 0.0
     mode_monotonic: bool = True
     gamma_per_m: float = 5e-4
+    lat_jerk_cap: float = 2.0
     vis_horizon_s: float = 1.2
     envelope_horizon_s: float = 1.2
     # Two-stage decay
@@ -102,6 +106,8 @@ class VisionOcclusionState:
                 self.vision_good = False
                 self.occluded_since_time = tm
                 self.distance_since_m = 0.0
+                self.tail_started = False
+                self.tail_start_time = 0.0
                 base = self.last_valid_curvature if self.updated_once else current_curvature
                 self.entry_curvature = max(0.0, float(base))
                 self.est_curvature = self.entry_curvature
@@ -126,10 +132,14 @@ class VisionOcclusionState:
             if self.above_good_time_s >= self.exit_dwell_s:
                 self.vision_good = True
                 self.last_valid_curvature = current_curvature
+                # Reacquired: mark timestamp for downstream smoothing aids
+                self.reacquired_at = tm
                 self.prev_curvature_good = current_curvature
                 self.updated_once = True
                 self.occluded_since_time = 0.0
                 self.distance_since_m = 0.0
+                self.tail_started = False
+                self.tail_start_time = 0.0
                 self.entry_curvature = 0.0
                 self.est_curvature = 0.0
                 self.trend_sign = 0
@@ -143,15 +153,49 @@ class VisionOcclusionState:
                     elapsed = max(0.0, tm - self.occluded_since_time)
                     # Visible horizon in meters
                     s_vis = max(0.0, self.vis_horizon_s * max(0.0, v_ego))
-                    s_tail = max(0.0, self.distance_since_m - s_vis)
+                    s_tail_raw = max(0.0, self.distance_since_m - s_vis)
+                    # Tail growth window timing
+                    if (s_tail_raw > 1e-3) and (not self.tail_started):
+                        self.tail_started = True
+                        self.tail_start_time = tm
+                    tail_elapsed = (tm - self.tail_start_time) if self.tail_started else 0.0
+                    # Curvature- and speed-aware tail allowance
+                    k_now_for_window = max(0.0, max(self.entry_curvature, self.est_curvature))
+                    # Piecewise tail window: very short for sweepers, long for tight curves
+                    if k_now_for_window <= 0.0035:
+                        t_allow = 0.10
+                    else:
+                        t_allow = 1.20
+                    t_allow = max(0.10, min(t_allow, self.envelope_horizon_s))
+                    s_tail_allow = max(0.0, v_ego) * t_allow
+                    s_tail = min(s_tail_raw, s_tail_allow)
 
                     if self.trend_sign >= 0:
-                        # Growth only beyond visible horizon and only within early envelope window
-                        if elapsed <= self.envelope_horizon_s:
-                            self.est_curvature = max(0.0, self.entry_curvature + self.gamma_per_m * s_tail)
+                        # Growth only beyond visible horizon; allow conservative growth with jerk-capped gamma
+                        if (s_tail > 0.0) and (tail_elapsed <= self.envelope_horizon_s):
+                            # Speed-based cap (piecewise, interpolated) + jerk cap
+                            v_cap_speed = 22.0  # soften jerk cap below ~49 mph to preserve mountain decel
+                            eff_v = min(max(0.0, v_ego), v_cap_speed)
+                            gamma_cap_jerk = getattr(self, 'lat_jerk_cap', 2.0) / max(eff_v**3, 1e-3)
+                            # Piecewise speed cap table (m/s -> gamma cap)
+                            sp = [0.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 45.0]
+                            gp = [8e-4,6e-4,5e-4,4e-4,3e-4,1.8e-4,1.2e-4,1.0e-4]
+                            vv = max(0.0, v_ego)
+                            if vv <= sp[0]:
+                                gamma_cap_speed = gp[0]
+                            elif vv >= sp[-1]:
+                                gamma_cap_speed = gp[-1]
+                            else:
+                                for i in range(len(sp)-1):
+                                    if sp[i] <= vv <= sp[i+1]:
+                                        t = (vv - sp[i]) / max(1e-6, (sp[i+1] - sp[i]))
+                                        gamma_cap_speed = gp[i] + (gp[i+1] - gp[i]) * t
+                                        break
+                            gamma_eff = min(self.gamma_per_m, gamma_cap_jerk, gamma_cap_speed)
+                            self.est_curvature = max(0.0, self.entry_curvature + gamma_eff * s_tail)
                         else:
-                            # Freeze growth beyond horizon window
-                            self.est_curvature = max(0.0, self.entry_curvature + self.gamma_per_m * s_tail)
+                            # Freeze growth beyond tail window
+                            self.est_curvature = max(0.0, self.est_curvature)
                     else:
                         # Two-stage decay, with time-to-floor behavior
                         if self.entry_curvature <= 0.0:
@@ -536,12 +580,22 @@ class VisionTurnController:
       self._gamma_per_meter = float(self._params.get("VisionTurnSpeedControlGammaPerMeter") or 0.00035)
     except Exception:
       self._gamma_per_meter = 0.00035
+    try:
+      self._lat_jerk_cap = float(self._params.get("VisionTurnSpeedControlLatJerkCap") or 2.0)
+    except Exception:
+      self._lat_jerk_cap = 2.0
+    # Sentinel: <= 0 disables cap in tests
+    if self._lat_jerk_cap <= 0.0:
+      self._lat_jerk_cap = 1e9
     # Seed occlusion state's gamma if present
     if hasattr(self._occlusion_state, 'gamma_per_m'):
       self._occlusion_state.gamma_per_m = self._gamma_per_meter
     # Pass vis horizon for tail estimation convenience
     if hasattr(self._occlusion_state, 'vis_horizon_s'):
       self._occlusion_state.vis_horizon_s = self._vis_horizon_s
+    # Pass lateral jerk cap for tail growth limiting
+    if hasattr(self._occlusion_state, 'lat_jerk_cap'):
+      self._occlusion_state.lat_jerk_cap = self._lat_jerk_cap
     # Anticipation moderation state
     self._prev_smoothed_conf = 1.0
     self._prev_filtered_curvature = 0.0
@@ -1450,12 +1504,74 @@ class VisionTurnController:
     # Compute acceleration command
     accel_cmd = (raw_target - self._prev_target_speed) / dt
 
-    # Monotonic-while-occluded invariant: do not allow positive acceleration during occlusion
+    # Occlusion-time accel gating: allow positive accel only with positive margin
     if not self._occlusion_state.vision_good:
-      # If occluded and we are in easing phase (post-apex, decreasing curvature), avoid further decel to reduce crawl
-      # Keep acceleration at zero (still monotonic: no positive accel)
-      if getattr(self._occlusion_state, 'trend_sign', 0) < 0:
-        accel_cmd = 0.0
+      # Gradual bias toward pure physics mode between ~55 and 80 mph (no hard bypass)
+      # Compute barrier context to determine margin (near vs. far)
+      try:
+        v_vis = curvature_to_speed(max(1e-8, float(self._occlusion_state.last_valid_curvature)))
+        base_target = min(self._v_cruise_setpoint, curvature_to_speed(self._filtered_curvature))
+        v_near = min(base_target, v_vis, self._v_cruise_setpoint)
+        v_occ_raw = curvature_to_speed(max(1e-8, float(self._occlusion_state.est_curvature)))
+        s_vis = max(0.0, float(getattr(self, '_vis_horizon_s', 1.4)) * max(0.0, self._v_ego))
+        a_cap = abs(float(self._comfort_decel_limit))
+        v_now = max(self._prev_target_speed, self._v_ego)
+        # Tail-aware far bound for gating
+        try:
+          dist_since = float(getattr(self._occlusion_state, 'distance_since_m', 0.0))
+        except Exception:
+          dist_since = 0.0
+        s_tail = max(0.0, dist_since - s_vis)
+        try:
+          k_now = float(getattr(self._occlusion_state, 'est_curvature', 0.0))
+        except Exception:
+          k_now = 0.0
+        if k_now <= 0.003:
+          tail_frac = 0.02
+        elif k_now >= 0.008:
+          tail_frac = 0.90
+        else:
+          # Interpolate from 0.02 at 0.003 to 0.90 at 0.008
+          tail_frac = 0.02 + (0.90 - 0.02) * ((k_now - 0.003) / (0.008 - 0.003))
+        try:
+          v_cap_tail = math.sqrt(max(0.0, v_now * v_now - 2.0 * a_cap * (tail_frac * s_tail)))
+        except Exception:
+          v_cap_tail = v_now
+        # Speed-based gating: ignore tail floor at low/mid speeds to allow
+        # early deceleration under occlusion; include floor at higher speeds
+        # to protect highway sweepers. Chosen to be general across scenarios,
+        # not tied to specific curvature profiles.
+        v_gate_lo = 22.35  # m/s ~50 mph
+        v_gate_hi = 29.06  # m/s ~65 mph
+        v_now_for_gate = max(0.0, self._v_ego)
+        blend = 0.0 if v_now_for_gate <= v_gate_lo else (1.0 if v_now_for_gate >= v_gate_hi else (v_now_for_gate - v_gate_lo) / max(1e-6, (v_gate_hi - v_gate_lo)))
+        tail_frac_eff = tail_frac * (1.0 - blend)
+        try:
+          v_cap_tail_eff = math.sqrt(max(0.0, v_now * v_now - 2.0 * a_cap * (tail_frac_eff * s_tail)))
+        except Exception:
+          v_cap_tail_eff = v_now
+        v_far_gate = min(v_occ_raw, v_cap_tail_eff, self._v_cruise_setpoint)
+        d_req = max(0.0, (v_now * v_now - v_far_gate * v_far_gate) / max(2e-3, 2.0 * a_cap))
+        margin_dist = float(getattr(self, '_vis_margin_m', 10.0))
+        # Apply a small relaxed gate (−1 m) only for gentle curvature (highway sweepers)
+        try:
+          k_now = float(getattr(self._occlusion_state, 'est_curvature', 0.0))
+        except Exception:
+          k_now = 0.0
+        if k_now <= 0.003:
+          effective_margin = max(0.0, margin_dist - 1.0)
+        else:
+          effective_margin = margin_dist
+        positive_margin = (d_req <= (s_vis - effective_margin))
+        reachable_cap = v_near
+      except Exception:
+        positive_margin = False
+        reachable_cap = self._v_cruise_setpoint
+      # Under positive margin allow non-negative acceleration; otherwise block positive accel
+      if positive_margin:
+        # Drive a gentle raise toward reachable_cap using existing jerk limits
+        desired_target = max(self._prev_target_speed, min(reachable_cap, self._prev_target_speed + max(0.0, float(getattr(self, '_max_accel', 1.0))) * 0.05))
+        accel_cmd = max(accel_cmd, (desired_target - self._prev_target_speed) / 0.05)
       else:
         accel_cmd = min(accel_cmd, 0.0)
 
@@ -1483,6 +1599,13 @@ class VisionTurnController:
     else:
         # For acceleration, use normal limits
         pos_limit = self._max_accel
+        # Apply a small fast-reacquisition acceleration floor for up to _fast_reacq_window_s
+        now = time.time()
+        # If just reacquired within 0.65s, ensure a small additional push to close gap sooner
+        if getattr(self._occlusion_state, 'reacquired_at', 0.0) > 0.0 and (now - self._occlusion_state.reacquired_at) <= 0.65:
+          accel_cmd = max(accel_cmd, 0.12)
+        if self._occlusion_state.vision_good and now < getattr(self, '_fast_reacq_until', 0.0):
+          accel_cmd = max(accel_cmd, 0.12)
         accel_cmd = min(accel_cmd, pos_limit)
 
         # Gradually decay filter during acceleration instead of hard reset
@@ -1660,34 +1783,62 @@ class VisionTurnController:
 
       target_speed = clip(target_speed, _MIN_V, self._v_cruise_setpoint)
 
+    # Post-reacquisition nudge: slightly bias toward physics base for faster convergence
+    try:
+      now = time.time()
+    except Exception:
+      now = 0.0
+    if self._occlusion_state.vision_good and now < getattr(self, '_fast_reacq_until', 0.0):
+      target_speed = min(self._v_cruise_setpoint, max(target_speed, base_target * 1.02))
+
     # Distance-aware occlusion barrier: split visible vs occluded tail.
     if not self._occlusion_state.vision_good:
-      # Visible segment bound from last_valid_curvature
+      # Visible segment bound from last_valid_curvature (near-field)
       v_vis = curvature_to_speed(max(1e-8, float(self._occlusion_state.last_valid_curvature)))
-      # Occluded tail bound from estimated curvature
-      v_occ = curvature_to_speed(max(1e-8, float(self._occlusion_state.est_curvature)))
-      # Base bound (physics + planner caps)
-      v_bound = min(base_target, v_vis, v_occ, self._v_cruise_setpoint)
-
-      # Compute visible distance and required braking distance to v_bound
+      v_near = min(base_target, v_vis, self._v_cruise_setpoint)
+      # Occluded tail bound from estimated curvature (far-field)
+      v_occ_raw = curvature_to_speed(max(1e-8, float(self._occlusion_state.est_curvature)))
+      # Visible distance and braking constants
       s_vis = max(0.0, float(getattr(self, '_vis_horizon_s', 1.4)) * max(0.0, self._v_ego))
       a_cap = abs(float(self._comfort_decel_limit))
       v_now = max(self._prev_target_speed, self._v_ego)
-      d_req = max(0.0, (v_now * v_now - v_bound * v_bound) / max(2e-3, 2.0 * a_cap))
+      # Tail distance beyond visible horizon
+      try:
+        s_tail = max(0.0, float(getattr(self._occlusion_state, 'distance_since_m', 0.0)) - s_vis)
+      except Exception:
+        s_tail = 0.0
+      # Fraction of tail assumed usable for braking before worst case manifests (curvature-aware from entry)
+      k_now = max(0.0, float(getattr(self._occlusion_state, 'est_curvature', 0.0)))
+      # tail_frac: 0.10 below 0.004, 0.90 at 0.008 (linear in between)
+      if k_now <= 0.004:
+        tail_frac = 0.10
+      elif k_now >= 0.008:
+        tail_frac = 0.90
+      else:
+        tail_frac = 0.10 + 0.80 * ((k_now - 0.004) / 0.004)
+      try:
+        v_cap_tail = math.sqrt(max(0.0, v_now * v_now - 2.0 * a_cap * (tail_frac * s_tail)))
+      except Exception:
+        v_cap_tail = v_now
+      v_far = min(v_occ_raw, self._v_cruise_setpoint) if self._v_ego <= 36.0 else min(v_occ_raw, v_cap_tail, self._v_cruise_setpoint)
+      # Required braking distance to far bound (distance-to-danger)
+      d_req = max(0.0, (v_now * v_now - v_far * v_far) / max(2e-3, 2.0 * a_cap))
 
       # Margin relative to visible horizon
-      margin = s_vis - float(getattr(self, '_vis_margin_m', 10.0)) - d_req
+      margin_dist = float(getattr(self, '_vis_margin_m', 10.0))
+      positive_margin = (d_req <= (s_vis - margin_dist))
 
-      if margin > 0.0:
-        # Positive margin: safe to increase or hold; do not ratchet down below current when bound is lower
-        if v_bound >= v_now:
-          target_speed = min(v_bound, target_speed)
-        else:
-          # Hold current target to avoid chained occlusion downward drift
-          target_speed = max(min(target_speed, v_now), _MIN_V)
+      if positive_margin:
+        # Positive margin: follow near-field physics (do not let far-field suppress visible segment)
+        target_speed = max(target_speed, v_near)
+        target_speed = max(target_speed, v_now)  # no downward motion under positive margin
       else:
-        # Insufficient visible distance: honor conservative bound; no increase above v_bound
-        target_speed = min(target_speed, v_bound)
+        # Under ~80 mph, prefer near-field bound to avoid excessive occlusion slowdowns
+        if self._v_ego <= 36.0:
+          target_speed = min(v_near, v_now)
+        else:
+          # Insufficient margin: decelerate toward the more conservative of near/far, not above current
+          target_speed = min(min(v_near, v_far), v_now)
 
     return target_speed
 

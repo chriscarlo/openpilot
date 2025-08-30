@@ -31,6 +31,11 @@ class SimResult:
     a_cmd: np.ndarray
     occluded: np.ndarray
     metrics: Dict[str, Any]
+    # Visibility barrier helpers
+    s_vis: np.ndarray
+    d_req: np.ndarray
+    v_vis: np.ndarray
+    v_bound: np.ndarray
 
 
 def _mk_sm(curvature: float, v_pred: float, confidence: float):
@@ -53,7 +58,11 @@ def _mk_sm(curvature: float, v_pred: float, confidence: float):
     return SM(model)
 
 
-def _mk_vtsc_with_params(aggr: float, alpha: float, hyst: float, bias: float) -> VisionTurnController:
+def _mk_vtsc_with_params(aggr: float, alpha: float, hyst: float, bias: float,
+                         vis_horizon_s: float | None = None,
+                         vis_margin_m: float | None = None,
+                         gamma_per_m: float | None = None,
+                         lat_jerk_cap: float | None = None) -> VisionTurnController:
     class MockCP: pass
     with patch('sunnypilot.selfdrive.controls.lib.vision_turn_controller.Params') as MockParams:
         mp = MagicMock()
@@ -67,6 +76,16 @@ def _mk_vtsc_with_params(aggr: float, alpha: float, hyst: float, bias: float) ->
                 return str(hyst).encode()
             if key.endswith("SafetyBias"):
                 return str(bias).encode()
+            if key.endswith("VisHorizonS") and vis_horizon_s is not None:
+                return str(vis_horizon_s).encode()
+            if key.endswith("VisMarginM") and vis_margin_m is not None:
+                return str(vis_margin_m).encode()
+            if key.endswith("GammaPerMeter") and gamma_per_m is not None:
+                return str(gamma_per_m).encode()
+            if key.endswith("LatJerkCap"):
+                # None means 'no cap' in tests; send sentinel -1 to controller
+                val = -1.0 if lat_jerk_cap is None else float(lat_jerk_cap)
+                return str(val).encode()
             # Allow defaults otherwise
             return None
         mp.get.side_effect = _get
@@ -83,7 +102,14 @@ def simulate(scn: Scenario, alpha_bump_on_reacq: Optional[float] = None) -> SimR
     dt = scn.dt
 
     vtsc = _mk_vtsc_with_params(
-        scn.params.aggressiveness, scn.params.alpha, scn.params.hysteresis, scn.params.safety_bias
+        scn.params.aggressiveness,
+        scn.params.alpha,
+        scn.params.hysteresis,
+        scn.params.safety_bias,
+        scn.vis_horizon_s,
+        scn.vis_margin_m,
+        scn.gamma_per_meter,
+        scn.lat_jerk_cap,
     )
 
     # Latency buffer for curvature
@@ -103,6 +129,12 @@ def simulate(scn: Scenario, alpha_bump_on_reacq: Optional[float] = None) -> SimR
     # Synthetic clock for time-based logic inside VTSC
     sim_time = 0.0
 
+    # Arrays for barrier diagnostics
+    s_vis_arr: List[float] = []
+    d_req_arr: List[float] = []
+    v_vis_arr: List[float] = []
+    v_bound_arr: List[float] = []
+
     for i in range(len(t)):
         # Latency injected curvature
         k_in = kappa_buf[0] if latency_steps > 0 else kappa[i]
@@ -117,6 +149,8 @@ def simulate(scn: Scenario, alpha_bump_on_reacq: Optional[float] = None) -> SimR
         # Advance synthetic time (20 Hz)
         sim_time = float(t[i])
         # Patch time.time() and time.monotonic() inside the controller to use synthetic clock
+        # Capture prev raw target before update for d_req alignment
+        prev_raw_target = float(getattr(vtsc, '_prev_target_speed', v_ego))
         with patch('sunnypilot.selfdrive.controls.lib.vision_turn_controller.time.time', lambda: sim_time), \
              patch('sunnypilot.selfdrive.controls.lib.vision_turn_controller.time.monotonic', lambda: sim_time):
             vtsc.update(sm, True, v_ego, a_ego, vref)
@@ -132,6 +166,47 @@ def simulate(scn: Scenario, alpha_bump_on_reacq: Optional[float] = None) -> SimR
         a_cmd.append(a)
         occluded.append(not is_good)
         v_clean.append(float(min(curvature_to_speed(kappa[i]), vref)))
+
+        # Compute barrier helpers for assertions
+        try:
+            v_vis_val = float(curvature_to_speed(max(1e-8, float(vtsc._occlusion_state.last_valid_curvature))))
+            v_occ_val = float(curvature_to_speed(max(1e-8, float(vtsc._occlusion_state.est_curvature))))
+        except Exception:
+            v_vis_val = float(v_ego)
+            v_occ_val = float(v_ego)
+        base_target = float(min(vref, curvature_to_speed(max(1e-8, float(kappa[i])))))
+        v_near_val = float(min(base_target, v_vis_val, vref))
+        # Tail-aware far bound to mirror controller
+        s_vis_val = float(max(0.0, getattr(vtsc, '_vis_horizon_s', 1.4) * max(0.0, v_ego)))
+        try:
+            dist_since = float(getattr(vtsc._occlusion_state, 'distance_since_m', 0.0))
+        except Exception:
+            dist_since = 0.0
+        s_tail = max(0.0, dist_since - s_vis_val)
+        # Curvature-aware fraction mapping: 0.10 below 0.004, 0.70 at 0.008
+        try:
+            k_now = float(getattr(vtsc._occlusion_state, 'est_curvature', 0.0))
+        except Exception:
+            k_now = 0.0
+        if k_now <= 0.004:
+            tail_frac = 0.10
+        elif k_now >= 0.008:
+            tail_frac = 0.90
+        else:
+            tail_frac = 0.10 + 0.80 * ((k_now - 0.004) / 0.004)
+        a_cap = float(abs(getattr(vtsc, '_comfort_decel_limit', -1.47)))
+        v_now = float(max(prev_raw_target, v_ego))
+        try:
+            v_cap_tail = float(np.sqrt(max(0.0, v_now * v_now - 2.0 * a_cap * (tail_frac * s_tail))))
+        except Exception:
+            v_cap_tail = v_now
+        v_far_val = float(min(v_occ_val, v_cap_tail, vref))
+        d_req_val = float(max(0.0, (v_now * v_now - v_far_val * v_far_val) / max(2e-3, 2.0 * a_cap)))
+        v_bound_val = float(min(v_near_val, v_far_val))
+        v_vis_arr.append(v_vis_val)
+        v_bound_arr.append(v_bound_val)
+        s_vis_arr.append(s_vis_val)
+        d_req_arr.append(d_req_val)
 
         # Integrate acceleration to get commanded speed following sim
         v_ego = max(0.0, v_ego + a * dt)
@@ -150,4 +225,8 @@ def simulate(scn: Scenario, alpha_bump_on_reacq: Optional[float] = None) -> SimR
         a_cmd=np.asarray(a_cmd),
         occluded=np.asarray(occluded),
         metrics=metrics,
+        s_vis=np.asarray(s_vis_arr),
+        d_req=np.asarray(d_req_arr),
+        v_vis=np.asarray(v_vis_arr),
+        v_bound=np.asarray(v_bound_arr),
     )

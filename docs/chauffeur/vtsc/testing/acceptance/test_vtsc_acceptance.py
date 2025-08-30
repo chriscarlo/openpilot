@@ -50,12 +50,12 @@ def test_REQ_VTSC_001_defaults_legacy_aligned():
   """
   Given an empty Params store (no user values)
   When VTSC initializes
-  Then defaults match legacy values (aggr=1.0, alpha=0.3, hyst=0.2, bias=0.1)
+  Then defaults match expected baselines (aggr=1.0, alpha=0.3, hyst=0.15, bias=0.1)
   """
   vtsc = _mk_vtsc_with_defaults()
   assert abs(vtsc._aggressiveness - 1.0) < 1e-6
   assert abs(vtsc._filter_alpha - 0.3) < 1e-6
-  assert abs(vtsc._hysteresis_threshold - 0.2) < 1e-6
+  assert abs(vtsc._hysteresis_threshold - 0.15) < 1e-6
   assert abs(vtsc._safety_bias - 0.1) < 1e-6
 
 

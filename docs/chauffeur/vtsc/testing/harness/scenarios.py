@@ -56,6 +56,11 @@ class Scenario:
     speed_limit: SpeedLimitProfile = field(default_factory=SpeedLimitProfile)
     latency_s: float = 0.0
     params: VTSCParams = field(default_factory=VTSCParams)
+    # Per-scenario visibility barrier params
+    vis_horizon_s: float = 1.4
+    vis_margin_m: float = 10.0
+    gamma_per_meter: float = 0.00035
+    lat_jerk_cap: float | None = None
 
 
 def load_scenario(path: str) -> Scenario:
