@@ -167,6 +167,38 @@ def publish_unavailable(pm: messaging.PubMaster, vis_horizon_m: float, diag: Inp
   pm.send('mapTurnSpeedControlSP', msg)
 
 
+def publish_recommendation(pm: messaging.PubMaster,
+                           vis_horizon_m: float,
+                           diag: Inputs,
+                           target_speed_mps: float,
+                           start_distance_m: float,
+                           confidence: float) -> None:
+  msg = messaging.new_message('mapTurnSpeedControlSP')
+  msg.valid = True
+  out = msg.mapTurnSpeedControlSP
+  out.timeStamp = int(time.monotonic() * 1e9)
+  out.available = True
+  out.confidence = float(max(0.0, min(1.0, confidence)))
+  out.targetSpeedMps = float(max(0.0, target_speed_mps))
+  out.startDistanceM = float(max(0.0, start_distance_m))
+  out.horizonCoverage = getattr(diag, 'horizon_coverage', 0.0)
+  out.minSpeedMps = getattr(diag, 'min_speed_mps', 0.0)
+  out.minSpeedAtDistanceM = getattr(diag, 'min_speed_at_m', 0.0)
+  out.matchedWayId = int(diag.matched_way_id)
+  out.roadClass = int(diag.road_class)
+  out.levelSeparation = int(diag.level)
+  out.headingErrorDeg = float(diag.heading_err_deg)
+  out.distanceToCenterlineM = float(diag.d_center_m if math.isfinite(diag.d_center_m) else 0.0)
+  out.visHorizonM = float(max(0.0, vis_horizon_m))
+  if hasattr(diag, 'distances_m') and isinstance(diag.distances_m, list):
+    out.distancesM = [float(x) for x in diag.distances_m[:30]]
+  if hasattr(diag, 'kappas_per_m') and isinstance(diag.kappas_per_m, list):
+    out.kappasPerM = [float(x) for x in diag.kappas_per_m[:30]]
+  if hasattr(diag, 'vsafe_mps') and isinstance(diag.vsafe_mps, list):
+    out.vSafeMps = [float(x) for x in diag.vsafe_mps[:30]]
+  pm.send('mapTurnSpeedControlSP', msg)
+
+
 # ===== M3: Horizon & Curvature helpers =====
 EARTH_R = 6371007.2
 
@@ -570,7 +602,42 @@ def main() -> None:
         inp.vsafe_mps = list(diag.get('vsafe_mps', []))          # type: ignore[attr-defined]
         inp.min_speed_mps = float(diag.get('min_speed_mps', 0.0))# type: ignore[attr-defined]
         inp.min_speed_at_m = float(diag.get('min_speed_at_m', 0.0))# type: ignore[attr-defined]
-      publish_unavailable(pm, vis_horizon_m, inp)
+
+      # M4 gating and target computation
+      conf = compute_confidence(inp)
+      coverage = float(getattr(inp, 'horizon_coverage', 0.0))
+      vsafe = list(getattr(inp, 'vsafe_mps', []))
+      dgrid = list(getattr(inp, 'distances_m', []))
+      speed_gate = 29.06  # ~65 mph
+      min_conf = 0.70
+      min_cov = 0.60
+      margin_m = 10.0
+      start_dist = max(0.0, vis_horizon_m + margin_m)
+
+      def reachable_cap(vsafe: List[float], dgrid: List[float], s_start: float, v_now: float, a_comf: float = 1.47) -> float:
+        if not vsafe or not dgrid or len(vsafe) != len(dgrid):
+          return v_now
+        vmax = v_now
+        for vi, di in zip(vsafe, dgrid):
+          if di < s_start:
+            continue
+          # max current speed to decel comfortably to vi over (di - s_start)
+          d = max(0.0, di - s_start)
+          try:
+            v_allow = math.sqrt(max(0.0, vi*vi + 2.0 * a_comf * d))
+          except Exception:
+            v_allow = v_now
+          vmax = min(vmax, v_allow)
+        return vmax
+
+      can_offer = (inp.v_ego <= speed_gate) and (conf >= min_conf) and (coverage >= min_cov) and (len(vsafe) >= 3)
+      if can_offer and curvature_to_speed is not None:
+        v_cap = reachable_cap(vsafe, dgrid, start_dist, inp.v_ego)
+        # Do not suggest acceleration; clamp to current speed
+        v_target = min(inp.v_ego, v_cap)
+        publish_recommendation(pm, vis_horizon_m, inp, v_target, start_dist, conf)
+      else:
+        publish_unavailable(pm, vis_horizon_m, inp)
 
     rk.keep_time()
 
