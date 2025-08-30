@@ -469,7 +469,26 @@ struct RtiStateSP @0xa1680744031fdb2d {
   }
 }
 
-struct CustomReserved10 @0xcb9fd56c7057593a {
+struct MapTurnSpeedControlSP @0xcb9fd56c7057593a {
+  timeStamp @0 :UInt64;                      # nanos since boot
+  available @1 :Bool;                        # recommendation is usable
+  confidence @2 :Float32;                    # 0..1 fused confidence
+  targetSpeedMps @3 :Float32;                # comfort/jerk-limited strategic target
+  startDistanceM @4 :Float32;                # distance where advice becomes relevant
+  horizonCoverage @5 :Float32;               # 0..1 fraction of requested horizon covered
+  minSpeedMps @6 :Float32;                   # min physics speed in horizon (diagnostic)
+  minSpeedAtDistanceM @7 :Float32;           # distance of min speed
+  matchedWayId @8 :UInt64;                   # OSM way ID
+  roadClass @9 :LiveMapDataSP.RoadSegment.RoadClass;  # reuse road class enum
+  levelSeparation @10 :Int8;                 # -1/0/+1 (under/ground/bridge)
+  headingErrorDeg @11 :Float32;              # ego vs way heading
+  distanceToCenterlineM @12 :Float32;        # closest distance to centerline
+  visHorizonM @13 :Float32;                  # visible horizon used for gating
+
+  # Optional decimated debug vectors (cap to ≤30 samples when used)
+  distancesM @14 :List(Float32);
+  kappasPerM @15 :List(Float32);
+  vSafeMps @16 :List(Float32);
 }
 
 struct CustomReserved11 @0xc2243c65e0340384 {

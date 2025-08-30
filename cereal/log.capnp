@@ -2632,7 +2632,7 @@ struct Event {
     carStateSP @114 :Custom.CarStateSP;
     liveMapDataSP @115 :Custom.LiveMapDataSP;
     rtiStateSP @116 :Custom.RtiStateSP;
-    customReserved10 @136 :Custom.CustomReserved10;
+    mapTurnSpeedControlSP @136 :Custom.MapTurnSpeedControlSP;
     customReserved11 @137 :Custom.CustomReserved11;
     customReserved12 @138 :Custom.CustomReserved12;
     customReserved13 @139 :Custom.CustomReserved13;
