@@ -226,6 +226,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"VisionTurnSpeedControlVisHorizonS", {PERSISTENT | BACKUP, FLOAT, "1.4"}},
     {"VisionTurnSpeedControlVisMarginM", {PERSISTENT | BACKUP, FLOAT, "10.0"}},
     {"VisionTurnSpeedControlGammaPerMeter", {PERSISTENT | BACKUP, FLOAT, "0.00035"}},
+    {"VisionTurnSpeedControlLatJerkCap", {PERSISTENT | BACKUP, FLOAT, "2.0"}},
 
     // VTSC Speed Control
     {"VisionTurnSpeedControlSpeedIncreaseFactor", {PERSISTENT | BACKUP, FLOAT, "1.0"}},
@@ -309,7 +310,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"LagdToggleDelay", {PERSISTENT | BACKUP, FLOAT, "0.2"}},
     {"LagdValueCache", {PERSISTENT, FLOAT, "0.2"}},
 
-    // mapd
+    // mapd + MTSC
     {"MapAdvisorySpeedLimit", {CLEAR_ON_ONROAD_TRANSITION, FLOAT}},
     {"MapdVersion", {PERSISTENT, STRING, ""}},
     {"MapSpeedLimit", {CLEAR_ON_ONROAD_TRANSITION, FLOAT, "0.0"}},
@@ -320,6 +321,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"OsmDownloadedDate", {PERSISTENT, STRING, "0.0"}},
     {"OSMDownloadLocations", {PERSISTENT, JSON}},
     {"OSMDownloadProgress", {CLEAR_ON_MANAGER_START, JSON}},
+    {"MTSCEnabled", {PERSISTENT | BACKUP, BOOL, "1"}},
     {"OsmLocal", {PERSISTENT, BOOL}},
     {"OsmLocationName", {PERSISTENT, STRING}},
     {"OsmLocationTitle", {PERSISTENT, STRING}},
