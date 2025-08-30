@@ -11,12 +11,11 @@ from __future__ import annotations
 import math
 import time
 from dataclasses import dataclass
-from typing import Optional, Tuple, List
 
 import cereal.messaging as messaging
 from openpilot.common.gps import get_gps_location_service
 from openpilot.common.params import Params
-from openpilot.common.realtime import Ratekeeper, config_realtime_process
+from openpilot.common.realtime import Priority, Ratekeeper, config_realtime_process
 from openpilot.common.swaglog import cloudlog
 from openpilot.sunnypilot.navd.helpers import Coordinate, minimum_distance
 try:
@@ -75,12 +74,12 @@ def read_inputs(sm: messaging.SubMaster, gps_service: str) -> Inputs:
       inp.heading_err_deg = _heading_error_deg(ego_bearing, road_dir)
       # Distance to centerline if GPS position available
       try:
-        lat = float(getattr(gps, 'latitude'))
-        lon = float(getattr(gps, 'longitude'))
+        lat = float(gps.latitude)
+        lon = float(gps.longitude)
         ego = Coordinate(lat, lon)
         pts = getattr(seg, 'centerline', [])
         dmin = math.inf
-        for i in range(0, max(0, len(pts) - 1)):
+        for i in range(max(0, len(pts) - 1)):
           a = Coordinate(float(pts[i].latitude), float(pts[i].longitude))
           b = Coordinate(float(pts[i+1].latitude), float(pts[i+1].longitude))
           dmin = min(dmin, minimum_distance(a, b, ego))
@@ -203,7 +202,7 @@ def publish_recommendation(pm: messaging.PubMaster,
 EARTH_R = 6371007.2
 
 
-def _xy_from_latlon(lat: float, lon: float, lat0: float, lon0: float) -> Tuple[float, float]:
+def _xy_from_latlon(lat: float, lon: float, lat0: float, lon0: float) -> tuple[float, float]:
   # Equirectangular approximation in meters relative to (lat0, lon0)
   dlat = math.radians(lat - lat0)
   dlon = math.radians(lon - lon0)
@@ -212,7 +211,7 @@ def _xy_from_latlon(lat: float, lon: float, lat0: float, lon0: float) -> Tuple[f
   return x, y
 
 
-def _project_s_on_centerline(centerline: List, lat: float, lon: float) -> Tuple[float, float]:
+def _project_s_on_centerline(centerline: list, lat: float, lon: float) -> tuple[float, float]:
   """Return (s_proj, d_perp) where s is distanceFromStart at projection and d_perp is perp distance (m)."""
   best_d = math.inf
   best_s = 0.0
@@ -269,7 +268,7 @@ def _project_s_on_centerline(centerline: List, lat: float, lon: float) -> Tuple[
   return best_s, best_d
 
 
-def _interpolate_latlon_from_s(s_list: List[float], lat_list: List[float], lon_list: List[float], s_target: float) -> Tuple[float, float]:
+def _interpolate_latlon_from_s(s_list: list[float], lat_list: list[float], lon_list: list[float], s_target: float) -> tuple[float, float]:
   if s_target <= s_list[0]:
     return lat_list[0], lon_list[0]
   if s_target >= s_list[-1]:
@@ -289,7 +288,7 @@ def _interpolate_latlon_from_s(s_list: List[float], lat_list: List[float], lon_l
   return lat, lon
 
 
-def _compute_curvature(xs: List[float], ys: List[float]) -> List[float]:
+def _compute_curvature(xs: list[float], ys: list[float]) -> list[float]:
   """Return |curvature| per middle point for triples (i,i+1,i+2)."""
   k = []
   for i in range(len(xs) - 2):
@@ -367,8 +366,8 @@ def build_horizon_and_diagnostics(seg, lat: float, lon: float, v_ego: float,
   lats = []
   lons = []
   lat_ref, lon_ref = _interpolate_latlon_from_s(s_list, lat_list, lon_list, s_vals[0])
-  xs: List[float] = []
-  ys: List[float] = []
+  xs: list[float] = []
+  ys: list[float] = []
   for sv in s_vals:
     la, lo = _interpolate_latlon_from_s(s_list, lat_list, lon_list, sv)
     lats.append(la)
@@ -401,7 +400,7 @@ def build_horizon_and_diagnostics(seg, lat: float, lon: float, v_ego: float,
     min_at = float(d_mids[idx])
 
   # Decimate vectors to ≤30 elements for message
-  def decimate(arr: List[float], maxn: int = 30) -> List[float]:
+  def decimate(arr: list[float], maxn: int = 30) -> list[float]:
     if len(arr) <= maxn:
       return arr
     step = len(arr) / maxn
@@ -421,7 +420,7 @@ def build_horizon_and_diagnostics(seg, lat: float, lon: float, v_ego: float,
 def main() -> None:
   params = Params()
   # real-time priority for low overhead
-  config_realtime_process(5)
+  config_realtime_process(5, Priority.CTRL_LOW)
   gps_service = get_gps_location_service(params)
   sm = messaging.SubMaster(['liveMapDataSP', 'carState', 'selfdriveState', gps_service], ignore_avg_freq=True)
   pm = messaging.PubMaster(['mapTurnSpeedControlSP'])
@@ -430,10 +429,10 @@ def main() -> None:
   cloudlog.info('mtscd: started')
 
   # M2 continuity state
-  stable_way_id: Optional[int] = None
+  stable_way_id: int | None = None
   stable_score: float = 0.0
   stable_since: float = 0.0
-  best_way_id: Optional[int] = None
+  best_way_id: int | None = None
   best_since: float = 0.0
 
   # M2 tunables (could be Params in later pass)
@@ -465,7 +464,7 @@ def main() -> None:
       except Exception:
         pass
 
-      def seg_metrics(seg) -> Tuple[float, float, int, int, int]:
+      def seg_metrics(seg) -> tuple[float, float, int, int, int]:
         try:
           ego_bearing = float(getattr(gps, 'bearingDeg', 0.0))
         except Exception:
@@ -475,11 +474,11 @@ def main() -> None:
         # Distance to centerline
         dmin = math.inf
         try:
-          lat = float(getattr(gps, 'latitude'))
-          lon = float(getattr(gps, 'longitude'))
+          lat = float(gps.latitude)
+          lon = float(gps.longitude)
           ego = Coordinate(lat, lon)
           pts = getattr(seg, 'centerline', [])
-          for i in range(0, max(0, len(pts) - 1)):
+          for i in range(max(0, len(pts) - 1)):
             a = Coordinate(float(pts[i].latitude), float(pts[i].longitude))
             b = Coordinate(float(pts[i+1].latitude), float(pts[i+1].longitude))
             dmin = min(dmin, minimum_distance(a, b, ego))
@@ -574,8 +573,8 @@ def main() -> None:
       # Build M3 horizon diagnostics if we have a selected/diagnosed segment
       try:
         gps = sm[gps_service]
-        lat = float(getattr(gps, 'latitude'))
-        lon = float(getattr(gps, 'longitude'))
+        lat = float(gps.latitude)
+        lon = float(gps.longitude)
       except Exception:
         lat = lon = 0.0
 
@@ -614,11 +613,11 @@ def main() -> None:
       margin_m = 10.0
       start_dist = max(0.0, vis_horizon_m + margin_m)
 
-      def reachable_cap(vsafe: List[float], dgrid: List[float], s_start: float, v_now: float, a_comf: float = 1.47) -> float:
+      def reachable_cap(vsafe: list[float], dgrid: list[float], s_start: float, v_now: float, a_comf: float = 1.47) -> float:
         if not vsafe or not dgrid or len(vsafe) != len(dgrid):
           return v_now
         vmax = v_now
-        for vi, di in zip(vsafe, dgrid):
+        for vi, di in zip(vsafe, dgrid, strict=False):
           if di < s_start:
             continue
           # max current speed to decel comfortably to vi over (di - s_start)
