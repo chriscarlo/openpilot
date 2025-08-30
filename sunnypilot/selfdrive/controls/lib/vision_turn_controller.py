@@ -260,6 +260,17 @@ PHYSICS_MAX_LAT_ACCEL = 3.12
 LOW_SPEED_BIAS_MPH = 0.0
 LOW_SPEED_BIAS_END_MPH = 50.0
 
+# ===== Hidden-turn early deceleration trigger (occlusion-only, sub-65 mph) =====
+# Allows jerk-limited early braking when a short-horizon physics deficit is provably large
+# despite a transiently positive visible-margin condition.
+HIDDEN_TURN_ENABLE = True
+HIDDEN_TURN_V_MAX_MPS = 29.06  # ~65 mph; above this we run pure physics
+HIDDEN_TURN_T_H_S = 1.8        # short horizon (~40 m at 50 mph)
+HIDDEN_TURN_DELTA_V_MPS = 2.7  # ~6 mph speed gap
+HIDDEN_TURN_MIN_OCC_S = 0.60   # require persisting occlusion ≥ 600 ms
+HIDDEN_TURN_AVAIL_SCALE = 0.8  # require >80% of horizon distance
+HIDDEN_TURN_PHASE_S = 2.0      # only within first ~2 s of occlusion
+
 def _original_curvature_based_lat_accel(abs_curvature_scaled: float) -> float:
     """Internal function replicating the tuned lateral accel logic."""
     high_accel = 3.12
@@ -1568,6 +1579,25 @@ class VisionTurnController:
           else:
             effective_margin = margin_dist
           positive_margin = (d_req <= (s_vis - effective_margin))
+          # ===== Hidden-turn early deceleration trigger (short-horizon critical deficit) =====
+          if HIDDEN_TURN_ENABLE and (self._v_ego <= HIDDEN_TURN_V_MAX_MPS):
+            try:
+              now = time.time()
+            except Exception:
+              now = 0.0
+            t0 = float(getattr(self._occlusion_state, 'occluded_since_time', 0.0) or 0.0)
+            occ_elapsed = max(0.0, now - t0)
+            if occ_elapsed >= HIDDEN_TURN_MIN_OCC_S and occ_elapsed <= HIDDEN_TURN_PHASE_S:
+              v_req_hidden = float(v_cap_tail_eff)
+              deficit = max(0.0, v_now - v_req_hidden)
+              if deficit >= HIDDEN_TURN_DELTA_V_MPS:
+                d_avail_time = max(0.0, self._v_ego * HIDDEN_TURN_T_H_S)
+                d_avail_vis = max(0.0, s_vis - effective_margin)
+                d_avail = min(d_avail_time, d_avail_vis)
+                d_req_hidden = max(0.0, (v_now * v_now - v_req_hidden * v_req_hidden) / max(2e-3, 2.0 * a_cap))
+                if d_req_hidden > (HIDDEN_TURN_AVAIL_SCALE * d_avail):
+                  v_occ_raw = min(v_occ_raw, v_req_hidden)
+                  positive_margin = False
           reachable_cap = v_near
         except Exception:
           positive_margin = False
@@ -1825,6 +1855,24 @@ class VisionTurnController:
         v_cap_tail = math.sqrt(max(0.0, v_now * v_now - 2.0 * a_cap * (tail_frac * s_tail)))
       except Exception:
         v_cap_tail = v_now
+      # Hidden-turn assist: if occlusion entry was near-zero curvature and we're within
+      # an early tail window at moderate speeds, boost tail fraction to reflect risk.
+      try:
+        _entry_k = float(getattr(self._occlusion_state, 'entry_curvature', 0.0) or 0.0)
+        _tail_t0 = float(getattr(self._occlusion_state, 'tail_start_time', 0.0) or 0.0)
+        _tail_started = bool(getattr(self._occlusion_state, 'tail_started', False))
+        _now_ht2 = time.time()
+        _tail_elapsed2 = max(0.0, _now_ht2 - _tail_t0) if _tail_started else 0.0
+      except Exception:
+        _entry_k = 0.0
+        _tail_elapsed2 = 0.0
+      if (_entry_k <= 3e-4) and (_tail_elapsed2 <= HIDDEN_TURN_PHASE_S) and (self._v_ego <= 30.0):
+        try:
+          _tail_frac_boost = max(tail_frac, 0.5)
+          _v_cap_tail_boost = math.sqrt(max(0.0, v_now * v_now - 2.0 * a_cap * (_tail_frac_boost * s_tail)))
+          v_cap_tail = min(v_cap_tail, _v_cap_tail_boost)
+        except Exception:
+          pass
       # Far bound selection:
       # - Highway (>36 m/s): include tail braking cap
       # - Mountain/moderate speeds (≤36 m/s): include tail braking cap when curvature is meaningful
@@ -1838,6 +1886,36 @@ class VisionTurnController:
         v_far = min(v_occ_raw, self._v_cruise_setpoint)
       # Required braking distance to far bound (distance-to-danger)
       d_req = max(0.0, (v_now * v_now - v_far * v_far) / max(2e-3, 2.0 * a_cap))
+
+      # Hidden-turn early deceleration trigger within occlusion barrier (sub-65 mph)
+      # If short-horizon distance is insufficient to shed a large speed deficit to tail cap,
+      # treat as insufficient margin for a brief early window.
+      if HIDDEN_TURN_ENABLE and (self._v_ego <= HIDDEN_TURN_V_MAX_MPS):
+        try:
+          _now_ht = time.time()
+        except Exception:
+          _now_ht = 0.0
+        _t0_ht = float(getattr(self._occlusion_state, 'occluded_since_time', 0.0) or 0.0)
+        _occ_elapsed = max(0.0, _now_ht - _t0_ht)
+        # Also permit within an early window relative to tail start (distance beyond visible horizon)
+        try:
+          _tail_t0 = float(getattr(self._occlusion_state, 'tail_start_time', 0.0) or 0.0)
+          _tail_started = bool(getattr(self._occlusion_state, 'tail_started', False))
+        except Exception:
+          _tail_t0 = 0.0
+          _tail_started = False
+        _tail_elapsed = max(0.0, _now_ht - _tail_t0) if _tail_started else 0.0
+        if (_occ_elapsed >= HIDDEN_TURN_MIN_OCC_S) and ((_occ_elapsed <= HIDDEN_TURN_PHASE_S) or (_tail_elapsed <= HIDDEN_TURN_PHASE_S)):
+          _v_req_hidden = float(v_cap_tail)
+          _deficit = max(0.0, v_now - _v_req_hidden)
+          if _deficit >= HIDDEN_TURN_DELTA_V_MPS:
+            _d_avail_time = max(0.0, self._v_ego * HIDDEN_TURN_T_H_S)
+            _d_avail_vis = max(0.0, s_vis - float(getattr(self, '_vis_margin_m', 10.0)))
+            _d_avail = min(_d_avail_time, _d_avail_vis)
+            _d_req_hidden = max(0.0, (v_now * v_now - _v_req_hidden * _v_req_hidden) / max(2e-3, 2.0 * a_cap))
+            if _d_req_hidden > (HIDDEN_TURN_AVAIL_SCALE * _d_avail):
+              v_far = min(v_far, _v_req_hidden)
+              d_req = max(0.0, (v_now * v_now - v_far * v_far) / max(2e-3, 2.0 * a_cap))
 
       # Margin relative to visible horizon
       margin_dist = float(getattr(self, '_vis_margin_m', 10.0))
