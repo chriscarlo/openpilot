@@ -8,6 +8,7 @@
 - Tests sit alongside modules and at repo root as `test_*.py`.
 
 ## Build, Test, and Development Commands
+- Environment check: confirm whether you're on the TICI production environment or the WSL Ubuntu dev environment; some scripts, paths, and hardware access differ.
 - Create env: `python -m venv .venv && source .venv/bin/activate`.
 - Install deps (dev+tests): `pip install -e ".[testing,dev]"`.
 - Build native targets: `scons -j$(nproc)` (add `--stock-ui` to build stock UI).
@@ -40,4 +41,3 @@
 ## Security & Configuration Tips
 - Do not commit private keys, large binaries, or personal drive logs. Use Git LFS when needed.
 - Changes to controls/safety require clear justification and tests.
-- Do not modify `.claude/` or `docs/chauffeur/claude/`.
