@@ -22,33 +22,7 @@ void ModelRendererSP::update_model(const cereal::ModelDataV2::Reader &model, con
 }
 
 void ModelRendererSP::drawPath(QPainter &painter, const cereal::ModelDataV2::Reader &model, const QRect &surface_rect) {
-  auto *s = uiState();
-  auto &sm = *(s->sm);
-  bool blindspot = Params().getBool("BlindSpot");
-
-  if (blindspot) {
-    bool left_blindspot = sm["carState"].getCarState().getLeftBlindspot();
-    bool right_blindspot = sm["carState"].getCarState().getRightBlindspot();
-
-    //painter.setBrush(QColor::fromRgbF(1.0, 0.0, 0.0, 0.4));  // Red with alpha for blind spot
-
-    if (left_blindspot && !left_blindspot_vertices.isEmpty()) {
-      QLinearGradient gradient(0, 0, surface_rect.width(), 0); // Horizontal gradient from left to right
-      gradient.setColorAt(0.0, QColor(255, 165, 0, 102)); // Orange with alpha
-      gradient.setColorAt(1.0, QColor(255, 255, 0, 102)); // Yellow with alpha
-      painter.setBrush(gradient);
-      painter.drawPolygon(left_blindspot_vertices);
-    }
-
-    if (right_blindspot && !right_blindspot_vertices.isEmpty()) {
-      QLinearGradient gradient(surface_rect.width(), 0, 0, 0); // Horizontal gradient from right to left
-      gradient.setColorAt(0.0, QColor(255, 165, 0, 102)); // Orange with alpha
-      gradient.setColorAt(1.0, QColor(255, 255, 0, 102)); // Yellow with alpha
-      painter.setBrush(gradient);
-      painter.drawPolygon(right_blindspot_vertices);
-    }
-  }
-
+  // First, draw the usual driving path (base implementation)
   bool rainbow = Params().getBool("RainbowMode");
   //float v_ego = sm["carState"].getCarState().getVEgo();
 
@@ -86,5 +60,33 @@ void ModelRendererSP::drawPath(QPainter &painter, const cereal::ModelDataV2::Rea
   } else {
     // Normal path rendering
     ModelRenderer::drawPath(painter, model, surface_rect.height());
+  }
+
+  // Then overlay blind spot indicators on top so they remain visible
+  auto *s = uiState();
+  auto &sm = *(s->sm);
+  const bool blindspot_enabled = Params().getBool("BlindSpot");
+  if (blindspot_enabled && sm.valid("carState")) {
+    const bool left_blindspot = sm["carState"].getCarState().getLeftBlindspot();
+    const bool right_blindspot = sm["carState"].getCarState().getRightBlindspot();
+
+    // No outlines; filled translucent overlays only
+    painter.setPen(Qt::NoPen);
+
+    if (left_blindspot && !left_blindspot_vertices.isEmpty()) {
+      QLinearGradient gradient(0, 0, surface_rect.width(), 0); // left -> right
+      gradient.setColorAt(0.0, QColor(255, 165, 0, 140)); // Orange with more alpha
+      gradient.setColorAt(1.0, QColor(255, 255, 0, 140)); // Yellow with more alpha
+      painter.setBrush(gradient);
+      painter.drawPolygon(left_blindspot_vertices);
+    }
+
+    if (right_blindspot && !right_blindspot_vertices.isEmpty()) {
+      QLinearGradient gradient(surface_rect.width(), 0, 0, 0); // right -> left
+      gradient.setColorAt(0.0, QColor(255, 165, 0, 140)); // Orange with more alpha
+      gradient.setColorAt(1.0, QColor(255, 255, 0, 140)); // Yellow with more alpha
+      painter.setBrush(gradient);
+      painter.drawPolygon(right_blindspot_vertices);
+    }
   }
 }
