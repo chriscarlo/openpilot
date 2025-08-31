@@ -24,12 +24,14 @@ public:
   explicit DevicePanelSP(SettingsWindowSP *parent = 0);
   void showEvent(QShowEvent *event) override;
   void setOffroadMode();
+  void setOnroadMode();
   void updateState();
   void resetSettings();
 
 private:
   std::map<QString, PushButtonSP*> buttons;
   PushButtonSP *offroadBtn;
+  PushButtonSP *onroadBtn;
   MaxTimeOffroad *maxTimeOffroad;
   ButtonParamControlSP *toggleDeviceBootMode;
   Brightness *brightness;

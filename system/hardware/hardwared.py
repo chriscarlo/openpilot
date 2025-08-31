@@ -241,6 +241,23 @@ def hardware_thread(end_event, hw_queue) -> None:
         onroad_conditions["ignition"] = False
         cloudlog.error("panda timed out onroad")
 
+    # Developer overrides: allow forcing onroad by faking ignition
+    # 1) Params key "ForceOnroad" (bool)
+    # 2) Env var "FORCE_ONROAD" (any non-empty value other than "0"/"false")
+    # When enabled, manager will consider ignition true and start onroad processes.
+    try:
+      if params.get_bool("ForceOnroad"):
+        onroad_conditions["ignition"] = True
+    except Exception:
+      pass
+
+    try:
+      force_env = os.getenv("FORCE_ONROAD")
+      if force_env and force_env.lower() not in ("0", "false"):
+        onroad_conditions["ignition"] = True
+    except Exception:
+      pass
+
     # Run at 2Hz, plus either edge of ignition
     ign_edge = (started_ts is not None) != all(onroad_conditions.values())
     if (sm.frame % round(SERVICE_LIST['pandaStates'].frequency * DT_HW) != 0) and not ign_edge:
@@ -342,6 +359,12 @@ def hardware_thread(end_event, hw_queue) -> None:
     should_start = all(onroad_conditions.values())
     if started_ts is None:
       should_start = should_start and all(startup_conditions.values())
+    # Developer override: if ForceOnroad is set, force should_start regardless of other conditions
+    try:
+      if params.get_bool("ForceOnroad"):
+        should_start = True
+    except Exception:
+      pass
 
     if should_start != should_start_prev or (count == 0):
       params.put_bool("IsEngaged", False)

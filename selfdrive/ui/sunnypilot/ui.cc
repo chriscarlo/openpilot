@@ -35,7 +35,7 @@ void UIStateSP::update() {
   update_state(this);
   updateStatus();
 
-  // Force onroad mode if environment variable is set
+  // Force onroad mode if environment variable is set (dev only)
   if (getenv("FORCE_ONROAD_UI") && !scene.started) {
     scene.started = true;
     scene.started_frame = sm->frame;

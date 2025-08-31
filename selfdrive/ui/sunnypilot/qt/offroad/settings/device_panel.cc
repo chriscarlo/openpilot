@@ -104,42 +104,40 @@ DevicePanelSP::DevicePanelSP(SettingsWindowSP *parent) : DevicePanel(parent) {
   connect(brightness, &OptionControlSP::updateLabels, brightness, &Brightness::refresh);
   addItem(brightness);
 
-  addItem(device_grid_layout);
+  // Add mode buttons row to existing grid for perfect alignment
+  offroadBtn = new PushButtonSP(tr("Always Offroad"), 750, this);
+  QObject::connect(offroadBtn, &PushButtonSP::clicked, this, &DevicePanelSP::setOffroadMode);
+  device_grid_layout->addWidget(offroadBtn, row, 0, Qt::AlignLeft);
 
-  // offroad mode and power buttons
+  onroadBtn = new PushButtonSP(tr("Always Onroad"), 750, this);
+  QObject::connect(onroadBtn, &PushButtonSP::clicked, this, &DevicePanelSP::setOnroadMode);
+  device_grid_layout->addWidget(onroadBtn, row, 1, Qt::AlignRight);
+  row++;
 
-  QHBoxLayout *power_layout = new QHBoxLayout();
-  power_layout->setSpacing(25);
-
+  // Add power buttons row to the same grid
   PushButtonSP *rebootBtn = new PushButtonSP(tr("Reboot"), 750, this);
   rebootBtn->setStyleSheet(rebootButtonStyle);
-  power_layout->addWidget(rebootBtn);
   QObject::connect(rebootBtn, &PushButtonSP::clicked, this, &DevicePanelSP::reboot);
+  device_grid_layout->addWidget(rebootBtn, row, 0, Qt::AlignLeft);
 
   PushButtonSP *poweroffBtn = new PushButtonSP(tr("Power Off"), 750, this);
   poweroffBtn->setStyleSheet(powerOffButtonStyle);
-  power_layout->addWidget(poweroffBtn);
   QObject::connect(poweroffBtn, &PushButtonSP::clicked, this, &DevicePanelSP::poweroff);
+  device_grid_layout->addWidget(poweroffBtn, row, 1, Qt::AlignRight);
+  row++;
 
   if (!Hardware::PC()) {
     connect(uiState(), &UIState::offroadTransition, poweroffBtn, &PushButtonSP::setVisible);
   }
 
-  offroadBtn = new PushButtonSP(tr("Offroad Mode"));
-  offroadBtn->setFixedWidth(power_layout->sizeHint().width());
-  QObject::connect(offroadBtn, &PushButtonSP::clicked, this, &DevicePanelSP::setOffroadMode);
-
-  QVBoxLayout *power_group_layout = new QVBoxLayout();
-  power_group_layout->setSpacing(25);
-  power_group_layout->addWidget(offroadBtn, 0, Qt::AlignHCenter);
-  power_group_layout->addLayout(power_layout);
-
-  addItem(power_group_layout);
+  // Add the grid of device buttons (including mode + power rows) to the panel
+  addItem(device_grid_layout);
 
   std::vector always_enabled_btns = {
     rebootBtn,
     poweroffBtn,
     offroadBtn,
+    onroadBtn,
     buttons["quietModeBtn"],
   };
 
@@ -167,12 +165,38 @@ void DevicePanelSP::setOffroadMode() {
       if (ConfirmationDialog::confirm(tr("Are you sure you want to enter Always Offroad mode?"), tr("Confirm"), this)) {
         // Check engaged again in case it changed while the dialog was open
         if (!uiState()->engaged()) {
+          // Ensure mutual exclusivity with Always Onroad
+          params.putBool("ForceOnroad", false);
           params.putBool("OffroadMode", true);
         }
       }
     }
   } else {
     ConfirmationDialog::alert(tr("Disengage to Enter Always Offroad Mode"), this);
+  }
+
+  updateState();
+}
+
+void DevicePanelSP::setOnroadMode() {
+  if (!uiState()->engaged()) {
+    if (params.getBool("ForceOnroad")) {
+      if (ConfirmationDialog::confirm(tr("Are you sure you want to exit Always Onroad mode?"), tr("Confirm"), this)) {
+        if (!uiState()->engaged()) {
+          params.putBool("ForceOnroad", false);
+        }
+      }
+    } else {
+      if (ConfirmationDialog::confirm(tr("Are you sure you want to enter Always Onroad mode?"), tr("Confirm"), this)) {
+        if (!uiState()->engaged()) {
+          // Ensure mutual exclusivity with Always Offroad
+          params.remove("OffroadMode");
+          params.putBool("ForceOnroad", true);
+        }
+      }
+    }
+  } else {
+    ConfirmationDialog::alert(tr("Disengage to Enter Always Onroad Mode"), this);
   }
 
   updateState();
@@ -203,6 +227,10 @@ void DevicePanelSP::updateState() {
   bool offroad_mode_param = params.getBool("OffroadMode");
   offroadBtn->setText(offroad_mode_param ? tr("Exit Always Offroad") : tr("Always Offroad"));
   offroadBtn->setStyleSheet(offroad_mode_param ? alwaysOffroadStyle : autoOffroadStyle);
+
+  bool onroad_mode_param = params.getBool("ForceOnroad");
+  onroadBtn->setText(onroad_mode_param ? tr("Exit Always Onroad") : tr("Always Onroad"));
+  onroadBtn->setStyleSheet(onroad_mode_param ? alwaysOffroadStyle : autoOffroadStyle);
 
   DeviceSleepModeStatus currStatus = DeviceSleepModeStatus::DEFAULT;
   if (params.get("DeviceBootMode") == "1") {

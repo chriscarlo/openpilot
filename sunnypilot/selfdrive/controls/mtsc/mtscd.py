@@ -16,8 +16,10 @@ import cereal.messaging as messaging
 from openpilot.common.gps import get_gps_location_service
 from openpilot.common.params import Params
 from openpilot.common.realtime import Ratekeeper, Priority, config_realtime_process
+import os
+from openpilot.system.statsd import statlog
 from openpilot.common.swaglog import cloudlog
-from openpilot.sunnypilot.navd.helpers import Coordinate, minimum_distance
+from openpilot.sunnypilot.navd.helpers import Coordinate, minimum_distance, coordinate_from_param
 try:
   # Reuse physics mapping from VTSC
   from openpilot.sunnypilot.selfdrive.controls.lib.vision_turn_controller import curvature_to_speed
@@ -158,13 +160,22 @@ def publish_unavailable(pm: messaging.PubMaster, vis_horizon_m: float, diag: Inp
   out.distanceToCenterlineM = float(diag.d_center_m if math.isfinite(diag.d_center_m) else 0.0)
   out.visHorizonM = float(max(0.0, vis_horizon_m))
   # Optional debug vectors if present on diag
-  if hasattr(diag, 'distances_m') and isinstance(diag.distances_m, list):
-    out.distancesM = [float(x) for x in diag.distances_m[:30]]
-  if hasattr(diag, 'kappas_per_m') and isinstance(diag.kappas_per_m, list):
-    out.kappasPerM = [float(x) for x in diag.kappas_per_m[:30]]
-  if hasattr(diag, 'vsafe_mps') and isinstance(diag.vsafe_mps, list):
-    out.vSafeMps = [float(x) for x in diag.vsafe_mps[:30]]
-  pm.send('mapTurnSpeedControlSP', msg)
+  # Optional debug vectors if explicitly enabled via param
+  try:
+    if Params().get_int('MTSCLogDetail') > 0:
+      if hasattr(diag, 'distances_m') and isinstance(diag.distances_m, list):
+        out.distancesM = [float(x) for x in diag.distances_m[:30]]
+      if hasattr(diag, 'kappas_per_m') and isinstance(diag.kappas_per_m, list):
+        out.kappasPerM = [float(x) for x in diag.kappas_per_m[:30]]
+      if hasattr(diag, 'vsafe_mps') and isinstance(diag.vsafe_mps, list):
+        out.vSafeMps = [float(x) for x in diag.vsafe_mps[:30]]
+  except Exception:
+    pass
+  try:
+    pm.send('mapTurnSpeedControlSP', msg)
+  except Exception:
+    # Never crash publisher on transport errors
+    pass
 
 
 def publish_recommendation(pm: messaging.PubMaster,
@@ -190,13 +201,22 @@ def publish_recommendation(pm: messaging.PubMaster,
   out.headingErrorDeg = float(diag.heading_err_deg)
   out.distanceToCenterlineM = float(diag.d_center_m if math.isfinite(diag.d_center_m) else 0.0)
   out.visHorizonM = float(max(0.0, vis_horizon_m))
-  if hasattr(diag, 'distances_m') and isinstance(diag.distances_m, list):
-    out.distancesM = [float(x) for x in diag.distances_m[:30]]
-  if hasattr(diag, 'kappas_per_m') and isinstance(diag.kappas_per_m, list):
-    out.kappasPerM = [float(x) for x in diag.kappas_per_m[:30]]
-  if hasattr(diag, 'vsafe_mps') and isinstance(diag.vsafe_mps, list):
-    out.vSafeMps = [float(x) for x in diag.vsafe_mps[:30]]
-  pm.send('mapTurnSpeedControlSP', msg)
+  # Optional debug vectors if explicitly enabled via param
+  try:
+    if Params().get_int('MTSCLogDetail') > 0:
+      if hasattr(diag, 'distances_m') and isinstance(diag.distances_m, list):
+        out.distancesM = [float(x) for x in diag.distances_m[:30]]
+      if hasattr(diag, 'kappas_per_m') and isinstance(diag.kappas_per_m, list):
+        out.kappasPerM = [float(x) for x in diag.kappas_per_m[:30]]
+      if hasattr(diag, 'vsafe_mps') and isinstance(diag.vsafe_mps, list):
+        out.vSafeMps = [float(x) for x in diag.vsafe_mps[:30]]
+  except Exception:
+    pass
+  try:
+    pm.send('mapTurnSpeedControlSP', msg)
+  except Exception:
+    # Never crash publisher on transport errors
+    pass
 
 
 # ===== M3: Horizon & Curvature helpers =====
@@ -420,10 +440,33 @@ def build_horizon_and_diagnostics(seg, lat: float, lon: float, v_ego: float,
 
 def main() -> None:
   params = Params()
-  # real-time priority for low overhead
-  config_realtime_process(5, Priority.CTRL_LOW)
-  gps_service = get_gps_location_service(params)
-  sm = messaging.SubMaster(['liveMapDataSP', 'carState', 'selfdriveState', gps_service], ignore_avg_freq=True)
+  # Optional realtime scheduling, disabled by default to prevent starvation
+  use_rt = False
+  try:
+    use_rt = bool(params.get_bool('MTSCRealtime'))
+  except Exception:
+    use_rt = False
+  if not use_rt:
+    try:
+      ev = os.getenv('MTSC_REALTIME')
+      if ev and ev.lower() not in ('0', 'false', 'no'):
+        use_rt = True
+    except Exception:
+      pass
+  if use_rt:
+    try:
+      config_realtime_process(5, Priority.CTRL_LOW)
+    except Exception as e:
+      try:
+        cloudlog.event('mtscd: realtime config failed', error=str(e))
+      except Exception:
+        pass
+
+  # Subscribe to both GPS services to avoid misselection and stalls
+  gps_qcom = 'gpsLocation'
+  gps_ublox = 'gpsLocationExternal'
+  sm = messaging.SubMaster(['liveMapDataSP', 'carState', 'selfdriveState', gps_qcom, gps_ublox],
+                           ignore_avg_freq=True, poll='selfdriveState')
   pm = messaging.PubMaster(['mapTurnSpeedControlSP'])
 
   rk = Ratekeeper(10, print_delay_threshold=None)
@@ -442,15 +485,39 @@ def main() -> None:
   SWITCH_MARGIN = 0.08
   SWITCH_DWELL_S = 0.40
 
+  # profiling controls
+  try:
+    prof_enabled = bool(params.get_bool('MTSCProfile'))
+  except Exception:
+    prof_enabled = False
+  if not prof_enabled:
+    try:
+      ev = os.getenv('MTSC_PROFILE')
+      if ev and ev.lower() not in ('0', 'false', 'no'):
+        prof_enabled = True
+    except Exception:
+      pass
+
   while True:
-    sm.update(0)
+    # Initialize timing markers to avoid unbound vars on early exceptions
+    t_loop_start = time.monotonic()
+    t_after_update = t_loop_start
+    t_after_inputs = t_loop_start
+    t_after_select = t_loop_start
+    t_after_horizon = t_loop_start
+    # Block modestly to cooperate with scheduler and other daemons
+    sm.update(100)
 
     # Visible horizon estimate: use a default until integrated with VTSC
     vis_horizon_s = 1.3
     v_ego = float(sm['carState'].vEgo) if sm['carState'] is not None else 0.0
     vis_horizon_m = max(0.0, v_ego * vis_horizon_s)
 
+    # Choose GPS source dynamically with preference for Qualcomm if alive
+    gps_service = gps_qcom if sm.alive.get(gps_qcom, False) else (gps_ublox if sm.alive.get(gps_ublox, False) else gps_qcom)
+    t_after_update = time.monotonic()
     inp = read_inputs(sm, gps_service)
+    t_after_inputs = time.monotonic()
 
     # Candidate selection (M2): choose best segment based on distance/heading/class/level, apply continuity/hysteresis
     try:
@@ -460,7 +527,21 @@ def main() -> None:
       if getattr(mapd, 'currentRoadSegment', None) is not None:
         candidates.append(mapd.currentRoadSegment)
       try:
-        for seg in getattr(mapd, 'nearbyRoadSegments', [])[:10]:
+        nearby = getattr(mapd, 'nearbyRoadSegments', [])
+        # Allow param to cap nearby segments for performance tuning
+        try:
+          limit = int(params.get('MTSCNearbyLimit') or 10)
+        except Exception:
+          limit = 10
+        # env override
+        try:
+          ev = os.getenv('MTSC_NEARBY_LIMIT')
+          if ev is not None and ev.strip() != '':
+            limit = int(ev)
+        except Exception:
+          pass
+        limit = max(0, min(10, limit))
+        for seg in nearby[:limit]:
           candidates.append(seg)
       except Exception:
         pass
@@ -565,8 +646,13 @@ def main() -> None:
         inp.heading_err_deg = herr
         inp.d_center_m = dmin
         # override confidence in publish by reflecting active score via compute_confidence(inp)
+      t_after_select = time.monotonic()
     except Exception:
       cloudlog.exception('mtscd: candidate selection failed')
+      t_after_select = time.monotonic()
+
+    # Default horizon timestamp for profiler; may be updated if we build a horizon
+    t_after_horizon = t_after_select
 
     # Skeleton behavior with M3 diagnostics: publish unavailable unless onroad, gps fresh, and map valid
     if not (inp.onroad and inp.gps_fresh and inp.map_valid):
@@ -575,10 +661,23 @@ def main() -> None:
       # Build M3 horizon diagnostics if we have a selected/diagnosed segment
       try:
         gps = sm[gps_service]
-        lat = float(gps.latitude)
-        lon = float(gps.longitude)
+        lat = float(getattr(gps, 'latitude', 0.0))
+        lon = float(getattr(gps, 'longitude', 0.0))
+        # Fallback to mapd's fused GPS if unavailable
+        if not (lat or lon):
+          raise ValueError('empty gps')
       except Exception:
         lat = lon = 0.0
+        try:
+          # Prefer memparams from mapd_manager
+          mempos = coordinate_from_param('LastGPSPosition', Params('/dev/shm/params'))
+          if mempos is None:
+            mempos = coordinate_from_param('LastGPSPosition', Params())
+          if mempos is not None:
+            lat = float(mempos.latitude)
+            lon = float(mempos.longitude)
+        except Exception:
+          pass
 
       # Find the segment whose wayId matches our current diagnostics (stable or best)
       seg_use = None
@@ -603,6 +702,8 @@ def main() -> None:
         inp.vsafe_mps = list(diag.get('vsafe_mps', []))          # type: ignore[attr-defined]
         inp.min_speed_mps = float(diag.get('min_speed_mps', 0.0))# type: ignore[attr-defined]
         inp.min_speed_at_m = float(diag.get('min_speed_at_m', 0.0))# type: ignore[attr-defined]
+      # Always set horizon timestamp for profiler
+      t_after_horizon = time.monotonic()
 
       # M4 gating and target computation
       conf = compute_confidence(inp)
@@ -640,7 +741,36 @@ def main() -> None:
       else:
         publish_unavailable(pm, vis_horizon_m, inp)
 
-    rk.keep_time()
+    # Profiling and watchdog
+    lagged = rk.keep_time()
+    if prof_enabled:
+      t_end = time.monotonic()
+      dt_update = (t_after_update - t_loop_start) * 1000.0
+      dt_inputs = (t_after_inputs - t_after_update) * 1000.0
+      dt_select = (t_after_select - t_after_inputs) * 1000.0
+      try:
+        base_h = t_after_horizon
+      except NameError:
+        base_h = t_after_select
+      dt_horizon = (base_h - t_after_select) * 1000.0
+      dt_total = (t_end - t_loop_start) * 1000.0
+      # statsd gauges (lightweight)
+      try:
+        statlog.gauge('mtscd_dt_update_ms', dt_update)
+        statlog.gauge('mtscd_dt_inputs_ms', dt_inputs)
+        statlog.gauge('mtscd_dt_select_ms', dt_select)
+        statlog.gauge('mtscd_dt_horizon_ms', dt_horizon)
+        statlog.gauge('mtscd_dt_total_ms', dt_total)
+        statlog.gauge('mtscd_lagged', int(bool(lagged)))
+      except Exception:
+        pass
+      # occasional log if over budget (>8ms per tick)
+      if dt_total > 8.0:
+        try:
+          cloudlog.event('mtscd.profile', dt_total_ms=dt_total, dt_update_ms=dt_update,
+                         dt_inputs_ms=dt_inputs, dt_select_ms=dt_select, dt_horizon_ms=dt_horizon)
+        except Exception:
+          pass
 
 
 if __name__ == '__main__':

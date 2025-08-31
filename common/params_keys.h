@@ -157,6 +157,8 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"MaxTimeOffroad", {PERSISTENT | BACKUP, INT, "1800"}},
     {"ModelRunnerTypeCache", {CLEAR_ON_ONROAD_TRANSITION, INT}},
     {"OffroadMode", {CLEAR_ON_MANAGER_START, BOOL}},
+    // Developer-only ignition override to force onroad for debugging
+    {"ForceOnroad", {CLEAR_ON_MANAGER_START | DEVELOPMENT_ONLY, BOOL}},
     {"QuickBootToggle", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"QuietMode", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"RainbowMode", {PERSISTENT | BACKUP, BOOL, "0"}},
@@ -242,6 +244,13 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"VisionTurnSpeedControlPhysicsCenter", {PERSISTENT | BACKUP, FLOAT, "0.004778"}},
     {"VisionTurnSpeedControlPhysicsMinLatAccel", {PERSISTENT | BACKUP, FLOAT, "1.8"}},
     {"VisionTurnSpeedControlPhysicsMaxLatAccel", {PERSISTENT | BACKUP, FLOAT, "3.12"}},
+    
+    // MTSC (Map Turn Speed Control) debug + profiling
+    {"MTSCEnabled", {PERSISTENT | BACKUP, BOOL, "1"}},
+    {"MTSCLogDetail", {PERSISTENT | BACKUP, INT, "0"}},
+    {"MTSCNearbyLimit", {PERSISTENT | BACKUP, INT, "10"}},
+    {"MTSCProfile", {PERSISTENT | BACKUP, BOOL, "0"}},
+    {"MTSCRealtime", {PERSISTENT | BACKUP, BOOL, "0"}},
     
     {"VibePersonalityEnabled", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"VibeAccelPersonalityEnabled", {PERSISTENT | BACKUP, BOOL, "0"}},

@@ -245,7 +245,8 @@ def main(demo=False):
   meta_extra = FrameMeta()
 
 
-  if demo:
+  # Allow development overlay off-vehicle: when ForceOnroad is enabled, use demo CarParams
+  if demo or Params().get_bool("ForceOnroad"):
     CP = get_demo_car_params()
   else:
     CP = messaging.log_from_bytes(params.get("CarParams", block=True), car.CarParams)

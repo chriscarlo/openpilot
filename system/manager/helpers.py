@@ -51,17 +51,25 @@ def write_onroad_params(started, params):
 
 
 def save_bootlog():
-  # copy current params
-  tmp = tempfile.mkdtemp()
-  params_dirname = pathlib.Path(Params().get_param_path()).name
-  params_dir = os.path.join(tmp, params_dirname)
-  shutil.copytree(Params().get_param_path(), params_dir, dirs_exist_ok=True)
+  # copy current params; failures (e.g., ENOSPC) should not prevent manager from starting
+  try:
+    tmp = tempfile.mkdtemp()
+    params_dirname = pathlib.Path(Params().get_param_path()).name
+    params_dir = os.path.join(tmp, params_dirname)
+    shutil.copytree(Params().get_param_path(), params_dir, dirs_exist_ok=True)
 
-  def fn(tmpdir):
-    env = os.environ.copy()
-    env['PARAMS_COPY_PATH'] = tmpdir
-    subprocess.call("./bootlog", cwd=os.path.join(BASEDIR, "system/loggerd"), env=env)
-    shutil.rmtree(tmpdir)
-  t = threading.Thread(target=fn, args=(tmp, ))
-  t.daemon = True
-  t.start()
+    def fn(tmpdir):
+      env = os.environ.copy()
+      env['PARAMS_COPY_PATH'] = tmpdir
+      subprocess.call("./bootlog", cwd=os.path.join(BASEDIR, "system/loggerd"), env=env)
+      shutil.rmtree(tmpdir)
+    t = threading.Thread(target=fn, args=(tmp, ))
+    t.daemon = True
+    t.start()
+  except Exception as e:
+    # Log and continue without bootlog to avoid blocking startup
+    try:
+      from openpilot.common.swaglog import cloudlog
+      cloudlog.warning(f"save_bootlog failed: {e}")
+    except Exception:
+      pass
