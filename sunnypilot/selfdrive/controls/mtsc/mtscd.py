@@ -64,10 +64,8 @@ def read_inputs(sm: messaging.SubMaster, gps_service: str) -> Inputs:
     if getattr(mapd, 'currentRoadSegment', None) is not None:
       seg = mapd.currentRoadSegment
       inp.matched_way_id = int(getattr(seg, 'wayId', 0))
-      # roadClass may be a capnp DynamicEnum; convert robustly to int
-      inp.road_class = _enum_to_int(getattr(seg, 'roadClass', 7))
-      # levelSeparation may be enum/int; coerce safely
-      inp.level = _enum_to_int(getattr(seg, 'levelSeparation', 0), default=0)
+      inp.road_class = int(getattr(seg, 'roadClass', 7))
+      inp.level = int(getattr(seg, 'levelSeparation', 0))
       try:
         ego_bearing = float(getattr(gps, 'bearingDeg', 0.0))
       except Exception:
@@ -138,39 +136,6 @@ def compute_confidence(di: Inputs) -> float:
   w_dist, w_head, w_class, w_level = 0.35, 0.35, 0.15, 0.15
   conf = (w_dist * s_dist + w_head * s_head + w_class * s_class + w_level * s_level)
   return float(max(0.0, min(1.0, conf)))
-
-
-# Robust conversion for capnp DynamicEnum to int with name fallback
-_ROAD_CLASS_NAME_TO_INT = {
-  'motorway': 0,
-  'trunk': 1,
-  'primary': 2,
-  'secondary': 3,
-  'tertiary': 4,
-  'residential': 5,
-  'service': 6,
-  'unclassified': 7,
-}
-
-
-def _enum_to_int(val, default: int = 0) -> int:
-  try:
-    return int(val)
-  except Exception:
-    pass
-  # try common attributes
-  for attr in ('raw', 'value', 'ordinal'):
-    try:
-      v = getattr(val, attr)
-      return int(v)
-    except Exception:
-      continue
-  # try string name mapping
-  try:
-    name = str(val).split('.')[-1]
-    return int(_ROAD_CLASS_NAME_TO_INT.get(name, default))
-  except Exception:
-    return int(default)
 
 
 def publish_unavailable(pm: messaging.PubMaster, vis_horizon_m: float, diag: Inputs) -> None:
@@ -454,8 +419,8 @@ def build_horizon_and_diagnostics(seg, lat: float, lon: float, v_ego: float,
 
 def main() -> None:
   params = Params()
-  # real-time priority and core affinity similar to other low-priority control procs
-  config_realtime_process([0, 1, 2, 3], Priority.CTRL_LOW)
+  # real-time priority for low overhead
+  config_realtime_process(5, Priority.CTRL_LOW)
   gps_service = get_gps_location_service(params)
   sm = messaging.SubMaster(['liveMapDataSP', 'carState', 'selfdriveState', gps_service], ignore_avg_freq=True)
   pm = messaging.PubMaster(['mapTurnSpeedControlSP'])
@@ -519,8 +484,8 @@ def main() -> None:
             dmin = min(dmin, minimum_distance(a, b, ego))
         except Exception:
           dmin = math.inf
-        road_class = _enum_to_int(getattr(seg, 'roadClass', 7), default=7)
-        level = _enum_to_int(getattr(seg, 'levelSeparation', 0), default=0)
+        road_class = int(getattr(seg, 'roadClass', 7))
+        level = int(getattr(seg, 'levelSeparation', 0))
         way_id = int(getattr(seg, 'wayId', 0))
         return dmin, heading_err, road_class, level, way_id
 
