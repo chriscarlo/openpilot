@@ -494,11 +494,8 @@ def main() -> None:
       if getattr(mapd, 'currentRoadSegment', None) is not None:
         candidates.append(mapd.currentRoadSegment)
       try:
-        nbs = getattr(mapd, 'nearbyRoadSegments', [])
-        # Avoid slicing capnp lists; index safely up to 10
-        nb_len = len(nbs)
-        for j in range(min(nb_len, 10)):
-          candidates.append(nbs[j])
+        for seg in getattr(mapd, 'nearbyRoadSegments', [])[:10]:
+          candidates.append(seg)
       except Exception:
         pass
 
@@ -655,7 +652,7 @@ def main() -> None:
         if not vsafe or not dgrid or len(vsafe) != len(dgrid):
           return v_now
         vmax = v_now
-        for vi, di in zip(vsafe, dgrid):
+        for vi, di in zip(vsafe, dgrid, strict=False):
           if di < s_start:
             continue
           # max current speed to decel comfortably to vi over (di - s_start)
