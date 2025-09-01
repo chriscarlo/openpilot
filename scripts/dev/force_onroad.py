@@ -40,16 +40,15 @@ def get_started() -> bool:
 def main() -> int:
   ap = argparse.ArgumentParser(description="Force onroad mode helper")
   ap.add_argument('cmd', choices=['on', 'off', 'toggle', 'status'], help='action to perform')
-  ap.add_argument('--no-mtsc', action='store_true', help='do not enable MTSCEnabled on "on"')
+  ap.add_argument('--no-mtsc', action='store_true', help='(deprecated) no-op; MTSC publisher removed')
   args = ap.parse_args()
 
   p = Params()
 
   if args.cmd == 'on':
     p.put_bool('ForceOnroad', True)
-    if not args.no_mtsc:
-      p.put_bool('MTSCEnabled', True)
-    print('ForceOnroad=1 set' + (', MTSCEnabled=1' if not args.no_mtsc else ''))
+    # MTSCEnabled no longer used
+    print('ForceOnroad=1 set')
   elif args.cmd == 'off':
     p.put_bool('ForceOnroad', False)
     print('ForceOnroad=0 set')
@@ -68,4 +67,3 @@ def main() -> int:
 
 if __name__ == '__main__':
   raise SystemExit(main())
-

@@ -60,16 +60,7 @@ class LongitudinalPlannerSP:
 
     cruise_speeds = [v_cruise]
 
-    # Map Turn Speed Controller (MTSC)
-    try:
-      mtsc_msg = sm['mapTurnSpeedControlSP']
-      # Rely on daemon gating; require available
-      if getattr(mtsc_msg, 'available', False):
-        v_cruise_mtsc = float(getattr(mtsc_msg, 'targetSpeedMps', float('inf')))
-        if v_cruise_mtsc > 0.0:
-          cruise_speeds.append(v_cruise_mtsc)
-    except Exception:
-      pass
+    # MTSC publisher deprecated: VTSC handles map lookahead internally
 
     if self.v_tsc.is_active and v_cruise_v_tsc != V_CRUISE_UNSET:
       cruise_speeds.append(v_cruise_v_tsc)

@@ -97,16 +97,8 @@ def rti_enabled(started: bool, params: Params, CP: car.CarParams) -> bool:
   return started and params.get_bool("RTIEnabled")
 
 def mtsc_enabled(started: bool, params: Params, CP: car.CarParams) -> bool:
-  """Check if MTSC (Map Turn Speed Controller) is enabled.
-
-  Default-on behavior: if MTSCEnabled is unset, treat as enabled.
-  """
-  try:
-    raw = params.get("MTSCEnabled")
-    enabled = True if raw is None else params.get_bool("MTSCEnabled")
-  except Exception:
-    enabled = True
-  return started and enabled
+  # Deprecated: MTSC publisher removed in favor of direct VTSC map lookahead.
+  return False
 
 def or_(*fns):
   return lambda *args: operator.or_(*(fn(*args) for fn in fns))
@@ -188,8 +180,7 @@ procs += [
   NativeProcess("mapd", Paths.mapd_root(), ["bash", "-c", f"{MAPD_PATH} > /dev/null 2>&1"], mapd_ready),
   PythonProcess("mapd_manager", "sunnypilot.mapd.mapd_manager", always_run),
 
-  # MTSC (Map Turn Speed Controller)
-  PythonProcess("mtscd", "sunnypilot.selfdrive.controls.mtsc.mtscd", mtsc_enabled),
+  # MTSC publisher removed; VTSC now consumes map lookahead directly
 
   # RTI (Realtime Traffic Intelligence)
   PythonProcess("rtid", "sunnypilot.rtid.rtid", rti_enabled),
