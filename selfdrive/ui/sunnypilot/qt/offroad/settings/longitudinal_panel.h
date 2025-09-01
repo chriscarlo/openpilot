@@ -54,6 +54,7 @@ private:
   DecControllerSubpanel *decScreen;
   DecControl *decControl;
   VisionTurnControlWithSettings *visionTurnSpeedControl = nullptr;
+  ParamControlSP *mtscLookaheadControl = nullptr;
   VTSCSettingsPanel *vtscSettingsScreen = nullptr;
   VTSCAnticipationPanel *anticipationDistanceScreen = nullptr;
   VTSCDrivingStylePanel *drivingStyleScreen = nullptr;

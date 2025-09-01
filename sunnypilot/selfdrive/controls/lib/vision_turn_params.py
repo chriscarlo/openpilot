@@ -35,6 +35,9 @@ def update_vtsc_params(ctrl, *, force: bool = False) -> None:
   ctrl._is_enabled = getb("VisionTurnSpeedControl", False)
   ctrl._aggressiveness = getf("VisionTurnSpeedControlAggressiveness", getattr(ctrl, "_aggressiveness", 1.0), 0.5, 2.0)
   ctrl._fixed_lead_time_s = getf("VisionTurnSpeedControlFixedLeadTimeSeconds", getattr(ctrl, "_fixed_lead_time_s", 0.0), 0.0, 10.0)
+  # Lead-aware occlusion bypass
+  ctrl._occl_bypass_with_lead = getb("VisionTurnSpeedControlOcclBypassWithLead", getattr(ctrl, "_occl_bypass_with_lead", True))
+  ctrl._occl_bypass_headway_s = getf("VisionTurnSpeedControlOcclBypassHeadwayS", getattr(ctrl, "_occl_bypass_headway_s", 3.0), 0.5, 6.0)
 
   # Adaptive decel filtering + safety bias
   ctrl._filter_alpha = getf("VisionTurnSpeedControlFilterAlpha", getattr(ctrl, "_filter_alpha", 0.3), 0.1, 0.9)

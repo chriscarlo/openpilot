@@ -98,5 +98,6 @@ void VisionTurnControlWithSettings::refresh() {
   if (enabled != toggle->on) {
     toggle->togglePosition();
   }
-  settings_btn->setEnabled(enabled);
+  // Hide settings button to remove GUI knobs per design
+  settings_btn->hide();
 }

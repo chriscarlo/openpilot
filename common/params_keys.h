@@ -339,6 +339,11 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"OsmStateTitle", {PERSISTENT, STRING}},
     {"OsmWayTest", {PERSISTENT, STRING}},
     {"RoadName", {CLEAR_ON_ONROAD_TRANSITION, STRING, ""}},
+    // VTSC map lookahead
+    {"MTSCLookaheadEnabled", {PERSISTENT | BACKUP, BOOL, "0"}},
+    // VTSC: occlusion bypass when following a lead
+    {"VisionTurnSpeedControlOcclBypassWithLead", {PERSISTENT | BACKUP, BOOL, "1"}},
+    {"VisionTurnSpeedControlOcclBypassHeadwayS", {PERSISTENT | BACKUP, FLOAT, "3.0"}},
 
     // Speed Limit Control
     {"SpeedLimitControl", {PERSISTENT | BACKUP, BOOL, "0"}},

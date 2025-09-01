@@ -1,6 +1,7 @@
 import numpy as np
 import time
 import math
+import json
 from dataclasses import dataclass
 from enum import IntEnum
 
@@ -15,6 +16,17 @@ from .vision_turn_params import update_vtsc_params
 VisionTurnControllerState = custom.LongitudinalPlanSP.VisionTurnSpeedControl.VisionTurnSpeedControlState
 
 N_POINTS = int(min(33, len(ModelConstants.T_IDXS)))  # Use available trajectory points
+
+# ===== Map lookahead helpers =====
+EARTH_R_M = 6371007.2
+
+def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+  lat1, lon1, lat2, lon2 = map(math.radians, (lat1, lon1, lat2, lon2))
+  dlat = lat2 - lat1
+  dlon = lon2 - lon1
+  a = math.sin(dlat/2)**2 + math.cos(lat1)*math.cos(lat2)*math.sin(dlon/2)**2
+  c = 2*math.atan2(math.sqrt(a), math.sqrt(1-a))
+  return EARTH_R_M * c
 
 # ===== ADAPTIVE DECELERATION SYSTEM =====
 # Physics-based deceleration management for vision update lag scenarios
@@ -562,6 +574,10 @@ def _description_for_state(turn_controller_state):
 class VisionTurnController:
   def __init__(self, CP):
     self._params = Params()
+    try:
+      self._mem_params = Params("/dev/shm/params")
+    except Exception:
+      self._mem_params = self._params
     self._CP = CP
     self._op_enabled = False
     self._gas_pressed = False
@@ -683,6 +699,22 @@ class VisionTurnController:
     except Exception:
       # Safe to continue with defaults if Params not available at startup
       pass
+
+    # Map lookahead cache/state
+    self._map_curv_cache_raw = None
+    self._map_curv_cache = []
+    self._map_curv_last_ts = 0.0
+    self._map_tail_active = False
+    self._map_tail_last_cap = None
+    self._map_tail_last_start = 0.0
+    self._map_tail_last_coverage = 0.0
+
+    # Lead-aware occlusion bypass
+    self._occl_bypass_with_lead = True
+    self._occl_bypass_headway_s = 3.0
+    self._lead_present = False
+    self._lead_headway_s = 99.0
+    self._occl_lead_bypass_active = False
 
   # ===== Internal Param Helpers (decode/parse/clip) =====
   def _get_float_param(self, key: str, default: float, lo: float | None = None, hi: float | None = None) -> float:
@@ -941,6 +973,19 @@ class VisionTurnController:
   def _update_calculations(self, sm):
     """Advanced vision-based curvature calculation using direct model outputs."""
     model_data = sm['modelV2'] if sm.valid.get('modelV2', False) else None
+    # Lead presence/headway estimation from radarState (if available)
+    try:
+      rs = sm['radarState'] if sm.valid.get('radarState', False) else None
+      lead = getattr(rs, 'leadOne', None) if rs is not None else None
+      status = bool(getattr(lead, 'status', False)) if lead is not None else False
+      d_rel = float(getattr(lead, 'dRel', 1e9)) if lead is not None else 1e9
+      v_ego_safe = max(0.1, float(self._v_ego))
+      headway_s = float(d_rel) / v_ego_safe
+      self._lead_present = status
+      self._lead_headway_s = headway_s
+    except Exception:
+      self._lead_present = False
+      self._lead_headway_s = 99.0
     current_time = time.time()
 
     # Handle vision occlusion and get adjusted curvature
@@ -950,6 +995,12 @@ class VisionTurnController:
     current_curvature_signed = 0.0
     current_curvature = adjusted_curvature
     max_pred_curvature = adjusted_curvature
+
+    # Lead-aware occlusion bypass activation
+    try:
+      self._occl_lead_bypass_active = bool(self._occl_bypass_with_lead and (not self._occlusion_state.vision_good) and self._lead_present and (self._lead_headway_s <= float(self._occl_bypass_headway_s)))
+    except Exception:
+      self._occl_lead_bypass_active = False
 
     # Use advanced method: direct model data access whenever model is available
     if (model_data is not None and
@@ -1145,13 +1196,29 @@ class VisionTurnController:
     scale_decel = dynamic_decel_scale(self._v_ego)
     scale_jerk = 1.0  # Keep jerk scaling constant to respect caps
 
+    # Optional: apply map-based lookahead cap to extend horizon
+    try:
+      if self._get_bool_param('MTSCLookaheadEnabled', False):
+        v_cap, s_start, coverage = self._map_tail_cap()
+        if v_cap is not None:
+          raw_target = min(raw_target, float(v_cap))
+          # keep diagnostics
+          self._map_tail_active = True
+          self._map_tail_last_cap = float(v_cap)
+          self._map_tail_last_start = float(s_start)
+          self._map_tail_last_coverage = float(coverage)
+        else:
+          self._map_tail_active = False
+    except Exception:
+      self._map_tail_active = False
+
     # Compute acceleration command to drive current speed toward target
     accel_cmd = (raw_target - self._v_ego) / dt
 
     # Occlusion-time accel gating: allow positive accel only with positive margin
     occl_positive_margin = False
     early_no_raise = False  # suppress positive accel in early hidden-turn phase
-    if not self._occlusion_state.vision_good:
+    if (not self._occlusion_state.vision_good) and (not getattr(self, '_occl_lead_bypass_active', False)):
       v_gate_hi = 29.06  # ~65 mph
       if self._v_ego < v_gate_hi:
         # Gradual bias toward pure physics mode between ~50 and 65 mph (no hard bypass)
@@ -1305,7 +1372,7 @@ class VisionTurnController:
             accel_cmd = min(accel_cmd, physics_required_decel)
 
         # While occluded, avoid over-braking: cap to comfort decel limit
-        if not self._occlusion_state.vision_good:
+        if (not self._occlusion_state.vision_good) and (not getattr(self, '_occl_lead_bypass_active', False)):
             accel_cmd = max(accel_cmd, self._comfort_decel_limit)
 
         # Apply adaptive deceleration system with noise filtering
@@ -1521,7 +1588,7 @@ class VisionTurnController:
       target_speed = min(self._v_cruise_setpoint, max(target_speed, base_target * 1.02))
 
     # Distance-aware occlusion barrier (target-level integration)
-    if (not self._occlusion_state.vision_good) and (self._v_ego < 29.06):
+    if (not self._occlusion_state.vision_good) and (self._v_ego < 29.06) and (not getattr(self, '_occl_lead_bypass_active', False)):
       try:
         v_vis = curvature_to_speed(max(1e-8, float(self._occlusion_state.last_valid_curvature)))
         v_near = min(base_target, v_vis, self._v_cruise_setpoint)
@@ -1622,6 +1689,131 @@ class VisionTurnController:
           target_speed = min(target_speed, barrier_target_speed)
       except Exception:
         pass
+
+  def _get_last_gps(self) -> tuple[float, float] | None:
+    try:
+      raw = self._mem_params.get('LastGPSPosition') or self._params.get('LastGPSPosition')
+      if not raw:
+        return None
+      obj = json.loads(raw if isinstance(raw, str) else raw.decode('utf-8'))
+      lat = float(obj.get('latitude', 0.0))
+      lon = float(obj.get('longitude', 0.0))
+      if lat == 0.0 and lon == 0.0:
+        return None
+      return (lat, lon)
+    except Exception:
+      return None
+
+  def _load_map_curvatures(self) -> list[tuple[float, float, float]]:
+    """Return list of (lat, lon, curvature) from mapd Params, decimated to ~80 points."""
+    now = time.time()
+    # refresh at most 5 Hz
+    if (now - self._map_curv_last_ts) < 0.2 and self._map_curv_cache:
+      return self._map_curv_cache
+    try:
+      raw = self._mem_params.get('MapCurvatures') or self._params.get('MapCurvatures')
+      if not raw:
+        self._map_curv_cache = []
+        self._map_curv_last_ts = now
+        return []
+      s = raw if isinstance(raw, str) else raw.decode('utf-8')
+      if s == self._map_curv_cache_raw:
+        self._map_curv_last_ts = now
+        return self._map_curv_cache
+      arr = json.loads(s)
+      pts = []
+      for it in arr:
+        try:
+          lat = float(it.get('latitude', it.get('lat', 0.0)))
+          lon = float(it.get('longitude', it.get('lon', 0.0)))
+          k = float(it.get('curvature', 0.0))
+          pts.append((lat, lon, max(0.0, k)))
+        except Exception:
+          continue
+      # decimate to <= 80 samples to keep things cheap
+      n = len(pts)
+      if n > 80:
+        step = max(1, n // 80)
+        pts = pts[::step]
+      self._map_curv_cache_raw = s
+      self._map_curv_cache = pts
+      self._map_curv_last_ts = now
+      return pts
+    except Exception:
+      self._map_curv_cache = []
+      self._map_curv_last_ts = now
+      return []
+
+  def _map_tail_cap(self) -> tuple[float | None, float, float]:
+    """
+    Compute a comfort-reachable cap on current speed from map curvature tail.
+
+    Returns (v_cap_mps|None, start_distance_m, coverage_frac)
+    """
+    gps = self._get_last_gps()
+    if gps is None:
+      return (None, 0.0, 0.0)
+    lat0, lon0 = gps
+    pts = self._load_map_curvatures()
+    if len(pts) < 3:
+      return (None, 0.0, 0.0)
+
+    # Find nearest index to ego
+    try:
+      dists = [ _haversine_m(lat0, lon0, p[0], p[1]) for p in pts ]
+      i0 = int(np.argmin(dists))
+    except Exception:
+      i0 = 0
+
+    # Build forward along-track distances from nearest point
+    s_list = [0.0]
+    for i in range(i0, len(pts)-1):
+      s_list.append(s_list[-1] + _haversine_m(pts[i][0], pts[i][1], pts[i+1][0], pts[i+1][1]))
+    # Remove duplicate 0 entry alignment
+    if len(s_list) > 0:
+      s_list = s_list[1:]
+    k_list = [max(0.0, pts[j][2]) for j in range(i0+1, len(pts))]
+    if not s_list or not k_list:
+      return (None, 0.0, 0.0)
+
+    # Limit horizon to ~800 m
+    S_MAX = 800.0
+    L = len(s_list)
+    cut = L
+    for idx, s in enumerate(s_list):
+      if s >= S_MAX:
+        cut = idx+1
+        break
+    s_list = s_list[:cut]
+    k_list = k_list[:cut]
+
+    # Compute vsafe from curvature
+    vsafe = [ curvature_to_speed(k) for k in k_list ]
+
+    # Determine start distance: visible horizon + margin
+    s_start = max(0.0, self._v_ego * float(getattr(self, '_vis_horizon_s', 1.4)) + float(getattr(self, '_vis_margin_m', 10.0)))
+    # Comfort decel
+    a_comf = float(max(0.1, getattr(self, '_max_decel', 3.5)))
+
+    # Reachable cap for current speed from future safe speeds
+    v_now = float(self._v_ego)
+    v_cap = v_now
+    any_future = False
+    for vi, di in zip(vsafe, s_list, strict=False):
+      if di < s_start:
+        continue
+      any_future = True
+      d = max(0.0, di - s_start)
+      try:
+        v_allow = math.sqrt(max(0.0, vi*vi + 2.0 * a_comf * d))
+      except Exception:
+        v_allow = v_now
+      v_cap = min(v_cap, v_allow)
+    if not any_future:
+      return (None, s_start, float(min(1.0, s_list[-1] / max(1e-3, s_start))))
+
+    coverage = float(min(1.0, (s_list[-1] - s_start) / max(1e-3, (S_MAX - s_start)))) if s_list[-1] > s_start else 0.0
+    return (max(0.0, v_cap), s_start, coverage)
 
   def update(self, sm, enabled, v_ego, a_ego, v_cruise_setpoint, v_cruise_cluster_setpoint=None):
     self._op_enabled = enabled
