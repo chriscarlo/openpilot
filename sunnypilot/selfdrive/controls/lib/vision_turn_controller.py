@@ -2,6 +2,7 @@ import numpy as np
 import time
 import math
 import json
+import os
 from dataclasses import dataclass
 from enum import IntEnum
 
@@ -722,6 +723,7 @@ class VisionTurnController:
     self._dbg_emit_interval_s = 0.5  # ~2 Hz
     self._dbg_next_emit_ts = 0.0
     self._dbg_refresh_ts = 0.0
+    self._dbg_write_file = False
     # Snapshot fields
     self._dbg_k_model = 0.0
     self._dbg_target_raw = 0.0
@@ -763,6 +765,8 @@ class VisionTurnController:
     try:
       if now_s >= float(getattr(self, '_dbg_refresh_ts', 0.0)):
         self._dbg_enabled = bool(self._get_bool_param('VTSCVerboseDebug', False))
+        # refresh file writer toggle alongside verbose debug
+        self._dbg_write_file = bool(self._get_bool_param('VTSCWriteSnapshotFile', False))
         self._dbg_refresh_ts = now_s + 2.0
     except Exception:
       self._dbg_enabled = False
@@ -788,6 +792,32 @@ class VisionTurnController:
     if vs == VisionStatus.VISION_LOST:
       return 'LOST'
     return 'UNKNOWN'
+
+  def _append_snapshot_to_file(self, snap: dict, now_s: float) -> None:
+    """Append a compact JSON snapshot line to a small rotating file on device."""
+    try:
+      base_dir = "/data/media/0/VTSCDebug"
+      path = os.path.join(base_dir, "vtsc_snapshots.jsonl")
+      os.makedirs(base_dir, exist_ok=True)
+      # Attach timestamp to snapshot
+      snap_out = dict(snap)
+      snap_out['ts'] = float(now_s)
+      line = json.dumps(snap_out, separators=(',', ':')) + "\n"
+      # Rotate if file grows beyond ~512 KB (simple strategy)
+      try:
+        if os.path.exists(path) and os.path.getsize(path) > 512 * 1024:
+          # Truncate by replacing with empty file; keep a single backup
+          try:
+            os.replace(path, path + ".1")
+          except Exception:
+            pass
+      except Exception:
+        pass
+      with open(path, 'a', encoding='utf-8') as f:
+        f.write(line)
+    except Exception:
+      # Never raise from telemetry path
+      pass
 
   def snapshot_debug_state(self) -> dict:
     try:
@@ -824,6 +854,7 @@ class VisionTurnController:
       max_adapt = float(getattr(self, '_max_adaptive_decel', -6.0))
       decel_cmd = float(getattr(self, '_current_decel', 0.0))
       jerk_cmd = float(getattr(self, '_dbg_jerk_cmd', 0.0))
+      a_cmd = float(getattr(self, '_a_target', 0.0))
       return {
         'v': v_ego, 'cruise': v_cruise, 'lead': lead, 'hw': hw,
         'conf': conf, 'vision_status': self._vision_status_str(),
@@ -834,7 +865,7 @@ class VisionTurnController:
         'occl_positive_margin': occl_margin, 'occl_lead_bypass_active': bypass,
         'vis_horizon_s': vis_h, 'tail_frac': tail_frac, 's_tail': s_tail, 'early_no_raise': enr,
         'map_tail_active': map_active, 'map_tail_cap': map_cap, 'map_tail_start_m': map_start, 'map_tail_coverage': map_cov,
-        'comfort_decel': comfort, 'max_adaptive_decel': max_adapt, 'decel_cmd': decel_cmd, 'jerk_cmd': jerk_cmd,
+        'comfort_decel': comfort, 'max_adaptive_decel': max_adapt, 'decel_cmd': decel_cmd, 'jerk_cmd': jerk_cmd, 'a_cmd': a_cmd,
       }
     except Exception:
       return {}
@@ -1975,5 +2006,7 @@ class VisionTurnController:
         snap = self.snapshot_debug_state()
         if snap:
           cloudlog.debug("VTSCDBG %s", json.dumps(snap, separators=(',', ':')))
+          if bool(getattr(self, '_dbg_write_file', False)):
+            self._append_snapshot_to_file(snap, now_s)
       except Exception:
         pass

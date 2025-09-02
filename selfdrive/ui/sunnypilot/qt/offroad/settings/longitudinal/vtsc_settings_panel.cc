@@ -254,20 +254,49 @@ void VTSCSettingsPanel::setupUI() {
 
   // No category description per concise style
 
-  QHBoxLayout *dbgRow = new QHBoxLayout();
-  QLabel *dbgLbl = new QLabel(tr("Verbose VTSC Debug Logging"));
-  dbgLbl->setStyleSheet("font-size: 36px; color: #E4E4E4;");
-  dbgRow->addWidget(dbgLbl);
-  dbgRow->addStretch();
-  dbgTog_ = new ToggleSP();
-  dbgTog_->setFixedSize(150, 80);
+  // Row: Verbose debug logging
   {
-    Params p; bool on = p.getBool("VTSCVerboseDebug");
-    if (dbgTog_->on != on) dbgTog_->togglePosition();
+    QHBoxLayout *dbgRow = new QHBoxLayout();
+    QLabel *dbgLbl = new QLabel(tr("Verbose VTSC Debug Logging"));
+    dbgLbl->setStyleSheet("font-size: 36px; color: #E4E4E4;");
+    dbgRow->addWidget(dbgLbl);
+    dbgRow->addStretch();
+    dbgTog_ = new ToggleSP();
+    dbgTog_->setFixedSize(150, 80);
+    {
+      Params p; bool on = p.getBool("VTSCVerboseDebug");
+      if (dbgTog_->on != on) dbgTog_->togglePosition();
+    }
+    QObject::connect(dbgTog_, &ToggleSP::stateChanged, [](bool s){ Params().putBool("VTSCVerboseDebug", s); });
+    dbgRow->addWidget(dbgTog_);
+    devLayout->addLayout(dbgRow);
   }
-  QObject::connect(dbgTog_, &ToggleSP::stateChanged, [](bool s){ Params().putBool("VTSCVerboseDebug", s); });
-  dbgRow->addWidget(dbgTog_);
-  devLayout->addLayout(dbgRow);
+
+  // Row: Write onroad VTSC snapshots to file (JSONL)
+  {
+    QHBoxLayout *fileRow = new QHBoxLayout();
+    QLabel *fileLbl = new QLabel(tr("Write Onroad VTSC Snapshots (JSONL)"));
+    fileLbl->setStyleSheet("font-size: 36px; color: #E4E4E4;");
+    fileRow->addWidget(fileLbl);
+    fileRow->addStretch();
+    ToggleSP *fileTog = new ToggleSP();
+    fileTog->setFixedSize(150, 80);
+    {
+      Params p; bool on = p.getBool("VTSCWriteSnapshotFile");
+      if (fileTog->on != on) fileTog->togglePosition();
+    }
+    QObject::connect(fileTog, &ToggleSP::stateChanged, [](bool s){ Params().putBool("VTSCWriteSnapshotFile", s); });
+    fileRow->addWidget(fileTog);
+    devLayout->addLayout(fileRow);
+
+    QLabel *fileHelp = new QLabel(tr(
+      "When ON, VTSC writes compact JSON lines with key decisions to /data/media/0/VTSCDebug/vtsc_snapshots.jsonl.\n"
+      "Keep this OFF unless debugging real-world discrepancies; file rotates automatically (small size)."
+    ));
+    fileHelp->setStyleSheet("font-size: 32px; color: #999999; padding-left: 10px; padding-bottom: 5px;");
+    fileHelp->setWordWrap(true);
+    devLayout->addWidget(fileHelp);
+  }
   mainLayout->addWidget(devFrame);
 
   mainLayout->addStretch();

@@ -343,6 +343,8 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"MTSCLookaheadEnabled", {PERSISTENT | BACKUP, BOOL, "0"}},
     // VTSC verbose debug logging (rate-limited)
     {"VTSCVerboseDebug", {PERSISTENT | BACKUP, BOOL, "0"}},
+    // VTSC onroad snapshot file writer (JSONL, small/rotating)
+    {"VTSCWriteSnapshotFile", {PERSISTENT | BACKUP, BOOL, "0"}},
     // VTSC: occlusion bypass when following a lead
     {"VisionTurnSpeedControlOcclBypassWithLead", {PERSISTENT | BACKUP, BOOL, "1"}},
     {"VisionTurnSpeedControlOcclBypassHeadwayS", {PERSISTENT | BACKUP, FLOAT, "3.0"}},
