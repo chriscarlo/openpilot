@@ -98,6 +98,6 @@ void VisionTurnControlWithSettings::refresh() {
   if (enabled != toggle->on) {
     toggle->togglePosition();
   }
-  // Hide settings button to remove GUI knobs per design
-  settings_btn->hide();
+  // Show settings button to expose VTSC settings submenu
+  settings_btn->show();
 }

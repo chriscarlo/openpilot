@@ -88,12 +88,7 @@ LongitudinalPanel::LongitudinalPanel(QWidget *parent) : QWidget(parent) {
   visionTurnSpeedControl->showDescription();
   list->addItem(visionTurnSpeedControl);
 
-  // Map lookahead for VTSC (single user-facing toggle)
-  mtscLookaheadControl = new ParamControlSP("MTSCLookaheadEnabled",
-    tr("Map Lookahead for VTSC"),
-    tr("Use map-based curvature lookahead to extend VTSC horizon for early, comfort-limited slowing into upcoming curves."),
-    "../assets/offroad/icon_shell.png", nullptr, false, false);
-  list->addItem(mtscLookaheadControl);
+  // Map lookahead toggle moved into VTSC settings submenu
 
   connect(slcControl, &SpeedLimitControl::settingsClicked, [=]() {
     cruisePanelScroller->setLastScrollPosition();
@@ -128,13 +123,22 @@ LongitudinalPanel::LongitudinalPanel(QWidget *parent) : QWidget(parent) {
     main_layout->setCurrentWidget(cruisePanelScreen);
   });
   
-  // Remove VTSC advanced settings UI to reduce on-device complexity
+  // VTSC settings submenu
+  vtscSettingsScreen = new VTSCSettingsPanel(this);
+  connect(vtscSettingsScreen, &VTSCSettingsPanel::backPress, [=]() {
+    cruisePanelScroller->restoreScrollPosition();
+    main_layout->setCurrentWidget(cruisePanelScreen);
+  });
+  connect(visionTurnSpeedControl, &VisionTurnControlWithSettings::settingsClicked, [=]() {
+    cruisePanelScroller->setLastScrollPosition();
+    main_layout->setCurrentWidget(vtscSettingsScreen);
+  });
 
   main_layout->addWidget(cruisePanelScreen);
   main_layout->addWidget(slcScreen);
   main_layout->addWidget(rtiSettingsScreen);
   main_layout->addWidget(decScreen);
-  // (VTSC subpanels intentionally not added)
+  main_layout->addWidget(vtscSettingsScreen);
   main_layout->setCurrentWidget(cruisePanelScreen);
   
   // Call refresh after all controls are initialized to avoid null pointer dereference

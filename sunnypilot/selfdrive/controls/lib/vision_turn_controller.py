@@ -7,6 +7,7 @@ from enum import IntEnum
 
 from cereal import custom
 from openpilot.common.params import Params
+from openpilot.common.swaglog import cloudlog
 from openpilot.common.numpy_fast import clip
 from opendbc.car.common.conversions import Conversions as CV
 from openpilot.selfdrive.car.cruise import V_CRUISE_MAX
@@ -716,6 +717,21 @@ class VisionTurnController:
     self._lead_headway_s = 99.0
     self._occl_lead_bypass_active = False
 
+    # Telemetry/debug controls
+    self._dbg_enabled = False
+    self._dbg_emit_interval_s = 0.5  # ~2 Hz
+    self._dbg_next_emit_ts = 0.0
+    self._dbg_refresh_ts = 0.0
+    # Snapshot fields
+    self._dbg_k_model = 0.0
+    self._dbg_target_raw = 0.0
+    self._dbg_target_final = 0.0
+    self._dbg_occl_positive_margin = False
+    self._dbg_early_no_raise = False
+    self._dbg_tail_frac = 0.0
+    self._dbg_s_tail = 0.0
+    self._dbg_jerk_cmd = 0.0
+
   # ===== Internal Param Helpers (decode/parse/clip) =====
   def _get_float_param(self, key: str, default: float, lo: float | None = None, hi: float | None = None) -> float:
     """Read a float param from Params with robust decoding and optional clipping.
@@ -742,6 +758,86 @@ class VisionTurnController:
       return bool(self._params.get_bool(key))
     except Exception:
       return bool(default)
+
+  def _should_emit_debug(self, now_s: float) -> bool:
+    try:
+      if now_s >= float(getattr(self, '_dbg_refresh_ts', 0.0)):
+        self._dbg_enabled = bool(self._get_bool_param('VTSCVerboseDebug', False))
+        self._dbg_refresh_ts = now_s + 2.0
+    except Exception:
+      self._dbg_enabled = False
+    if not self._dbg_enabled:
+      return False
+    nxt = float(getattr(self, '_dbg_next_emit_ts', 0.0))
+    if now_s >= nxt:
+      self._dbg_next_emit_ts = now_s + float(getattr(self, '_dbg_emit_interval_s', 0.5))
+      return True
+    return False
+
+  def _vision_status_str(self) -> str:
+    try:
+      vs = getattr(self._occlusion_state, 'vision_status', None)
+    except Exception:
+      vs = None
+    if vs == VisionStatus.FULL_VISIBILITY:
+      return 'FULL'
+    if vs == VisionStatus.PARTIAL_OCCLUSION:
+      return 'PARTIAL'
+    if vs == VisionStatus.SEVERE_OCCLUSION:
+      return 'SEVERE'
+    if vs == VisionStatus.VISION_LOST:
+      return 'LOST'
+    return 'UNKNOWN'
+
+  def snapshot_debug_state(self) -> dict:
+    try:
+      v_ego = float(getattr(self, '_v_ego', 0.0))
+      v_cruise = float(getattr(self, '_v_cruise_setpoint', 0.0))
+      lead = bool(getattr(self, '_lead_present', False))
+      hw = float(getattr(self, '_lead_headway_s', 99.0))
+      conf = float(getattr(self._occlusion_state, 'smoothed_confidence', 0.0))
+      k_model = float(getattr(self, '_dbg_k_model', 0.0))
+      k_est = float(getattr(self._occlusion_state, 'est_curvature', 0.0))
+      k_vis = float(getattr(self._occlusion_state, 'last_valid_curvature', 0.0))
+      is_easing = bool(getattr(self, '_is_easing', False))
+      abs_cr = float(getattr(self, '_abs_curvature_rate', 0.0))
+      # Speeds
+      v_phys_base = float(min(v_cruise, curvature_to_speed(max(1e-8, float(getattr(self, '_filtered_curvature', 0.0))))))
+      v_occ = float(curvature_to_speed(max(1e-8, k_est)))
+      v_vis = float(curvature_to_speed(max(1e-8, k_vis)))
+      raw = float(getattr(self, '_dbg_target_raw', 0.0))
+      final = float(getattr(self, '_dbg_target_final', raw))
+      # Occlusion gating
+      occl_margin = bool(getattr(self, '_dbg_occl_positive_margin', False))
+      bypass = bool(getattr(self, '_occl_lead_bypass_active', False))
+      vis_h = float(getattr(self, '_vis_horizon_s', 1.4))
+      tail_frac = float(getattr(self, '_dbg_tail_frac', 0.0))
+      s_tail = float(getattr(self, '_dbg_s_tail', 0.0))
+      enr = bool(getattr(self, '_dbg_early_no_raise', False))
+      # Lookahead
+      map_active = bool(getattr(self, '_map_tail_active', False))
+      map_cap = float(getattr(self, '_map_tail_last_cap', 0.0) or 0.0)
+      map_start = float(getattr(self, '_map_tail_last_start', 0.0) or 0.0)
+      map_cov = float(getattr(self, '_map_tail_last_coverage', 0.0) or 0.0)
+      # Limits and commands
+      comfort = float(getattr(self, '_comfort_decel_limit', -1.47))
+      max_adapt = float(getattr(self, '_max_adaptive_decel', -6.0))
+      decel_cmd = float(getattr(self, '_current_decel', 0.0))
+      jerk_cmd = float(getattr(self, '_dbg_jerk_cmd', 0.0))
+      return {
+        'v': v_ego, 'cruise': v_cruise, 'lead': lead, 'hw': hw,
+        'conf': conf, 'vision_status': self._vision_status_str(),
+        'k_model': k_model, 'k_occ': k_est, 'k_vis_last': k_vis,
+        'is_easing': is_easing, 'abs_curv_rate': abs_cr,
+        'v_base': v_phys_base, 'v_occ': v_occ, 'v_vis': v_vis,
+        'raw': raw, 'final': final,
+        'occl_positive_margin': occl_margin, 'occl_lead_bypass_active': bypass,
+        'vis_horizon_s': vis_h, 'tail_frac': tail_frac, 's_tail': s_tail, 'early_no_raise': enr,
+        'map_tail_active': map_active, 'map_tail_cap': map_cap, 'map_tail_start_m': map_start, 'map_tail_coverage': map_cov,
+        'comfort_decel': comfort, 'max_adaptive_decel': max_adapt, 'decel_cmd': decel_cmd, 'jerk_cmd': jerk_cmd,
+      }
+    except Exception:
+      return {}
 
   @property
   def state(self):
@@ -1026,6 +1122,8 @@ class VisionTurnController:
         # For max calculations, use absolute values
         curvature_array_abs = np.abs(curvature_array_signed)
         max_pred_curvature = float(np.max(curvature_array_abs))
+        # expose for debug snapshot
+        self._dbg_k_model = max_pred_curvature
 
         # Store curvature trajectory and detect apexes (use absolute values for apex detection)
         self._curvature_trajectory = curvature_array_abs.tolist()
@@ -1191,6 +1289,11 @@ class VisionTurnController:
     raw_target = self._plan_advanced_speed_trajectory()
     if raw_target is None:
       raw_target = self._prev_target_speed if hasattr(self, '_prev_target_speed') else self._v_ego
+    # Debug: record raw target prior to map caps
+    try:
+      self._dbg_target_raw = float(raw_target)
+    except Exception:
+      self._dbg_target_raw = float(self._prev_target_speed if hasattr(self, '_prev_target_speed') else self._v_ego)
 
     # Apply dynamic scaling
     scale_decel = dynamic_decel_scale(self._v_ego)
@@ -1211,6 +1314,11 @@ class VisionTurnController:
           self._map_tail_active = False
     except Exception:
       self._map_tail_active = False
+    # Debug: record final target after map caps
+    try:
+      self._dbg_target_final = float(raw_target)
+    except Exception:
+      self._dbg_target_final = float(self._prev_target_speed if hasattr(self, '_prev_target_speed') else self._v_ego)
 
     # Compute acceleration command to drive current speed toward target
     accel_cmd = (raw_target - self._v_ego) / dt
@@ -1276,6 +1384,13 @@ class VisionTurnController:
           # Use harness-equivalent margin for gating decisions with small buffer (≈2 m)
           positive_margin = (d_req_h <= (s_vis - (margin_dist + 2.0)))
           occl_positive_margin = bool(positive_margin)
+          # Snapshot for telemetry
+          try:
+            self._dbg_s_tail = float(s_tail)
+            self._dbg_tail_frac = float(tail_frac)
+          except Exception:
+            self._dbg_s_tail = 0.0
+            self._dbg_tail_frac = 0.0
           # ===== Hidden-turn early deceleration trigger (short-horizon critical deficit) =====
           if HIDDEN_TURN_ENABLE and (self._v_ego <= HIDDEN_TURN_V_MAX_MPS):
             try:
@@ -1361,6 +1476,9 @@ class VisionTurnController:
         early_no_raise = True
       if (not occl_positive_margin) or early_no_raise:
         accel_cmd = min(accel_cmd, 0.0)
+    # record for telemetry
+    self._dbg_occl_positive_margin = bool(occl_positive_margin)
+    self._dbg_early_no_raise = bool(early_no_raise)
     # Check if deceleration is required
     if accel_cmd < 0:
         # For curve scenarios, use physics-based calculation if needed
@@ -1409,6 +1527,7 @@ class VisionTurnController:
     # Jerk-limit the change in acceleration
     accel_diff = accel_cmd - self._current_accel
 
+    prev_accel_val = float(self._current_accel)
     if accel_diff > 0:
       # Cap positive jerk to 2.5 m/s^3 to meet comfort bounds in tests
       max_jerk_pos = min(self._max_jerk_accel * scale_jerk, 2.5)
@@ -1428,6 +1547,11 @@ class VisionTurnController:
     # Post-jerk stage: do not hard-clamp; pre-jerk gating already constrained accel_cmd
     if False:
       self._current_accel = self._current_accel
+    # compute jerk for telemetry (m/s^3)
+    try:
+      self._dbg_jerk_cmd = float((self._current_accel - prev_accel_val) / dt)
+    except Exception:
+      self._dbg_jerk_cmd = 0.0
 
     # Hard clamp: after a speed-limit step while occluded, disallow any positive acceleration
     if (not self._occlusion_state.vision_good) and getattr(self, '_suppress_raise_due_to_limit', False) and self._current_accel > 0.0:
@@ -1841,3 +1965,15 @@ class VisionTurnController:
     self._update_calculations(sm)
     self._state_transition()
     self._update_solution()
+    # Emit compact debug snapshot if enabled and rate allows
+    try:
+      now_s = float(getattr(time, 'monotonic', time.time)())
+    except Exception:
+      now_s = time.time()
+    if self._should_emit_debug(now_s):
+      try:
+        snap = self.snapshot_debug_state()
+        if snap:
+          cloudlog.debug("VTSCDBG %s", json.dumps(snap, separators=(',', ':')))
+      except Exception:
+        pass

@@ -16,10 +16,26 @@
 - Lint & types: `scripts/lint/lint.sh` (runs `ruff`, `mypy`, `codespell`, etc.).
 - Chauffeur examples: `pytest docs/chauffeur -q` (target a file to iterate faster).
 
+- Mapd source inspection (no vendoring):
+  - To clone upstream `openpilot-mapd` sources into an ignored cache dir for ad-hoc review, run:
+    - `bash scripts/dev/fetch_mapd_source.sh` (defaults to `.cache/openpilot-mapd`)
+    - Pin a ref: `bash scripts/dev/fetch_mapd_source.sh -r <tag|branch|commit>`
+  - Do not commit these sources; they are for inspection only. Runtime still uses the installed binary at `third_party/mapd_pfeiferj/mapd`.
+
 ## Coding Style & Naming Conventions
 - Python: 2-space indent, type hints encouraged; files use `snake_case.py`.
 - C/C++: Clang/Clang++ (C++17); follow `.clang-tidy`; warnings are errors in SCons.
 - Keep functions small, documented; remove dead code and unused params.
+
+## Offroad UI Style Standards
+- All offroad settings menus must follow the Chauffeur Offroad Settings UI Brand Style Guide.
+- Source of truth: `docs/chauffeur/ui/bsg/offroad/offroad_settings_bsg.md`.
+- Panels should mirror the RTI Settings submenu visual language (titles, section cards, toggles, range controls), including:
+  - Title 50px/600 centered; section headers 42px/500; control labels 36px.
+  - Section cards use `#292929` background, 20px radius, 25px padding; screen margins 50/20/50/20.
+  - Toggles use `ToggleSP` 150×80 right-aligned; ± controls are 100×100 circles; Reset 150×80.
+  - Descriptions use 32–34px body text, `#999999`.
+  - Group related rows into logical sections (e.g., Visibility & Lookahead, Developer Options).
 
 ## Testing Guidelines
 - Framework: `pytest` with parallelization (`-n auto` if configured).

@@ -8,48 +8,35 @@
 #pragma once
 
 #include <QWidget>
-#include <QStackedLayout>
-#include <QGridLayout>
-#include <QPushButton>
 #include <QFrame>
+#include <QVBoxLayout>
+#include <QHBoxLayout>
 #include <QLabel>
+#include <QPushButton>
+#include <QShowEvent>
 
 #include "selfdrive/ui/sunnypilot/qt/widgets/controls.h"
-
-class VTSCIconButton : public QPushButton {
-  Q_OBJECT
-
-public:
-  VTSCIconButton(const QString &icon_path, const QString &text, QWidget *parent = nullptr);
-  
-signals:
-  void buttonClicked();
-};
 
 class VTSCSettingsPanel : public QFrame {
   Q_OBJECT
 
 public:
   explicit VTSCSettingsPanel(QWidget *parent = nullptr);
+  
+protected:
+  void showEvent(QShowEvent *event) override;
 
 signals:
   void backPress();
-  void anticipationSettingsClicked();
-  void curveDetectionClicked();
-  void drivingStyleClicked();
-  void adaptiveFilteringClicked();
-  void smoothingLimitsClicked();
-  void apexBoostClicked();
-  void visionOcclusionClicked();
-  void limitsClicked();
-  void physicsClicked();
-  void physicsInternalsClicked();
   
 private:
   void setupUI();
-  QWidget* createIconGrid();
-  
-  QStackedLayout *main_layout;
-  QWidget *icon_grid_screen;
-  QPushButton *back_btn;
+  QFrame* createSectionFrame();
+
+  // Persisted control handles for refresh
+  ToggleSP *mapTog_ = nullptr;
+  ToggleSP *bypassTog_ = nullptr;
+  ToggleSP *dbgTog_ = nullptr;
+  QLabel *headValLabel_ = nullptr;
+  QLabel *headStatusLabel_ = nullptr;
 };

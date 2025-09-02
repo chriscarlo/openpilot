@@ -16,7 +16,7 @@ Foundations
 - Typography (Qt pixel sizes):
   - Panel title: 50px, weight 600
   - Section header: 42px, weight 500
-  - Control label (row title): 50px, weight 450
+  - Control label (row title): 36px, weight 500
   - Body/description: 34–40px, color #999999 (prefer 40px; use 34px where space is tight)
   - Big numeric value: 70px, weight 500
   - Button glyphs (±): 60px, reset/utility: 35px
@@ -45,7 +45,8 @@ Core Components
   - Placement: left of toggle on feature rows (RTI/VTSC/DEC)
 - Section Card (`QFrame`):
   - Style: `background-color: #292929; border-radius: 20px; padding: 25px;`
-  - Used to group related controls (ranges, carousels, alerts)
+  - Use one section card per category/heading; do not mix unrelated controls in the same card
+  - Typical content order: header (42px) → rows (toggles/ranges/carousels)
 - Range Control (value with ± and Reset):
   - Label block: title 42px, desc 32px (#999999)
   - Value: 70px, centered; status under value: “(Default)” gray or “(Modified)” amber #FFC107
@@ -61,17 +62,20 @@ Core Components
 Pattern Index
 - Feature Hub Panel (multi‑feature menu with submenus): see `pattern_feature_hub.md`
 - Feature Menu (specific feature sub‑panel): see `pattern_feature_menu.md`
+- Toggle Row (Function): `Function Name` + `Toggle` on the same line; description appears directly below the row.
+- Adjustment Row (Function): Title (42px) above, then the control (± 100×100, centered value + status, Reset 150×80 on the right), then a concise description below.
+- Category Titles: Concise (≤ 4 words), no category descriptions; let functions’ descriptions carry meaning.
 
 Text & Content
 - Titles: Title Case, concrete feature names (avoid slang)
-- Descriptions: concise, one sentence where possible; present tense; clarify safety constraints
+- Descriptions: behavior-first and plain-language. Assume it’s the user’s first time seeing the feature; avoid internal code filenames/functions in UI copy. Clarify the effect of toggling or adjusting a value using simple examples when helpful (e.g., how headway works), and keep implementation references out of the on-device text.
 - Units: always show in label/value; keep integer steps for mph; show two decimals for miles where precision matters
 - Status labels: use “(Default)” gray when at default; “(Modified)” amber when user‑changed
 
 Interaction Rules
 - Disable settings gear when feature toggle is OFF
 - Show/hide dependent rows based on primary toggle (e.g., Vibe personalities)
-- Persist changes immediately via Params on every increment/decrement/selection
+- Persist changes immediately via Params on every increment/decrement/selection; refresh all controls from Params in `showEvent` so values survive reboots and always display persisted state.
 - Touch targets: ≥100×100 for primary controls
 
 Implementation References (code)
@@ -81,9 +85,14 @@ Implementation References (code)
 - Carousel pattern: `selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/horizontal_carousel.*`
 
 Authoring Checklist (for any new Offroad setting)
+  - Mirror the RTI Settings panel visual language exactly (title, section cards, toggles, range controls)
+  - Use one card per category; category titles concise (≤ 4 words); no category description blocks
+  - Toggle rows: label 36px at left; `ToggleSP 150×80` right-aligned; concise description directly below
+  - Numeric ranges: Title (42px) above; ± 100×100 circular buttons; value 70px centered with status line; Reset 150×80; concise description below
+  - Use `#292929` section background, 20px radius, 25px padding; page margins 50/20/50/20
+  - Persist & refresh: write Params immediately on interaction; refresh all controls from Params in panel `showEvent`
 - Use `AbstractControlSP` (or derived) for rows; prefer toggle + optional settings gear
 - Use section cards for grouped controls on sub‑panels; follow spacing and type scale
 - Apply colors/radii/pressed/disabled states as defined
 - Define Params keys, defaults, units; show “Default/Modified” status when applicable
 - Provide a `Back` affordance with `PanelBackButton`
-
