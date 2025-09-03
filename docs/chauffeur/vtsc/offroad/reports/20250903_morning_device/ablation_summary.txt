@@ -1,0 +1,5 @@
+baseline: v_chk=23.08 m/s, drop_ge0.8_time=None
+psi_margin_9deg: v_chk=23.08 m/s, drop_ge0.8_time=None
+pretrigger_1.0s: v_chk=23.08 m/s, drop_ge0.8_time=None
+onset_boost_8: v_chk=23.08 m/s, drop_ge0.8_time=None
+disable_overshoot_window: v_chk=23.08 m/s, drop_ge0.8_time=None

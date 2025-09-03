@@ -1,0 +1,65 @@
+{
+  "summary": [
+    {
+      "segment": "/data/media/0/realdata/0000007c--7a8f10f800--0/rlog.zst",
+      "both_windows": [
+        [
+          68.345984191,
+          115.03563675000001
+        ]
+      ],
+      "events_total": 0
+    },
+    {
+      "segment": "/data/media/0/realdata/0000007c--7a8f10f800--1/rlog.zst",
+      "both_windows": [
+        [
+          115.038622664,
+          175.03174811300002
+        ]
+      ],
+      "events_total": 0
+    },
+    {
+      "segment": "/data/media/0/realdata/0000007c--7a8f10f800--2/rlog.zst",
+      "both_windows": [
+        [
+          175.245706903,
+          234.94145353000002
+        ]
+      ],
+      "events_total": 0
+    },
+    {
+      "segment": "/data/media/0/realdata/0000007c--7a8f10f800--3/rlog.zst",
+      "both_windows": [
+        [
+          280.313393495,
+          294.89768131100004
+        ]
+      ],
+      "events_total": 0
+    },
+    {
+      "segment": "/data/media/0/realdata/0000007c--7a8f10f800--4/rlog.zst",
+      "both_windows": [
+        [
+          294.90258152,
+          354.864110982
+        ]
+      ],
+      "events_total": 0
+    },
+    {
+      "segment": "/data/media/0/realdata/0000007c--7a8f10f800--5/rlog.zst",
+      "both_windows": [
+        [
+          356.77424469600004,
+          414.85752488400004
+        ]
+      ],
+      "events_total": 0
+    }
+  ],
+  "findings": []
+}

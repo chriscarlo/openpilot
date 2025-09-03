@@ -1,0 +1,8 @@
+bringing up nodes...
+bringing up nodes...
+
+.                                                                        [100%]
+============================= slowest 10 durations =============================
+0.38s call     docs/chauffeur/vtsc/testing/integration/test_freeway_failopen_no_crawl.py::test_freeway_failopen_no_crawl
+0.06s setup    docs/chauffeur/vtsc/testing/integration/test_freeway_failopen_no_crawl.py::test_freeway_failopen_no_crawl
+0.01s teardown docs/chauffeur/vtsc/testing/integration/test_freeway_failopen_no_crawl.py::test_freeway_failopen_no_crawl

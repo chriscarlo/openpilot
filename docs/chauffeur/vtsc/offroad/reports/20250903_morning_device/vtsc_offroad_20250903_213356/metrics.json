@@ -1,0 +1,131 @@
+{
+  "aggregate": {
+    "count_logs": 8,
+    "psi_fov_deg": 28.0,
+    "psi_margin_deg": 5.0,
+    "n_on": 5,
+    "n_off": 10,
+    "freeway_occluded_after_pct_med": 0.0,
+    "crawl_after_pct_med": 0.0,
+    "hidden_recall_after_pct_med": null,
+    "logs_worse_than_spec": {
+      "freeway_occluded_after_pct>2": [],
+      "crawl_after_pct>1": [],
+      "hidden_recall_after_pct<90": []
+    }
+  },
+  "logs": [
+    {
+      "rlog": "/data/media/0/realdata/0000007c--7a8f10f800--0/rlog.zst",
+      "frames_total": 0,
+      "freeway_frames": 0,
+      "occluded_orig_pct": 0.0,
+      "occluded_after_pct": 0.0,
+      "freeway_occluded_orig_pct": 0.0,
+      "freeway_occluded_after_pct": 0.0,
+      "crawl_orig_pct": 0.0,
+      "crawl_after_pct": 0.0,
+      "crawl_sequences_after_ge2s": 0,
+      "hidden_pos_total": 0,
+      "hidden_recall_after_pct": 0.0
+    },
+    {
+      "rlog": "/data/media/0/realdata/0000007c--7a8f10f800--1/rlog.zst",
+      "frames_total": 0,
+      "freeway_frames": 0,
+      "occluded_orig_pct": 0.0,
+      "occluded_after_pct": 0.0,
+      "freeway_occluded_orig_pct": 0.0,
+      "freeway_occluded_after_pct": 0.0,
+      "crawl_orig_pct": 0.0,
+      "crawl_after_pct": 0.0,
+      "crawl_sequences_after_ge2s": 0,
+      "hidden_pos_total": 0,
+      "hidden_recall_after_pct": 0.0
+    },
+    {
+      "rlog": "/data/media/0/realdata/0000007c--7a8f10f800--2/rlog.zst",
+      "frames_total": 0,
+      "freeway_frames": 0,
+      "occluded_orig_pct": 0.0,
+      "occluded_after_pct": 0.0,
+      "freeway_occluded_orig_pct": 0.0,
+      "freeway_occluded_after_pct": 0.0,
+      "crawl_orig_pct": 0.0,
+      "crawl_after_pct": 0.0,
+      "crawl_sequences_after_ge2s": 0,
+      "hidden_pos_total": 0,
+      "hidden_recall_after_pct": 0.0
+    },
+    {
+      "rlog": "/data/media/0/realdata/0000007c--7a8f10f800--3/rlog.zst",
+      "frames_total": 0,
+      "freeway_frames": 0,
+      "occluded_orig_pct": 0.0,
+      "occluded_after_pct": 0.0,
+      "freeway_occluded_orig_pct": 0.0,
+      "freeway_occluded_after_pct": 0.0,
+      "crawl_orig_pct": 0.0,
+      "crawl_after_pct": 0.0,
+      "crawl_sequences_after_ge2s": 0,
+      "hidden_pos_total": 0,
+      "hidden_recall_after_pct": 0.0
+    },
+    {
+      "rlog": "/data/media/0/realdata/0000007c--7a8f10f800--4/rlog.zst",
+      "frames_total": 0,
+      "freeway_frames": 0,
+      "occluded_orig_pct": 0.0,
+      "occluded_after_pct": 0.0,
+      "freeway_occluded_orig_pct": 0.0,
+      "freeway_occluded_after_pct": 0.0,
+      "crawl_orig_pct": 0.0,
+      "crawl_after_pct": 0.0,
+      "crawl_sequences_after_ge2s": 0,
+      "hidden_pos_total": 0,
+      "hidden_recall_after_pct": 0.0
+    },
+    {
+      "rlog": "/data/media/0/realdata/0000007c--7a8f10f800--5/rlog.zst",
+      "frames_total": 0,
+      "freeway_frames": 0,
+      "occluded_orig_pct": 0.0,
+      "occluded_after_pct": 0.0,
+      "freeway_occluded_orig_pct": 0.0,
+      "freeway_occluded_after_pct": 0.0,
+      "crawl_orig_pct": 0.0,
+      "crawl_after_pct": 0.0,
+      "crawl_sequences_after_ge2s": 0,
+      "hidden_pos_total": 0,
+      "hidden_recall_after_pct": 0.0
+    },
+    {
+      "rlog": "/data/media/0/realdata/0000007c--7a8f10f800--6/rlog.zst",
+      "frames_total": 0,
+      "freeway_frames": 0,
+      "occluded_orig_pct": 0.0,
+      "occluded_after_pct": 0.0,
+      "freeway_occluded_orig_pct": 0.0,
+      "freeway_occluded_after_pct": 0.0,
+      "crawl_orig_pct": 0.0,
+      "crawl_after_pct": 0.0,
+      "crawl_sequences_after_ge2s": 0,
+      "hidden_pos_total": 0,
+      "hidden_recall_after_pct": 0.0
+    },
+    {
+      "rlog": "/data/media/0/realdata/0000007c--7a8f10f800--7/rlog.zst",
+      "frames_total": 0,
+      "freeway_frames": 0,
+      "occluded_orig_pct": 0.0,
+      "occluded_after_pct": 0.0,
+      "freeway_occluded_orig_pct": 0.0,
+      "freeway_occluded_after_pct": 0.0,
+      "crawl_orig_pct": 0.0,
+      "crawl_after_pct": 0.0,
+      "crawl_sequences_after_ge2s": 0,
+      "hidden_pos_total": 0,
+      "hidden_recall_after_pct": 0.0
+    }
+  ]
+}

@@ -1,0 +1,84 @@
+bringing up nodes...
+bringing up nodes...
+
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________ TestAbruptHiddenTurn.test_abrupt_hidden_turn_outside_fov ___________
+[gw2] linux -- Python 3.12.3 /usr/local/venv/bin/python3
+
+self = <test_abrupt_hidden_turn.TestAbruptHiddenTurn testMethod=test_abrupt_hidden_turn_outside_fov>
+
+    def test_abrupt_hidden_turn_outside_fov(self):
+        v0_mph = 50.0
+        v0_mps = v0_mph * CV.MPH_TO_MS
+        v_safe_mph = 25.0
+        v_safe_mps = v_safe_mph * CV.MPH_TO_MS
+    
+        # Curvature corresponding to ~25 mph safe physics speed
+        k_tight = _kappa_for_target_speed_mps(v_safe_mps)
+        r_tight = 1.0 / max(1e-6, k_tight)
+    
+        # Geometry: straight-in 2.0 s, then constant-radius bend
+        straight_s = 2.0
+        bend_s = 6.0
+        segments = [
+            {"duration_s": straight_s, "radius_m": 1e9, "sign": 1.0},
+            {"duration_s": bend_s,     "radius_m": r_tight, "sign": 1.0},
+        ]
+    
+        # Time to rotate ~30° (=0.524 rad) inside the bend
+        delta_psi = 0.524
+        s_to_30deg = delta_psi / max(1e-6, k_tight)
+        t_to_30deg = s_to_30deg / max(1e-6, v0_mps)
+        t_bend = straight_s
+        # Begin occlusion when tangent nears the FOV edge
+        t_occ_start = t_bend + t_to_30deg
+        # Window the low confidence to persist from that point onward
+        t_occ_end = straight_s + bend_s + 1.0
+    
+        scn = Scenario(
+            name='abrupt_hidden_turn_realistic',
+            duration_s=t_occ_end,
+            dt=0.05,
+            v0_mps=v0_mps,
+            geometry=GeometryProfile(kind='multi_curve', segments=segments),
+            # High confidence initially; drop to low once bend reaches the FOV edge
+            confidence=ConfidenceProfile(kind='window', value=0.3, window_start_s=t_occ_start, window_end_s=t_occ_end),
+            speed_limit=SpeedLimitProfile(kind='none', start_mps=v0_mps),
+        )
+        # Barrier parameters
+        scn.vis_horizon_s = 1.4
+        scn.vis_margin_m = 12.0
+        scn.gamma_per_meter = 0.00020
+        scn.lat_jerk_cap = 2.0
+    
+        res = simulate(scn)
+        m = res.metrics
+    
+        # Diagnostics
+        min_cmd_mps = float(np.min(res.v_cmd))
+        min_clean_mps = float(np.min(res.v_clean))
+        print(f"Hidden-turn realistic: v0={v0_mph:.1f}mph, v_safe≈{v_safe_mph:.1f}mph, "
+              f"min_cmd={min_cmd_mps*CV.MS_TO_MPH:.1f}mph, min_clean={min_clean_mps*CV.MS_TO_MPH:.1f}mph, "
+              f"t_occ_start={t_occ_start:.2f}s")
+    
+        # Jerk caps within bounds
+        self.assertLessEqual(m['jerk_pos'], 2.6)
+        self.assertGreaterEqual(m['jerk_neg'], -6.5)
+    
+        # Fair deceleration expectation: within ~4.0 s after occlusion onset, we should see
+        # a meaningful reduction (>= 2.0 m/s). This avoids penalizing the pre-occlusion lead-in.
+        occ_idx = int(round(t_occ_start / scn.dt))
+        chk_idx = min(len(res.t) - 1, occ_idx + int(round(4.5 / scn.dt)))
+>       self.assertLessEqual(res.v_cmd[chk_idx], v0_mps - 0.8, "Reduce ≥ 2 m/s within ~4 s after occlusion start")
+E       AssertionError: np.float64(23.078250000000033) not less than or equal to 21.552000000000003 : Reduce ≥ 2 m/s within ~4 s after occlusion start
+
+docs/chauffeur/vtsc/testing/integration/test_abrupt_hidden_turn.py:98: AssertionError
+----------------------------- Captured stdout call -----------------------------
+Hidden-turn realistic: v0=50.0mph, v_safe≈25.0mph, min_cmd=50.0mph, min_clean=25.0mph, t_occ_start=3.49s
+============================= slowest 10 durations =============================
+0.67s call     docs/chauffeur/vtsc/testing/integration/test_abrupt_hidden_turn.py::TestAbruptHiddenTurn::test_abrupt_hidden_turn_outside_fov
+0.06s setup    docs/chauffeur/vtsc/testing/integration/test_abrupt_hidden_turn.py::TestAbruptHiddenTurn::test_abrupt_hidden_turn_outside_fov
+0.01s teardown docs/chauffeur/vtsc/testing/integration/test_abrupt_hidden_turn.py::TestAbruptHiddenTurn::test_abrupt_hidden_turn_outside_fov
+=========================== short test summary info ============================
+FAILED docs/chauffeur/vtsc/testing/integration/test_abrupt_hidden_turn.py::TestAbruptHiddenTurn::test_abrupt_hidden_turn_outside_fov

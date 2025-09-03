@@ -1,0 +1,19 @@
+Hidden-turn baseline metrics:
+{
+  "event": "hidden_turn_sim",
+  "t_occ_on": 4.5,
+  "t_occ_off": null,
+  "v_cmd_at_onset": 23.078250000000033,
+  "v_cmd_at_check": 23.078250000000033,
+  "v_target_at_check": 22.352000000000004,
+  "drop_ge_0p8_s": null,
+  "drop_ge_2p0_s": null,
+  "passes_4p5s_rule": false,
+  "psi_margin_deg": 6.999997270451807,
+  "kappa_gate_onset": 0.0,
+  "ewma_kappa_onset": 0.013590063280921983,
+  "chk_idx": 180,
+  "occ_idx": 90,
+  "dt": 0.05
+}
+Ablation summary saved.

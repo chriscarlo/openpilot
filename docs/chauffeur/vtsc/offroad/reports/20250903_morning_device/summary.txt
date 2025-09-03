@@ -1,0 +1,6 @@
+Data & methods: Read VTSC status doc, controller, tunables, tests, and ran off-road analyzer on 8 today rlogs; deep-dived with on-device VTSCDebug snapshots.
+Hidden-turn timing: onset=4.000s, check+4.5s v_cmd=23.078 m/s (target drop≥0.8 m/s: FALSE).
+At onset: v_cmd=23.060 m/s, kappa≈0.015769 1/m, psi_margin≈4.98°. No measurable decel within 4.5 s.
+Ablations: psi_margin_9deg: v_chk=23.08 m/s, drop_ge0.8_time=None; pretrigger_1.0s: v_chk=23.08 m/s, drop_ge0.8_time=None; onset_boost_8: v_chk=23.08 m/s, drop_ge0.8_time=None; disable_overshoot_window: v_chk=23.08 m/s, drop_ge0.8_time=None
+Integration tests: freeway_no_crawl=FAIL, hidden_turn=FAIL.
+Next: instrument early-decel assist for 0.5–0.8 s post-onset (≤0.4 m/s²), and/or nudge pretrigger_time_s +0.2 s with psi_margin +1°; re-run freeway battery and hidden-turn timing.

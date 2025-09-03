@@ -1,0 +1,5 @@
+event_idx,event_time,occlusion_onset_time,occlusion_clear_time,time_to_first_significant_decel_s,v_cmd_at_onset_mps,v_cmd_at_check_mps,v_target_at_check_mps,time_between_onset_and_vcmd_drop_s,passes_4.5s_timing,freeway_no_crawl_pass,psi_margin_deg,kappa_gate_at_onset,EWMA_kappa_at_onset
+1,4.000,4.000,0.000,,23.060,23.078,0.000,,FALSE,,4.98,0.015769,
+2,4.000,4.000,0.000,,23.060,23.078,0.000,,FALSE,,4.98,0.015769,
+3,4.000,4.000,0.000,,23.060,23.078,0.000,,FALSE,,4.98,0.015769,
+4,4.000,4.000,,,23.060,23.078,0.000,,FALSE,,4.98,0.015769,
