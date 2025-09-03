@@ -1,0 +1,30 @@
+{
+  "meta": {
+    "created_iso": "2025-09-03T01:40:06+0000",
+    "device_path_hint": "/data/media/0/realdata",
+    "note": "Most recent rlogs copied for VTSC/MTSC analysis. Prefer using on-device paths if present."
+  },
+  "items": [
+    {
+      "file": "docs/chauffeur/vtsc/vtsc_good_data_20250903_013935/logs/0000007a--1f95ff2406--78_rlog.zst",
+      "bytes": 10349116,
+      "size_mb": 9.87,
+      "mtime_iso": "2025-09-03T01:39:51+0000",
+      "route_hint": "0000007a--1f95ff2406--78"
+    },
+    {
+      "file": "docs/chauffeur/vtsc/vtsc_good_data_20250903_013935/logs/0000007a--1f95ff2406--79_rlog.zst",
+      "bytes": 10269771,
+      "size_mb": 9.79,
+      "mtime_iso": "2025-09-03T01:39:51+0000",
+      "route_hint": "0000007a--1f95ff2406--79"
+    },
+    {
+      "file": "docs/chauffeur/vtsc/vtsc_good_data_20250903_013935/logs/0000007a--1f95ff2406--80_rlog.zst",
+      "bytes": 475136,
+      "size_mb": 0.45,
+      "mtime_iso": "2025-09-03T01:39:51+0000",
+      "route_hint": "0000007a--1f95ff2406--80"
+    }
+  ]
+}
