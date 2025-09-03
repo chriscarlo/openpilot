@@ -19,6 +19,12 @@ VisionTurnControllerState = custom.LongitudinalPlanSP.VisionTurnSpeedControl.Vis
 
 N_POINTS = int(min(33, len(ModelConstants.T_IDXS)))  # Use available trajectory points
 
+# ===== Freeway Fail-Open Guard Tunables =====
+# If path is straight, visibility is long, and confidence is good, ignore occlusion effects.
+FREEWAY_CURV_EPS = 1e-5       # effectively straight (1/m)
+FREEWAY_MIN_VISIBLE_M = 120.0 # visible horizon long enough (m)
+FREEWAY_MIN_CONF = 0.60       # path/model confidence threshold
+
 # ===== Map lookahead helpers =====
 EARTH_R_M = 6371007.2
 
@@ -733,6 +739,17 @@ class VisionTurnController:
     self._dbg_tail_frac = 0.0
     self._dbg_s_tail = 0.0
     self._dbg_jerk_cmd = 0.0
+    # Cap selection + freeway guard debug fields
+    self._dbg_active_cap = ""
+    self._dbg_cap_visible_vmin = 0.0
+    self._dbg_cap_occl_vmin = 0.0
+    self._dbg_cap_map_vmin = 0.0
+    self._dbg_vtsc_cmd = 0.0
+    self._dbg_kappa_vis = 0.0
+    self._dbg_s_visible_m = 0.0
+    self._dbg_path_conf = 0.0
+    self._dbg_fail_open = False
+    self._freeway_failopen_active = False
 
   # ===== Internal Param Helpers (decode/parse/clip) =====
   def _get_float_param(self, key: str, default: float, lo: float | None = None, hi: float | None = None) -> float:
@@ -866,6 +883,12 @@ class VisionTurnController:
         'vis_horizon_s': vis_h, 'tail_frac': tail_frac, 's_tail': s_tail, 'early_no_raise': enr,
         'map_tail_active': map_active, 'map_tail_cap': map_cap, 'map_tail_start_m': map_start, 'map_tail_coverage': map_cov,
         'comfort_decel': comfort, 'max_adaptive_decel': max_adapt, 'decel_cmd': decel_cmd, 'jerk_cmd': jerk_cmd, 'a_cmd': a_cmd,
+        # New fields for quick triage on road
+        'active_cap': active_cap, 'vtsc_cmd': vtsc_cmd,
+        'cap_visible_vmin': cap_vis, 'cap_occl_vmin': cap_occ, 'cap_map_vmin': cap_map,
+        's_visible_m': s_vis_m, 'kappa_vis': k_vis, 'path_conf': p_conf,
+        'occluded': bool(not getattr(self._occlusion_state, 'vision_good', True)),
+        'fail_open': fail_open,
       }
     except Exception:
       return {}
@@ -1351,13 +1374,30 @@ class VisionTurnController:
     except Exception:
       self._dbg_target_final = float(self._prev_target_speed if hasattr(self, '_prev_target_speed') else self._v_ego)
 
+    # ===== Freeway sanity guard (fail-open) =====
+    try:
+      kappa_vis = float(abs(getattr(self._occlusion_state, 'last_valid_curvature', 0.0)))
+      s_visible_m = float(max(0.0, getattr(self, '_vis_horizon_s', 1.4) * max(0.0, self._v_ego)))
+      path_conf = float(getattr(self._occlusion_state, 'smoothed_confidence', 0.0))
+    except Exception:
+      kappa_vis, s_visible_m, path_conf = 0.0, 0.0, 0.0
+    # Param override to force fail-open during on-road triage
+    failopen_param = bool(self._get_bool_param('VTSCFailOpen', False))
+    fail_open = bool((kappa_vis <= FREEWAY_CURV_EPS) and (s_visible_m >= FREEWAY_MIN_VISIBLE_M) and (path_conf >= FREEWAY_MIN_CONF))
+    self._freeway_failopen_active = bool(fail_open or failopen_param)
+    # Snapshot fields for triage
+    self._dbg_kappa_vis = kappa_vis
+    self._dbg_s_visible_m = s_visible_m
+    self._dbg_path_conf = path_conf
+    self._dbg_fail_open = bool(self._freeway_failopen_active)
+
     # Compute acceleration command to drive current speed toward target
     accel_cmd = (raw_target - self._v_ego) / dt
 
     # Occlusion-time accel gating: allow positive accel only with positive margin
     occl_positive_margin = False
     early_no_raise = False  # suppress positive accel in early hidden-turn phase
-    if (not self._occlusion_state.vision_good) and (not getattr(self, '_occl_lead_bypass_active', False)):
+    if (not self._occlusion_state.vision_good) and (not getattr(self, '_occl_lead_bypass_active', False)) and (not self._freeway_failopen_active):
       v_gate_hi = 29.06  # ~65 mph
       if self._v_ego < v_gate_hi:
         # Gradual bias toward pure physics mode between ~50 and 65 mph (no hard bypass)
@@ -1594,6 +1634,39 @@ class VisionTurnController:
     # This makes the controller's internal target track what we actually commanded.
     self._prev_target_speed = max(0.0, self._prev_target_speed + self._current_accel * dt)
 
+    # ===== Determine winning cap for telemetry =====
+    try:
+      cap_visible_vmin = float(min(self._v_cruise_setpoint, curvature_to_speed(max(1e-8, float(self._filtered_curvature)))))
+    except Exception:
+      cap_visible_vmin = float(self._v_cruise_setpoint)
+    try:
+      cap_occl_vmin = float(curvature_to_speed(max(1e-8, float(getattr(self._occlusion_state, 'est_curvature', 0.0)))))
+    except Exception:
+      cap_occl_vmin = 0.0
+    try:
+      cap_map_vmin = float(getattr(self, '_map_tail_last_cap', 0.0) or 0.0) if bool(getattr(self, '_map_tail_active', False)) else 0.0
+    except Exception:
+      cap_map_vmin = 0.0
+    self._dbg_cap_visible_vmin = cap_visible_vmin
+    self._dbg_cap_occl_vmin = cap_occl_vmin
+    self._dbg_cap_map_vmin = cap_map_vmin
+    # Build candidate list; drop occlusion if freeway fail-open is active
+    caps = [("visible", cap_visible_vmin)]
+    if not self._freeway_failopen_active:
+      caps.append(("occlusion", cap_occl_vmin))
+    if bool(getattr(self, '_map_tail_active', False)) and cap_map_vmin > 0.0:
+      caps.append(("map", cap_map_vmin))
+    try:
+      active_cap, _ = min(caps, key=lambda kv: kv[1])
+    except Exception:
+      active_cap = "none"
+    self._dbg_active_cap = str(active_cap)
+    # Expose commanded min speed approximation for telemetry
+    try:
+      self._dbg_vtsc_cmd = float(self.v_turn)
+    except Exception:
+      self._dbg_vtsc_cmd = float(self._prev_target_speed)
+
 
   def _find_time_index(self, times: np.ndarray, target_time: float, clip_high=False) -> int:
     """Helper to find an index in 'times' that is closest to 'target_time'."""
@@ -1743,7 +1816,7 @@ class VisionTurnController:
       target_speed = min(self._v_cruise_setpoint, max(target_speed, base_target * 1.02))
 
     # Distance-aware occlusion barrier (target-level integration)
-    if (not self._occlusion_state.vision_good) and (self._v_ego < 29.06) and (not getattr(self, '_occl_lead_bypass_active', False)):
+    if (not self._occlusion_state.vision_good) and (self._v_ego < 29.06) and (not getattr(self, '_occl_lead_bypass_active', False)) and (not self._freeway_failopen_active):
       try:
         v_vis = curvature_to_speed(max(1e-8, float(self._occlusion_state.last_valid_curvature)))
         v_near = min(base_target, v_vis, self._v_cruise_setpoint)

@@ -57,3 +57,7 @@
 ## Security & Configuration Tips
 - Do not commit private keys, large binaries, or personal drive logs. Use Git LFS when needed.
 - Changes to controls/safety require clear justification and tests.
+
+## Rlogs: Finding and Parsing (on-device)
+- Find segment logs (largest dirs on /data): `ls -lt /data/media/0/realdata | head` then inspect a route like `/data/media/0/realdata/<dongle>--<route>--<seg>/rlog.zst`.
+- Quick VTSC scan: `python - <<'PY'\nfrom openpilot.tools.lib.logreader import LogReader\nimport json, glob\nsegs = sorted(glob.glob('/data/media/0/realdata/*--*--*/rlog.zst'))\nfor p in segs[-20:]:\n  for m in LogReader(p):\n    if m.which()=='logMessage':\n      s = m.logMessage\n      if 'VTSCDBG ' in s:\n        d = json.loads(json.loads(s)['msg'].split('VTSCDBG ',1)[1])\n        print(p, d.get('vision_status'), d.get('v_occ'), d.get('v_vis'))\n        break\nPY`
