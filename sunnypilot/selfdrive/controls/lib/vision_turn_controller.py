@@ -762,6 +762,12 @@ class VisionTurnController:
     self._dbg_overshoot_left = 0
     self._dbg_units_ok = True
     self._dbg_gamma_eff = 0.0
+    # Onset tracking for occlusion window and early no-raise
+    self._occlusion_prev = False
+    self._occlusion_onset_timer_s = 0.0
+    self._no_raise_timer_s = 0.0
+    self._v_cap_active_at_onset_mps = 0.0
+    self._onset_no_raise_active = False
     # Cap selection + freeway guard debug fields
     self._dbg_active_cap = ""
     self._dbg_cap_visible_vmin = 0.0
@@ -928,6 +934,7 @@ class VisionTurnController:
         'comfort_decel': comfort, 'max_adaptive_decel': max_adapt, 'decel_cmd': decel_cmd, 'jerk_cmd': jerk_cmd, 'a_cmd': a_cmd,
         # New fields for quick triage on road
         'active_cap': active_cap, 'vtsc_cmd': vtsc_cmd,
+        'cap_source': str(getattr(self, '_dbg_cap_source', '')),
         'cap_visible_vmin': cap_vis, 'cap_occl_vmin': cap_occ, 'cap_map_vmin': cap_map,
         's_visible_m': s_vis_m, 'kappa_vis': k_vis, 'path_conf': conf,
         'occluded': bool(not getattr(self._occlusion_state, 'vision_good', True)),
@@ -1598,6 +1605,58 @@ class VisionTurnController:
       v_occ_cap = float(curvature_to_speed(k_cons))
       accel_cmd = min(accel_cmd, (v_occ_cap - self._v_ego) / dt)
 
+      # === Consolidated curvature cap and early no-raise during onset window ===
+      # Maintain onset timers on rising edge of occlusion
+      if self._fov_occluded and not getattr(self, '_occlusion_prev', False):
+        self._occlusion_onset_timer_s = 0.0
+        self._no_raise_timer_s = 0.0
+        # Estimate visible cap at onset for reference (min of cruise and filtered-curvature speed)
+        try:
+          cap_vis_onset = float(min(self._v_cruise_setpoint, curvature_to_speed(max(1e-8, float(getattr(self, '_filtered_curvature', 0.0))))))
+        except Exception:
+          cap_vis_onset = float(self._v_cruise_setpoint)
+        # Active cap approx at onset
+        self._v_cap_active_at_onset_mps = float(min(cap_vis_onset, v_occ_cap))
+      if self._fov_occluded:
+        self._occlusion_onset_timer_s += dt
+        self._no_raise_timer_s += dt
+      self._occlusion_prev = bool(self._fov_occluded)
+
+      # Strict gating
+      try:
+        psi_margin_deg = float(getattr(self, '_psi_margin_rad', 0.087)) * 57.2957795
+      except Exception:
+        psi_margin_deg = 0.0
+      ttfov_s = float(getattr(self, '_dbg_ttfov_s', 999.0))
+      pretrigger_time = float(getattr(self, '_fov_pretrigger_time_s', 1.5))
+      slack_s = 0.10
+      v_max_mps = 36.0
+      window_s = 0.8
+      no_raise_win_s = 0.7
+      ttfov_ok = (ttfov_s < 0.0) or (ttfov_s <= pretrigger_time + slack_s)
+      onset_gate = (self._fov_occluded and ttfov_ok and (psi_margin_deg >= 5.0) and (self._v_ego <= v_max_mps) and (self._occlusion_onset_timer_s <= window_s))
+      if onset_gate:
+        # Consolidate curvature to avoid near-zero entry curvature
+        try:
+          k_gate = float(abs(getattr(self, '_filtered_curvature', 0.0)))
+        except Exception:
+          k_gate = 0.0
+        k_cons2 = max(k_cons, k_filt, k_gate)
+        try:
+          ewma = float(getattr(self, '_fov_kappa_ewma', k_filt))
+        except Exception:
+          ewma = k_filt
+        k_cons2 = max(k_cons2, ewma)
+        if k_cons2 > 0.0:
+          a_lat_onset = 2.0
+          v_kcons = float(math.sqrt(a_lat_onset / k_cons2))
+          accel_cmd = min(accel_cmd, (v_kcons - self._v_ego) / dt)
+          self._dbg_cap_source = 'occluded_onset_kcons'
+        # Early no-raise activation window
+        self._onset_no_raise_active = bool(self._no_raise_timer_s <= no_raise_win_s)
+      else:
+        self._onset_no_raise_active = False
+
     # Occlusion-time accel gating: allow positive accel only with positive margin
     occl_positive_margin = False
     early_no_raise = False  # suppress positive accel in early hidden-turn phase
@@ -1755,6 +1814,9 @@ class VisionTurnController:
         pass
       # If a speed-limit down-step occurred, suppress raising entirely until vision is good again
       if getattr(self, '_suppress_raise_due_to_limit', False):
+        early_no_raise = True
+      # Force early no-raise during onset window
+      if getattr(self, '_onset_no_raise_active', False):
         early_no_raise = True
       if (not occl_positive_margin) or early_no_raise:
         accel_cmd = min(accel_cmd, 0.0)
