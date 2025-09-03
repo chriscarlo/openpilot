@@ -924,6 +924,40 @@ class VisionTurnController:
     except Exception:
       return {}
 
+  # Pure FOV-based occlusion gating helper
+  @staticmethod
+  def occlusion_gate(kappa_vis: float, s_visible_m: float, path_conf: float,
+                     psi_fov_rad: float, psi_margin_rad: float,
+                     k_freeway: float = FREEWAY_CURV_EPS,
+                     k_min: float = 2e-4, s_long: float = 120.0,
+                     state: dict | None = None) -> tuple[bool, dict, str, dict]:
+    state = dict(state or {})
+    on_cnt = int(state.get('on_cnt', 0))
+    off_cnt = int(state.get('off_cnt', 0))
+    occluded = bool(state.get('occluded', False))
+    psi_vis = abs(float(kappa_vis)) * max(0.0, float(s_visible_m))
+    psi_thresh = max(0.0, float(psi_fov_rad) - float(psi_margin_rad))
+    onset = (abs(kappa_vis) >= k_min) and (psi_vis >= psi_thresh)
+    clear = (abs(kappa_vis) < k_freeway) or ((s_visible_m >= s_long) and (psi_vis < psi_thresh) and (path_conf >= 0.6))
+    N_on, N_off = 5, 10
+    reason = 'none'
+    if onset:
+      on_cnt += 1
+      off_cnt = 0
+      if on_cnt >= N_on:
+        occluded = True
+        reason = 'fov_exit'
+    elif clear:
+      off_cnt += 1
+      on_cnt = 0
+      if off_cnt >= N_off:
+        occluded = False
+        reason = 'freeway' if abs(kappa_vis) < k_freeway else 'short_vis'
+    else:
+      on_cnt = max(0, on_cnt - 1)
+      off_cnt = max(0, off_cnt - 1)
+    return occluded, {'on_cnt': on_cnt, 'off_cnt': off_cnt, 'occluded': occluded}, reason, {'psi_vis': psi_vis, 'psi_thresh': psi_thresh}
+
   @property
   def state(self):
     return self._state
