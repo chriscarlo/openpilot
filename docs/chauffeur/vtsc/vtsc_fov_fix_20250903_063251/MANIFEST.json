@@ -1,0 +1,15 @@
+{
+  "created": "2025-09-03T06:32:52.817199Z",
+  "branch": "feat/vtsc-fov-gating",
+  "commit": "67cee1f01701aee1e59cefb61e0e66d6113240cc",
+  "files": [
+    "README.md",
+    "fov_gate_sweep.json",
+    "unit_audit_gamma_cap.json"
+  ],
+  "gamma_audit": {
+    "monotone_nonincreasing": true,
+    "min": 0.0001,
+    "max": 0.0008
+  }
+}
