@@ -35,5 +35,375 @@
         "num_comments": 0
       }
     }
+  },
+  {
+    "timestamp": 1323.018939131,
+    "location": [
+      38.705858577081095,
+      -120.81249499911674
+    ],
+    "alert": {
+      "id": "785954537",
+      "type": "policeHiding",
+      "latitude": 38.70479,
+      "longitude": -120.856792,
+      "confidence": 3.0,
+      "speed_limit": null,
+      "street": "US-50 W",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "785954537",
+        "type": "POLICE",
+        "subtype": "POLICE_HIDING",
+        "reported_by": null,
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2025-09-02T23:56:35.000Z",
+        "country": "US",
+        "city": null,
+        "street": "US-50 W",
+        "latitude": 38.70479,
+        "longitude": -120.856792,
+        "num_thumbs_up": 10,
+        "alert_reliability": 10,
+        "alert_confidence": 3,
+        "near_by": "Placerville",
+        "comments": [],
+        "num_comments": 0
+      }
+    }
+  },
+  {
+    "timestamp": 1323.018939131,
+    "location": [
+      38.705858577081095,
+      -120.81249499911674
+    ],
+    "alert": {
+      "id": "786037923",
+      "type": "police",
+      "latitude": 38.70471,
+      "longitude": -120.857746,
+      "confidence": 0.0,
+      "speed_limit": null,
+      "street": "to US-50 W \u00bb Sacramento",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "786037923",
+        "type": "POLICE",
+        "subtype": null,
+        "reported_by": null,
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2025-09-03T00:31:23.000Z",
+        "country": "US",
+        "city": "Diamond Springs, CA",
+        "street": "to US-50 W \u00bb Sacramento",
+        "latitude": 38.70471,
+        "longitude": -120.857746,
+        "num_thumbs_up": 0,
+        "alert_reliability": 5,
+        "alert_confidence": 0,
+        "near_by": null,
+        "comments": [],
+        "num_comments": 0
+      }
+    }
+  },
+  {
+    "timestamp": 1323.018939131,
+    "location": [
+      38.705858577081095,
+      -120.81249499911674
+    ],
+    "alert": {
+      "id": "786070708",
+      "type": "police",
+      "latitude": 38.70357,
+      "longitude": -120.859492,
+      "confidence": 0.0,
+      "speed_limit": null,
+      "street": "US-50 E",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "786070708",
+        "type": "POLICE",
+        "subtype": null,
+        "reported_by": null,
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2025-09-03T00:39:42.000Z",
+        "country": "US",
+        "city": null,
+        "street": "US-50 E",
+        "latitude": 38.70357,
+        "longitude": -120.859492,
+        "num_thumbs_up": 0,
+        "alert_reliability": 5,
+        "alert_confidence": 0,
+        "near_by": "Placerville",
+        "comments": [],
+        "num_comments": 0
+      }
+    }
+  },
+  {
+    "timestamp": 1323.018939131,
+    "location": [
+      38.705858577081095,
+      -120.81249499911674
+    ],
+    "alert": {
+      "id": "786056096",
+      "type": "police",
+      "latitude": 38.701038,
+      "longitude": -120.866777,
+      "confidence": 1.0,
+      "speed_limit": null,
+      "street": "US-50 E",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "786056096",
+        "type": "POLICE",
+        "subtype": null,
+        "reported_by": null,
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2025-09-03T00:27:36.000Z",
+        "country": "US",
+        "city": null,
+        "street": "US-50 E",
+        "latitude": 38.701038,
+        "longitude": -120.866777,
+        "num_thumbs_up": 5,
+        "alert_reliability": 10,
+        "alert_confidence": 1,
+        "near_by": "Diamond Springs",
+        "comments": [],
+        "num_comments": 0
+      }
+    }
+  },
+  {
+    "timestamp": 1623.05641702,
+    "location": [
+      38.72785981797062,
+      -120.80530193568704
+    ],
+    "alert": {
+      "id": "786037923",
+      "type": "police",
+      "latitude": 38.70471,
+      "longitude": -120.857746,
+      "confidence": 0.0,
+      "speed_limit": null,
+      "street": "to US-50 W \u00bb Sacramento",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "786037923",
+        "type": "POLICE",
+        "subtype": null,
+        "reported_by": null,
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2025-09-03T00:31:23.000Z",
+        "country": "US",
+        "city": "Diamond Springs, CA",
+        "street": "to US-50 W \u00bb Sacramento",
+        "latitude": 38.70471,
+        "longitude": -120.857746,
+        "num_thumbs_up": 0,
+        "alert_reliability": 5,
+        "alert_confidence": 0,
+        "near_by": null,
+        "comments": [],
+        "num_comments": 0
+      }
+    }
+  },
+  {
+    "timestamp": 1623.05641702,
+    "location": [
+      38.72785981797062,
+      -120.80530193568704
+    ],
+    "alert": {
+      "id": "786070708",
+      "type": "police",
+      "latitude": 38.70357,
+      "longitude": -120.859492,
+      "confidence": 0.0,
+      "speed_limit": null,
+      "street": "US-50 E",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "786070708",
+        "type": "POLICE",
+        "subtype": null,
+        "reported_by": null,
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2025-09-03T00:39:42.000Z",
+        "country": "US",
+        "city": null,
+        "street": "US-50 E",
+        "latitude": 38.70357,
+        "longitude": -120.859492,
+        "num_thumbs_up": 0,
+        "alert_reliability": 5,
+        "alert_confidence": 0,
+        "near_by": "Placerville",
+        "comments": [],
+        "num_comments": 0
+      }
+    }
+  },
+  {
+    "timestamp": 1923.0965319,
+    "location": [
+      38.73455257370102,
+      -120.81383067577046
+    ],
+    "alert": {
+      "id": "786037923",
+      "type": "police",
+      "latitude": 38.70471,
+      "longitude": -120.857746,
+      "confidence": 0.0,
+      "speed_limit": null,
+      "street": "to US-50 W \u00bb Sacramento",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "786037923",
+        "type": "POLICE",
+        "subtype": null,
+        "reported_by": null,
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2025-09-03T00:31:23.000Z",
+        "country": "US",
+        "city": "Diamond Springs, CA",
+        "street": "to US-50 W \u00bb Sacramento",
+        "latitude": 38.70471,
+        "longitude": -120.857746,
+        "num_thumbs_up": 0,
+        "alert_reliability": 5,
+        "alert_confidence": 0,
+        "near_by": null,
+        "comments": [],
+        "num_comments": 0
+      }
+    }
+  },
+  {
+    "timestamp": 1923.0965319,
+    "location": [
+      38.73455257370102,
+      -120.81383067577046
+    ],
+    "alert": {
+      "id": "786070708",
+      "type": "police",
+      "latitude": 38.70357,
+      "longitude": -120.859492,
+      "confidence": 0.0,
+      "speed_limit": null,
+      "street": "US-50 E",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "786070708",
+        "type": "POLICE",
+        "subtype": null,
+        "reported_by": null,
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2025-09-03T00:39:42.000Z",
+        "country": "US",
+        "city": null,
+        "street": "US-50 E",
+        "latitude": 38.70357,
+        "longitude": -120.859492,
+        "num_thumbs_up": 1,
+        "alert_reliability": 9,
+        "alert_confidence": 0,
+        "near_by": "Placerville",
+        "comments": [],
+        "num_comments": 0
+      }
+    }
+  },
+  {
+    "timestamp": 2223.117008083,
+    "location": [
+      38.734593097652905,
+      -120.8138472843189
+    ],
+    "alert": {
+      "id": "786037923",
+      "type": "police",
+      "latitude": 38.70471,
+      "longitude": -120.857746,
+      "confidence": 0.0,
+      "speed_limit": null,
+      "street": "to US-50 W \u00bb Sacramento",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "786037923",
+        "type": "POLICE",
+        "subtype": null,
+        "reported_by": null,
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2025-09-03T00:31:23.000Z",
+        "country": "US",
+        "city": "Diamond Springs, CA",
+        "street": "to US-50 W \u00bb Sacramento",
+        "latitude": 38.70471,
+        "longitude": -120.857746,
+        "num_thumbs_up": 0,
+        "alert_reliability": 5,
+        "alert_confidence": 0,
+        "near_by": null,
+        "comments": [],
+        "num_comments": 0
+      }
+    }
+  },
+  {
+    "timestamp": 2523.118045684,
+    "location": [
+      38.73452594535274,
+      -120.81386242038673
+    ],
+    "alert": {
+      "id": "786037923",
+      "type": "police",
+      "latitude": 38.70471,
+      "longitude": -120.857746,
+      "confidence": 0.0,
+      "speed_limit": null,
+      "street": "to US-50 W \u00bb Sacramento",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "786037923",
+        "type": "POLICE",
+        "subtype": null,
+        "reported_by": null,
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2025-09-03T00:31:23.000Z",
+        "country": "US",
+        "city": "Diamond Springs, CA",
+        "street": "to US-50 W \u00bb Sacramento",
+        "latitude": 38.70471,
+        "longitude": -120.857746,
+        "num_thumbs_up": 0,
+        "alert_reliability": 5,
+        "alert_confidence": 0,
+        "near_by": null,
+        "comments": [],
+        "num_comments": 0
+      }
+    }
   }
 ]
