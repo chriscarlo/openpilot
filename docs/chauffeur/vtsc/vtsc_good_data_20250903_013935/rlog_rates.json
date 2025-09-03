@@ -1,0 +1,152 @@
+{
+  "0000007a--1f95ff2406--78_rlog.zst": {
+    "duration_s": 4741.41,
+    "topics": {
+      "liveCalibration": {
+        "n": 240,
+        "hz_med": 4.0,
+        "p95_gap_s": 0.253
+      },
+      "driverMonitoringState": {
+        "n": 1200,
+        "hz_med": 20.015,
+        "p95_gap_s": 0.06
+      },
+      "longitudinalPlan": {
+        "n": 1200,
+        "hz_med": 20.004,
+        "p95_gap_s": 0.054
+      },
+      "liveDelay": {
+        "n": 240,
+        "hz_med": 4.001,
+        "p95_gap_s": 0.255
+      },
+      "liveParameters": {
+        "n": 1200,
+        "hz_med": 20.033,
+        "p95_gap_s": 0.055
+      },
+      "radarState": {
+        "n": 1200,
+        "hz_med": 20.002,
+        "p95_gap_s": 0.054
+      },
+      "liveTorqueParameters": {
+        "n": 240,
+        "hz_med": 3.999,
+        "p95_gap_s": 0.254
+      },
+      "driverAssistance": {
+        "n": 1200,
+        "hz_med": 20.001,
+        "p95_gap_s": 0.054
+      },
+      "mapTurnSpeedControlSP": {
+        "n": 0,
+        "hz_med": 0.0,
+        "p95_gap_s": null
+      }
+    }
+  },
+  "0000007a--1f95ff2406--79_rlog.zst": {
+    "duration_s": 4801.41,
+    "topics": {
+      "liveCalibration": {
+        "n": 240,
+        "hz_med": 4.0,
+        "p95_gap_s": 0.254
+      },
+      "driverMonitoringState": {
+        "n": 1200,
+        "hz_med": 20.003,
+        "p95_gap_s": 0.06
+      },
+      "longitudinalPlan": {
+        "n": 1200,
+        "hz_med": 19.991,
+        "p95_gap_s": 0.054
+      },
+      "liveDelay": {
+        "n": 240,
+        "hz_med": 4.001,
+        "p95_gap_s": 0.254
+      },
+      "liveParameters": {
+        "n": 1200,
+        "hz_med": 20.015,
+        "p95_gap_s": 0.055
+      },
+      "radarState": {
+        "n": 1200,
+        "hz_med": 19.992,
+        "p95_gap_s": 0.054
+      },
+      "liveTorqueParameters": {
+        "n": 240,
+        "hz_med": 3.998,
+        "p95_gap_s": 0.255
+      },
+      "driverAssistance": {
+        "n": 1200,
+        "hz_med": 19.993,
+        "p95_gap_s": 0.054
+      },
+      "mapTurnSpeedControlSP": {
+        "n": 0,
+        "hz_med": 0.0,
+        "p95_gap_s": null
+      }
+    }
+  },
+  "0000007a--1f95ff2406--80_rlog.zst": {
+    "duration_s": 4803.61,
+    "topics": {
+      "liveCalibration": {
+        "n": 9,
+        "hz_med": 4.004,
+        "p95_gap_s": 0.251
+      },
+      "driverMonitoringState": {
+        "n": 44,
+        "hz_med": 20.103,
+        "p95_gap_s": 0.06
+      },
+      "longitudinalPlan": {
+        "n": 44,
+        "hz_med": 19.966,
+        "p95_gap_s": 0.054
+      },
+      "liveDelay": {
+        "n": 9,
+        "hz_med": 4.005,
+        "p95_gap_s": 0.255
+      },
+      "liveParameters": {
+        "n": 44,
+        "hz_med": 19.975,
+        "p95_gap_s": 0.055
+      },
+      "radarState": {
+        "n": 44,
+        "hz_med": 19.967,
+        "p95_gap_s": 0.054
+      },
+      "liveTorqueParameters": {
+        "n": 9,
+        "hz_med": 3.998,
+        "p95_gap_s": 0.251
+      },
+      "driverAssistance": {
+        "n": 44,
+        "hz_med": 19.97,
+        "p95_gap_s": 0.054
+      },
+      "mapTurnSpeedControlSP": {
+        "n": 0,
+        "hz_med": 0.0,
+        "p95_gap_s": null
+      }
+    }
+  }
+}
