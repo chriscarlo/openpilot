@@ -1563,7 +1563,8 @@ class VisionTurnController:
           margin_dist = float(getattr(self, '_vis_margin_m', 10.0))
           # Use harness-equivalent margin for gating decisions with small buffer (≈2 m)
           positive_margin = (d_req_h <= (s_vis - (margin_dist + 2.0)))
-          occl_positive_margin = bool(positive_margin)
+          early_phase = int(getattr(self, '_fov_on_cnt', 0)) <= 10
+          occl_positive_margin = bool(positive_margin and not early_phase)
           # Snapshot for telemetry
           try:
             self._dbg_s_tail = float(s_tail)

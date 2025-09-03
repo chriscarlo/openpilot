@@ -43,3 +43,12 @@ This report summarizes on‑device VTSC behavior during the reported freeway cra
 - Root cause drill‑down: fix occlusion onset/gating — verify confidence source (laneLineProbs), FOV geometry/s_visible_m, and unit scales feeding the barrier.
 - Regression tests: focus on hidden‑turn integration tests; ensure freeway no‑crawl stays green and occlusion still decelerates on genuine hidden turns.
 
+
+## Off‑Road Verification Results (FOV‑Gated VTSC)
+- Evaluator: `docs/chauffeur/vtsc/offroad/eval_fov_gate_on_rlogs.py` (no driving; replays VTSCDBG snapshots)
+- Dataset: 132 Route 50 segments under `/data/media/0/realdata/0000007a--1f95ff2406--*/rlog.zst`.
+- Summary (median across logs):
+  - `freeway_occluded_after_pct`: 0.0%
+  - `crawl_after_pct`: 0.0%
+  - `hidden_recall_after_pct`: N/A on this freeway‑dominant set (no hidden‑turn positives)
+- Artifacts written to: `docs/chauffeur/vtsc/offroad/reports/vtsc_offroad_20250903_080152/` (metrics.json, by_log.jsonl)
