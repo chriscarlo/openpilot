@@ -101,6 +101,16 @@ def update_vtsc_params(ctrl, *, force: bool = False) -> None:
     ctrl._psi_margin_rad = getf("VisionTurnSpeedControlPsiMarginRad", getattr(ctrl, "_psi_margin_rad", 0.087), 0.0, 0.5)
   except Exception:
     ctrl._psi_margin_rad = getattr(ctrl, "_psi_margin_rad", 0.087)
+  # Additional FOV gate tunables
+  ctrl._fov_k_min = getf("VisionTurnSpeedControlFOVKMin", getattr(ctrl, "_fov_k_min", 2e-4), 1e-6, 1e-2)
+  ctrl._fov_k_freeway = getf("VisionTurnSpeedControlFOVKFreeway", getattr(ctrl, "_fov_k_freeway", 1e-5), 1e-7, 1e-3)
+  ctrl._fov_s_long_m = getf("VisionTurnSpeedControlFOVSLongM", getattr(ctrl, "_fov_s_long_m", 120.0), 10.0, 400.0)
+  ctrl._fov_pretrigger_time_s = getf("VisionTurnSpeedControlFOVPretriggerTimeS", getattr(ctrl, "_fov_pretrigger_time_s", 1.2), 0.1, 3.0)
+  ctrl._fov_onset_boost_frames = int(getf("VisionTurnSpeedControlFOVOnsetBoostFrames", getattr(ctrl, "_fov_onset_boost_frames", 10), 0.0, 60.0))
+  ctrl._fov_overshoot_frames = int(getf("VisionTurnSpeedControlFOVOvershootFrames", getattr(ctrl, "_fov_overshoot_frames", 10), 0.0, 60.0))
+  ctrl._fov_ewma_tau_s = getf("VisionTurnSpeedControlFOVEWMATauS", getattr(ctrl, "_fov_ewma_tau_s", 0.5), 0.05, 3.0)
+  ctrl._fov_N_on = int(getf("VisionTurnSpeedControlFOVNOn", getattr(ctrl, "_fov_N_on", 5), 1.0, 30.0))
+  ctrl._fov_N_off = int(getf("VisionTurnSpeedControlFOVNOff", getattr(ctrl, "_fov_N_off", 10), 1.0, 60.0))
 
   # Anticipation & overshoot
   plan_decel_b = P.get("VisionTurnSpeedControlPlanningDecelLimit")

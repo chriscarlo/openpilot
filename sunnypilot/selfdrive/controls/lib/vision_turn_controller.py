@@ -746,8 +746,20 @@ class VisionTurnController:
     self._fov_on_cnt = 0
     self._fov_off_cnt = 0
     self._fov_reason = ''
+    self._fov_pretrigger_time_s = 1.2
+    self._fov_onset_boost_frames = 10
+    self._fov_overshoot_frames = 10
+    self._fov_boost_left = 0
+    self._fov_overshoot_left = 0
+    self._fov_ewma_tau_s = 0.5
+    self._fov_kappa_ewma = 0.0
+    self._fov_N_on = 5
+    self._fov_N_off = 10
     self._dbg_psi_vis = 0.0
     self._dbg_psi_thresh = 0.0
+    self._dbg_ttfov_s = 0.0
+    self._dbg_onset_boost_left = 0
+    self._dbg_overshoot_left = 0
     self._dbg_units_ok = True
     self._dbg_gamma_eff = 0.0
     # Cap selection + freeway guard debug fields
@@ -901,6 +913,8 @@ class VisionTurnController:
       occl_off = int(getattr(self, '_fov_off_cnt', 0))
       gamma_eff = float(getattr(self, '_dbg_gamma_eff', 0.0))
       units_ok = bool(getattr(self, '_dbg_units_ok', True))
+      boost_left = int(getattr(self, '_fov_boost_left', 0))
+      overshoot_left = int(getattr(self, '_fov_overshoot_left', 0))
       return {
         'v': v_ego, 'cruise': v_cruise, 'lead': lead, 'hw': hw,
         'conf': conf, 'vision_status': self._vision_status_str(),
@@ -918,8 +932,8 @@ class VisionTurnController:
         's_visible_m': s_vis_m, 'kappa_vis': k_vis, 'path_conf': conf,
         'occluded': bool(not getattr(self._occlusion_state, 'vision_good', True)),
         'fail_open': fail_open,
-        'psi_vis': psi_vis, 'psi_thresh': psi_thresh, 'psi_fov_rad': psi_fov, 'psi_margin_rad': psi_margin,
-        'occlusion_reason': occl_reason, 'occl_on_cnt': occl_on, 'occl_off_cnt': occl_off,
+        'psi_vis': psi_vis, 'psi_thresh': psi_thresh, 'ttfov_s': ttfov, 'psi_fov_rad': psi_fov, 'psi_margin_rad': psi_margin,
+        'occlusion_reason': occl_reason, 'occl_on_cnt': occl_on, 'occl_off_cnt': occl_off, 'onset_boost_left': boost_left, 'overshoot_left': overshoot_left,
         'gamma_eff': gamma_eff, 'units_ok': units_ok,
       }
     except Exception:
@@ -1457,42 +1471,61 @@ class VisionTurnController:
     self._dbg_path_conf = path_conf
     self._dbg_fail_open = bool(self._freeway_failopen_active)
 
-    # FOV-based occlusion gate computation (diagnostic + gradual rollout)
+    # FOV-based occlusion gate computation with pre-trigger and stickiness
     try:
       psi_fov = float(getattr(self, '_psi_fov_rad', 0.49))
-      psi_margin = float(getattr(self, '_psi_margin_rad', 0.105))
+      psi_margin = float(getattr(self, '_psi_margin_rad', 0.087))
     except Exception:
       psi_fov, psi_margin = 0.49, 0.087
-    # compute instantaneous psi for snapshot
+    # instantaneous psi
+    self._dbg_psi_vis = float(abs(kappa_vis) * max(0.0, s_visible_m))
+    self._dbg_psi_thresh = float(max(0.0, psi_fov - psi_margin))
+    # Pre-trigger by time-to-FOV-exit (TTFOV)
+    k_min = float(getattr(self, '_fov_k_min', 2e-4))
+    k_free = float(getattr(self, '_fov_k_freeway', FREEWAY_CURV_EPS))
+    s_long = float(getattr(self, '_fov_s_long_m', FREEWAY_MIN_VISIBLE_M))
     try:
-      self._dbg_psi_vis = float(abs(kappa_vis) * max(0.0, s_visible_m))
-      self._dbg_psi_thresh = float(max(0.0, psi_fov - psi_margin))
+      delta_psi = max(0.0, self._dbg_psi_thresh - self._dbg_psi_vis)
+      delta_s_to_exit = delta_psi / max(abs(kappa_vis), 1e-9)
+      ttfov_s = delta_s_to_exit / max(self._v_ego, 0.1)
     except Exception:
-      self._dbg_psi_vis = 0.0
-      self._dbg_psi_thresh = max(0.0, psi_fov - psi_margin)
-    # Maintain a separate FOV occlusion state; does not disable existing occlusion physics, only gates its use below
-    try:
-      # Hysteretic gate with simple counters
-      onset = (abs(kappa_vis) >= 1.5e-4) and (self._dbg_psi_vis >= self._dbg_psi_thresh)
-      clear = (abs(kappa_vis) < FREEWAY_CURV_EPS) or ((s_visible_m >= FREEWAY_MIN_VISIBLE_M) and (self._dbg_psi_vis < self._dbg_psi_thresh) and (path_conf >= FREEWAY_MIN_CONF))
-      if onset:
-        self._fov_on_cnt = int(self._fov_on_cnt) + 1
-        self._fov_off_cnt = 0
-        if self._fov_on_cnt >= 3:
-          self._fov_occluded = True
-          self._fov_reason = 'fov_exit'
-      elif clear:
+      ttfov_s = 999.0
+    self._dbg_ttfov_s = float(ttfov_s)
+    pretrigger_time = float(getattr(self, '_fov_pretrigger_time_s', 1.2))
+    pretrigger = (ttfov_s <= pretrigger_time) and (abs(kappa_vis) >= k_min)
+    # Hysteretic onset/clear
+    onset_geom = (abs(kappa_vis) >= k_min) and (self._dbg_psi_vis >= self._dbg_psi_thresh)
+    onset = onset_geom or pretrigger
+    clear = (abs(kappa_vis) < k_free) or ((s_visible_m >= s_long) and (self._dbg_psi_vis < self._dbg_psi_thresh) and (path_conf >= FREEWAY_MIN_CONF))
+    if onset and not self._fov_occluded:
+      self._fov_on_cnt = int(self._fov_on_cnt) + 1
+      self._fov_off_cnt = 0
+      if self._fov_on_cnt >= int(getattr(self, '_fov_N_on', 5)):
+        self._fov_occluded = True
+        self._fov_reason = 'pretrigger' if pretrigger else 'fov_exit'
+        self._fov_boost_left = int(getattr(self, '_fov_onset_boost_frames', 10))
+        self._fov_overshoot_left = int(getattr(self, '_fov_overshoot_frames', 10))
+        # initialize EWMA curvature at current filtered
+        try:
+          self._fov_kappa_ewma = float(getattr(self, '_filtered_curvature', 0.0))
+        except Exception:
+          self._fov_kappa_ewma = 0.0
+    elif clear and self._fov_occluded:
+      # During onset stickiness window, do not clear on small margin
+      if int(getattr(self, '_fov_boost_left', 0)) <= 0:
         self._fov_off_cnt = int(self._fov_off_cnt) + 1
         self._fov_on_cnt = 0
-        if self._fov_off_cnt >= 8:
+        if self._fov_off_cnt >= int(getattr(self, '_fov_N_off', 10)):
           self._fov_occluded = False
-          self._fov_reason = 'freeway' if abs(kappa_vis) < FREEWAY_CURV_EPS else 'short_vis'
-      else:
-        # decay counters slowly
-        self._fov_on_cnt = max(0, int(self._fov_on_cnt) - 1)
-        self._fov_off_cnt = max(0, int(self._fov_off_cnt) - 1)
-    except Exception:
-      pass
+          self._fov_reason = 'freeway' if abs(kappa_vis) < k_free else 'short_vis'
+    else:
+      self._fov_on_cnt = max(0, int(self._fov_on_cnt) - 1)
+      self._fov_off_cnt = max(0, int(self._fov_off_cnt) - 1)
+    # decay windows
+    if int(getattr(self, '_fov_boost_left', 0)) > 0:
+      self._fov_boost_left -= 1
+    if int(getattr(self, '_fov_overshoot_left', 0)) > 0:
+      self._fov_overshoot_left -= 1
 
     # Compute acceleration command to drive current speed toward target
     accel_cmd = (raw_target - self._v_ego) / dt
@@ -1750,7 +1783,22 @@ class VisionTurnController:
     except Exception:
       cap_visible_vmin = float(self._v_cruise_setpoint)
     try:
-      cap_occl_vmin = float(curvature_to_speed(max(1e-8, float(getattr(self._occlusion_state, 'est_curvature', 0.0)))))
+      try:
+      k_est = float(getattr(self._occlusion_state, 'est_curvature', 0.0))
+    except Exception:
+      k_est = 0.0
+    k_filt = float(max(1e-8, float(getattr(self, '_filtered_curvature', 0.0))))
+    if int(getattr(self, '_fov_overshoot_left', 0)) > 0:
+      try:
+        tau = float(getattr(self, '_fov_ewma_tau_s', 0.5))
+        alpha = 1.0 - math.exp(-dt / max(1e-3, tau))
+      except Exception:
+        alpha = 0.5
+      self._fov_kappa_ewma = (1.0 - alpha) * float(getattr(self, '_fov_kappa_ewma', k_filt)) + alpha * k_filt
+      k_cons = max(1e-8, min(self._fov_kappa_ewma, k_est))
+      cap_occl_vmin = float(curvature_to_speed(k_cons))
+    else:
+      cap_occl_vmin = float(curvature_to_speed(max(1e-8, k_est)))
     except Exception:
       cap_occl_vmin = 0.0
     try:
