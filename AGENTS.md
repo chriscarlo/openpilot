@@ -58,6 +58,60 @@
 - Do not commit private keys, large binaries, or personal drive logs. Use Git LFS when needed.
 - Changes to controls/safety require clear justification and tests.
 
-## Rlogs: Finding and Parsing (on-device)
-- Find segment logs (largest dirs on /data): `ls -lt /data/media/0/realdata | head` then inspect a route like `/data/media/0/realdata/<dongle>--<route>--<seg>/rlog.zst`.
-- Quick VTSC scan: `python - <<'PY'\nfrom openpilot.tools.lib.logreader import LogReader\nimport json, glob\nsegs = sorted(glob.glob('/data/media/0/realdata/*--*--*/rlog.zst'))\nfor p in segs[-20:]:\n  for m in LogReader(p):\n    if m.which()=='logMessage':\n      s = m.logMessage\n      if 'VTSCDBG ' in s:\n        d = json.loads(json.loads(s)['msg'].split('VTSCDBG ',1)[1])\n        print(p, d.get('vision_status'), d.get('v_occ'), d.get('v_vis'))\n        break\nPY`
+## Logs: Rlogs/Qlogs vs Swaglogs (on-device)
+
+- Where (segments): `/data/media/0/realdata/<dongle>--<route>--<seg>/`
+  - Rlog: `rlog.zst` (or `rlog.bz2`)
+  - Qlog: `qlog.zst` (or `qlog.bz2`)
+  - Video: `fcamera.hevc`, `ecamera.hevc`, optional `qcamera.ts`
+
+- Where (swaglogs): `/data/log/swaglog.*` (rotating newline‑delimited JSON files)
+
+- Parse rlogs/qlogs with `tools/lib/logreader.py` (handles .zst/.bz2):
+  - Example (extract VTSCDBG from rlogs):
+    `python - <<'PY'
+from openpilot.tools.lib.logreader import LogReader
+import glob, json
+for p in sorted(glob.glob('/data/media/0/realdata/*--*--*/rlog.zst'))[-20:]:
+  for m in LogReader(p):
+    if m.which()=='logMessage':
+      s = m.logMessage              # outer swaglog JSON string embedded in the capnp event
+      try:
+        outer = json.loads(s)
+      except Exception:
+        continue
+      msg = outer.get('msg','')
+      if msg.startswith('VTSCDBG '):
+        d = json.loads(msg.split('VTSCDBG ',1)[1])
+        print(p, d.get('vision_status'), d.get('v_occ'), d.get('v_vis'))
+        break
+PY`
+
+- Parse qlogs similarly (force qlog mode):
+  - `from openpilot.tools.lib.logreader import LogReader, ReadMode`
+  - `for m in LogReader('/data/media/0/realdata/<...>/qlog.zst', default_mode=ReadMode.QLOG): ...`
+
+- Parse swaglogs (newline‑delimited JSON, no capnp):
+  - Example:
+    `python - <<'PY'
+import json, glob
+for path in sorted(glob.glob('/data/log/swaglog.*'))[-5:]:
+  with open(path,'r',encoding='utf-8',errors='ignore') as f:
+    for line in f:
+      try:
+        rec = json.loads(line)
+      except Exception:
+        continue
+      if isinstance(rec.get('msg'), str) and rec['msg'].startswith('VTSCDBG '):
+        d = json.loads(rec['msg'].split('VTSCDBG ',1)[1])
+        print(path, d.get('vision_status'), d.get('v_occ'), d.get('v_vis'))
+        break
+PY`
+
+- Quick grep on compressed rlogs (coarse):
+  - `zstd -dc /data/media/0/realdata/<...>/rlog.zst | strings | rg -n "VTSCDBG|Route 50"`
+
+- Tips:
+  - Use `ls -lt /data/media/0/realdata | head` to find most recent routes; segment numbers grow over time.
+  - For time windows, filter by file mtime or by `created` field inside swaglog JSON lines.
+  - Prefer `LogReader` for correctness and speed over raw `zstd | strings` when extracting fields.
