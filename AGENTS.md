@@ -9,6 +9,7 @@
 
 ## Build, Test, and Development Commands
 - Environment check: confirm whether you're on the TICI production environment or the WSL Ubuntu dev environment; some scripts, paths, and hardware access differ.
+- Environment/persistence report: see `/persist/PERSISTENCE_AND_ENVIRONMENT_REPORT_*.md` (latest). When work depends on storage durability, mount options, partition sizes, or hardware limits, consult this report first and regenerate if stale.
 - Create env: `python -m venv .venv && source .venv/bin/activate`.
 - Install deps (dev+tests): `pip install -e ".[testing,dev]"`.
 - Build native targets: `scons -j$(nproc)` (add `--stock-ui` to build stock UI).

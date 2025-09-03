@@ -230,6 +230,19 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"VisionTurnSpeedControlGammaPerMeter", {PERSISTENT | BACKUP, FLOAT, "0.00035"}},
     {"VisionTurnSpeedControlLatJerkCap", {PERSISTENT | BACKUP, FLOAT, "2.0"}},
 
+    // VTSC Field-of-View (FOV) gating + geometry
+    {"VisionTurnSpeedControlPsiFOVRad", {PERSISTENT | BACKUP, FLOAT, "0.49"}},
+    {"VisionTurnSpeedControlPsiMarginRad", {PERSISTENT | BACKUP, FLOAT, "0.087"}},
+    {"VisionTurnSpeedControlFOVKMin", {PERSISTENT | BACKUP, FLOAT, "0.0002"}},
+    {"VisionTurnSpeedControlFOVKFreeway", {PERSISTENT | BACKUP, FLOAT, "0.00001"}},
+    {"VisionTurnSpeedControlFOVSLongM", {PERSISTENT | BACKUP, FLOAT, "120.0"}},
+    {"VisionTurnSpeedControlFOVPretriggerTimeS", {PERSISTENT | BACKUP, FLOAT, "1.2"}},
+    {"VisionTurnSpeedControlFOVOnsetBoostFrames", {PERSISTENT | BACKUP, INT, "10"}},
+    {"VisionTurnSpeedControlFOVOvershootFrames", {PERSISTENT | BACKUP, INT, "10"}},
+    {"VisionTurnSpeedControlFOVEWMATauS", {PERSISTENT | BACKUP, FLOAT, "0.5"}},
+    {"VisionTurnSpeedControlFOVNOn", {PERSISTENT | BACKUP, INT, "5"}},
+    {"VisionTurnSpeedControlFOVNOff", {PERSISTENT | BACKUP, INT, "10"}},
+
     // VTSC Speed Control
     {"VisionTurnSpeedControlSpeedIncreaseFactor", {PERSISTENT | BACKUP, FLOAT, "1.0"}},
     {"VisionTurnSpeedControlMaxSpeed", {PERSISTENT | BACKUP, FLOAT, "70.0"}},

@@ -934,6 +934,9 @@ class VisionTurnController:
         'fail_open': fail_open,
         'psi_vis': psi_vis, 'psi_thresh': psi_thresh, 'ttfov_s': ttfov, 'psi_fov_rad': psi_fov, 'psi_margin_rad': psi_margin,
         'occlusion_reason': occl_reason, 'occl_on_cnt': occl_on, 'occl_off_cnt': occl_off, 'onset_boost_left': boost_left, 'overshoot_left': overshoot_left,
+        # κ-bias diagnostics
+        'onset_bias_active': bool(getattr(self, '_dbg_onset_bias_active', False)),
+        'onset_gate_reason': getattr(self, '_dbg_onset_gate_reason', None),
         'gamma_eff': gamma_eff, 'units_ok': units_ok,
       }
     except Exception:
@@ -1551,6 +1554,47 @@ class VisionTurnController:
         k_cons = max(1e-8, min(self._fov_kappa_ewma, k_est))
       else:
         k_cons = max(1e-8, min(k_filt, k_est))
+      # === κ-bias at occluded onset: briefly bias occlusion cap to ensure decel starts ===
+      # Use existing onset stickiness window (_fov_boost_left) as a safe timing window.
+      try:
+        psi_margin_deg = float(getattr(self, '_psi_margin_rad', 0.087)) * 57.2957795
+      except Exception:
+        psi_margin_deg = 0.0
+      try:
+        ttfov_s = float(getattr(self, '_dbg_ttfov_s', 999.0))
+      except Exception:
+        ttfov_s = 999.0
+      pretrigger_time = float(getattr(self, '_fov_pretrigger_time_s', 1.5))
+      slack_s = 0.10
+      v_max_mps = 36.0
+      try:
+        boost_left = int(getattr(self, '_fov_boost_left', 0))
+      except Exception:
+        boost_left = 0
+      onset_gate = (boost_left > 0) and (psi_margin_deg >= 5.0) and (self._v_ego <= v_max_mps) and (ttfov_s <= (pretrigger_time + slack_s))
+      try:
+        if onset_gate:
+          kappa_mul = 1.35
+          # Ensure we don't undercut filtered curvature at onset; bias toward stronger (higher) curvature
+          k_cons = max(k_cons, k_filt) * float(kappa_mul)
+          self._dbg_onset_bias_active = True
+          self._dbg_onset_gate_reason = {
+            'psi_ok': True,
+            'speed_ok': True,
+            'ttfov_ok': True,
+            'boost_left': int(boost_left),
+          }
+        else:
+          self._dbg_onset_bias_active = False
+          self._dbg_onset_gate_reason = {
+            'psi_ok': bool(psi_margin_deg >= 5.0),
+            'speed_ok': bool(self._v_ego <= v_max_mps),
+            'ttfov_ok': bool(ttfov_s <= (pretrigger_time + slack_s)),
+            'boost_left': int(boost_left),
+          }
+      except Exception:
+        self._dbg_onset_bias_active = False
+        self._dbg_onset_gate_reason = {'error': True}
       v_occ_cap = float(curvature_to_speed(k_cons))
       accel_cmd = min(accel_cmd, (v_occ_cap - self._v_ego) / dt)
 
