@@ -1,0 +1,50 @@
+{
+  "runtime": {
+    "mtscd": {
+      "pid": "79459",
+      "cls": "TS",
+      "rtprio": "-",
+      "pri": "19",
+      "ni": "0",
+      "psr": "2",
+      "cpu_pct": 1.7,
+      "mem_pct": 0.0,
+      "affinity": "pid 79459's current affinity list: 0-7",
+      "chrt": [
+        "pid 79459's current scheduling policy: SCHED_OTHER",
+        "pid 79459's current scheduling priority: 0"
+      ]
+    },
+    "rt_throttling": false,
+    "rt_throttling_lines": []
+  },
+  "services": {
+    "mapTurnSpeedControlSP": "<cereal.services.Service object at 0x7f8377fef0>",
+    "duplicate_ports": []
+  },
+  "live_probe": {
+    "stale_after_15s": [
+      "mapTurnSpeedControlSP"
+    ],
+    "last_age_s": {
+      "liveCalibration": 0.206,
+      "driverMonitoringState": 0.037,
+      "longitudinalPlan": 0.0,
+      "liveDelay": 0.14,
+      "liveParameters": 0.045,
+      "radarState": 0.05,
+      "liveTorqueParameters": 0.093,
+      "driverAssistance": 0.051,
+      "mapTurnSpeedControlSP": null
+    }
+  },
+  "load_hint": {
+    "loggerd_cpu_pct": 27.0,
+    "encoderd_cpu_pct": 13.0,
+    "mtscd_cpu_pct": 0.0,
+    "loggerd_cpu_hot": true,
+    "mtscd_cpu_hot": false
+  },
+  "verdict": "inconclusive",
+  "notes": "- Evidence insufficient for a clear verdict. Provide runtime/services/live_probe/load_hint if missing."
+}

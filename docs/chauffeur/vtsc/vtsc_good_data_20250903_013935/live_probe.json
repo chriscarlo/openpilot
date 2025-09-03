@@ -1,0 +1,16 @@
+{
+  "stale_after_15s": [
+    "mapTurnSpeedControlSP"
+  ],
+  "last_age_s": {
+    "liveCalibration": 0.206,
+    "driverMonitoringState": 0.037,
+    "longitudinalPlan": 0.0,
+    "liveDelay": 0.14,
+    "liveParameters": 0.045,
+    "radarState": 0.05,
+    "liveTorqueParameters": 0.093,
+    "driverAssistance": 0.051,
+    "mapTurnSpeedControlSP": null
+  }
+}

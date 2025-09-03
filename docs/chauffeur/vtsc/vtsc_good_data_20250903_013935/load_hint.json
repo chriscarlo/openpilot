@@ -1,0 +1,7 @@
+{
+  "loggerd_cpu_pct": 27.0,
+  "encoderd_cpu_pct": 13.0,
+  "mtscd_cpu_pct": 0.0,
+  "loggerd_cpu_hot": true,
+  "mtscd_cpu_hot": false
+}
