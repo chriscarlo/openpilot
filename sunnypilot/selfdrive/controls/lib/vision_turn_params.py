@@ -92,6 +92,15 @@ def update_vtsc_params(ctrl, *, force: bool = False) -> None:
   ctrl._lat_jerk_cap = getf("VisionTurnSpeedControlLatJerkCap", getattr(ctrl, "_lat_jerk_cap", 2.0))
   if ctrl._lat_jerk_cap <= 0.0:
     ctrl._lat_jerk_cap = 1e9
+  # FOV gating parameters
+  try:
+    ctrl._psi_fov_rad = getf("VisionTurnSpeedControlPsiFOVRad", getattr(ctrl, "_psi_fov_rad", 0.49), 0.1, 1.2)
+  except Exception:
+    ctrl._psi_fov_rad = getattr(ctrl, "_psi_fov_rad", 0.49)
+  try:
+    ctrl._psi_margin_rad = getf("VisionTurnSpeedControlPsiMarginRad", getattr(ctrl, "_psi_margin_rad", 0.087), 0.0, 0.5)
+  except Exception:
+    ctrl._psi_margin_rad = getattr(ctrl, "_psi_margin_rad", 0.087)
 
   # Anticipation & overshoot
   plan_decel_b = P.get("VisionTurnSpeedControlPlanningDecelLimit")

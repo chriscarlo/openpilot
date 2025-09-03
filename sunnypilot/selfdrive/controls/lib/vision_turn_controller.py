@@ -739,6 +739,16 @@ class VisionTurnController:
     self._dbg_tail_frac = 0.0
     self._dbg_s_tail = 0.0
     self._dbg_jerk_cmd = 0.0
+    # FOV gating + units diagnostics
+    self._psi_fov_rad = 0.49
+    self._psi_margin_rad = 0.087
+    self._fov_on_cnt = 0
+    self._fov_off_cnt = 0
+    self._fov_reason = ''
+    self._dbg_psi_vis = 0.0
+    self._dbg_psi_thresh = 0.0
+    self._dbg_units_ok = True
+    self._dbg_gamma_eff = 0.0
     # Cap selection + freeway guard debug fields
     self._dbg_active_cap = ""
     self._dbg_cap_visible_vmin = 0.0
@@ -872,6 +882,24 @@ class VisionTurnController:
       decel_cmd = float(getattr(self, '_current_decel', 0.0))
       jerk_cmd = float(getattr(self, '_dbg_jerk_cmd', 0.0))
       a_cmd = float(getattr(self, '_a_target', 0.0))
+      # Newly added diagnostics populated in _update_solution
+      cap_vis = float(getattr(self, '_dbg_cap_visible_vmin', 0.0))
+      cap_occ = float(getattr(self, '_dbg_cap_occl_vmin', 0.0))
+      cap_map = float(getattr(self, '_dbg_cap_map_vmin', 0.0))
+      active_cap = str(getattr(self, '_dbg_active_cap', '') or '')
+      vtsc_cmd = float(getattr(self, '_dbg_vtsc_cmd', 0.0) or 0.0)
+      s_vis_m = float(getattr(self, '_dbg_s_visible_m', 0.0))
+      fail_open = bool(getattr(self, '_dbg_fail_open', False))
+      # FOV/units helpers (may be unset on older builds; default sensibly)
+      psi_fov = float(getattr(self, '_psi_fov_rad', 0.49))
+      psi_margin = float(getattr(self, '_psi_margin_rad', 0.087))
+      psi_vis = float(abs(k_vis) * max(0.0, s_vis_m))
+      psi_thresh = float(max(0.0, psi_fov - psi_margin))
+      occl_reason = str(getattr(self, '_fov_reason', '') or '')
+      occl_on = int(getattr(self, '_fov_on_cnt', 0))
+      occl_off = int(getattr(self, '_fov_off_cnt', 0))
+      gamma_eff = float(getattr(self, '_dbg_gamma_eff', 0.0))
+      units_ok = bool(getattr(self, '_dbg_units_ok', True))
       return {
         'v': v_ego, 'cruise': v_cruise, 'lead': lead, 'hw': hw,
         'conf': conf, 'vision_status': self._vision_status_str(),
@@ -886,12 +914,49 @@ class VisionTurnController:
         # New fields for quick triage on road
         'active_cap': active_cap, 'vtsc_cmd': vtsc_cmd,
         'cap_visible_vmin': cap_vis, 'cap_occl_vmin': cap_occ, 'cap_map_vmin': cap_map,
-        's_visible_m': s_vis_m, 'kappa_vis': k_vis, 'path_conf': p_conf,
+        's_visible_m': s_vis_m, 'kappa_vis': k_vis, 'path_conf': conf,
         'occluded': bool(not getattr(self._occlusion_state, 'vision_good', True)),
         'fail_open': fail_open,
+        'psi_vis': psi_vis, 'psi_thresh': psi_thresh, 'psi_fov_rad': psi_fov, 'psi_margin_rad': psi_margin,
+        'occlusion_reason': occl_reason, 'occl_on_cnt': occl_on, 'occl_off_cnt': occl_off,
+        'gamma_eff': gamma_eff, 'units_ok': units_ok,
       }
     except Exception:
       return {}
+
+  # Pure FOV-based occlusion gating helper
+  @staticmethod
+  def occlusion_gate(kappa_vis: float, s_visible_m: float, path_conf: float,
+                     psi_fov_rad: float, psi_margin_rad: float,
+                     k_freeway: float = FREEWAY_CURV_EPS,
+                     k_min: float = 2e-4, s_long: float = 120.0,
+                     state: dict | None = None) -> tuple[bool, dict, str, dict]:
+    state = dict(state or {})
+    on_cnt = int(state.get('on_cnt', 0))
+    off_cnt = int(state.get('off_cnt', 0))
+    occluded = bool(state.get('occluded', False))
+    psi_vis = abs(float(kappa_vis)) * max(0.0, float(s_visible_m))
+    psi_thresh = max(0.0, float(psi_fov_rad) - float(psi_margin_rad))
+    onset = (abs(kappa_vis) >= k_min) and (psi_vis >= psi_thresh)
+    clear = (abs(kappa_vis) < k_freeway) or ((s_visible_m >= s_long) and (psi_vis < psi_thresh) and (path_conf >= 0.6))
+    N_on, N_off = 5, 10
+    reason = 'none'
+    if onset:
+      on_cnt += 1
+      off_cnt = 0
+      if on_cnt >= N_on:
+        occluded = True
+        reason = 'fov_exit'
+    elif clear:
+      off_cnt += 1
+      on_cnt = 0
+      if off_cnt >= N_off:
+        occluded = False
+        reason = 'freeway' if abs(kappa_vis) < k_freeway else 'short_vis'
+    else:
+      on_cnt = max(0, on_cnt - 1)
+      off_cnt = max(0, off_cnt - 1)
+    return occluded, {'on_cnt': on_cnt, 'off_cnt': off_cnt, 'occluded': occluded}, reason, {'psi_vis': psi_vis, 'psi_thresh': psi_thresh}
 
   @property
   def state(self):
@@ -1391,13 +1456,50 @@ class VisionTurnController:
     self._dbg_path_conf = path_conf
     self._dbg_fail_open = bool(self._freeway_failopen_active)
 
+    # FOV-based occlusion gate computation (diagnostic + gradual rollout)
+    try:
+      psi_fov = float(getattr(self, '_psi_fov_rad', 0.49))
+      psi_margin = float(getattr(self, '_psi_margin_rad', 0.087))
+    except Exception:
+      psi_fov, psi_margin = 0.49, 0.087
+    # compute instantaneous psi for snapshot
+    try:
+      self._dbg_psi_vis = float(abs(kappa_vis) * max(0.0, s_visible_m))
+      self._dbg_psi_thresh = float(max(0.0, psi_fov - psi_margin))
+    except Exception:
+      self._dbg_psi_vis = 0.0
+      self._dbg_psi_thresh = max(0.0, psi_fov - psi_margin)
+    # Maintain a separate FOV occlusion state; does not disable existing occlusion physics, only gates its use below
+    try:
+      # Hysteretic gate with simple counters
+      onset = (abs(kappa_vis) >= 2e-4) and (self._dbg_psi_vis >= self._dbg_psi_thresh)
+      clear = (abs(kappa_vis) < FREEWAY_CURV_EPS) or ((s_visible_m >= FREEWAY_MIN_VISIBLE_M) and (self._dbg_psi_vis < self._dbg_psi_thresh) and (path_conf >= FREEWAY_MIN_CONF))
+      if onset:
+        self._fov_on_cnt = int(self._fov_on_cnt) + 1
+        self._fov_off_cnt = 0
+        if self._fov_on_cnt >= 5:
+          self._fov_occluded = True
+          self._fov_reason = 'fov_exit'
+      elif clear:
+        self._fov_off_cnt = int(self._fov_off_cnt) + 1
+        self._fov_on_cnt = 0
+        if self._fov_off_cnt >= 10:
+          self._fov_occluded = False
+          self._fov_reason = 'freeway' if abs(kappa_vis) < FREEWAY_CURV_EPS else 'short_vis'
+      else:
+        # decay counters slowly
+        self._fov_on_cnt = max(0, int(self._fov_on_cnt) - 1)
+        self._fov_off_cnt = max(0, int(self._fov_off_cnt) - 1)
+    except Exception:
+      pass
+
     # Compute acceleration command to drive current speed toward target
     accel_cmd = (raw_target - self._v_ego) / dt
 
     # Occlusion-time accel gating: allow positive accel only with positive margin
     occl_positive_margin = False
     early_no_raise = False  # suppress positive accel in early hidden-turn phase
-    if (not self._occlusion_state.vision_good) and (not getattr(self, '_occl_lead_bypass_active', False)) and (not self._freeway_failopen_active):
+    if self._fov_occluded and (not getattr(self, '_occl_lead_bypass_active', False)) and (not self._freeway_failopen_active):
       v_gate_hi = 29.06  # ~65 mph
       if self._v_ego < v_gate_hi:
         # Gradual bias toward pure physics mode between ~50 and 65 mph (no hard bypass)
@@ -1561,7 +1663,7 @@ class VisionTurnController:
             accel_cmd = min(accel_cmd, physics_required_decel)
 
         # While occluded, avoid over-braking: cap to comfort decel limit
-        if (not self._occlusion_state.vision_good) and (not getattr(self, '_occl_lead_bypass_active', False)):
+        if self._fov_occluded and (not getattr(self, '_occl_lead_bypass_active', False)):
             accel_cmd = max(accel_cmd, self._comfort_decel_limit)
 
         # Apply adaptive deceleration system with noise filtering
@@ -1816,7 +1918,7 @@ class VisionTurnController:
       target_speed = min(self._v_cruise_setpoint, max(target_speed, base_target * 1.02))
 
     # Distance-aware occlusion barrier (target-level integration)
-    if (not self._occlusion_state.vision_good) and (self._v_ego < 29.06) and (not getattr(self, '_occl_lead_bypass_active', False)) and (not self._freeway_failopen_active):
+    if self._fov_occluded and (self._v_ego < 29.06) and (not getattr(self, '_occl_lead_bypass_active', False)) and (not self._freeway_failopen_active):
       try:
         v_vis = curvature_to_speed(max(1e-8, float(self._occlusion_state.last_valid_curvature)))
         v_near = min(base_target, v_vis, self._v_cruise_setpoint)
