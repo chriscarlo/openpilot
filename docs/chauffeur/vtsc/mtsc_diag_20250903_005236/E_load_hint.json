@@ -1,0 +1,7 @@
+{
+  "ps_load": "  49278 ./loggerd                   27.2 11.9\n  49280 ./encoderd                  13.0  1.4\n  49067 system.loggerd.uploader      0.2  2.0\n  49054 system.loggerd.deleter       0.0  1.9\n  57209 grep -E -E loggerd|encoderd  0.0  0.0\n",
+  "hint": {
+    "loggerd_cpu_hot": true,
+    "mtscd_cpu_hot": false
+  }
+}

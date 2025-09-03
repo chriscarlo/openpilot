@@ -1,0 +1,28 @@
+[Wed Sep  3 00:17:55 2025] sched_clock: 56 bits at 19MHz, resolution 52ns, wraps every 4398046511078ns
+[Wed Sep  3 00:17:55 2025] sched-energy: Sched-energy-costs installed from DT
+[Wed Sep  3 00:17:55 2025] schedtune: init normalization constants...
+[Wed Sep  3 00:17:55 2025] schedtune: CLUSTER[0-3]      min_pwr:     1 max_pwr:    17
+[Wed Sep  3 00:17:55 2025] schedtune: CPU[0]            min_pwr:     4 max_pwr:   160
+[Wed Sep  3 00:17:55 2025] schedtune: CPU[1]            min_pwr:     4 max_pwr:   160
+[Wed Sep  3 00:17:55 2025] schedtune: CPU[2]            min_pwr:     4 max_pwr:   160
+[Wed Sep  3 00:17:55 2025] schedtune: CPU[3]            min_pwr:     4 max_pwr:   160
+[Wed Sep  3 00:17:55 2025] schedtune: CLUSTER[4-5]      min_pwr:     1 max_pwr:   190
+[Wed Sep  3 00:17:55 2025] schedtune: CPU[4]            min_pwr:    40 max_pwr: 60000
+[Wed Sep  3 00:17:55 2025] schedtune: CPU[5]            min_pwr:    40 max_pwr: 60000
+[Wed Sep  3 00:17:55 2025] schedtune: SYSTEM            min_pwr:    98 max_pwr: 120847
+[Wed Sep  3 00:17:55 2025] schedtune: using normalization constants mul: 367182730 sh1: 1 sh2: 16
+[Wed Sep  3 00:17:55 2025] schedtune: configured to support 5 boost groups
+[Wed Sep  3 00:17:55 2025] msm_watchdog 17980000.qcom,wdt: wdog absent resource not present
+[Wed Sep  3 00:17:55 2025] msm_watchdog 17980000.qcom,wdt: No need to allocate memory for scandumps
+[Wed Sep  3 00:17:55 2025] msm_watchdog 17980000.qcom,wdt: MSM Watchdog Initialized
+[Wed Sep  3 00:17:56 2025] sched-energy energy-costs: cpu=0 eff=1024 [freq=300000 cap=65 power_d0=12] -> [freq=1766400 cap=381 power_d0=160]
+[Wed Sep  3 00:17:56 2025] sched-energy energy-costs: cpu=1 eff=1024 [freq=300000 cap=65 power_d0=12] -> [freq=1766400 cap=381 power_d0=160]
+[Wed Sep  3 00:17:56 2025] sched-energy energy-costs: cpu=2 eff=1024 [freq=300000 cap=65 power_d0=12] -> [freq=1766400 cap=381 power_d0=160]
+[Wed Sep  3 00:17:56 2025] sched-energy energy-costs: cpu=3 eff=1024 [freq=300000 cap=65 power_d0=12] -> [freq=1766400 cap=381 power_d0=160]
+[Wed Sep  3 00:17:56 2025] sched-energy energy-costs: cpu=4 eff=1740 [freq=300000 cap=110 power_d0=189] -> [freq=2956800 cap=1024 power_d0=60000]
+[Wed Sep  3 00:17:56 2025] sched-energy energy-costs: cpu=5 eff=1740 [freq=300000 cap=110 power_d0=189] -> [freq=2956800 cap=1024 power_d0=60000]
+[Wed Sep  3 00:17:56 2025] sched-energy energy-costs: cpu=6 eff=1740 [freq=300000 cap=110 power_d0=189] -> [freq=2956800 cap=1024 power_d0=60000]
+[Wed Sep  3 00:17:56 2025] sched-energy energy-costs: cpu=7 eff=1740 [freq=300000 cap=110 power_d0=189] -> [freq=2956800 cap=1024 power_d0=60000]
+[Wed Sep  3 00:17:56 2025] sched-energy energy-costs: Sched-energy-costs capacity updated
+[Wed Sep  3 00:17:56 2025] io scheduler noop registered
+[Wed Sep  3 00:17:56 2025] io scheduler cfq registered (default)

@@ -1,0 +1,9 @@
+{
+  "mapTurnSpeedControlSP": {
+    "should_log": true,
+    "frequency": 10.0,
+    "decimation": 10
+  },
+  "duplicate_ports": [],
+  "note": "Ports not defined in this cereal.services"
+}

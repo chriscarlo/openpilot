@@ -1,0 +1,2 @@
+87a3db5d2
+87a3db5d2 tests(vtsc): add map-negative + dwell/hysteresis tests; co-located harness; docs overview + post-drive RCA; analyzer script\\n\\ncontrols(vtsc): optional JSONL snapshot writer (VTSCWriteSnapshotFile); include a_cmd in snapshot\\nui(vtsc): add 'Write Onroad VTSC Snapshots' toggle in VTSC settings\\ncommon: add VTSCWriteSnapshotFile (persistent)

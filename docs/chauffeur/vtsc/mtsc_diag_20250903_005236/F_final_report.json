@@ -1,0 +1,43 @@
+{
+  "runtime": {
+    "mtscd": {
+      "found": true,
+      "cls": "SCHED_OTHER",
+      "rtprio": "0",
+      "cpu_pct": 1.4,
+      "affinity": "0-7"
+    },
+    "rt_throttling": false
+  },
+  "services": {
+    "mapTurnSpeedControlSP": {
+      "should_log": true,
+      "frequency": 10.0,
+      "decimation": 10
+    },
+    "duplicate_ports": [],
+    "note": "Ports not defined in this cereal.services"
+  },
+  "live_probe": {
+    "stale_after_15s": [
+      "mapTurnSpeedControlSP"
+    ],
+    "last_age_s": {
+      "liveCalibration": 0.122,
+      "driverMonitoringState": 0.0,
+      "longitudinalPlan": 0.016,
+      "liveDelay": 0.053,
+      "liveParameters": 0.012,
+      "radarState": 0.013,
+      "liveTorqueParameters": 0.009,
+      "driverAssistance": 0.016,
+      "mapTurnSpeedControlSP": null
+    }
+  },
+  "rlog_rates": {},
+  "load_hint": {
+    "loggerd_cpu_hot": true,
+    "mtscd_cpu_hot": false
+  },
+  "verdict": "service_schema"
+}
