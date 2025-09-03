@@ -1637,7 +1637,7 @@ class VisionTurnController:
     # ===== APPLY ADAPTIVE DECELERATION SYSTEM =====
     # Enforce no positive acceleration while occluded unless positive margin exists.
     # Additionally, suppress positive accel in early hidden-turn phase.
-    if not self._occlusion_state.vision_good:
+    if self._fov_occluded:
       # Suppress raising during recent speed-limit step down while occluded
       try:
         if time.time() < getattr(self, '_limit_step_until', 0.0):
@@ -1685,7 +1685,7 @@ class VisionTurnController:
         if self._occlusion_state.vision_good and now < getattr(self, '_fast_reacq_until', 0.0):
           accel_cmd = max(accel_cmd, 0.18)
         # Positive-margin uplift while occluded: after an initial dwell, apply a modest floor
-        if (not self._occlusion_state.vision_good) and occl_positive_margin and occ_age > 1.5:
+        if self._fov_occluded and occl_positive_margin and occ_age > 1.5:
           accel_cmd = max(accel_cmd, 0.22)
         accel_cmd = min(accel_cmd, pos_limit)
 
@@ -1727,7 +1727,7 @@ class VisionTurnController:
       self._dbg_jerk_cmd = 0.0
 
     # Hard clamp: after a speed-limit step while occluded, disallow any positive acceleration
-    if (not self._occlusion_state.vision_good) and getattr(self, '_suppress_raise_due_to_limit', False) and self._current_accel > 0.0:
+    if self._fov_occluded and getattr(self, '_suppress_raise_due_to_limit', False) and self._current_accel > 0.0:
       self._current_accel = 0.0
     # Update target acceleration for compatibility
     self._a_target = self._current_accel
@@ -1752,9 +1752,9 @@ class VisionTurnController:
     self._dbg_cap_visible_vmin = cap_visible_vmin
     self._dbg_cap_occl_vmin = cap_occl_vmin
     self._dbg_cap_map_vmin = cap_map_vmin
-    # Build candidate list; drop occlusion if freeway fail-open is active
+    # Build candidate list; drop occlusion unless FOV-gated occlusion is active
     caps = [("visible", cap_visible_vmin)]
-    if not self._freeway_failopen_active:
+    if (self._fov_occluded and not self._freeway_failopen_active):
       caps.append(("occlusion", cap_occl_vmin))
     if bool(getattr(self, '_map_tail_active', False)) and cap_map_vmin > 0.0:
       caps.append(("map", cap_map_vmin))
