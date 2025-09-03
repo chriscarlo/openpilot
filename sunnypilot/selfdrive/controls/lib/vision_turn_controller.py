@@ -741,20 +741,20 @@ class VisionTurnController:
     self._dbg_jerk_cmd = 0.0
     # FOV gating + units diagnostics
     self._psi_fov_rad = 0.49
-    self._psi_margin_rad = 0.087
+    self._psi_margin_rad = 0.122173  # ~7 deg
     self._fov_occluded = False
     self._fov_on_cnt = 0
     self._fov_off_cnt = 0
     self._fov_reason = ''
-    self._fov_pretrigger_time_s = 1.2
-    self._fov_onset_boost_frames = 10
-    self._fov_overshoot_frames = 10
+    self._fov_pretrigger_time_s = 1.5
+    self._fov_onset_boost_frames = 12
+    self._fov_overshoot_frames = 12
     self._fov_boost_left = 0
     self._fov_overshoot_left = 0
-    self._fov_ewma_tau_s = 0.5
+    self._fov_ewma_tau_s = 0.4
     self._fov_kappa_ewma = 0.0
-    self._fov_N_on = 5
-    self._fov_N_off = 10
+    self._fov_N_on = 2
+    self._fov_N_off = 12
     self._dbg_psi_vis = 0.0
     self._dbg_psi_thresh = 0.0
     self._dbg_ttfov_s = 0.0
@@ -1477,8 +1477,12 @@ class VisionTurnController:
       psi_margin = float(getattr(self, '_psi_margin_rad', 0.087))
     except Exception:
       psi_fov, psi_margin = 0.49, 0.087
-    # instantaneous psi
-    self._dbg_psi_vis = float(abs(kappa_vis) * max(0.0, s_visible_m))
+    # instantaneous psi (use filtered curvature to anticipate FOV exit)
+    try:
+      kappa_gate = float(getattr(self, '_filtered_curvature', 0.0))
+    except Exception:
+      kappa_gate = kappa_vis
+    self._dbg_psi_vis = float(abs(kappa_gate) * max(0.0, s_visible_m))
     self._dbg_psi_thresh = float(max(0.0, psi_fov - psi_margin))
     # Pre-trigger by time-to-FOV-exit (TTFOV)
     k_min = float(getattr(self, '_fov_k_min', 2e-4))
@@ -1486,15 +1490,15 @@ class VisionTurnController:
     s_long = float(getattr(self, '_fov_s_long_m', FREEWAY_MIN_VISIBLE_M))
     try:
       delta_psi = max(0.0, self._dbg_psi_thresh - self._dbg_psi_vis)
-      delta_s_to_exit = delta_psi / max(abs(kappa_vis), 1e-9)
+      delta_s_to_exit = delta_psi / max(abs(kappa_gate), 1e-9)
       ttfov_s = delta_s_to_exit / max(self._v_ego, 0.1)
     except Exception:
       ttfov_s = 999.0
     self._dbg_ttfov_s = float(ttfov_s)
     pretrigger_time = float(getattr(self, '_fov_pretrigger_time_s', 1.2))
-    pretrigger = (ttfov_s <= pretrigger_time) and (abs(kappa_vis) >= k_min)
+    pretrigger = (ttfov_s <= pretrigger_time) and (abs(kappa_gate) >= k_min)
     # Hysteretic onset/clear
-    onset_geom = (abs(kappa_vis) >= k_min) and (self._dbg_psi_vis >= self._dbg_psi_thresh)
+    onset_geom = (abs(kappa_gate) >= k_min) and (self._dbg_psi_vis >= self._dbg_psi_thresh)
     onset = onset_geom or pretrigger
     clear = (abs(kappa_vis) < k_free) or ((s_visible_m >= s_long) and (self._dbg_psi_vis < self._dbg_psi_thresh) and (path_conf >= FREEWAY_MIN_CONF))
     if onset and not self._fov_occluded:
@@ -1529,6 +1533,26 @@ class VisionTurnController:
 
     # Compute acceleration command to drive current speed toward target
     accel_cmd = (raw_target - self._v_ego) / dt
+    # If FOV-gated occlusion is active, fold in a conservative occlusion cap immediately
+    if self._fov_occluded and (not getattr(self, '_occl_lead_bypass_active', False)) and (not self._freeway_failopen_active):
+      try:
+        k_est = float(getattr(self._occlusion_state, 'est_curvature', 0.0))
+      except Exception:
+        k_est = 0.0
+      k_filt = float(max(1e-8, float(getattr(self, '_filtered_curvature', 0.0))))
+      # During early overshoot window, use EWMA to be conservative
+      if int(getattr(self, '_fov_overshoot_left', 0)) > 0:
+        try:
+          tau = float(getattr(self, '_fov_ewma_tau_s', 0.5))
+          alpha = 1.0 - math.exp(-dt / max(1e-3, tau))
+        except Exception:
+          alpha = 0.5
+        self._fov_kappa_ewma = (1.0 - alpha) * float(getattr(self, '_fov_kappa_ewma', k_filt)) + alpha * k_filt
+        k_cons = max(1e-8, min(self._fov_kappa_ewma, k_est))
+      else:
+        k_cons = max(1e-8, min(k_filt, k_est))
+      v_occ_cap = float(curvature_to_speed(k_cons))
+      accel_cmd = min(accel_cmd, (v_occ_cap - self._v_ego) / dt)
 
     # Occlusion-time accel gating: allow positive accel only with positive margin
     occl_positive_margin = False
@@ -1784,21 +1808,21 @@ class VisionTurnController:
       cap_visible_vmin = float(self._v_cruise_setpoint)
     try:
       try:
-      k_est = float(getattr(self._occlusion_state, 'est_curvature', 0.0))
-    except Exception:
-      k_est = 0.0
-    k_filt = float(max(1e-8, float(getattr(self, '_filtered_curvature', 0.0))))
-    if int(getattr(self, '_fov_overshoot_left', 0)) > 0:
-      try:
-        tau = float(getattr(self, '_fov_ewma_tau_s', 0.5))
-        alpha = 1.0 - math.exp(-dt / max(1e-3, tau))
+        k_est = float(getattr(self._occlusion_state, 'est_curvature', 0.0))
       except Exception:
-        alpha = 0.5
-      self._fov_kappa_ewma = (1.0 - alpha) * float(getattr(self, '_fov_kappa_ewma', k_filt)) + alpha * k_filt
-      k_cons = max(1e-8, min(self._fov_kappa_ewma, k_est))
-      cap_occl_vmin = float(curvature_to_speed(k_cons))
-    else:
-      cap_occl_vmin = float(curvature_to_speed(max(1e-8, k_est)))
+        k_est = 0.0
+      k_filt = float(max(1e-8, float(getattr(self, '_filtered_curvature', 0.0))))
+      if int(getattr(self, '_fov_overshoot_left', 0)) > 0:
+        try:
+          tau = float(getattr(self, '_fov_ewma_tau_s', 0.5))
+          alpha = 1.0 - math.exp(-dt / max(1e-3, tau))
+        except Exception:
+          alpha = 0.5
+        self._fov_kappa_ewma = (1.0 - alpha) * float(getattr(self, '_fov_kappa_ewma', k_filt)) + alpha * k_filt
+        k_cons = max(1e-8, min(self._fov_kappa_ewma, k_est))
+        cap_occl_vmin = float(curvature_to_speed(k_cons))
+      else:
+        cap_occl_vmin = float(curvature_to_speed(max(1e-8, k_est)))
     except Exception:
       cap_occl_vmin = 0.0
     try:
