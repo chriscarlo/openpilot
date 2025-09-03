@@ -296,6 +296,7 @@ def main():
     except Exception as e:
       print(f"ERROR analyzing {r}: {e}", file=sys.stderr)
 
+  hp = [x["hidden_recall_after_pct"] for x in per_log if x["hidden_pos_total"]>0]
   agg = {
     "count_logs": len(per_log),
     "psi_fov_deg": args.psi_fov_deg,
@@ -303,7 +304,7 @@ def main():
     "n_on": args.n_on, "n_off": args.n_off,
     "freeway_occluded_after_pct_med": (statistics.median([x["freeway_occluded_after_pct"] for x in per_log]) if per_log else None),
     "crawl_after_pct_med": (statistics.median([x["crawl_after_pct"] for x in per_log]) if per_log else None),
-    "hidden_recall_after_pct_med": (statistics.median([x["hidden_recall_after_pct"] for x in per_log if x["hidden_pos_total"]>0]) if per_log else None),
+    "hidden_recall_after_pct_med": (statistics.median(hp) if hp else None),
     "logs_worse_than_spec": {
       "freeway_occluded_after_pct>2": [x["rlog"] for x in per_log if x["freeway_occluded_after_pct"] > 2.0],
       "crawl_after_pct>1": [x["rlog"] for x in per_log if x["crawl_after_pct"] > 1.0],
@@ -313,16 +314,13 @@ def main():
 
   with open(os.path.join(outdir, "by_log.jsonl"), "w") as f:
     for s in per_log:
-      f.write(json.dumps(s) + "
-")
+      f.write(json.dumps(s) + "\n")
   with open(os.path.join(outdir, "metrics.json"), "w") as f:
     json.dump({"aggregate": agg, "logs": per_log}, f, indent=2)
 
-  print("
-=== VTSC OFF-ROAD SUMMARY ===")
+  print("\n=== VTSC OFF-ROAD SUMMARY ===")
   print(json.dumps(agg, indent=2))
-  print(f"
-Artifacts written to: {outdir}")
+  print(f"\nArtifacts written to: {outdir}")
 
 
 if __name__ == "__main__":

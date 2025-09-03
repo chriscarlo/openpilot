@@ -742,6 +742,7 @@ class VisionTurnController:
     # FOV gating + units diagnostics
     self._psi_fov_rad = 0.49
     self._psi_margin_rad = 0.087
+    self._fov_occluded = False
     self._fov_on_cnt = 0
     self._fov_off_cnt = 0
     self._fov_reason = ''
@@ -892,7 +893,7 @@ class VisionTurnController:
       fail_open = bool(getattr(self, '_dbg_fail_open', False))
       # FOV/units helpers (may be unset on older builds; default sensibly)
       psi_fov = float(getattr(self, '_psi_fov_rad', 0.49))
-      psi_margin = float(getattr(self, '_psi_margin_rad', 0.087))
+      psi_margin = float(getattr(self, '_psi_margin_rad', 0.105))
       psi_vis = float(abs(k_vis) * max(0.0, s_vis_m))
       psi_thresh = float(max(0.0, psi_fov - psi_margin))
       occl_reason = str(getattr(self, '_fov_reason', '') or '')
@@ -1459,7 +1460,7 @@ class VisionTurnController:
     # FOV-based occlusion gate computation (diagnostic + gradual rollout)
     try:
       psi_fov = float(getattr(self, '_psi_fov_rad', 0.49))
-      psi_margin = float(getattr(self, '_psi_margin_rad', 0.087))
+      psi_margin = float(getattr(self, '_psi_margin_rad', 0.105))
     except Exception:
       psi_fov, psi_margin = 0.49, 0.087
     # compute instantaneous psi for snapshot
@@ -1472,18 +1473,18 @@ class VisionTurnController:
     # Maintain a separate FOV occlusion state; does not disable existing occlusion physics, only gates its use below
     try:
       # Hysteretic gate with simple counters
-      onset = (abs(kappa_vis) >= 2e-4) and (self._dbg_psi_vis >= self._dbg_psi_thresh)
+      onset = (abs(kappa_vis) >= 1.5e-4) and (self._dbg_psi_vis >= self._dbg_psi_thresh)
       clear = (abs(kappa_vis) < FREEWAY_CURV_EPS) or ((s_visible_m >= FREEWAY_MIN_VISIBLE_M) and (self._dbg_psi_vis < self._dbg_psi_thresh) and (path_conf >= FREEWAY_MIN_CONF))
       if onset:
         self._fov_on_cnt = int(self._fov_on_cnt) + 1
         self._fov_off_cnt = 0
-        if self._fov_on_cnt >= 5:
+        if self._fov_on_cnt >= 3:
           self._fov_occluded = True
           self._fov_reason = 'fov_exit'
       elif clear:
         self._fov_off_cnt = int(self._fov_off_cnt) + 1
         self._fov_on_cnt = 0
-        if self._fov_off_cnt >= 10:
+        if self._fov_off_cnt >= 8:
           self._fov_occluded = False
           self._fov_reason = 'freeway' if abs(kappa_vis) < FREEWAY_CURV_EPS else 'short_vis'
       else:
@@ -1508,7 +1509,13 @@ class VisionTurnController:
           v_vis = curvature_to_speed(max(1e-8, float(self._occlusion_state.last_valid_curvature)))
           base_target = min(self._v_cruise_setpoint, curvature_to_speed(self._filtered_curvature))
           v_near = min(base_target, v_vis, self._v_cruise_setpoint)
-          v_occ_raw = curvature_to_speed(max(1e-8, float(self._occlusion_state.est_curvature)))
+          # Use the more conservative (lower speed) of occlusion est curvature and filtered curvature
+          try:
+            k_est = float(getattr(self._occlusion_state, 'est_curvature', 0.0))
+          except Exception:
+            k_est = 0.0
+          k_filt = float(max(1e-8, float(getattr(self, '_filtered_curvature', 0.0))))
+          v_occ_raw = min(curvature_to_speed(max(1e-8, k_est)), curvature_to_speed(k_filt))
           s_vis = max(0.0, float(getattr(self, '_vis_horizon_s', 1.4)) * max(0.0, self._v_ego))
           a_cap = abs(float(self._comfort_decel_limit))
           v_now = max(self._prev_target_speed, self._v_ego)
@@ -1922,7 +1929,12 @@ class VisionTurnController:
       try:
         v_vis = curvature_to_speed(max(1e-8, float(self._occlusion_state.last_valid_curvature)))
         v_near = min(base_target, v_vis, self._v_cruise_setpoint)
-        v_occ_raw = curvature_to_speed(max(1e-8, float(self._occlusion_state.est_curvature)))
+        try:
+          k_est = float(getattr(self._occlusion_state, 'est_curvature', 0.0))
+        except Exception:
+          k_est = 0.0
+        k_filt = float(max(1e-8, float(getattr(self, '_filtered_curvature', 0.0))))
+        v_occ_raw = min(curvature_to_speed(max(1e-8, k_est)), curvature_to_speed(k_filt))
         s_vis = max(0.0, float(getattr(self, '_vis_horizon_s', 1.4)) * max(0.0, self._v_ego))
         a_cap = abs(float(self._comfort_decel_limit))
         v_now = max(self._prev_target_speed, self._v_ego)
