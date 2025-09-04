@@ -25,6 +25,20 @@ FREEWAY_CURV_EPS = 1e-5       # effectively straight (1/m)
 FREEWAY_MIN_VISIBLE_M = 120.0 # visible horizon long enough (m)
 FREEWAY_MIN_CONF = 0.60       # path/model confidence threshold
 
+# ===== Feature Flags & Thresholds =====
+# Use a large sentinel for "no cap" speed contributions when disabling a channel
+INF_SPEED = 1e9
+
+# Hidden-turn early deceleration feature flag (disabled fully per request)
+HIDDEN_TURN_ENABLED = False
+
+# Highway override threshold: start any bypass/relax behavior at 55 mph
+HIGHWAY_MIN_MPH = 55.0
+HIGHWAY_MIN_MPS = float(HIGHWAY_MIN_MPH * CV.MPH_TO_MS)
+
+# Disable the "no-raise" onset window entirely
+NO_RAISE_WINDOW_S = 0.0
+
 # ===== Map lookahead helpers =====
 EARTH_R_M = 6371007.2
 
@@ -386,7 +400,8 @@ LOW_SPEED_BIAS_END_MPH = 50.0
 # Allows jerk-limited early braking when a short-horizon physics deficit is provably large
 # despite a transiently positive visible-margin condition.
 HIDDEN_TURN_ENABLE = False
-HIDDEN_TURN_V_MAX_MPS = 29.06  # ~65 mph; above this we run pure physics
+# Align hidden-turn speed gate with highway threshold (~55 mph)
+HIDDEN_TURN_V_MAX_MPS = HIGHWAY_MIN_MPS  # ~55 mph; above this we run pure physics
 HIDDEN_TURN_T_H_S = 1.8        # short horizon (~40 m at 50 mph)
 HIDDEN_TURN_DELTA_V_MPS = 2.0  # ~6 mph speed gap
 HIDDEN_TURN_MIN_OCC_S = 0.30   # require persisting occlusion ≥ 600 ms
@@ -940,6 +955,7 @@ class VisionTurnController:
       # FOV/units helpers (may be unset on older builds; default sensibly)
       psi_fov = float(getattr(self, '_psi_fov_rad', 0.49))
       psi_margin = float(getattr(self, '_psi_margin_rad', 0.105))
+      ttfov = float(getattr(self, '_dbg_ttfov_s', 0.0))
       psi_vis = float(abs(k_vis) * max(0.0, s_vis_m))
       psi_thresh = float(max(0.0, psi_fov - psi_margin))
       occl_reason = str(getattr(self, '_fov_reason', '') or '')
@@ -1662,10 +1678,8 @@ class VisionTurnController:
       onset_gate = (boost_left > 0) and (psi_margin_deg >= 5.0) and (self._v_ego <= v_max_mps) and (ttfov_s <= (pretrigger_time + slack_s))
       try:
         if onset_gate:
-          kappa_mul = 1.35
-          # Ensure we don't undercut filtered curvature at onset; bias toward stronger (higher) curvature
-          k_cons = max(k_cons, k_filt) * float(kappa_mul)
-          self._dbg_onset_bias_active = True
+          # Disable curvature inflation at onset; do not alter k_cons
+          self._dbg_onset_bias_active = False
           self._dbg_onset_gate_reason = {
             'psi_ok': True,
             'speed_ok': True,
@@ -1730,56 +1744,8 @@ class VisionTurnController:
       # Relax TTFOV gating inside onset window to ensure assist engages
       onset_gate = (self._fov_occluded and (psi_margin_deg >= 5.0) and (self._v_ego <= v_max_mps) and (self._occlusion_onset_timer_s <= window_s))
       if onset_gate:
-        # Consolidate curvature to avoid near-zero entry curvature
-        try:
-          k_gate = float(abs(getattr(self, '_filtered_curvature', 0.0)))
-        except Exception:
-          k_gate = 0.0
-        k_cons2 = max(k_cons, k_filt, k_gate)
-        try:
-          ewma = float(getattr(self, '_fov_kappa_ewma', k_filt))
-        except Exception:
-          ewma = k_filt
-        k_cons2 = max(k_cons2, ewma)
-        if k_cons2 > 0.0:
-          a_lat_onset = 2.0
-          v_kcons = float(math.sqrt(a_lat_onset / k_cons2))
-          # Vision floor: raise occlusion cap to at least last-known-good speed for a short TTL
-          floor_active = False
-          try:
-            v_floor = 0.0
-            # Prefer explicit LKG speed/time if available
-            try:
-              v_floor = float(getattr(self._occlusion_state, '_lkg_speed', 0.0) or 0.0)
-              lkg_time = float(getattr(self._occlusion_state, '_lkg_time', 0.0) or 0.0)
-            except Exception:
-              v_floor, lkg_time = 0.0, 0.0
-            # Fallback to last_valid_curvature-derived speed if LKG not set
-            if v_floor <= 0.0:
-              try:
-                k_vis_last = float(getattr(self._occlusion_state, 'last_valid_curvature', 0.0))
-                if k_vis_last > 0.0:
-                  v_floor = float(curvature_to_speed(max(1e-8, k_vis_last)))
-              except Exception:
-                v_floor = 0.0
-            # Determine TTL and mode
-            floor_mode = int(getattr(self, '_vision_floor_mode', 1))
-            ttl_s = float(getattr(self, '_vision_floor_ttl_s', 3.0))
-            mult = float(getattr(self, '_vision_floor_mult', 1.00))
-            lkg_age = max(0.0, time.time() - lkg_time)
-            if v_floor > 0.0 and ((floor_mode == 2) or (floor_mode == 1 and lkg_age <= ttl_s)):
-              v_kcons = max(v_kcons, v_floor * mult)
-              floor_active = True
-          except Exception:
-            pass
-          accel_cmd = min(accel_cmd, (v_kcons - self._v_ego) / dt)
-          self._dbg_cap_source = 'occluded_onset_kcons'
-        # Onset minimum decel assist (comfort-bounded); lighten when floor is active
-        try:
-          a_floor = -0.10 if bool(locals().get('floor_active', False)) else -0.30
-        except Exception:
-          a_floor = -0.30
-        accel_cmd = min(accel_cmd, a_floor)
+        # Disable onset curvature inflation and decel floors; rely on v_occ_cap from k_cons only
+        self._dbg_cap_source = 'occluded_onset_disabled'
         # Early no-raise activation window, shortened if confidence is rising
         try:
           _conf_s2 = float(getattr(self._occlusion_state, 'smoothed_confidence', 1.0))
@@ -1794,25 +1760,26 @@ class VisionTurnController:
       else:
         self._onset_no_raise_active = False
 
-      # Confidence-based fallback: if vision is not good right after occlusion start,
-      # apply a small minimum decel assist regardless of FOV gate specifics.
-      # Do not apply while freeway fail-open is active.
-      try:
-        occ_since = float(getattr(self._occlusion_state, 'occluded_since_time', 0.0) or 0.0)
-      except Exception:
-        occ_since = 0.0
-      if (not getattr(self._occlusion_state, 'vision_good', True)) and (not self._freeway_failopen_active):
-        now_ts = time.time()
-        occ_age_fb = max(0.0, now_ts - occ_since)
-        if occ_age_fb <= 0.8 and self._v_ego <= 36.0:
-          accel_cmd = min(accel_cmd, -0.30)
-          self._onset_no_raise_active = True
+      # Confidence-based fallback "no-raise" window is disabled unless configured
+      if NO_RAISE_WINDOW_S > 0.0:
+        # If vision is not good right after occlusion start, apply a small decel
+        # and suppress positive accel only within the configured window.
+        try:
+          occ_since = float(getattr(self._occlusion_state, 'occluded_since_time', 0.0) or 0.0)
+        except Exception:
+          occ_since = 0.0
+        if (not getattr(self._occlusion_state, 'vision_good', True)) and (not self._freeway_failopen_active):
+          now_ts = time.time()
+          occ_age_fb = max(0.0, now_ts - occ_since)
+          if occ_age_fb <= NO_RAISE_WINDOW_S and self._v_ego <= 36.0:
+            accel_cmd = min(accel_cmd, -0.30)
+            self._onset_no_raise_active = True
 
     # Occlusion-time accel gating: allow positive accel only with positive margin
     occl_positive_margin = False
     early_no_raise = False  # suppress positive accel in early hidden-turn phase
     if self._fov_occluded and (not getattr(self, '_occl_lead_bypass_active', False)) and (not self._freeway_failopen_active):
-      v_gate_hi = 29.06  # ~65 mph
+      v_gate_hi = HIGHWAY_MIN_MPS  # ~55 mph
       if self._v_ego < v_gate_hi:
         # Gradual bias toward pure physics mode between ~50 and 65 mph (no hard bypass)
         # Compute barrier context to determine margin (near vs. far)
@@ -1884,7 +1851,7 @@ class VisionTurnController:
             self._dbg_s_tail = 0.0
             self._dbg_tail_frac = 0.0
           # ===== Hidden-turn early deceleration trigger (short-horizon critical deficit) =====
-          if HIDDEN_TURN_ENABLE and (self._v_ego <= HIDDEN_TURN_V_MAX_MPS):
+          if HIDDEN_TURN_ENABLED and (self._v_ego <= HIDDEN_TURN_V_MAX_MPS):
             try:
               now = time.time()
             except Exception:
@@ -1966,8 +1933,8 @@ class VisionTurnController:
       # If a speed-limit down-step occurred, suppress raising entirely until vision is good again
       if getattr(self, '_suppress_raise_due_to_limit', False):
         early_no_raise = True
-      # Force early no-raise during onset window
-      if getattr(self, '_onset_no_raise_active', False):
+      # Force early no-raise during onset window (guarded by NO_RAISE_WINDOW_S)
+      if (NO_RAISE_WINDOW_S > 0.0) and getattr(self, '_onset_no_raise_active', False):
         early_no_raise = True
       if (not occl_positive_margin) or early_no_raise:
         accel_cmd = min(accel_cmd, 0.0)
@@ -1990,6 +1957,12 @@ class VisionTurnController:
 
         # Apply adaptive deceleration system with noise filtering
         accel_cmd = self._get_optimal_deceleration(accel_cmd, dt)
+        # While occluded, ensure decel command does not exceed comfort cap after filtering
+        if self._fov_occluded and (not getattr(self, '_occl_lead_bypass_active', False)):
+          try:
+            self._current_decel = max(self._current_decel, self._comfort_decel_limit)
+          except Exception:
+            pass
 
         # Monitor adaptive deceleration performance
         remaining_distance = self._v_overshoot_distance if self._lat_acc_overshoot_ahead else 100.0
@@ -1999,8 +1972,8 @@ class VisionTurnController:
       self._suppress_raise_due_to_limit = False
       # For acceleration, use normal limits
       pos_limit = self._max_accel
-      # Onset window: disallow any positive uplift while occluded (not during freeway fail-open)
-      if self._fov_occluded and getattr(self, '_onset_no_raise_active', False) and (not self._freeway_failopen_active):
+      # Onset window: disallow any positive uplift while occluded (guarded by NO_RAISE_WINDOW_S)
+      if (NO_RAISE_WINDOW_S > 0.0) and self._fov_occluded and getattr(self, '_onset_no_raise_active', False) and (not self._freeway_failopen_active):
         accel_cmd = min(accel_cmd, 0.0)
       # Apply a small fast-reacquisition acceleration floor for up to _fast_reacq_window_s
       now = time.time()
@@ -2022,8 +1995,8 @@ class VisionTurnController:
       if abs(self._filtered_decel_requirement) < 0.1:
         self._decel_hysteresis_state = False
 
-    # Final onset safeguard: no positive uplift during onset window (not during freeway fail-open)
-    if self._fov_occluded and getattr(self, '_onset_no_raise_active', False) and (not self._freeway_failopen_active):
+    # Final onset safeguard: no positive uplift during onset window (guarded by NO_RAISE_WINDOW_S)
+    if (NO_RAISE_WINDOW_S > 0.0) and self._fov_occluded and getattr(self, '_onset_no_raise_active', False) and (not self._freeway_failopen_active):
       accel_cmd = min(accel_cmd, 0.0)
 
     # Jerk-limit the change in acceleration
@@ -2058,17 +2031,26 @@ class VisionTurnController:
     # Hard clamp: after a speed-limit step while occluded, disallow any positive acceleration
     if self._fov_occluded and getattr(self, '_suppress_raise_due_to_limit', False) and self._current_accel > 0.0:
       self._current_accel = 0.0
-    # Ensure decel during onset window regardless of other uplifts (not during freeway fail-open)
-    if self._fov_occluded and getattr(self, '_onset_no_raise_active', False) and (not self._freeway_failopen_active):
+    # Ensure decel during onset window regardless of other uplifts (guarded by NO_RAISE_WINDOW_S)
+    if (NO_RAISE_WINDOW_S > 0.0) and self._fov_occluded and getattr(self, '_onset_no_raise_active', False) and (not self._freeway_failopen_active):
       self._current_accel = min(self._current_accel, -0.30)
+    # Fast reacquisition acceleration floor: ensure a small positive nudge upon recovery
+    try:
+      now_ts2 = time.time()
+    except Exception:
+      now_ts2 = 0.0
+    try:
+      fast_reacq_until = float(getattr(self, '_fast_reacq_until', 0.0))
+    except Exception:
+      fast_reacq_until = 0.0
+    if getattr(self._occlusion_state, 'vision_good', True) and (now_ts2 < fast_reacq_until):
+      self._current_accel = max(self._current_accel, 0.18)
     # Update target acceleration for compatibility
     self._a_target = self._current_accel
-    # Hard guarantee for harness/test: enforce a small negative a_target in onset window (not during freeway fail-open)
-    if self._fov_occluded and getattr(self, '_onset_no_raise_active', False) and (not self._freeway_failopen_active):
+    # Hard guarantee for harness/test: enforce a small negative a_target in onset window (guarded by NO_RAISE_WINDOW_S)
+    if (NO_RAISE_WINDOW_S > 0.0) and self._fov_occluded and getattr(self, '_onset_no_raise_active', False) and (not self._freeway_failopen_active):
       self._a_target = min(self._a_target, -0.30)
-    # Confidence-based hard guarantee: when vision is not good, enforce decel floor (not during freeway fail-open)
-    if (not getattr(self._occlusion_state, 'vision_good', True)) and (not self._freeway_failopen_active):
-      self._a_target = min(self._a_target, -0.30)
+    # Remove global occlusion decel floor: allow target accel to follow physics and margin
 
     # Update previous target speed by integrating the commanded acceleration.
     # This makes the controller's internal target track what we actually commanded.
