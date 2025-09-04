@@ -242,8 +242,8 @@ class VisionOcclusionState:
                                         t = (vv - sp[i]) / max(1e-6, (sp[i+1] - sp[i]))
                                         gamma_cap_speed = gp[i] + (gp[i+1] - gp[i]) * t
                                         break
-                            # Allow growth up to configured gamma and speed cap; do not additionally limit by lateral jerk here
-                            gamma_eff = min(self.gamma_per_m, gamma_cap_speed)
+                            # Allow growth up to configured gamma with both speed and jerk caps
+                            gamma_eff = min(self.gamma_per_m, gamma_cap_speed, gamma_cap_jerk)
                             self.est_curvature = max(0.0, self.entry_curvature + gamma_eff * s_tail)
                         else:
                             # Freeze growth beyond tail window
@@ -348,14 +348,13 @@ _ENTERING_SMOOTH_DECEL_BP = [1.3, 3.]  # absolute value of lat acc ahead
 _TURNING_ACC_V = [0.5, 0., -0.4]  # acc value
 _TURNING_ACC_BP = [1.5, 2.3, 3.]  # absolute value of current lat acc
 
-_LEAVING_ACC = 0.5  # Confortble acceleration to regain speed while leaving a turn.
+_LEAVING_ACC = 0.5  # Comfortable acceleration to regain speed while leaving a turn.
 
 _DEBUG = False
 
 # Advanced vision-based functions extracted from chauffeur_vtsc.py
 
 # Constants for advanced curvature-based speed calculation
-CURV_CORR_FACTOR = (CV.MS_TO_MPH ** 2)  # Correction factor for lat accel function
 MAX_SPEED_DEFAULT = 70.0  # m/s, fallback for straight roads (overridden by param)
 SPEED_INCREASE_FACTOR = 1.0  # Global multiplier on target speeds (overridden by param)
 
@@ -383,17 +382,6 @@ HIDDEN_TURN_AVAIL_SCALE = 0.50  # slight nudge for earlier activation
 HIDDEN_TURN_PHASE_S = 2.0      # only within first ~2 s of occlusion
 HIDDEN_TURN_HEADING_WIN_S = 1.2
 HIDDEN_TURN_VIS_HEADING_MAX_RAD = math.radians(6.0)  # ~6°, "straight enough"
-
-def _original_curvature_based_lat_accel(abs_curvature_scaled: float) -> float:
-    """Internal function replicating the tuned lateral accel logic."""
-    high_accel = 3.12
-    low_accel = 1.5
-    span = high_accel - low_accel
-    center_curvature = 0.060
-    k = 75
-    reduction = span / (1.0 + math.exp(-k * (abs_curvature_scaled - center_curvature)))
-    lat_acc = high_accel - reduction
-    return clip(lat_acc, low_accel, high_accel)
 
 def _physics_based_lateral_acceleration(curvature: float) -> float:
     """
@@ -480,17 +468,7 @@ def dynamic_decel_scale(v_ego_ms: float) -> float:
     else:
         ratio = (v_ego_ms - min_speed) / (max_speed - min_speed)
         scale = 9.0 + (2.0 - 9.0) * ratio
-    return min(scale, 3.0)
-
-def find_apexes(curv_array: np.ndarray, threshold: float = 5e-5) -> list:
-    """Identify indices where curvature spikes above threshold and is a local maximum."""
-    apex_indices = []
-    for i in range(1, len(curv_array) - 1):
-        if (curv_array[i] > threshold and
-            curv_array[i] >= curv_array[i + 1] and
-            curv_array[i] > curv_array[i - 1]):
-            apex_indices.append(i)
-    return apex_indices
+    return clip(scale, 2.0, 9.0)
 
 def nonlinear_lat_accel(v_ego_ms: float, turn_aggressiveness: float = 1.0) -> float:
     """Compute lateral acceleration limit based on speed and aggressiveness."""
@@ -559,7 +537,7 @@ def calculate_anticipation_time(v_ego_ms: float, target_speed_ms: float, max_pre
     timing_max = 8.0                 # vs original 3.0 - wider range
 
     # Context-aware multipliers based on speed
-    v_ego_mph = v_ego_ms * 2.237
+    v_ego_mph = v_ego_ms * CV.MS_TO_MPH
     if v_ego_mph <= 15:
         context_multiplier = 0.973      # Parking: slightly faster
     elif v_ego_mph <= 35:
