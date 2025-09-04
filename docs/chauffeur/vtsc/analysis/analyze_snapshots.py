@@ -2,17 +2,21 @@
 """
 Lightweight analyzer for VTSC on-road snapshots (JSONL).
 
-Usage:
-  python docs/chauffeur/vtsc/analysis/analyze_snapshots.py /path/to/vtsc_snapshots.jsonl
+Adds LKG (last-known-good) channel and quantifies "vision floor saves" when
+the occlusion cap is lifted to at least the LKG speed under occlusion.
 
-No external deps; prints a concise summary and flags common issues.
+Usage:
+  python docs/chauffeur/vtsc/analysis/analyze_snapshots.py /path/to/vtsc_snapshots.jsonl [--dump-tsv out.tsv]
+
+No external deps; prints a concise summary and flags common issues. Optional TSV
+dump includes: ts, v (v_ego), v_base, v_vis, v_occ, v_lkg, cap_vis, cap_occ, final.
 """
 from __future__ import annotations
 
 import json
 import math
 import sys
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Optional
 
 
 def load_jsonl(path: str) -> List[Dict[str, Any]]:
@@ -27,6 +31,30 @@ def load_jsonl(path: str) -> List[Dict[str, Any]]:
       except Exception:
         continue
   return out
+
+
+def _get_float(row: Dict[str, Any], key: str, default: float = 0.0) -> float:
+  try:
+    v = row.get(key, default)
+    return float(v)
+  except Exception:
+    return float(default)
+
+
+def derive_v_lkg(row: Dict[str, Any]) -> Optional[float]:
+  """Return LKG speed for this snapshot row.
+
+  Priority:
+    1) Use 'v_vis' if present (already curvature_to_speed(k_vis_last)).
+    2) Else, None (we intentionally avoid re-implementing controller physics here).
+  """
+  v_vis = row.get('v_vis', None)
+  try:
+    if v_vis is None:
+      return None
+    return float(v_vis)
+  except Exception:
+    return None
 
 
 def summarize_basic(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -46,6 +74,52 @@ def summarize_basic(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     'duration_s': round(dt, 2),
     'avg_speed_mps': round(avg_v, 2),
     'vision_counts': vision_counts,
+  }
+
+
+def quantify_floor_saves(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+  """Quantify cases where the occlusion cap appears lifted to LKG speed.
+
+  Heuristic per row (occlusion-only):
+    - occluded == true
+    - v_occ < v_lkg - eps (occluded raw slower than LKG)
+    - cap_occl_vmin >= v_lkg * mult_lo (cap lifted to at least LKG)
+
+  Returns counts and median delta (v_lkg - v_occ) for such rows.
+  """
+  saves = 0
+  occl_rows = 0
+  deltas: List[float] = []
+  examples: List[Tuple[float, float, float, float, float]] = []  # ts, v_occ, v_lkg, cap_occ, final
+  for r in rows:
+    if not bool(r.get('occluded', False)):
+      continue
+    occl_rows += 1
+    v_occ = _get_float(r, 'v_occ', 0.0)
+    v_lkg = derive_v_lkg(r)
+    cap_occ = _get_float(r, 'cap_occl_vmin', 0.0)
+    if v_lkg is None or v_occ <= 0.0:
+      continue
+    # Heuristics with small margins to avoid float/quantization noise
+    if (v_occ < (v_lkg - 0.1)) and (cap_occ >= (0.98 * v_lkg)):
+      saves += 1
+      deltas.append((v_lkg - v_occ))
+      if len(examples) < 6:
+        examples.append((
+          _get_float(r, 'ts', 0.0),
+          v_occ,
+          float(v_lkg),
+          cap_occ,
+          _get_float(r, 'final', 0.0),
+        ))
+  import statistics
+  med_delta = statistics.median(deltas) if deltas else 0.0
+  return {
+    'occlusion_points': occl_rows,
+    'floor_saves': saves,
+    'floor_save_ratio': (saves / occl_rows) if occl_rows else 0.0,
+    'median_saved_mps': med_delta,
+    'examples': examples,
   }
 
 
@@ -147,6 +221,15 @@ def flag_jerk_or_comfort(rows: List[Dict[str, Any]]) -> Tuple[int, int]:
 
 
 def main(path: str) -> None:
+  out_tsv: Optional[str] = None
+  # Accept optional --dump-tsv argument
+  if len(sys.argv) >= 3 and sys.argv[2] == '--dump-tsv':
+    if len(sys.argv) >= 4:
+      out_tsv = sys.argv[3]
+    else:
+      print('Error: --dump-tsv requires an output path')
+      sys.exit(2)
+
   rows = load_jsonl(path)
   if not rows:
     print("No data found. Make sure toggles are ON and drive for a few minutes.")
@@ -155,6 +238,16 @@ def main(path: str) -> None:
   print("VTSC Snapshot Summary")
   print(f"- Points: {basic.get('points')}  Duration: {basic.get('duration_s')} s  Avg v: {basic.get('avg_speed_mps')} m/s")
   print(f"- Vision states: {basic.get('vision_counts')}")
+
+  # LKG/floor saves
+  q = quantify_floor_saves(rows)
+  print("\nLKG + Vision Floor Saves")
+  print(f"- Occlusion points: {q['occlusion_points']}  floor_saves: {q['floor_saves']}  ratio: {q['floor_save_ratio']:.2%}")
+  print(f"- Median saved delta (v_lkg - v_occ): {q['median_saved_mps']:.2f} m/s")
+  if q['examples']:
+    print("- Examples (ts, v_occ, v_lkg, cap_occ, final):")
+    for ts, v_occ, v_lkg, cap_occ, final in q['examples']:
+      print(f"  {ts:.2f}\t{v_occ:.2f}\t{v_lkg:.2f}\t{cap_occ:.2f}\t{final:.2f}")
 
   checks = []
   snc_bad, snc_tot = flag_straight_no_crawl(rows)
@@ -197,10 +290,31 @@ def main(path: str) -> None:
     elif name == "jerk_or_comfort_violations":
       print("- Comfort bounds flagged: verify jerk limits and comfort decel caps under occlusion.")
 
+  # Optional TSV dump for quick plotting
+  if out_tsv:
+    try:
+      with open(out_tsv, 'w', encoding='utf-8') as f:
+        f.write("# ts\tv\tv_base\tv_vis\tv_occ\tv_lkg\tcap_visible\tcap_occl\tfinal\n")
+        for r in rows:
+          ts = _get_float(r, 'ts', 0.0)
+          v = _get_float(r, 'v', 0.0)
+          v_base = _get_float(r, 'v_base', 0.0)
+          v_vis = _get_float(r, 'v_vis', 0.0)
+          v_occ = _get_float(r, 'v_occ', 0.0)
+          v_lkg = derive_v_lkg(r) or 0.0
+          cap_v = _get_float(r, 'cap_visible_vmin', 0.0)
+          cap_o = _get_float(r, 'cap_occl_vmin', 0.0)
+          final = _get_float(r, 'final', 0.0)
+          f.write(f"{ts:.3f}\t{v:.3f}\t{v_base:.3f}\t{v_vis:.3f}\t{v_occ:.3f}\t{v_lkg:.3f}\t{cap_v:.3f}\t{cap_o:.3f}\t{final:.3f}\n")
+      print(f"\nTSV written: {out_tsv}")
+      print("Plot tip (gnuplot):")
+      print("  gnuplot -e \"set key left; plot 'OUT.tsv' u 1:3 w l t 'v_base', '' u 1:4 w l t 'v_vis', '' u 1:5 w l t 'v_occ', '' u 1:6 w l t 'v_lkg', '' u 1:9 w l t 'final'\"")
+    except Exception as e:
+      print("TSV write failed:", e)
+
 
 if __name__ == '__main__':
   if len(sys.argv) < 2:
-    print("Usage: analyze_snapshots.py /path/to/vtsc_snapshots.jsonl")
+    print("Usage: analyze_snapshots.py /path/to/vtsc_snapshots.jsonl [--dump-tsv out.tsv]")
     sys.exit(2)
   main(sys.argv[1])
-

@@ -116,3 +116,13 @@ PY`
   - Use `ls -lt /data/media/0/realdata | head` to find most recent routes; segment numbers grow over time.
   - For time windows, filter by file mtime or by `created` field inside swaglog JSON lines.
   - Prefer `LogReader` for correctness and speed over raw `zstd | strings` when extracting fields.
+
+## VTSC Monitoring Quick-Start (On-Device)
+- Ensure VTSC debug toggles are ON in Offroad → Cruise → VTSC → Settings:
+  - `Verbose VTSC Debug Logging` (`VTSCVerboseDebug`)
+  - `Write Onroad VTSC Snapshots (JSONL)` (`VTSCWriteSnapshotFile`)
+- Start watcher: `nohup python3 tools/vtsc/vtsc_watch.py > .cache/vtsc_watch.out 2>&1 & echo $! > .cache/vtsc_watch.pid`
+- Tail output during drive: `tail -f .cache/vtsc_watch.out`
+- Snapshots file: `/data/media/0/VTSCDebug/vtsc_snapshots.jsonl` (used by the analyzer)
+- Post-drive: `python docs/chauffeur/vtsc/analysis/analyze_snapshots.py /data/media/0/VTSCDebug/vtsc_snapshots.jsonl --dump-tsv OUT.tsv`
+- Organize results under `docs/chauffeur/vtsc/debug/debug_YYYY-MM-DD/` as per `docs/chauffeur/vtsc/AGENTS.md`.

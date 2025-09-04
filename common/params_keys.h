@@ -243,6 +243,16 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"VisionTurnSpeedControlFOVNOn", {PERSISTENT | BACKUP, INT, "5"}},
     {"VisionTurnSpeedControlFOVNOff", {PERSISTENT | BACKUP, INT, "10"}},
 
+    // VTSC Vision-floor and dropout discrimination
+    // 0=off, 1=TTL floor (aggressive), 2=strict floor
+    {"VisionTurnSpeedControlVisionFloorMode", {PERSISTENT | BACKUP, FLOAT, "1.0"}},
+    // Seconds to retain last-known-good vision floor
+    {"VisionTurnSpeedControlVisionFloorTtlS", {PERSISTENT | BACKUP, FLOAT, "3.0"}},
+    // Multiplier applied to the floor speed cap
+    {"VisionTurnSpeedControlVisionFloorMult", {PERSISTENT | BACKUP, FLOAT, "1.0"}},
+    // Grace period for transient model dropouts (seconds)
+    {"VisionTurnSpeedControlDropoutGraceS", {PERSISTENT | BACKUP, FLOAT, "0.40"}},
+
     // VTSC Speed Control
     {"VisionTurnSpeedControlSpeedIncreaseFactor", {PERSISTENT | BACKUP, FLOAT, "1.0"}},
     {"VisionTurnSpeedControlMaxSpeed", {PERSISTENT | BACKUP, FLOAT, "70.0"}},

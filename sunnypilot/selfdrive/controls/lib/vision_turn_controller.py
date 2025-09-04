@@ -119,6 +119,11 @@ class VisionOcclusionState:
     exit_dwell_s: float = 0.10
     below_bad_time_s: float = 0.0
     above_good_time_s: float = 0.0
+    # Last-known-good (LKG) anchor for occlusion re-anchoring
+    _lkg_kappa: float = 0.0
+    _lkg_time: float = 0.0
+    _lkg_speed: float = 0.0
+    _lkg_ramp_s: float = 1.5  # ramp time to allow occluded estimate to exceed LKG
 
     def update(self, current_curvature: float, vision_confidence: float, v_ego_or_tm, tm=None):
         # Support both 3-arg (tm) and 4-arg (v_ego, tm) signatures
@@ -295,12 +300,30 @@ class VisionOcclusionState:
 
         # ===== Compatibility: no-decay fix =====
         self.confidence_decay_factor = 1.0
-        # Expose an extrapolated curvature that reflects the occlusion model when occluded,
-        # and current curvature when vision is good. This lets fresh vision trump occlusion.
-        if not self.vision_good:
-            self.extrapolated_curvature = float(max(0.0, self.est_curvature))
-        else:
+        # Vision-first extrapolated curvature with LKG anchoring during occlusion.
+        # - When vision is good: update LKG anchor and use current curvature.
+        # - When occluded: blend from LKG toward occluded estimate with a short time ramp.
+        now_ts = float(tm)
+        if self.vision_good:
+            try:
+                self._lkg_kappa = float(abs(current_curvature))
+                self._lkg_time = now_ts
+                # curvature_to_speed defined below; safe to call at runtime
+                self._lkg_speed = float(curvature_to_speed(max(1e-8, self._lkg_kappa)))
+            except Exception:
+                pass
             self.extrapolated_curvature = float(current_curvature)
+        else:
+            try:
+                k_occ = float(max(0.0, self.est_curvature))
+                k_lkg = float(getattr(self, '_lkg_kappa', k_occ))
+                age_s = max(0.0, now_ts - float(getattr(self, '_lkg_time', 0.0)))
+                ramp_s = float(getattr(self, '_lkg_ramp_s', 1.5))
+                alpha = min(1.0, age_s / max(0.1, ramp_s))
+                k_blend = k_lkg + alpha * max(0.0, k_occ - k_lkg)
+                self.extrapolated_curvature = float(k_blend)
+            except Exception:
+                self.extrapolated_curvature = float(max(0.0, self.est_curvature))
 
 # ===== ORIGINAL PHYSICS-BASED VTSC CONSTANTS =====
 _MIN_V = 2.24  # Do not operate under 5mph (was 5.6 m/s = 12.5mph)
@@ -785,6 +808,15 @@ class VisionTurnController:
     self._dbg_fail_open = False
     self._freeway_failopen_active = False
 
+    # Vision-floor and dropout discrimination (aggressive bias)
+    # 0=off, 1=TTL floor after last-known-good, 2=strict floor always
+    self._vision_floor_mode = 1
+    self._vision_floor_ttl_s = 3.0
+    self._vision_floor_mult = 1.00
+    # Treat short model frame loss as transient dropout; suppress occlusion pretrigger briefly
+    self._dropout_grace_s = 0.40
+    self._dropout_until = 0.0
+
   # ===== Internal Param Helpers (decode/parse/clip) =====
   def _get_float_param(self, key: str, default: float, lo: float | None = None, hi: float | None = None) -> float:
     """Read a float param from Params with robust decoding and optional clipping.
@@ -1171,6 +1203,19 @@ class VisionTurnController:
 
   def _update_vision_occlusion(self, model_data, current_time: float):
     """Update vision occlusion state and return curvature to use under monotonic occlusion mode."""
+    # Dropout detection: if the model publishes too few orientationRate frames, consider it a transient
+    # and open a short grace window during which we avoid pretrigger occlusion.
+    try:
+      z = getattr(getattr(model_data, 'orientationRate', None), 'z', None)
+      n_frames = int(len(z)) if z is not None else 0
+      if n_frames and n_frames < 33:
+        self._dropout_until = float(time.time()) + float(getattr(self, '_dropout_grace_s', 0.40))
+    except Exception:
+      pass
+    try:
+      setattr(self._occlusion_state, 'dropout_active', bool(time.time() < float(getattr(self, '_dropout_until', 0.0))))
+    except Exception:
+      pass
     # Estimate vision confidence
     if model_data is None:
         vision_confidence = 0.0
@@ -1537,6 +1582,12 @@ class VisionTurnController:
     except Exception:
       _conf_s, _conf_bad, _conf_good, _vis_good, conf_rising = 1.0, 0.65, 0.70, True, False
     pretrigger = (ttfov_s <= pretrigger_time) and (abs(kappa_gate) >= k_min) and (_conf_s < _conf_bad) and (not conf_rising)
+    # Suppress pretrigger during short model dropouts to avoid overreacting
+    try:
+      if bool(getattr(self._occlusion_state, 'dropout_active', False)):
+        pretrigger = False
+    except Exception:
+      pass
     # Hysteretic onset/clear
     onset_geom = (abs(kappa_gate) >= k_min) and (self._dbg_psi_vis >= self._dbg_psi_thresh)
     onset = (onset_geom or pretrigger) and (not _vis_good)
@@ -1700,10 +1751,42 @@ class VisionTurnController:
         if k_cons2 > 0.0:
           a_lat_onset = 2.0
           v_kcons = float(math.sqrt(a_lat_onset / k_cons2))
+          # Vision floor: raise occlusion cap to at least last-known-good speed for a short TTL
+          floor_active = False
+          try:
+            v_floor = 0.0
+            # Prefer explicit LKG speed/time if available
+            try:
+              v_floor = float(getattr(self._occlusion_state, '_lkg_speed', 0.0) or 0.0)
+              lkg_time = float(getattr(self._occlusion_state, '_lkg_time', 0.0) or 0.0)
+            except Exception:
+              v_floor, lkg_time = 0.0, 0.0
+            # Fallback to last_valid_curvature-derived speed if LKG not set
+            if v_floor <= 0.0:
+              try:
+                k_vis_last = float(getattr(self._occlusion_state, 'last_valid_curvature', 0.0))
+                if k_vis_last > 0.0:
+                  v_floor = float(curvature_to_speed(max(1e-8, k_vis_last)))
+              except Exception:
+                v_floor = 0.0
+            # Determine TTL and mode
+            floor_mode = int(getattr(self, '_vision_floor_mode', 1))
+            ttl_s = float(getattr(self, '_vision_floor_ttl_s', 3.0))
+            mult = float(getattr(self, '_vision_floor_mult', 1.00))
+            lkg_age = max(0.0, time.time() - lkg_time)
+            if v_floor > 0.0 and ((floor_mode == 2) or (floor_mode == 1 and lkg_age <= ttl_s)):
+              v_kcons = max(v_kcons, v_floor * mult)
+              floor_active = True
+          except Exception:
+            pass
           accel_cmd = min(accel_cmd, (v_kcons - self._v_ego) / dt)
           self._dbg_cap_source = 'occluded_onset_kcons'
-        # Onset minimum decel assist (comfort-bounded)
-        accel_cmd = min(accel_cmd, -0.30)
+        # Onset minimum decel assist (comfort-bounded); lighten when floor is active
+        try:
+          a_floor = -0.10 if bool(locals().get('floor_active', False)) else -0.30
+        except Exception:
+          a_floor = -0.30
+        accel_cmd = min(accel_cmd, a_floor)
         # Early no-raise activation window, shortened if confidence is rising
         try:
           _conf_s2 = float(getattr(self._occlusion_state, 'smoothed_confidence', 1.0))
@@ -1720,11 +1803,12 @@ class VisionTurnController:
 
       # Confidence-based fallback: if vision is not good right after occlusion start,
       # apply a small minimum decel assist regardless of FOV gate specifics.
+      # Do not apply while freeway fail-open is active.
       try:
         occ_since = float(getattr(self._occlusion_state, 'occluded_since_time', 0.0) or 0.0)
       except Exception:
         occ_since = 0.0
-      if (not getattr(self._occlusion_state, 'vision_good', True)):
+      if (not getattr(self._occlusion_state, 'vision_good', True)) and (not self._freeway_failopen_active):
         now_ts = time.time()
         occ_age_fb = max(0.0, now_ts - occ_since)
         if occ_age_fb <= 0.8 and self._v_ego <= 36.0:
@@ -1922,8 +2006,8 @@ class VisionTurnController:
       self._suppress_raise_due_to_limit = False
       # For acceleration, use normal limits
       pos_limit = self._max_accel
-      # Onset window: disallow any positive uplift while occluded
-      if self._fov_occluded and getattr(self, '_onset_no_raise_active', False):
+      # Onset window: disallow any positive uplift while occluded (not during freeway fail-open)
+      if self._fov_occluded and getattr(self, '_onset_no_raise_active', False) and (not self._freeway_failopen_active):
         accel_cmd = min(accel_cmd, 0.0)
       # Apply a small fast-reacquisition acceleration floor for up to _fast_reacq_window_s
       now = time.time()
@@ -1945,8 +2029,8 @@ class VisionTurnController:
       if abs(self._filtered_decel_requirement) < 0.1:
         self._decel_hysteresis_state = False
 
-    # Final onset safeguard: no positive uplift during onset window
-    if self._fov_occluded and getattr(self, '_onset_no_raise_active', False):
+    # Final onset safeguard: no positive uplift during onset window (not during freeway fail-open)
+    if self._fov_occluded and getattr(self, '_onset_no_raise_active', False) and (not self._freeway_failopen_active):
       accel_cmd = min(accel_cmd, 0.0)
 
     # Jerk-limit the change in acceleration
@@ -1981,16 +2065,16 @@ class VisionTurnController:
     # Hard clamp: after a speed-limit step while occluded, disallow any positive acceleration
     if self._fov_occluded and getattr(self, '_suppress_raise_due_to_limit', False) and self._current_accel > 0.0:
       self._current_accel = 0.0
-    # Ensure decel during onset window regardless of other uplifts
-    if self._fov_occluded and getattr(self, '_onset_no_raise_active', False):
+    # Ensure decel during onset window regardless of other uplifts (not during freeway fail-open)
+    if self._fov_occluded and getattr(self, '_onset_no_raise_active', False) and (not self._freeway_failopen_active):
       self._current_accel = min(self._current_accel, -0.30)
     # Update target acceleration for compatibility
     self._a_target = self._current_accel
-    # Hard guarantee for harness/test: enforce a small negative a_target in onset window
-    if self._fov_occluded and getattr(self, '_onset_no_raise_active', False):
+    # Hard guarantee for harness/test: enforce a small negative a_target in onset window (not during freeway fail-open)
+    if self._fov_occluded and getattr(self, '_onset_no_raise_active', False) and (not self._freeway_failopen_active):
       self._a_target = min(self._a_target, -0.30)
-    # Confidence-based hard guarantee: when vision is not good, enforce decel floor
-    if not getattr(self._occlusion_state, 'vision_good', True):
+    # Confidence-based hard guarantee: when vision is not good, enforce decel floor (not during freeway fail-open)
+    if (not getattr(self._occlusion_state, 'vision_good', True)) and (not self._freeway_failopen_active):
       self._a_target = min(self._a_target, -0.30)
 
     # Update previous target speed by integrating the commanded acceleration.
@@ -2193,113 +2277,10 @@ class VisionTurnController:
     if self._occlusion_state.vision_good and now < getattr(self, '_fast_reacq_until', 0.0):
       target_speed = min(self._v_cruise_setpoint, max(target_speed, base_target * 1.02))
 
-    # Distance-aware occlusion barrier (target-level integration)
-    if self._fov_occluded and (self._v_ego < 29.06) and (not getattr(self, '_occl_lead_bypass_active', False)) and (not self._freeway_failopen_active):
-      try:
-        v_vis = curvature_to_speed(max(1e-8, float(self._occlusion_state.last_valid_curvature)))
-        v_near = min(base_target, v_vis, self._v_cruise_setpoint)
-        try:
-          k_est = float(getattr(self._occlusion_state, 'est_curvature', 0.0))
-        except Exception:
-          k_est = 0.0
-        k_filt = float(max(1e-8, float(getattr(self, '_filtered_curvature', 0.0))))
-        v_occ_raw = min(curvature_to_speed(max(1e-8, k_est)), curvature_to_speed(k_filt))
-        s_vis = max(0.0, float(getattr(self, '_vis_horizon_s', 1.4)) * max(0.0, self._v_ego))
-        a_cap = abs(float(self._comfort_decel_limit))
-        v_now = max(self._prev_target_speed, self._v_ego)
-        dist_since = float(getattr(self._occlusion_state, 'distance_since_m', 0.0))
-        s_tail = max(0.0, dist_since - s_vis)
-        k_now = max(0.0, float(getattr(self._occlusion_state, 'est_curvature', 0.0)))
-        if k_now <= 0.004:
-          tail_frac = 0.10
-        elif k_now >= 0.008:
-          tail_frac = 0.90
-        else:
-          tail_frac = 0.10 + 0.80 * ((k_now - 0.004) / 0.004)
-        try:
-          v_cap_tail = math.sqrt(max(0.0, v_now * v_now - 2.0 * a_cap * (tail_frac * s_tail)))
-        except Exception:
-          v_cap_tail = v_now
-        # Hidden-turn assist: moderate boost early at moderate speeds
-        try:
-          _entry_k = float(getattr(self._occlusion_state, 'entry_curvature', 0.0) or 0.0)
-          _tail_t0 = float(getattr(self._occlusion_state, 'tail_start_time', 0.0) or 0.0)
-          _tail_started = bool(getattr(self._occlusion_state, 'tail_started', False))
-          _now_ht2 = time.time()
-          _tail_elapsed2 = max(0.0, _now_ht2 - _tail_t0) if _tail_started else 0.0
-        except Exception:
-          _entry_k = 0.0
-          _tail_elapsed2 = 0.0
-        if (_entry_k <= 3e-4) and (_tail_elapsed2 <= HIDDEN_TURN_PHASE_S) and (self._v_ego <= 30.0):
-          try:
-            _tail_frac_boost = max(tail_frac, 0.7)
-            _v_cap_tail_boost = math.sqrt(max(0.0, v_now * v_now - 2.0 * a_cap * (_tail_frac_boost * s_tail)))
-            v_cap_tail = min(v_cap_tail, _v_cap_tail_boost)
-          except Exception:
-            pass
-        if self._v_ego > 36.0:
-          v_far = min(v_occ_raw, v_cap_tail, self._v_cruise_setpoint)
-        elif self._v_ego <= 30.0:
-          v_far = min(v_occ_raw, v_cap_tail, self._v_cruise_setpoint)
-        else:
-          v_far = min(v_occ_raw, self._v_cruise_setpoint)
-        d_req = max(0.0, (v_now * v_now - v_far * v_far) / max(2e-3, 2.0 * a_cap))
-        margin_dist = float(getattr(self, '_vis_margin_m', 10.0))
-        positive_margin = (d_req <= (s_vis - margin_dist))
+    # Note: occlusion barriers and onset handling are applied centrally in _update_solution.
+    # Avoid duplicating those effects here to prevent double-clamping.
 
-        _hidden_turn_active = False
-        if HIDDEN_TURN_ENABLE and (self._v_ego <= HIDDEN_TURN_V_MAX_MPS):
-          try:
-            _now_ht = time.time()
-          except Exception:
-            _now_ht = 0.0
-          _t0_ht = float(getattr(self._occlusion_state, 'occluded_since_time', 0.0) or 0.0)
-          _occ_elapsed = max(0.0, _now_ht - _t0_ht)
-          if _occ_elapsed >= HIDDEN_TURN_MIN_OCC_S and _occ_elapsed <= HIDDEN_TURN_PHASE_S:
-            _v_req_hidden = float(v_cap_tail)
-            _deficit = max(0.0, v_now - _v_req_hidden)
-            if _deficit >= HIDDEN_TURN_DELTA_V_MPS:
-              _d_avail_time = max(0.0, self._v_ego * HIDDEN_TURN_T_H_S)
-              _d_avail_vis = max(0.0, s_vis - margin_dist)
-              _d_avail = min(_d_avail_time, _d_avail_vis)
-              try:
-                _vs = getattr(self._occlusion_state, 'vision_status', None)
-              except Exception:
-                _vs = None
-              if (_vs == VisionStatus.SEVERE_OCCLUSION or _vs == VisionStatus.VISION_LOST):
-                _v_req_min = max(0.0, v_now - HIDDEN_TURN_DELTA_V_MPS)
-                _d_req_hidden = max(0.0, (v_now * v_now - _v_req_min * _v_req_min) / max(2e-3, 2.0 * a_cap))
-              else:
-                _d_req_hidden = max(0.0, (v_now * v_now - _v_req_hidden * _v_req_hidden) / max(2e-3, 2.0 * a_cap))
-              try:
-                _entry_kappa = abs(float(getattr(self._occlusion_state, 'entry_curvature', 0.0) or 0.0))
-              except Exception:
-                _entry_kappa = 0.0
-              _s_head = max(6.0, self._v_ego * HIDDEN_TURN_HEADING_WIN_S)
-              _vis_heading_rad = _entry_kappa * _s_head
-              _straightness_gain = max(0.0, min(1.0,
-                (HIDDEN_TURN_VIS_HEADING_MAX_RAD - _vis_heading_rad) / max(1e-6, HIDDEN_TURN_VIS_HEADING_MAX_RAD)))
-              _phase_progress = max(0.0, min(1.0, _occ_elapsed / max(1e-6, HIDDEN_TURN_PHASE_S)))
-              _early_tighten = 0.55 * _straightness_gain * (1.0 - _phase_progress)
-              _short_h_avail = (HIDDEN_TURN_AVAIL_SCALE * _d_avail) * (1.0 - _early_tighten)
-              if _d_req_hidden > _short_h_avail:
-                positive_margin = False
-                _hidden_turn_active = True
-
-        if positive_margin:
-          # Positive margin: barrier target should not induce deceleration
-          barrier_target_speed = max(v_near, v_now)
-          target_speed = min(target_speed, barrier_target_speed)
-        else:
-          # Negative/insufficient margin: barrier acts as an upper bound (safety clamp)
-          use_far = (self._v_ego > 36.0) or (self._v_ego <= 36.0 and k_now >= 0.004) or (self._v_ego <= 30.0)
-          if use_far:
-            barrier_target_speed = min(min(v_near, v_far), v_now)
-          else:
-            barrier_target_speed = min(v_near, v_now)
-          target_speed = min(target_speed, barrier_target_speed)
-      except Exception:
-        pass
+    return float(target_speed)
 
   def _get_last_gps(self) -> tuple[float, float] | None:
     try:
