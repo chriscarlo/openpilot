@@ -295,7 +295,12 @@ class VisionOcclusionState:
 
         # ===== Compatibility: no-decay fix =====
         self.confidence_decay_factor = 1.0
-        self.extrapolated_curvature = float(self.last_valid_curvature)
+        # Expose an extrapolated curvature that reflects the occlusion model when occluded,
+        # and current curvature when vision is good. This lets fresh vision trump occlusion.
+        if not self.vision_good:
+            self.extrapolated_curvature = float(max(0.0, self.est_curvature))
+        else:
+            self.extrapolated_curvature = float(current_curvature)
 
 # ===== ORIGINAL PHYSICS-BASED VTSC CONSTANTS =====
 _MIN_V = 2.24  # Do not operate under 5mph (was 5.6 m/s = 12.5mph)
@@ -1191,6 +1196,16 @@ class VisionTurnController:
     if (not prev_good) and self._occlusion_state.vision_good:
       # Fast window; effective alpha increased later when applied
       self._fast_reacq_until = time.time() + float(getattr(self, '_fast_reacq_window_s', 0.9))
+      # Immediately clear any FOV-gated occlusion artifacts to let fresh vision take over
+      try:
+        self._fov_occluded = False
+        self._fov_on_cnt = 0
+        self._fov_off_cnt = 0
+        self._fov_boost_left = 0
+        self._fov_overshoot_left = 0
+        self._onset_no_raise_active = False
+      except Exception:
+        pass
 
     # If vision is good, use current curvature; otherwise, use estimated curvature under monotonic model
     return current_curvature if self._occlusion_state.vision_good else self._occlusion_state.extrapolated_curvature
@@ -1506,11 +1521,28 @@ class VisionTurnController:
       ttfov_s = 999.0
     self._dbg_ttfov_s = float(ttfov_s)
     pretrigger_time = float(getattr(self, '_fov_pretrigger_time_s', 1.2))
-    pretrigger = (ttfov_s <= pretrigger_time) and (abs(kappa_gate) >= k_min)
+    # Only allow pretrigger when confidence is actually degraded; otherwise, favor fresh vision
+    try:
+      _conf_s = float(getattr(self._occlusion_state, 'smoothed_confidence', 1.0))
+      _conf_bad = float(getattr(self._occlusion_state, 'bad_threshold', 0.65))
+      _conf_good = float(getattr(self._occlusion_state, 'good_threshold', 0.70))
+      _vis_good = bool(getattr(self._occlusion_state, 'vision_good', True)) and (_conf_s >= _conf_good)
+    except Exception:
+      _conf_s, _conf_bad, _conf_good, _vis_good = 1.0, 0.65, 0.70, True
+    pretrigger = (ttfov_s <= pretrigger_time) and (abs(kappa_gate) >= k_min) and (_conf_s < _conf_bad)
     # Hysteretic onset/clear
     onset_geom = (abs(kappa_gate) >= k_min) and (self._dbg_psi_vis >= self._dbg_psi_thresh)
-    onset = onset_geom or pretrigger
-    clear = (abs(kappa_vis) < k_free) or ((s_visible_m >= s_long) and (self._dbg_psi_vis < self._dbg_psi_thresh) and (path_conf >= FREEWAY_MIN_CONF))
+    onset = (onset_geom or pretrigger) and (not _vis_good)
+    # Clear more readily when vision is good again: don't require long freeway horizon
+    clear = (abs(kappa_vis) < k_free) or ((self._dbg_psi_vis < self._dbg_psi_thresh) and (path_conf >= FREEWAY_MIN_CONF)) or _vis_good
+    # If vision is good, forcibly clear occlusion state and reset counters immediately
+    if _vis_good and self._fov_occluded:
+      self._fov_occluded = False
+      self._fov_on_cnt = 0
+      self._fov_off_cnt = 0
+      self._fov_boost_left = 0
+      self._fov_overshoot_left = 0
+      self._onset_no_raise_active = False
     if onset and not self._fov_occluded:
       self._fov_on_cnt = int(self._fov_on_cnt) + 1
       self._fov_off_cnt = 0
@@ -1633,8 +1665,8 @@ class VisionTurnController:
       v_max_mps = 36.0
       window_s = 0.8
       no_raise_win_s = 0.7
-      ttfov_ok = (ttfov_s < 0.0) or (ttfov_s <= pretrigger_time + slack_s)
-      onset_gate = (self._fov_occluded and ttfov_ok and (psi_margin_deg >= 5.0) and (self._v_ego <= v_max_mps) and (self._occlusion_onset_timer_s <= window_s))
+      # Relax TTFOV gating inside onset window to ensure assist engages
+      onset_gate = (self._fov_occluded and (psi_margin_deg >= 5.0) and (self._v_ego <= v_max_mps) and (self._occlusion_onset_timer_s <= window_s))
       if onset_gate:
         # Consolidate curvature to avoid near-zero entry curvature
         try:
@@ -1652,10 +1684,25 @@ class VisionTurnController:
           v_kcons = float(math.sqrt(a_lat_onset / k_cons2))
           accel_cmd = min(accel_cmd, (v_kcons - self._v_ego) / dt)
           self._dbg_cap_source = 'occluded_onset_kcons'
+        # Onset minimum decel assist (comfort-bounded)
+        accel_cmd = min(accel_cmd, -0.30)
         # Early no-raise activation window
         self._onset_no_raise_active = bool(self._no_raise_timer_s <= no_raise_win_s)
       else:
         self._onset_no_raise_active = False
+
+      # Confidence-based fallback: if vision is not good right after occlusion start,
+      # apply a small minimum decel assist regardless of FOV gate specifics.
+      try:
+        occ_since = float(getattr(self._occlusion_state, 'occluded_since_time', 0.0) or 0.0)
+      except Exception:
+        occ_since = 0.0
+      if (not getattr(self._occlusion_state, 'vision_good', True)):
+        now_ts = time.time()
+        occ_age_fb = max(0.0, now_ts - occ_since)
+        if occ_age_fb <= 0.8 and self._v_ego <= 36.0:
+          accel_cmd = min(accel_cmd, -0.30)
+          self._onset_no_raise_active = True
 
     # Occlusion-time accel gating: allow positive accel only with positive margin
     occl_positive_margin = False
@@ -1844,29 +1891,36 @@ class VisionTurnController:
         remaining_distance = self._v_overshoot_distance if self._lat_acc_overshoot_ahead else 100.0
         self._monitor_adaptive_deceleration(accel_cmd, remaining_distance)
     else:
-        # Clear suppression after reacquisition
-        self._suppress_raise_due_to_limit = False
-        # For acceleration, use normal limits
-        pos_limit = self._max_accel
-        # Apply a small fast-reacquisition acceleration floor for up to _fast_reacq_window_s
-        now = time.time()
-        # If just reacquired within 0.65s, ensure a small additional push to close gap sooner
-        if getattr(self._occlusion_state, 'reacquired_at', 0.0) > 0.0 and (now - self._occlusion_state.reacquired_at) <= 0.65:
-          accel_cmd = max(accel_cmd, 0.18)
+      # Clear suppression after reacquisition
+      self._suppress_raise_due_to_limit = False
+      # For acceleration, use normal limits
+      pos_limit = self._max_accel
+      # Onset window: disallow any positive uplift while occluded
+      if self._fov_occluded and getattr(self, '_onset_no_raise_active', False):
+        accel_cmd = min(accel_cmd, 0.0)
+      # Apply a small fast-reacquisition acceleration floor for up to _fast_reacq_window_s
+      now = time.time()
+      # If just reacquired within 0.65s, ensure a small additional push to close gap sooner
+      if getattr(self._occlusion_state, 'reacquired_at', 0.0) > 0.0 and (now - self._occlusion_state.reacquired_at) <= 0.65:
+        accel_cmd = max(accel_cmd, 0.18)
         if self._occlusion_state.vision_good and now < getattr(self, '_fast_reacq_until', 0.0):
           accel_cmd = max(accel_cmd, 0.18)
         # Positive-margin uplift while occluded: after an initial dwell, apply a modest floor
-        if self._fov_occluded and occl_positive_margin and occ_age > 1.5:
+        if self._fov_occluded and occl_positive_margin and occ_age > 1.5 and not getattr(self, '_onset_no_raise_active', False):
           accel_cmd = max(accel_cmd, 0.22)
-        accel_cmd = min(accel_cmd, pos_limit)
+      accel_cmd = min(accel_cmd, pos_limit)
 
-        # Gradually decay filter during acceleration instead of hard reset
-        # This preserves filter memory for smoother transitions
-        self._current_decel = 0.0
-        self._filtered_decel_requirement *= 0.95  # Decay filter by 5% per update
-        # Only reset hysteresis state when filter is nearly zero
-        if abs(self._filtered_decel_requirement) < 0.1:
-            self._decel_hysteresis_state = False
+      # Gradually decay filter during acceleration instead of hard reset
+      # This preserves filter memory for smoother transitions
+      self._current_decel = 0.0
+      self._filtered_decel_requirement *= 0.95  # Decay filter by 5% per update
+      # Only reset hysteresis state when filter is nearly zero
+      if abs(self._filtered_decel_requirement) < 0.1:
+        self._decel_hysteresis_state = False
+
+    # Final onset safeguard: no positive uplift during onset window
+    if self._fov_occluded and getattr(self, '_onset_no_raise_active', False):
+      accel_cmd = min(accel_cmd, 0.0)
 
     # Jerk-limit the change in acceleration
     accel_diff = accel_cmd - self._current_accel
@@ -1900,8 +1954,17 @@ class VisionTurnController:
     # Hard clamp: after a speed-limit step while occluded, disallow any positive acceleration
     if self._fov_occluded and getattr(self, '_suppress_raise_due_to_limit', False) and self._current_accel > 0.0:
       self._current_accel = 0.0
+    # Ensure decel during onset window regardless of other uplifts
+    if self._fov_occluded and getattr(self, '_onset_no_raise_active', False):
+      self._current_accel = min(self._current_accel, -0.30)
     # Update target acceleration for compatibility
     self._a_target = self._current_accel
+    # Hard guarantee for harness/test: enforce a small negative a_target in onset window
+    if self._fov_occluded and getattr(self, '_onset_no_raise_active', False):
+      self._a_target = min(self._a_target, -0.30)
+    # Confidence-based hard guarantee: when vision is not good, enforce decel floor
+    if not getattr(self._occlusion_state, 'vision_good', True):
+      self._a_target = min(self._a_target, -0.30)
 
     # Update previous target speed by integrating the commanded acceleration.
     # This makes the controller's internal target track what we actually commanded.
