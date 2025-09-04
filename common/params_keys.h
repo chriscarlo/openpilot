@@ -364,6 +364,8 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"RoadName", {CLEAR_ON_ONROAD_TRANSITION, STRING, ""}},
     // VTSC map lookahead
     {"MTSCLookaheadEnabled", {PERSISTENT | BACKUP, BOOL, "0"}},
+    // VTSC freeway fail-open guard (developer triage)
+    {"VTSCFailOpen", {PERSISTENT | BACKUP, BOOL, "0"}},
     // VTSC verbose debug logging (rate-limited)
     {"VTSCVerboseDebug", {PERSISTENT | BACKUP, BOOL, "0"}},
     // VTSC onroad snapshot file writer (JSONL, small/rotating)
