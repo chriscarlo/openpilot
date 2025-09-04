@@ -114,6 +114,9 @@ class VisionOcclusionState:
     decay_tau_slow_s: float = 2.0
     min_frac_initial: float = 0.6
     min_frac: float = 0.20
+    # Trend multipliers (decreasing multiplier set to 1.0 per design)
+    increasing_trend_mul: float = 1.0
+    decreasing_trend_mul: float = 1.0
     # Dwell timers
     enter_dwell_s: float = 0.20
     exit_dwell_s: float = 0.10
@@ -244,7 +247,12 @@ class VisionOcclusionState:
                                         break
                             # Allow growth up to configured gamma with both speed and jerk caps
                             gamma_eff = min(self.gamma_per_m, gamma_cap_speed, gamma_cap_jerk)
-                            self.est_curvature = max(0.0, self.entry_curvature + gamma_eff * s_tail)
+                            # Optional trend multipliers (default 1.0)
+                            try:
+                                inc_mul = float(getattr(self, 'increasing_trend_mul', 1.0))
+                            except Exception:
+                                inc_mul = 1.0
+                            self.est_curvature = max(0.0, self.entry_curvature + inc_mul * (gamma_eff * s_tail))
                         else:
                             # Freeze growth beyond tail window
                             self.est_curvature = max(0.0, self.est_curvature)
@@ -258,7 +266,11 @@ class VisionOcclusionState:
                             floor_val = floor_frac * self.entry_curvature
                             tau = self.decay_tau_fast_s if elapsed <= 0.8 else self.decay_tau_slow_s
                             decay = math.exp(-elapsed / max(1e-3, tau))
-                            self.est_curvature = max(floor_val, self.entry_curvature * decay)
+                            try:
+                                dec_mul = float(getattr(self, 'decreasing_trend_mul', 1.0))
+                            except Exception:
+                                dec_mul = 1.0
+                            self.est_curvature = max(floor_val, (self.entry_curvature * decay) * dec_mul)
 
 
         # ===== Compatibility: expose VisionStatus with hysteresis thresholds =====
@@ -373,7 +385,7 @@ LOW_SPEED_BIAS_END_MPH = 50.0
 # ===== Hidden-turn early deceleration trigger (occlusion-only, sub-65 mph) =====
 # Allows jerk-limited early braking when a short-horizon physics deficit is provably large
 # despite a transiently positive visible-margin condition.
-HIDDEN_TURN_ENABLE = True
+HIDDEN_TURN_ENABLE = False
 HIDDEN_TURN_V_MAX_MPS = 29.06  # ~65 mph; above this we run pure physics
 HIDDEN_TURN_T_H_S = 1.8        # short horizon (~40 m at 50 mph)
 HIDDEN_TURN_DELTA_V_MPS = 2.0  # ~6 mph speed gap
@@ -753,8 +765,9 @@ class VisionTurnController:
     self._fov_off_cnt = 0
     self._fov_reason = ''
     self._fov_pretrigger_time_s = 1.5
-    self._fov_onset_boost_frames = 12
-    self._fov_overshoot_frames = 12
+    # Disable onset stickiness/overshoot windows (no-raise window effectively 0)
+    self._fov_onset_boost_frames = 0
+    self._fov_overshoot_frames = 0
     self._fov_boost_left = 0
     self._fov_overshoot_left = 0
     self._fov_ewma_tau_s = 0.4
@@ -1709,9 +1722,11 @@ class VisionTurnController:
         k0_mid = 0.019
         k_slope = 0.005
         sig = 1.0 / (1.0 + math.exp(-(k_for_win - k0_mid) / max(1e-6, k_slope)))
-        no_raise_win_s = 0.35 + 0.45 * sig  # 0.35..0.80 s
+        # Disable no-raise window: set duration to 0.0 s
+        no_raise_win_s = 0.0
       except Exception:
-        no_raise_win_s = 0.7
+        # Fallback also disabled
+        no_raise_win_s = 0.0
       # Relax TTFOV gating inside onset window to ensure assist engages
       onset_gate = (self._fov_occluded and (psi_margin_deg >= 5.0) and (self._v_ego <= v_max_mps) and (self._occlusion_onset_timer_s <= window_s))
       if onset_gate:
@@ -1773,9 +1788,9 @@ class VisionTurnController:
           rising_conf = (_conf_s2 >= float(getattr(self._occlusion_state, 'bad_threshold', 0.65))) and (conf_slope > 0.02)
         except Exception:
           rising_conf = False
-        dyn_win_s = 0.35 if rising_conf else no_raise_win_s
+        dyn_win_s = 0.0  # no-raise window disabled
         decel_in_effect = (accel_cmd < -0.05)
-        self._onset_no_raise_active = (self._no_raise_timer_s <= dyn_win_s) and decel_in_effect
+        self._onset_no_raise_active = False
       else:
         self._onset_no_raise_active = False
 
@@ -1836,9 +1851,9 @@ class VisionTurnController:
             v_cap_tail = math.sqrt(max(0.0, v_now * v_now - 2.0 * a_cap * (tail_frac * s_tail)))
           except Exception:
             v_cap_tail = v_now
-          # Speed-based gating: ignore tail floor above ~65 mph (pure physics) and taper between 50–65 mph
+          # Speed-based gating: ignore tail floor above ~55 mph (pure physics) and taper between 50–55 mph
           v_gate_lo = 22.35  # m/s ~50 mph
-          v_gate_hi = 29.06  # m/s ~65 mph
+          v_gate_hi = 24.5872  # m/s ~55 mph
           v_now_for_gate = max(0.0, self._v_ego)
           blend = 0.0 if v_now_for_gate <= v_gate_lo else (1.0 if v_now_for_gate >= v_gate_hi else (v_now_for_gate - v_gate_lo) / max(1e-6, (v_gate_hi - v_gate_lo)))
           tail_frac_eff = tail_frac * (1.0 - blend)
