@@ -21,23 +21,29 @@ from openpilot.tools.lib.logreader import LogReader
 from sunnypilot.selfdrive.controls.lib.vision_turn_controller import curvature_to_speed
 
 
-def nearest(samples: List[Tuple[float, float]], t: float) -> Tuple[float, float] | None:
+def _interp(samples: List[Tuple[float, float]], t: float) -> float | None:
+  """Linear interpolation of (t, v) samples at time t; clamps at ends."""
   if not samples:
     return None
-  # Binary search for nearest timestamp
-  lo, hi = 0, len(samples) - 1
-  while lo < hi:
+  n = len(samples)
+  if t <= samples[0][0]:
+    return samples[0][1]
+  if t >= samples[-1][0]:
+    return samples[-1][1]
+  # binary search
+  lo, hi = 0, n - 1
+  while lo + 1 < hi:
     mid = (lo + hi) // 2
-    if samples[mid][0] < t:
-      lo = mid + 1
+    if samples[mid][0] <= t:
+      lo = mid
     else:
       hi = mid
-  idx = lo
-  cands = [idx]
-  if idx > 0:
-    cands.append(idx - 1)
-  best = min(cands, key=lambda i: abs(samples[i][0] - t))
-  return samples[best]
+  t0, v0 = samples[lo]
+  t1, v1 = samples[hi]
+  if t1 == t0:
+    return v0
+  a = (t - t0) / (t1 - t0)
+  return v0 + a * (v1 - v0)
 
 
 def analyze_segment(seg: Path, sample_dt: float = 0.5) -> Tuple[int, int, List[Tuple[float, float, float, float, float]]]:
@@ -45,9 +51,9 @@ def analyze_segment(seg: Path, sample_dt: float = 0.5) -> Tuple[int, int, List[T
   if not rlog.exists():
     return 0, 0, []
 
-  vego: List[Tuple[float, float]] = []
-  vts: List[Tuple[float, float]] = []
-  k0: List[Tuple[float, float]] = []
+  vego: List[Tuple[float, float]] = []    # (time, v_ego m/s)
+  vts: List[Tuple[float, float]] = []     # (time, v_vts m/s)
+  yaw: List[Tuple[float, float]] = []     # (time, |yaw_rate| rad/s), min over first 3 model points
 
   for m in LogReader(str(rlog)):
     t = m.logMonoTime / 1e9
@@ -60,12 +66,13 @@ def analyze_segment(seg: Path, sample_dt: float = 0.5) -> Tuple[int, int, List[T
       try:
         z = m.modelV2.orientationRate.z
         if z and len(z) > 0:
-          k = abs(float(z[0]))
-          k0.append((t, k))
+          # Use a conservative min across the first 3 points to reduce spikes
+          zmin = min(abs(float(x)) for x in z[:3])
+          yaw.append((t, zmin))
       except Exception:
         pass
 
-  if not vego or not vts or not k0:
+  if not vego or not vts or not yaw:
     return 0, 0, []
 
   t0 = vego[0][0]
@@ -74,23 +81,33 @@ def analyze_segment(seg: Path, sample_dt: float = 0.5) -> Tuple[int, int, List[T
   decel_events = 0
   early = 0
   examples: List[Tuple[float, float, float, float, float]] = []
+  # persistence: require >= 2 consecutive early flags (~1.0 s at 0.5 s dt)
+  early_streak = 0
   while t <= t1:
-    vn = nearest(vego, t)
-    vt = nearest(vts, t)
-    kk = nearest(k0, t)
-    if not (vn and vt and kk):
+    v_ego = _interp(vego, t)
+    v_vts = _interp(vts, t)
+    yaw_rt = _interp(yaw, t)
+    if v_ego is None or v_vts is None or yaw_rt is None:
       t += sample_dt
       continue
-    v_ego = vn[1]
-    v_vts = vt[1]
-    k = max(1e-8, kk[1])
+    # Convert yaw rate (rad/s) to curvature (1/m): k = yaw_rate / v
+    k = max(1e-8, yaw_rt / max(1.0, v_ego))
     v_vis = curvature_to_speed(k)
+    # decel event: VTSC below current speed
     if v_ego > 5.0 and v_vts < v_ego:
       decel_events += 1
-      if v_vts < 0.9 * v_vis:
-        early += 1
-        if len(examples) < 8:
-          examples.append((t, v_ego, v_vts, v_vis, k))
+      # early if below both relative and absolute margins vs vision physics
+      rel_ok = (v_vts <= 0.88 * v_vis)
+      abs_ok = ((v_vis - v_vts) >= 0.8)
+      is_early = rel_ok or abs_ok
+      if is_early:
+        early_streak += 1
+        if early_streak >= 2:
+          early += 1
+          if len(examples) < 8:
+            examples.append((t, v_ego, v_vts, v_vis, k))
+      else:
+        early_streak = 0
     t += sample_dt
 
   return decel_events, early, examples
@@ -118,4 +135,3 @@ def main():
 
 if __name__ == '__main__':
   main()
-

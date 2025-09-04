@@ -1527,9 +1527,16 @@ class VisionTurnController:
       _conf_bad = float(getattr(self._occlusion_state, 'bad_threshold', 0.65))
       _conf_good = float(getattr(self._occlusion_state, 'good_threshold', 0.70))
       _vis_good = bool(getattr(self._occlusion_state, 'vision_good', True)) and (_conf_s >= _conf_good)
+      # Track slope to suppress pretrigger while confidence is rising from borderline
+      try:
+        _conf_prev = float(getattr(self._occlusion_state, 'prev_smoothed_conf', _conf_s))
+      except Exception:
+        _conf_prev = _conf_s
+      setattr(self._occlusion_state, 'prev_smoothed_conf', _conf_s)
+      conf_rising = (_conf_s >= _conf_prev + 0.005)  # ~0.5% absolute rise per update
     except Exception:
-      _conf_s, _conf_bad, _conf_good, _vis_good = 1.0, 0.65, 0.70, True
-    pretrigger = (ttfov_s <= pretrigger_time) and (abs(kappa_gate) >= k_min) and (_conf_s < _conf_bad)
+      _conf_s, _conf_bad, _conf_good, _vis_good, conf_rising = 1.0, 0.65, 0.70, True, False
+    pretrigger = (ttfov_s <= pretrigger_time) and (abs(kappa_gate) >= k_min) and (_conf_s < _conf_bad) and (not conf_rising)
     # Hysteretic onset/clear
     onset_geom = (abs(kappa_gate) >= k_min) and (self._dbg_psi_vis >= self._dbg_psi_thresh)
     onset = (onset_geom or pretrigger) and (not _vis_good)
@@ -1664,7 +1671,18 @@ class VisionTurnController:
       slack_s = 0.10
       v_max_mps = 36.0
       window_s = 0.8
-      no_raise_win_s = 0.7
+      # curvature-aware onset window with early release when confidence rises
+      try:
+        k_for_win = abs(float(kappa_gate))
+      except Exception:
+        k_for_win = 0.0
+      try:
+        k0_mid = 0.019
+        k_slope = 0.005
+        sig = 1.0 / (1.0 + math.exp(-(k_for_win - k0_mid) / max(1e-6, k_slope)))
+        no_raise_win_s = 0.35 + 0.45 * sig  # 0.35..0.80 s
+      except Exception:
+        no_raise_win_s = 0.7
       # Relax TTFOV gating inside onset window to ensure assist engages
       onset_gate = (self._fov_occluded and (psi_margin_deg >= 5.0) and (self._v_ego <= v_max_mps) and (self._occlusion_onset_timer_s <= window_s))
       if onset_gate:
@@ -1686,8 +1704,17 @@ class VisionTurnController:
           self._dbg_cap_source = 'occluded_onset_kcons'
         # Onset minimum decel assist (comfort-bounded)
         accel_cmd = min(accel_cmd, -0.30)
-        # Early no-raise activation window
-        self._onset_no_raise_active = bool(self._no_raise_timer_s <= no_raise_win_s)
+        # Early no-raise activation window, shortened if confidence is rising
+        try:
+          _conf_s2 = float(getattr(self._occlusion_state, 'smoothed_confidence', 1.0))
+          _conf_prev2 = float(getattr(self._occlusion_state, 'prev_smoothed_conf', _conf_s2))
+          conf_slope = (_conf_s2 - _conf_prev2)
+          rising_conf = (_conf_s2 >= float(getattr(self._occlusion_state, 'bad_threshold', 0.65))) and (conf_slope > 0.02)
+        except Exception:
+          rising_conf = False
+        dyn_win_s = 0.35 if rising_conf else no_raise_win_s
+        decel_in_effect = (accel_cmd < -0.05)
+        self._onset_no_raise_active = (self._no_raise_timer_s <= dyn_win_s) and decel_in_effect
       else:
         self._onset_no_raise_active = False
 
