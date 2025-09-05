@@ -58,7 +58,9 @@ Please analyze the provided artifacts and:
 - This analysis is offline; you cannot run code in GitHub. Use the TSV, logs, and rlog.zst for reference.
 - Offroad toggles for VTSC debug were enabled during collection.
 - Safety requirements apply: changes must preserve safe decel behavior and avoid high‑risk fail‑open scenarios.
- - Branch: `chubbs-merge` at commit `aa3b5d957a3c`.
+- Branch: `chubbs-merge` at commit `aa3b5d957a3c`.
+ - Branch: `chubbs-merge` at commit `c871cbe69`.
+ - Environment snapshot: https://github.com/chriscarlo/chauffeur/blob/chubbs-merge/docs/chauffeur/vtsc/debug/debug_2025-09-05/ENVIRONMENT.md
 
 ## Preferred Output
 - A written analysis with concrete findings tied to fields in the TSV/flagged logs.

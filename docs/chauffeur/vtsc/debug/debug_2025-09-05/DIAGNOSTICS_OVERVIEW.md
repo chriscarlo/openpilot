@@ -45,3 +45,4 @@ overslow_by_reason_top: fov_exit=925, pretrigger=176, short_vis=11
 - Per-segment metrics TSV: debug/debug_2025-09-05/window_segment_metrics.tsv
 - VTSC vs Vision scan: debug/debug_2025-09-05/analyze_vtsc_vs_vision.txt
 - TSV Field Reference: cases/overslow_2025-09-05/DATA_DICTIONARY.md
+- Environment snapshot: debug/debug_2025-09-05/ENVIRONMENT.md
