@@ -101,6 +101,15 @@ def update_vtsc_params(ctrl, *, force: bool = False) -> None:
     ctrl._psi_margin_rad = getf("VisionTurnSpeedControlPsiMarginRad", getattr(ctrl, "_psi_margin_rad", 0.087), 0.0, 0.5)
   except Exception:
     ctrl._psi_margin_rad = getattr(ctrl, "_psi_margin_rad", 0.087)
+  # Occlusion arbitration PSI gate (separate from FOV psi)
+  try:
+    ctrl._psi_thresh_rad = float(getf("VTSC.PsiThreshRad", getattr(ctrl, "_psi_thresh_rad", 0.020)))
+  except Exception:
+    ctrl._psi_thresh_rad = getattr(ctrl, "_psi_thresh_rad", 0.020)
+  try:
+    ctrl._psi_hyst_rad = float(getf("VTSC.PsiHystRad", getattr(ctrl, "_psi_hyst_rad", 0.005)))
+  except Exception:
+    ctrl._psi_hyst_rad = getattr(ctrl, "_psi_hyst_rad", 0.005)
   # Additional FOV gate tunables
   ctrl._fov_k_min = getf("VisionTurnSpeedControlFOVKMin", getattr(ctrl, "_fov_k_min", 2e-4), 1e-6, 1e-2)
   ctrl._fov_k_freeway = getf("VisionTurnSpeedControlFOVKFreeway", getattr(ctrl, "_fov_k_freeway", 1e-5), 1e-7, 1e-3)
@@ -396,5 +405,23 @@ def update_vtsc_params(ctrl, *, force: bool = False) -> None:
     getattr(ctrl, "_dropout_grace_s", 0.40),
     0.0, 2.0,
   )
+
+  # Double-cap guard and fov_exit relax tunables
+  try:
+    ctrl._double_cap_eps_mps = float(getf("VTSC.DoubleCapEpsMps", getattr(ctrl, "_double_cap_eps_mps", 0.30)))
+  except Exception:
+    ctrl._double_cap_eps_mps = getattr(ctrl, "_double_cap_eps_mps", 0.30)
+  try:
+    ctrl._occl_conf_floor = float(getf("VTSC.OcclConfFloor", getattr(ctrl, "_occl_conf_floor", 0.05)))
+  except Exception:
+    ctrl._occl_conf_floor = getattr(ctrl, "_occl_conf_floor", 0.05)
+  try:
+    ctrl._fov_exit_relax_s = float(getf("VTSC.FovExitRelaxS", getattr(ctrl, "_fov_exit_relax_s", 0.60)))
+  except Exception:
+    ctrl._fov_exit_relax_s = getattr(ctrl, "_fov_exit_relax_s", 0.60)
+  try:
+    ctrl._occl_vmin_nudge_mps = float(getf("VTSC.OcclVminNudgeMps", getattr(ctrl, "_occl_vmin_nudge_mps", 0.50)))
+  except Exception:
+    ctrl._occl_vmin_nudge_mps = getattr(ctrl, "_occl_vmin_nudge_mps", 0.50)
 
   ctrl._last_params_update = float(tm)

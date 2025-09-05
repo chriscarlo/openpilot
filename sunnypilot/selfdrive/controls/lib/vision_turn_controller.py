@@ -39,6 +39,17 @@ HIGHWAY_MIN_MPS = float(HIGHWAY_MIN_MPH * CV.MPH_TO_MS)
 # Disable the "no-raise" onset window entirely
 NO_RAISE_WINDOW_S = 0.0
 
+# ===== PSI / Occlusion arbitration tunables (defaults; overridden via Params) =====
+# PSI gate to qualify occlusion influence during FOV occlusion
+PSI_THRESH_RAD = 0.020     # default gate open threshold (radians)
+PSI_HYST_RAD  = 0.005      # hysteresis
+# Double-cap guard: if pre-cap target already ≤ occl vmin + eps, don't re-apply occlusion cap
+DOUBLE_CAP_EPS_MPS = 0.30
+# fov_exit recovery when confidence is near-zero and psi gate is closed
+OCCL_CONF_FLOOR    = 0.05
+FOV_EXIT_RELAX_S   = 0.60
+OCCL_VMIN_NUDGE_MPS = 0.50
+
 # ===== Map lookahead helpers =====
 EARTH_R_M = 6371007.2
 
@@ -796,6 +807,10 @@ class VisionTurnController:
     self._dbg_overshoot_left = 0
     self._dbg_units_ok = True
     self._dbg_gamma_eff = 0.0
+    # Occlusion arbitration breadcrumbs (defaults)
+    self._dbg_psi_est = 0.0
+    self._dbg_consider_occl = False
+    self._dbg_double_cap_guard = False
     # Onset tracking for occlusion window and early no-raise
     self._occlusion_prev = False
     self._occlusion_onset_timer_s = 0.0
@@ -989,6 +1004,18 @@ class VisionTurnController:
         'onset_bias_active': bool(getattr(self, '_dbg_onset_bias_active', False)),
         'onset_gate_reason': getattr(self, '_dbg_onset_gate_reason', None),
         'gamma_eff': gamma_eff, 'units_ok': units_ok,
+        # Occlusion arbitration breadcrumbs
+        'psi_gate_est': float(getattr(self, '_dbg_psi_est', 0.0)),
+        'psi_gate_thresh': float(getattr(self, '_psi_thresh_rad', PSI_THRESH_RAD)),
+        'consider_occl_gate': bool(getattr(self, '_dbg_consider_occl', False)),
+        'double_cap_guard': bool(getattr(self, '_dbg_double_cap_guard', False)),
+        'pre_cap_target': float(getattr(self, '_pre_cap_target_speed', 0.0)),
+        # Duplicated with _dbg_* names for watcher compatibility
+        '_dbg_psi_est': float(getattr(self, '_dbg_psi_est', 0.0)),
+        '_dbg_psi_thresh': float(getattr(self, '_psi_thresh_rad', PSI_THRESH_RAD)),
+        '_dbg_consider_occl': bool(getattr(self, '_dbg_consider_occl', False)),
+        '_dbg_double_cap_guard': bool(getattr(self, '_dbg_double_cap_guard', False)),
+        '_dbg_pre_cap_target': float(getattr(self, '_pre_cap_target_speed', 0.0)),
       }
     except Exception:
       return {}
@@ -2087,9 +2114,76 @@ class VisionTurnController:
     self._dbg_cap_visible_vmin = cap_visible_vmin
     self._dbg_cap_occl_vmin = cap_occl_vmin
     self._dbg_cap_map_vmin = cap_map_vmin
-    # Build candidate list; drop occlusion unless FOV-gated occlusion is active
+    # ===== Arbitration: PSI-gated occlusion, optional relax, and double-cap guard =====
     caps = [("visible", cap_visible_vmin)]
-    if (self._fov_occluded and not self._freeway_failopen_active):
+
+    consider_occl = bool(getattr(self, "_fov_occluded", False)) and not bool(getattr(self, "_freeway_failopen_active", False))
+    psi_gate_open = True
+    psi_est = 0.0
+    if consider_occl:
+      # Estimate visible-horizon heading change (psi) from local curvature and visible horizon
+      try:
+        v_ego = float(max(0.0, self._v_ego))
+      except Exception:
+        v_ego = 0.0
+      try:
+        s_vis = float(max(0.0, getattr(self._occlusion_state, "vis_horizon_s", 1.2)) * v_ego)
+      except Exception:
+        s_vis = 0.0
+      try:
+        kappa = float(max(0.0, abs(getattr(self, "_filtered_curvature", 0.0))))
+      except Exception:
+        kappa = 0.0
+      psi_est = kappa * s_vis
+      try:
+        psi_th = float(getattr(self, "_psi_thresh_rad", PSI_THRESH_RAD))
+      except Exception:
+        psi_th = float(PSI_THRESH_RAD)
+      try:
+        psi_hyst = float(getattr(self, "_psi_hyst_rad", PSI_HYST_RAD))
+      except Exception:
+        psi_hyst = float(PSI_HYST_RAD)
+      # Simple hysteresis on the gate
+      psi_gate_open = psi_est >= (psi_th - psi_hyst)
+      consider_occl = consider_occl and psi_gate_open
+      # Export debug breadcrumbs
+      try:
+        self._dbg_psi_est = float(psi_est)
+        self._dbg_psi_gate_thresh = float(psi_th)
+      except Exception:
+        pass
+
+    if consider_occl:
+      # If confidence is near-zero and we've been in fov_exit for a while, relax occlusion vmin upward (bounded by visible)
+      try:
+        conf = float(getattr(self._occlusion_state, "smoothed_confidence", 1.0))
+        occ_start = float(getattr(self._occlusion_state, "occlusion_start_time", 0.0))
+        now_t = time.time()
+        if (conf <= float(getattr(self, "_occl_conf_floor", OCCL_CONF_FLOOR))) and (now_t - occ_start >= float(getattr(self, "_fov_exit_relax_s", FOV_EXIT_RELAX_S))):
+          cap_occl_vmin = min(cap_visible_vmin, cap_occl_vmin + float(getattr(self, "_occl_vmin_nudge_mps", OCCL_VMIN_NUDGE_MPS)))
+      except Exception:
+        pass
+      # Double-cap guard: skip occlusion if pre-cap target already ≤ occlusion vmin + eps
+      try:
+        raw_pre = float(getattr(self, "_pre_cap_target_speed", getattr(self, "_prev_target_speed", 0.0)))
+      except Exception:
+        raw_pre = float(getattr(self, "_prev_target_speed", 0.0))
+      try:
+        eps = float(getattr(self, "_double_cap_eps_mps", DOUBLE_CAP_EPS_MPS))
+      except Exception:
+        eps = float(DOUBLE_CAP_EPS_MPS)
+      if raw_pre <= cap_occl_vmin + eps:
+        try:
+          self._dbg_double_cap_guard = True
+        except Exception:
+          pass
+        consider_occl = False
+
+    try:
+      self._dbg_consider_occl = bool(consider_occl)
+    except Exception:
+      pass
+    if consider_occl:
       caps.append(("occlusion", cap_occl_vmin))
     if bool(getattr(self, '_map_tail_active', False)) and cap_map_vmin > 0.0:
       caps.append(("map", cap_map_vmin))
@@ -2130,6 +2224,11 @@ class VisionTurnController:
     # Calculate safe speed using curvature_to_speed (physics-based)
     physics_safe_speed = curvature_to_speed(self._filtered_curvature)
     base_target = min(self._v_cruise_setpoint, physics_safe_speed)
+    # Expose a "pre-cap" baseline so central arbitration can detect double-capping
+    try:
+      self._pre_cap_target_speed = float(base_target)
+    except Exception:
+      self._pre_cap_target_speed = float(base_target)
 
     # CONSENSUS FIX: Physics-based boost using lateral acceleration, not cruise setpoint
     # Calculate actual lateral acceleration from current curvature
