@@ -1,0 +1,6 @@
+window: 2025-09-05_002550UTC -> 2025-09-05_012550UTC
+events_matched: 3601
+flagged_events: 1386
+psi_below_thresh: 1214
+pretrigger_with_high_conf: 108
+double_occl_cap_suspect: 73

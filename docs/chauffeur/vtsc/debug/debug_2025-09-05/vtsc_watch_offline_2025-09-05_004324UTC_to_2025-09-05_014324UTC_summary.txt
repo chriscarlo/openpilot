@@ -1,0 +1,14 @@
+window: 2025-09-05_004324UTC -> 2025-09-05_014324UTC
+files: 16
+events_matched: 1612
+flagged_events: 190
+pretrigger_with_high_conf: 103
+double_occl_cap_suspect: 53
+psi_below_thresh: 37
+
+[derived_overslow_metrics]
+threshold: v - final >= 2.0 m/s
+events: 1406
+overslow_total: 1112
+overslow_by_cap: visible=819 occlusion=293 other=0
+overslow_by_reason_top: fov_exit=925, pretrigger=176, short_vis=11
