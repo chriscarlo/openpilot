@@ -1,0 +1,18 @@
+{
+  "aggregate": {
+    "count_logs": 0,
+    "psi_fov_deg": 28.0,
+    "psi_margin_deg": 5.0,
+    "n_on": 2,
+    "n_off": 12,
+    "freeway_occluded_after_pct_med": null,
+    "crawl_after_pct_med": null,
+    "hidden_recall_after_pct_med": null,
+    "logs_worse_than_spec": {
+      "freeway_occluded_after_pct>2": [],
+      "crawl_after_pct>1": [],
+      "hidden_recall_after_pct<90": []
+    }
+  },
+  "logs": []
+}

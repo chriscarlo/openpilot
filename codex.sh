@@ -1,5 +1,5 @@
 #!/bin/bash
-# Codex CLI Launch Script for AGNOS - Credential Authorization Only
+# Codex CLI Launch Script for AGNOS (+ tmux persistent session helper)
 # Designed for comma three (C3/C3X) hardware running AGNOS
 
 set -e  # Exit on error
@@ -10,6 +10,10 @@ NODE_VERSION="v22.18.0"
 NVM_DIR="/data/persist/comma/nvm"
 PERSIST_CODEX_DIR="/data/.codex"  # Persistent storage across reboots
 HOME_CODEX_DIR="$HOME/.codex"
+CODEX_TMUX_SESSION_NAME="${CODEX_TMUX_SESSION_NAME:-codex}"
+CODEX_TMUX_SENTINEL="${CODEX_TMUX_SENTINEL:-}"
+CODEX_TMUX_CONF_LINK="$HOME/.tmux.conf"
+CODEX_TMUX_CONF_PERSIST="$PERSIST_CODEX_DIR/tmux.conf"
 
 # Colors for output
 RED='\033[0;31m'
@@ -32,6 +36,136 @@ echo "════════════════════════�
 echo "          Codex CLI for AGNOS - Credential Auth Only"
 echo "═══════════════════════════════════════════════════════════════════"
 echo ""
+
+# --- tmux helpers (persistent user session across SSH disconnects) ---
+
+ensure_tmux_available() {
+    if command -v tmux >/dev/null 2>&1; then
+        return 0
+    fi
+    print_warn "tmux is not installed; persistence on disconnect won't work"
+    echo ""
+    echo "To install tmux on Ubuntu/AGNOS-based systems:"
+    echo "  sudo apt-get update && sudo apt-get install -y tmux"
+    echo ""
+    return 1
+}
+
+setup_tmux_config() {
+    # Ensure persistent dir and home symlink for codex (reused below)
+    [ -d "$PERSIST_CODEX_DIR" ] || mkdir -p "$PERSIST_CODEX_DIR"
+
+    # Create a sane default tmux config in persistent storage if missing
+    if [ ! -f "$CODEX_TMUX_CONF_PERSIST" ]; then
+        cat > "$CODEX_TMUX_CONF_PERSIST" <<'TMUXCONF'
+# Minimal, readable defaults for device work
+set -g mouse on
+set -g history-limit 500000
+set -g assume-paste-time 10
+set -g focus-events on
+setw -g remain-on-exit on
+# Keep terminal colors predictable
+set -g default-terminal "screen-256color"
+set -as terminal-overrides ',xterm-256color:RGB'
+TMUXCONF
+    fi
+
+    # Ensure smooth scroll/copy-mode helpers exist (idempotent upsert)
+    local begin_marker="# BEGIN CODEX_SCROLL_HELPERS"
+    local end_marker="# END CODEX_SCROLL_HELPERS"
+    if grep -qF "$begin_marker" "$CODEX_TMUX_CONF_PERSIST" 2>/dev/null; then
+        # Strip old block
+        awk -v bgn="$begin_marker" -v end="$end_marker" '
+          BEGIN{skip=0}
+          $0==bgn{skip=1; next}
+          $0==end{skip=0; next}
+          skip==0{print $0}
+        ' "$CODEX_TMUX_CONF_PERSIST" > "$CODEX_TMUX_CONF_PERSIST.tmp" && mv "$CODEX_TMUX_CONF_PERSIST.tmp" "$CODEX_TMUX_CONF_PERSIST"
+    fi
+    cat >> "$CODEX_TMUX_CONF_PERSIST" <<'TMUXHELP'
+# BEGIN CODEX_SCROLL_HELPERS
+# Scrollwheel auto-enters copy-mode; PageUp/PageDown work intuitively
+setw -g mode-keys vi
+set -g mouse on
+bind -T root WheelUpPane if -F '#{pane_in_mode}' 'send-keys -M' 'copy-mode -e; send-keys -M'
+bind -T root WheelDownPane if -F '#{pane_in_mode}' 'send-keys -M' 'send-keys -M'
+bind -T copy-mode-vi WheelUpPane send -N 1 -X scroll-up
+bind -T copy-mode-vi WheelDownPane send -N 1 -X scroll-down
+bind -T copy-mode WheelUpPane send -N 1 -X scroll-up
+bind -T copy-mode WheelDownPane send -N 1 -X scroll-down
+bind -n S-PageUp copy-mode -e
+bind -T copy-mode-vi S-PageUp send -X page-up
+bind -T copy-mode-vi S-PageDown send -X page-down
+bind -T copy-mode S-PageUp send -X page-up
+bind -T copy-mode S-PageDown send -X page-down
+# Keep a large scrollback
+set -g history-limit 500000
+
+# Optional: to use your terminal's own scrollback instead of tmux's copy-mode,
+# launch codex with CODEX_TMUX_DISABLE_ALTERNATE_SCREEN=1 (see script runtime).
+# This disables the alternate screen so your terminal scrollbar works in tmux,
+# but full-screen apps like less/vim won't use a separate screen.
+# END CODEX_SCROLL_HELPERS
+TMUXHELP
+
+    # Home is ephemeral; point ~/.tmux.conf at persistent copy every run
+    if [ -L "$CODEX_TMUX_CONF_LINK" ] || [ -e "$CODEX_TMUX_CONF_LINK" ]; then
+        rm -f "$CODEX_TMUX_CONF_LINK" || true
+    fi
+    ln -s "$CODEX_TMUX_CONF_PERSIST" "$CODEX_TMUX_CONF_LINK" 2>/dev/null || true
+}
+
+tmux_start_or_attach() {
+    # Skip if already inside tmux or sentinel active
+    if [ -n "$TMUX" ] || [ -n "$CODEX_TMUX_SENTINEL" ]; then
+        return 0
+    fi
+
+    # Only attach/create when running interactively (TTY present)
+    if [ ! -t 0 ] || [ ! -t 1 ]; then
+        return 0
+    fi
+
+    # Ensure tmux exists; if not, just warn and continue without tmux
+    if ! ensure_tmux_available; then
+        return 0
+    fi
+
+    # Create persistent config/symlink quietly
+    setup_tmux_config || true
+
+    # Helper to enforce runtime tmux options (applies even on existing servers)
+    apply_tmux_runtime_options() {
+        local hist_limit="${CODEX_TMUX_HISTORY_LIMIT:-500000}"
+        tmux set -g mouse on 2>/dev/null || true
+        tmux set -g focus-events on 2>/dev/null || true
+        tmux setw -g remain-on-exit on 2>/dev/null || true
+        tmux set -g history-limit "$hist_limit" 2>/dev/null || true
+        tmux set -g default-terminal "screen-256color" 2>/dev/null || true
+        tmux set -as terminal-overrides ',xterm-256color:RGB' 2>/dev/null || true
+        if [ "${CODEX_TMUX_DISABLE_ALTERNATE_SCREEN:-0}" = "1" ]; then
+          tmux set -ga terminal-overrides ',*:smcup@:rmcup@' 2>/dev/null || true
+        fi
+        # Also (re)source user config in case it changed
+        tmux source-file "$CODEX_TMUX_CONF_LINK" 2>/dev/null || true
+    }
+
+    # Attach if session exists; create otherwise and run this script inside it
+    if tmux has-session -t "$CODEX_TMUX_SESSION_NAME" 2>/dev/null; then
+        print_info "Attaching to tmux session '$CODEX_TMUX_SESSION_NAME'"
+        apply_tmux_runtime_options || true
+        exec tmux attach -t "$CODEX_TMUX_SESSION_NAME"
+    else
+        print_info "Creating tmux session '$CODEX_TMUX_SESSION_NAME' and attaching"
+        # Run this script inside the new session, marked with sentinel to avoid recursion
+        # Pass through original arguments.
+        tmux -f "$CODEX_TMUX_CONF_LINK" new-session -d -s "$CODEX_TMUX_SESSION_NAME" \
+            env CODEX_TMUX_SENTINEL=1 "$0" "$@"
+        # Ensure the brand-new server has desired options as well
+        apply_tmux_runtime_options || true
+        exec tmux attach -t "$CODEX_TMUX_SESSION_NAME"
+    fi
+}
 
 # Check SSH port forwarding for OAuth callback
 check_ssh_forwarding() {
@@ -102,6 +236,55 @@ setup_node_env() {
     # Verify Node.js
     NODE_ACTUAL=$(node --version 2>/dev/null || echo "unknown")
     print_info "Node.js version: $NODE_ACTUAL"
+}
+
+# Install auto-attach-on-SSH snippet into ~/.bashrc (ephemeral per boot)
+install_ssh_auto_attach() {
+    local bashrc="$HOME/.bashrc"
+    local begin_marker="# BEGIN CODEX_TMUX_AUTO_ATTACH"
+    local end_marker="# END CODEX_TMUX_AUTO_ATTACH"
+
+    # Make sure file exists
+    if [ ! -f "$bashrc" ]; then
+        touch "$bashrc"
+    fi
+
+    # Build snippet
+    local snippet
+    read -r -d '' snippet <<'SNIP'
+# BEGIN CODEX_TMUX_AUTO_ATTACH
+# Auto-attach/create a tmux session on SSH interactive logins
+if [ -n "$SSH_TTY" ] && [ -z "$TMUX" ] && [ -t 0 ] && [ -t 1 ]; then
+  # Allow disabling with a persistent flag file
+  if [ -f /persist/ssh/disable_tmux_auto_attach ] || [ -f /persist/disable_tmux_auto_attach ]; then
+    : # disabled by flag
+  elif command -v tmux >/dev/null 2>&1; then
+    sess="${CODEX_TMUX_SESSION_NAME:-codex}"
+    # Use our config file when starting the server the first time
+    if tmux has-session -t "$sess" 2>/dev/null; then
+      exec tmux attach -t "$sess"
+    else
+      exec tmux -f "$HOME/.tmux.conf" new -As "$sess"
+    fi
+  fi
+fi
+# END CODEX_TMUX_AUTO_ATTACH
+SNIP
+
+    # Remove any existing block, then append fresh block
+    if grep -q -F "$begin_marker" "$bashrc" >/dev/null 2>&1; then
+        # Use awk to strip old block safely
+        awk -v bgn="$begin_marker" -v end="$end_marker" '
+          BEGIN{skip=0}
+          $0==bgn{skip=1; next}
+          $0==end{skip=0; next}
+          skip==0{print $0}
+        ' "$bashrc" > "$bashrc.tmp" && mv "$bashrc.tmp" "$bashrc"
+    fi
+    {
+      echo "";
+      echo "$snippet";
+    } >> "$bashrc"
 }
 
 # Setup persistent credential storage (handles ephemeral home directory)
@@ -217,10 +400,17 @@ check_auth_status() {
 
 # Main execution
 main() {
+    # If not already in tmux, create/attach persistent session first.
+    # This will exec tmux and not return in normal usage; when a new
+    # session is created, this script is re-run inside it with sentinel set.
+    tmux_start_or_attach "$@"
+
     # Setup environment
     setup_node_env
     setup_credential_storage
     verify_codex_binary
+    # Install auto-attach on SSH for future logins this boot
+    install_ssh_auto_attach || true
     
     # Check SSH forwarding
     check_ssh_forwarding
@@ -243,16 +433,36 @@ main() {
         echo "  Tip: Use 'codex --help' for all options"
         echo "       Use 'codex logout' to remove stored credentials"
         echo ""
-        # Launch with dangerous bypass flag for YOLO mode + GPT-5 high reasoning
-        exec codex --dangerously-bypass-approvals-and-sandbox \
-                   --model gpt-5 \
-                   -c 'model_reasoning_effort="high"'
+        if [ -n "$TMUX" ] || [ -n "$CODEX_TMUX_SENTINEL" ]; then
+            # Inside tmux: run Codex, then drop to interactive shell so the window stays useful
+            codex --dangerously-bypass-approvals-and-sandbox \
+                  --model gpt-5 \
+                  -c 'model_reasoning_effort="high"'
+            echo ""
+            print_info "Codex session ended. Dropping to interactive shell inside tmux."
+            exec bash -l
+        else
+            # Outside tmux: replace process
+            exec codex --dangerously-bypass-approvals-and-sandbox \
+                       --model gpt-5 \
+                       -c 'model_reasoning_effort="high"'
+        fi
     else
         # If user provided arguments, pass them through with dangerous flag + GPT-5 high
-        exec codex --dangerously-bypass-approvals-and-sandbox \
-                   --model gpt-5 \
-                   -c 'model_reasoning_effort="high"' \
-                   "$@"
+        if [ -n "$TMUX" ] || [ -n "$CODEX_TMUX_SENTINEL" ]; then
+            codex --dangerously-bypass-approvals-and-sandbox \
+                  --model gpt-5 \
+                  -c 'model_reasoning_effort="high"' \
+                  "$@"
+            echo ""
+            print_info "Command finished. Dropping to interactive shell inside tmux."
+            exec bash -l
+        else
+            exec codex --dangerously-bypass-approvals-and-sandbox \
+                       --model gpt-5 \
+                       -c 'model_reasoning_effort="high"' \
+                       "$@"
+        fi
     fi
 }
 

@@ -1,0 +1,22 @@
+VTSC Snapshot Summary
+- Points: 22800  Duration: 0.0 s  Avg v: 16.13 m/s
+- Vision states: {'FULL': 8811, 'PARTIAL': 2927, 'SEVERE': 11062}
+
+LKG + Vision Floor Saves
+- Occlusion points: 9855  floor_saves: 2  ratio: 0.02%
+- Median saved delta (v_lkg - v_occ): 0.10 m/s
+- Examples (ts, v_occ, v_lkg, cap_occ, final):
+  976.60	5.28	5.38	5.28	5.39
+  976.71	5.28	5.38	5.28	5.34
+
+Flags
+- straight_no_crawl_fail: 0/448  (0.00%)  -- final << v_base while vision FULL on straight
+- highway_bypass_fail: 0/1967  (0.00%)  -- occlusion depressing target at ≥~65 mph
+- lead_bypass_fail: 0/0  (0.00%)  -- no positive accel with lead≤3s under occlusion
+- map_cap_misuse: 0/0  (0.00%)  -- map cap active with poor coverage or overshoot vs base
+- reacq_nudge_fail: 48/58  (82.76%)  -- no accel ≥0.18 m/s² within ~0.65s after FULL
+- jerk_or_comfort_violations: 6314/22800  (27.69%)  -- jerk bounds or comfort decel violations
+
+Recommendations
+- Reacquisition nudge flagged: verify 'a_cmd' >= 0.18 within 0.65s after regaining FULL vision.
+- Comfort bounds flagged: verify jerk limits and comfort decel caps under occlusion.

@@ -1,0 +1,61 @@
+{"rlog": "/data/media/0/realdata/00000087--4057e9bf8a--10/rlog.zst", "freeway_occluded_after_pct": 0.0, "crawl_after_pct": 100.0, "hidden_recall_after_pct": 96.33}
+{"rlog": "/data/media/0/realdata/00000087--4057e9bf8a--11/rlog.zst", "freeway_occluded_after_pct": 0.0, "crawl_after_pct": 100.0, "hidden_recall_after_pct": 95.918}
+{"rlog": "/data/media/0/realdata/00000087--4057e9bf8a--12/rlog.zst", "freeway_occluded_after_pct": 0.0, "crawl_after_pct": 100.0, "hidden_recall_after_pct": 96.429}
+{"rlog": "/data/media/0/realdata/00000087--4057e9bf8a--13/rlog.zst", "freeway_occluded_after_pct": 0.0, "crawl_after_pct": 100.0, "hidden_recall_after_pct": 96.296}
+{"rlog": "/data/media/0/realdata/00000087--4057e9bf8a--14/rlog.zst", "freeway_occluded_after_pct": 0.0, "crawl_after_pct": 100.0, "hidden_recall_after_pct": 87.097}
+{"rlog": "/data/media/0/realdata/00000087--4057e9bf8a--15/rlog.zst", "freeway_occluded_after_pct": 0.0, "crawl_after_pct": 100.0, "hidden_recall_after_pct": 0.0}
+{"rlog": "/data/media/0/realdata/00000087--4057e9bf8a--16/rlog.zst", "freeway_occluded_after_pct": 0.0, "crawl_after_pct": 100.0, "hidden_recall_after_pct": 0.0}
+{"rlog": "/data/media/0/realdata/00000087--4057e9bf8a--17/rlog.zst", "freeway_occluded_after_pct": 0.0, "crawl_after_pct": 100.0, "hidden_recall_after_pct": 0.0}
+{"rlog": "/data/media/0/realdata/00000087--4057e9bf8a--18/rlog.zst", "freeway_occluded_after_pct": 0.0, "crawl_after_pct": 100.0, "hidden_recall_after_pct": 0.0}
+{"rlog": "/data/media/0/realdata/00000087--4057e9bf8a--19/rlog.zst", "freeway_occluded_after_pct": 0.0, "crawl_after_pct": 100.0, "hidden_recall_after_pct": 0.0}
+{"rlog": "/data/media/0/realdata/00000087--4057e9bf8a--20/rlog.zst", "freeway_occluded_after_pct": 0.0, "crawl_after_pct": 100.0, "hidden_recall_after_pct": 0.0}
+{"rlog": "/data/media/0/realdata/00000087--4057e9bf8a--21/rlog.zst", "freeway_occluded_after_pct": 0.0, "crawl_after_pct": 100.0, "hidden_recall_after_pct": 0.0}
+{"rlog": "/data/media/0/realdata/00000087--4057e9bf8a--3/rlog.zst", "freeway_occluded_after_pct": 0.0, "crawl_after_pct": 100.0, "hidden_recall_after_pct": 93.846}
+{"rlog": "/data/media/0/realdata/00000087--4057e9bf8a--4/rlog.zst", "freeway_occluded_after_pct": 0.0, "crawl_after_pct": 100.0, "hidden_recall_after_pct": 96.46}
+{"rlog": "/data/media/0/realdata/00000087--4057e9bf8a--5/rlog.zst", "freeway_occluded_after_pct": 0.0, "crawl_after_pct": 100.0, "hidden_recall_after_pct": 94.366}
+{"rlog": "/data/media/0/realdata/00000087--4057e9bf8a--6/rlog.zst", "freeway_occluded_after_pct": 0.0, "crawl_after_pct": 100.0, "hidden_recall_after_pct": 95.181}
+{"rlog": "/data/media/0/realdata/00000087--4057e9bf8a--7/rlog.zst", "freeway_occluded_after_pct": 0.0, "crawl_after_pct": 100.0, "hidden_recall_after_pct": 89.655}
+{"rlog": "/data/media/0/realdata/00000087--4057e9bf8a--8/rlog.zst", "freeway_occluded_after_pct": 0.0, "crawl_after_pct": 100.0, "hidden_recall_after_pct": 95.181}
+{"rlog": "/data/media/0/realdata/00000087--4057e9bf8a--9/rlog.zst", "freeway_occluded_after_pct": 0.0, "crawl_after_pct": 100.0, "hidden_recall_after_pct": 95.652}
+
+=== VTSC OFF-ROAD SUMMARY ===
+{
+  "count_logs": 19,
+  "psi_fov_deg": 28.0,
+  "psi_margin_deg": 5.0,
+  "n_on": 5,
+  "n_off": 10,
+  "freeway_occluded_after_pct_med": 0.0,
+  "crawl_after_pct_med": 100.0,
+  "hidden_recall_after_pct_med": 95.4165,
+  "logs_worse_than_spec": {
+    "freeway_occluded_after_pct>2": [],
+    "crawl_after_pct>1": [
+      "/data/media/0/realdata/00000087--4057e9bf8a--10/rlog.zst",
+      "/data/media/0/realdata/00000087--4057e9bf8a--11/rlog.zst",
+      "/data/media/0/realdata/00000087--4057e9bf8a--12/rlog.zst",
+      "/data/media/0/realdata/00000087--4057e9bf8a--13/rlog.zst",
+      "/data/media/0/realdata/00000087--4057e9bf8a--14/rlog.zst",
+      "/data/media/0/realdata/00000087--4057e9bf8a--15/rlog.zst",
+      "/data/media/0/realdata/00000087--4057e9bf8a--16/rlog.zst",
+      "/data/media/0/realdata/00000087--4057e9bf8a--17/rlog.zst",
+      "/data/media/0/realdata/00000087--4057e9bf8a--18/rlog.zst",
+      "/data/media/0/realdata/00000087--4057e9bf8a--19/rlog.zst",
+      "/data/media/0/realdata/00000087--4057e9bf8a--20/rlog.zst",
+      "/data/media/0/realdata/00000087--4057e9bf8a--21/rlog.zst",
+      "/data/media/0/realdata/00000087--4057e9bf8a--3/rlog.zst",
+      "/data/media/0/realdata/00000087--4057e9bf8a--4/rlog.zst",
+      "/data/media/0/realdata/00000087--4057e9bf8a--5/rlog.zst",
+      "/data/media/0/realdata/00000087--4057e9bf8a--6/rlog.zst",
+      "/data/media/0/realdata/00000087--4057e9bf8a--7/rlog.zst",
+      "/data/media/0/realdata/00000087--4057e9bf8a--8/rlog.zst",
+      "/data/media/0/realdata/00000087--4057e9bf8a--9/rlog.zst"
+    ],
+    "hidden_recall_after_pct<90": [
+      "/data/media/0/realdata/00000087--4057e9bf8a--14/rlog.zst",
+      "/data/media/0/realdata/00000087--4057e9bf8a--7/rlog.zst"
+    ]
+  }
+}
+
+Artifacts written to: docs/chauffeur/vtsc/offroad/reports/vtsc_offroad_20250905_144906

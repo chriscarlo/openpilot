@@ -78,15 +78,20 @@ def occlusion_gate_fallback(kappa_vis: float, s_visible_m: float, path_conf: flo
   return occluded, state, (reason if reason != "none" else ("fov_exit" if onset else "freeway" if clear else "none")), dbg
 
 
-def gated(ka, s, conf, psi_fov_rad, psi_margin_rad, state, n_on, n_off):
-  if HAVE_VTSC_GATE:
+def gated(ka, s, conf, psi_fov_rad, psi_margin_rad, state, n_on, n_off, force_fallback=False):
+  """Run occlusion gating. Favor fallback to honor n_on/n_off unless explicitly forced.
+
+  The static VisionTurnController.occlusion_gate() uses hardcoded hysteresis (N_on=5, N_off=10),
+  which may not reflect on-road params. To evaluate tuned hysteresis, the fallback implements
+  the same logic with adjustable n_on/n_off. Set force_fallback=True to ensure this path.
+  """
+  if HAVE_VTSC_GATE and not force_fallback:
     try:
       return VisionTurnController.occlusion_gate(ka, s, conf, psi_fov_rad, psi_margin_rad,
                                                  state=state,
                                                  k_freeway=1e-5, k_min=2e-4, s_long=120.0)
-    except TypeError:
-      pass
     except Exception:
+      # Fall back on any error
       pass
   return occlusion_gate_fallback(ka, s, conf, psi_fov_rad, psi_margin_rad, state=state, n_on=n_on, n_off=n_off)
 
@@ -148,7 +153,7 @@ def classify_freeway(dbg: Dict[str, Any]) -> bool:
 
 
 def analyze_log(rlog_path: str, psi_fov_deg: float, psi_margin_deg: float,
-                n_on: int, n_off: int) -> Dict[str, Any]:
+                n_on: int, n_off: int, force_fallback: bool = False) -> Dict[str, Any]:
   psi_fov = math.radians(psi_fov_deg)
   psi_margin = math.radians(psi_margin_deg)
   state = {"occluded": False, "on_cnt": 0, "off_cnt": 0}
@@ -177,7 +182,7 @@ def analyze_log(rlog_path: str, psi_fov_deg: float, psi_margin_deg: float,
     v_set = dbg.get("v_set") or dbg.get("cruise") or v_ego
 
     occl_orig = bool(dbg.get("occluded", False))
-    occl_after, state, reason, fdbg = gated(kappa, svis, conf, psi_fov, psi_margin, state, n_on, n_off)
+    occl_after, state, reason, fdbg = gated(kappa, svis, conf, psi_fov, psi_margin, state, n_on, n_off, force_fallback=force_fallback)
     occl_orig_total += int(occl_orig)
     occl_after_total += int(occl_after)
 
@@ -266,8 +271,9 @@ def main():
   ap.add_argument("--glob", nargs="*", default=[], help='Glob(s), e.g. /data/media/0/realdata/*/*/rlog.*')
   ap.add_argument("--psi-fov-deg", type=float, default=28.0)
   ap.add_argument("--psi-margin-deg", type=float, default=5.0)
-  ap.add_argument("--n-on", type=int, default=5)
-  ap.add_argument("--n-off", type=int, default=10)
+  ap.add_argument("--n-on", type=int, default=2)
+  ap.add_argument("--n-off", type=int, default=12)
+  ap.add_argument("--force-fallback", action="store_true", help="Force adjustable fallback occlusion gate")
   ap.add_argument("--outdir", default="docs/chauffeur/vtsc/offroad/reports")
   args = ap.parse_args()
 
@@ -288,7 +294,7 @@ def main():
   per_log: List[Dict[str, Any]] = []
   for r in rlogs:
     try:
-      s = analyze_log(r, args.psi_fov_deg, args.psi_margin_deg, args.n_on, args.n_off)
+      s = analyze_log(r, args.psi_fov_deg, args.psi_margin_deg, args.n_on, args.n_off, force_fallback=args.force_fallback)
       print(json.dumps({k: s[k] for k in ("rlog","freeway_occluded_after_pct","crawl_after_pct","hidden_recall_after_pct")}))
       per_log.append(s)
     except KeyboardInterrupt:

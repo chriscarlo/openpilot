@@ -84,8 +84,8 @@ CONF_ALPHA = 0.28       # Faster EMA to track recovery
 CONF_GOOD_TH = 0.70     # Threshold to (re)enter good vision
 CONF_BAD_TH = 0.65      # Threshold to enter occlusion
 # Public hysteresis thresholds (compatibility for tests)
-CONFIDENCE_ENTER_PARTIAL = 0.75
-CONFIDENCE_EXIT_TO_FULL = 0.85
+CONFIDENCE_ENTER_PARTIAL = CONF_BAD_TH  # align status with control gate
+CONFIDENCE_EXIT_TO_FULL = CONF_GOOD_TH  # align status with control gate
 CONFIDENCE_ENTER_SEVERE = 0.45
 CONFIDENCE_EXIT_TO_PARTIAL = 0.55
 
@@ -130,10 +130,10 @@ class VisionOcclusionState:
     last_time: float = 0.0
     distance_since_m: float = 0.0
     mode_monotonic: bool = True
-    gamma_per_m: float = 5e-4
+    gamma_per_m: float = 2.5e-4
     lat_jerk_cap: float = 2.0
     vis_horizon_s: float = 1.2
-    envelope_horizon_s: float = 1.2
+    envelope_horizon_s: float = 1.0
     # Two-stage decay
     decay_tau_fast_s: float = 1.2
     decay_tau_slow_s: float = 2.0
@@ -151,7 +151,7 @@ class VisionOcclusionState:
     _lkg_kappa: float = 0.0
     _lkg_time: float = 0.0
     _lkg_speed: float = 0.0
-    _lkg_ramp_s: float = 1.5  # ramp time to allow occluded estimate to exceed LKG
+    _lkg_ramp_s: float = 0.9  # ramp time to allow occluded estimate to exceed LKG
 
     def update(self, current_curvature: float, vision_confidence: float, v_ego_or_tm, tm=None):
         # Support both 3-arg (tm) and 4-arg (v_ego, tm) signatures
@@ -1274,7 +1274,13 @@ class VisionTurnController:
     # On reacquisition, arm a fast filtering window to improve recovery time
     if (not prev_good) and self._occlusion_state.vision_good:
       # Fast window; effective alpha increased later when applied
-      self._fast_reacq_until = time.time() + float(getattr(self, '_fast_reacq_window_s', 0.9))
+      now_t = time.time()
+      self._fast_reacq_until = now_t + float(getattr(self, '_fast_reacq_window_s', 0.9))
+      # Record precise reacquisition moment for accel floor logic
+      try:
+        self._occlusion_state.reacquired_at = float(now_t)
+      except Exception:
+        pass
       # Immediately clear any FOV-gated occlusion artifacts to let fresh vision take over
       try:
         self._fov_occluded = False
@@ -1667,6 +1673,19 @@ class VisionTurnController:
 
     # Compute acceleration command to drive current speed toward target
     accel_cmd = (raw_target - self._v_ego) / dt
+    # Fast reacquisition nudge: only if physics base supports acceleration above current speed
+    try:
+      now_t = time.time()
+      if bool(getattr(self._occlusion_state, 'vision_good', True)) and (now_t <= float(getattr(self, '_fast_reacq_until', 0.0))):
+        try:
+          base_cap = float(min(self._v_cruise_setpoint, curvature_to_speed(max(1e-8, float(getattr(self, '_filtered_curvature', 0.0))))))
+        except Exception:
+          base_cap = float(self._v_cruise_setpoint)
+        # Require a small margin to ensure this is a raise scenario
+        if (base_cap > (self._v_ego + 0.05)) and (float(getattr(self, '_prev_target_speed', self._v_ego)) < 0.98 * base_cap):
+          accel_cmd = max(accel_cmd, 0.18)
+    except Exception:
+      pass
     # If FOV-gated occlusion is active, fold in a conservative occlusion cap immediately
     if self._fov_occluded and (not getattr(self, '_occl_lead_bypass_active', False)) and (not self._freeway_failopen_active):
       try:
@@ -1739,6 +1758,11 @@ class VisionTurnController:
           cap_vis_onset = float(self._v_cruise_setpoint)
         # Active cap approx at onset
         self._v_cap_active_at_onset_mps = float(min(cap_vis_onset, v_occ_cap))
+        # Arm a short vision-floor TTL to avoid immediate depression below LKG
+        try:
+          self._vision_floor_until = float(time.time()) + float(getattr(self, '_vision_floor_ttl_s', 2.5))
+        except Exception:
+          self._vision_floor_until = 0.0
       if self._fov_occluded:
         self._occlusion_onset_timer_s += dt
         self._no_raise_timer_s += dt
@@ -2070,8 +2094,18 @@ class VisionTurnController:
       fast_reacq_until = float(getattr(self, '_fast_reacq_until', 0.0))
     except Exception:
       fast_reacq_until = 0.0
-    if getattr(self._occlusion_state, 'vision_good', True) and (now_ts2 < fast_reacq_until):
-      self._current_accel = max(self._current_accel, 0.18)
+    try:
+      now_ts2 = float(time.time())
+    except Exception:
+      now_ts2 = 0.0
+    if getattr(self._occlusion_state, 'vision_good', True) and (now_ts2 <= fast_reacq_until):
+      # Only enforce positive accel floor when physics base supports a raise
+      try:
+        base_cap2 = float(min(self._v_cruise_setpoint, curvature_to_speed(max(1e-8, float(getattr(self, '_filtered_curvature', 0.0))))))
+      except Exception:
+        base_cap2 = float(self._v_cruise_setpoint)
+      if (base_cap2 > (self._v_ego + 0.05)) and (float(getattr(self, '_prev_target_speed', self._v_ego)) < 0.98 * base_cap2):
+        self._current_accel = max(self._current_accel, 0.18)
     # Update target acceleration for compatibility
     self._a_target = self._current_accel
     # Hard guarantee for harness/test: enforce a small negative a_target in onset window (guarded by NO_RAISE_WINDOW_S)
@@ -2118,6 +2152,12 @@ class VisionTurnController:
     caps = [("visible", cap_visible_vmin)]
 
     consider_occl = bool(getattr(self, "_fov_occluded", False)) and not bool(getattr(self, "_freeway_failopen_active", False))
+    # Do not allow occlusion to depress below visible when we have good vision correlation
+    try:
+      if bool(getattr(self._occlusion_state, 'vision_good', True)):
+        consider_occl = False
+    except Exception:
+      pass
     psi_gate_open = True
     psi_est = 0.0
     if consider_occl:
@@ -2153,6 +2193,24 @@ class VisionTurnController:
       except Exception:
         pass
 
+    # Enough-vision predicate: skip occlusion capping when correlation is viable
+    try:
+      v_ego_local = float(max(0.0, self._v_ego))
+    except Exception:
+      v_ego_local = 0.0
+    try:
+      s_vis_m_local = float(max(0.0, getattr(self, '_vis_horizon_s', 1.4)) * v_ego_local)
+    except Exception:
+      s_vis_m_local = 0.0
+    try:
+      conf_local = float(getattr(self._occlusion_state, 'smoothed_confidence', 1.0))
+    except Exception:
+      conf_local = 1.0
+    enough_s = float(getattr(self, '_enough_s_visible_m', 35.0))
+    enough_vision = bool(getattr(self._occlusion_state, 'vision_good', True)) or ((s_vis_m_local >= enough_s) and (conf_local >= FREEWAY_MIN_CONF))
+    if enough_vision:
+      consider_occl = False
+
     if consider_occl:
       # If confidence is near-zero and we've been in fov_exit for a while, relax occlusion vmin upward (bounded by visible)
       try:
@@ -2161,6 +2219,20 @@ class VisionTurnController:
         now_t = time.time()
         if (conf <= float(getattr(self, "_occl_conf_floor", OCCL_CONF_FLOOR))) and (now_t - occ_start >= float(getattr(self, "_fov_exit_relax_s", FOV_EXIT_RELAX_S))):
           cap_occl_vmin = min(cap_visible_vmin, cap_occl_vmin + float(getattr(self, "_occl_vmin_nudge_mps", OCCL_VMIN_NUDGE_MPS)))
+      except Exception:
+        pass
+      # Vision floor TTL: lift occl cap to at least a fraction of LKG speed for a short window
+      try:
+        now_t2 = time.time()
+        if now_t2 <= float(getattr(self, '_vision_floor_until', 0.0)):
+          try:
+            k_lkg = float(abs(getattr(self._occlusion_state, 'last_valid_curvature', 0.0)))
+          except Exception:
+            k_lkg = 0.0
+          v_lkg = float(curvature_to_speed(max(1e-8, k_lkg)))
+          floor_mult = float(getattr(self, '_vision_floor_mult', 0.98))
+          v_floor = floor_mult * v_lkg
+          cap_occl_vmin = max(cap_occl_vmin, min(cap_visible_vmin, v_floor))
       except Exception:
         pass
       # Double-cap guard: skip occlusion if pre-cap target already ≤ occlusion vmin + eps

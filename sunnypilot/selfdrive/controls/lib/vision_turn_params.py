@@ -88,7 +88,7 @@ def update_vtsc_params(ctrl, *, force: bool = False) -> None:
   # Visibility barrier and occlusion growth knobs on controller
   ctrl._vis_horizon_s = getf("VisionTurnSpeedControlVisHorizonS", getattr(ctrl, "_vis_horizon_s", 1.4))
   ctrl._vis_margin_m = getf("VisionTurnSpeedControlVisMarginM", getattr(ctrl, "_vis_margin_m", 10.0))
-  ctrl._gamma_per_meter = getf("VisionTurnSpeedControlGammaPerMeter", getattr(ctrl, "_gamma_per_meter", 0.00035))
+  ctrl._gamma_per_meter = getf("VisionTurnSpeedControlGammaPerMeter", getattr(ctrl, "_gamma_per_meter", 0.00025))
   ctrl._lat_jerk_cap = getf("VisionTurnSpeedControlLatJerkCap", getattr(ctrl, "_lat_jerk_cap", 2.0))
   if ctrl._lat_jerk_cap <= 0.0:
     ctrl._lat_jerk_cap = 1e9
@@ -343,13 +343,13 @@ def update_vtsc_params(ctrl, *, force: bool = False) -> None:
 
   ctrl._occlusion_state.gamma_per_m = getf(
     "VisionTurnSpeedControlCurvatureGrowthPerMeter",
-    getattr(ctrl._occlusion_state, "gamma_per_m", 5e-4),
+    getattr(ctrl._occlusion_state, "gamma_per_m", 2.5e-4),
     0.0, 0.01,
   )
 
   ctrl._occlusion_state.envelope_horizon_s = getf(
     "VisionTurnSpeedControlEnvelopeHorizonS",
-    getattr(ctrl._occlusion_state, "envelope_horizon_s", 1.2),
+    getattr(ctrl._occlusion_state, "envelope_horizon_s", 1.0),
     0.1, 5.0,
   )
 

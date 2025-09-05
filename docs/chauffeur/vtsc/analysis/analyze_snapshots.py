@@ -184,13 +184,21 @@ def flag_map_misuse(rows: List[Dict[str, Any]]) -> Tuple[int, int]:
 
 def flag_reacq_nudge(rows: List[Dict[str, Any]]) -> Tuple[int, int]:
   # Count transitions from non-FULL to FULL and check a_cmd ≥ 0.18 within ~0.65s thereafter
+  # Only require a nudge when final is below ~98% of base at the moment of FULL.
   bad = 0
   total = 0
-  # Build quick indices by time
   for i in range(1, len(rows)):
     prev = rows[i-1].get('vision_status', 'UNKNOWN')
     cur = rows[i].get('vision_status', 'UNKNOWN')
     if prev != 'FULL' and cur == 'FULL':
+      try:
+        v_base_i = float(rows[i].get('v_base', 0.0))
+        final_i = float(rows[i].get('final', 0.0))
+      except Exception:
+        v_base_i = final_i = 0.0
+      # Skip if not a raise scenario
+      if not (final_i < 0.98 * v_base_i):
+        continue
       total += 1
       t0 = float(rows[i].get('ts', 0.0))
       ok = False

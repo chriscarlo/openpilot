@@ -1,0 +1,23 @@
+VTSC Snapshot Summary
+- Points: 22800  Duration: 0.0 s  Avg v: 16.13 m/s
+- Vision states: {'PARTIAL': 11628, 'SEVERE': 11062, 'FULL': 110}
+
+LKG + Vision Floor Saves
+- Occlusion points: 10044  floor_saves: 0  ratio: 0.00%
+- Median saved delta (v_lkg - v_occ): 0.00 m/s
+
+Flags
+- straight_no_crawl_fail: 0/448  (0.00%)  -- final << v_base while vision FULL on straight
+- highway_bypass_fail: 0/7905  (0.00%)  -- occlusion depressing target at ≥~65 mph
+- lead_bypass_fail: 0/0  (0.00%)  -- no positive accel with lead≤3s under occlusion
+- map_cap_misuse: 0/0  (0.00%)  -- map cap active with poor coverage or overshoot vs base
+- reacq_nudge_fail: 57/110  (51.82%)  -- no accel ≥0.18 m/s² within ~0.65s after FULL
+- jerk_or_comfort_violations: 6141/22800  (26.93%)  -- jerk bounds or comfort decel violations
+
+Recommendations
+- Reacquisition nudge flagged: verify 'a_cmd' >= 0.18 within 0.65s after regaining FULL vision.
+- Comfort bounds flagged: verify jerk limits and comfort decel caps under occlusion.
+
+TSV written: docs/chauffeur/vtsc/offroad/replays/run_20250905_1312_1330/combined.tsv
+Plot tip (gnuplot):
+  gnuplot -e "set key left; plot 'OUT.tsv' u 1:3 w l t 'v_base', '' u 1:4 w l t 'v_vis', '' u 1:5 w l t 'v_occ', '' u 1:6 w l t 'v_lkg', '' u 1:9 w l t 'final'"
