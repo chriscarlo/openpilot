@@ -69,3 +69,15 @@ Please analyze the provided artifacts and:
 - If changes are non‑trivial, include tests or a stepwise rollout plan with guardrails.
 
 Thank you.
+
+## Code Pointers
+- Controller: vision turn logic and cap arbitration
+  - https://github.com/chriscarlo/chauffeur/blob/chubbs-merge/sunnypilot/selfdrive/controls/lib/vision_turn_controller.py
+  - Helpful identifiers to search:
+    - Psi gating and clear: `psi_vis`, `psi_thresh`, `onset`, `clear` (e.g., around gating helpers and debug fields).
+    - Cap computation and arbitration: `cap_visible_vmin`, `cap_occl_vmin`, `caps = [("visible", ...)]`, `active_cap = min(caps, ...)`.
+    - Debug fields published to VTSCDBG: `_dbg_active_cap`, `_dbg_cap_visible_vmin`, `_dbg_cap_occl_vmin`.
+- Params and thresholds (lookahead, confidence hysteresis):
+  - https://github.com/chriscarlo/chauffeur/blob/chubbs-merge/sunnypilot/selfdrive/controls/lib/vision_turn_params.py
+- Watcher/parser used to render logs (for field mapping):
+  - https://github.com/chriscarlo/chauffeur/blob/chubbs-merge/tools/vtsc/vtsc_watch.py
