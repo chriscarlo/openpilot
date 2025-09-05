@@ -1,0 +1,21 @@
+# VTSC TSV Field Reference
+
+- created_utc: Human-readable UTC timestamp from swaglog `created` field.
+- v: Vehicle speed (m/s).
+- v_base: Base target velocity before caps (m/s).
+- raw: Raw VTSC command before final arbitration (m/s).
+- final: Final VTSC command after caps/arbitration (m/s).
+- active_cap: Winning cap at this step: `visible` or `occlusion`.
+- cap_visible_vmin: Minimum velocity implied by visibility/physics (m/s).
+- cap_occl_vmin: Minimum velocity implied by occlusion gating (m/s).
+- v_vis: Visibility-based target (m/s) reported by VTSC.
+- v_occ: Occlusion-based target (m/s) reported by VTSC.
+- conf: Path confidence (0–1), alias `path_conf`.
+- kappa_vis: Absolute curvature within visibility horizon (1/m), alias `k_vis_last`.
+- s_visible_m: Visible distance in meters; may be derived from `vis_horizon_s * v` if `s_visible_m` absent.
+- psi_vis: Heading change across visible horizon.
+- psi_thresh: Threshold for psi-based gating.
+- occlusion_reason: Reason string for occlusion gating (e.g., `fov_exit`, `pretrigger`, `short_vis`).
+- tail_frac: Tail fraction of the trajectory used.
+- s_tail: Tail length (m) of the trajectory used.
+- overslow: 1 if `(v - final) >= 2.0 m/s`, else 0.
