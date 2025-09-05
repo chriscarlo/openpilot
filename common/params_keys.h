@@ -370,6 +370,13 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"VTSCVerboseDebug", {PERSISTENT | BACKUP, BOOL, "0"}},
     // VTSC onroad snapshot file writer (JSONL, small/rotating)
     {"VTSCWriteSnapshotFile", {PERSISTENT | BACKUP, BOOL, "0"}},
+    // VTSC occlusion arbitration tunables (psi gate + double-cap guard + fov_exit relax)
+    {"VTSC.PsiThreshRad", {PERSISTENT | BACKUP, FLOAT, "0.020"}},
+    {"VTSC.PsiHystRad", {PERSISTENT | BACKUP, FLOAT, "0.005"}},
+    {"VTSC.DoubleCapEpsMps", {PERSISTENT | BACKUP, FLOAT, "0.30"}},
+    {"VTSC.OcclConfFloor", {PERSISTENT | BACKUP, FLOAT, "0.05"}},
+    {"VTSC.FovExitRelaxS", {PERSISTENT | BACKUP, FLOAT, "0.60"}},
+    {"VTSC.OcclVminNudgeMps", {PERSISTENT | BACKUP, FLOAT, "0.50"}},
     // VTSC: occlusion bypass when following a lead
     {"VisionTurnSpeedControlOcclBypassWithLead", {PERSISTENT | BACKUP, BOOL, "1"}},
     {"VisionTurnSpeedControlOcclBypassHeadwayS", {PERSISTENT | BACKUP, FLOAT, "3.0"}},
