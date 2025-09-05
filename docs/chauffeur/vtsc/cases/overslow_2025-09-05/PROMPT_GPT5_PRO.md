@@ -59,7 +59,7 @@ Please analyze the provided artifacts and:
 - Offroad toggles for VTSC debug were enabled during collection.
 - Safety requirements apply: changes must preserve safe decel behavior and avoid high‑risk fail‑open scenarios.
 - Branch: `chubbs-merge` at commit `aa3b5d957a3c`.
- - Branch: `chubbs-merge` at commit `c871cbe69`.
+ - Branch: `chubbs-merge` at commit `520889f04`.
  - Environment snapshot: https://github.com/chriscarlo/chauffeur/blob/chubbs-merge/docs/chauffeur/vtsc/debug/debug_2025-09-05/ENVIRONMENT.md
 
 ## Preferred Output
