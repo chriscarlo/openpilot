@@ -4,12 +4,13 @@ We’re investigating persistent VTSC overslow behavior during the ~17:30–18:3
 
 ## Artifacts to Review
 - Cross‑window summary (hour):
-  - `docs/chauffeur/vtsc/debug/debug_2025-09-05/vtsc_watch_offline_2025-09-05_004324UTC_to_2025-09-05_014324UTC_summary.txt`
+  - https://github.com/chriscarlo/chauffeur/blob/chubbs-merge/docs/chauffeur/vtsc/debug/debug_2025-09-05/vtsc_watch_offline_2025-09-05_004324UTC_to_2025-09-05_014324UTC_summary.txt
 - Selected “worst‑offender” segment package (highest flagged count):
-  - `docs/chauffeur/vtsc/cases/overslow_2025-09-05/00000085--f247b281ca--80/CASE_REPORT.md`
-  - `docs/chauffeur/vtsc/cases/overslow_2025-09-05/00000085--f247b281ca--80/rlog_00000085--f247b281ca--80.zst`
-  - `docs/chauffeur/vtsc/cases/overslow_2025-09-05/00000085--f247b281ca--80/vtsc_events_00000085--f247b281ca--80.tsv`
-  - `docs/chauffeur/vtsc/cases/overslow_2025-09-05/00000085--f247b281ca--80/flagged_00000085--f247b281ca--80.log`
+  - Case folder: https://github.com/chriscarlo/chauffeur/tree/chubbs-merge/docs/chauffeur/vtsc/cases/overslow_2025-09-05/00000085--f247b281ca--80
+  - Report: https://github.com/chriscarlo/chauffeur/blob/chubbs-merge/docs/chauffeur/vtsc/cases/overslow_2025-09-05/00000085--f247b281ca--80/CASE_REPORT.md
+  - Rlog: https://github.com/chriscarlo/chauffeur/blob/chubbs-merge/docs/chauffeur/vtsc/cases/overslow_2025-09-05/00000085--f247b281ca--80/rlog_00000085--f247b281ca--80.zst
+  - TSV: https://github.com/chriscarlo/chauffeur/blob/chubbs-merge/docs/chauffeur/vtsc/cases/overslow_2025-09-05/00000085--f247b281ca--80/vtsc_events_00000085--f247b281ca--80.tsv
+  - Flagged: https://github.com/chriscarlo/chauffeur/blob/chubbs-merge/docs/chauffeur/vtsc/cases/overslow_2025-09-05/00000085--f247b281ca--80/flagged_00000085--f247b281ca--80.log
 
 ## What the Data Shows (high level)
 - Hour summary: 1612 matched VTSCDBG events; 190 flagged by the watcher.
@@ -47,4 +48,3 @@ Please analyze the provided artifacts and:
 - If changes are non‑trivial, include tests or a stepwise rollout plan with guardrails.
 
 Thank you.
-
