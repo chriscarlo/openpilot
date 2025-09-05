@@ -1,0 +1,17 @@
+segment	total	overslow	visible	occlusion	other	reasons_json
+00000085--f247b281ca--68	113	113	73	40	0	{"fov_exit":77,"pretrigger":36}
+00000085--f247b281ca--70	113	113	98	15	0	{"fov_exit":113}
+00000085--f247b281ca--67	113	112	110	2	0	{"fov_exit":75,"pretrigger":37}
+00000085--f247b281ca--74	114	110	109	1	0	{"fov_exit":56,"pretrigger":49,"short_vis":5}
+00000085--f247b281ca--69	114	109	85	24	0	{"fov_exit":77,"pretrigger":29,"short_vis":3}
+00000085--f247b281ca--75	113	104	84	20	0	{"fov_exit":104}
+00000085--f247b281ca--73	113	101	98	3	0	{"fov_exit":101}
+00000085--f247b281ca--71	113	97	75	22	0	{"fov_exit":69,"pretrigger":25,"short_vis":3}
+00000085--f247b281ca--72	113	96	95	1	0	{"fov_exit":86,"pretrigger":10}
+00000085--f247b281ca--78	113	82	11	71	0	{"fov_exit":82}
+00000085--f247b281ca--79	113	74	14	60	0	{"fov_exit":74}
+00000085--f247b281ca--77	114	70	68	2	0	{"fov_exit":66,"pretrigger":4}
+00000085--f247b281ca--76	113	69	44	25	0	{"pretrigger":36,"fov_exit":33}
+00000085--f247b281ca--66	57	48	48	0	0	{"pretrigger":33,"fov_exit":15}
+00000085--f247b281ca--80	84	11	0	11	0	{"fov_exit":11}
+00000086--4eb3297d7b--0	0	0	0	0	0	{}
