@@ -46,3 +46,27 @@ overslow_by_reason_top: fov_exit=925, pretrigger=176, short_vis=11
 - VTSC vs Vision scan: debug/debug_2025-09-05/analyze_vtsc_vs_vision.txt
 - TSV Field Reference: cases/overslow_2025-09-05/DATA_DICTIONARY.md
 - Environment snapshot: debug/debug_2025-09-05/ENVIRONMENT.md
+
+## Snapshot Analysis (on-device JSONL)
+
+- Source: `/data/media/0/VTSCDebug/vtsc_snapshots.jsonl` (221 points)
+- Summary:
+  - Vision states: FULL=60, PARTIAL=16, SEVERE=145
+  - straight_no_crawl_fail: 16/66 (24.24%)
+  - highway_bypass_fail: 0/16 (0.00%)
+  - lead_bypass_fail: 6/8 (75.00%)
+  - map_cap_misuse: 16/16 (100.00%)
+  - reacq_nudge_fail: 1/20 (5.00%)
+  - jerk_or_comfort_violations: 24/221 (10.86%)
+- TSV: debug/debug_2025-09-05/vtsc_snapshots.tsv
+
+## Off-road FOV Gate Evaluation (rlogs)
+
+- Segment 00000085--f247b281ca--80 report:
+  - metrics.json: offroad/reports/vtsc_offroad_20250905_060843/metrics.json
+  - by_log.jsonl: offroad/reports/vtsc_offroad_20250905_060843/by_log.jsonl
+- Segment 00000085--f247b281ca--67 report:
+  - metrics.json: offroad/reports/vtsc_offroad_20250905_060856/metrics.json
+  - by_log.jsonl: offroad/reports/vtsc_offroad_20250905_060856/by_log.jsonl
+
+Notes: Off-road gate evaluation replays gating heuristics on existing VTSCDBG frames and does not reflect on-device controller arbitration changes beyond gating.

@@ -1,0 +1,1 @@
+{"rlog": "/data/media/0/realdata/00000085--f247b281ca--80/rlog.zst", "frames_total": 84, "freeway_frames": 0, "occluded_orig_pct": 100.0, "occluded_after_pct": 95.238, "freeway_occluded_orig_pct": 0.0, "freeway_occluded_after_pct": 0.0, "crawl_orig_pct": 96.429, "crawl_after_pct": 100.0, "crawl_sequences_after_ge2s": 1, "hidden_pos_total": 47, "hidden_recall_after_pct": 91.489}

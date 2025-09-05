@@ -11,6 +11,14 @@ We’re investigating persistent VTSC overslow behavior during the ~17:30–18:3
   - https://github.com/chriscarlo/chauffeur/blob/chubbs-merge/docs/chauffeur/vtsc/debug/debug_2025-09-05/window_segment_metrics.tsv
 - VTSC vs Vision scan (latest 20 segs):
   - https://github.com/chriscarlo/chauffeur/blob/chubbs-merge/docs/chauffeur/vtsc/debug/debug_2025-09-05/analyze_vtsc_vs_vision.txt
+  
+### Off‑road FOV Gate Evaluation (per‑segment)
+- 00000085--f247b281ca--80
+  - metrics.json: https://github.com/chriscarlo/chauffeur/blob/chubbs-merge/docs/chauffeur/vtsc/offroad/reports/vtsc_offroad_20250905_060843/metrics.json
+  - by_log.jsonl: https://github.com/chriscarlo/chauffeur/blob/chubbs-merge/docs/chauffeur/vtsc/offroad/reports/vtsc_offroad_20250905_060843/by_log.jsonl
+- 00000085--f247b281ca--67
+  - metrics.json: https://github.com/chriscarlo/chauffeur/blob/chubbs-merge/docs/chauffeur/vtsc/offroad/reports/vtsc_offroad_20250905_060856/metrics.json
+  - by_log.jsonl: https://github.com/chriscarlo/chauffeur/blob/chubbs-merge/docs/chauffeur/vtsc/offroad/reports/vtsc_offroad_20250905_060856/by_log.jsonl
 - Case A — visible‑cap overslow (top visible overslow):
   - Folder: https://github.com/chriscarlo/chauffeur/tree/chubbs-merge/docs/chauffeur/vtsc/cases/overslow_2025-09-05/00000085--f247b281ca--67
   - Report: https://github.com/chriscarlo/chauffeur/blob/chubbs-merge/docs/chauffeur/vtsc/cases/overslow_2025-09-05/00000085--f247b281ca--67/CASE_REPORT.md
@@ -41,6 +49,22 @@ We’re investigating persistent VTSC overslow behavior during the ~17:30–18:3
   - Overslow count: 112 (visible=110, occlusion=2)
   - Overslow reasons: `fov_exit` (75), `pretrigger` (37)
   - Watcher flags: `pretrigger_with_high_conf` (11), `double_occl_cap_suspect` (1)
+
+## Patch Under Test (what changed)
+We’ve applied a targeted VTSC update in this branch (see source files below) to address overslow under occlusion:
+- PSI‑gated occlusion arbitration: occlusion cap participates only when `psi_vis ≥ psi_thresh − hyst`.
+- Double‑cap guard: skip occlusion when the pre‑cap target is already ≤ occl vmin + ε.
+- fov_exit relax: after short dwell at near‑zero confidence, nudge occl vmin up toward visible vmin (bounded by visible) to avoid crawl.
+- Telemetry: added `_dbg_psi_est`, `_dbg_psi_thresh`, `_dbg_consider_occl`, `_dbg_double_cap_guard`, `_dbg_pre_cap_target` in VTSCDBG.
+
+Source (for reference):
+- `sunnypilot/selfdrive/controls/lib/vision_turn_controller.py`
+- `sunnypilot/selfdrive/controls/lib/vision_turn_params.py`
+
+Expected impact to verify on future captures:
+- Fewer `psi_below_thresh` coincident with `active_cap=occlusion`.
+- Fewer `double_occl_cap_suspect` events.
+- Reduced `fov_exit` overslow under occlusion (especially in segment‑like scenarios similar to ...--80).
 
 ## Hypotheses / Suspicions
 1) Psi gating may be too sticky or inconsistently applied: numerous frames show `psi_below_thresh` while occlusion cap remains active with very low vmin (~2.7 m/s), conf near 0.0.
