@@ -148,7 +148,8 @@ markers = [
   "tici: tests that are only meant to run on the C3/C3X",
   "skip_tici_setup: mark test to skip tici setup fixture",
   "accuracy: tests that validate algorithm accuracy",
-  "schema: tests that validate schema synchronization"
+  "schema: tests that validate schema synchronization",
+  "regression: known failing on-road regressions; run explicitly"
 ]
 testpaths = [
   "common",
