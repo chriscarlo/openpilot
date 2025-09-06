@@ -144,3 +144,17 @@ Watcher flags explained:
 - `double_occl_cap_suspect`: Raw target ≈ occlusion cap while occlusion cap is active.
 - `pretrigger_with_high_conf`: Pretrigger reason while confidence ≥ 0.70.
 - `psi_below_thresh`: Occlusion active but `psi_vis < psi_thresh`.
+
+## Agent Macros: VTSC Full-Trace Replay
+
+- Trigger: `/trace vtsc <rlog_path> [--max-frames N] [--cruise MPS] [--disable-failopen]`
+- Agent will:
+  - Validate `<rlog_path>` exists and is readable.
+  - Run: `python docs/chauffeur/vtsc/testing/full_trace_replay.py <rlog_path> --out .cache/vtsc_full_trace.jsonl [--max-frames N] [--cruise MPS] [--disable-failopen]`.
+  - On success, print the output path, frame count (`wc -l`), and a small head/tail sample.
+  - Optionally copy to docs (when requested): `docs/chauffeur/vtsc/testing/examples/<derived_name>.jsonl` for sharing/prompts.
+  - If needed, re-run with adjusted flags for iteration.
+
+Examples:
+- `/trace vtsc docs/chauffeur/vtsc/cases/overslow_2025-09-05/00000085--f247b281ca--67/rlog_00000085--f247b281ca--67.zst --max-frames 200`
+- `/trace vtsc /data/media/0/realdata/<dongle>--<route>--<seg>/rlog.zst --disable-failopen`
