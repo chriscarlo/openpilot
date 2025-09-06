@@ -55,8 +55,8 @@ def test_rlog67_overslow_rate_is_low():
 
   assert total >= 50, "insufficient frames captured"
   rate = overslow / max(1, total)
-  # Strict: overslow rate must be low in a healthy controller; set bar at 20%
-  assert rate <= 0.20, f"overslow rate too high: {rate:.3f} ({overslow}/{total})"
+  # Tightened: aim near 0%; allow temporary headroom at 2%
+  assert rate <= 0.02, f"overslow rate too high: {rate:.3f} ({overslow}/{total})"
 
 
 @pytest.mark.regression
@@ -92,4 +92,10 @@ def test_rlog80_psi_mismatch_and_doublecap_are_rare():
   assert psi_rate <= 0.01, f"psi mismatch rate too high: {psi_rate:.3f} ({psi_mismatch}/{total})"
   # Strict: double-cap guard violations must be zero
   assert doublecap_viol == 0, f"double-cap violations: {doublecap_viol}/{total}"
-
+  # Also ensure overslow is negligible on this segment
+  overslow = 0
+  for rec in _load_jsonl(out):
+    s = rec.get('snapshot', {})
+    v = float(s.get('v', 0.0)); final = float(s.get('final', v))
+    if v > 0.1 and (v - final) >= 2.0: overslow += 1
+  assert overslow <= 2, f"overslow frames too high on seg80: {overslow}/{total}"
