@@ -31,79 +31,50 @@ class MockParams:
 
 def test_basic_import():
     """Test that we can import VisionTurnController without crashing."""
-    try:
-        from sunnypilot.selfdrive.controls.lib.vision_turn_controller import VisionTurnController
-        print("SUCCESS: Import successful")
-        return True
-    except Exception as e:
-        print(f"FAILED: Import failed with error: {e}")
-        return False
+    from sunnypilot.selfdrive.controls.lib.vision_turn_controller import VisionTurnController  # noqa: F401
+    import sunnypilot.selfdrive.controls.lib.vision_turn_controller as vmod
+    print("SUCCESS: Import successful from", getattr(vmod, '__file__', '?'))
 
 def test_basic_instantiation():
     """Test that we can instantiate VisionTurnController."""
-    try:
-        from sunnypilot.selfdrive.controls.lib.vision_turn_controller import VisionTurnController
-        
-        # Mock the Params class to avoid parameter system dependencies
-        with patch('sunnypilot.selfdrive.controls.lib.vision_turn_controller.Params', MockParams):
-            vtsc = VisionTurnController(None)  # CP can be None for basic test
-            print("SUCCESS: Instantiation with mocked Params successful")
-            return True
-    except Exception as e:
-        print(f"FAILED: Instantiation failed with error: {e}")
-        return False
+    from sunnypilot.selfdrive.controls.lib.vision_turn_controller import VisionTurnController
+    # Mock the Params class to avoid parameter system dependencies
+    with patch('sunnypilot.selfdrive.controls.lib.vision_turn_controller.Params', MockParams):
+        vtsc = VisionTurnController(None)  # CP can be None for basic test
+        assert vtsc is not None
+        print("SUCCESS: Instantiation with mocked Params successful")
 
 def test_basic_assertion():
     """Test basic properties of VisionTurnController."""
-    try:
-        from sunnypilot.selfdrive.controls.lib.vision_turn_controller import VisionTurnController
-        
-        with patch('sunnypilot.selfdrive.controls.lib.vision_turn_controller.Params', MockParams):
-            vtsc = VisionTurnController(None)
-            
-            # Test that initial state is disabled
-            from sunnypilot.selfdrive.controls.lib.vision_turn_controller import VisionTurnControllerState
-            assert vtsc.state == VisionTurnControllerState.disabled, f"Expected disabled state, got {vtsc.state}"
-            
-            # Test that aggressiveness parameter was loaded correctly
-            assert vtsc._aggressiveness == 1.0, f"Expected aggressiveness=1.0, got {vtsc._aggressiveness}"
-            
-            print("SUCCESS: Basic assertions passed")
-            return True
-    except Exception as e:
-        print(f"FAILED: Assertion test failed with error: {e}")
-        return False
+    from sunnypilot.selfdrive.controls.lib.vision_turn_controller import VisionTurnController, VisionTurnControllerState
+    with patch('sunnypilot.selfdrive.controls.lib.vision_turn_controller.Params', MockParams):
+        vtsc = VisionTurnController(None)
+        # Test that initial state is disabled
+        assert vtsc.state == VisionTurnControllerState.disabled, f"Expected disabled state, got {vtsc.state}"
+        # Test that aggressiveness parameter was loaded correctly
+        assert vtsc._aggressiveness == 1.0, f"Expected aggressiveness=1.0, got {vtsc._aggressiveness}"
+        print("SUCCESS: Basic assertions passed")
 
-def test_emergency_levels():
-    """Test the emergency level determination system."""
-    try:
-        from sunnypilot.selfdrive.controls.lib.vision_turn_controller import VisionTurnController, EmergencyLevel, DECEL_LIMITS
-        
-        with patch('sunnypilot.selfdrive.controls.lib.vision_turn_controller.Params', MockParams):
-            vtsc = VisionTurnController(None)
-            
-            # Test that emergency level constants exist and are correct
-            assert EmergencyLevel.NORMAL == 0, f"Expected NORMAL=0, got {EmergencyLevel.NORMAL}"
-            assert EmergencyLevel.INTERVENTION == 4, f"Expected INTERVENTION=4, got {EmergencyLevel.INTERVENTION}"
-            
-            # Test decel limits are properly defined
-            expected_limits = {
-                EmergencyLevel.NORMAL: -1.47,
-                EmergencyLevel.CAUTION: -2.45,
-                EmergencyLevel.WARNING: -3.92,
-                EmergencyLevel.CRITICAL: -5.50,
-                EmergencyLevel.INTERVENTION: -6.00
-            }
-            
-            for level, expected_limit in expected_limits.items():
-                actual_limit = DECEL_LIMITS[level]
-                assert abs(actual_limit - expected_limit) < 0.01, f"Expected {level.name}: {expected_limit}, got {actual_limit}"
-            
-            print("SUCCESS: Emergency levels test passed")
-            return True
-    except Exception as e:
-        print(f"FAILED: Emergency levels test failed with error: {e}")
-        return False
+def test_physics_bounds_and_monotonicity():
+    """Check lateral-accel bounds and curvature_to_speed monotonicity."""
+    from sunnypilot.selfdrive.controls.lib.vision_turn_controller import (
+        VisionTurnController, curvature_to_speed,
+        _physics_based_lateral_acceleration as lat_accel,
+        PHYSICS_MIN_LAT_ACCEL, PHYSICS_MAX_LAT_ACCEL,
+    )
+    # Instantiate once with mocked Params (ensure no side-effects)
+    with patch('sunnypilot.selfdrive.controls.lib.vision_turn_controller.Params', MockParams):
+        _ = VisionTurnController(None)
+    # Lat accel stays within configured bounds across a range
+    for k in [1e-8, 5e-5, 1e-4, 5e-4, 1e-3, 5e-3]:
+        a = lat_accel(k)
+        assert PHYSICS_MIN_LAT_ACCEL - 1e-6 <= a <= PHYSICS_MAX_LAT_ACCEL + 1e-6
+    # curvature_to_speed decreases with increasing curvature (choose values below ceiling)
+    v1 = curvature_to_speed(1e-3)
+    v2 = curvature_to_speed(2e-3)
+    v3 = curvature_to_speed(5e-3)
+    assert v1 >= v2 >= v3 and v1 > 0.0
+    print("SUCCESS: Physics bounds and monotonicity passed")
 
 if __name__ == '__main__':
     print("Testing basic import of VisionTurnController...")

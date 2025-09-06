@@ -785,7 +785,8 @@ class VisionTurnController:
     self._dbg_jerk_cmd = 0.0
     # FOV gating + units diagnostics
     self._psi_fov_rad = 0.49
-    self._psi_margin_rad = 0.122173  # ~7 deg
+    # Unify margin to ~5° across all code paths
+    self._psi_margin_rad = 0.087  # ~5 deg
     self._fov_occluded = False
     self._fov_on_cnt = 0
     self._fov_off_cnt = 0
@@ -969,7 +970,7 @@ class VisionTurnController:
       fail_open = bool(getattr(self, '_dbg_fail_open', False))
       # FOV/units helpers (may be unset on older builds; default sensibly)
       psi_fov = float(getattr(self, '_psi_fov_rad', 0.49))
-      psi_margin = float(getattr(self, '_psi_margin_rad', 0.105))
+      psi_margin = float(getattr(self, '_psi_margin_rad', 0.087))
       ttfov = float(getattr(self, '_dbg_ttfov_s', 0.0))
       psi_vis = float(abs(k_vis) * max(0.0, s_vis_m))
       psi_thresh = float(max(0.0, psi_fov - psi_margin))
@@ -1381,9 +1382,11 @@ class VisionTurnController:
           current_curvature = float(curvature_array_abs[0])  # Absolute value for calculations
           current_curvature_signed = float(curvature_array_signed[0])  # Signed value for lateral accel
 
-        # Update filtered curvature using EMA
+        # Update filtered curvature using EMA of the NEAR-TERM curvature, not the horizon max.
+        # Using the max across the horizon makes the "visible" path act like an occlusion cap
+        # and causes premature, persistent overslow. Filter toward the instantaneous curvature instead.
         self._filtered_curvature = ((1 - self._curvature_ema_ratio) * self._filtered_curvature +
-                                   self._curvature_ema_ratio * max_pred_curvature)
+                                   self._curvature_ema_ratio * current_curvature)
 
         # Calculate lateral accelerations using model predictions (not steering angle)
         self._current_lat_acc = current_curvature_signed * self._v_ego**2
@@ -1836,8 +1839,10 @@ class VisionTurnController:
         # Compute barrier context to determine margin (near vs. far)
         try:
           v_vis = curvature_to_speed(max(1e-8, float(self._occlusion_state.last_valid_curvature)))
+          # When occluded, do NOT let the filtered/model curvature drive the near cap;
+          # rely on last-visible curvature (v_vis) for the near bound.
           base_target = min(self._v_cruise_setpoint, curvature_to_speed(self._filtered_curvature))
-          v_near = min(base_target, v_vis, self._v_cruise_setpoint)
+          v_near = min(v_vis, self._v_cruise_setpoint)
           # Use the more conservative (lower speed) of occlusion est curvature and filtered curvature
           try:
             k_est = float(getattr(self._occlusion_state, 'est_curvature', 0.0))
@@ -2118,8 +2123,15 @@ class VisionTurnController:
     self._prev_target_speed = max(0.0, self._prev_target_speed + self._current_accel * dt)
 
     # ===== Determine winning cap for telemetry =====
+    # Visible-cap should reflect only what is actually visible. While occluded,
+    # use the last-known-good visible curvature instead of the filtered/model value.
     try:
-      cap_visible_vmin = float(min(self._v_cruise_setpoint, curvature_to_speed(max(1e-8, float(self._filtered_curvature)))))
+      if bool(getattr(self, '_fov_occluded', False)):
+        k_vis_only = float(max(1e-8, float(getattr(self._occlusion_state, 'last_valid_curvature', 0.0))))
+        cap_visible_vmin = float(min(self._v_cruise_setpoint, curvature_to_speed(k_vis_only)))
+      else:
+        k_filt_only = float(max(1e-8, float(getattr(self, '_filtered_curvature', 0.0))))
+        cap_visible_vmin = float(min(self._v_cruise_setpoint, curvature_to_speed(k_filt_only)))
     except Exception:
       cap_visible_vmin = float(self._v_cruise_setpoint)
     try:

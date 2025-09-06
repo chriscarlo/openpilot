@@ -1,0 +1,59 @@
+{
+  "idx": 123,
+  "ts": 1757098451.511,
+  "inputs": {"v_ego": 22.4, "a_ego": 0.1, "v_cruise": 24.0},
+  "trace": [
+    {
+      "phase": "pre",
+      "method": "_update_solution",
+      "state": {
+        "_v_ego": 22.4,
+        "_filtered_curvature": 0.0028,
+        "_fov_occluded": false,
+        "_dbg_psi_vis": 0.0,
+        "_dbg_psi_thresh": 0.403,
+        "_dbg_active_cap": "visible",
+        "_dbg_cap_visible_vmin": 18.2,
+        "_dbg_cap_occl_vmin": 70.0,
+        "_pre_cap_target_speed": 18.2,
+        "occlusion_state": {
+          "vision_good": true,
+          "smoothed_confidence": 0.78,
+          "last_valid_curvature": 0.0027,
+          "est_curvature": 0.0029
+        }
+      }
+    },
+    {
+      "phase": "post",
+      "method": "_update_solution",
+      "state": {
+        "_prev_target_speed": 17.9,
+        "_current_accel": -0.7,
+        "_a_target": -0.7,
+        "_dbg_vtsc_cmd": 17.9,
+        "_dbg_active_cap": "visible"
+      }
+    }
+  ],
+  "snapshot": {
+    "v": 22.4,
+    "conf": 0.78,
+    "vision_status": "FULL",
+    "v_base": 18.2,
+    "v_occ": 70.0,
+    "v_vis": 18.0,
+    "raw": 17.9,
+    "final": 17.9,
+    "active_cap": "visible",
+    "cap_visible_vmin": 18.2,
+    "cap_occl_vmin": 70.0,
+    "cap_map_vmin": 0.0,
+    "psi_vis": 0.0,
+    "psi_thresh": 0.403,
+    "occlusion_reason": "",
+    "tail_frac": 0.0,
+    "s_tail": 0.0
+  }
+}
+

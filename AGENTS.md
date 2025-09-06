@@ -126,3 +126,21 @@ PY`
 - Snapshots file: `/data/media/0/VTSCDebug/vtsc_snapshots.jsonl` (used by the analyzer)
 - Post-drive: `python docs/chauffeur/vtsc/analysis/analyze_snapshots.py /data/media/0/VTSCDebug/vtsc_snapshots.jsonl --dump-tsv OUT.tsv`
 - Organize results under `docs/chauffeur/vtsc/debug/debug_YYYY-MM-DD/` as per `docs/chauffeur/vtsc/AGENTS.md`.
+
+## Agent Macros: VTSC Live Monitoring
+
+- Trigger: `/monitor vtsc` or phrase “monitor the vtsc”.
+- Agent will:
+  - Ensure Params toggles are ON: `VTSCVerboseDebug=1`, `VTSCWriteSnapshotFile=1`.
+  - Start watcher: `nohup python3 tools/vtsc/vtsc_watch.py > .cache/vtsc_watch.out 2>&1 & echo $! > .cache/vtsc_watch.pid`.
+  - Confirm snapshot file exists: `/data/media/0/VTSCDebug/vtsc_snapshots.jsonl`.
+  - Tail output live to the user and surface flags only when requested (`rg -n "flags=(?!-)" .cache/vtsc_watch.out`).
+  - If manager/UI are down, relaunch `python3 system/manager/manager.py` and verify `controlsd`, `plannerd`, and UI daemons.
+  - After the drive, offer analyzer: `python docs/chauffeur/vtsc/analysis/analyze_snapshots.py <snapshots.jsonl> --dump-tsv OUT.tsv`.
+- Stop: `/monitor vtsc stop` → kill PID from `.cache/vtsc_watch.pid`.
+
+Watcher flags explained:
+- `freeway_failopen_missed`: Straight, long visibility, good confidence but occlusion cap active.
+- `double_occl_cap_suspect`: Raw target ≈ occlusion cap while occlusion cap is active.
+- `pretrigger_with_high_conf`: Pretrigger reason while confidence ≥ 0.70.
+- `psi_below_thresh`: Occlusion active but `psi_vis < psi_thresh`.
