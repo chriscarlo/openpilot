@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "VTSC Full-Trace Event (Example)",
+  "type": "object",
+  "required": ["idx", "inputs", "trace", "snapshot"],
+  "properties": {
+    "idx": {"type": "integer", "minimum": 0},
+    "ts": {"type": "number"},
+    "inputs": {
+      "type": "object",
+      "required": ["v_ego", "a_ego", "v_cruise"],
+      "properties": {
+        "v_ego": {"type": "number"},
+        "a_ego": {"type": "number"},
+        "v_cruise": {"type": "number"}
+      }
+    },
+    "trace": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["phase", "method", "state"],
+        "properties": {
+          "phase": {"enum": ["pre", "post"]},
+          "method": {"type": "string"},
+          "state": {"type": "object"}
+        }
+      }
+    },
+    "snapshot": {"type": "object"}
+  }
+}
+

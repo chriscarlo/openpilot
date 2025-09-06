@@ -3,8 +3,8 @@ VTSC Full‑Trace Analysis Prompt (for GPT‑5 Pro)
 Context
 - This repository contains a Vision Turn Speed Control (VTSC) module that computes a target speed for upcoming curves using model curvature, visibility, and occlusion logic. Recent behavior reports: overly sensitive early slowing, “double‑capping” under occlusion, and inconsistent gating.
 - You have two inputs:
-  1) A small, concrete full‑trace replay JSONL from a recorded rlog: `docs/chauffeur/vtsc/testing/examples/vtsc_full_trace_sample.jsonl` (20 frames).
-  2) The normalized trace schema example: `docs/chauffeur/vtsc/testing/examples/trace_event_schema.json`.
+  1) A small, concrete full‑trace replay JSONL from a recorded rlog: `docs/chauffeur/vtsc/fullTrace/examples/vtsc_full_trace_sample.jsonl` (20 frames).
+  2) The normalized trace schema example: `docs/chauffeur/vtsc/fullTrace/examples/trace_event_schema.json`.
 
 Your Goal
 Analyze the full‑trace JSONL to identify: (a) the exact phase(s) and conditions where VTSC clamps or slows too early, (b) any duplicated effects between visible and occlusion caps, (c) inconsistencies in PSI/FOV gating, and (d) concrete, code‑level remediation with validation steps.
@@ -46,13 +46,13 @@ Ground Truth / Expectations
 - On straight, long‑visibility, high‑confidence highway frames, occlusion must fail‑open (no occlusion cap wins).
 
 Data to Analyze
-- Full trace sample: `docs/chauffeur/vtsc/testing/examples/vtsc_full_trace_sample.jsonl`
+- Full trace sample: `docs/chauffeur/vtsc/fullTrace/examples/vtsc_full_trace_sample.jsonl`
   - Each line is a JSON object with: `idx`, `ts` (optional), `inputs`, `trace[]`, and `snapshot`.
   - Use `trace` to locate the exact method and state where decisions change, then corroborate with `snapshot`.
 
 Useful commands (replay and metrics)
 - Full trace (custom rlog):
-  - `python docs/chauffeur/vtsc/testing/full_trace_replay.py /path/to/rlog.zst --out OUT.jsonl --max-frames 300`
+  - `python docs/chauffeur/vtsc/fullTrace/full_trace_replay.py /path/to/rlog.zst --out OUT.jsonl --max-frames 300`
 - Quick replay (snapshots only):
   - `python docs/chauffeur/vtsc/offroad/replay_vtsc_on_rlog.py /path/to/rlog.zst --out OUT.jsonl --max-frames 300`
 - Candidate rlogs in repo:
@@ -69,5 +69,4 @@ Deliverables
   - Any diagnostics/plots that visualize cap winners and gating transitions over time
 
 Appendix: Schema reference
-- See `docs/chauffeur/vtsc/testing/examples/trace_event_schema.json` for a compact example record and core keys.
-
+- See `docs/chauffeur/vtsc/fullTrace/examples/trace_event_schema.json` for a compact example record and core keys.

@@ -150,7 +150,7 @@ Watcher flags explained:
 - Trigger: `/trace vtsc <rlog_path> [--max-frames N] [--cruise MPS] [--disable-failopen]`
 - Agent will:
   - Validate `<rlog_path>` exists and is readable.
-  - Run: `python docs/chauffeur/vtsc/testing/full_trace_replay.py <rlog_path> --out .cache/vtsc_full_trace.jsonl [--max-frames N] [--cruise MPS] [--disable-failopen]`.
+- Run: `python docs/chauffeur/vtsc/fullTrace/full_trace_replay.py <rlog_path> --out .cache/vtsc_full_trace.jsonl [--max-frames N] [--cruise MPS] [--disable-failopen]`.
   - On success, print the output path, frame count (`wc -l`), and a small head/tail sample.
   - Optionally copy to docs (when requested): `docs/chauffeur/vtsc/testing/examples/<derived_name>.jsonl` for sharing/prompts.
   - If needed, re-run with adjusted flags for iteration.
