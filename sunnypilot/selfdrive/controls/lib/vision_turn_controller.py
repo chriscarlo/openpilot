@@ -1378,8 +1378,10 @@ class VisionTurnController:
         velocity_pred = np.array(list(velocity_pred_raw)[:n_points], dtype=float)
 
         # Compute curvature array with SIGNED values.
-        # In VTSC tests, orientationRate.z carries curvature directly.
-        curvature_array_signed = orientation_rate_signed
+        # Model orientationRate.z is yaw rate (rad/s). Curvature κ = yaw_rate / speed (1/m).
+        # Use predicted velocity to convert; clamp very low speeds to avoid blow-ups.
+        v_clip = np.clip(velocity_pred, 0.1, None)
+        curvature_array_signed = orientation_rate_signed / v_clip
         # For max calculations, use absolute values
         curvature_array_abs = np.abs(curvature_array_signed)
         max_pred_curvature = float(np.max(curvature_array_abs))
