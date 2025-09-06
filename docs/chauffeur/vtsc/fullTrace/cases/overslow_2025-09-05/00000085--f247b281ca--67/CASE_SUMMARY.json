@@ -1,0 +1,19 @@
+{
+  "segment": "00000085--f247b281ca--67",
+  "window_first_event": "2025-09-05 00:43:54 UTC",
+  "window_last_event": "2025-09-05 00:44:54 UTC",
+  "events_total": 113,
+  "overslow_total_v_minus_final_ge_2": 112,
+  "overslow_by_cap": {
+    "visible": 110,
+    "occlusion": 2
+  },
+  "overslow_by_reason": {
+    "fov_exit": 75,
+    "pretrigger": 37
+  },
+  "flag_counts": {
+    "pretrigger_with_high_conf": 11,
+    "double_occl_cap_suspect": 1
+  }
+}

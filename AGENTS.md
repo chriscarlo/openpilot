@@ -49,6 +49,23 @@
   - Note: `chauffeur-dev2` is deprecated. We will still reference it to port custom features into `chubbs-merge` and for debugging comparisons when needed.
 - PRs: include rationale, verification steps (routes/logs for car changes), linked issues, and tests. Use templates in `.github/pull_request_template.md`.
 
+## Agent Planning (update_plan tool)
+
+- When the plan tool is available (session launched with `-c include_plan_tool=true`), always maintain a concise task plan using the `update_plan` tool.
+- Create the plan at task start, then update it after each meaningful change (file edits, commands, test runs).
+- Keep 3–6 steps total. Use statuses: `pending`, `in_progress`, `completed`.
+- Exactly one step may be `in_progress` at a time.
+- Prefer small, verifiable steps; revise instead of appending long tails.
+- If the tool is not enabled, ask to enable it: “Launch Codex with `-c include_plan_tool=true` (e.g., `codexh`/`codexl`) so I can publish plan updates.”
+
+Example intent (do not paste literally; invoke the tool):
+- explanation: short reason for changes when the plan structure shifts
+- plan:
+  - { step: "Scan repo and confirm env", status: completed }
+  - { step: "Pin scope and create patch", status: in_progress }
+  - { step: "Run fast tests", status: pending }
+  - { step: "Summarize changes + next steps", status: pending }
+
 ## Chauffeur Porting Rules
 - Source branch: `chubbs-ssh-only`. Only port requested changes.
 - No submodules: repository is flattened. Vendor code into local `*_repo/...` paths.
