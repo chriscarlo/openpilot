@@ -1,0 +1,97 @@
+diff --git a/userspace/install_extras.sh b/userspace/install_extras.sh
+index 0000000..0000000 100644
+--- a/userspace/install_extras.sh
++++ b/userspace/install_extras.sh
+@@
+-apt-fast update && apt-fast install -y --no-install-recommends \
+-  bash-completion \
++apt-fast update && apt-fast install -y --no-install-recommends \
++  bluez \
++  rfkill \
++  bash-completion \
+   btop \
+   iperf \
+   iperf3 \
+   dnsmasq \
+   irqtop \
+   ripgrep \
+   ncdu \
+   nfs-common \
+   socat \
+   wavemon \
+   avahi-daemon \
+   avahi-utils
+
+diff --git a/userspace/services.sh b/userspace/services.sh
+index 0000000..0000000 100644
+--- a/userspace/services.sh
++++ b/userspace/services.sh
+@@
+ systemctl enable avahi-daemon
+ systemctl enable avahi-ssh-publish.service
++
++# Bluetooth services
++systemctl enable bluetooth
++systemctl enable qca-bt-attach.service
+
+ # Disable some of our services
+ systemctl disable agnos-tests.service
+
+diff --git a/userspace/files/qca-bt-attach.service b/userspace/files/qca-bt-attach.service
+new file mode 100644
+index 0000000..0000000
+--- /dev/null
++++ b/userspace/files/qca-bt-attach.service
+@@
++[Unit]
++Description=Attach Qualcomm Bluetooth controller (QCA)
++After=systemd-udevd.service
++Before=bluetooth.service
++ConditionPathExistsGlob=/dev/ttyMSM* /dev/ttyHS*
++
++[Service]
++Type=simple
++ExecStart=/usr/comma/bin/qca_bt_attach.sh
++Restart=on-failure
++RestartSec=2s
++
++[Install]
++WantedBy=multi-user.target
+
+diff --git a/userspace/usr/comma/bin/qca_bt_attach.sh b/userspace/usr/comma/bin/qca_bt_attach.sh
+new file mode 100755
+index 0000000..0000000
+--- /dev/null
++++ b/userspace/usr/comma/bin/qca_bt_attach.sh
+@@
++#!/usr/bin/env bash
++set -euo pipefail
++
++rfkill unblock bluetooth || true
++
++# Try common UARTs on SDM845; adjust if dmesg indicates a specific one
++for dev in /dev/ttyHS0 /dev/ttyMSM1 /dev/ttyMSM0; do
++  if [ -e "$dev" ]; then
++    echo "[qca-bt] Attaching on $dev"
++    if command -v btattach >/dev/null 2>&1; then
++      exec btattach -B "$dev" -S 3000000 -P qca
++    elif command -v hciattach >/dev/null 2>&1; then
++      exec hciattach -n -s 3000000 "$dev" qca
++    else
++      echo "[qca-bt] Neither btattach nor hciattach found" >&2
++      exit 1
++    fi
++  fi
++done
++
++echo "[qca-bt] No known UART found; check dmesg for hci_qca/serdev logs" >&2
++exit 1
+
+diff --git a/Dockerfile.agnos b/Dockerfile.agnos
+index 0000000..0000000 100644
+--- a/Dockerfile.agnos
++++ b/Dockerfile.agnos
+@@
+-COPY ./userspace/usr/comma/ /usr/$USERNAME/
++COPY ./userspace/usr/comma/ /usr/$USERNAME/
++RUN chmod +x /usr/$USERNAME/bin/qca_bt_attach.sh || true

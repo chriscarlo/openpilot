@@ -66,6 +66,16 @@ Example intent (do not paste literally; invoke the tool):
   - { step: "Run fast tests", status: pending }
   - { step: "Summarize changes + next steps", status: pending }
 
+## UI Controls — Sunnypilot Builds
+- When building under `SUNNYPILOT`, always use the SP widget variants or alias to them:
+  - `LabelControlSP`, `ListWidgetSP`, `ToggleControlSP`, `ParamControlSP`, `LayoutWidgetSP`.
+  - You may `#define` base names to SP names inside `#ifdef SUNNYPILOT` blocks for shared code.
+- Using base controls in SP builds can leave layouts uninitialized and crash the UI on widget creation.
+
+## Device Editing Policy
+- Do not modify files directly on the device. Use the device only for logs, tracing, and context.
+- Make code/documentation changes in this repo and push; pull from the device to avoid divergence.
+
 ## Chauffeur Porting Rules
 - Source branch: `chubbs-ssh-only`. Only port requested changes.
 - No submodules: repository is flattened. Vendor code into local `*_repo/...` paths.

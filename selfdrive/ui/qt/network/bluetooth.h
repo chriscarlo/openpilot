@@ -16,6 +16,12 @@
 
 #ifdef SUNNYPILOT
 #include "selfdrive/ui/sunnypilot/qt/widgets/controls.h"
+// Map base control names to Sunnypilot variants to ensure proper widget init/layout
+#define LabelControl LabelControlSP
+#define ListWidget ListWidgetSP
+#define ToggleControl ToggleControlSP
+#define ParamControl ParamControlSP
+#define LayoutWidget LayoutWidgetSP
 #else
 #include "selfdrive/ui/qt/widgets/controls.h"
 #endif
