@@ -89,3 +89,8 @@ private:
   std::future<void> future;
   SafeQueue<std::pair<std::string, std::string>> queue;
 };
+
+// Bluetooth UI Params (Offroad Network → Bluetooth)
+// - BluetoothEnabled: master enable/disable control from UI
+// - BluetoothDiscoverable: toggle discoverability/advertising
+// Note: Param defaults are handled at first read if not present; UI should initialize explicitly.

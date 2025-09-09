@@ -40,6 +40,24 @@ Networking::Networking(QWidget* parent, bool show_advanced) : QFrame(parent) {
     vlayout->addSpacing(10);
     vlayout->addWidget(advancedSettings, 0, Qt::AlignRight);
     vlayout->addSpacing(10);
+    // Bluetooth submenu button
+    QPushButton* btSettings = new QPushButton(tr("Bluetooth"));
+    btSettings->setObjectName("advanced_btn");
+    btSettings->setStyleSheet("margin-right: 30px;");
+    btSettings->setFixedSize(400, 100);
+    // Lazy include to avoid header dependency cycle
+    QWidget *btPanel = nullptr;
+    connect(btSettings, &QPushButton::clicked, [=]() mutable {
+      if (!btPanel) {
+        btPanel = new BluetoothPanel(this);
+        connect(btPanel, SIGNAL(backPress()), this, SLOT(hideEvent(nullptr)));
+        main_layout->addWidget(btPanel);
+      }
+      main_layout->setCurrentWidget(btPanel);
+    });
+    vlayout->addSpacing(10);
+    vlayout->addWidget(btSettings, 0, Qt::AlignRight);
+    vlayout->addSpacing(10);
   }
 
   wifiWidget = new WifiUI(this, wifi);

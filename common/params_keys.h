@@ -238,6 +238,10 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"VisionTurnSpeedControlFOVSLongM", {PERSISTENT | BACKUP, FLOAT, "120.0"}},
     {"VisionTurnSpeedControlFOVPretriggerTimeS", {PERSISTENT | BACKUP, FLOAT, "1.2"}},
     {"VisionTurnSpeedControlFOVOnsetBoostFrames", {PERSISTENT | BACKUP, INT, "10"}},
+
+    // --- Bluetooth (Offroad Network → Bluetooth) --- //
+    {"BluetoothEnabled", {PERSISTENT | BACKUP, BOOL, "0"}},
+    {"BluetoothDiscoverable", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"VisionTurnSpeedControlFOVOvershootFrames", {PERSISTENT | BACKUP, INT, "10"}},
     {"VisionTurnSpeedControlFOVEWMATauS", {PERSISTENT | BACKUP, FLOAT, "0.5"}},
     {"VisionTurnSpeedControlFOVNOn", {PERSISTENT | BACKUP, INT, "5"}},

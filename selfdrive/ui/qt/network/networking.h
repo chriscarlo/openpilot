@@ -3,6 +3,7 @@
 #include <vector>
 
 #include "selfdrive/ui/qt/network/wifi_manager.h"
+#include "selfdrive/ui/qt/network/bluetooth.h"
 #include "selfdrive/ui/qt/prime_state.h"
 #include "selfdrive/ui/qt/widgets/input.h"
 #include "selfdrive/ui/qt/widgets/ssh_keys.h"
@@ -104,6 +105,7 @@ protected:
   QWidget* wifiScreen = nullptr;
   AdvancedNetworking* an = nullptr;
   WifiUI* wifiWidget;
+  // Bluetooth panel created lazily in networking.cc
 
   void showEvent(QShowEvent* event) override;
   void hideEvent(QHideEvent* event) override;

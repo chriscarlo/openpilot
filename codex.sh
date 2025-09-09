@@ -59,6 +59,7 @@ setup_tmux_config() {
     if [ ! -f "$CODEX_TMUX_CONF_PERSIST" ]; then
         cat > "$CODEX_TMUX_CONF_PERSIST" <<'TMUXCONF'
 # Minimal, readable defaults for device work
+# Defaults favor standard tmux behavior; iOS overrides appended below
 set -g mouse on
 set -g history-limit 500000
 set -g assume-paste-time 10
@@ -101,12 +102,32 @@ bind -T copy-mode S-PageDown send -X page-down
 # Keep a large scrollback
 set -g history-limit 500000
 
-# Optional: to use your terminal's own scrollback instead of tmux's copy-mode,
-# launch codex with CODEX_TMUX_DISABLE_ALTERNATE_SCREEN=1 (see script runtime).
-# This disables the alternate screen so your terminal scrollbar works in tmux,
-# but full-screen apps like less/vim won't use a separate screen.
+# Note: Alternate screen is disabled by default elsewhere in this config so
+# your terminal's own scrollback works naturally inside tmux.
 # END CODEX_SCROLL_HELPERS
 TMUXHELP
+
+    # Minimal block (idempotent upsert): disable mouse, status bar, and alt screen
+    local ios_begin="# BEGIN CODEX_IOS_MINIMAL"
+    local ios_end="# END CODEX_IOS_MINIMAL"
+    if grep -qF "$ios_begin" "$CODEX_TMUX_CONF_PERSIST" 2>/dev/null; then
+        awk -v bgn="$ios_begin" -v end="$ios_end" '
+          BEGIN{skip=0}
+          $0==bgn{skip=1; next}
+          $0==end{skip=0; next}
+          skip==0{print $0}
+        ' "$CODEX_TMUX_CONF_PERSIST" > "$CODEX_TMUX_CONF_PERSIST.tmp" && mv "$CODEX_TMUX_CONF_PERSIST.tmp" "$CODEX_TMUX_CONF_PERSIST"
+    fi
+    cat >> "$CODEX_TMUX_CONF_PERSIST" <<'TMUXIOS'
+# BEGIN CODEX_IOS_MINIMAL
+# Make tmux behave like a normal shell in iOS SSH apps
+set -g status on
+set -g mouse off
+set -g history-limit 100000
+setw -g alternate-screen off
+set -ga terminal-overrides ",xterm*:smcup@:rmcup@"
+# END CODEX_IOS_MINIMAL
+TMUXIOS
 
     # Home is ephemeral; point ~/.tmux.conf at persistent copy every run
     if [ -L "$CODEX_TMUX_CONF_LINK" ] || [ -e "$CODEX_TMUX_CONF_LINK" ]; then
@@ -137,15 +158,21 @@ tmux_start_or_attach() {
     # Helper to enforce runtime tmux options (applies even on existing servers)
     apply_tmux_runtime_options() {
         local hist_limit="${CODEX_TMUX_HISTORY_LIMIT:-500000}"
-        tmux set -g mouse on 2>/dev/null || true
+        # Base settings
         tmux set -g focus-events on 2>/dev/null || true
         tmux setw -g remain-on-exit on 2>/dev/null || true
         tmux set -g history-limit "$hist_limit" 2>/dev/null || true
         tmux set -g default-terminal "screen-256color" 2>/dev/null || true
         tmux set -as terminal-overrides ',xterm-256color:RGB' 2>/dev/null || true
-        if [ "${CODEX_TMUX_DISABLE_ALTERNATE_SCREEN:-0}" = "1" ]; then
-          tmux set -ga terminal-overrides ',*:smcup@:rmcup@' 2>/dev/null || true
-        fi
+
+        # Always-on minimal behavior for better mobile SSH scrolling
+        tmux set -g mouse off 2>/dev/null || true
+        tmux set -g status on 2>/dev/null || true
+        tmux setw -g alternate-screen off 2>/dev/null || true
+        tmux set -ga terminal-overrides ',*:smcup@:rmcup@' 2>/dev/null || true
+        # Make sure subshells know alternate screen is disabled
+        tmux set-environment -g CODEX_TMUX_DISABLE_ALTERNATE_SCREEN 1 2>/dev/null || true
+
         # Also (re)source user config in case it changed
         tmux source-file "$CODEX_TMUX_CONF_LINK" 2>/dev/null || true
     }
@@ -264,7 +291,10 @@ if [ -n "$SSH_TTY" ] && [ -z "$TMUX" ] && [ -t 0 ] && [ -t 1 ]; then
     if tmux has-session -t "$sess" 2>/dev/null; then
       exec tmux attach -t "$sess"
     else
-      exec tmux -f "$HOME/.tmux.conf" new -As "$sess"
+      # On first creation, immediately run Codex launcher inside tmux
+      # so sessions start in YOLO mode automatically.
+      exec tmux -f "$HOME/.tmux.conf" new -As "$sess" \
+        /data/openpilot/codex.sh
     fi
   fi
 fi
