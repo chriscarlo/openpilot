@@ -193,3 +193,12 @@ Appendix A — Commands quick sheet
 - Attach conservative: `echo Y > /sys/module/hci_uart/parameters/patch115200; btattach -B /dev/ttyHS0 -P qca -S 115200`
 - Attach pre‑bump: `echo N > /sys/module/hci_uart/parameters/patch115200; btattach -B /dev/ttyHS0 -P qca -S 115200`
 - Inspect BT: `ls -l /sys/class/bluetooth; rfkill list; hciconfig -a`
+
+External Review (GPT-5 Pro) — Summary & Actions (Sep 11, 2025)
+- Converging guidance: remove unsolicited IBS WAKE/ACK before RESET; keep IBS from sleeping during PATCH_VER + early TLV; drop WCN3990 baud-change VSE (0x92) with a short (≤100 ms) completion; keep TLV per-segment acks at 115200; keep pre-RESET quiet (40 ms) and RESET timeout (3 s).
+- Implemented now in #63:
+  - hci_qca: added an awake-guard to ignore SLEEP_IND for ~900 ms around PATCH_VER + early TLV (minimal equivalent of upstream IBS-disable during attach).
+  - hci_qca: reduced baud-change wait to 100 ms; removed the WAKE/ACK nudge before reset.
+  - btqca: reduced TLV pacing from 15 ms → 0.5–1.0 ms; PATCH_VER timeout set to 1.5 s; request_firmware_direct stays.
+- Next: if early HCI_RESET still times out, try deferring the initial rome_reset() in qca_uart_setup_rome() and leaving RESET only at the end, per upstream WCN399x flow.
+- Test matrix to run (≤40 s each): Attempt A (115200, per-seg acks), Attempt B (same with tiny pacing toggle), Attempt C (baud bump after final RESET, ensure 0x92 dropped), Attempt D (power-pulse OFF→ON gap if applicable).
