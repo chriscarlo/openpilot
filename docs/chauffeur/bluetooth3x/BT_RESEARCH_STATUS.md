@@ -202,3 +202,51 @@ External Review (GPT-5 Pro) — Summary & Actions (Sep 11, 2025)
   - btqca: reduced TLV pacing from 15 ms → 0.5–1.0 ms; PATCH_VER timeout set to 1.5 s; request_firmware_direct stays.
 - Next: if early HCI_RESET still times out, try deferring the initial rome_reset() in qca_uart_setup_rome() and leaving RESET only at the end, per upstream WCN399x flow.
 - Test matrix to run (≤40 s each): Attempt A (115200, per-seg acks), Attempt B (same with tiny pacing toggle), Attempt C (baud bump after final RESET, ensure 0x92 dropped), Attempt D (power-pulse OFF→ON gap if applicable).
+
+Amnesia Resume Snapshot — Sep 11, 2025 (current state)
+- Kernel on device: 4.9.103 #67 (Thu Sep 11 21:57:47 UTC 2025)
+- Controller: WCN3990 over UART H4+IBS on /dev/ttyHS0 (SDM845)
+- Current attach window per attempt: 60 s (avoid longer — risks USB gadget drop)
+- ADB/usbipd stability:
+  - Windows: usbipd attach --wsl --auto-attach --busid <BUSID>
+  - Do NOT run `adb root`/`adb kill-server` during attach. Use `adb shell su -c` for privileged commands.
+  - Always bind firmware first; unblock rfkill before each attempt.
+- How we run attempts (conservative 115200):
+  - adb shell 'su -c "mount --bind /data/firmware /lib/firmware; rfkill unblock all; echo Y > /sys/module/hci_uart/parameters/patch115200; timeout 60 btattach -B /dev/ttyHS0 -P qca -S 115200 > /data/local/tmp/btattach.out 2>&1 || true"'
+  - Pull logs: /data/local/tmp/btattach.out and 1200–2000 lines of dmesg/logcat-kernel tail.
+- Driver code state (summarized):
+  - hci_qca.c: no unsolicited WAKE/ACK; BAUD 0x92 wait = 100 ms; added “awake-guard” (now 1200 ms) to ignore SLEEP_IND across PATCH_VER + early TLV; pre-patch bump optional; IBS disabled bit cleared for patch download.
+  - btqca.c: request_firmware_direct(); PATCH_VER timeout ~1500 ms; per-seg pacing 0.5–1.0 ms; experiments:
+    - Skip‑VSE for early segments (then acks) → tested; seg0 still stalled.
+    - Flow-control tweak: temporarily disable HW flow control for seg0 only, then re-enable; tested.
+    - Full skip‑VSE for all but last segment → currently under test.
+- Observed outcomes (latest):
+  - PATCH_VER is reliable (Product/ROM/SOC prints; controller version 0x02140201).
+  - TLV seg#0 stalls with per‑seg acks at 115200: “TLV seg#0 size=96 mode=0” → repeated “0xfc00 tx timeout” → “Failed to download patch (-5)”.
+  - With skip‑VSE (first segments or full), and with seg0 flow-control relax, still observing seg#0 stalls in several runs (bounded to 60 s) — continuing to iterate.
+- Hypotheses for seg#0 wedge:
+  1) Residual IBS interaction despite awake-guard; controller dozing right at seg0 boundary.
+  2) UART flow control/credit timing at 115200 on SDM845 causing the first vendor ack to get lost; first-chunk drain/settle insufficient.
+  3) TLV mode policy mismatch; controller expects initial skip‑VSE (or smaller first segment) before per‑seg acks.
+  4) Board power pulse/BT power domain needs OFF→ON gaps (if applicable), affecting earliest EDL transactions.
+- Next steps (concrete, in order; all attempts ≤60 s):
+  1) Keep full skip‑VSE for all but last segment (runtime as in #67); retest. If still stuck, reduce seg0 size to 64 B and add a pre‑seg0 quiet 10–15 ms.
+  2) Replace awake‑guard with full IBS-disable for ROM/TLV/NVM (explicitly ignore IBS rx/tx tokens across the phase), then restore IBS after final RESET. Retest.
+  3) After successful PATCH_VER at 115200, pre‑bump to 3M for TLV/NVM (patch115200=N) with correct 0x92 drop (≤100 ms wait) and short settle; tiny/zero pacing; retest.
+  4) If your board path uses qca power pulses: add 50 ms OFF→ON gap and 100 ms after ON; retest at 115200 per‑seg ack mode.
+  5) If still failing: add debug breadcrumbs around seg0 send/recv (log H4 bytes, event headers, and any IBS tokens) to pinpoint whether any RX appears right after seg0.
+- Logging/run hygiene:
+  - Always run as: adb shell 'su -c "…"' (never restart adb). Keep single attach per window.
+  - Use timeout 60 for btattach; abort immediately if usbipd logs detach.
+  - Pull: /data/local/tmp/btattach*.out and 1600–2000 line kernel slices; record key lines into this doc under the current date.
+- Quick commands:
+  - Conservative:
+    - su -c 'mount --bind /data/firmware /lib/firmware; rfkill unblock all; echo Y > /sys/module/hci_uart/parameters/patch115200; timeout 60 btattach -B /dev/ttyHS0 -P qca -S 115200 > /data/local/tmp/btattach_60s.out 2>&1 || true'
+  - Pre‑bump to 3M after PATCH_VER (if attempted):
+    - su -c 'echo N > /sys/module/hci_uart/parameters/patch115200; timeout 60 btattach -B /dev/ttyHS0 -P qca -S 115200 > /data/local/tmp/btattach_60s_prebump.out 2>&1 || true'
+- Remote references (open these for full context):
+  - Live research doc: https://github.com/chriscarlo/chauffeur/blob/chubbs-merge/docs/chauffeur/bluetooth3x/BT_RESEARCH_STATUS.md
+  - GPT‑5 Pro responses used for guidance:
+    - 7: https://github.com/chriscarlo/chauffeur/blob/chubbs-merge/docs/chauffeur/bluetooth3x/gpt5ProResponses/gpt5proResponse7.md
+    - 8: https://github.com/chriscarlo/chauffeur/blob/chubbs-merge/docs/chauffeur/bluetooth3x/gpt5ProResponses/gpt5proResponse8.md
+  - Latest kernel diff (btqca + hci_qca) for this cycle: will be under docs/chauffeur/bluetooth3x/patches/ with a cycle5 timestamp.
