@@ -9,6 +9,13 @@ run only when explicitly requested, e.g.:
   pytest -q -m regression docs/chauffeur/vtsc/fullTrace/tests/test_regressions_rlogs.py
 
 They operate on committed rlogs (segments 67 and 80) and the full-trace harness.
+
+NOTE on data provenance:
+- These rlogs must originate from a real on-device drive on a TICI (comma3x in
+  this repo/workspace), even if the files are later copied to a dev machine and
+  committed here.
+- Do not substitute simulator/desktop logs for these regressions; message timing
+  and content differences can mask the overslow/recovery bugs we are chasing.
 """
 
 from __future__ import annotations
@@ -18,6 +25,8 @@ import os
 from pathlib import Path
 
 import pytest
+
+pytest.importorskip("capnp", reason="rlog replay requires pycapnp (LogReader)")
 
 from docs.chauffeur.vtsc.fullTrace.gpt5pro_full_trace_harness import replay_full_trace
 

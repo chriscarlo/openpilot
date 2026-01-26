@@ -4,6 +4,13 @@ Purpose
 - Replays recorded rlogs through the current VisionTurnController (VTSC), capturing method‑level pre/post state changes and the final VTSC snapshot for each model frame.
 - Enables precise, reproducible debugging of early/over‑slowing, gating decisions, and caps arbitration without on‑road testing.
 
+Data provenance (important)
+- For VTSC behavior regressions, rlog input data should originate from a real drive on the target device.
+  - In this repo/workspace that means **TICI / comma3x**.
+- Some rlogs may appear “local” in this git checkout because they were copied over from the device and committed as fixtures.
+  - Treat them as **tici-sourced** even when running analysis/tests on a dev laptop.
+  - Avoid substituting sim/desktop-generated logs for these cases; timing/message-shape differences can mask overslow/recovery issues.
+
 Files
 - `full_trace_replay.py`: CLI tool to run a full VTSC trace over an rlog and write JSONL output.
 - `examples/trace_event_schema.json`: Example of one replay step’s JSON shape for downstream tooling (e.g., GPT‑5 Pro prompt or notebooks).
@@ -47,4 +54,3 @@ Notes
 - Harness uses method wrapping (monkey‑patch) to capture `pre`/`post` state without modifying VTSC logic.
 - This is read‑only with respect to rlogs; produced JSONL can be large — use `--max-frames` for development.
 - Pair with `docs/chauffeur/vtsc/analysis/analyze_snapshots.py` or your own notebooks to aggregate decisions and flags.
-
