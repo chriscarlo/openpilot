@@ -2132,6 +2132,47 @@ class VisionTurnController:
         if (not occl_positive_margin) and (self._v_ego <= LOW_SPEED_MARGIN_MAX_V_MPS) and (k_now <= LOW_SPEED_MARGIN_CURV_THRESH):
           occl_positive_margin = True
           self._dbg_low_speed_margin = True
+      else:
+        # Highway-speed occlusion path: compute near/far context locally.
+        # NOTE: Tail-floor terms are intentionally omitted here; above ~55 mph we operate in
+        # "pure physics" mode (v_occ_raw + last-visible curvature), and rely on downstream
+        # occlusion "no-raise" gating to prevent inappropriate acceleration.
+        try:
+          v_vis = curvature_to_speed(max(1e-8, float(self._occlusion_state.last_valid_curvature)))
+        except Exception:
+          v_vis = float(self._v_cruise_setpoint)
+        v_near = min(float(v_vis), float(self._v_cruise_setpoint))
+        try:
+          k_now = abs(float(getattr(self._occlusion_state, 'est_curvature', 0.0) or 0.0))
+        except Exception:
+          k_now = 0.0
+        try:
+          k_est = float(getattr(self._occlusion_state, 'est_curvature', 0.0))
+        except Exception:
+          k_est = 0.0
+        k_filt = float(max(1e-8, float(getattr(self, '_filtered_curvature', 0.0))))
+        v_occ_raw = min(curvature_to_speed(max(1e-8, k_est)), curvature_to_speed(k_filt))
+        v_now = max(float(getattr(self, '_prev_target_speed', self._v_ego)), float(self._v_ego))
+        v_far_gate = min(float(v_occ_raw), float(self._v_cruise_setpoint))
+
+        # Produce barrier target using near/far policy and fold into accel (favor decel)
+        # Include far-field bound for:
+        # - Highway (>36 m/s)
+        # - Moderate/mountain speeds when curvature is meaningful (k_now ≥ 0.004)
+        # - All sub-30 m/s regimes to ensure timely slowing for hidden/abrupt turns outside FoV
+        use_far = (self._v_ego > 36.0) or (self._v_ego <= 36.0 and k_now >= 0.004) or (self._v_ego <= 30.0)
+        if use_far:
+          barrier_target_speed = min(min(v_near, v_far_gate), v_now)
+        else:
+          barrier_target_speed = min(v_near, v_now)
+        # Fold barrier target into commanded deceleration (respect jerk limits downstream):
+        # Pull toward barrier target; prefer more conservative (more negative) acceleration
+        accel_cmd = min(accel_cmd, (barrier_target_speed - self._v_ego) / 0.05)
+        # Constrain published cap for planner ingestion.
+        try:
+          v_target_cap = min(float(v_target_cap), float(barrier_target_speed))
+        except Exception:
+          pass
     # ===== APPLY ADAPTIVE DECELERATION SYSTEM =====
     # Enforce no positive acceleration while occluded unless positive margin exists.
     # Additionally, suppress positive accel in early hidden-turn phase.
