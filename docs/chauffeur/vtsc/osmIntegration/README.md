@@ -12,7 +12,8 @@
 **Getting OSM Offline Tiles (mapd)**
 - **UI trigger:** Offroad > OSM panel writes params `OSMDownloadLocations`/`OSMDownloadBounds`; `mapd` downloads tiles into `offline/` and reports `OSMDownloadProgress`.
 - **Manual (what we did for CA):** Fetched 2° tiles from `https://map-data.pfeifer.dev/offline/<lat>/<lon>.tar.gz` for California bounds and extracted into `~/.comma/media/0/osm/offline/`. Total ~468 MB.
-- **Repo for binary/source:** `third_party/openpilot-mapd` (key files: `download.go`, `generate_offline.go`, `mapd.go`, `offline.capnp`, `params.go`).
+- **Binary on device:** `third_party/mapd_pfeiferj/mapd` (pfeiferj/openpilot-mapd release build).
+- **Source (vendored):** `mapd_repo/openpilot-mapd/` (key files: `download.go`, `generate_offline.go`, `mapd.go`, `offline.capnp`, `params.go`).
 
 **Offline Tile Format (Cap’n Proto)**
 - **Schema (subset):**
@@ -67,7 +68,8 @@
 - **Fallbacks:** If map coverage is sparse/conflicting, fall back to model-only curvature and original VTSC behavior.
 
 **Quick Reference: Relevant Files**
-- **Mapd:** `third_party/openpilot-mapd/{download.go, generate_offline.go, mapd.go, offline.capnp, params.go}`.
+- **Mapd source:** `mapd_repo/openpilot-mapd/{download.go, generate_offline.go, mapd.go, offline.capnp, params.go}`.
+- **Mapd binary:** `third_party/mapd_pfeiferj/mapd`.
 - **VTSC:** `sunnypilot/selfdrive/controls/lib/vision_turn_controller.py` (physics and blending), `longitudinal_planner.py` (min() integration).
 - **Paths:** `openpilot/system/hardware/hw.py::Paths.mapd_root()`.
 - **UI OSM:** `selfdrive/ui/sunnypilot/qt/offroad/settings/osm_panel.*`.
