@@ -11,6 +11,7 @@ from openpilot.common.params import Params
 from opendbc.car.common.conversions import Conversions as CV
 from openpilot.selfdrive.car.cruise import V_CRUISE_UNSET, V_CRUISE_MAX
 from openpilot.common.swaglog import cloudlog
+import time
 
 # Speed safety constants
 MIN_OPERATING_SPEED = 2.24  # 5 mph in m/s - minimum speed for RTI operation
@@ -49,6 +50,11 @@ class RTIController:
         self._v_ego = 0.0
         self._a_ego = 0.0
         self._v_cruise = V_CRUISE_UNSET
+
+        # Ramped decel state for RTI-only speed target shaping
+        self._ramped_speed = None  # m/s, internal smoothed recommendation
+        self._last_update_ts = None  # monotonic seconds
+        self._rti_decel_rate = 1.4  # m/s^2 default (gentle, slightly > coast)
 
         # Load user-configured parameters
         self._load_user_params()
@@ -98,6 +104,21 @@ class RTIController:
         else:
             self._custom_speed_reduction_ms = 4.4  # Default 10 mph in m/s
 
+        # Gentle RTI decel rate (m/s^2). Only affects RTI recommendation shaping.
+        try:
+            decel_rate = self.params.get("RTIDecelRate")
+        except Exception:
+            decel_rate = None
+        if decel_rate:
+            try:
+                val = float(decel_rate)
+                # clamp to safe range
+                self._rti_decel_rate = max(0.5, min(3.0, val))
+            except (ValueError, TypeError):
+                self._rti_decel_rate = 1.4
+        else:
+            self._rti_decel_rate = 1.4
+
     def update(self, sm: messaging.SubMaster, v_ego: float, a_ego: float, v_cruise: float) -> None:
         """
         Update RTI controller state based on current conditions.
@@ -125,10 +146,17 @@ class RTIController:
             self._reset_state()
             return
 
+        # Compute dt for ramping
+        now = time.monotonic()
+        dt = 0.0
+        if self._last_update_ts is not None:
+            dt = max(0.0, min(1.0, now - self._last_update_ts))
+        self._last_update_ts = now
+
         # Process RTI state if available
         if sm.valid.get('rtiStateSP', False):
             rti_state = sm['rtiStateSP']
-            self._process_rti_state(rti_state)
+            self._process_rti_state(rti_state, dt)
         else:
             self._reset_state()
 
@@ -139,7 +167,7 @@ class RTIController:
                 msg = f"RTI Active: threat at {self._threat_distance:.0f}m, recommending {self._speed_recommendation * CV.MS_TO_KPH:.1f} km/h"
                 cloudlog.info(msg)
 
-    def _process_rti_state(self, rti_state) -> None:
+    def _process_rti_state(self, rti_state, dt: float) -> None:
         """
         Process RTI state message and determine speed recommendation.
 
@@ -246,9 +274,36 @@ class RTIController:
         # Calculate safe speed based on threat distance
         safe_speed = self._calculate_safe_speed(target_speed)
 
+        # RTI-only gentle ramp-down toward base target to limit decel aggressiveness.
+        base_target = safe_speed
+
+        # Initialize ramp from current cruise or ego on activation
+        if self._ramped_speed is None or not self._is_active:
+            start_from = self._v_cruise if self._v_cruise > 0 else max(self._v_ego, base_target)
+            self._ramped_speed = max(base_target, min(start_from, V_CRUISE_MAX))
+        else:
+            # Decrease at most rti_decel_rate * dt; increase immediately
+            if self._ramped_speed > base_target and dt > 0.0:
+                max_drop = self._rti_decel_rate * dt
+                self._ramped_speed = max(base_target, self._ramped_speed - max_drop)
+            else:
+                self._ramped_speed = min(V_CRUISE_MAX, base_target)
+
+        # Safety: avoid encouraging acceleration while threat is ahead
+        hysteresis = 0.45  # ~1 mph
+        if self._threat_ahead and self._ramped_speed > (base_target + hysteresis):
+            self._ramped_speed = min(self._ramped_speed, self._v_ego)
+
+        # Final bounding vs. user's cruise
+        final_reco = self._ramped_speed
+        if self._v_cruise > 0:
+            final_reco = min(final_reco, self._v_cruise)
+
+        final_reco = min(final_reco, V_CRUISE_MAX)
+
         # Apply safety validations
-        if safe_speed > 0 and safe_speed < self._v_cruise:
-            self._speed_recommendation = safe_speed
+        if final_reco > 0 and (self._v_cruise <= 0 or final_reco < self._v_cruise):
+            self._speed_recommendation = final_reco
             self._is_active = True
         else:
             self._reset_state()
@@ -266,22 +321,16 @@ class RTIController:
         # Start with the target speed (typically posted speed limit)
         safe_speed = target_speed
 
-        # In "posted" mode, use the posted speed limit without reduction factors
-        # User expects RTI to recommend actual speed limit, not a fraction of it
+        # In "posted" mode, use the posted speed limit exactly (no extra reductions)
+        # Keep within planner bounds and the user's cruise setpoint, but do not ratchet below the limit.
         if self._speed_reduction_mode == "posted":
-            # For posted mode, only apply minimal safety constraints
-            # Don't reduce based on distance - that's the longitudinal planner's job
-            
-            # Ensure we never recommend acceleration toward a threat
-            safe_speed = min(safe_speed, self._v_ego)
-            
-            # Ensure minimum speed
-            if safe_speed < MIN_OPERATING_SPEED:
-                safe_speed = MIN_OPERATING_SPEED
-                
-            # Ensure maximum reasonable speed
+            # Bound by user's current cruise setpoint if available
+            if self._v_cruise > 0:
+                safe_speed = min(safe_speed, self._v_cruise)
+            # Bound by global max cruise
             safe_speed = min(safe_speed, V_CRUISE_MAX)
-            
+            # Ensure non-negative
+            safe_speed = max(0.0, safe_speed)
             return safe_speed
         
         # For custom mode, apply distance-based reduction factors
