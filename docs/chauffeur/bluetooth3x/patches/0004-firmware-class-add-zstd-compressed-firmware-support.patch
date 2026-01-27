@@ -1,0 +1,112 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DevAgent <agent@local>
+Date: Sun, 14 Sep 2025 09:45:00 +0000
+Subject: [PATCH] firmware: support Zstandard-compressed firmware blobs (.zst)
+
+Backport minimal support for loading Zstandard-compressed firmware blobs
+on Linux 4.9 by teaching firmware_class to detect Zstd files and
+decompress them before handing data to consumers (e.g., btqca).
+
+Key points:
+- Detect by extension (".zst") or by magic 0xFD2FB528 at offset 0.
+- Decompress via lib/decompress_unzstd.c wrapper (added separately).
+- Gate with CONFIG_FW_LOADER_COMPRESS and CONFIG_ZSTD_DECOMPRESS.
+- Preserve existing uncompressed path and memory ownership semantics.
+
+This enables systems to ship only compressed firmware files under
+/lib/firmware without relying on a userspace helper.
+
+--- a/drivers/base/firmware_class.c
++++ b/drivers/base/firmware_class.c
+@@
+ #include <linux/firmware.h>
+ #include <linux/slab.h>
+ #include <linux/vmalloc.h>
+ #include <linux/fs.h>
+ #include <linux/uaccess.h>
++#ifdef CONFIG_FW_LOADER_COMPRESS
++#include <linux/decompress/unzstd.h>
++#endif
+@@
+ static int _request_firmware_load(struct firmware *fw, const char *name,
+                                  struct device *device, bool uevent,
+                                  bool nowarn, int opt_flags)
+ {
+     int ret;
+@@
+     ret = fw_read_file_contents(fw, name, device, nowarn, opt_flags);
+     if (ret)
+         return ret;
+
++#ifdef CONFIG_FW_LOADER_COMPRESS
++    /* If the blob appears to be Zstd-compressed, decompress it in-kernel */
++    if (fw->size >= 4) {
++        const u8 *p = fw->data;
++        bool looks_zst = false;
++        /* Magic: 0xFD2FB528 (little-endian) */
++        if (p[0] == 0x28 && p[1] == 0xB5 && p[2] == 0x2F && p[3] == 0xFD)
++            looks_zst = true;
++        else if (strlen(name) > 4 && !strcmp(name + strlen(name) - 4, ".zst"))
++            looks_zst = true;
++        if (looks_zst) {
++            const void *in = fw->data;
++            size_t in_size = fw->size;
++            void *out = NULL;
++            size_t out_size = 0;
++            int zret;
++            zret = unzstd(in, in_size, &out, &out_size);
++            if (zret == 0 && out && out_size) {
++                /* Replace the firmware contents with decompressed buffer */
++                vfree(fw->data);
++                fw->data = out;
++                fw->size = out_size;
++            } else {
++                dev_err(device, "firmware: Zstd decompress failed for %s (err=%d)\n", name, zret);
++                return -EINVAL;
++            }
++        }
++    }
++#endif
+
+     return 0;
+ }
+
+--- a/lib/Kconfig
++++ b/lib/Kconfig
+@@
+ config FW_LOADER
+     bool "Firmware loading facility" if EXPERT
+@@
++config FW_LOADER_COMPRESS
++    bool "Allow in-kernel decompression of firmware"
++    depends on FW_LOADER
++    help
++      Enable support for reading and decompressing compressed firmware
++      files (e.g., Zstandard) in the kernel, avoiding userspace helpers.
++
+ config ZLIB_INFLATE
+     tristate
+@@
++config ZSTD_DECOMPRESS
++    tristate "Zstd decompressor"
++    help
++      Provides the Zstandard decompression API used by firmware loader.
++
+--- a/lib/Makefile
++++ b/lib/Makefile
+@@
+ obj-$(CONFIG_ZLIB_DEFLATE) += zlib_deflate/
++obj-$(CONFIG_ZSTD_DECOMPRESS) += decompress_unzstd.o
+
+--- /dev/null
++++ b/include/linux/decompress/unzstd.h
+@@
++#ifndef _LINUX_DECOMPRESS_UNZSTD_H
++#define _LINUX_DECOMPRESS_UNZSTD_H
++#include <linux/types.h>
++int unzstd(const void *src, size_t src_size, void **dstp, size_t *dst_size);
++#endif
+
+-- 
+2.45.1
+

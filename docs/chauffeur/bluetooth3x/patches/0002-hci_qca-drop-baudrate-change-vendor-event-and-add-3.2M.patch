@@ -1,0 +1,58 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex Agent <agent@local>
+Date: Fri, 12 Sep 2025 12:00:01 +0000
+Subject: [PATCH 2/3] Bluetooth: hci_qca: Drop baud-change VSE; add 3.2 Mbps
+
+Upstream fixes a race where the vendor-specific event (VSE 0x92)
+indicating baudrate-change completion may be lost or reordered. The
+driver now simply waits a short fixed delay (<=100 ms) after requesting
+the speed change and proceeds without relying on the VSE.
+
+Also map 3.2 Mbps (3200000) to the corresponding QCA baud enum so that
+platforms using that rate work out of the box.
+
+Based on commits such as:
+- "Bluetooth: hci_qca: Drop the wait for baudrate change vendor event"
+
+--- a/drivers/bluetooth/hci_qca.c
++++ b/drivers/bluetooth/hci_qca.c
+@@
+ enum qca_baudrate {
+ 	QCA_BAUDRATE_115200 = 0,
+ 	QCA_BAUDRATE_3M     = 5,
+ 	QCA_BAUDRATE_3_2M   = 8,
+ };
+
+ static u8 qca_get_baudrate_val(unsigned int speed)
+ {
+ 	switch (speed) {
+ 	case 115200:
+ 		return QCA_BAUDRATE_115200;
+ 	case 3000000:
+ 		return QCA_BAUDRATE_3M;
+ 	case 3200000:
+ 		return QCA_BAUDRATE_3_2M;
+ 	default:
+ 		return QCA_BAUDRATE_3M;
+ 	}
+ }
+
+@@
+ static int qca_set_speed(struct hci_uart *hu, unsigned int speed)
+ {
+ 	/* send vendor speed-change command */
+ 	int err = qca_send_change_baud(hu, qca_get_baudrate_val(speed));
+ 	if (err)
+ 		return err;
+ 
+ 	/* Do not wait for VSE 0x92; just allow hardware to settle */
+ 	msleep(100);
+ 
+ 	/* bump host UART */
+ 	host_set_baudrate(hu, speed);
+ 	return 0;
+ }
+
+-- 
+2.45.1
+

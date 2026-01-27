@@ -1,0 +1,145 @@
+diff --git a/drivers/bluetooth/Kconfig b/drivers/bluetooth/Kconfig
+index 0000000..0000000 100644
+--- a/drivers/bluetooth/Kconfig
++++ b/drivers/bluetooth/Kconfig
+@@
+ 
+ config BT_QCOM_GLINK
+ 	tristate "Qualcomm GLINK HCI support (stub)"
+ 	depends on BT && RPMSG && RPMSG_QCOM_GLINK_PKT
+ 	help
+ 	  Exposes a Bluetooth HCI controller via Qualcomm GLINK/RPMSG.
+ 	  This is a minimal skeleton for SDM845-class boards using WCN39xx.
+ 	  It registers an RPMSG client and an HCI device. TX/RX plumbing and
+ 	  power/firmware sequencing must be implemented for functionality.
+
+diff --git a/drivers/bluetooth/Makefile b/drivers/bluetooth/Makefile
+index 0000000..0000000 100644
+--- a/drivers/bluetooth/Makefile
++++ b/drivers/bluetooth/Makefile
+@@
+ obj-$(CONFIG_BT_QCOM_GLINK)	+= btqcomglink.o
+
+diff --git a/drivers/bluetooth/btqcomglink.c b/drivers/bluetooth/btqcomglink.c
+new file mode 100644
+index 0000000..0000000
+--- /dev/null
++++ b/drivers/bluetooth/btqcomglink.c
+@@
+/* Minimal, non-functional skeleton for a Qualcomm GLINK-based HCI device. */
+
+#include <linux/module.h>
+#include <linux/of.h>
+#include <linux/rpmsg.h>
+#include <linux/slab.h>
+#include <net/bluetooth/hci_core.h>
+
+struct btqcomglink {
+    struct rpmsg_device *rpdev;
+    struct hci_dev *hdev;
+};
+
+static int btqcomglink_open(struct hci_dev *hdev)
+{
+    return 0;
+}
+
+static int btqcomglink_close(struct hci_dev *hdev)
+{
+    return 0;
+}
+
+static int btqcomglink_send(struct hci_dev *hdev, struct sk_buff *skb)
+{
+    /* TODO: transmit skb->data over rpmsg */
+    kfree_skb(skb);
+    return 0;
+}
+
+static int btqcomglink_rpmsg_cb(struct rpmsg_device *rpdev, void *data, int len,
+                                 void *priv, u32 addr)
+{
+    struct btqcomglink *bgl = dev_get_drvdata(&rpdev->dev);
+    struct sk_buff *skb;
+
+    if (!bgl || !bgl->hdev)
+        return 0;
+
+    /* TODO: wrap incoming bytes as HCI frames; for stub, drop */
+    skb = bt_skb_alloc(len, GFP_ATOMIC);
+    if (!skb)
+        return 0;
+    skb_put_data(skb, data, len);
+    /* In a real driver, parse H4 packet boundary and deliver via hci_recv_frame */
+    kfree_skb(skb);
+    return 0;
+}
+
+static int btqcomglink_rpmsg_probe(struct rpmsg_device *rpdev)
+{
+    struct btqcomglink *bgl;
+    struct hci_dev *hdev;
+    int err;
+
+    bgl = devm_kzalloc(&rpdev->dev, sizeof(*bgl), GFP_KERNEL);
+    if (!bgl)
+        return -ENOMEM;
+
+    hdev = hci_alloc_dev();
+    if (!hdev)
+        return -ENOMEM;
+
+    bgl->rpdev = rpdev;
+    bgl->hdev = hdev;
+    dev_set_drvdata(&rpdev->dev, bgl);
+
+    hdev->bus = HCI_VIRTUAL; /* placeholder */
+    hdev->dev_type = HCI_PRIMARY;
+    hdev->open = btqcomglink_open;
+    hdev->close = btqcomglink_close;
+    hdev->send = btqcomglink_send;
+    hci_set_drvdata(hdev, bgl);
+
+    err = hci_register_dev(hdev);
+    if (err) {
+        hci_free_dev(hdev);
+        return err;
+    }
+
+    dev_info(&rpdev->dev, "btqcomglink stub probed on rpmsg channel %s\n",
+             rpdev->id.name);
+    return 0;
+}
+
+static void btqcomglink_rpmsg_remove(struct rpmsg_device *rpdev)
+{
+    struct btqcomglink *bgl = dev_get_drvdata(&rpdev->dev);
+    if (bgl && bgl->hdev) {
+        hci_unregister_dev(bgl->hdev);
+        hci_free_dev(bgl->hdev);
+    }
+}
+
+/* TODO: Replace with the actual GLINK/RPMSG service name(s) for BT on this platform. */
+static const struct rpmsg_device_id btqcomglink_rpmsg_id[] = {
+    { .name = "bt_qcom_glink" },
+    { }
+};
+MODULE_DEVICE_TABLE(rpmsg, btqcomglink_rpmsg_id);
+
+static struct rpmsg_driver btqcomglink_rpmsg_driver = {
+    .drv = {
+        .name = "btqcomglink",
+    },
+    .id_table = btqcomglink_rpmsg_id,
+    .probe = btqcomglink_rpmsg_probe,
+    .callback = btqcomglink_rpmsg_cb,
+    .remove = btqcomglink_rpmsg_remove,
+};
+
+module_rpmsg_driver(btqcomglink_rpmsg_driver);
+
+MODULE_AUTHOR("stub");
+MODULE_DESCRIPTION("Qualcomm GLINK Bluetooth HCI (stub)");
+MODULE_LICENSE("GPL v2");
+

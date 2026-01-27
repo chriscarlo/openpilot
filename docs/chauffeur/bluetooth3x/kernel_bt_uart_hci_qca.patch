@@ -1,0 +1,57 @@
+diff --git a/arch/arm64/configs/tici_defconfig b/arch/arm64/configs/tici_defconfig
+index 0000000..0000000 100644
+--- a/arch/arm64/configs/tici_defconfig
++++ b/arch/arm64/configs/tici_defconfig
+@@
+# Enable UART-attached QCA Bluetooth (WCN3990)
+CONFIG_BT=y
+CONFIG_BT_BREDR=y
+CONFIG_BT_LE=y
+CONFIG_BT_QCA=y
+CONFIG_BT_HCIUART=y
+CONFIG_BT_HCIUART_QCA=y
+
+# Ensure GENI serial and QUP support for SDM845 UARTs
+CONFIG_SERIAL_MSM_GENI=y
+CONFIG_SERIAL_MSM_GENI_CONSOLE=y
+CONFIG_QCOM_GENI_SE=y
+
+# Power helper (often already enabled in this tree)
+CONFIG_MSM_BT_POWER=y
+
+diff --git a/arch/arm64/boot/dts/qcom/comma_common.dtsi b/arch/arm64/boot/dts/qcom/comma_common.dtsi
+index 0000000..0000000 100644
+--- a/arch/arm64/boot/dts/qcom/comma_common.dtsi
++++ b/arch/arm64/boot/dts/qcom/comma_common.dtsi
+@@
+ &vendor {
+     /* Keep bt_power node with PM8998 supplies and XO vote */
+     bt_wcn3990: bt_wcn3990 {
+         compatible = "qca,wcn3990";
+         qca,bt-vdd-io-supply   = <&pm8998_s3>;
+         qca,bt-vdd-xtal-supply = <&pm8998_s5>;
+         qca,bt-vdd-core-supply = <&pm8998_l7>;
+         qca,bt-vdd-pa-supply   = <&pm8998_l17>;
+         qca,bt-vdd-ldo-supply  = <&pm8998_l25>;
+         clocks = <&clock_rpmh RPMH_CXO_CLK>;
+         clock-names = "xo";
+         status = "okay";
+     };
+ };
+
+ /* Attach WCN3990 BT to the correct UART (adjust &uart6 if needed) */
+ &uart6 {
+     status = "okay";
+     /* pinctrl-names = "default", "sleep"; */
+     /* pinctrl-0 = <&uart6_default>; pinctrl-1 = <&uart6_sleep>; */
+
+     bluetooth: wcn3990-bt {
+         compatible = "qcom,wcn3990-bt";
+         vddio-supply = <&pm8998_s3>;
+         vddxo-supply = <&pm8998_s5>;
+         vddrf-supply = <&pm8998_l7>;
+         vddch0-supply = <&pm8998_l25>;
+         max-speed = <3200000>;
+     };
+ };
+

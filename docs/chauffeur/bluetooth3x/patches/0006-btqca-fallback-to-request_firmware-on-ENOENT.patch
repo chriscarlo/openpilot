@@ -1,0 +1,32 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DevAgent <agent@local>
+Date: Sun, 14 Sep 2025 09:45:20 +0000
+Subject: [PATCH] Bluetooth: btqca: fall back to request_firmware() when direct load fails
+
+Older trees sometimes call request_firmware_direct(), which bypasses the
+userspace firmware helper. If .zst-only files are present, direct lookup
+may return -ENOENT. Add a fallback to request_firmware() so udev/user helper
+can serve the blob via sysfs while kernel-side Zstd support is being
+backported.
+
+--- a/drivers/bluetooth/btqca.c
++++ b/drivers/bluetooth/btqca.c
+@@
+ static int qca_request_file(struct hci_dev *hdev, const char *name,
+                            const struct firmware **fw)
+ {
+     int ret;
+     ret = request_firmware_direct(fw, name, &hdev->dev);
+     if (ret == -ENOENT) {
+         bt_dev_warn(hdev, "direct firmware load failed for %s (-2); trying helper", name);
+         ret = request_firmware(fw, name, &hdev->dev);
+     }
+     return ret;
+ }
+
+/* Adapt callsites to use qca_request_file() in place of request_firmware_* */
+/* NOTE: Apply to TLV and NVM paths in your tree as appropriate. */
+
+-- 
+2.45.1
+

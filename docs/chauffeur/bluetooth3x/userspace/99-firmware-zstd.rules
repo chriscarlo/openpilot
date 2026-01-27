@@ -1,0 +1,5 @@
+# Serve compressed firmware blobs via helper when the kernel requests firmware
+# uevent contains: SUBSYSTEM=firmware, ACTION=add, FIRMWARE=<name>, DEVPATH=...
+
+SUBSYSTEM=="firmware", ACTION=="add", RUN+="/usr/libexec/firmware_zstd_helper.sh"
+

@@ -1,0 +1,111 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex Agent <agent@local>
+Date: Fri, 12 Sep 2025 12:00:00 +0000
+Subject: [PATCH 1/3] Bluetooth: hci_qca: WCN3990 power pulses + reopen
+
+Bring older 4.9-based trees in line with upstream WCN3990 bring-up:
+
+- Add qca_send_power_pulse() that disables HW flow control while
+  transmitting a single-byte power command at a specific baud and
+  waits for completion. After ON pulse, wait ~100 ms; after OFF pulse,
+  wait 1–10 ms.
+- Implement qca_wcn3990_init():
+  1) host to 2400 bps, send OFF (0xC0)
+  2) host to init speed (115200), send ON (0xFC), wait 100 ms
+  3) Reopen serdev port to sync RTS/CTS, clear flow control
+
+This mirrors mainline/Android ‘hci_qca.c’ logic and avoids early
+PATCH_VER/reset timeouts when the ROM is in an indeterminate state.
+
+Upstream references:
+- LNX: drivers/bluetooth/hci_qca.c:qca_send_power_pulse/qca_wcn3990_init
+- AOSP: kernel/common 4.19/5.10/6.1 equivalents
+
+--- a/drivers/bluetooth/hci_qca.c
++++ b/drivers/bluetooth/hci_qca.c
+@@
+ static inline void host_set_baudrate(struct hci_uart *hu, unsigned int speed)
+ {
+ 	if (hu->serdev)
+ 		serdev_device_set_baudrate(hu->serdev, speed);
+ 	else
+ 		hci_uart_set_baudrate(hu, speed);
+ }
+
+/* New: power pulse helper (disabled HW flow control while sending) */
+static int qca_send_power_pulse(struct hci_uart *hu, bool on)
+{
+    int ret;
+    int timeout = msecs_to_jiffies(2000);
+    u8 cmd = on ? 0xFC /* QCA_WCN3990_POWERON_PULSE */
+               : 0xC0 /* QCA_WCN3990_POWEROFF_PULSE */;
+
+    if (!hu->serdev)
+        return -EOPNOTSUPP;
+
+    bt_dev_dbg(hu->hdev, "sending power pulse %02x to controller", cmd);
+    serdev_device_write_flush(hu->serdev);
+    hci_uart_set_flow_control(hu, true);
+    ret = serdev_device_write_buf(hu->serdev, &cmd, sizeof(cmd));
+    if (ret < 0) {
+        bt_dev_err(hu->hdev, "failed to send power pulse %02x", cmd);
+        return ret;
+    }
+    serdev_device_wait_until_sent(hu->serdev, timeout);
+    hci_uart_set_flow_control(hu, false);
+
+    if (on)
+        msleep(100);
+    else
+        usleep_range(1000, 10000);
+
+    return 0;
+}
+
+/* New: WCN3990 init sequence (OFF@2400 -> ON@115200 -> reopen) */
+static int qca_wcn3990_init(struct hci_uart *hu)
+{
+    int ret;
+
+    host_set_baudrate(hu, 2400);
+    ret = qca_send_power_pulse(hu, false);
+    if (ret)
+        return ret;
+
+    /* switch to init speed and power on */
+    host_set_baudrate(hu, 115200);
+    ret = qca_send_power_pulse(hu, true);
+    if (ret)
+        return ret;
+
+    if (hu->serdev) {
+        serdev_device_close(hu->serdev);
+        ret = serdev_device_open(hu->serdev);
+        if (ret) {
+            bt_dev_err(hu->hdev, "failed to reopen serdev port");
+            return ret;
+        }
+    }
+    hci_uart_set_flow_control(hu, false);
+    return 0;
+}
+
+/* Call qca_wcn3990_init() early in qca_setup() for WCN3990 */
+@@
+ static int qca_setup(struct hci_uart *hu)
+ {
+     enum qca_btsoc_type soc_type = qca_soc_type(hu);
+     ...
+     if (soc_type == QCA_WCN3990) {
+         int r = qca_wcn3990_init(hu);
+         if (r)
+             return r;
+     }
+     ...
+ }
+
+/* end */
+
+-- 
+2.45.1
+

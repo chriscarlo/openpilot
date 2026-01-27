@@ -1,0 +1,39 @@
+// SDM845 + WCN3990 Bluetooth over UART (serdev, hci_qca)
+// Include or merge this fragment into the board DTS. Adjust &uart6 if your wiring uses a different UART.
+
+&uart6 {
+    status = "okay";
+
+    /* Optional: ensure proper pinctrl states exist in your board pinmux file
+     * pinctrl-names = "default", "sleep";
+     * pinctrl-0 = <&uart6_default>;
+     * pinctrl-1 = <&uart6_sleep>;
+     * CTS/RTS recommended for reliable 3Mbaud operation
+     */
+
+    bluetooth: wcn3990-bt {
+        compatible = "qcom,wcn3990-bt";
+        vddio-supply = <&pm8998_s3>;   // 1.8V IO
+        vddxo-supply = <&pm8998_s5>;   // 1.8V XO
+        vddrf-supply = <&pm8998_l7>;   // ~1.3V RF
+        vddch0-supply = <&pm8998_l25>; // 3.3V CH0
+        max-speed = <3200000>;
+    };
+};
+
+&vendor {
+    /* Ensure bt_power node exists and stays enabled; keep XO vote if used by downstream btpower */
+    bt_wcn3990: bt_wcn3990 {
+        compatible = "qca,wcn3990";
+        qca,bt-vdd-io-supply   = <&pm8998_s3>;
+        qca,bt-vdd-xtal-supply = <&pm8998_s5>;
+        qca,bt-vdd-core-supply = <&pm8998_l7>;
+        qca,bt-vdd-pa-supply   = <&pm8998_l17>;
+        qca,bt-vdd-ldo-supply  = <&pm8998_l25>;
+        clocks = <&clock_rpmh RPMH_CXO_CLK>;
+        clock-names = "xo";
+        status = "okay";
+        /* Intentionally omit qca,bt-reset-gpio unless HW confirms a real BT_EN */
+    };
+};
+

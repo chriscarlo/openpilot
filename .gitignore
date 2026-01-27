@@ -120,3 +120,13 @@ Pipfile
 !.idea/tools/*
 !.run/*
 /.run
+
+### Local bring-up artifacts ###
+data/
+logs/
+log.txt
+build.kernel.*.log
+docs/chauffeur/bluetooth3x/archived/
+docs/chauffeur/bluetooth3x/diagnostics/
+docs/chauffeur/bluetooth3x/bootloops/
+cythonize

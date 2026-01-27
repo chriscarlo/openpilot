@@ -1,0 +1,93 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DevAgent <agent@local>
+Date: Sun, 14 Sep 2025 09:45:10 +0000
+Subject: [PATCH] lib: add decompress_unzstd wrapper used by firmware loader
+
+Introduce a tiny wrapper `unzstd()` that allocates an output buffer,
+invokes the in-kernel Zstd decompressor, and returns the decompressed
+blob. This mirrors upstream `lib/decompress_unzstd.c` behavior but is
+trimmed to a single helper for the firmware loader backport.
+
+Callers must `vfree()` the returned buffer when done.
+
+--- /dev/null
++++ b/lib/decompress_unzstd.c
+@@
++// Minimal unzstd() wrapper for kernel 4.9 backport
++#include <linux/kernel.h>
++#include <linux/slab.h>
++#include <linux/vmalloc.h>
++#include <linux/errno.h>
++#include <linux/string.h>
++#include <linux/types.h>
++#include <linux/zstd.h>
++
++/* Heuristic upper bound growth factor if unknown: 8x cap */
++#define ZSTD_MAX_GROWTH_FACTOR 8
++
++int unzstd(const void *src, size_t src_size, void **dstp, size_t *dst_size)
++{
++
++#ifdef CONFIG_ZSTD_DECOMPRESS
++	ZSTD_DCtx *dctx;
++	size_t needed, ret;
++	void *out;
++
++	if (!src || !dstp || !dst_size)
++		return -EINVAL;
++
++	*dstp = NULL;
++	*dst_size = 0;
++
++	needed = ZSTD_getFrameContentSize(src, src_size);
++	if (needed == ZSTD_CONTENTSIZE_ERROR || needed == ZSTD_CONTENTSIZE_UNKNOWN) {
++		/* Fallback: guess a buffer up to 8x input, capped */
++		needed = min_t(size_t, src_size * ZSTD_MAX_GROWTH_FACTOR, 16 * 1024 * 1024);
++	}
++	if (!needed)
++		return -EINVAL;
++
++	out = vmalloc(needed);
++	if (!out)
++		return -ENOMEM;
++
++	dctx = ZSTD_createDCtx();
++	if (!dctx) {
++		vfree(out);
++		return -ENOMEM;
++	}
++	ret = ZSTD_decompressDCtx(dctx, out, needed, src, src_size);
++	ZSTD_freeDCtx(dctx);
++	if (ZSTD_isError(ret)) {
++		vfree(out);
++		return -EINVAL;
++	}
++	*dstp = out;
++	*dst_size = ret;
++	return 0;
++#else
++	return -ENOTSUPP;
++#endif
++}
+
+--- a/include/linux/zstd.h
++++ b/include/linux/zstd.h
+@@
++/* Minimal subset of Zstd API required for firmware loader backport. */
++#ifndef _LINUX_ZSTD_MIN_H
++#define _LINUX_ZSTD_MIN_H
++#include <linux/types.h>
++typedef struct ZSTD_DCtx_s ZSTD_DCtx;
++ZSTD_DCtx *ZSTD_createDCtx(void);
++size_t ZSTD_freeDCtx(ZSTD_DCtx *dctx);
++size_t ZSTD_decompressDCtx(ZSTD_DCtx* dctx, void* dst, size_t dstCapacity,
++                           const void* src, size_t srcSize);
++unsigned long long ZSTD_getFrameContentSize(const void *src, size_t srcSize);
++int ZSTD_isError(size_t code);
++#define ZSTD_CONTENTSIZE_ERROR    (0ULL - 2)
++#define ZSTD_CONTENTSIZE_UNKNOWN  (0ULL - 1)
++#endif
+
+-- 
+2.45.1
+

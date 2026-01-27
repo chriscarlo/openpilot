@@ -1,0 +1,569 @@
+diff --git a/drivers/bluetooth/btqca.c b/drivers/bluetooth/btqca.c
+index f64e86f40cd9..2ef952269d9e 100644
+--- a/drivers/bluetooth/btqca.c
++++ b/drivers/bluetooth/btqca.c
+@@ -19,36 +19,66 @@
+  */
+ #include <linux/module.h>
+ #include <linux/firmware.h>
++#include <linux/delay.h>
+ 
+ #include <net/bluetooth/bluetooth.h>
+ #include <net/bluetooth/hci_core.h>
++#include <linux/param.h>
+ 
+ #include "btqca.h"
+ 
+ #define VERSION "0.1"
+ 
+-#define MAX_PATCH_FILE_SIZE (100*1024)
+-#define MAX_NVM_FILE_SIZE   (10*1024)
++/* Older trees may not define HCI_EV_VENDOR (0xFF) explicitly */
++#ifndef HCI_EV_VENDOR
++#define HCI_EV_VENDOR 0xff
++#endif
++
++/* Module params for TLV behavior; expose knobs to iterate without rebuilds. */
++static bool qca_tlv_force_sync = true;        /* ack every segment */
++static bool qca_tlv_full_skipvse = true;      /* skip VSE for non-final segs */
++static int  qca_tlv_seg0_len = 64;            /* bytes in first segment (<=128) */
++static int  qca_tlv_preseg0_us = 10000;       /* quiet before seg0 (usec) */
++static int  qca_tlv_pace_us = 750;            /* pacing between segments (usec) */
++
++module_param_named(tlv_force_sync,   qca_tlv_force_sync,   bool, 0644);
++MODULE_PARM_DESC(tlv_force_sync,   "Send all TLV segments synchronously (1)");
++module_param_named(tlv_full_skipvse, qca_tlv_full_skipvse, bool, 0644);
++MODULE_PARM_DESC(tlv_full_skipvse, "Skip VSE for non-final segments (1)");
++module_param_named(tlv_seg0_len,    qca_tlv_seg0_len,      int,  0644);
++MODULE_PARM_DESC(tlv_seg0_len,    "First TLV segment length in bytes (<=128)");
++module_param_named(tlv_preseg0_us,  qca_tlv_preseg0_us,    int,  0644);
++MODULE_PARM_DESC(tlv_preseg0_us,  "Quiet before seg0 (usec)");
++module_param_named(tlv_pace_us,     qca_tlv_pace_us,       int,  0644);
++MODULE_PARM_DESC(tlv_pace_us,     "Uniform pacing between TLV segments (usec)");
++
++/* Increase limits to accommodate WCN3990 TLV sizes */
++#define MAX_PATCH_FILE_SIZE (512*1024)
++#define MAX_NVM_FILE_SIZE   (64*1024)
+ 
+ static int rome_patch_ver_req(struct hci_dev *hdev, u32 *rome_version)
+ {
+-	struct sk_buff *skb;
+-	struct edl_event_hdr *edl;
+-	struct rome_version *ver;
+-	char cmd;
+-	int err = 0;
+-
+-	BT_DBG("%s: ROME Patch Version Request", hdev->name);
+-
+-	cmd = EDL_PATCH_VER_REQ_CMD;
+-	skb = __hci_cmd_sync_ev(hdev, EDL_PATCH_CMD_OPCODE, EDL_PATCH_CMD_LEN,
+-				&cmd, HCI_VENDOR_PKT, HCI_INIT_TIMEOUT);
+-	if (IS_ERR(skb)) {
+-		err = PTR_ERR(skb);
+-		BT_ERR("%s: Failed to read version of ROME (%d)", hdev->name,
+-		       err);
+-		return err;
+-	}
++    struct sk_buff *skb;
++    struct edl_event_hdr *edl;
++    struct rome_version *ver;
++    char cmd;
++    int err = 0;
++    int attempt;
++
++    BT_INFO("%s: qca/btqca: ROME Patch Version Request (0xFC00)", hdev->name);
++
++    cmd = EDL_PATCH_VER_REQ_CMD;
++    for (attempt = 1; attempt <= 2; attempt++) {
++        unsigned long timeout = msecs_to_jiffies(1500);
++        skb = __hci_cmd_sync_ev(hdev, EDL_PATCH_CMD_OPCODE, EDL_PATCH_CMD_LEN,
++                                &cmd, HCI_EV_VENDOR, timeout);
++        if (!IS_ERR(skb))
++            break;
++        err = PTR_ERR(skb);
++        BT_INFO("%s: qca/btqca: Retry ROM version after 40ms (attempt %d err=%d)",
++                hdev->name, attempt, err);
++        msleep(40);
++    }
+ 
+ 	if (skb->len != sizeof(*edl) + sizeof(*ver)) {
+ 		BT_ERR("%s: Version size mismatch len %d", hdev->name,
+@@ -74,7 +104,10 @@ static int rome_patch_ver_req(struct hci_dev *hdev, u32 *rome_version)
+ 
+ 	ver = (struct rome_version *)(edl->data);
+ 
+-	BT_DBG("%s: Product:0x%08x", hdev->name, le32_to_cpu(ver->product_id));
++    BT_INFO("%s: qca/btqca: Product:0x%08x Patch:0x%04x ROM:0x%04x SOC:0x%08x",
++            hdev->name, le32_to_cpu(ver->product_id),
++            le16_to_cpu(ver->patch_ver), le16_to_cpu(ver->rome_ver),
++            le32_to_cpu(ver->soc_id));
+ 	BT_DBG("%s: Patch  :0x%08x", hdev->name, le16_to_cpu(ver->patch_ver));
+ 	BT_DBG("%s: ROM    :0x%08x", hdev->name, le16_to_cpu(ver->rome_ver));
+ 	BT_DBG("%s: SOC    :0x%08x", hdev->name, le32_to_cpu(ver->soc_id));
+@@ -99,7 +132,10 @@ static int rome_reset(struct hci_dev *hdev)
+ 
+ 	BT_DBG("%s: ROME HCI_RESET", hdev->name);
+ 
+-	skb = __hci_cmd_sync(hdev, HCI_OP_RESET, 0, NULL, HCI_INIT_TIMEOUT);
++    /* Some WCN3990 parts respond sluggishly to the first RESET; allow
++     * a longer completion timeout (2s) to avoid spurious -ETIMEDOUT.
++     */
++            skb = __hci_cmd_sync(hdev, HCI_OP_RESET, 0, NULL, msecs_to_jiffies(2000));
+ 	if (IS_ERR(skb)) {
+ 		err = PTR_ERR(skb);
+ 		BT_ERR("%s: Reset failed (%d)", hdev->name, err);
+@@ -112,7 +148,7 @@ static int rome_reset(struct hci_dev *hdev)
+ }
+ 
+ static void rome_tlv_check_data(struct rome_config *config,
+-				const struct firmware *fw)
++                                const struct firmware *fw)
+ {
+ 	const u8 *data;
+ 	u32 type_len;
+@@ -131,16 +167,18 @@ static void rome_tlv_check_data(struct rome_config *config,
+ 	BT_DBG("Length\t\t : %d bytes", length);
+ 
+ 	switch (config->type) {
+-	case TLV_TYPE_PATCH:
+-		tlv_patch = (struct tlv_type_patch *)tlv->data;
+-		BT_DBG("Total Length\t\t : %d bytes",
+-		       le32_to_cpu(tlv_patch->total_size));
++        case TLV_TYPE_PATCH:
++            tlv_patch = (struct tlv_type_patch *)tlv->data;
++            BT_DBG("Total Length\t\t : %d bytes",
++                   le32_to_cpu(tlv_patch->total_size));
+ 		BT_DBG("Patch Data Length\t : %d bytes",
+ 		       le32_to_cpu(tlv_patch->data_length));
+ 		BT_DBG("Signing Format Version : 0x%x",
+ 		       tlv_patch->format_version);
+-		BT_DBG("Signature Algorithm\t : 0x%x",
+-		       tlv_patch->signature);
++            BT_DBG("Signature Algorithm\t : 0x%x",
++                   tlv_patch->signature);
++            BT_DBG("Download Mode\t : 0x%x",
++                   tlv_patch->download_mode);
+ 		BT_DBG("Reserved\t\t : 0x%x",
+ 		       le16_to_cpu(tlv_patch->reserved1));
+ 		BT_DBG("Product ID\t\t : 0x%04x",
+@@ -153,7 +191,12 @@ static void rome_tlv_check_data(struct rome_config *config,
+ 		       le16_to_cpu(tlv_patch->reserved2));
+ 		BT_DBG("Patch Entry Address\t : 0x%x",
+ 		       le32_to_cpu(tlv_patch->entry));
+-		break;
++            /* Propagate download_mode from TLV header so the sender can
++             * honor skip‑VSE semantics on WCN399x.
++             */
++            config->dnld_type = tlv_patch->download_mode;
++            config->dnld_mode = config->dnld_type;
++            break;
+ 
+ 	case TLV_TYPE_NVM:
+ 		idx = 0;
+@@ -198,105 +241,223 @@ static void rome_tlv_check_data(struct rome_config *config,
+ }
+ 
+ static int rome_tlv_send_segment(struct hci_dev *hdev, int idx, int seg_size,
+-				 const u8 *data)
++                 const u8 *data, u8 dnld_mode)
+ {
+-	struct sk_buff *skb;
+-	struct edl_event_hdr *edl;
+-	struct tlv_seg_resp *tlv_resp;
+-	u8 cmd[MAX_SIZE_PER_TLV_SEGMENT + 2];
+-	int err = 0;
+-
+-	BT_DBG("%s: Download segment #%d size %d", hdev->name, idx, seg_size);
+-
+-	cmd[0] = EDL_PATCH_TLV_REQ_CMD;
+-	cmd[1] = seg_size;
+-	memcpy(cmd + 2, data, seg_size);
+-
+-	skb = __hci_cmd_sync_ev(hdev, EDL_PATCH_CMD_OPCODE, seg_size + 2, cmd,
+-				HCI_VENDOR_PKT, HCI_INIT_TIMEOUT);
+-	if (IS_ERR(skb)) {
+-		err = PTR_ERR(skb);
+-		BT_ERR("%s: Failed to send TLV segment (%d)", hdev->name, err);
+-		return err;
+-	}
+-
+-	if (skb->len != sizeof(*edl) + sizeof(*tlv_resp)) {
+-		BT_ERR("%s: TLV response size mismatch", hdev->name);
+-		err = -EILSEQ;
+-		goto out;
+-	}
+-
+-	edl = (struct edl_event_hdr *)(skb->data);
+-	if (!edl) {
+-		BT_ERR("%s: TLV with no header", hdev->name);
+-		err = -EILSEQ;
+-		goto out;
+-	}
++    struct sk_buff *skb;
++    struct edl_event_hdr *edl;
++    struct tlv_seg_resp *tlv_resp;
++    u8 cmd[MAX_SIZE_PER_TLV_SEGMENT + 2];
++    int err = 0;
++
++    BT_INFO("%s: qca/btqca: TLV seg#%d size=%d mode=%u", hdev->name, idx, seg_size, dnld_mode);
++    /* Briefly relax HW flow control for the very first TLV segment on
++     * WCN3990/SDM845 to avoid dead starts.
++     */
++    {
++        struct hci_uart *hu = hci_get_drvdata(hdev);
++        if (hu && idx == 0)
++            hci_uart_set_flow_control(hu, false);
++    }
++
++    cmd[0] = EDL_PATCH_TLV_REQ_CMD;
++    cmd[1] = seg_size;
++    memcpy(cmd + 2, data, seg_size);
++    /* Give the controller a tiny quiet period before the very first TLV
++     * segment to avoid dropping it on some parts.
++     */
++    if (idx == 0) {
++        int q = clamp_t(int, qca_tlv_preseg0_us, 0, 50000);
++        if (q > 0)
++            usleep_range(q, q + 5000);
++    }
++    {
++        int attempt, max_attempts = (idx == 0) ? 4 : 2;
++        for (attempt = 1; attempt <= max_attempts; attempt++) {
++            unsigned long timeout = msecs_to_jiffies((attempt >= 4) ? 25000 : (attempt >= 3 ? 20000 : 15000));
++            if (dnld_mode == ROME_SKIP_EVT_NONE || qca_tlv_force_sync) {
++                skb = __hci_cmd_sync_ev(hdev, EDL_PATCH_CMD_OPCODE,
++                                        seg_size + 2, cmd,
++                                        HCI_EV_VENDOR, timeout);
++            } else {
++                /* In skip‑VSE modes, queue command without waiting for
++                 * per‑segment ack. __hci_cmd_send() intentionally avoids
++                 * engaging the core command tracking so credits are not
++                 * consumed per segment.
++                 */
++                int send_ret = __hci_cmd_send(hdev, EDL_PATCH_CMD_OPCODE,
++                                              seg_size + 2, cmd);
++                if (send_ret < 0)
++                    err = send_ret;
++                /* No skb to parse in this branch */
++                skb = NULL;
++            }
++            if (dnld_mode != ROME_SKIP_EVT_NONE || (skb && !IS_ERR(skb)))
++                break;
++            if (skb)
++                err = PTR_ERR(skb);
++            if (attempt < max_attempts) {
++                int pause_ms = 10; /* uniform pacing when retrying */
++            BT_INFO("%s: qca/btqca: Retry TLV seg %d (attempt %d) after %dms (err=%d)",
++                        hdev->name, idx, attempt+1, pause_ms, err);
++                msleep(pause_ms);
++                continue;
++            }
++            BT_ERR("%s: Failed to send TLV segment (%d)", hdev->name, err);
++            return err;
++        }
++    }
++
++    if (dnld_mode == ROME_SKIP_EVT_NONE &&
++        skb && skb->len != sizeof(*edl) + sizeof(*tlv_resp)) {
++        BT_ERR("%s: qca/btqca: TLV response size mismatch", hdev->name);
++        err = -EILSEQ;
++        goto out;
++    }
++
++    if (dnld_mode != ROME_SKIP_EVT_NONE) {
++        /* In skip‑VSE mode we didn't wait for a segment ack; skip deeper
++         * response validation here.
++         */
++        goto out;
++    }
++
++    edl = (struct edl_event_hdr *)(skb->data);
++    if (!edl) {
++        BT_ERR("%s: TLV with no header", hdev->name);
++        err = -EILSEQ;
++        goto out;
++    }
+ 
+ 	tlv_resp = (struct tlv_seg_resp *)(edl->data);
+ 
+ 	if (edl->cresp != EDL_CMD_REQ_RES_EVT ||
+ 	    edl->rtype != EDL_TVL_DNLD_RES_EVT || tlv_resp->result != 0x00) {
+-		BT_ERR("%s: TLV with error stat 0x%x rtype 0x%x (0x%x)",
+-		       hdev->name, edl->cresp, edl->rtype, tlv_resp->result);
++        BT_ERR("%s: qca/btqca: TLV error stat 0x%x rtype 0x%x (0x%x)",
++               hdev->name, edl->cresp, edl->rtype, tlv_resp->result);
+ 		err = -EIO;
+ 	}
+ 
+ out:
+-	kfree_skb(skb);
+-
+-	return err;
++    kfree_skb(skb);
++    {
++        struct hci_uart *hu = hci_get_drvdata(hdev);
++        if (hu && idx == 0)
++            hci_uart_set_flow_control(hu, true);
++    }
++
++    return err;
+ }
+ 
+ static int rome_tlv_download_request(struct hci_dev *hdev,
+-				     const struct firmware *fw)
++                                     const struct firmware *fw,
++                                     struct rome_config *config)
+ {
+-	const u8 *buffer, *data;
+-	int total_segment, remain_size;
+-	int ret, i;
+-
+-	if (!fw || !fw->data)
+-		return -EINVAL;
+-
+-	total_segment = fw->size / MAX_SIZE_PER_TLV_SEGMENT;
+-	remain_size = fw->size % MAX_SIZE_PER_TLV_SEGMENT;
+-
+-	BT_DBG("%s: Total segment num %d remain size %d total size %zu",
+-	       hdev->name, total_segment, remain_size, fw->size);
+-
+-	data = fw->data;
+-	for (i = 0; i < total_segment; i++) {
+-		buffer = data + i * MAX_SIZE_PER_TLV_SEGMENT;
+-		ret = rome_tlv_send_segment(hdev, i, MAX_SIZE_PER_TLV_SEGMENT,
+-					    buffer);
+-		if (ret < 0)
+-			return -EIO;
+-	}
+-
+-	if (remain_size) {
+-		buffer = data + total_segment * MAX_SIZE_PER_TLV_SEGMENT;
+-		ret = rome_tlv_send_segment(hdev, total_segment, remain_size,
+-					    buffer);
+-		if (ret < 0)
+-			return -EIO;
+-	}
+-
+-	return 0;
++    const u8 *data;
++    size_t left;
++    size_t offset = 0;
++    int ret;
++    int seg_idx = 0;
++
++    if (!fw || !fw->data)
++        return -EINVAL;
++
++    data = fw->data;
++    left = fw->size;
++
++    BT_DBG("%s: TLV total size %zu", hdev->name, fw->size);
++
++    while (left > 0) {
++        int seg_sz;
++        const u8 *buffer;
++
++        /* Reliability tuning for this platform:
++         * - Use 96–128B segments; smaller segments reduce bursts.
++         * - Pace segments with a uniform delay.
++         */
++        seg_sz = (left > 128) ? 128 : left;
++        /* Respect tunable seg0 length and caps for subsequent segments */
++        if (seg_idx == 0) {
++            int s0 = clamp_t(int, qca_tlv_seg0_len, 16, 128);
++            if (seg_sz > s0)
++                seg_sz = s0;
++        } else if (seg_sz > 96) {
++            seg_sz = 96;
++        }
++
++        buffer = data + offset;
++
++        /* Force last segment to wait for vendor ack; earlier ones follow
++         * TLV header's download_mode (skip‑VSE on WCN399x).
++         */
++        if (left - seg_sz == 0) {
++            config->dnld_mode = ROME_SKIP_EVT_NONE; /* force ack on last */
++        } else {
++            config->dnld_mode = qca_tlv_full_skipvse ? ROME_SKIP_EVT_VSE : ROME_SKIP_EVT_NONE;
++        }
++
++        ret = rome_tlv_send_segment(hdev, seg_idx, seg_sz, buffer,
++                                     config->dnld_mode);
++        if (ret < 0)
++            return -EIO;
++
++        left -= seg_sz;
++        offset += seg_sz;
++        /* extra settle right after seg 0 succeeds */
++        if (seg_idx == 0)
++            usleep_range(500, 1000);
++        /* uniform pacing between segments (tiny, to avoid overruns) */
++        {
++            int p = clamp_t(int, qca_tlv_pace_us, 0, 20000);
++            if (p > 0)
++                usleep_range(p, p + 500);
++        }
++        seg_idx++;
++    }
++
++    /* If the TLV header indicated a skip‑VSE mode, inject a single
++     * Command Complete to reconcile command credits with the core.
++     */
++    if (config->dnld_type == ROME_SKIP_EVT_VSE ||
++        config->dnld_type == ROME_SKIP_EVT_VSE_CC) {
++        struct sk_buff *skb;
++        struct hci_event_hdr *hdr;
++        struct hci_ev_cmd_complete *evt;
++
++        skb = bt_skb_alloc(sizeof(*hdr) + sizeof(*evt) + 1, GFP_ATOMIC);
++        if (!skb)
++            return -ENOMEM;
++
++        hdr = (struct hci_event_hdr *)skb_put(skb, sizeof(*hdr));
++        hdr->evt = HCI_EV_CMD_COMPLETE;
++        hdr->plen = sizeof(*evt) + 1;
++
++        evt = (struct hci_ev_cmd_complete *)skb_put(skb, sizeof(*evt));
++        evt->ncmd = 0x01;
++        evt->opcode = cpu_to_le16(QCA_HCI_CC_OPCODE);
++
++        *skb_put(skb, 1) = QCA_HCI_CC_SUCCESS;
++
++        hci_skb_pkt_type(skb) = HCI_EVENT_PKT;
++        hci_recv_frame(hdev, skb);
++    }
++
++    return 0;
+ }
+ 
+ static int rome_download_firmware(struct hci_dev *hdev,
+-				  struct rome_config *config)
++                                  struct rome_config *config)
+ {
+-	const struct firmware *fw;
++    const struct firmware *fw;
+ 	u32 type_len, length;
+ 	struct tlv_type_hdr *tlv;
+ 	int ret;
+ 
+-	BT_INFO("%s: ROME Downloading file: %s", hdev->name, config->fwname);
+-	ret = request_firmware(&fw, config->fwname, &hdev->dev);
++    BT_INFO("%s: qca/btqca: Downloading file: %s", hdev->name, config->fwname);
++    /* Avoid userspace helper race during attach by using _direct() */
++    ret = request_firmware_direct(&fw, config->fwname, &hdev->dev);
+ 
+ 	if (ret || !fw || !fw->data || fw->size <= 0) {
+-		BT_ERR("Failed to request file: err = (%d)", ret);
++        BT_ERR("qca/btqca: Failed to request file: err = (%d)", ret);
+ 		ret = ret ? ret : -EINVAL;
+ 		return ret;
+ 	}
+@@ -336,12 +497,12 @@ static int rome_download_firmware(struct hci_dev *hdev,
+ 		goto exit;
+ 	}
+ 
+-	rome_tlv_check_data(config, fw);
+-	ret = rome_tlv_download_request(hdev, fw);
++    rome_tlv_check_data(config, fw);
++    ret = rome_tlv_download_request(hdev, fw, config);
+ 
+-	if (ret) {
+-		BT_ERR("Failed to download FW: error = (%d)", ret);
+-	}
++    if (ret) {
++        BT_ERR("Failed to download FW: error = (%d)", ret);
++    }
+ 
+ exit:
+ 	release_firmware(fw);
+@@ -359,8 +520,8 @@ int qca_set_bdaddr_rome(struct hci_dev *hdev, const bdaddr_t *bdaddr)
+ 	cmd[1] = 0x02;
+ 	cmd[2] = sizeof(bdaddr_t);
+ 	memcpy(cmd + 3, bdaddr, sizeof(bdaddr_t));
+-	skb = __hci_cmd_sync_ev(hdev, EDL_NVM_ACCESS_OPCODE, sizeof(cmd), cmd,
+-				HCI_VENDOR_PKT, HCI_INIT_TIMEOUT);
++    skb = __hci_cmd_sync_ev(hdev, EDL_NVM_ACCESS_OPCODE, sizeof(cmd), cmd,
++                            HCI_EV_VENDOR, HCI_INIT_TIMEOUT);
+ 	if (IS_ERR(skb)) {
+ 		err = PTR_ERR(skb);
+ 		BT_ERR("%s: Change address command failed (%d)",
+@@ -376,37 +537,49 @@ EXPORT_SYMBOL_GPL(qca_set_bdaddr_rome);
+ 
+ int qca_uart_setup_rome(struct hci_dev *hdev, uint8_t baudrate)
+ {
+-	u32 rome_ver = 0;
+-	struct rome_config config;
+-	int err;
++    u32 rome_ver = 0;
++    struct rome_config config;
++    int err;
+ 
+-	BT_DBG("%s: ROME setup on UART", hdev->name);
++    BT_DBG("%s: ROME setup on UART", hdev->name);
+ 
+-	config.user_baud_rate = baudrate;
++    config.user_baud_rate = baudrate;
+ 
+-	/* Get ROME version information */
+-	err = rome_patch_ver_req(hdev, &rome_ver);
+-	if (err < 0 || rome_ver == 0) {
+-		BT_ERR("%s: Failed to get version 0x%x", hdev->name, err);
+-		return err;
++    /* Defer HCI_RESET until after patch/NVM per upstream WCN399x flow. */
++
++    /* Get ROME version information */
++    err = rome_patch_ver_req(hdev, &rome_ver);
++    if (err < 0 || rome_ver == 0) {
++        BT_ERR("%s: Failed to get version 0x%x", hdev->name, err);
++        return err;
+ 	}
+ 
+ 	BT_INFO("%s: ROME controller version 0x%08x", hdev->name, rome_ver);
+ 
+-	/* Download rampatch file */
+-	config.type = TLV_TYPE_PATCH;
+-	snprintf(config.fwname, sizeof(config.fwname), "qca/rampatch_%08x.bin",
+-		 rome_ver);
+-	err = rome_download_firmware(hdev, &config);
++    /* Download rampatch file */
++    config.type = TLV_TYPE_PATCH;
++    /* WCN3990 (ROM 0x02140201) uses TLV file crbtfw21.tlv upstream */
++    if (rome_ver == 0x02140201)
++        strlcpy(config.fwname, "qca/crbtfw21.tlv", sizeof(config.fwname));
++    else
++        snprintf(config.fwname, sizeof(config.fwname), "qca/rampatch_%08x.bin",
++             rome_ver);
++    err = rome_download_firmware(hdev, &config);
+ 	if (err < 0) {
+ 		BT_ERR("%s: Failed to download patch (%d)", hdev->name, err);
+ 		return err;
+ 	}
+ 
+-	/* Download NVM configuration */
+-	config.type = TLV_TYPE_NVM;
+-	snprintf(config.fwname, sizeof(config.fwname), "qca/nvm_%08x.bin",
+-		 rome_ver);
++    /* Short delay before NVM transfer improves WCN3990 reliability */
++    msleep(10);
++
++    /* Download NVM configuration */
++    config.type = TLV_TYPE_NVM;
++    if (rome_ver == 0x02140201)
++        strlcpy(config.fwname, "qca/crnv21.bin", sizeof(config.fwname));
++    else
++        snprintf(config.fwname, sizeof(config.fwname), "qca/nvm_%08x.bin",
++             rome_ver);
+ 	err = rome_download_firmware(hdev, &config);
+ 	if (err < 0) {
+ 		BT_ERR("%s: Failed to download NVM (%d)", hdev->name, err);
+@@ -430,3 +603,9 @@ MODULE_AUTHOR("Ben Young Tae Kim <ytkim@qca.qualcomm.com>");
+ MODULE_DESCRIPTION("Bluetooth support for Qualcomm Atheros family ver " VERSION);
+ MODULE_VERSION(VERSION);
+ MODULE_LICENSE("GPL");
++
++int qca_read_rom_version(struct hci_dev *hdev, u32 *rome_version)
++{
++    return rome_patch_ver_req(hdev, rome_version);
++}
++EXPORT_SYMBOL_GPL(qca_read_rom_version);

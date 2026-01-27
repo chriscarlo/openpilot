@@ -1,0 +1,15 @@
+[Unit]
+Description=Attach QCA WCN3990 on UART
+After=local-fs.target bt-unblock.service
+Requires=bt-unblock.service
+Before=bluetooth.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/env bash -lc '/usr/bin/btattach -B /dev/ttyHS0 -S 115200 -P qca'
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+

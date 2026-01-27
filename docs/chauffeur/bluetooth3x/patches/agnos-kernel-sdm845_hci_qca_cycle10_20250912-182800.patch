@@ -1,0 +1,487 @@
+diff --git a/drivers/bluetooth/hci_qca.c b/drivers/bluetooth/hci_qca.c
+index 74b2f4a14643..318f085c799f 100644
+--- a/drivers/bluetooth/hci_qca.c
++++ b/drivers/bluetooth/hci_qca.c
+@@ -33,6 +33,7 @@
+ 
+ #include <net/bluetooth/bluetooth.h>
+ #include <net/bluetooth/hci_core.h>
++#include <linux/module.h>
+ 
+ #include "hci_uart.h"
+ #include "btqca.h"
+@@ -43,12 +44,27 @@
+ #define HCI_IBS_WAKE_ACK	0xFC
+ #define HCI_MAX_IBS_SIZE	10
+ 
++/* Module parameter: keep TLV/NVM at 115200 (true) or bump to oper_speed
++ * before TLV/NVM like upstream (false). Default false (pre-bump).
++ */
++static bool qca_patch_at_115200 = true;
++module_param_named(patch115200, qca_patch_at_115200, bool, 0644);
++MODULE_PARM_DESC(patch115200, "Keep 115200 until after TLV/NVM (default: 0)");
++
++/* Optional: send a single IBS WAKE_IND just before the first HCI_RESET
++ * performed inside qca_uart_setup_rome(). Some parts respond more
++ * reliably when nudged awake prior to reset. Default off.
++ */
++static bool qca_wake_before_reset = false;
++module_param_named(wake_before_reset, qca_wake_before_reset, bool, 0644);
++MODULE_PARM_DESC(wake_before_reset, "Send IBS WAKE_IND before rome_reset (default: 0)");
++
+ /* Controller states */
+ #define STATE_IN_BAND_SLEEP_ENABLED	1
+ 
+ #define IBS_WAKE_RETRANS_TIMEOUT_MS	100
+ #define IBS_TX_IDLE_TIMEOUT_MS		2000
+-#define BAUDRATE_SETTLE_TIMEOUT_MS	300
++#define BAUDRATE_SETTLE_TIMEOUT_MS	100
+ 
+ /* HCI_IBS transmit side sleep protocol states */
+ enum tx_ibs_states {
+@@ -109,6 +125,22 @@ struct qca_data {
+ 	u64 rx_votes_off;
+ 	u64 votes_on;
+ 	u64 votes_off;
++
++    /* WCN3990: During controller baud-rate change, the controller sends
++     * a vendor event (0x92). While switching host UART speed we drop this
++     * event and wait for it to arrive to avoid H4 framing errors.
++     */
++    bool drop_baud_evt;
++    struct completion drop_ev_comp;
++
++    /* Keep link awake through early attach window */
++    unsigned long awake_guard_expires;
++
++    /* Explicit IBS disable gate for ROM/TLV/NVM: when true, drop all
++     * incoming IBS tokens (WAKE_IND/WAKE_ACK/SLEEP_IND) without acting.
++     * Cleared once controller is fully up after patch/NVM/reset.
++     */
++    bool ibs_force_disabled;
+ };
+ 
+ static void __serial_clock_on(struct tty_struct *tty)
+@@ -436,6 +468,10 @@ static int qca_open(struct hci_uart *hu)
+ 	qca->rx_votes_on = 0;
+ 	qca->rx_votes_off = 0;
+ 
++    init_completion(&qca->drop_ev_comp);
++    qca->drop_baud_evt = false;
++    qca->ibs_force_disabled = false;
++
+ 	hu->priv = qca;
+ 
+ 	init_timer(&qca->wake_retrans_timer);
+@@ -516,26 +552,58 @@ static int qca_flush(struct hci_uart *hu)
+ /* Close protocol */
+ static int qca_close(struct hci_uart *hu)
+ {
+-	struct qca_data *qca = hu->priv;
++    struct qca_data *qca = hu->priv;
++    struct hci_dev *hdev = hu->hdev;
+ 
+-	BT_DBG("hu %p qca close", hu);
++    BT_DBG("hu %p qca close", hu);
+ 
+-	serial_clock_vote(HCI_IBS_VOTE_STATS_UPDATE, hu);
++    if (!qca)
++        return 0;
+ 
+-	skb_queue_purge(&qca->tx_wait_q);
+-	skb_queue_purge(&qca->txq);
+-	del_timer(&qca->tx_idle_timer);
+-	del_timer(&qca->wake_retrans_timer);
+-	destroy_workqueue(qca->workqueue);
+-	qca->hu = NULL;
++    /* Detach hardening: ensure no pending waits or timers fire after close */
++    serial_clock_vote(HCI_IBS_VOTE_STATS_UPDATE, hu);
+ 
+-	kfree_skb(qca->rx_skb);
++    /* Re-enable IBS policy and drop any attach-time gates */
++    qca->ibs_force_disabled = false;
++    set_bit(STATE_IN_BAND_SLEEP_ENABLED, &qca->flags);
+ 
+-	hu->priv = NULL;
++    /* If a baud-change event was being dropped, release any waiter */
++    if (qca->drop_baud_evt) {
++        qca->drop_baud_evt = false;
++        complete_all(&qca->drop_ev_comp);
++    }
+ 
+-	kfree(qca);
++    /* Stop timers synchronously before tearing down workqueue */
++    del_timer_sync(&qca->tx_idle_timer);
++    del_timer_sync(&qca->wake_retrans_timer);
+ 
+-	return 0;
++    /* Cancel outstanding works to avoid races during destroy */
++    cancel_work_sync(&qca->ws_awake_rx);
++    cancel_work_sync(&qca->ws_awake_device);
++    cancel_work_sync(&qca->ws_rx_vote_off);
++    cancel_work_sync(&qca->ws_tx_vote_off);
++
++    /* Flush and destroy ordered workqueue */
++    flush_workqueue(qca->workqueue);
++    destroy_workqueue(qca->workqueue);
++
++    /* Purge queues after workers are quiesced */
++    skb_queue_purge(&qca->tx_wait_q);
++    skb_queue_purge(&qca->txq);
++
++    qca->hu = NULL;
++
++    kfree_skb(qca->rx_skb);
++    qca->rx_skb = NULL;
++
++    hu->priv = NULL;
++
++    kfree(qca);
++
++    if (hdev)
++        BT_INFO("%s: qca/hci_qca: closed (detach hardened)", hdev->name);
++
++    return 0;
+ }
+ 
+ /* Called upon a wake-up-indication from the device.
+@@ -593,6 +661,15 @@ static void device_want_to_sleep(struct hci_uart *hu)
+ 
+ 	BT_DBG("hu %p want to sleep", hu);
+ 
++    /* Minimal awake guard to keep the link from sleeping during the fragile
++     * early attach window (PATCH_VER + early TLV). If this deadline is in the
++     * future, ignore SLEEP_IND and keep clocks on.
++     */
++    if (qca && time_before(jiffies, qca->awake_guard_expires)) {
++        BT_DBG("IBS: ignoring SLEEP_IND during awake guard window");
++        return;
++    }
++
+ 	spin_lock_irqsave(&qca->hci_ibs_lock, flags);
+ 
+ 	qca->ibs_recv_slps++;
+@@ -729,7 +806,16 @@ static int qca_enqueue(struct hci_uart *hu, struct sk_buff *skb)
+ 
+ static int qca_ibs_sleep_ind(struct hci_dev *hdev, struct sk_buff *skb)
+ {
+-	struct hci_uart *hu = hci_get_drvdata(hdev);
++    struct hci_uart *hu = hci_get_drvdata(hdev);
++    struct qca_data *qca = hu ? hu->priv : NULL;
++
++    /* During ROM/TLV/NVM we explicitly ignore IBS tokens to avoid
++     * sleeps mid-transfer. Drop silently while force-disabled.
++     */
++    if (qca && qca->ibs_force_disabled) {
++        kfree_skb(skb);
++        return 0;
++    }
+ 
+ 	BT_DBG("hu %p recv hci ibs cmd 0x%x", hu, HCI_IBS_SLEEP_IND);
+ 
+@@ -741,7 +827,13 @@ static int qca_ibs_sleep_ind(struct hci_dev *hdev, struct sk_buff *skb)
+ 
+ static int qca_ibs_wake_ind(struct hci_dev *hdev, struct sk_buff *skb)
+ {
+-	struct hci_uart *hu = hci_get_drvdata(hdev);
++    struct hci_uart *hu = hci_get_drvdata(hdev);
++    struct qca_data *qca = hu ? hu->priv : NULL;
++
++    if (qca && qca->ibs_force_disabled) {
++        kfree_skb(skb);
++        return 0;
++    }
+ 
+ 	BT_DBG("hu %p recv hci ibs cmd 0x%x", hu, HCI_IBS_WAKE_IND);
+ 
+@@ -753,7 +845,13 @@ static int qca_ibs_wake_ind(struct hci_dev *hdev, struct sk_buff *skb)
+ 
+ static int qca_ibs_wake_ack(struct hci_dev *hdev, struct sk_buff *skb)
+ {
+-	struct hci_uart *hu = hci_get_drvdata(hdev);
++    struct hci_uart *hu = hci_get_drvdata(hdev);
++    struct qca_data *qca = hu ? hu->priv : NULL;
++
++    if (qca && qca->ibs_force_disabled) {
++        kfree_skb(skb);
++        return 0;
++    }
+ 
+ 	BT_DBG("hu %p recv hci ibs cmd 0x%x", hu, HCI_IBS_WAKE_ACK);
+ 
+@@ -784,13 +882,41 @@ static int qca_ibs_wake_ack(struct hci_dev *hdev, struct sk_buff *skb)
+ 	.lsize = 0, \
+ 	.maxlen = HCI_MAX_IBS_SIZE
+ 
++static int qca_recv_event(struct hci_dev *hdev, struct sk_buff *skb)
++{
++    struct hci_event_hdr *hdr = (void *)skb->data;
++    struct hci_uart *hu = hci_get_drvdata(hdev);
++    struct qca_data *qca = hu ? hu->priv : NULL;
++
++    if (skb->len >= sizeof(*hdr)) {
++        /* Vendor-specific event code is 0xFF */
++        if (hdr->evt == 0xFF && hdr->plen >= sizeof(struct edl_event_hdr) &&
++            skb->len >= sizeof(*hdr) + hdr->plen) {
++            struct edl_event_hdr *edl = (void *)(skb->data + sizeof(*hdr));
++            /* When drop window is open, swallow the baud-change event and
++             * signal completion to the setter.
++             */
++            if (qca && qca->drop_baud_evt &&
++                edl->rtype == EDL_SET_BAUDRATE_RSP_EVT) {
++                BT_DBG("Dropping QCA baudrate-change vendor event (0x92)");
++                qca->drop_baud_evt = false;
++                complete_all(&qca->drop_ev_comp);
++                kfree_skb(skb);
++                return 0;
++            }
++        }
++    }
++
++    return hci_recv_frame(hdev, skb);
++}
++
+ static const struct h4_recv_pkt qca_recv_pkts[] = {
+-	{ H4_RECV_ACL,             .recv = hci_recv_frame    },
+-	{ H4_RECV_SCO,             .recv = hci_recv_frame    },
+-	{ H4_RECV_EVENT,           .recv = hci_recv_frame    },
+-	{ QCA_IBS_WAKE_IND_EVENT,  .recv = qca_ibs_wake_ind  },
+-	{ QCA_IBS_WAKE_ACK_EVENT,  .recv = qca_ibs_wake_ack  },
+-	{ QCA_IBS_SLEEP_IND_EVENT, .recv = qca_ibs_sleep_ind },
++    { H4_RECV_ACL,             .recv = hci_recv_frame    },
++    { H4_RECV_SCO,             .recv = hci_recv_frame    },
++    { H4_RECV_EVENT,           .recv = qca_recv_event    },
++    { QCA_IBS_WAKE_IND_EVENT,  .recv = qca_ibs_wake_ind  },
++    { QCA_IBS_WAKE_ACK_EVENT,  .recv = qca_ibs_wake_ack  },
++    { QCA_IBS_SLEEP_IND_EVENT, .recv = qca_ibs_sleep_ind },
+ };
+ 
+ static int qca_recv(struct hci_uart *hu, const void *data, int count)
+@@ -853,12 +979,32 @@ static uint8_t qca_get_baudrate_value(int speed)
+ 	}
+ }
+ 
++static int qca_baudrate_to_speed(uint8_t br)
++{
++    switch (br) {
++    case QCA_BAUDRATE_9600: return 9600;
++    case QCA_BAUDRATE_19200: return 19200;
++    case QCA_BAUDRATE_38400: return 38400;
++    case QCA_BAUDRATE_57600: return 57600;
++    case QCA_BAUDRATE_115200: return 115200;
++    case QCA_BAUDRATE_230400: return 230400;
++    case QCA_BAUDRATE_460800: return 460800;
++    case QCA_BAUDRATE_500000: return 500000;
++    case QCA_BAUDRATE_921600: return 921600;
++    case QCA_BAUDRATE_1000000: return 1000000;
++    case QCA_BAUDRATE_2000000: return 2000000;
++    case QCA_BAUDRATE_3000000: return 3000000;
++    case QCA_BAUDRATE_3500000: return 3500000;
++    default: return 115200;
++    }
++}
++
+ static int qca_set_baudrate(struct hci_dev *hdev, uint8_t baudrate)
+ {
+-	struct hci_uart *hu = hci_get_drvdata(hdev);
+-	struct qca_data *qca = hu->priv;
+-	struct sk_buff *skb;
+-	u8 cmd[] = { 0x01, 0x48, 0xFC, 0x01, 0x00 };
++    struct hci_uart *hu = hci_get_drvdata(hdev);
++    struct qca_data *qca = hu->priv;
++    struct sk_buff *skb;
++    u8 cmd[] = { 0x01, 0x48, 0xFC, 0x01, 0x00 };
+ 
+ 	if (baudrate > QCA_BAUDRATE_3000000)
+ 		return -EINVAL;
+@@ -871,32 +1017,49 @@ static int qca_set_baudrate(struct hci_dev *hdev, uint8_t baudrate)
+ 		return -ENOMEM;
+ 	}
+ 
+-	/* Assign commands to change baudrate and packet type. */
+-	memcpy(skb_put(skb, sizeof(cmd)), cmd, sizeof(cmd));
+-	hci_skb_pkt_type(skb) = HCI_COMMAND_PKT;
+-
+-	skb_queue_tail(&qca->txq, skb);
+-	hci_uart_tx_wakeup(hu);
+-
+-	/* wait 300ms to change new baudrate on controller side
+-	 * controller will come back after they receive this HCI command
+-	 * then host can communicate with new baudrate to controller
+-	 */
+-	set_current_state(TASK_UNINTERRUPTIBLE);
+-	schedule_timeout(msecs_to_jiffies(BAUDRATE_SETTLE_TIMEOUT_MS));
+-	set_current_state(TASK_INTERRUPTIBLE);
+-
+-	return 0;
++    /* Assign commands to change baudrate and packet type. */
++    memcpy(skb_put(skb, sizeof(cmd)), cmd, sizeof(cmd));
++    hci_skb_pkt_type(skb) = HCI_COMMAND_PKT;
++
++    /* Open a drop window for the controller's vendor event that
++     * follows the baud change. Switch host UART immediately after
++     * queuing the controller command so the event is received at the
++     * new speed without confusing the H4 parser.
++     *
++     * Some WCN3990 parts need longer than 100 ms before the event
++     * appears; allow up to BAUDRATE_SETTLE_TIMEOUT_MS and add a tiny
++     * post‑event settle.
++     */
++    reinit_completion(&qca->drop_ev_comp);
++    qca->drop_baud_evt = true;
++    skb_queue_tail(&qca->txq, skb);
++    hci_uart_tx_wakeup(hu);
++
++    hci_uart_set_baudrate(hu, qca_baudrate_to_speed(baudrate));
++    /* Wait for the dropped event to arrive (controller can be slow) */
++    if (!wait_for_completion_timeout(&qca->drop_ev_comp,
++            msecs_to_jiffies(BAUDRATE_SETTLE_TIMEOUT_MS))) {
++        BT_INFO("%s: baud-change VSE (0x92) not seen within %dms; continuing",
++                hdev->name, BAUDRATE_SETTLE_TIMEOUT_MS);
++    }
++    /* Post-flip settle to avoid racing the next command */
++    usleep_range(1500, 8000);
++
++    return 0;
+ }
+ 
+ static int qca_setup(struct hci_uart *hu)
+ {
+-	struct hci_dev *hdev = hu->hdev;
+-	struct qca_data *qca = hu->priv;
+-	unsigned int speed, qca_baudrate = QCA_BAUDRATE_115200;
+-	int ret;
++    struct hci_dev *hdev = hu->hdev;
++    struct qca_data *qca = hu->priv;
++    unsigned int speed, qca_baudrate = QCA_BAUDRATE_115200;
++    int ret;
+ 
+-	BT_INFO("%s: ROME setup", hdev->name);
++    BT_INFO("%s: qca/hci_qca: ROME setup (init_speed=%u oper_speed=%u patch115200=%c)",
++            hdev->name,
++            hu->init_speed ? hu->init_speed : hu->proto->init_speed,
++            hu->oper_speed ? hu->oper_speed : hu->proto->oper_speed,
++            qca_patch_at_115200 ? 'Y' : 'N');
+ 
+ 	/* Patch downloading has to be done without IBS mode */
+ 	clear_bit(STATE_IN_BAND_SLEEP_ENABLED, &qca->flags);
+@@ -911,35 +1074,70 @@ static int qca_setup(struct hci_uart *hu)
+ 	if (speed)
+ 		hci_uart_set_baudrate(hu, speed);
+ 
+-	/* Setup user speed if needed */
+-	speed = 0;
+-	if (hu->oper_speed)
+-		speed = hu->oper_speed;
+-	else if (hu->proto->oper_speed)
+-		speed = hu->proto->oper_speed;
+-
+-	if (speed) {
+-		qca_baudrate = qca_get_baudrate_value(speed);
+-
+-		BT_INFO("%s: Set UART speed to %d", hdev->name, speed);
+-		ret = qca_set_baudrate(hdev, qca_baudrate);
+-		if (ret) {
+-			BT_ERR("%s: Failed to change the baud rate (%d)",
+-			       hdev->name, ret);
+-			return ret;
+-		}
+-		hci_uart_set_baudrate(hu, speed);
+-	}
+-
+-	/* Setup patch / NVM configurations */
+-	ret = qca_uart_setup_rome(hdev, qca_baudrate);
+-	if (!ret) {
+-		set_bit(STATE_IN_BAND_SLEEP_ENABLED, &qca->flags);
+-		qca_debugfs_init(hdev);
+-	} else if (ret == -ENOENT) {
+-		/* No patch/nvm-config found, run with original fw/config */
+-		ret = 0;
+-	}
++    /* Keep early handshake minimal; rely on qca_uart_setup_rome() to
++     * perform an initial HCI_RESET and settle before vendor commands.
++     */
++
++    /* Defer HCI_RESET: try vendor ROM read first; if that fails, use
++     * a best‑effort HCI_RESET as recovery, then retry ROM read once.
++     */
++
++    /* Defer ROM version read to qca_uart_setup_rome(), which performs
++     * a best‑effort HCI_RESET and its own settle before issuing the
++     * first vendor command. This keeps the early handshake minimal.
++     */
++
++    /* Determine desired operational speed for subsequent steps */
++    speed = 0;
++    if (hu->oper_speed)
++        speed = hu->oper_speed;
++    else if (hu->proto->oper_speed)
++        speed = hu->proto->oper_speed;
++    if (speed)
++        qca_baudrate = qca_get_baudrate_value(speed);
++
++    /* Optional upstream-style: bump to operational speed BEFORE TLV/NVM */
++    if (speed && !qca_patch_at_115200) {
++        BT_INFO("%s: qca/hci_qca: Pre-bump UART to %d before TLV/NVM", hdev->name, speed);
++        ret = qca_set_baudrate(hdev, qca_baudrate);
++        if (ret) {
++            BT_ERR("%s: Failed to change the baud rate pre-patch (%d)", hdev->name, ret);
++            return ret;
++        }
++        /* Host UART speed has been updated inside qca_set_baudrate */
++        usleep_range(1000, 10000);
++    }
++
++        /* Explicitly disable IBS token handling during ROM/TLV/NVM. */
++        qca->ibs_force_disabled = true;
++        BT_INFO("%s: qca/hci_qca: IBS DISABLED for ROM/TLV/NVM", hdev->name);
++
++        /* Setup patch / NVM configurations at current UART speed */
++			ret = qca_uart_setup_rome(hdev, qca_baudrate);
++    if (!ret) {
++        set_bit(STATE_IN_BAND_SLEEP_ENABLED, &qca->flags);
++        qca->ibs_force_disabled = false;
++        BT_INFO("%s: qca/hci_qca: IBS ENABLED after attach", hdev->name);
++        qca_debugfs_init(hdev);
++    } else if (ret == -ENOENT) {
++        /* No patch/nvm-config found, run with original fw/config */
++        ret = 0;
++        set_bit(STATE_IN_BAND_SLEEP_ENABLED, &qca->flags);
++        qca->ibs_force_disabled = false;
++        BT_INFO("%s: qca/hci_qca: IBS ENABLED (no patch/NVM)", hdev->name);
++    }
++
++    /* Post-patch bump only when we didn't pre-bump above */
++    if (!ret && speed && qca_patch_at_115200) {
++        BT_INFO("%s: qca/hci_qca: Set UART speed to %d post-patch", hdev->name, speed);
++        ret = qca_set_baudrate(hdev, qca_baudrate);
++        if (ret) {
++            BT_ERR("%s: Failed to change the baud rate (%d)", hdev->name, ret);
++            return ret;
++        }
++        /* Host UART speed has been updated inside qca_set_baudrate */
++        usleep_range(1000, 10000);
++    }
+ 
+ 	/* Setup bdaddr */
+ 	hu->hdev->set_bdaddr = qca_set_bdaddr_rome;
+@@ -947,12 +1145,18 @@ static int qca_setup(struct hci_uart *hu)
+ 	return ret;
+ }
+ 
++/* Module parameter: keep TLV/NVM at 115200 (true) or bump to oper_speed
++ * before TLV/NVM like upstream (false). Default true; can be toggled at
++ * runtime via /sys/module/hci_qca/parameters/patch115200 for A/B testing.
++ */
++/* duplicate declarations removed; see top of file for module param */
++
+ static struct hci_uart_proto qca_proto = {
+ 	.id		= HCI_UART_QCA,
+ 	.name		= "QCA",
+ 	.manufacturer	= 29,
+ 	.init_speed	= 115200,
+-	.oper_speed	= 3000000,
++    .oper_speed	= 3000000,
+ 	.open		= qca_open,
+ 	.close		= qca_close,
+ 	.flush		= qca_flush,

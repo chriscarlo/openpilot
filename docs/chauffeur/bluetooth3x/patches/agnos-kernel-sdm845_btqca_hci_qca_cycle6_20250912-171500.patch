@@ -1,0 +1,106 @@
+diff --git a/drivers/bluetooth/hci_qca.c b/drivers/bluetooth/hci_qca.c
+index b8f1c2805c0a..d1e9beefdead 100644
+--- a/drivers/bluetooth/hci_qca.c
++++ b/drivers/bluetooth/hci_qca.c
+@@
+ struct qca_data {
+ 	u64 rx_votes_off;
+ 	u64 votes_on;
+ 	u64 votes_off;
+ 
+     /* WCN3990: During controller baud-rate change, the controller sends
+      * a vendor event (0x92). While switching host UART speed we drop this
+      * event and wait for it to arrive to avoid H4 framing errors.
+      */
+     bool drop_baud_evt;
+     struct completion drop_ev_comp;
+ 
+     /* Keep link awake through early attach window */
+     unsigned long awake_guard_expires;
+ 
+ +   /* Explicitly force IBS disabled during ROM/TLV/NVM. When set, all
+ +    * IBS tokens (WAKE_IND/WAKE_ACK/SLEEP_IND) are ignored in the
+ +    * corresponding handlers. Cleared once the controller is fully up.
+ +    */
+ +   bool ibs_force_disabled;
+ };
+@@
+ static int qca_open(struct hci_uart *hu)
+ {
+ 	struct qca_data *qca;
+ 
+ 	qca = kzalloc(sizeof(*qca), GFP_KERNEL);
+ 	if (!qca)
+ 		return -ENOMEM;
+@@
+ 	qca->rx_votes_on = 0;
+ 	qca->rx_votes_off = 0;
+ 
+     init_completion(&qca->drop_ev_comp);
+     qca->drop_baud_evt = false;
+ +   qca->ibs_force_disabled = false;
+@@
+ static int qca_ibs_wake_ind(struct hci_dev *hdev, struct sk_buff *skb)
+ {
+ +   struct hci_uart *hu = hci_get_drvdata(hdev);
+ +   struct qca_data *qca = hu ? hu->priv : NULL;
+ +   if (qca && qca->ibs_force_disabled) {
+ +           kfree_skb(skb);
+ +           return 0;
+ +   }
+ 	...
+ }
+@@
+ static int qca_ibs_wake_ack(struct hci_dev *hdev, struct sk_buff *skb)
+ {
+ +   struct hci_uart *hu = hci_get_drvdata(hdev);
+ +   struct qca_data *qca = hu ? hu->priv : NULL;
+ +   if (qca && qca->ibs_force_disabled) {
+ +           kfree_skb(skb);
+ +           return 0;
+ +   }
+ 	...
+ }
+@@
+ static int qca_ibs_sleep_ind(struct hci_dev *hdev, struct sk_buff *skb)
+ {
+ +   struct hci_uart *hu = hci_get_drvdata(hdev);
+ +   struct qca_data *qca = hu ? hu->priv : NULL;
+ +   if (qca && qca->ibs_force_disabled) {
+ +           kfree_skb(skb);
+ +           return 0;
+ +   }
+ 	...
+ }
+@@
+ static int qca_setup(struct hci_uart *hu)
+ {
+ 	struct hci_dev *hdev = hu->hdev;
+ 	struct qca_data *qca = hu->priv;
+ 	unsigned int speed, qca_baudrate = QCA_BAUDRATE_115200;
+ 	int ret;
+@@
+ 	/* Patch downloading has to be done without IBS mode */
+ 	clear_bit(STATE_IN_BAND_SLEEP_ENABLED, &qca->flags);
+ +   /* Also force-drop any IBS tokens during ROM/TLV/NVM phase. */
+ +   qca->ibs_force_disabled = true;
+ +   BT_INFO("%s: qca/hci_qca: IBS DISABLED for ROM/TLV/NVM", hdev->name);
+@@
+-		ret = qca_uart_setup_rome(hdev, qca_baudrate);
++		ret = qca_uart_setup_rome(hdev, qca_baudrate);
+ 	if (!ret) {
+ 		set_bit(STATE_IN_BAND_SLEEP_ENABLED, &qca->flags);
+ +       qca->ibs_force_disabled = false;
+ +       BT_INFO("%s: qca/hci_qca: IBS ENABLED after attach", hdev->name);
+ 		qca_debugfs_init(hdev);
+ 	} else if (ret == -ENOENT) {
+ 		/* No patch/nvm-config found, run with original fw/config */
+ 		ret = 0;
+ +       /* Still re-enable IBS for normal operation. */
+ +       set_bit(STATE_IN_BAND_SLEEP_ENABLED, &qca->flags);
+ +       qca->ibs_force_disabled = false;
+ +       BT_INFO("%s: qca/hci_qca: IBS ENABLED (no patch/NVM)", hdev->name);
+ 	}
+@@
+ }
+

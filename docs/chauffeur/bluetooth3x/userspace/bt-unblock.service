@@ -1,0 +1,12 @@
+[Unit]
+Description=Unblock Bluetooth rfkill early
+DefaultDependencies=no
+Before=sysinit.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/rfkill unblock bluetooth
+
+[Install]
+WantedBy=sysinit.target
+

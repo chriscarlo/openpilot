@@ -1,0 +1,16 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DevAgent <agent@local>
+Date: Sun, 14 Sep 2025 09:45:30 +0000
+Subject: [PATCH] sdm845_defconfig: enable firmware loader compression + Zstd
+
+--- a/arch/arm64/configs/sdm845_defconfig
++++ b/arch/arm64/configs/sdm845_defconfig
+@@
+ CONFIG_FW_LOADER=y
++CONFIG_FW_LOADER_COMPRESS=y
++CONFIG_ZSTD_DECOMPRESS=y
+ CONFIG_RFKILL=y
+
+-- 
+2.45.1
+
