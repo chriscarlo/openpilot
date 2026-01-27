@@ -73,9 +73,10 @@ void DeveloperPanel::updateToggles(bool _offroad) {
     capnp::FlatArrayMessageReader cmsg(aligned_buf.align(cp_bytes.data(), cp_bytes.size()));
     cereal::CarParams::Reader CP = cmsg.getRoot<cereal::CarParams>();
 
-    if (!CP.getAlphaLongitudinalAvailable() || is_release) {
+    const bool alpha_long_available = CP.getAlphaLongitudinalAvailable() && !is_release;
+
+    if (!alpha_long_available) {
       params.remove("AlphaLongitudinalEnabled");
-      experimentalLongitudinalToggle->setEnabled(false);
     }
 
     /*
@@ -83,12 +84,16 @@ void DeveloperPanel::updateToggles(bool _offroad) {
      * - is not a release branch, and
      * - the car supports experimental longitudinal control (alpha)
      */
-    experimentalLongitudinalToggle->setVisible(CP.getAlphaLongitudinalAvailable() && !is_release);
+    experimentalLongitudinalToggle->setVisible(alpha_long_available);
+    // If alpha-long becomes available after a refingerprint, re-enable the toggle.
+    // (This panel may stay alive across car changes.)
+    experimentalLongitudinalToggle->setEnabled(alpha_long_available);
 
     longManeuverToggle->setEnabled(hasLongitudinalControl(CP) && _offroad);
   } else {
     longManeuverToggle->setEnabled(false);
     experimentalLongitudinalToggle->setVisible(false);
+    experimentalLongitudinalToggle->setEnabled(false);
   }
   experimentalLongitudinalToggle->refresh();
 
