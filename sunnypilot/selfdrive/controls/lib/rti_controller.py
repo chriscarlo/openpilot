@@ -43,6 +43,7 @@ class RTIController:
         self._threat_distance = 0.0
         self._threat_type = None
         self._confidence = 0.0
+        self._active_threat_id = None
 
         # Vehicle state
         self._v_ego = 0.0
@@ -152,7 +153,34 @@ class RTIController:
 
         # Find relevant threats based on direction and distance
         relevant_threat = None
+        prev_active_threat_id = self._active_threat_id
+        
+        # Live-read user filter as extra defense (daemon also filters)
+        def _filter_allows(threat_type) -> bool:
+            try:
+                tf_raw = self.params.get("RTIThreatFilter")
+                filt = int(tf_raw) if tf_raw is not None else 0
+            except Exception:
+                filt = 0
+            # Normalize type to lowercase string name for comparison
+            tname = str(threat_type)
+            tname = tname.split('.')[-1] if '.' in tname else tname
+            tname = tname.lower()
+            if filt == 0:  # all
+                return True
+            if filt == 1:  # police
+                return tname in ("police", "policehiding")
+            if filt == 2:  # cameras
+                return tname in ("speedtrap", "speedcamera")
+            if filt == 3:  # hazards
+                return tname in ("hazard", "shoulderhazard", "roadhazard")
+            # Custom (treat as all until per-type toggles exist)
+            return True
+
         for threat in rti_state.threats:
+            # Respect user-selected filter (belt-and-suspenders; rtid already applies it)
+            if not _filter_allows(getattr(threat, 'type', None)):
+                continue
             threat_distance = threat.distance
             threat_direction = threat.direction
             
@@ -167,6 +195,27 @@ class RTIController:
                 if relevant_threat is None or threat_distance < relevant_threat.distance:
                     relevant_threat = threat
 
+        # Transition robustness: keep slowing for the last active threat if we briefly lose
+        # its direction classification (common when ego is on top of the alert and bearing becomes unstable).
+        if relevant_threat is None and self._is_active and prev_active_threat_id:
+            for threat in rti_state.threats:
+                if not _filter_allows(getattr(threat, 'type', None)):
+                    continue
+
+                try:
+                    tid = getattr(threat, 'id', None)
+                    if tid is None:
+                        continue
+                    if str(tid) != str(prev_active_threat_id):
+                        continue
+
+                    threat_distance = float(getattr(threat, 'distance', 1e9))
+                    if threat_distance <= self._resume_speed_distance:
+                        relevant_threat = threat
+                        break
+                except Exception:
+                    continue
+
         # No relevant threats found
         if relevant_threat is None:
             self._reset_state()
@@ -178,6 +227,7 @@ class RTIController:
         self._threat_direction = relevant_threat.direction
         self._threat_type = relevant_threat.type
         self._confidence = relevant_threat.confidence
+        self._active_threat_id = str(getattr(relevant_threat, 'id', '')) or None
 
         # Determine target speed based on threat and user settings
         if self._speed_reduction_mode == "posted" and relevant_threat.speedLimitMs > 0:
@@ -274,6 +324,8 @@ class RTIController:
         self._threat_distance = 0.0
         self._threat_type = None
         self._confidence = 0.0
+        self._ramped_speed = None
+        self._active_threat_id = None
 
     @property
     def is_active(self) -> bool:

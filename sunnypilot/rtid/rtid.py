@@ -64,26 +64,83 @@ class RTIDaemon:
         cloudlog.info(f"RTI Daemon initialized - API interval: {self.api_fetch_interval}s ({api_calls_per_hour:.0f} calls/hr max)")
 
     def _load_api_key(self) -> str | None:
-        """Load Waze API key from environment-aware location."""
+        """Load Waze API key from params/env/persist locations.
+
+        Supported sources (in priority order):
+        - Params `RTIManualApiKey` (set by RTISettingsPanel on-device)
+        - Env vars `RAPIDAPI_KEY`, `WAZE_API_KEY`, `RTI_API_KEY`
+        - JSON key files (legacy + UI paths):
+          - `/persist/waze/waze_rapidapi.json`
+          - `/data/persist/waze/waze_rapidapi.json`
+          - `/persist/waze/rapidapi_key.json`
+          - `/data/persist/waze/rapidapi_key.json`
+        - Plain-text key files via `api_key_manager.get_api_key()`
+        """
+
+        # 1) Params (preferred on-device; avoids hard dependency on a specific file name)
+        try:
+            param_val = self.params.get("RTIManualApiKey")
+            if isinstance(param_val, (bytes, bytearray)):
+                param_val = param_val.decode("utf-8", errors="ignore")
+            if isinstance(param_val, str) and param_val.strip():
+                cloudlog.info("RTI API key loaded from Params (RTIManualApiKey)")
+                return param_val.strip()
+        except Exception as e:
+            cloudlog.debug(f"RTI: Could not read RTIManualApiKey from Params: {e}")
+
+        # 2) Env vars (useful for dev and CI)
+        for env_var in ("RAPIDAPI_KEY", "WAZE_API_KEY", "RTI_API_KEY"):
+            env_val = os.getenv(env_var)
+            if isinstance(env_val, str) and env_val.strip():
+                cloudlog.info(f"RTI API key loaded from env var {env_var}")
+                return env_val.strip()
+
+        # 3) JSON config files (support both historical and UI paths/keys)
         key_paths = [
-            '/persist/waze/waze_rapidapi.json',  # Production TICI
-            '/data/persist/waze/waze_rapidapi.json',  # Development fallback
+            '/persist/waze/waze_rapidapi.json',       # Legacy production TICI path
+            '/data/persist/waze/waze_rapidapi.json',  # Legacy dev fallback
+            '/persist/waze/rapidapi_key.json',        # UI path (RTISettingsPanel)
+            '/data/persist/waze/rapidapi_key.json',   # Dev fallback for UI path
         ]
 
         for key_path in key_paths:
-            if os.path.exists(key_path):
-                try:
-                    with open(key_path) as f:
-                        key_data = json.load(f)
-                        api_key_val = key_data.get('api_key')
-                        if isinstance(api_key_val, str) and api_key_val:
-                            cloudlog.info(f"RTI API key loaded from {key_path}")
-                            return api_key_val
-                except (OSError, json.JSONDecodeError, KeyError) as e:
-                    cloudlog.error(f"RTI failed to load API key from {key_path}: {e}")
+            if not os.path.exists(key_path):
+                continue
+            try:
+                with open(key_path) as f:
+                    key_data = json.load(f)
+                api_key_val = None
+                if isinstance(key_data, dict):
+                    api_key_val = key_data.get('api_key') or key_data.get('apiKey') or key_data.get('key')
+                if isinstance(api_key_val, str) and api_key_val.strip():
+                    cloudlog.info(f"RTI API key loaded from {key_path}")
+                    return api_key_val.strip()
+            except (OSError, json.JSONDecodeError) as e:
+                cloudlog.error(f"RTI failed to load API key from {key_path}: {e}")
+
+        # 4) Plain-text persist locations
+        try:
+            from .api_key_manager import get_api_key
+            api_key_val = get_api_key()
+            if isinstance(api_key_val, str) and api_key_val.strip():
+                cloudlog.info("RTI API key loaded from api_key_manager persist paths")
+                return api_key_val.strip()
+        except Exception as e:
+            cloudlog.debug(f"RTI: api_key_manager.get_api_key() failed: {e}")
 
         cloudlog.warning("RTI API key not found - running in offline mode")
         return None
+
+    @staticmethod
+    def _map_health_to_api_status(health_status: str) -> str:
+        """Map WazeAPIClient health strings to capnp ApiStatus values."""
+        # capnp enum: connected, disconnected, rateLimited, error, offline
+        if health_status in ("connected", "disconnected", "rateLimited", "error", "offline"):
+            return health_status
+        # Internal WazeAPIClient may use "degraded"; map to closest capnp value
+        if health_status == "degraded":
+            return "disconnected"
+        return "disconnected"
 
     def _check_enabled(self) -> bool:
         """Check if RTI is enabled via params."""
@@ -242,7 +299,6 @@ class RTIDaemon:
 
             # Check if we need to fetch new API data (rate limited!)
             traffic_data = None
-            api_status = 'offline'
             data_age = current_time - self.cached_data_timestamp
 
             if self.waze_client:
@@ -270,7 +326,12 @@ class RTIDaemon:
 
                         radius_km = radius_m / 1000.0  # Convert to km
 
-                        traffic_data = await self.waze_client.get_traffic_alerts(
+                        # Record the attempt immediately to avoid retry storms if the request fails.
+                        # This daemon runs at 50Hz; without this, a failure could spam the API.
+                        self.last_api_fetch_time = current_time
+
+                        prev_success_time = getattr(self.waze_client, "last_success_time", 0)
+                        traffic_data_candidate = await self.waze_client.get_traffic_alerts(
                             location[0], location[1], radius_km
                         )
 
@@ -279,7 +340,7 @@ class RTIDaemon:
                         police_alerts = []
                         all_alert_types = set()
 
-                        for alert in traffic_data:
+                        for alert in (traffic_data_candidate or []):
                             # Track all alert types
                             all_alert_types.add(alert.type)
 
@@ -327,30 +388,37 @@ class RTIDaemon:
                             except Exception as e:
                                 cloudlog.error(f"RTI: Failed to save police data: {e}")
 
-                        cloudlog.info(f"RTI: Found {len(traffic_data)} total alerts. Types: {all_alert_types}")
+                        # Only treat this fetch as "fresh" if the HTTP request actually succeeded.
+                        # `get_traffic_alerts()` returns [] both for "no alerts" and for request errors,
+                        # so we use `last_success_time` to differentiate.
+                        request_succeeded = getattr(self.waze_client, "last_success_time", 0) > prev_success_time
+                        if request_succeeded:
+                            traffic_data = traffic_data_candidate
+                            cloudlog.info(f"RTI: Found {len(traffic_data)} total alerts. Types: {all_alert_types}")
 
-                        # Update cache
-                        self.cached_traffic_data = traffic_data
-                        self.cached_data_location = location
-                        self.cached_data_timestamp = current_time
-                        self.last_api_fetch_time = current_time
-                        api_status = 'connected'
+                            # Update cache on success (even if empty list)
+                            self.cached_traffic_data = traffic_data
+                            self.cached_data_location = location
+                            self.cached_data_timestamp = current_time
+                        else:
+                            cloudlog.warning("RTI: API request failed; keeping cached traffic data")
+                            traffic_data = self.cached_traffic_data
                     except Exception as e:
                         cloudlog.error(f"RTI API error: {e}")
-                        api_status = 'error'
                         # Keep using cached data if available
                         traffic_data = self.cached_traffic_data
                 else:
                     # Use cached data
                     traffic_data = self.cached_traffic_data
                     if traffic_data is not None:  # Check for None, not truthiness (empty list is valid)
-                        if data_age < self.max_data_age:
-                            # Cached data is still usable - keep reporting as connected
-                            api_status = 'connected'
-                        else:
-                            # Data too old - effectively offline
-                            api_status = 'offline'
+                        if data_age >= self.max_data_age:
                             cloudlog.warning(f"RTI data is stale ({data_age:.0f}s old)")
+
+            # Derive API status from client health (matches capnp enum values).
+            if self.waze_client:
+                api_status = self._map_health_to_api_status(self.waze_client.get_health_status())
+            else:
+                api_status = 'offline'
 
             # Get current road name from map data
             current_road_name = None

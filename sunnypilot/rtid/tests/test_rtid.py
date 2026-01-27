@@ -91,10 +91,46 @@ class TestRTIDaemon:
             assert daemon.waze_client is None
             mock_client_class.assert_not_called()
 
+    def test_api_key_loading_from_params(self, mock_messaging, mock_params):
+        """Test API key loading from Params (RTIManualApiKey)."""
+        test_key = b"test-api-key-from-params"
+
+        mock_params.get.return_value = test_key
+
+        with patch("os.path.exists", return_value=False), \
+             patch('sunnypilot.rtid.rtid.WazeAPIClient') as mock_client_class, \
+             patch('sunnypilot.rtid.rtid.ThreatDetector'):
+
+            daemon = RTIDaemon()
+
+            assert daemon.api_key == test_key.decode("utf-8")
+            mock_client_class.assert_called_once_with(test_key.decode("utf-8"))
+
+    def test_api_key_loading_from_ui_json_path(self, mock_messaging, mock_params):
+        """Test API key loading from the UI JSON path (/persist/waze/rapidapi_key.json)."""
+        test_key = "test-api-key-ui-json"
+        key_data = {"apiKey": test_key}
+
+        # Ensure Params doesn't short-circuit this test
+        mock_params.get.return_value = None
+
+        with patch("os.path.exists") as mock_exists, \
+             patch("builtins.open", mock_open(read_data=json.dumps(key_data))), \
+             patch('sunnypilot.rtid.rtid.WazeAPIClient') as mock_client_class, \
+             patch('sunnypilot.rtid.rtid.ThreatDetector'):
+
+            mock_exists.side_effect = lambda path: path == '/persist/waze/rapidapi_key.json'
+
+            daemon = RTIDaemon()
+
+            assert daemon.api_key == test_key
+            mock_client_class.assert_called_once_with(test_key)
+
     def test_api_key_loading_malformed_json(self, mock_messaging, mock_params):
         """Test handling of malformed API key file."""
         with patch("os.path.exists", return_value=True), \
              patch("builtins.open", mock_open(read_data="invalid json")), \
+             patch("sunnypilot.rtid.api_key_manager.get_api_key", return_value=None), \
              patch('sunnypilot.rtid.rtid.WazeAPIClient') as mock_client_class, \
              patch('sunnypilot.rtid.rtid.ThreatDetector'):
 
@@ -121,26 +157,23 @@ class TestRTIDaemon:
         mock_gps = MagicMock()
         mock_gps.latitude = 37.4221
         mock_gps.longitude = -122.0841
-        mock_gps.accuracy = 5.0
+        mock_gps.horizontalAccuracy = 5.0
 
-        daemon.sm.updated = {'gpsLocationExternal': True, 'liveLocationKalman': False}
         daemon.sm.__getitem__.side_effect = lambda key: mock_gps if key == 'gpsLocationExternal' else None
 
         location = daemon._get_current_location()
 
         assert location == (37.4221, -122.0841)
-        daemon.sm.update.assert_called_with(0)
+        daemon.sm.update.assert_called_with(100)
 
-    def test_get_current_location_kalman_fallback(self, daemon):
-        """Test location fallback to Kalman filter."""
-        # Mock Kalman filter data
-        mock_kalman = MagicMock()
-        mock_kalman.lat = 37.4221
-        mock_kalman.lon = -122.0841
-        mock_kalman.status = 'valid'
+    def test_get_current_location_internal_gps_fallback(self, daemon):
+        """Test location fallback to internal GPS (gpsLocation)."""
+        mock_gps = MagicMock()
+        mock_gps.latitude = 37.4221
+        mock_gps.longitude = -122.0841
+        mock_gps.hasFix = True
 
-        daemon.sm.updated = {'gpsLocationExternal': False, 'gpsLocation': False, 'liveLocationKalman': True}
-        daemon.sm.__getitem__.side_effect = lambda key: mock_kalman if key == 'liveLocationKalman' else None
+        daemon.sm.__getitem__.side_effect = lambda key: mock_gps if key == 'gpsLocation' else None
 
         location = daemon._get_current_location()
 
@@ -148,7 +181,7 @@ class TestRTIDaemon:
 
     def test_get_current_location_no_valid_data(self, daemon):
         """Test location retrieval with no valid GPS data."""
-        daemon.sm.updated = {'gpsLocationExternal': False, 'gpsLocation': False, 'liveLocationKalman': False}
+        daemon.sm.__getitem__.side_effect = lambda key: None
 
         location = daemon._get_current_location()
 
@@ -160,9 +193,8 @@ class TestRTIDaemon:
         mock_gps = MagicMock()
         mock_gps.latitude = 37.4221
         mock_gps.longitude = -122.0841
-        mock_gps.accuracy = 50.0  # Poor accuracy
+        mock_gps.horizontalAccuracy = 50.0  # Poor accuracy
 
-        daemon.sm.updated = {'gpsLocationExternal': True, 'gpsLocation': False, 'liveLocationKalman': False}
         daemon.sm.__getitem__.side_effect = lambda key: mock_gps if key == 'gpsLocationExternal' else None
 
         location = daemon._get_current_location()
@@ -214,6 +246,10 @@ class TestRTIDaemon:
         test_state = rti_state
         test_state.threats = [processed_threat]
 
+        # Avoid depending on SubMaster message wiring for this unit test.
+        daemon._get_current_location = MagicMock(return_value=None)
+        daemon._get_current_heading_deg = MagicMock(return_value=0.0)
+
         daemon._publish_rti_state(test_state)
 
         # Verify message was sent
@@ -234,13 +270,12 @@ class TestRTIDaemon:
         # Mock no valid location
         daemon._get_current_location = MagicMock(return_value=None)
         daemon._get_current_speed = MagicMock(return_value=25.0)
+        daemon._get_cruise_cluster_speed = MagicMock(return_value=0.0)
+        daemon._get_current_speed_limit = MagicMock(return_value=0.0)
 
-        await daemon._process_cycle()
+        await daemon._process_cycle_async()
 
-        # Should publish offline state when no location
-        daemon.pm.send.assert_called_once()
-        msg = daemon.pm.send.call_args[0][1]
-        assert msg.rtiStateSP.apiStatus == 'offline'
+        assert getattr(daemon, "_last_processed_state", None) is None
 
     @pytest.mark.asyncio
     async def test_process_cycle_with_api_client(self, daemon, mock_waze_api_response):
@@ -248,10 +283,21 @@ class TestRTIDaemon:
         # Mock valid location and speed
         daemon._get_current_location = MagicMock(return_value=(37.4221, -122.0841))
         daemon._get_current_speed = MagicMock(return_value=25.0)
+        daemon._get_cruise_cluster_speed = MagicMock(return_value=30.0)
+        daemon._get_current_speed_limit = MagicMock(return_value=0.0)
+        daemon._get_current_heading_deg = MagicMock(return_value=0.0)
+        daemon.params.get.return_value = None  # ensure default RTIDetectionRadius path
 
         # Mock API client
         daemon.waze_client = AsyncMock()
-        daemon.waze_client.get_traffic_alerts.return_value = []
+        daemon.waze_client.last_success_time = 0
+        daemon.waze_client.get_health_status = MagicMock(return_value="connected")
+
+        async def _fake_get_traffic_alerts(lat, lon, radius_km):
+            daemon.waze_client.last_success_time = 1
+            return []
+
+        daemon.waze_client.get_traffic_alerts.side_effect = _fake_get_traffic_alerts
 
         # Mock threat detector
         mock_state = RTIState(
@@ -265,16 +311,21 @@ class TestRTIDaemon:
         )
         daemon.threat_detector.process_threats = MagicMock(return_value=mock_state)
 
-        await daemon._process_cycle()
+        await daemon._process_cycle_async()
 
         # Verify API was called
-        daemon.waze_client.get_traffic_alerts.assert_called_once_with(37.4221, -122.0841)
+        daemon.waze_client.get_traffic_alerts.assert_awaited_once()
+        call_args = daemon.waze_client.get_traffic_alerts.call_args[0]
+        assert call_args[0] == 37.4221
+        assert call_args[1] == -122.0841
+        assert call_args[2] == pytest.approx(4.828, rel=1e-3)  # default 4828m -> 4.828km
 
         # Verify threat detector was called
         daemon.threat_detector.process_threats.assert_called_once()
 
-        # Verify state was published
-        daemon.pm.send.assert_called_once()
+        assert daemon._last_processed_state is mock_state
+        assert daemon._last_processed_state.api_status == "connected"
+        assert daemon._last_processed_state.source == "waze"
 
     @pytest.mark.asyncio
     async def test_process_cycle_api_error(self, daemon):
@@ -282,9 +333,14 @@ class TestRTIDaemon:
         # Mock valid location and speed
         daemon._get_current_location = MagicMock(return_value=(37.4221, -122.0841))
         daemon._get_current_speed = MagicMock(return_value=25.0)
+        daemon._get_cruise_cluster_speed = MagicMock(return_value=30.0)
+        daemon._get_current_speed_limit = MagicMock(return_value=0.0)
+        daemon._get_current_heading_deg = MagicMock(return_value=0.0)
 
         # Mock API client with error
         daemon.waze_client = AsyncMock()
+        daemon.waze_client.last_success_time = 0
+        daemon.waze_client.get_health_status = MagicMock(return_value="error")
         daemon.waze_client.get_traffic_alerts.side_effect = Exception("API Error")
 
         # Mock threat detector
@@ -299,15 +355,13 @@ class TestRTIDaemon:
         )
         daemon.threat_detector.process_threats = MagicMock(return_value=mock_state)
 
-        await daemon._process_cycle()
+        await daemon._process_cycle_async()
 
         # Should handle API error gracefully
         daemon.threat_detector.process_threats.assert_called_once()
-        daemon.pm.send.assert_called_once()
 
-        # Published state should have error status
-        msg = daemon.pm.send.call_args[0][1]
-        assert msg.rtiStateSP.apiStatus == 'error'
+        assert daemon._last_processed_state is mock_state
+        assert daemon._last_processed_state.api_status == "error"
 
     @pytest.mark.asyncio
     async def test_process_cycle_no_api_client(self, daemon):
@@ -315,6 +369,9 @@ class TestRTIDaemon:
         # Mock valid location and speed
         daemon._get_current_location = MagicMock(return_value=(37.4221, -122.0841))
         daemon._get_current_speed = MagicMock(return_value=25.0)
+        daemon._get_cruise_cluster_speed = MagicMock(return_value=30.0)
+        daemon._get_current_speed_limit = MagicMock(return_value=0.0)
+        daemon._get_current_heading_deg = MagicMock(return_value=0.0)
 
         # No API client (offline mode)
         daemon.waze_client = None
@@ -331,22 +388,17 @@ class TestRTIDaemon:
         )
         daemon.threat_detector.process_threats = MagicMock(return_value=mock_state)
 
-        # Mock time.time() to return predictable timestamp
-        with patch('sunnypilot.rtid.rtid.time.time', return_value=1234.567890):
-            await daemon._process_cycle()
+        with patch('sunnypilot.rtid.rtid.time.monotonic_ns', return_value=1234567890000):
+            await daemon._process_cycle_async()
 
-        # Should process without API data
-        daemon.threat_detector.process_threats.assert_called_once_with(
-            traffic_data=None,
-            current_location=(37.4221, -122.0841),
-            current_speed=25.0,
-            timestamp=1234567890000  # 1234.567890 * 1e9 = 1234567890000 (nanoseconds)
-        )
-
-        # Published state should be offline
-        daemon.pm.send.assert_called_once()
-        msg = daemon.pm.send.call_args[0][1]
-        assert msg.rtiStateSP.apiStatus == 'offline'
+        daemon.threat_detector.process_threats.assert_called_once()
+        kwargs = daemon.threat_detector.process_threats.call_args.kwargs
+        assert kwargs["traffic_data"] is None
+        assert kwargs["current_location"] == (37.4221, -122.0841)
+        assert kwargs["current_speed"] == 25.0
+        assert kwargs["timestamp"] == 1234567890000
+        assert daemon._last_processed_state is mock_state
+        assert daemon._last_processed_state.api_status == "offline"
 
     @pytest.mark.asyncio
     async def test_process_cycle_exception_handling(self, daemon):
@@ -354,12 +406,9 @@ class TestRTIDaemon:
         # Mock location retrieval to raise exception
         daemon._get_current_location = MagicMock(side_effect=Exception("Location error"))
 
-        await daemon._process_cycle()
+        await daemon._process_cycle_async()
 
-        # Should publish offline state on exception
-        daemon.pm.send.assert_called_once()
-        msg = daemon.pm.send.call_args[0][1]
-        assert msg.rtiStateSP.apiStatus == 'offline'
+        assert getattr(daemon, "_last_processed_state", None) is None
 
 
 @pytest.mark.integration
@@ -411,7 +460,7 @@ class TestRTIDaemonIntegration:
 
             # Mock RTI enabled
             daemon._check_enabled = MagicMock(return_value=True)
-            daemon._process_cycle = AsyncMock()
+            daemon._process_cycle_async = AsyncMock()
 
             # Run for a short time
             run_task = asyncio.create_task(daemon.run())
@@ -424,19 +473,19 @@ class TestRTIDaemonIntegration:
                 pass
 
             # Should have called process cycle
-            assert daemon._process_cycle.call_count > 0
+            assert daemon._process_cycle_async.call_count > 0
 
     @pytest.mark.asyncio
     @pytest.mark.performance
     async def test_daemon_loop_timing(self, mock_messaging, mock_params, performance_timer):
-        """Test daemon loop timing maintains 1Hz rate."""
+        """Test daemon loop timing maintains ~50Hz rate."""
         with patch('sunnypilot.rtid.rtid.WazeAPIClient'), \
              patch('sunnypilot.rtid.rtid.ThreatDetector'):
             daemon = RTIDaemon()
 
             # Mock fast processing
             daemon._check_enabled = MagicMock(return_value=True)
-            daemon._process_cycle = AsyncMock()
+            daemon._process_cycle_async = AsyncMock()
 
             # Measure loop timing
             performance_timer.start()
@@ -452,11 +501,11 @@ class TestRTIDaemonIntegration:
 
             performance_timer.stop()
 
-            # Should maintain approximately 1Hz (allow some variance)
-            cycles_expected = 2
-            assert daemon._process_cycle.call_count >= cycles_expected
+            # Should run at roughly 50Hz (allow some variance for CI/dev env)
+            cycles_expected = 50
+            assert daemon._process_cycle_async.call_count >= cycles_expected
 
-            # Should not run significantly faster than 1Hz
+            # Should not complete significantly faster than 2 seconds
             assert performance_timer.elapsed_ms >= 2000  # At least 2 seconds
 
     @pytest.mark.asyncio
@@ -476,7 +525,7 @@ class TestRTIDaemonIntegration:
                 await asyncio.sleep(0.15)  # 150ms - exceeds 100ms warning threshold
 
             daemon._check_enabled = MagicMock(return_value=True)
-            daemon._process_cycle = slow_process
+            daemon._process_cycle_async = slow_process
 
             # Run for one cycle
             run_task = asyncio.create_task(daemon.run())
@@ -489,9 +538,8 @@ class TestRTIDaemonIntegration:
                 pass
 
             # Should have logged performance warning
-            mock_log.warning.assert_called()
-            warning_call = mock_log.warning.call_args[0][0]
-            assert "RTI cycle took" in warning_call
+            warnings = [str(call.args[0]) for call in mock_log.warning.call_args_list if call.args]
+            assert any("RTI cycle took" in w for w in warnings), f"Expected cycle timing warning in: {warnings}"
 
 
 @pytest.mark.unit
