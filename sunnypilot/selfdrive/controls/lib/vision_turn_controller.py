@@ -29,6 +29,15 @@ FREEWAY_CURV_EPS = 1e-5       # effectively straight (1/m)
 FREEWAY_MIN_VISIBLE_M = 120.0 # visible horizon long enough (m)
 FREEWAY_MIN_CONF = 0.60       # path/model confidence threshold
 
+# ===== Freeway Cap Hold (Planner Response Latency) =====
+# At freeway speeds, the VTSC cap can briefly dip for a single model frame as curvature predictions
+# fluctuate. The longitudinal planner/MPC typically cannot respond meaningfully to these sub-0.5s
+# pulses, which presents as "VTSC is late to slow". Hold material cap reductions briefly so the
+# planner sees a stable target and begins braking sooner.
+VTURN_HOLD_MIN_V_MPS = 27.0    # only engage hold above ~60 mph
+VTURN_HOLD_DELTA_MPS = 1.0    # only hold when cap reduces cruise by ≥ this
+VTURN_HOLD_S = 1.2            # tuned from rlogs: typical planner response ≈ 0.9–1.2s
+
 # ===== Feature Flags & Thresholds =====
 # Use a large sentinel for "no cap" speed contributions when disabling a channel
 INF_SPEED = 1e9
@@ -56,6 +65,12 @@ LOW_SPEED_MARGIN_MIN_SCALE = 0.28      # retain ~28% of nominal margin at very l
 LOW_SPEED_MARGIN_MAX_V_MPS = 12.5      # taper ends ≈28 mph (dominates town speeds)
 LOW_SPEED_MARGIN_CURV_THRESH = 3.5e-4  # below this treat as effectively straight
 LOW_SPEED_MARGIN_VIS_BUFFER_M = 3.0    # minimum available distance after buffer to allow uplift
+
+# Lead-bypass headway floor: avoid inflated headway at crawl speeds behind a lead
+OCCL_BYPASS_HEADWAY_V_FLOOR_MPS = 5.0  # ~11 mph
+# Lead-bypass low-speed close-lead fallback
+OCCL_BYPASS_LOW_SPEED_V_MPS = 7.0      # ~16 mph
+OCCL_BYPASS_LEAD_D_REL_MAX_M = 27.0    # ~89 ft
 
 # ===== PSI / Occlusion arbitration tunables (defaults; overridden via Params) =====
 # PSI gate to qualify occlusion influence during FOV occlusion
@@ -717,6 +732,10 @@ class VisionTurnController:
     self._intervention_required = False
     self._critical_situation_time = 0.0
 
+    # ===== Freeway cap hold (avoid flicker) =====
+    self._v_turn_hold_until = 0.0
+    self._v_turn_hold_min = float(INF_SPEED)
+
     # Advanced controller state
     self._planned_speeds = np.zeros(N_POINTS, dtype=float)
     self._current_accel = 0.0
@@ -1011,6 +1030,8 @@ class VisionTurnController:
       units_ok = bool(getattr(self, '_dbg_units_ok', True))
       boost_left = int(getattr(self, '_fov_boost_left', 0))
       overshoot_left = int(getattr(self, '_fov_overshoot_left', 0))
+      cap_hold_active = bool(getattr(self, '_dbg_vturn_hold_active', False))
+      cap_hold_min = float(getattr(self, '_dbg_vturn_hold_min', 0.0) or 0.0)
       return {
         'v': v_ego, 'cruise': v_cruise, 'lead': lead, 'hw': hw,
         'conf': conf, 'vision_status': self._vision_status_str(),
@@ -1033,6 +1054,7 @@ class VisionTurnController:
         'fail_open': fail_open,
         'psi_vis': psi_vis, 'psi_thresh': psi_thresh, 'ttfov_s': ttfov, 'psi_fov_rad': psi_fov, 'psi_margin_rad': psi_margin,
         'occlusion_reason': occl_reason, 'occl_on_cnt': occl_on, 'occl_off_cnt': occl_off, 'onset_boost_left': boost_left, 'overshoot_left': overshoot_left,
+        'cap_hold_active': cap_hold_active, 'cap_hold_min': cap_hold_min,
         # κ-bias diagnostics
         'onset_bias_active': bool(getattr(self, '_dbg_onset_bias_active', False)),
         'onset_gate_reason': getattr(self, '_dbg_onset_gate_reason', None),
@@ -1201,6 +1223,65 @@ class VisionTurnController:
     self._is_decelerating_for_curve = False
     self._anticipation_start_time = 0.0
     self._curve_detection_distance = 0.0
+
+  def _apply_freeway_v_turn_hold(self, v_cap: float) -> float:
+    """Hold material VTSC cap reductions briefly at freeway speeds.
+
+    Motivation: At >60 mph the model curvature horizon can flicker, producing short (<0.5s) cap dips.
+    The longitudinal planner/MPC often cannot react within that window, so braking begins late.
+    Holding the lowest cap for a short interval makes the cap persistent enough to be acted upon.
+    """
+    try:
+      now = float(time.time())
+    except Exception:
+      now = 0.0
+
+    # Default: no hold
+    self._dbg_vturn_hold_active = False
+
+    try:
+      v_ego = float(self._v_ego)
+    except Exception:
+      v_ego = 0.0
+
+    # Only apply this to visible (good-vision) freeway behavior.
+    if v_ego < float(VTURN_HOLD_MIN_V_MPS):
+      return float(v_cap)
+    try:
+      if not bool(getattr(self._occlusion_state, 'vision_good', True)):
+        return float(v_cap)
+    except Exception:
+      pass
+    if bool(getattr(self, '_fov_occluded', False)):
+      return float(v_cap)
+
+    try:
+      v_cruise = float(self._v_cruise_setpoint)
+    except Exception:
+      v_cruise = float(v_cap)
+
+    # Update/extend hold window only when VTSC is asking for a meaningful reduction.
+    if (v_cruise - float(v_cap)) >= float(VTURN_HOLD_DELTA_MPS):
+      hold_until = float(getattr(self, '_v_turn_hold_until', 0.0) or 0.0)
+      hold_min = float(getattr(self, '_v_turn_hold_min', float(v_cap)) or float(v_cap))
+      if now >= hold_until:
+        hold_min = float(v_cap)
+      else:
+        hold_min = min(hold_min, float(v_cap))
+      self._v_turn_hold_min = hold_min
+      self._v_turn_hold_until = now + float(VTURN_HOLD_S)
+
+    # Apply hold if active
+    hold_until2 = float(getattr(self, '_v_turn_hold_until', 0.0) or 0.0)
+    hold_min2 = float(getattr(self, '_v_turn_hold_min', float(v_cap)) or float(v_cap))
+    if now < hold_until2:
+      self._dbg_vturn_hold_active = True
+      self._dbg_vturn_hold_min = float(hold_min2)
+      return float(min(float(v_cap), hold_min2))
+
+    # Hold expired: allow immediate release
+    self._v_turn_hold_min = float(INF_SPEED)
+    return float(v_cap)
 
   def _update_params(self):
     # Delegate to shared reader to avoid duplicating logic here
@@ -1375,8 +1456,11 @@ class VisionTurnController:
       status = bool(getattr(lead, 'status', False)) if lead is not None else False
       d_rel = float(getattr(lead, 'dRel', 1e9)) if lead is not None else 1e9
       v_ego_safe = max(0.1, float(self._v_ego))
-      headway_s = float(d_rel) / v_ego_safe
+      v_floor = max(float(OCCL_BYPASS_HEADWAY_V_FLOOR_MPS), float(_MIN_V))
+      v_for_headway = max(v_ego_safe, v_floor)
+      headway_s = float(d_rel) / v_for_headway
       self._lead_present = status
+      self._lead_d_rel_m = float(d_rel)
       self._lead_headway_s = headway_s
     except Exception:
       self._lead_present = False
@@ -1396,7 +1480,14 @@ class VisionTurnController:
       # Lead-bypass is intended to prevent the occlusion subsystem from interfering while following
       # a lead at close headway (e.g., lane-line confidence drops behind a lead should not "stick"
       # VTSC in occlusion/no-raise behavior on otherwise benign segments).
-      self._occl_lead_bypass_active = bool(self._occl_bypass_with_lead and self._lead_present and (self._lead_headway_s <= float(self._occl_bypass_headway_s)))
+      low_speed_lead_close = bool(
+        self._lead_present and (v_ego_safe <= float(OCCL_BYPASS_LOW_SPEED_V_MPS)) and (float(self._lead_d_rel_m) <= float(OCCL_BYPASS_LEAD_D_REL_MAX_M))
+      )
+      self._occl_lead_bypass_active = bool(
+        self._occl_bypass_with_lead and self._lead_present and (
+          (self._lead_headway_s <= float(self._occl_bypass_headway_s)) or low_speed_lead_close
+        )
+      )
     except Exception:
       self._occl_lead_bypass_active = False
 
@@ -1591,6 +1682,11 @@ class VisionTurnController:
     """SIMPLIFIED: State machine kept only for UI/logging - doesn't affect activation anymore."""
     # System-level disable conditions
     if not self._op_enabled or not self._is_enabled or self._gas_pressed:
+      # Clear freeway cap hold when VTSC is truly disabled (user override / disengage / gas).
+      # NOTE: We intentionally do *not* clear this when the state machine toggles to disabled
+      # due to transient curvature horizon changes; the hold is meant to bridge those blips.
+      self._v_turn_hold_until = 0.0
+      self._v_turn_hold_min = float(INF_SPEED)
       self.state = VisionTurnControllerState.disabled
       return
 
@@ -1809,7 +1905,15 @@ class VisionTurnController:
       k_gate_abs = abs(float(kappa_gate))
     except Exception:
       k_gate_abs = 0.0
-    severe_conf_no_raise = bool(severe_conf and (not occl_bypass) and (not self._freeway_failopen_active) and (k_gate_abs >= float(k_min)))
+    try:
+      min_operating_v = float(_MIN_V)
+    except Exception:
+      min_operating_v = 0.0
+    low_speed_guard = bool(self._v_ego <= max(0.0, min_operating_v))
+    severe_conf_no_raise = bool(
+      severe_conf and (not occl_bypass) and (not self._freeway_failopen_active)
+      and (k_gate_abs >= float(k_min)) and (not low_speed_guard)
+    )
     if severe_conf_no_raise:
       accel_cmd = min(accel_cmd, 0.0)
       try:
@@ -2328,7 +2432,8 @@ class VisionTurnController:
 
     # Publish cap to the planner: clamp to cruise setpoint and keep non-negative.
     try:
-      self._v_turn_output = float(max(0.0, min(float(v_target_cap), float(self._v_cruise_setpoint))))
+      v_publish = float(max(0.0, min(float(v_target_cap), float(self._v_cruise_setpoint))))
+      self._v_turn_output = float(self._apply_freeway_v_turn_hold(v_publish))
     except Exception:
       self._v_turn_output = float(getattr(self, '_v_cruise_setpoint', 0.0) or 0.0)
 

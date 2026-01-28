@@ -3,7 +3,7 @@ import math
 
 import pytest
 
-from sunnypilot.selfdrive.controls.lib.vision_turn_controller import curvature_to_speed
+from sunnypilot.selfdrive.controls.lib.vision_turn_controller import curvature_to_speed, VTURN_HOLD_S
 from pathlib import Path
 
 from .harness import Step, simulate_sequence, simulate_sequence_trace, mk_vtsc_with_params, load_steps_from_rlog
@@ -47,6 +47,30 @@ def test_highway_bypass_partial_occlusion():
   final = float(snap['final'])
   # At ≥ ~65 mph gate the occlusion; ensure no undue slow-down
   assert final >= v0 - 0.5
+
+
+def test_freeway_cap_hold_prevents_single_frame_flicker():
+  # Regression (freeway): we observed many short (<0.5s) VTSC cap dips in rlogs, which the
+  # longitudinal planner/MPC often cannot respond to quickly. VTSC should hold a material cap
+  # reduction briefly so the planner sees a stable target and begins braking sooner.
+  v0 = 32.0
+  v_cruise = 33.0
+  dt = 0.05
+
+  # One-frame "curve ahead" pulse (horizon only), then straight. Without the hold, v_turn would
+  # immediately jump back to cruise on the next frame.
+  steps = [Step(curvature=0.0, curvature_ahead=0.012, confidence=0.95)]
+  steps += [Step(curvature=0.0, curvature_ahead=0.0, confidence=0.95) for _ in range(int(VTURN_HOLD_S / dt) + 12)]
+
+  trace = simulate_sequence_trace(steps=steps, v0_mps=v0, v_cruise_mps=v_cruise, dt=dt, integrate_ego=False)
+  assert trace and len(trace) >= 3
+
+  # First frame should produce a meaningful cap reduction.
+  assert float(trace[0]['v_turn']) <= v_cruise - 1.0
+  # Second frame must remain held low even though horizon is straight.
+  assert float(trace[1]['v_turn']) <= v_cruise - 1.0
+  # After the hold expires, cap should recover to cruise promptly.
+  assert float(trace[-1]['v_turn']) >= v_cruise - 1e-3
 
 
 def test_lead_bypass_active_allows_raise_with_margin():
@@ -205,6 +229,32 @@ def test_severe_confidence_on_straight_does_not_block_raise():
   assert snap
   assert snap['vision_status'] in ('SEVERE', 'LOST')
   assert bool(snap['occluded']) is True
+  assert float(snap['a_last']) >= 0.05
+
+
+def test_severe_confidence_low_speed_lead_does_not_freeze():
+  # Regression (real-world stop-and-go):
+  #
+  # When crawling behind a lead, lane-line confidence can drop to SEVERE/LOST (lead covers lines),
+  # but VTSC must not "stick" in a no-raise clamp that prevents resuming motion when the lead moves.
+  v0 = 1.0
+  v_cruise = 15.0
+  conf = 0.10
+  k = 5e-4  # tiny curvature (above k_min) where physics cap is effectively cruise
+  lead_d = 15.0
+
+  snap = simulate_sequence(
+    steps=_steps_constant(curvature=k, confidence=conf, n=25, lead_d=lead_d),
+    v0_mps=v0,
+    v_cruise_mps=v_cruise,
+    dt=0.05,
+  )
+  assert snap
+  assert snap['vision_status'] in ('SEVERE', 'LOST')
+  assert bool(snap['lead']) is True
+  assert bool(snap['occl_lead_bypass_active']) is True
+  # Cap must be above current speed (otherwise planner will not accelerate)
+  assert float(snap['vtsc_cmd']) > float(snap['v']) + 0.5
   assert float(snap['a_last']) >= 0.05
 
 
