@@ -45,8 +45,9 @@
 
 ## Commit & Pull Request Guidelines
 - Commits: imperative mood with scoped prefix, e.g., `selfdrive: fix MPC latency`.
-- Branch policy: work only on `chubbs-merge` in this workspace. PRs target `chubbs-merge`.
-  - Note: `chauffeur-dev2` is deprecated. We will still reference it to port custom features into `chubbs-merge` and for debugging comparisons when needed.
+- Branch policy: work only on `chauffeur-dev3` in this workspace. PRs target `chauffeur-dev3`.
+  - Note: `chubbs-merge` is not an active development branch right now; use it only for debugging comparisons or targeted ports when explicitly requested.
+  - Note: `chauffeur-dev2` is deprecated.
 - PRs: include rationale, verification steps (routes/logs for car changes), linked issues, and tests. Use templates in `.github/pull_request_template.md`.
 
 ## Agent Planning (update_plan tool)
