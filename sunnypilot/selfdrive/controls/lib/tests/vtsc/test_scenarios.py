@@ -306,6 +306,32 @@ def test_severe_confidence_model_flat_steering_fallback_slows_for_sharp_curve():
   assert trace[idx_check]['v_turn'] <= v_safe + 2.5
 
 
+def test_severe_confidence_overshoot_is_mildly_conservative_for_blind_curves():
+  # Regression-style guard:
+  #
+  # On some blind off-ramps, lane-line confidence can be extremely low for several seconds
+  # before the model curvature spikes. Without any conservatism, overshoot detection may only
+  # trigger at the last moment.
+  #
+  # Ensure that in SEVERE/LOST confidence (and without a lead-bypass), the overshoot detector is
+  # slightly conservative, producing an early (small) cap reduction for moderate curvature.
+  v0 = 26.8  # ~60 mph
+  v_cruise = 26.8
+  dt = 0.05
+  conf = 0.05
+  k = 0.0035
+
+  trace = simulate_sequence_trace(
+    steps=[Step(curvature=k, curvature_ahead=k, confidence=conf) for _ in range(5)],
+    v0_mps=v0,
+    v_cruise_mps=v_cruise,
+    dt=dt,
+    integrate_ego=False,
+  )
+  assert trace
+  assert float(trace[0]['v_turn']) <= v0 - 0.10
+
+
 def test_hidden_turn_early_decel_with_caps():
   # During early occlusion phase, with tightening curvature behind FoV, ensure decel engages and respects caps
   v0 = 22.0

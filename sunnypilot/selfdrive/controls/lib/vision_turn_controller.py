@@ -18,6 +18,11 @@ except Exception:
 from openpilot.selfdrive.car.cruise import V_CRUISE_MAX
 from openpilot.selfdrive.modeld.constants import ModelConstants
 from .vision_turn_params import update_vtsc_params
+try:
+  from .vtsc_curve_tuning import Q_CURVE_ENABLED, Q_CURVE_POINTS
+except Exception:
+  Q_CURVE_ENABLED = False
+  Q_CURVE_POINTS = []
 
 VisionTurnControllerState = custom.LongitudinalPlanSP.VisionTurnSpeedControl.VisionTurnSpeedControlState
 
@@ -47,6 +52,12 @@ INF_SPEED = 1e9
 # use steering-derived curvature as a last-resort signal to avoid entering a real curve at cruise.
 STEER_CURVATURE_FALLBACK_MODEL_KAPPA_MAX = 0.002  # 1/m: model says "straight"
 STEER_CURVATURE_FALLBACK_MIN_KAPPA = 0.008        # 1/m: car is actually turning
+
+# ===== Severe-confidence overshoot conservatism =====
+# If lane-line confidence is extremely low, the model often "discovers" tight off-ramp curvature late.
+# Make overshoot detection slightly more conservative so VTSC begins slowing earlier in SEVERE/LOST,
+# without changing the baseline curvature→speed mapping used in good visibility.
+SEVERE_OVERSHOOT_SPEED_SCALE_MIN = 0.90  # multiplicative on safe speeds (lower => more conservative)
 
 # Hidden-turn early deceleration feature flag (disabled fully per request)
 HIDDEN_TURN_ENABLED = False
@@ -471,6 +482,42 @@ def _physics_based_lateral_acceleration(curvature: float) -> float:
     result = PHYSICS_A / (1.0 + math.exp(PHYSICS_B * (curvature - PHYSICS_C))) + PHYSICS_D
     return max(PHYSICS_MIN_LAT_ACCEL, min(result, PHYSICS_MAX_LAT_ACCEL))
 
+def _q_curve_multiplier(abs_curvature_meters: float) -> float:
+    if not Q_CURVE_ENABLED or len(Q_CURVE_POINTS) < 2:
+        return 1.0
+    if not (abs_curvature_meters > 0.0 and math.isfinite(abs_curvature_meters)):
+        return 1.0
+
+    pts = []
+    for k, q in Q_CURVE_POINTS:
+        try:
+            kf = float(k)
+            qf = float(q)
+        except Exception:
+            continue
+        if not (kf > 0.0 and math.isfinite(qf)):
+            continue
+        pts.append((kf, qf))
+    if len(pts) < 2:
+        return 1.0
+    pts.sort(key=lambda kv: kv[0])
+
+    kappa = clip(float(abs_curvature_meters), pts[0][0], pts[-1][0])
+    logk = math.log10(max(kappa, 1e-12))
+
+    for i in range(len(pts) - 1):
+        k0, q0 = pts[i]
+        k1, q1 = pts[i + 1]
+        if kappa <= k1:
+            log0 = math.log10(max(k0, 1e-12))
+            log1 = math.log10(max(k1, 1e-12))
+            if log1 <= log0:
+                return clip(q0, 0.5, 1.5)
+            t = (logk - log0) / (log1 - log0)
+            q = q0 + (q1 - q0) * t
+            return clip(q, 0.5, 1.5)
+    return clip(pts[-1][1], 0.5, 1.5)
+
 def curvature_to_speed(abs_curvature_meters: float) -> float:
     """FIXED: Calculates target speed (m/s) directly from curvature with NO SCALING HACK"""
     if abs_curvature_meters < 1e-7:  # Handle straight roads
@@ -494,7 +541,11 @@ def curvature_to_speed(abs_curvature_meters: float) -> float:
 
     # Apply speed increase factor and clip to reasonable maximum
     target_speed_mps = base_speed_mps * SPEED_INCREASE_FACTOR
-    return clip(target_speed_mps, 0.0, MAX_SPEED_DEFAULT)
+    target_speed_mps = clip(target_speed_mps, 0.0, MAX_SPEED_DEFAULT)
+
+    # Optional post-scale for tuning the curvature→speed relationship (multiplicative in speed)
+    q = _q_curve_multiplier(abs_curvature_meters)
+    return clip(target_speed_mps * q, 0.0, MAX_SPEED_DEFAULT)
 
 def find_apexes_enhanced(curvature_array: np.ndarray, threshold: float = 5e-5, min_prominence: float = 1e-4) -> list:
     """
@@ -1575,6 +1626,25 @@ class VisionTurnController:
 
         # Check for overshoot using curvature_to_speed method (use absolute values)
         safe_speeds = np.array([curvature_to_speed(curv) for curv in curvature_array_abs])
+        # Under very low lane-line confidence, be mildly conservative when deciding whether we need
+        # to start slowing for a curve ahead. This helps blind off-ramps where the model curvature
+        # estimate can rise sharply only very late in the approach.
+        try:
+          conf_for_scale = float(vision_confidence)
+        except Exception:
+          conf_for_scale = 1.0
+        try:
+          lead_bypass = bool(self._occl_lead_bypass_active)
+        except Exception:
+          lead_bypass = False
+        if (not lead_bypass) and (conf_for_scale < CONFIDENCE_EXIT_TO_PARTIAL):
+          try:
+            denom = float(max(1e-6, CONFIDENCE_EXIT_TO_PARTIAL - CONFIDENCE_ENTER_SEVERE))
+            t = float(clip((conf_for_scale - CONFIDENCE_ENTER_SEVERE) / denom, 0.0, 1.0))
+          except Exception:
+            t = 0.0
+          scale = float(SEVERE_OVERSHOOT_SPEED_SCALE_MIN + (1.0 - SEVERE_OVERSHOOT_SPEED_SCALE_MIN) * t)
+          safe_speeds = safe_speeds * scale
         overshoot_mask = safe_speeds < self._v_ego
         self._lat_acc_overshoot_ahead = np.any(overshoot_mask)
 
