@@ -77,46 +77,47 @@ class ModelState(ModelStateBase):
         self.numpy_inputs[key] = np.zeros(shape, dtype=np.float32)
         # Temporal input: shape is [batch, history, features]
         if len(shape) == 3 and shape[1] > 1:
-          buffer_history_len = max(100, (shape[1] * 4 if shape[1] < 100 else shape[1]))   # Allow for higher history buffers in the future
+          buffer_history_len = shape[1] * 4 if shape[1] < 99 else shape[1]  # Allow for higher history buffers in the future
           feature_len = shape[2]
+          features_buffer_shape = self.model_runner.input_shapes.get('features_buffer')
+          if shape[1] in (24, 25) and features_buffer_shape is not None and features_buffer_shape[1] == 24:  # 20Hz
+            buffer_history_len = (features_buffer_shape[1] + 1) * 4
+            step = int(-buffer_history_len / shape[1])
+            self.temporal_idxs_map[key] = np.arange(step, step * (shape[1] + 1), step)[::-1]
+          elif shape[1] == 25:  # Split
+            skip = buffer_history_len // shape[1]
+            self.temporal_idxs_map[key] = np.arange(buffer_history_len)[-1 - (skip * (shape[1] - 1))::skip]
+          elif shape[1] >= 99:  # non20hz
+            self.temporal_idxs_map[key] = np.arange(shape[1])
           self.temporal_buffers[key] = np.zeros((1, buffer_history_len, feature_len), dtype=np.float32)
-          step_size = buffer_history_len // shape[1]
-          self.temporal_idxs_map[key] = np.arange(buffer_history_len - step_size * shape[1], buffer_history_len, step_size)
-
-    self.full_desire = self.temporal_buffers['desire']
-    self.desire_idxs = self.temporal_idxs_map['desire']
-    self.full_features_buffer = self.temporal_buffers['features_buffer']
-    self.features_idxs = self.temporal_idxs_map['features_buffer']
-    if 'prev_desired_curv' in self.temporal_buffers:
-      self.full_prev_desired_curv = self.temporal_buffers['prev_desired_curv']
-      self.prev_desired_curv_idxs = self.temporal_idxs_map['prev_desired_curv']
-    if 'prev_desired_curvs' in self.temporal_buffers:
-      self.full_prev_desired_curv = self.temporal_buffers['prev_desired_curvs']
-      self.prev_desired_curv_idxs = self.temporal_idxs_map['prev_desired_curvs']
 
   @property
   def mlsim(self) -> bool:
     return bool(self.generation is not None and self.generation >= 11)
 
+  @property
+  def desire_key(self) -> str:
+    return next(key for key in self.numpy_inputs if key.startswith('desire'))
+
   def run(self, bufs: dict[str, VisionBuf], transforms: dict[str, np.ndarray],
                 inputs: dict[str, np.ndarray], prepare_only: bool) -> dict[str, np.ndarray] | None:
     # Model decides when action is completed, so desire input is just a pulse triggered on rising edge
-    inputs['desire'][0] = 0
-    new_desire = np.where(inputs['desire'] - self.prev_desire > .99, inputs['desire'], 0)
-    self.prev_desire[:] = inputs['desire']
-    self.full_desire[0,:-1] = self.full_desire[0,1:]
-    self.full_desire[0,-1] = new_desire
+    inputs[self.desire_key][0] = 0
+    new_desire = np.where(inputs[self.desire_key] - self.prev_desire > .99, inputs[self.desire_key], 0)
+    self.prev_desire[:] = inputs[self.desire_key]
+    self.temporal_buffers[self.desire_key][0,:-1] = self.temporal_buffers[self.desire_key][0,1:]
+    self.temporal_buffers[self.desire_key][0,-1] = new_desire
 
     # Roll buffer and assign based on desire.shape[1] value
-    if self.full_desire.shape[1] > self.numpy_inputs['desire'].shape[1]:
-      skip = self.full_desire.shape[1] // self.numpy_inputs['desire'].shape[1]
-      self.numpy_inputs['desire'][:] = (
-        self.full_desire[0].reshape(self.numpy_inputs['desire'].shape[0], self.numpy_inputs['desire'].shape[1], skip, -1).max(axis=2))
+    if self.temporal_buffers[self.desire_key].shape[1] > self.numpy_inputs[self.desire_key].shape[1]:
+      skip = self.temporal_buffers[self.desire_key].shape[1] // self.numpy_inputs[self.desire_key].shape[1]
+      self.numpy_inputs[self.desire_key][:] = (self.temporal_buffers[self.desire_key][0].reshape(
+                                               self.numpy_inputs[self.desire_key].shape[0], self.numpy_inputs[self.desire_key].shape[1], skip, -1).max(axis=2))
     else:
-      self.numpy_inputs['desire'][:] = self.full_desire[0, self.desire_idxs]
+      self.numpy_inputs[self.desire_key][:] = self.temporal_buffers[self.desire_key][0, self.temporal_idxs_map[self.desire_key]]
 
     for key in self.numpy_inputs:
-      if key in inputs and key not in ['desire']:
+      if key in inputs and key not in [self.desire_key]:
         self.numpy_inputs[key][:] = inputs[key]
 
     imgs_cl = {name: self.frames[name].prepare(bufs[name], transforms[name].flatten()) for name in self.model_runner.vision_input_names}
@@ -131,9 +132,9 @@ class ModelState(ModelStateBase):
     outputs = self.model_runner.run_model()
 
     # Update features_buffer
-    self.full_features_buffer[0, :-1] = self.full_features_buffer[0, 1:]
-    self.full_features_buffer[0, -1] = outputs['hidden_state'][0, :]
-    self.numpy_inputs['features_buffer'][:] = self.full_features_buffer[0, self.features_idxs]
+    self.temporal_buffers['features_buffer'][0, :-1] = self.temporal_buffers['features_buffer'][0, 1:]
+    self.temporal_buffers['features_buffer'][0, -1] = outputs['hidden_state'][0, :]
+    self.numpy_inputs['features_buffer'][:] = self.temporal_buffers['features_buffer'][0, self.temporal_idxs_map['features_buffer']]
 
     if "desired_curvature" in outputs:
       input_name_prev = None
@@ -146,11 +147,11 @@ class ModelState(ModelStateBase):
     return outputs
 
   def process_desired_curvature(self, outputs, input_name_prev):
-    self.full_prev_desired_curv[0,:-1] = self.full_prev_desired_curv[0,1:]
-    self.full_prev_desired_curv[0,-1,:] = outputs['desired_curvature'][0, :]
-    self.numpy_inputs[input_name_prev][:] = self.full_prev_desired_curv[0, self.prev_desired_curv_idxs]
+    self.temporal_buffers[input_name_prev][0,:-1] = self.temporal_buffers[input_name_prev][0,1:]
+    self.temporal_buffers[input_name_prev][0,-1,:] = outputs['desired_curvature'][0, :]
+    self.numpy_inputs[input_name_prev][:] = self.temporal_buffers[input_name_prev][0, self.temporal_idxs_map[input_name_prev]]
     if self.mlsim:
-      self.numpy_inputs[input_name_prev][:] = 0*self.full_prev_desired_curv[0, self.prev_desired_curv_idxs]
+      self.numpy_inputs[input_name_prev][:] = 0*self.temporal_buffers[input_name_prev][0, self.temporal_idxs_map[input_name_prev]]
 
   def get_action_from_model(self, model_output: dict[str, np.ndarray], prev_action: log.ModelDataV2.Action,
                             lat_action_t: float, long_action_t: float, v_ego: float) -> log.ModelDataV2.Action:
@@ -310,7 +311,7 @@ def main(demo=False):
     bufs = {name: buf_extra if 'big' in name else buf_main for name in model.model_runner.vision_input_names}
     transforms = {name: model_transform_extra if 'big' in name else model_transform_main for name in model.model_runner.vision_input_names}
     inputs:dict[str, np.ndarray] = {
-      'desire': vec_desire,
+      model.desire_key: vec_desire,
       'traffic_convention': traffic_convention,
     }
 

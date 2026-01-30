@@ -8,6 +8,7 @@ See the LICENSE.md file in the root directory for more details.
 import time
 
 import requests
+from requests.exceptions import (SSLError, RequestException, HTTPError)
 from openpilot.common.params import Params
 from openpilot.common.swaglog import cloudlog
 from sunnypilot.models.helpers import is_bundle_version_compatible
@@ -66,6 +67,7 @@ class ModelParser:
     model_bundle.is20hz = bundle.get("is_20hz", False)
     model_bundle.minimumSelectorVersion = int(bundle["minimum_selector_version"])
     model_bundle.overrides = ModelParser._parse_overrides(bundle.get("overrides", {}))
+    model_bundle.ref = bundle.get("ref")
 
     return model_bundle
 
@@ -114,41 +116,58 @@ class ModelCache:
 
 class ModelFetcher:
   """Handles fetching and caching of model data from remote source"""
-  MODEL_URL = "https://docs.sunnypilot.ai/driving_models_v7.json"
+  MODEL_URL = "https://raw.githubusercontent.com/sunnypilot/sunnypilot-docs/refs/heads/gh-pages/docs/driving_models_v10.json"
 
   def __init__(self, params: Params):
     self.params = params
     self.model_cache = ModelCache(params)
     self.model_parser = ModelParser()
 
-  def _fetch_and_cache_models(self) -> list[custom.ModelManagerSP.ModelBundle]:
-    """Fetches fresh model data from remote and updates cache"""
+  def _fetch_and_cache_models(self) -> list[custom.ModelManagerSP.ModelBundle] | None:
+    """Fetches fresh model data from remote and updates cache.
+    Returns None on fetch/transport errors. 404s are logged explicitly.
+    """
     try:
       response = requests.get(self.MODEL_URL, timeout=10)
+
+      # Explicitly handle 404 differently
+      if response.status_code == 404:
+        cloudlog.error(f"Models URL returned 404 Not Found: {self.MODEL_URL}")
+        raise HTTPError(f"404 Not Found: {self.MODEL_URL}", response=response)
+
       response.raise_for_status()
       json_data = response.json()
 
       self.model_cache.set(json_data)
       cloudlog.debug("Successfully updated models cache")
       return self.model_parser.parse_models(json_data)
-    except Exception:
-      cloudlog.exception("Error fetching models")
-      raise
+
+    except SSLError as e:
+      cloudlog.warning(f"SSL error while fetching models: {e}")
+    except RequestException as e:
+      cloudlog.warning(f"Request transport error while fetching models: {e}")
+    except Exception as e:
+      cloudlog.exception(f"Unexpected error fetching models: {e}")
+
+    return None
 
   def get_available_bundles(self) -> list[custom.ModelManagerSP.ModelBundle]:
     """Gets the list of available models, with smart cache handling"""
     cached_data, is_expired = self.model_cache.get()
 
     if cached_data and not is_expired:
-      cloudlog.debug("Using valid cached models data")
-      return self.model_parser.parse_models(cached_data)
+      cached_bundles = self.model_parser.parse_models(cached_data)
+      if cached_bundles:
+        cloudlog.debug("Using valid cached models data")
+        return cached_bundles
+      cloudlog.warning("Cached models data is empty/incompatible, forcing refresh")
 
-    try:
-      return self._fetch_and_cache_models()
-    except Exception:
-      if not cached_data:
-        cloudlog.exception("Failed to fetch fresh data and no cache available")
-        raise
+    fetched_bundles = self._fetch_and_cache_models()
+    if fetched_bundles is not None:
+      return fetched_bundles
+
+    if not cached_data:
+      cloudlog.warning("Failed to fetch fresh data and no cache available")
 
     cloudlog.warning("Failed to fetch fresh data. Using expired cache as fallback")
     return self.model_parser.parse_models(cached_data)

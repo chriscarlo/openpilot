@@ -19,8 +19,8 @@ from openpilot.system.hardware.hw import Paths
 from pathlib import Path
 
 # see the README.md for more details on the model selector versioning
-CURRENT_SELECTOR_VERSION = 9
-REQUIRED_MIN_SELECTOR_VERSION = 9
+CURRENT_SELECTOR_VERSION = 13
+REQUIRED_MIN_SELECTOR_VERSION = 12
 
 USE_ONNX = os.getenv('USE_ONNX', PC)
 
@@ -185,3 +185,27 @@ def load_meta_constants(model_metadata):
       meta = MetaTombRaider
 
   return meta
+
+
+# The following method(s) are modeld helper methods
+def plan_x_idxs_helper(constants, plan, model_output) -> list[float]:
+  # times at X_IDXS according to plan.
+  line_t_idxs = [np.nan] * constants.IDX_N
+  line_t_idxs[0] = 0.0
+  plan_x = model_output['plan'][0, :, plan.POSITION][:, 0].tolist()
+  for xidx in range(1, constants.IDX_N):
+    tidx = 0
+    # increment tidx until we find an element that's further away than the current xidx
+    while tidx < constants.IDX_N - 1 and plan_x[tidx + 1] < constants.X_IDXS[xidx]:
+      tidx += 1
+    if tidx == constants.IDX_N - 1:
+      # if the plan doesn't extend far enough, set plan_t to the max value (10s), then break
+      line_t_idxs[xidx] = constants.T_IDXS[constants.IDX_N - 1]
+      break
+    # interpolate to find `t` for the current xidx
+    current_x_val = plan_x[tidx]
+    next_x_val = plan_x[tidx + 1]
+    denom = next_x_val - current_x_val
+    p = (constants.X_IDXS[xidx] - current_x_val) / denom if abs(denom) > 1e-9 else float('nan')
+    line_t_idxs[xidx] = p * constants.T_IDXS[tidx + 1] + (1 - p) * constants.T_IDXS[tidx]
+  return line_t_idxs
