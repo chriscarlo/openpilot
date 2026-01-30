@@ -21,6 +21,10 @@ VisualAlert = structs.CarControl.HUDControl.VisualAlert
 
 COMFORT_BAND_VAL = 0.01
 
+COMFORT_BAND_ACCEL_BP = [0.0, 0.25, 0.5, 1.0, 1.5, 2.0]
+COMFORT_BAND_DECEL_BP = [-3.5, -2.5, -1.5, -0.75, -0.25, -0.05]
+COMFORT_BAND_V = [0.0, 0.02, 0.04, 0.06, 0.08, 0.10]
+
 DYNAMIC_LOWER_JERK_BP = [-2.0, -1.5, -1.0, -0.25, -0.1, -0.025, -0.01, -0.005]
 DYNAMIC_LOWER_JERK_V  = [3.3,  2.5,  2.0,   1.9,  1.8,   1.65,  1.15,    0.5]
 
@@ -280,14 +284,15 @@ class LongitudinalController:
 
     self.accel_last = self.actual_accel
 
-  def calculate_comfort_band(self, CC: structs.CarControl) -> None:
+  def calculate_comfort_band(self, CC: structs.CarControl, CS: CarStateBase) -> None:
     if not self.enabled or self.CP.radarUnavailable or not CC.longActive:
       self.comfort_band_upper = 0.0
       self.comfort_band_lower = 0.0
       return
 
-    self.comfort_band_upper = COMFORT_BAND_VAL
-    self.comfort_band_lower = COMFORT_BAND_VAL
+    accel = CS.out.aEgo
+    self.comfort_band_upper = float(np.interp(accel, COMFORT_BAND_ACCEL_BP, COMFORT_BAND_V))
+    self.comfort_band_lower = float(np.interp(accel, COMFORT_BAND_DECEL_BP, COMFORT_BAND_V[::-1]))
 
   def get_tuning_state(self) -> None:
     """Update the tuning state object with current control values.
@@ -349,7 +354,7 @@ class LongitudinalController:
     else:
       self.calculate_jerk(CC, CS, long_control_state)
       self.calculate_accel(CC)
-      self.calculate_comfort_band(CC)
+      self.calculate_comfort_band(CC, CS)
 
     self.get_tuning_state()
     self.long_control_state_last = long_control_state
