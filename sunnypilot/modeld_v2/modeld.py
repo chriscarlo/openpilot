@@ -91,6 +91,12 @@ class ModelState(ModelStateBase):
             self.temporal_idxs_map[key] = np.arange(shape[1])
           self.temporal_buffers[key] = np.zeros((1, buffer_history_len, feature_len), dtype=np.float32)
 
+    # One-time runtime contract debug: what the bundle expects vs what we provide from upstream.
+    # This is especially useful when migrating between older `desire` inputs and newer `desire_pulse` split models.
+    self._input_contract_logged = False
+    vision_inputs = set(self.model_runner.vision_input_names)
+    self._policy_input_shapes_from_metadata = {k: v for k, v in self.model_runner.input_shapes.items() if k not in vision_inputs}
+
   @property
   def mlsim(self) -> bool:
     return bool(self.generation is not None and self.generation >= 11)
@@ -101,6 +107,30 @@ class ModelState(ModelStateBase):
 
   def run(self, bufs: dict[str, VisionBuf], transforms: dict[str, np.ndarray],
                 inputs: dict[str, np.ndarray], prepare_only: bool) -> dict[str, np.ndarray] | None:
+    if not self._input_contract_logged:
+      expected_policy_keys = sorted(self._policy_input_shapes_from_metadata.keys())
+      provided_keys = sorted(inputs.keys())
+
+      # Keys auto-managed inside this process (not expected to be present in `inputs`).
+      auto_keys = {'features_buffer'}
+      auto_keys.add(self.desire_key)  # We provide the current desire vector via `inputs[desire_key]`.
+      for k in ('prev_desired_curvs', 'prev_desired_curv'):
+        if k in self._policy_input_shapes_from_metadata:
+          auto_keys.add(k)
+
+      missing_from_inputs = sorted(set(expected_policy_keys) - set(provided_keys) - auto_keys)
+      extra_in_inputs = sorted(set(provided_keys) - set(expected_policy_keys))
+
+      cloudlog.warning(
+        "modeld_v2 input contract (bundle metadata): generation=%s runner=%s desire_key=%s "
+        "expected_policy_inputs=%s provided_inputs=%s auto_managed=%s missing_from_inputs=%s extra_in_inputs=%s "
+        "policy_input_shapes=%s",
+        self.generation, self.model_runner.__class__.__name__, self.desire_key,
+        expected_policy_keys, provided_keys, sorted(auto_keys), missing_from_inputs, extra_in_inputs,
+        {k: self._policy_input_shapes_from_metadata[k] for k in expected_policy_keys},
+      )
+      self._input_contract_logged = True
+
     # Model decides when action is completed, so desire input is just a pulse triggered on rising edge
     inputs[self.desire_key][0] = 0
     new_desire = np.where(inputs[self.desire_key] - self.prev_desire > .99, inputs[self.desire_key], 0)
@@ -156,11 +186,16 @@ class ModelState(ModelStateBase):
   def get_action_from_model(self, model_output: dict[str, np.ndarray], prev_action: log.ModelDataV2.Action,
                             lat_action_t: float, long_action_t: float, v_ego: float) -> log.ModelDataV2.Action:
     plan = model_output['plan'][0]
+    if 'planplus' in model_output:
+      # Newer split models may output a "planplus" residual that should be added to the base plan.
+      # Keep this strictly conditional so older bundles remain unchanged.
+      recovery_power = 0.75 if v_ego > 20.0 else 1.0
+      plan = plan + recovery_power * model_output['planplus'][0]
     desired_accel, should_stop = get_accel_from_plan(plan[:, Plan.VELOCITY][:, 0], plan[:, Plan.ACCELERATION][:, 0], self.constants.T_IDXS,
                                                      action_t=long_action_t)
     desired_accel = smooth_value(desired_accel, prev_action.desiredAcceleration, self.LONG_SMOOTH_SECONDS)
 
-    desired_curvature = get_curvature_from_output(model_output, v_ego, lat_action_t, self.mlsim)
+    desired_curvature = get_curvature_from_output(model_output, plan, v_ego, lat_action_t, self.mlsim)
     if v_ego > self.MIN_LAT_CONTROL_SPEED:
       desired_curvature = smooth_value(desired_curvature, prev_action.desiredCurvature, self.LAT_SMOOTH_SECONDS)
     else:

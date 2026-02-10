@@ -88,20 +88,27 @@ class Parser:
     outs[name] = pred_mu_final.reshape(final_shape)
     outs[name + '_stds'] = pred_std_final.reshape(final_shape)
 
+  def is_mhp(self, outs, name, shape):
+    if self.check_missing(outs, name):
+      return False
+    # simplified outputs omit the extra MHP dimensions, leaving exactly 2*shape (mu + std)
+    return outs[name].shape[1] != 2 * shape
+
   def parse_dynamic_outputs(self, outs: dict[str, np.ndarray]) -> None:
     if 'lead' in outs:
-      if outs['lead'].shape[1] == 2 * SplitModelConstants.LEAD_MHP_SELECTION * SplitModelConstants.LEAD_TRAJ_LEN * SplitModelConstants.LEAD_WIDTH:
-        self.parse_mdn('lead', outs, in_N=0, out_N=0,
-                       out_shape=(SplitModelConstants.LEAD_MHP_SELECTION, SplitModelConstants.LEAD_TRAJ_LEN, SplitModelConstants.LEAD_WIDTH))
-      else:
-        self.parse_mdn('lead', outs, in_N=SplitModelConstants.LEAD_MHP_N, out_N=SplitModelConstants.LEAD_MHP_SELECTION,
-                       out_shape=(SplitModelConstants.LEAD_TRAJ_LEN, SplitModelConstants.LEAD_WIDTH))
+      lead_mhp = self.is_mhp(outs, 'lead',
+                             SplitModelConstants.LEAD_MHP_SELECTION * SplitModelConstants.LEAD_TRAJ_LEN * SplitModelConstants.LEAD_WIDTH)
+      lead_in_N, lead_out_N = (SplitModelConstants.LEAD_MHP_N, SplitModelConstants.LEAD_MHP_SELECTION) if lead_mhp else (0, 0)
+      lead_out_shape = (SplitModelConstants.LEAD_TRAJ_LEN, SplitModelConstants.LEAD_WIDTH) if lead_mhp else \
+        (SplitModelConstants.LEAD_MHP_SELECTION, SplitModelConstants.LEAD_TRAJ_LEN, SplitModelConstants.LEAD_WIDTH)
+      self.parse_mdn('lead', outs, in_N=lead_in_N, out_N=lead_out_N, out_shape=lead_out_shape)
     if 'plan' in outs:
-      if outs['plan'].shape[1] == 2 * SplitModelConstants.IDX_N * SplitModelConstants.PLAN_WIDTH:
-        self.parse_mdn('plan', outs, in_N=0, out_N=0,
-                       out_shape=(SplitModelConstants.IDX_N, SplitModelConstants.PLAN_WIDTH))
-      else:
-        self.parse_mdn('plan', outs, in_N=SplitModelConstants.PLAN_MHP_N, out_N=SplitModelConstants.PLAN_MHP_SELECTION,
+      plan_mhp = self.is_mhp(outs, 'plan', SplitModelConstants.IDX_N * SplitModelConstants.PLAN_WIDTH)
+      plan_in_N, plan_out_N = (SplitModelConstants.PLAN_MHP_N, SplitModelConstants.PLAN_MHP_SELECTION) if plan_mhp else (0, 0)
+      self.parse_mdn('plan', outs, in_N=plan_in_N, out_N=plan_out_N,
+                     out_shape=(SplitModelConstants.IDX_N, SplitModelConstants.PLAN_WIDTH))
+      if 'planplus' in outs:
+        self.parse_mdn('planplus', outs, in_N=plan_in_N, out_N=plan_out_N,
                        out_shape=(SplitModelConstants.IDX_N, SplitModelConstants.PLAN_WIDTH))
 
   def split_outputs(self, outs: dict[str, np.ndarray]) -> None:
@@ -129,16 +136,8 @@ class Parser:
       self.parse_mdn('sim_pose', outs, in_N=0, out_N=0, out_shape=(SplitModelConstants.POSE_WIDTH,))
 
   def parse_vision_outputs(self, outs: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
-    # Debug: Log available keys for v12 model (skip if generation not available)
-    if hasattr(self, 'generation') and self.generation == 12 and not hasattr(self, '_keys_logged'):
-      with open('/tmp/model_keys.txt', 'w') as f:
-        f.write(f"Generation {self.generation} model outputs:\n")
-        f.write(f"Keys: {sorted(outs.keys())}\n")
-        for k, v in outs.items():
-          f.write(f"  {k}: shape={v.shape if hasattr(v, 'shape') else 'N/A'}\n")
-      self._keys_logged = True
-
     self.parse_mdn('pose', outs, in_N=0, out_N=0, out_shape=(SplitModelConstants.POSE_WIDTH,))
+    # Some older bundles omitted this output; tolerate missing for backwards compatibility.
     if 'wide_from_device_euler' in outs:
       self.parse_mdn('wide_from_device_euler', outs, in_N=0, out_N=0, out_shape=(SplitModelConstants.WIDE_FROM_DEVICE_WIDTH,))
     self.parse_mdn('road_transform', outs, in_N=0, out_N=0, out_shape=(SplitModelConstants.POSE_WIDTH,))
