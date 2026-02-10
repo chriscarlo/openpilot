@@ -36,7 +36,7 @@ def _fill_driver_data(builder) -> None:
   builder.notReadyProb = [0.0, 0.0]
 
 
-def _get_driverstate_packet(frame_id: int, exec_time: float) -> messaging.Message:
+def _get_driverstate_packet(frame_id: int, exec_time: float):
   msg = messaging.new_message("driverStateV2", valid=True)
   ds = msg.driverStateV2
   ds.frameId = frame_id
