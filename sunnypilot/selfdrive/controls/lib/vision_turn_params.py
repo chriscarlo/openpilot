@@ -384,12 +384,6 @@ def update_vtsc_params(ctrl, *, force: bool = False) -> None:
   )
 
   # Vision-floor and dropout discrimination knobs
-  # 0=off, 1=TTL floor (default aggressive), 2=strict
-  try:
-    mode = int(float(getf("VisionTurnSpeedControlVisionFloorMode", getattr(ctrl, "_vision_floor_mode", 1))))
-  except Exception:
-    mode = getattr(ctrl, "_vision_floor_mode", 1)
-  ctrl._vision_floor_mode = int(max(0, min(2, mode)))
   ctrl._vision_floor_ttl_s = getf(
     "VisionTurnSpeedControlVisionFloorTtlS",
     getattr(ctrl, "_vision_floor_ttl_s", 3.0),

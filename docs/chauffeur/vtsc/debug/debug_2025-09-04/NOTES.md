@@ -12,7 +12,7 @@
   - Dropout grace to suppress pretrigger on brief model frame loss.
   - Vision-floor TTL uplift at occlusion onset (prevents crawl on straights for short TTL).
 - Parameters (persistent; `common/params_keys.h`):
-  - `VisionTurnSpeedControlVisionFloorMode` (0/1/2), `VisionTurnSpeedControlVisionFloorTtlS`, `VisionTurnSpeedControlVisionFloorMult`, `VisionTurnSpeedControlDropoutGraceS`.
+  - `VisionTurnSpeedControlVisionFloorTtlS`, `VisionTurnSpeedControlVisionFloorMult`, `VisionTurnSpeedControlDropoutGraceS`.
 - Param wiring: loaded in `vision_turn_params.update_vtsc_params()` and consumed in `vision_turn_controller.py`.
 - Tooling: added `tools/vtsc/vtsc_watch.py` (real-time watcher for VTSC).
 
@@ -25,4 +25,3 @@
 - Capture a short clear-road drive with debug toggles ON and watcher running. Confirm `cap != occlusion` on straights and no `pretrigger_with_high_conf` flags.
 - Post-drive: run `docs/chauffeur/vtsc/analysis/analyze_snapshots.py /data/media/0/VTSCDebug/vtsc_snapshots.jsonl --dump-tsv OUT.tsv`.
 - If freeway crawl recurs, validate: `freeway_failopen_missed`, `psi_below_thresh`, and model dropout counts around the event.
-

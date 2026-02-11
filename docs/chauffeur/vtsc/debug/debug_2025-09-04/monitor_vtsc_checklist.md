@@ -24,10 +24,9 @@
   - Inspect summary for LKG “floor saves” and gating anomalies.
 
 - Optional runtime safety knobs (persisted)
-  - `VisionTurnSpeedControlVisionFloorMode` in {0,1,2}, TTL `VisionTurnSpeedControlVisionFloorTtlS`, mult `VisionTurnSpeedControlVisionFloorMult`
+  - TTL `VisionTurnSpeedControlVisionFloorTtlS`, mult `VisionTurnSpeedControlVisionFloorMult`
   - Dropout grace: `VisionTurnSpeedControlDropoutGraceS`
 
 - Cleanup
   - Stop watcher: `kill "$(cat .cache/vtsc_watch.pid)"`
   - Optionally disable debug toggles in UI to reduce log noise.
-

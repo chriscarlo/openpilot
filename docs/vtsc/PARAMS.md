@@ -95,7 +95,6 @@ FOV gating / geometry:
 - `VisionTurnSpeedControlFOVNOff`
 
 Vision “floor” / dropout discrimination:
-- `VisionTurnSpeedControlVisionFloorMode`
 - `VisionTurnSpeedControlVisionFloorTtlS`
 - `VisionTurnSpeedControlVisionFloorMult`
 - `VisionTurnSpeedControlDropoutGraceS`

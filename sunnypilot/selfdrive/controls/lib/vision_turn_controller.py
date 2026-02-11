@@ -69,16 +69,11 @@ HIDDEN_TURN_ENABLED = False
 HIGHWAY_MIN_MPH = 55.0
 HIGHWAY_MIN_MPS = float(HIGHWAY_MIN_MPH * CV.MPH_TO_MS)
 
-# Disable the "no-raise" onset window entirely
-NO_RAISE_WINDOW_S = 0.0
-
 # ===== Low-speed occlusion margin relax =====
 # At very low speeds on effectively-straight roads, VTSC's occlusion math can trip "negative margin"
 # and enforce a decel/hold that feels like a crawl. Allow a small override in this regime.
-LOW_SPEED_MARGIN_MIN_SCALE = 0.28      # retain ~28% of nominal margin at very low speeds
 LOW_SPEED_MARGIN_MAX_V_MPS = 12.5      # taper ends ≈28 mph (dominates town speeds)
 LOW_SPEED_MARGIN_CURV_THRESH = 3.5e-4  # below this treat as effectively straight
-LOW_SPEED_MARGIN_VIS_BUFFER_M = 3.0    # minimum available distance after buffer to allow uplift
 
 # Lead-bypass headway floor: avoid inflated headway at crawl speeds behind a lead
 OCCL_BYPASS_HEADWAY_V_FLOOR_MPS = 5.0  # ~11 mph
@@ -412,28 +407,6 @@ class VisionOcclusionState:
 # ===== ORIGINAL PHYSICS-BASED VTSC CONSTANTS =====
 _MIN_V = 2.24  # Do not operate under 5mph (was 5.6 m/s = 12.5mph)
 
-_ENTERING_PRED_LAT_ACC_TH = 1.3  # Predicted Lat Acc threshold to trigger entering turn state.
-_ABORT_ENTERING_PRED_LAT_ACC_TH = 1.1  # Predicted Lat Acc threshold to abort entering state if speed drops.
-
-_TURNING_LAT_ACC_TH = 1.6  # Lat Acc threshold to trigger turning turn state.
-
-_LEAVING_LAT_ACC_TH = 1.3  # Lat Acc threshold to trigger leaving turn state.
-_FINISH_LAT_ACC_TH = 1.1  # Lat Acc threshold to trigger end of turn cycle.
-
-_NO_OVERSHOOT_TIME_HORIZON = 4.  # s. Time to use for velocity desired based on a_target when not overshooting.
-
-# Lookup table for the minimum smooth deceleration during the ENTERING state
-# depending on the actual maximum absolute lateral acceleration predicted on the turn ahead.
-_ENTERING_SMOOTH_DECEL_V = [-0.2, -1.]  # min decel value allowed on ENTERING state
-_ENTERING_SMOOTH_DECEL_BP = [1.3, 3.]  # absolute value of lat acc ahead
-
-# Lookup table for the acceleration for the TURNING state
-# depending on the current lateral acceleration of the vehicle.
-_TURNING_ACC_V = [0.5, 0., -0.4]  # acc value
-_TURNING_ACC_BP = [1.5, 2.3, 3.]  # absolute value of current lat acc
-
-_LEAVING_ACC = 0.5  # Comfortable acceleration to regain speed while leaving a turn.
-
 _DEBUG = False
 
 # Advanced vision-based functions extracted from chauffeur_vtsc.py
@@ -457,7 +430,6 @@ LOW_SPEED_BIAS_END_MPH = 50.0
 # ===== Hidden-turn early deceleration trigger (occlusion-only, sub-65 mph) =====
 # Allows jerk-limited early braking when a short-horizon physics deficit is provably large
 # despite a transiently positive visible-margin condition.
-HIDDEN_TURN_ENABLE = False
 # Align hidden-turn speed gate with highway threshold (~55 mph)
 HIDDEN_TURN_V_MAX_MPS = HIGHWAY_MIN_MPS  # ~55 mph; above this we run pure physics
 HIDDEN_TURN_T_H_S = 1.8        # short horizon (~40 m at 50 mph)
@@ -581,49 +553,6 @@ def find_apexes_enhanced(curvature_array: np.ndarray, threshold: float = 5e-5, m
                 apex_indices.append(i)
 
     return apex_indices
-
-def dynamic_decel_scale(v_ego_ms: float) -> float:
-    """Dynamic deceleration scaling based on speed."""
-    min_speed = 3.0
-    max_speed = 35.0
-    if v_ego_ms <= min_speed:
-        scale = 9.0
-    elif v_ego_ms >= max_speed:
-        scale = 2.0
-    else:
-        ratio = (v_ego_ms - min_speed) / (max_speed - min_speed)
-        scale = 9.0 + (2.0 - 9.0) * ratio
-    return clip(scale, 2.0, 9.0)
-
-def nonlinear_lat_accel(v_ego_ms: float, turn_aggressiveness: float = 1.0) -> float:
-    """Compute lateral acceleration limit based on speed and aggressiveness."""
-    v_ego_mph = v_ego_ms * CV.MS_TO_MPH
-    base = 1.5
-    span = 2.18
-    center = 25.0
-    k = 0.10
-    lat_acc = base + span / (1.0 + math.exp(-k * (v_ego_mph - center)))
-    return lat_acc * turn_aggressiveness
-
-def margin_time_fn(v_ego_ms: float) -> float:
-    """Returns a 'margin time' used in backward-pass speed planning."""
-    v_low = 0.0
-    t_low = 1.0
-    v_med = 15.0     # ~34 mph
-    t_med = 3.0
-    v_high = 31.3    # ~70 mph
-    t_high = 5.0
-
-    if v_ego_ms <= v_low:
-        return t_low
-    elif v_ego_ms >= v_high:
-        return t_high
-    elif v_ego_ms <= v_med:
-        ratio = (v_ego_ms - v_low) / (v_med - v_low)
-        return t_low + ratio * (t_med - t_low)
-    else:
-        ratio = (v_ego_ms - v_med) / (v_high - v_med)
-        return t_med + ratio * (t_high - t_med)
 
 def calculate_anticipation_time(v_ego_ms: float, target_speed_ms: float, max_pred_lat_acc: float, aggressiveness: float = 1.0) -> float:
     """
@@ -776,22 +705,16 @@ class VisionTurnController:
     # Anticipation moderation state
     self._prev_smoothed_conf = 1.0
     self._prev_filtered_curvature = 0.0
-    self._prev_curv_time = 0.0
     self._anticipation_budget_window_start = 0.0
     self._cum_anticipation_reduction = 0.0
     self._last_high_conf_target_speed = 0.0
     self._anticipation_max_reduction_mps = 2.0
-
-    # ===== INTERVENTION DETECTION =====
-    self._intervention_required = False
-    self._critical_situation_time = 0.0
 
     # ===== Freeway cap hold (avoid flicker) =====
     self._v_turn_hold_until = 0.0
     self._v_turn_hold_min = float(INF_SPEED)
 
     # Advanced controller state
-    self._planned_speeds = np.zeros(N_POINTS, dtype=float)
     self._current_accel = 0.0
     self._prev_target_speed = 0.0
     # Smoothing bounds (tunable)
@@ -808,8 +731,6 @@ class VisionTurnController:
 
     # Anticipatory deceleration state
     self._is_decelerating_for_curve = False
-    self._anticipation_start_time = 0.0
-    self._curve_detection_distance = 0.0
 
     # Anticipation/Overshoot planning tunables
     self._planning_decel_limit = 3.5            # VisionTurnSpeedControlPlanningDecelLimit (m/s²)
@@ -904,8 +825,6 @@ class VisionTurnController:
     self._dbg_psi_vis = 0.0
     self._dbg_psi_thresh = 0.0
     self._dbg_ttfov_s = 0.0
-    self._dbg_onset_boost_left = 0
-    self._dbg_overshoot_left = 0
     self._dbg_units_ok = True
     self._dbg_gamma_eff = 0.0
     # Occlusion arbitration breadcrumbs (defaults)
@@ -915,7 +834,6 @@ class VisionTurnController:
     # Onset tracking for occlusion window and early no-raise
     self._occlusion_prev = False
     self._occlusion_onset_timer_s = 0.0
-    self._no_raise_timer_s = 0.0
     self._v_cap_active_at_onset_mps = 0.0
     self._onset_no_raise_active = False
     # Cap selection + freeway guard debug fields
@@ -932,7 +850,6 @@ class VisionTurnController:
 
     # Vision-floor and dropout discrimination (aggressive bias)
     # 0=off, 1=TTL floor after last-known-good, 2=strict floor always
-    self._vision_floor_mode = 1
     self._vision_floor_ttl_s = 3.0
     self._vision_floor_mult = 1.00
     # Treat short model frame loss as transient dropout; suppress occlusion pretrigger briefly
@@ -1262,7 +1179,6 @@ class VisionTurnController:
     self._curvature_trajectory = []
 
     # Reset advanced controller state (preserve current_accel to avoid jerk spikes)
-    self._planned_speeds[:] = self._v_ego if hasattr(self, '_v_ego') else 0.0
     # Do not zero _current_accel here; preserve continuity across state transitions
     self._prev_target_speed = self._v_ego if hasattr(self, '_v_ego') else 0.0
     self._filtered_curvature = 0.0
@@ -1273,8 +1189,6 @@ class VisionTurnController:
 
     # Reset anticipatory deceleration state
     self._is_decelerating_for_curve = False
-    self._anticipation_start_time = 0.0
-    self._curve_detection_distance = 0.0
 
   def _apply_freeway_v_turn_hold(self, v_cap: float) -> float:
     """Hold material VTSC cap reductions briefly to bridge model flicker.
@@ -1765,29 +1679,18 @@ class VisionTurnController:
     self._is_easing = (rate <= 0.0)
     self._prev_filtered_curvature = self._filtered_curvature
   def _state_transition(self):
-    """SIMPLIFIED: State machine kept only for UI/logging - doesn't affect activation anymore."""
-    # System-level disable conditions
+    """Compatibility shell for legacy VTSC state telemetry.
+
+    The state machine no longer drives VTSC behavior; it is retained only so traces and
+    tooling that expect this method/field continue to function.
+    """
+    # System-level disable conditions still clear hold state.
     if not self._op_enabled or not self._is_enabled or self._gas_pressed:
-      # Clear freeway cap hold when VTSC is truly disabled (user override / disengage / gas).
-      # NOTE: We intentionally do *not* clear this when the state machine toggles to disabled
-      # due to transient curvature horizon changes; the hold is meant to bridge those blips.
-      if self.state != VisionTurnControllerState.disabled:
-        self._reset()
       self._v_turn_hold_until = 0.0
       self._v_turn_hold_min = float(INF_SPEED)
       self.state = VisionTurnControllerState.disabled
       return
-
-    # Simplified state transitions for UI/logging only
-    if self._max_pred_lat_acc >= _ENTERING_PRED_LAT_ACC_TH:
-      if self._current_lat_acc >= _TURNING_LAT_ACC_TH:
-        self.state = VisionTurnControllerState.turning
-      elif self._current_lat_acc <= _LEAVING_LAT_ACC_TH and self.state == VisionTurnControllerState.turning:
-        self.state = VisionTurnControllerState.leaving
-      else:
-        self.state = VisionTurnControllerState.entering
-    else:
-      self.state = VisionTurnControllerState.disabled
+    self.state = VisionTurnControllerState.disabled
 
   def _update_solution(self):
     """SIMPLIFIED: Always run physics calculations - let longitudinal planner decide usage."""
@@ -1820,9 +1723,8 @@ class VisionTurnController:
     except Exception:
       self._dbg_target_raw = float(self._prev_target_speed if hasattr(self, '_prev_target_speed') else self._v_ego)
 
-    # Apply dynamic scaling
-    scale_decel = dynamic_decel_scale(self._v_ego)
-    scale_jerk = 1.0  # Keep jerk scaling constant to respect caps
+    # Keep jerk scaling constant to respect caps
+    scale_jerk = 1.0
 
     # Optional: apply map-based lookahead cap to extend horizon
     try:
@@ -2091,7 +1993,6 @@ class VisionTurnController:
       # Maintain onset timers on rising edge of occlusion
       if self._fov_occluded and not getattr(self, '_occlusion_prev', False):
         self._occlusion_onset_timer_s = 0.0
-        self._no_raise_timer_s = 0.0
         # Estimate visible cap at onset for reference (min of cruise and filtered-curvature speed)
         try:
           cap_vis_onset = float(min(self._v_cruise_setpoint, curvature_to_speed(max(1e-8, float(getattr(self, '_filtered_curvature', 0.0))))))
@@ -2106,66 +2007,21 @@ class VisionTurnController:
           self._vision_floor_until = 0.0
       if self._fov_occluded:
         self._occlusion_onset_timer_s += dt
-        self._no_raise_timer_s += dt
       self._occlusion_prev = bool(self._fov_occluded)
 
-      # Strict gating
+      # Onset window remains visible in debug breadcrumbs; no-raise behavior is disabled.
       try:
         psi_margin_deg = float(getattr(self, '_psi_margin_rad', 0.087)) * 57.2957795
       except Exception:
         psi_margin_deg = 0.0
-      ttfov_s = float(getattr(self, '_dbg_ttfov_s', 999.0))
-      pretrigger_time = float(getattr(self, '_fov_pretrigger_time_s', 1.5))
-      slack_s = 0.10
       v_max_mps = 36.0
       window_s = 0.8
-      # curvature-aware onset window with early release when confidence rises
-      try:
-        k_for_win = abs(float(kappa_gate))
-      except Exception:
-        k_for_win = 0.0
-      try:
-        k0_mid = 0.019
-        k_slope = 0.005
-        sig = 1.0 / (1.0 + math.exp(-(k_for_win - k0_mid) / max(1e-6, k_slope)))
-        # Disable no-raise window: set duration to 0.0 s
-        no_raise_win_s = 0.0
-      except Exception:
-        # Fallback also disabled
-        no_raise_win_s = 0.0
       # Relax TTFOV gating inside onset window to ensure assist engages
       onset_gate = (self._fov_occluded and (psi_margin_deg >= 5.0) and (self._v_ego <= v_max_mps) and (self._occlusion_onset_timer_s <= window_s))
       if onset_gate:
         # Disable onset curvature inflation and decel floors; rely on v_occ_cap from k_cons only
         self._dbg_cap_source = 'occluded_onset_disabled'
-        # Early no-raise activation window, shortened if confidence is rising
-        try:
-          _conf_s2 = float(getattr(self._occlusion_state, 'smoothed_confidence', 1.0))
-          _conf_prev2 = float(getattr(self._occlusion_state, 'prev_smoothed_conf', _conf_s2))
-          conf_slope = (_conf_s2 - _conf_prev2)
-          rising_conf = (_conf_s2 >= float(getattr(self._occlusion_state, 'bad_threshold', 0.65))) and (conf_slope > 0.02)
-        except Exception:
-          rising_conf = False
-        dyn_win_s = 0.0  # no-raise window disabled
-        decel_in_effect = (accel_cmd < -0.05)
-        self._onset_no_raise_active = False
-      else:
-        self._onset_no_raise_active = False
-
-      # Confidence-based fallback "no-raise" window is disabled unless configured
-      if NO_RAISE_WINDOW_S > 0.0:
-        # If vision is not good right after occlusion start, apply a small decel
-        # and suppress positive accel only within the configured window.
-        try:
-          occ_since = float(getattr(self._occlusion_state, 'occluded_since_time', 0.0) or 0.0)
-        except Exception:
-          occ_since = 0.0
-        if (not getattr(self._occlusion_state, 'vision_good', True)) and (not self._freeway_failopen_active):
-          now_ts = time.time()
-          occ_age_fb = max(0.0, now_ts - occ_since)
-          if occ_age_fb <= NO_RAISE_WINDOW_S and self._v_ego <= 36.0:
-            accel_cmd = min(accel_cmd, -0.30)
-            self._onset_no_raise_active = True
+      self._onset_no_raise_active = False
 
     # Occlusion-time accel gating: allow positive accel only with positive margin
     occl_positive_margin = False
@@ -2180,7 +2036,6 @@ class VisionTurnController:
           v_vis = curvature_to_speed(max(1e-8, float(self._occlusion_state.last_valid_curvature)))
           # When occluded, do NOT let the filtered/model curvature drive the near cap;
           # rely on last-visible curvature (v_vis) for the near bound.
-          base_target = min(self._v_cruise_setpoint, curvature_to_speed(self._filtered_curvature))
           v_near = min(v_vis, self._v_cruise_setpoint)
           # Use the more conservative (lower speed) of occlusion est curvature and filtered curvature
           try:
@@ -2378,9 +2233,6 @@ class VisionTurnController:
       # If a speed-limit down-step occurred, suppress raising entirely until vision is good again
       if getattr(self, '_suppress_raise_due_to_limit', False):
         early_no_raise = True
-      # Force early no-raise during onset window (guarded by NO_RAISE_WINDOW_S)
-      if (NO_RAISE_WINDOW_S > 0.0) and getattr(self, '_onset_no_raise_active', False):
-        early_no_raise = True
       if (not occl_positive_margin) or early_no_raise:
         accel_cmd = min(accel_cmd, 0.0)
         # Mirror the "no-raise" behavior in the published speed cap:
@@ -2424,9 +2276,6 @@ class VisionTurnController:
       self._suppress_raise_due_to_limit = False
       # For acceleration, use normal limits
       pos_limit = self._max_accel
-      # Onset window: disallow any positive uplift while occluded (guarded by NO_RAISE_WINDOW_S)
-      if (NO_RAISE_WINDOW_S > 0.0) and self._fov_occluded and getattr(self, '_onset_no_raise_active', False) and (not self._freeway_failopen_active):
-        accel_cmd = min(accel_cmd, 0.0)
       # Apply a small fast-reacquisition acceleration floor for up to _fast_reacq_window_s
       now = time.time()
       # If just reacquired within 0.65s, ensure a small additional push to close gap sooner
@@ -2446,10 +2295,6 @@ class VisionTurnController:
       # Only reset hysteresis state when filter is nearly zero
       if abs(self._filtered_decel_requirement) < 0.1:
         self._decel_hysteresis_state = False
-
-    # Final onset safeguard: no positive uplift during onset window (guarded by NO_RAISE_WINDOW_S)
-    if (NO_RAISE_WINDOW_S > 0.0) and self._fov_occluded and getattr(self, '_onset_no_raise_active', False) and (not self._freeway_failopen_active):
-      accel_cmd = min(accel_cmd, 0.0)
 
     # Jerk-limit the change in acceleration
     accel_diff = accel_cmd - self._current_accel
@@ -2471,9 +2316,6 @@ class VisionTurnController:
         self._current_accel = accel_cmd
     else:
       self._current_accel = accel_cmd
-    # Post-jerk stage: do not hard-clamp; pre-jerk gating already constrained accel_cmd
-    if False:
-      self._current_accel = self._current_accel
     # compute jerk for telemetry (m/s^3)
     try:
       self._dbg_jerk_cmd = float((self._current_accel - prev_accel_val) / dt)
@@ -2483,9 +2325,6 @@ class VisionTurnController:
     # Hard clamp: after a speed-limit step while occluded, disallow any positive acceleration
     if occl_effects_active and getattr(self, '_suppress_raise_due_to_limit', False) and self._current_accel > 0.0:
       self._current_accel = 0.0
-    # Ensure decel during onset window regardless of other uplifts (guarded by NO_RAISE_WINDOW_S)
-    if (NO_RAISE_WINDOW_S > 0.0) and self._fov_occluded and getattr(self, '_onset_no_raise_active', False) and (not self._freeway_failopen_active):
-      self._current_accel = min(self._current_accel, -0.30)
     # Fast reacquisition acceleration floor: ensure a small positive nudge upon recovery
     try:
       now_ts2 = time.time()
@@ -2509,9 +2348,6 @@ class VisionTurnController:
         self._current_accel = max(self._current_accel, 0.18)
     # Update target acceleration for compatibility
     self._a_target = self._current_accel
-    # Hard guarantee for harness/test: enforce a small negative a_target in onset window (guarded by NO_RAISE_WINDOW_S)
-    if (NO_RAISE_WINDOW_S > 0.0) and self._fov_occluded and getattr(self, '_onset_no_raise_active', False) and (not self._freeway_failopen_active):
-      self._a_target = min(self._a_target, -0.30)
     # Remove global occlusion decel floor: allow target accel to follow physics and margin
 
     # Update previous target speed by integrating the commanded acceleration.
@@ -2685,22 +2521,6 @@ class VisionTurnController:
     except Exception:
       self._dbg_vtsc_cmd = float(self._prev_target_speed)
 
-
-  def _find_time_index(self, times: np.ndarray, target_time: float, clip_high=False) -> int:
-    """Helper to find an index in 'times' that is closest to 'target_time'."""
-    n = len(times)
-    if target_time <= times[0]:
-        return 0
-    if target_time >= times[-1] and clip_high:
-        return n - 1
-    for i in range(n - 1):
-        if times[i] <= target_time < times[i + 1]:
-            if (target_time - times[i]) < (times[i + 1] - target_time):
-                return i
-            else:
-                return i + 1
-    return n - 1 if clip_high else n - 2
-
   def _plan_advanced_speed_trajectory(self) -> float:
     """SIMPLIFIED: Always calculate physics-based speed, let longitudinal planner handle activation."""
 
@@ -2784,7 +2604,6 @@ class VisionTurnController:
       if self._lat_acc_overshoot_ahead and not self._is_decelerating_for_curve:
         # Mark that we've started anticipatory deceleration
         self._is_decelerating_for_curve = True
-        self._curve_detection_distance = self._v_overshoot_distance
 
       # Use the physics-based calculation
       target_speed = base_target
@@ -3019,7 +2838,6 @@ class VisionTurnController:
     if (self._prev_target_speed == 0.0 or
         abs(self._prev_target_speed - v_ego) > 5.0):
       self._prev_target_speed = v_ego
-      self._planned_speeds[:] = v_ego
       self._current_accel = a_ego
 
     self._update_params()

@@ -24,8 +24,14 @@ ButtonType = structs.CarState.ButtonEvent.Type
 
 V_CRUISE_MAX = 145
 MAX_CTRL_SPEED = (V_CRUISE_MAX + 4) * CV.KPH_TO_MS
-ACCEL_MAX = 2.0
-ACCEL_MIN = -3.5
+# Global longitudinal acceleration envelope used by:
+# - the longitudinal MPC constraints, and
+# - the default CarInterfaceBase.get_pid_accel_limits() (LongControl PID limits).
+#
+# Many car ports further clamp these in their CarControllerParams, but this sets the
+# "planner + controller" ceiling/floor when a port doesn't override PID accel limits.
+ACCEL_MAX = 5.0
+ACCEL_MIN = -6.0
 
 TORQUE_PARAMS_PATH = os.path.join(BASEDIR, 'torque_data/params.toml')
 TORQUE_OVERRIDE_PATH = os.path.join(BASEDIR, 'torque_data/override.toml')
