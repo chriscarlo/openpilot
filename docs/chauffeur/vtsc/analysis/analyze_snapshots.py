@@ -17,6 +17,7 @@ import json
 import math
 import sys
 from typing import Any, Dict, List, Tuple, Optional
+import statistics
 
 
 def load_jsonl(path: str) -> List[Dict[str, Any]]:
@@ -112,13 +113,131 @@ def quantify_floor_saves(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
           cap_occ,
           _get_float(r, 'final', 0.0),
         ))
-  import statistics
   med_delta = statistics.median(deltas) if deltas else 0.0
   return {
     'occlusion_points': occl_rows,
     'floor_saves': saves,
     'floor_save_ratio': (saves / occl_rows) if occl_rows else 0.0,
     'median_saved_mps': med_delta,
+    'examples': examples,
+  }
+
+
+def summarize_cap_transitions(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+  if len(rows) < 2:
+    return {'transitions': 0, 'transitions_per_s': 0.0, 'map_to_visible': 0, 'visible_to_map': 0}
+  labels = [str(r.get('active_cap', '') or '') for r in rows]
+  transitions = 0
+  map_to_visible = 0
+  visible_to_map = 0
+  for a, b in zip(labels, labels[1:]):
+    if a == b:
+      continue
+    transitions += 1
+    if a == 'map' and b == 'visible':
+      map_to_visible += 1
+    elif a == 'visible' and b == 'map':
+      visible_to_map += 1
+  t0 = float(rows[0].get('ts', 0.0))
+  t1 = float(rows[-1].get('ts', t0))
+  if t1 > t0:
+    dur = max(1e-3, t1 - t0)
+  else:
+    # Fallback for logs/snapshots that omit or flatten timestamps.
+    dur = max(1e-3, 0.05 * (len(rows) - 1))
+  return {
+    'transitions': transitions,
+    'transitions_per_s': transitions / dur,
+    'map_to_visible': map_to_visible,
+    'visible_to_map': visible_to_map,
+  }
+
+
+def flag_handoff_conflicts(rows: List[Dict[str, Any]]) -> Tuple[int, int]:
+  """Count map-vs-vision arbitration conflicts.
+
+  Conflict condition:
+  - vision is FULL and map lookahead is active
+  - map cap is selected as active source
+  - visible cap is at least as restrictive as map (within small epsilon)
+  """
+  bad = 0
+  total = 0
+  eps = 0.20
+  for r in rows:
+    if str(r.get('vision_status', 'UNKNOWN')) != 'FULL':
+      continue
+    if not bool(r.get('map_tail_active', False)):
+      continue
+    cap_vis = _get_float(r, 'cap_visible_vmin', 0.0)
+    cap_map = _get_float(r, 'cap_map_vmin', 0.0)
+    if cap_vis <= 0.0 or cap_map <= 0.0:
+      continue
+    total += 1
+    active = str(r.get('active_cap', '') or '')
+    if active == 'map' and cap_vis <= (cap_map + eps):
+      bad += 1
+  return bad, total
+
+
+def _row_target_speed(r: Dict[str, Any]) -> float:
+  vals = []
+  for k in ('cap_visible_vmin', 'cap_occl_vmin', 'cap_map_vmin'):
+    v = _get_float(r, k, 0.0)
+    if v > 0.0:
+      vals.append(v)
+  if vals:
+    return min(vals)
+  return _get_float(r, 'final', 0.0)
+
+
+def _required_decel(v_now: float, v_target: float, distance: float) -> float:
+  d = max(1.0, float(distance))
+  return (v_target * v_target - v_now * v_now) / (2.0 * d)
+
+
+def quantify_required_decel_risk(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+  """Estimate whether current decel demand exceeds comfort/adaptive limits.
+
+  Uses visible horizon distance as a conservative proxy for remaining actionable distance.
+  """
+  evaluated = 0
+  comfort_excess = 0
+  adaptive_excess = 0
+  comfort_margin_samples: List[float] = []
+  adaptive_margin_samples: List[float] = []
+  examples: List[Tuple[float, float, float, float, float, float]] = []
+  for r in rows:
+    v_now = _get_float(r, 'v', 0.0)
+    s_vis = _get_float(r, 's_visible_m', 0.0)
+    if v_now < 8.0 or s_vis < 8.0:
+      continue
+    v_target = _row_target_speed(r)
+    if v_target <= 0.0 or v_target >= (v_now - 0.3):
+      continue
+    a_req = _required_decel(v_now, v_target, s_vis)
+    comfort = -abs(_get_float(r, 'comfort_decel', -1.47))
+    adaptive = -abs(_get_float(r, 'max_adaptive_decel', -6.0))
+    evaluated += 1
+    c_margin = comfort - a_req
+    a_margin = adaptive - a_req
+    comfort_margin_samples.append(c_margin)
+    adaptive_margin_samples.append(a_margin)
+    if c_margin > 0.20:
+      comfort_excess += 1
+    if a_margin > 0.20:
+      adaptive_excess += 1
+      if len(examples) < 6:
+        examples.append((
+          _get_float(r, 'ts', 0.0),
+          v_now, v_target, s_vis, a_req, adaptive,
+        ))
+  return {
+    'evaluated_rows': evaluated,
+    'comfort_excess_count': comfort_excess,
+    'adaptive_excess_count': adaptive_excess,
+    'median_comfort_margin': statistics.median(comfort_margin_samples) if comfort_margin_samples else 0.0,
+    'median_adaptive_margin': statistics.median(adaptive_margin_samples) if adaptive_margin_samples else 0.0,
     'examples': examples,
   }
 
@@ -247,6 +366,14 @@ def main(path: str) -> None:
   print(f"- Points: {basic.get('points')}  Duration: {basic.get('duration_s')} s  Avg v: {basic.get('avg_speed_mps')} m/s")
   print(f"- Vision states: {basic.get('vision_counts')}")
 
+  cap_trans = summarize_cap_transitions(rows)
+  print("\nArbitration & Handoff")
+  print(
+    "- Active-cap transitions: "
+    f"{cap_trans['transitions']} ({cap_trans['transitions_per_s']:.3f}/s), "
+    f"map→visible={cap_trans['map_to_visible']}, visible→map={cap_trans['visible_to_map']}"
+  )
+
   # LKG/floor saves
   q = quantify_floor_saves(rows)
   print("\nLKG + Vision Floor Saves")
@@ -270,11 +397,18 @@ def main(path: str) -> None:
   map_bad, map_tot = flag_map_misuse(rows)
   checks.append(("map_cap_misuse", map_bad, map_tot, "map cap active with poor coverage or overshoot vs base"))
 
+  handoff_bad, handoff_tot = flag_handoff_conflicts(rows)
+  checks.append(("handoff_conflict_fail", handoff_bad, handoff_tot, "map active while FULL-vision cap is equally/more restrictive"))
+
   rn_bad, rn_tot = flag_reacq_nudge(rows)
   checks.append(("reacq_nudge_fail", rn_bad, rn_tot, "no accel ≥0.18 m/s² within ~0.65s after FULL"))
 
   jc_bad, jc_tot = flag_jerk_or_comfort(rows)
   checks.append(("jerk_or_comfort_violations", jc_bad, jc_tot, "jerk bounds or comfort decel violations"))
+
+  req = quantify_required_decel_risk(rows)
+  checks.append(("comfort_margin_excess", req['comfort_excess_count'], req['evaluated_rows'], "required decel exceeds comfort envelope"))
+  checks.append(("late_brake_risk", req['adaptive_excess_count'], req['evaluated_rows'], "required decel exceeds adaptive envelope"))
 
   print("\nFlags")
   for name, bad, tot, hint in checks:
@@ -293,16 +427,33 @@ def main(path: str) -> None:
       print("- Lead bypass flagged: check 'lead', 'hw', 'occl_lead_bypass_active', and 'a_cmd'.")
     elif name == "map_cap_misuse":
       print("- Map misuse flagged: check 'map_tail_coverage', 'map_tail_cap' vs 'v_base'; consider disabling lookahead for verification.")
+    elif name == "handoff_conflict_fail":
+      print("- Handoff conflict flagged: inspect active_cap vs cap_visible_vmin/cap_map_vmin when vision_status is FULL.")
     elif name == "reacq_nudge_fail":
       print("- Reacquisition nudge flagged: verify 'a_cmd' >= 0.18 within 0.65s after regaining FULL vision.")
     elif name == "jerk_or_comfort_violations":
       print("- Comfort bounds flagged: verify jerk limits and comfort decel caps under occlusion.")
+    elif name == "comfort_margin_excess":
+      print("- Comfort margin excess flagged: map/vision onset may be late for comfort-only braking; review early anticipation and map handoff.")
+    elif name == "late_brake_risk":
+      print("- Late-brake risk flagged: required decel exceeded adaptive envelope; inspect map coverage, GPS latency, and arbitration timing.")
+
+  print("\nDecel Margin Summary")
+  print(
+    f"- Evaluated rows: {req['evaluated_rows']}  "
+    f"median comfort margin: {req['median_comfort_margin']:.3f}  "
+    f"median adaptive margin: {req['median_adaptive_margin']:.3f}"
+  )
+  if req['examples']:
+    print("- Late-brake examples (ts, v_now, v_target, s_visible_m, a_req, a_adaptive_limit):")
+    for ts, v_now, v_target, s_vis, a_req, a_lim in req['examples']:
+      print(f"  {ts:.2f}\t{v_now:.2f}\t{v_target:.2f}\t{s_vis:.1f}\t{a_req:.2f}\t{a_lim:.2f}")
 
   # Optional TSV dump for quick plotting
   if out_tsv:
     try:
       with open(out_tsv, 'w', encoding='utf-8') as f:
-        f.write("# ts\tv\tv_base\tv_vis\tv_occ\tv_lkg\tcap_visible\tcap_occl\tfinal\n")
+        f.write("# ts\tv\tv_base\tv_vis\tv_occ\tv_lkg\tcap_visible\tcap_occl\tcap_map\tmap_cov\ts_visible\tv_target\ta_req\tcomfort_margin\tadaptive_margin\tactive_cap\tfinal\n")
         for r in rows:
           ts = _get_float(r, 'ts', 0.0)
           v = _get_float(r, 'v', 0.0)
@@ -312,11 +463,25 @@ def main(path: str) -> None:
           v_lkg = derive_v_lkg(r) or 0.0
           cap_v = _get_float(r, 'cap_visible_vmin', 0.0)
           cap_o = _get_float(r, 'cap_occl_vmin', 0.0)
+          cap_m = _get_float(r, 'cap_map_vmin', 0.0)
+          map_cov = _get_float(r, 'map_tail_coverage', 0.0)
+          s_vis = _get_float(r, 's_visible_m', 0.0)
+          v_target = _row_target_speed(r)
+          a_req = _required_decel(v, v_target, s_vis) if (v_target > 0.0 and s_vis > 0.0) else 0.0
+          comfort = -abs(_get_float(r, 'comfort_decel', -1.47))
+          adaptive = -abs(_get_float(r, 'max_adaptive_decel', -6.0))
+          c_margin = comfort - a_req
+          a_margin = adaptive - a_req
+          active_cap = str(r.get('active_cap', '') or '')
           final = _get_float(r, 'final', 0.0)
-          f.write(f"{ts:.3f}\t{v:.3f}\t{v_base:.3f}\t{v_vis:.3f}\t{v_occ:.3f}\t{v_lkg:.3f}\t{cap_v:.3f}\t{cap_o:.3f}\t{final:.3f}\n")
+          f.write(
+            f"{ts:.3f}\t{v:.3f}\t{v_base:.3f}\t{v_vis:.3f}\t{v_occ:.3f}\t{v_lkg:.3f}\t"
+            f"{cap_v:.3f}\t{cap_o:.3f}\t{cap_m:.3f}\t{map_cov:.3f}\t{s_vis:.3f}\t{v_target:.3f}\t{a_req:.3f}\t"
+            f"{c_margin:.3f}\t{a_margin:.3f}\t{active_cap}\t{final:.3f}\n"
+          )
       print(f"\nTSV written: {out_tsv}")
       print("Plot tip (gnuplot):")
-      print("  gnuplot -e \"set key left; plot 'OUT.tsv' u 1:3 w l t 'v_base', '' u 1:4 w l t 'v_vis', '' u 1:5 w l t 'v_occ', '' u 1:6 w l t 'v_lkg', '' u 1:9 w l t 'final'\"")
+      print("  gnuplot -e \"set key left; plot 'OUT.tsv' u 1:3 w l t 'v_base', '' u 1:4 w l t 'v_vis', '' u 1:5 w l t 'v_occ', '' u 1:7 w l t 'cap_vis', '' u 1:9 w l t 'cap_map', '' u 1:17 w l t 'final'\"")
     except Exception as e:
       print("TSV write failed:", e)
 

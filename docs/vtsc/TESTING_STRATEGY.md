@@ -60,6 +60,7 @@ Typical assertions:
 - Dwell/hysteresis stability (enter/exit occlusion)
 - Steering-curvature fail-open guard: when confidence is SEVERE/LOST and model curvature is flat, steering-derived curvature must still drop the cap (`test_severe_confidence_model_flat_steering_fallback_slows_for_sharp_curve`)
 - Map lookahead caps apply only when available and covered
+- Map lookahead remains stable under GPS lag / stale map-data windows (no cap flapping or brake/accel sign oscillation during map→vision handoff)
 - Off-ramp “vision lost” fallback: when confidence is SEVERE/LOST and model curvature is unreliable, map lookahead must still cap short, tight curves inside the normal visible horizon (`test_offramp_short_tight_curve_map_cap_applies_when_vision_lost`, GPS seed 38°43'54.0"N 120°47'20.2"W)
 
 Location:
@@ -101,6 +102,7 @@ Entry points:
 - Replay scripts:
   - `docs/chauffeur/vtsc/offroad/replay_vtsc_on_rlog.py` (snapshot-only)
   - `docs/chauffeur/vtsc/fullTrace/full_trace_replay.py` (method-level trace)
+  - `docs/chauffeur/vtsc/analysis/analyze_snapshots.py` (adds handoff-conflict, cap-transition, and required-decel margin diagnostics)
 - Regression tests (strict; opt-in):
   - `pytest -q -m regression docs/chauffeur/vtsc/fullTrace/tests/test_regressions_rlogs.py`
 

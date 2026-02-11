@@ -1753,17 +1753,44 @@ class VisionTurnController:
     # Keep jerk scaling constant to respect caps
     scale_jerk = 1.0
 
-    # Optional: apply map-based lookahead cap to extend horizon
+    # Optional: apply map-based lookahead cap to extend horizon.
+    # Map is "advance warning only": once vision has confident in-range turn evidence,
+    # suppress map capping so vision remains the source of truth.
     try:
       if self._get_bool_param('MTSCLookaheadEnabled', False):
         v_cap, s_start, coverage = self._map_tail_cap()
         if v_cap is not None:
-          raw_target = min(raw_target, float(v_cap))
-          # keep diagnostics
-          self._map_tail_active = True
-          self._map_tail_last_cap = float(v_cap)
-          self._map_tail_last_start = float(s_start)
-          self._map_tail_last_coverage = float(coverage)
+          v_cap_f = float(v_cap)
+          s_start_f = float(s_start)
+          coverage_f = float(coverage)
+          # Keep latest map diagnostics even when map cap is suppressed.
+          self._map_tail_last_cap = v_cap_f
+          self._map_tail_last_start = s_start_f
+          self._map_tail_last_coverage = coverage_f
+
+          map_cap_allowed = True
+          try:
+            v_ego_local = float(max(0.0, self._v_ego))
+            s_visible = float(max(0.0, getattr(self, '_vis_horizon_s', 1.4)) * v_ego_local)
+            vis_margin = float(max(0.0, getattr(self, '_vis_margin_m', 10.0)))
+            k_turn_min = float(max(1e-6, getattr(self, '_fov_k_min', 2e-4)))
+            k_now = float(abs(getattr(self, '_filtered_curvature', 0.0)))
+            turn_visible_now = bool(k_now >= k_turn_min)
+            turn_visible_ahead = bool(
+              bool(getattr(self, '_lat_acc_overshoot_ahead', False)) and
+              (float(getattr(self, '_v_overshoot_distance', 1e9)) <= (s_visible + vis_margin))
+            )
+            vision_good = bool(getattr(self._occlusion_state, 'vision_good', True))
+            # Once vision has eyes-on turn evidence, map should no longer tighten VTSC.
+            map_cap_allowed = not bool(vision_good and (turn_visible_now or turn_visible_ahead))
+          except Exception:
+            map_cap_allowed = True
+
+          if map_cap_allowed:
+            raw_target = min(raw_target, v_cap_f)
+            self._map_tail_active = True
+          else:
+            self._map_tail_active = False
         else:
           self._map_tail_active = False
     except Exception:

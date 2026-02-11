@@ -2,6 +2,8 @@
 import math
 
 import pytest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from sunnypilot.selfdrive.controls.lib.vision_turn_controller import curvature_to_speed, VTURN_HOLD_S
 from pathlib import Path
@@ -375,6 +377,196 @@ def test_hidden_turn_early_decel_with_caps():
   assert float(snap['decel_cmd']) <= 0.0
   assert float(snap['decel_cmd']) >= float(snap['comfort_decel']) - 1e-6
   assert -7.0 <= float(snap['jerk_cmd']) <= 3.0
+
+
+def _mk_sm_for_map_latency(curvature: float, curvature_ahead: float, v_pred: float, confidence: float):
+  """Create a minimal modelV2-only SM for map/arbitration timing tests."""
+  v_pred = float(max(0.0, v_pred))
+  k_now = float(curvature)
+  k_ahead = float(curvature_ahead)
+  k_points = [k_now] + [k_ahead] * 32
+  yaw_rate_points = [k * v_pred for k in k_points]
+  model = SimpleNamespace(
+    orientationRate=SimpleNamespace(z=yaw_rate_points),
+    velocity=SimpleNamespace(x=[v_pred] * 33),
+    laneLineProbs=[float(confidence)] * 4,
+  )
+
+  class SM:
+    def __init__(self, m):
+      self.valid = {'modelV2': True}
+      self._data = {
+        'modelV2': m,
+        'carState': SimpleNamespace(gasPressed=False, steeringAngleDeg=0.0),
+      }
+    def __getitem__(self, key):
+      return self._data.get(key)
+
+  return SM(model)
+
+
+def _build_map_polyline(
+  lat0: float, lon0: float,
+  hairpin_start_m: float = 500.0, hairpin_end_m: float = 580.0,
+  k_hairpin: float = 0.025, total_m: float = 1500.0, step_m: float = 10.0,
+  curvature_offset_m: float = 0.0,
+):
+  pts = []
+  n = int(total_m // step_m)
+  for i in range(n + 1):
+    dist_m = i * step_m + float(curvature_offset_m)
+    k = float(k_hairpin) if (hairpin_start_m <= dist_m <= hairpin_end_m) else 0.0
+    pts.append((lat0 + (i * step_m) / 111000.0, lon0, k))
+  return pts
+
+
+def _run_map_latency_trace(
+  gps_delay_s: float = 0.0,
+  map_hold_s: float = 0.0,
+  map_stale_offset_m: float = 0.0,
+  vision_lookahead_m: float = 140.0,
+  v_ego_mps: float = 29.0,
+  total_s: float = 24.0,
+  dt: float = 0.05,
+):
+  """Run a deterministic straight→hairpin approach with map lookahead enabled.
+
+  The scenario keeps ego speed fixed to isolate arbitration behavior:
+  - Map can constrain early from far-horizon geometry.
+  - Vision begins "seeing" the curve at `vision_lookahead_m`.
+  - Optional GPS lag and stale map window inject latency faults.
+  """
+  lat0, lon0 = 37.0, -122.0
+  hairpin_start_m = 500.0
+  k_hairpin = 0.025
+
+  vtsc = mk_vtsc_with_params()
+  # Use comfort-like decel for lookahead reachability in this synthetic case.
+  vtsc._max_decel = 1.47
+  orig_get_bool = vtsc._get_bool_param
+  def _get_bool(key: str, default: bool = False) -> bool:
+    if key == 'MTSCLookaheadEnabled':
+      return True
+    return bool(orig_get_bool(key, default))
+  vtsc._get_bool_param = _get_bool
+
+  map_base = _build_map_polyline(lat0, lon0, k_hairpin=k_hairpin)
+  map_stale = _build_map_polyline(lat0, lon0, k_hairpin=k_hairpin, curvature_offset_m=map_stale_offset_m)
+
+  state = {'t': 0.0, 'd': 0.0}
+
+  def _gps():
+    d = max(0.0, state['d'] - float(gps_delay_s) * float(v_ego_mps))
+    return (lat0 + d / 111000.0, lon0)
+
+  def _map_pts():
+    return map_stale if state['t'] < float(map_hold_s) else map_base
+
+  vtsc._get_last_gps = _gps
+  vtsc._load_map_curvatures = _map_pts
+
+  trace = []
+  n_steps = int(total_s / dt)
+  for _ in range(n_steps):
+    dist_to_curve = float(hairpin_start_m - state['d'])
+    if dist_to_curve > float(vision_lookahead_m):
+      k_now = 0.0
+      k_ahead = 0.0
+    elif dist_to_curve > 0.0:
+      k_now = 0.0
+      k_ahead = k_hairpin
+    else:
+      k_now = k_hairpin
+      k_ahead = k_hairpin
+
+    sm = _mk_sm_for_map_latency(k_now, k_ahead, float(v_ego_mps), 0.95)
+    with patch('sunnypilot.selfdrive.controls.lib.vision_turn_controller.time.time', lambda: state['t']), \
+         patch('sunnypilot.selfdrive.controls.lib.vision_turn_controller.time.monotonic', lambda: state['t']):
+      vtsc.update(sm, True, float(v_ego_mps), 0.0, float(v_ego_mps))
+
+    snap = vtsc.snapshot_debug_state() or {}
+    trace.append({
+      't': float(state['t']),
+      'dist_to_curve_m': dist_to_curve,
+      'active_cap': str(snap.get('active_cap', '') or ''),
+      'map_tail_active': bool(snap.get('map_tail_active', False)),
+      'map_tail_cap': float(snap.get('map_tail_cap', 0.0) or 0.0),
+      'cap_visible_vmin': float(snap.get('cap_visible_vmin', 0.0) or 0.0),
+      'cap_map_vmin': float(snap.get('cap_map_vmin', 0.0) or 0.0),
+      'a_target': float(getattr(vtsc, 'a_target', 0.0)),
+      'v_turn': float(getattr(vtsc, 'v_turn', 0.0)),
+    })
+
+    state['t'] += float(dt)
+    state['d'] += float(v_ego_mps) * float(dt)
+
+  return trace
+
+
+def _count_active_cap_transitions(trace):
+  labels = [str(r.get('active_cap', '') or '') for r in trace]
+  return sum(1 for a, b in zip(labels, labels[1:]) if a != b)
+
+
+def _count_accel_sign_flips(trace, eps: float = 0.05):
+  signs = []
+  for r in trace:
+    a = float(r.get('a_target', 0.0))
+    if a > eps:
+      signs.append(1)
+    elif a < -eps:
+      signs.append(-1)
+  return sum(1 for a, b in zip(signs, signs[1:]) if a != b)
+
+
+def test_map_lookahead_gps_delay_does_not_cause_cap_flapping():
+  base = _run_map_latency_trace(gps_delay_s=0.0)
+  delayed = _run_map_latency_trace(gps_delay_s=1.0)
+
+  # Map should engage in both runs before vision sees the hairpin.
+  base_first_map = next((r['dist_to_curve_m'] for r in base if r['active_cap'] == 'map'), None)
+  delayed_first_map = next((r['dist_to_curve_m'] for r in delayed if r['active_cap'] == 'map'), None)
+  assert base_first_map is not None
+  assert delayed_first_map is not None
+  # 1s GPS lag should shift map engagement later (closer to the curve), not oscillate.
+  assert delayed_first_map < base_first_map - 10.0
+
+  # In the pre-entry approach window, cap arbitration should remain stable.
+  for tr in (base, delayed):
+    win = [r for r in tr if 0.0 <= r['dist_to_curve_m'] <= 260.0]
+    assert _count_active_cap_transitions(win) <= 3
+    assert _count_accel_sign_flips(win) <= 1
+
+
+def test_map_to_vision_handoff_prefers_visible_cap():
+  trace = _run_map_latency_trace(gps_delay_s=0.6)
+  onset_idx = next((i for i, r in enumerate(trace) if r['dist_to_curve_m'] <= 0.0), None)
+  assert onset_idx is not None
+
+  post = trace[onset_idx:onset_idx + 40]  # ~2.0 s after entering curve zone
+  first_visible = next((i for i, r in enumerate(post) if r['active_cap'] == 'visible'), None)
+  assert first_visible is not None, "Visible cap should take over after curve entry"
+  assert first_visible <= 15  # <= ~0.75 s at 20 Hz
+  # After visible takes over, map should not steal cap authority.
+  tail = post[first_visible:]
+  map_frames = sum(1 for r in tail if r['active_cap'] == 'map')
+  assert map_frames == 0
+
+
+def test_stale_map_recovery_avoids_brake_accel_oscillation():
+  # Hold stale map geometry for 3s, then recover to fresh geometry.
+  trace = _run_map_latency_trace(gps_delay_s=0.8, map_hold_s=3.0, map_stale_offset_m=150.0)
+  release_idx = next((i for i, r in enumerate(trace) if r['t'] >= 3.0), None)
+  assert release_idx is not None
+
+  pre = trace[max(0, release_idx - 20):release_idx]       # ~1.0 s before release
+  post = trace[release_idx:release_idx + 30]              # ~1.5 s after release
+
+  # Stale map should be active before release and hand off cleanly after release.
+  assert any(r['active_cap'] == 'map' for r in pre)
+  assert any(r['active_cap'] == 'visible' for r in post)
+  assert _count_active_cap_transitions(pre + post) <= 4
+  assert _count_accel_sign_flips(pre + post) <= 1
 
 
 def test_map_lookahead_cap_applies_when_available(monkeypatch):
