@@ -31,3 +31,18 @@ scons -j"$(nproc)" -u \
   selfdrive/modeld/models/commonmodel_pyx.so \
   sunnypilot/modeld_v2/models/commonmodel_pyx.so
 ```
+
+### VTSC regression (2026-02-11)
+```bash
+. .venv-dev4/bin/activate
+
+# Fast targeted suite for VTSC changes (hold logic + state reset behavior)
+python -m pytest -q sunnypilot/selfdrive/controls/lib/tests/vtsc
+
+# Sanity compile checks for touched scripts/tests
+python -m py_compile \
+  sunnypilot/selfdrive/controls/lib/vision_turn_controller.py \
+  sunnypilot/selfdrive/controls/lib/tests/vtsc/test_regression_rca_events.py \
+  tools/vtsc/vtsc_intervention_recorder.py \
+  tools/vtsc/extract_vtsc_rca_fixture.py
+```

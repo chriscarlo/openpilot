@@ -22,14 +22,15 @@ import json
 import os
 import re
 import shutil
+import sys
 import time
 from pathlib import Path
 from typing import Any
 
 # Allow running without `pip install -e .` by adding repo root to sys.path.
 REPO_ROOT = Path(__file__).resolve().parents[2]
-if str(REPO_ROOT) not in os.sys.path:
-  os.sys.path.insert(0, str(REPO_ROOT))
+if str(REPO_ROOT) not in sys.path:
+  sys.path.insert(0, str(REPO_ROOT))
 
 from cereal import messaging
 from opendbc.car.common.conversions import Conversions as CV
@@ -283,6 +284,9 @@ def main() -> int:
   gas_prev = False
   brake_prev = False
   last_trigger_t = -1e9
+  # Cache CurrentRoute reads to avoid hitting Params at 20Hz.
+  route_cache = ""
+  next_route_check_t = 0.0
 
   pending: dict[str, Any] | None = None
 
@@ -317,6 +321,10 @@ def main() -> int:
     sm.update(int(dt * 1000))
     t_mono = float(time.monotonic())
 
+    if t_mono >= next_route_check_t:
+      route_cache = _safe_read_current_route()
+      next_route_check_t = t_mono + 2.0
+
     try:
       cs = sm["carState"]
     except Exception:
@@ -337,6 +345,10 @@ def main() -> int:
       rti = sm["rtiStateSP"]
     except Exception:
       rti = None
+    try:
+      ctrls = sm["controlsState"]
+    except Exception:
+      ctrls = None
 
     gas = bool(getattr(cs, "gasPressed", False))
     brake = bool(getattr(cs, "brakePressed", False))
@@ -355,6 +367,56 @@ def main() -> int:
       v_ego = float(getattr(cs, "vEgo", 0.0))
     except Exception:
       v_ego = 0.0
+    try:
+      a_ego = float(getattr(cs, "aEgo", 0.0))
+    except Exception:
+      a_ego = 0.0
+    try:
+      brake_val = float(getattr(cs, "brake", 0.0))
+    except Exception:
+      brake_val = 0.0
+    try:
+      regen = bool(getattr(cs, "regenBraking", False))
+    except Exception:
+      regen = False
+
+    # ControlsState fields are helpful for offline triage (curvature + accel commands).
+    ctrl_curv = None
+    ctrl_des_curv = None
+    up_accel = None
+    ui_accel = None
+    uf_accel = None
+    long_ctrl_state = None
+    force_decel = None
+    if ctrls is not None:
+      try:
+        ctrl_curv = float(getattr(ctrls, "curvature", 0.0))
+      except Exception:
+        ctrl_curv = None
+      try:
+        ctrl_des_curv = float(getattr(ctrls, "desiredCurvature", 0.0))
+      except Exception:
+        ctrl_des_curv = None
+      try:
+        up_accel = float(getattr(ctrls, "upAccelCmd", 0.0))
+      except Exception:
+        up_accel = None
+      try:
+        ui_accel = float(getattr(ctrls, "uiAccelCmd", 0.0))
+      except Exception:
+        ui_accel = None
+      try:
+        uf_accel = float(getattr(ctrls, "ufAccelCmd", 0.0))
+      except Exception:
+        uf_accel = None
+      try:
+        long_ctrl_state = int(getattr(ctrls, "longControlState", 0))
+      except Exception:
+        long_ctrl_state = None
+      try:
+        force_decel = bool(getattr(ctrls, "forceDecel", False))
+      except Exception:
+        force_decel = None
 
     # VTSC + SLC details from longitudinalPlanSP (published every planner cycle).
     vtsc_state = None
@@ -408,14 +470,24 @@ def main() -> int:
     # Lightweight trace row for later slicing.
     row = {
       "t": t_mono,
-      "route": _safe_read_current_route(),
+      "route": route_cache,
       "vEgo": v_ego,
+      "aEgo": a_ego,
       "gas": gas,
       "brake": brake,
       "enabled": enabled,
       "latActive": lat_active,
       "longActive": long_active,
+      "brakeVal": brake_val,
+      "regenBraking": regen,
       "vCruiseMps": v_cruise_mps,
+      "ctrlCurvature": ctrl_curv,
+      "ctrlDesiredCurvature": ctrl_des_curv,
+      "ctrlUpAccelCmd": up_accel,
+      "ctrlUiAccelCmd": ui_accel,
+      "ctrlUfAccelCmd": uf_accel,
+      "ctrlLongControlState": long_ctrl_state,
+      "ctrlForceDecel": force_decel,
       "vtscState": vtsc_state,
       "vtscVelMps": vtsc_vel,
       "vtscMaxPredLatAcc": pred_lat_acc,
@@ -472,7 +544,14 @@ def main() -> int:
       continue
 
     # Only care while OP is actively controlling longitudinal, and VTSC is the limiting source.
-    if not (enabled and long_active and lat_active):
+    #
+    # NOTE: a pedal intervention can flip longActive/latActive in the same cycle, so use a short
+    # trailing window as "pre-intervention" truth.
+    recent_n = int(max(1, 0.75 / dt))  # ~0.75s window
+    recent = list(trace)[-recent_n:]
+    was_engaged = any(bool(r.get("enabled")) and bool(r.get("latActive")) and bool(r.get("longActive")) for r in recent)
+    was_vtsc_limiting = any(bool(r.get("vtscLimiting")) for r in recent)
+    if not (was_engaged and was_vtsc_limiting):
       continue
 
     # Ensure this is actually a "turny" scenario; avoid false positives on straight + other constraints.
@@ -533,4 +612,3 @@ def main() -> int:
 
 if __name__ == "__main__":
   raise SystemExit(main())
-

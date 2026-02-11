@@ -73,6 +73,35 @@ def test_freeway_cap_hold_prevents_single_frame_flicker():
   assert float(trace[-1]['v_turn']) >= v_cruise - 1e-3
 
 
+def test_mountain_cap_hold_prevents_single_frame_flicker_under_occlusion():
+  # Regression (mountain): at 30-50 mph we observed "cap flapping" where VTSC briefly recommends a
+  # much lower speed for <0.5s, then returns to cruise. The longitudinal planner often cannot
+  # react within that window, so braking begins late and the driver intervenes.
+  #
+  # Hold material cap reductions briefly under degraded vision so the planner sees a stable target.
+  v0 = 15.0
+  v_cruise = 24.0
+  dt = 0.05
+  conf = 0.52  # below CONF_BAD_TH to emulate severe/occluded frames in real events
+
+  # Warm-in low confidence so the controller enters occlusion mode (smoothed confidence hysteresis).
+  steps = [Step(curvature=0.0, curvature_ahead=0.0, confidence=conf) for _ in range(10)]
+  # One-frame "curve ahead" pulse (horizon only), then straight.
+  steps += [Step(curvature=0.0, curvature_ahead=0.012, confidence=conf)]
+  steps += [Step(curvature=0.0, curvature_ahead=0.0, confidence=conf) for _ in range(int(VTURN_HOLD_S / dt) + 12)]
+
+  trace = simulate_sequence_trace(steps=steps, v0_mps=v0, v_cruise_mps=v_cruise, dt=dt, integrate_ego=False)
+  assert trace and len(trace) >= 3
+
+  # First frame should produce a meaningful cap reduction.
+  first = 10
+  assert float(trace[first]['v_turn']) <= v_cruise - 1.0
+  # Second frame must remain held low even though horizon is straight.
+  assert float(trace[first + 1]['v_turn']) <= v_cruise - 1.0
+  # After the hold expires, cap should recover to cruise promptly.
+  assert float(trace[-1]['v_turn']) >= v_cruise - 1e-3
+
+
 def test_lead_bypass_active_allows_raise_with_margin():
   # Occluded vision with a lead at ~2.4 s headway should enable lead-bypass
   v0 = 20.0

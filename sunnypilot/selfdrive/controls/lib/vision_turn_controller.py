@@ -42,6 +42,9 @@ FREEWAY_MIN_CONF = 0.60       # path/model confidence threshold
 VTURN_HOLD_MIN_V_MPS = 27.0    # only engage hold above ~60 mph
 VTURN_HOLD_DELTA_MPS = 1.0    # only hold when cap reduces cruise by ≥ this
 VTURN_HOLD_S = 1.2            # tuned from rlogs: typical planner response ≈ 0.9–1.2s
+# Under degraded vision we still want a hold, but make it shorter to avoid "sticky" slowdowns after
+# a curve ends (especially when the UI state machine keeps predicted curvature slightly non-zero).
+VTURN_HOLD_S_OCCLUDED = 0.85
 
 # ===== Feature Flags & Thresholds =====
 # Use a large sentinel for "no cap" speed contributions when disabling a channel
@@ -1168,8 +1171,6 @@ class VisionTurnController:
   def state(self, value):
     if value != self._state:
       _debug(f'TVC: TurnVisionController state: {_description_for_state(value)}')
-      if value == VisionTurnControllerState.disabled:
-        self._reset()
     self._state = value
 
   @property
@@ -1276,11 +1277,12 @@ class VisionTurnController:
     self._curve_detection_distance = 0.0
 
   def _apply_freeway_v_turn_hold(self, v_cap: float) -> float:
-    """Hold material VTSC cap reductions briefly at freeway speeds.
+    """Hold material VTSC cap reductions briefly to bridge model flicker.
 
-    Motivation: At >60 mph the model curvature horizon can flicker, producing short (<0.5s) cap dips.
-    The longitudinal planner/MPC often cannot react within that window, so braking begins late.
-    Holding the lowest cap for a short interval makes the cap persistent enough to be acted upon.
+    Motivation: The model curvature horizon can flicker, producing short (<0.5s) cap dips. The
+    longitudinal planner/MPC often cannot react within that window, so braking begins late and the
+    driver intervenes. Holding the lowest cap briefly makes the cap persistent enough to be acted
+    upon, while keeping release responsive.
     """
     try:
       now = float(time.time())
@@ -1295,16 +1297,28 @@ class VisionTurnController:
     except Exception:
       v_ego = 0.0
 
-    # Only apply this to visible (good-vision) freeway behavior.
-    if v_ego < float(VTURN_HOLD_MIN_V_MPS):
-      return float(v_cap)
+    # Gate hold behavior:
+    # - At freeway speeds with good vision, hold helps when the horizon "pulses" a curve.
+    # - Under degraded vision (occlusion), hold helps at any speed when a real cap appears briefly.
     try:
-      if not bool(getattr(self._occlusion_state, 'vision_good', True)):
-        return float(v_cap)
+      vision_good = bool(getattr(self._occlusion_state, 'vision_good', True))
     except Exception:
-      pass
-    if bool(getattr(self, '_fov_occluded', False)):
-      return float(v_cap)
+      vision_good = True
+    try:
+      failopen = bool(getattr(self, '_freeway_failopen_active', False))
+    except Exception:
+      failopen = False
+    fov_occluded = bool(getattr(self, '_fov_occluded', False))
+    try:
+      turn_evidence = float(getattr(self, '_max_pred_lat_acc', 0.0)) >= float(_ENTERING_PRED_LAT_ACC_TH)
+    except Exception:
+      turn_evidence = False
+
+    freeway_clean = (v_ego >= float(VTURN_HOLD_MIN_V_MPS)) and vision_good and (not fov_occluded)
+    # Under degraded vision, allow triggering a hold at any speed when there is clear turn evidence.
+    # Do not trigger this while the FOV-occlusion latch is active: that subsystem already enforces
+    # monotonic caps and can legitimately hold a cap after a curve until geometry clears.
+    occluded_trigger_ok = (not vision_good) and (not failopen) and (not fov_occluded) and turn_evidence
 
     try:
       v_cruise = float(self._v_cruise_setpoint)
@@ -1312,7 +1326,8 @@ class VisionTurnController:
       v_cruise = float(v_cap)
 
     # Update/extend hold window only when VTSC is asking for a meaningful reduction.
-    if (v_cruise - float(v_cap)) >= float(VTURN_HOLD_DELTA_MPS):
+    overspeed = (v_ego - float(v_cap)) >= 0.5
+    if (freeway_clean or occluded_trigger_ok) and ((v_cruise - float(v_cap)) >= float(VTURN_HOLD_DELTA_MPS)) and (overspeed or freeway_clean):
       hold_until = float(getattr(self, '_v_turn_hold_until', 0.0) or 0.0)
       hold_min = float(getattr(self, '_v_turn_hold_min', float(v_cap)) or float(v_cap))
       if now >= hold_until:
@@ -1320,7 +1335,8 @@ class VisionTurnController:
       else:
         hold_min = min(hold_min, float(v_cap))
       self._v_turn_hold_min = hold_min
-      self._v_turn_hold_until = now + float(VTURN_HOLD_S)
+      hold_s = float(VTURN_HOLD_S_OCCLUDED) if occluded_trigger_ok else float(VTURN_HOLD_S)
+      self._v_turn_hold_until = now + hold_s
 
     # Apply hold if active
     hold_until2 = float(getattr(self, '_v_turn_hold_until', 0.0) or 0.0)
@@ -1755,6 +1771,8 @@ class VisionTurnController:
       # Clear freeway cap hold when VTSC is truly disabled (user override / disengage / gas).
       # NOTE: We intentionally do *not* clear this when the state machine toggles to disabled
       # due to transient curvature horizon changes; the hold is meant to bridge those blips.
+      if self.state != VisionTurnControllerState.disabled:
+        self._reset()
       self._v_turn_hold_until = 0.0
       self._v_turn_hold_min = float(INF_SPEED)
       self.state = VisionTurnControllerState.disabled
