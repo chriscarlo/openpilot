@@ -168,6 +168,10 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"VisionTurnSpeedControlAggressiveness", {PERSISTENT | BACKUP, INT, "1"}},
     // Optional fixed lead time override in seconds (0 = disabled, use automatic timing)
     {"VisionTurnSpeedControlFixedLeadTimeSeconds", {PERSISTENT | BACKUP, FLOAT, "0.0"}},
+    // Signed timing offsets (seconds): 0 = default; lower starts earlier, higher starts later
+    {"VisionTurnSpeedControlCurvePhaseOffsetS", {PERSISTENT | BACKUP, FLOAT, "0.0"}},
+    {"VisionTurnSpeedControlOvershootPhaseOffsetS", {PERSISTENT | BACKUP, FLOAT, "0.0"}},
+    {"VisionTurnSpeedControlApexExitPhaseOffsetS", {PERSISTENT | BACKUP, FLOAT, "0.0"}},
 
     // VTSC Adaptive Deceleration Parameters
     {"VisionTurnSpeedControlFilterAlpha", {PERSISTENT | BACKUP, FLOAT, "0.3"}},

@@ -7,6 +7,8 @@
 
 #include "selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/vtsc_settings_panel.h"
 #include <QPushButton>
+#include <algorithm>
+#include <cmath>
 
 // Local helper: create a section card with shared style
 QFrame* VTSCSettingsPanel::createSectionFrame() {
@@ -39,6 +41,21 @@ void VTSCSettingsPanel::showEvent(QShowEvent *event) {
     bool on = p.getBool("VTSCInterventionRecorderEnabled");
     if (recorderTog_->on != on) recorderTog_->togglePosition();
   }
+  auto refreshPhaseLabel = [&p](QLabel *valLabel, QLabel *statusLabel, const char *key) {
+    if (!valLabel || !statusLabel) return;
+    auto clampPhase = [](float x) { return std::max(-3.0f, std::min(3.0f, x)); };
+    float v = 0.0f;
+    QString s = QString::fromStdString(p.get(key));
+    if (!s.isEmpty()) v = s.toFloat();
+    v = clampPhase(v);
+    valLabel->setText(QString::number(v, 'f', 2) + " s");
+    bool isDefault = std::abs(v) < 0.001f;
+    statusLabel->setText(isDefault ? tr("(Default)") : tr("(Modified)"));
+    statusLabel->setStyleSheet(isDefault ? "font-size: 32px; color: #999999;" : "font-size: 32px; color: #FFC107;");
+  };
+  refreshPhaseLabel(curvePhaseValLabel_, curvePhaseStatusLabel_, "VisionTurnSpeedControlCurvePhaseOffsetS");
+  refreshPhaseLabel(overshootPhaseValLabel_, overshootPhaseStatusLabel_, "VisionTurnSpeedControlOvershootPhaseOffsetS");
+  refreshPhaseLabel(apexExitValLabel_, apexExitStatusLabel_, "VisionTurnSpeedControlApexExitPhaseOffsetS");
   if (headValLabel_ && headStatusLabel_) {
     auto clamp = [](float x){ return std::max(0.5f, std::min(5.0f, x)); };
     float v = 3.0f;
@@ -113,6 +130,133 @@ void VTSCSettingsPanel::setupUI() {
     mapLayout->addWidget(mapHelp);
   }
   mainLayout->addWidget(mapFrame);
+
+  // Section: Timing Alignment
+  QFrame *timingFrame = createSectionFrame();
+  QVBoxLayout *timingLayout = new QVBoxLayout(timingFrame);
+
+  QLabel *timingTitle = new QLabel(tr("Timing Alignment"));
+  timingTitle->setStyleSheet("font-size: 42px; font-weight: 500; color: #E4E4E4; padding-bottom: 15px;");
+  timingLayout->addWidget(timingTitle);
+
+  const QString circleButtonStyle = R"(
+    QPushButton { font-size: 60px; font-weight: 500; border-radius: 50px; background-color: #393939; color: #E4E4E4; }
+    QPushButton:pressed { background-color: #4a4a4a; }
+    QPushButton:disabled { background-color: #2a2a2a; color: #666666; }
+  )";
+  const QString resetButtonStyle = R"(
+    QPushButton { font-size: 35px; font-weight: 500; border-radius: 20px; background-color: #393939; color: #E4E4E4; }
+    QPushButton:pressed { background-color: #4a4a4a; }
+    QPushButton:disabled { background-color: #2a2a2a; color: #666666; }
+  )";
+
+  auto addTimingControl = [&](const QString &title, const char *paramKey, const QString &help, QLabel *&valueLabel, QLabel *&statusLabel) {
+    QLabel *controlTitle = new QLabel(title);
+    controlTitle->setStyleSheet("font-size: 42px; font-weight: 500; color: #E4E4E4;");
+    timingLayout->addWidget(controlTitle);
+
+    QHBoxLayout *row = new QHBoxLayout();
+
+    QPushButton *minusBtn = new QPushButton("-");
+    minusBtn->setFixedSize(100, 100);
+    minusBtn->setStyleSheet(circleButtonStyle);
+    minusBtn->setFocusPolicy(Qt::NoFocus);
+    row->addWidget(minusBtn);
+
+    QVBoxLayout *valueLayout = new QVBoxLayout();
+    valueLabel = new QLabel("0.00 s");
+    valueLabel->setAlignment(Qt::AlignCenter);
+    valueLabel->setFixedWidth(300);
+    valueLabel->setStyleSheet("font-size: 70px; font-weight: 500; color: #FFFFFF;");
+    valueLayout->addWidget(valueLabel);
+    statusLabel = new QLabel(tr("(Default)"));
+    statusLabel->setAlignment(Qt::AlignCenter);
+    statusLabel->setStyleSheet("font-size: 32px; color: #999999;");
+    valueLayout->addWidget(statusLabel);
+    row->addLayout(valueLayout);
+
+    QPushButton *plusBtn = new QPushButton("+");
+    plusBtn->setFixedSize(100, 100);
+    plusBtn->setStyleSheet(circleButtonStyle);
+    plusBtn->setFocusPolicy(Qt::NoFocus);
+    row->addWidget(plusBtn);
+
+    row->addStretch();
+
+    QPushButton *resetBtn = new QPushButton(tr("Reset"));
+    resetBtn->setFixedSize(150, 80);
+    resetBtn->setStyleSheet(resetButtonStyle);
+    resetBtn->setFocusPolicy(Qt::NoFocus);
+    row->addWidget(resetBtn);
+
+    auto clampPhase = [](float x) { return std::max(-3.0f, std::min(3.0f, x)); };
+    auto readValue = [paramKey, clampPhase]() -> float {
+      Params p;
+      float v = 0.0f;
+      QString s = QString::fromStdString(p.get(paramKey));
+      if (!s.isEmpty()) v = s.toFloat();
+      return clampPhase(v);
+    };
+    auto writeValue = [paramKey](float v) {
+      Params().put(paramKey, QString::number(v, 'f', 2).toStdString());
+    };
+    auto updateLabels = [valueLabel, statusLabel, minusBtn, plusBtn, resetBtn](float v) {
+      valueLabel->setText(QString::number(v, 'f', 2) + " s");
+      bool isDefault = std::abs(v) < 0.001f;
+      statusLabel->setText(isDefault ? QObject::tr("(Default)") : QObject::tr("(Modified)"));
+      statusLabel->setStyleSheet(isDefault ? "font-size: 32px; color: #999999;" : "font-size: 32px; color: #FFC107;");
+      minusBtn->setEnabled(v > -3.0f);
+      plusBtn->setEnabled(v < 3.0f);
+      resetBtn->setEnabled(!isDefault);
+    };
+
+    updateLabels(readValue());
+    QObject::connect(minusBtn, &QPushButton::clicked, [readValue, writeValue, updateLabels, clampPhase]() {
+      float v = clampPhase(readValue() - 0.10f);
+      writeValue(v);
+      updateLabels(v);
+    });
+    QObject::connect(plusBtn, &QPushButton::clicked, [readValue, writeValue, updateLabels, clampPhase]() {
+      float v = clampPhase(readValue() + 0.10f);
+      writeValue(v);
+      updateLabels(v);
+    });
+    QObject::connect(resetBtn, &QPushButton::clicked, [writeValue, updateLabels]() {
+      float v = 0.0f;
+      writeValue(v);
+      updateLabels(v);
+    });
+
+    timingLayout->addLayout(row);
+
+    QLabel *helpLabel = new QLabel(help);
+    helpLabel->setStyleSheet("font-size: 32px; color: #999999; padding-left: 10px; padding-bottom: 10px;");
+    helpLabel->setWordWrap(true);
+    timingLayout->addWidget(helpLabel);
+  };
+
+  addTimingControl(
+    tr("Curve Entry Timing (seconds)"),
+    "VisionTurnSpeedControlCurvePhaseOffsetS",
+    tr("This setting adjusts how soon or how late VTSC starts interpreting upcoming curvature for turn entry. "
+       "0 keeps default timing, lower values begin slowing sooner, and higher values begin slowing later."),
+    curvePhaseValLabel_, curvePhaseStatusLabel_);
+
+  addTimingControl(
+    tr("Overshoot Braking Timing (seconds)"),
+    "VisionTurnSpeedControlOvershootPhaseOffsetS",
+    tr("This setting adjusts how soon or how late stronger braking is requested when a tighter section ahead needs extra slowdown. "
+       "0 keeps default timing, lower values start braking earlier, and higher values start braking later."),
+    overshootPhaseValLabel_, overshootPhaseStatusLabel_);
+
+  addTimingControl(
+    tr("Apex Exit Timing (seconds)"),
+    "VisionTurnSpeedControlApexExitPhaseOffsetS",
+    tr("This setting adjusts how soon or how late the car begins to accelerate when an apex is detected. "
+       "0 is the default at-apex behavior, lower values move this target ahead of the apex, and larger values move it to after the apex."),
+    apexExitValLabel_, apexExitStatusLabel_);
+
+  mainLayout->addWidget(timingFrame);
 
   // Section: Lead Vehicle Bypass
   QFrame *leadFrame = createSectionFrame();

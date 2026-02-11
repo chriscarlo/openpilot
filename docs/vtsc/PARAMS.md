@@ -26,6 +26,9 @@ Enable / main knobs:
 - `VisionTurnSpeedControl` (bool)
 - `VisionTurnSpeedControlAggressiveness` (default `1`)
 - `VisionTurnSpeedControlFixedLeadTimeSeconds` (default `0.0`)
+- `VisionTurnSpeedControlCurvePhaseOffsetS` (default `0.0`)
+- `VisionTurnSpeedControlOvershootPhaseOffsetS` (default `0.0`)
+- `VisionTurnSpeedControlApexExitPhaseOffsetS` (default `0.0`)
 
 Adaptive decel + safety shaping:
 - `VisionTurnSpeedControlFilterAlpha`

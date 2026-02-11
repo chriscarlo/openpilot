@@ -35,6 +35,9 @@ def update_vtsc_params(ctrl, *, force: bool = False) -> None:
   ctrl._is_enabled = getb("VisionTurnSpeedControl", False)
   ctrl._aggressiveness = getf("VisionTurnSpeedControlAggressiveness", getattr(ctrl, "_aggressiveness", 1.0), 0.5, 2.0)
   ctrl._fixed_lead_time_s = getf("VisionTurnSpeedControlFixedLeadTimeSeconds", getattr(ctrl, "_fixed_lead_time_s", 0.0), 0.0, 10.0)
+  ctrl._curve_phase_offset_s = getf("VisionTurnSpeedControlCurvePhaseOffsetS", getattr(ctrl, "_curve_phase_offset_s", 0.0), -3.0, 3.0)
+  ctrl._overshoot_phase_offset_s = getf("VisionTurnSpeedControlOvershootPhaseOffsetS", getattr(ctrl, "_overshoot_phase_offset_s", 0.0), -3.0, 3.0)
+  ctrl._apex_exit_phase_offset_s = getf("VisionTurnSpeedControlApexExitPhaseOffsetS", getattr(ctrl, "_apex_exit_phase_offset_s", 0.0), -3.0, 3.0)
   # Lead-aware occlusion bypass
   ctrl._occl_bypass_with_lead = getb("VisionTurnSpeedControlOcclBypassWithLead", getattr(ctrl, "_occl_bypass_with_lead", True))
   ctrl._occl_bypass_headway_s = getf("VisionTurnSpeedControlOcclBypassHeadwayS", getattr(ctrl, "_occl_bypass_headway_s", 3.0), 0.5, 5.0)

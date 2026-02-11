@@ -46,6 +46,10 @@ VTURN_HOLD_S = 1.2            # tuned from rlogs: typical planner response ≈ 0
 # a curve ends (especially when the UI state machine keeps predicted curvature slightly non-zero).
 VTURN_HOLD_S_OCCLUDED = 0.85
 
+# Global model-horizon phase advance (seconds). Shifts both braking onset and post-apex
+# release earlier to compensate planner/actuation latency.
+VTSC_TRAJECTORY_PHASE_ADVANCE_S = 1.0
+
 # ===== Feature Flags & Thresholds =====
 # Use a large sentinel for "no cap" speed contributions when disabling a channel
 INF_SPEED = 1e9
@@ -664,6 +668,12 @@ class VisionTurnController:
 
     # Optional fixed lead time override (seconds). 0.0 = disabled
     self._fixed_lead_time_s = 0.0
+    # Signed timing offsets (seconds): 0 = default timing, lower = earlier, higher = later.
+    # Curve offset affects horizon interpretation; overshoot offset affects braking onset timing;
+    # apex exit offset affects when post-apex acceleration logic begins.
+    self._curve_phase_offset_s = 0.0
+    self._overshoot_phase_offset_s = 0.0
+    self._apex_exit_phase_offset_s = 0.0
     
     # ===== ADAPTIVE DECELERATION PARAMETERS =====
     # User-configurable noise filtering parameters
@@ -1486,6 +1496,15 @@ class VisionTurnController:
         n_points = int(min(len(orientation_rate_raw), len(velocity_pred_raw), N_POINTS))
         # Ensure n_points is a pure Python int for Cap'n Proto compatibility
         n_points = int(n_points)
+        # Advance model-time interpretation to remove systematic VTSC lag.
+        # User offset convention: lower values start earlier, higher values start later.
+        times_nominal = np.array(ModelConstants.T_IDXS[:n_points], dtype=float)
+        base_phase_advance_s = float(VTSC_TRAJECTORY_PHASE_ADVANCE_S)
+        curve_phase_offset_s = float(getattr(self, '_curve_phase_offset_s', 0.0))
+        phase_advance_s = float(clip(base_phase_advance_s - curve_phase_offset_s, 0.0, float(times_nominal[-1])))
+        lead_idx = int(np.searchsorted(times_nominal, phase_advance_s, side='left'))
+        lead_idx = int(min(max(lead_idx, 0), n_points - 1))
+        times_for_planning = np.maximum(0.0, times_nominal - phase_advance_s)
         # FIXED: Preserve sign information - don't use np.abs() here!
         orientation_rate_signed = np.array(list(orientation_rate_raw)[:n_points], dtype=float)
         velocity_pred = np.array(list(velocity_pred_raw)[:n_points], dtype=float)
@@ -1503,7 +1522,11 @@ class VisionTurnController:
 
         # Store curvature trajectory and detect apexes (use absolute values for apex detection)
         self._curvature_trajectory = curvature_array_abs.tolist()
-        self._apex_indices = find_apexes_enhanced(curvature_array_abs, self._apex_threshold, self._apex_prominence)
+        raw_apex_indices = find_apexes_enhanced(curvature_array_abs, self._apex_threshold, self._apex_prominence)
+        if lead_idx > 0 and raw_apex_indices:
+          self._apex_indices = sorted({max(0, int(i) - lead_idx) for i in raw_apex_indices})
+        else:
+          self._apex_indices = raw_apex_indices
         _debug(f'TVC: Found {len(self._apex_indices)} apexes at indices: {self._apex_indices}')
 
         # Calculate lateral acceleration using model-predicted curvature
@@ -1587,7 +1610,6 @@ class VisionTurnController:
           # PROPER FIX: Consider ALL points requiring deceleration, not just first or tightest
           # Calculate which points need immediate action based on deceleration requirements
           overshoot_indices = np.where(overshoot_mask)[0]
-          times = np.array(ModelConstants.T_IDXS[:n_points])
 
           # For each point that needs slowing, calculate if we need to start NOW
           max_decel = max(0.1, float(self._planning_decel_limit))  # m/s² planning decel limit
@@ -1599,7 +1621,7 @@ class VisionTurnController:
             decel_distance_needed = abs(speed_diff_sq) / max(2e-3, (2 * max_decel))
 
             # How far away is this point?
-            point_distance = times[idx] * self._v_ego
+            point_distance = times_for_planning[idx] * self._v_ego
 
             # Do we need to start slowing NOW for this point?
             if point_distance <= decel_distance_needed * max(1.0, float(self._overshoot_safety_margin)):
@@ -1620,7 +1642,7 @@ class VisionTurnController:
             # Don't just use the first overshoot - find the point with minimum safe speed
             tightest_idx = overshoot_indices[np.argmin(safe_speeds[overshoot_indices])]
             overshoot_idx = tightest_idx
-            self._v_overshoot_distance = times[overshoot_idx] * self._v_ego
+            self._v_overshoot_distance = times_for_planning[overshoot_idx] * self._v_ego
 
           self._v_overshoot = min(safe_speeds[overshoot_idx], self._v_cruise_setpoint)
           # Distance already set above based on immediate requirements or tightest point
@@ -1637,6 +1659,11 @@ class VisionTurnController:
           # Optional override: use fixed lead time in seconds if configured (> 0)
           if getattr(self, '_fixed_lead_time_s', 0.0) > 0.0:
             anticipation_time = clip(self._fixed_lead_time_s, 0.1, 10.0)
+
+          # Signed user timing offset for overshoot-based braking onset.
+          # Lower values (negative) begin slowing earlier; higher values delay onset.
+          overshoot_phase_offset_s = float(getattr(self, '_overshoot_phase_offset_s', 0.0))
+          anticipation_time = clip(anticipation_time - overshoot_phase_offset_s, 0.0, 10.0)
 
           # Adjust the overshoot distance to start deceleration earlier
           # This makes us reach target speed BEFORE the apex
@@ -2570,13 +2597,21 @@ class VisionTurnController:
 
       current_time = time.time()
 
-      # Simple heuristic: if apex is in first few indices, we're very close or past it
-      if nearest_apex_idx < int(self._apex_near_index):
+      # Convert signed exit offset into a dynamic trigger index.
+      # Lower values (negative) move acceleration onset earlier; higher values delay it.
+      idx_per_second = float(self._v_ego) / max(0.1, meters_per_index)
+      apex_exit_offset_s = float(getattr(self, '_apex_exit_phase_offset_s', 0.0))
+      base_apex_idx = int(self._apex_near_index)
+      trigger_apex_idx = int(round(base_apex_idx - apex_exit_offset_s * idx_per_second))
+      trigger_apex_idx = int(clip(trigger_apex_idx, 1, 50))
+
+      # Simple heuristic: if apex is in first trigger indices, we're very close or past it
+      if nearest_apex_idx < trigger_apex_idx:
         # Check hysteresis - don't re-trigger same apex within 2 seconds
         if current_time - self._last_apex_passed_time > float(self._apex_hysteresis_time):
           is_past_apex = True
           self._last_apex_passed_time = current_time
-          self._distance_past_apex = (int(self._apex_near_index) - nearest_apex_idx) * meters_per_index
+          self._distance_past_apex = max(0.0, (trigger_apex_idx - nearest_apex_idx) * meters_per_index)
         else:
           # Still in boost window from previous detection
           is_past_apex = True
