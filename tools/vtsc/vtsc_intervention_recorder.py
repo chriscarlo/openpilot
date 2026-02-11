@@ -41,7 +41,8 @@ VTSC_DEBUG_DIR = Path("/data/media/0/VTSCDebug")
 EVENTS_DIR_DEFAULT = Path("/data/media/0/VTSCTuner/events")
 
 # Conservative defaults: keep bundles, but avoid unbounded growth.
-DEFAULT_MAX_TOTAL_MB = 2048
+# Event bundles include copied rlog/qlog segments, so use a bounded cap by default.
+DEFAULT_MAX_TOTAL_MB = 512
 
 
 def _now_utc_tag() -> str:

@@ -37,6 +37,7 @@ private:
   ToggleSP *mapTog_ = nullptr;
   ToggleSP *bypassTog_ = nullptr;
   ToggleSP *dbgTog_ = nullptr;
+  ToggleSP *recorderTog_ = nullptr;
   QLabel *headValLabel_ = nullptr;
   QLabel *headStatusLabel_ = nullptr;
 };

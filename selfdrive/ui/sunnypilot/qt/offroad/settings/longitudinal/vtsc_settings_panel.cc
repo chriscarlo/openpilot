@@ -35,6 +35,10 @@ void VTSCSettingsPanel::showEvent(QShowEvent *event) {
     bool on = p.getBool("VTSCVerboseDebug");
     if (dbgTog_->on != on) dbgTog_->togglePosition();
   }
+  if (recorderTog_) {
+    bool on = p.getBool("VTSCInterventionRecorderEnabled");
+    if (recorderTog_->on != on) recorderTog_->togglePosition();
+  }
   if (headValLabel_ && headStatusLabel_) {
     auto clamp = [](float x){ return std::max(0.5f, std::min(5.0f, x)); };
     float v = 3.0f;
@@ -296,6 +300,32 @@ void VTSCSettingsPanel::setupUI() {
     fileHelp->setStyleSheet("font-size: 32px; color: #999999; padding-left: 10px; padding-bottom: 5px;");
     fileHelp->setWordWrap(true);
     devLayout->addWidget(fileHelp);
+  }
+
+  // Row: VTSC intervention recorder (driver gas/brake interventions while VTSC is limiting)
+  {
+    QHBoxLayout *recRow = new QHBoxLayout();
+    QLabel *recLbl = new QLabel(tr("Record VTSC Driver Interventions"));
+    recLbl->setStyleSheet("font-size: 36px; color: #E4E4E4;");
+    recRow->addWidget(recLbl);
+    recRow->addStretch();
+    recorderTog_ = new ToggleSP();
+    recorderTog_->setFixedSize(150, 80);
+    {
+      Params p; bool on = p.getBool("VTSCInterventionRecorderEnabled");
+      if (recorderTog_->on != on) recorderTog_->togglePosition();
+    }
+    QObject::connect(recorderTog_, &ToggleSP::stateChanged, [](bool s){ Params().putBool("VTSCInterventionRecorderEnabled", s); });
+    recRow->addWidget(recorderTog_);
+    devLayout->addLayout(recRow);
+
+    QLabel *recHelp = new QLabel(tr(
+      "When ON, an onroad background recorder captures gas/brake interventions while VTSC is the limiting source.\n"
+      "Bundles are written to /data/media/0/VTSCTuner/events and auto-pruned by total size."
+    ));
+    recHelp->setStyleSheet("font-size: 32px; color: #999999; padding-left: 10px; padding-bottom: 5px;");
+    recHelp->setWordWrap(true);
+    devLayout->addWidget(recHelp);
   }
   mainLayout->addWidget(devFrame);
 

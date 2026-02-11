@@ -100,6 +100,9 @@ def mtsc_enabled(started: bool, params: Params, CP: car.CarParams) -> bool:
   # Deprecated: MTSC publisher removed in favor of direct VTSC map lookahead.
   return False
 
+def vtsc_intervention_recorder_enabled(started: bool, params: Params, CP: car.CarParams) -> bool:
+  return started and (not CP.notCar) and params.get_bool("VTSCInterventionRecorderEnabled")
+
 def or_(*fns):
   return lambda *args: operator.or_(*(fn(*args) for fn in fns))
 
@@ -148,6 +151,7 @@ procs = [
   PythonProcess("plannerd", "selfdrive.controls.plannerd", not_long_maneuver),
   PythonProcess("maneuversd", "tools.longitudinal_maneuvers.maneuversd", long_maneuver),
   PythonProcess("radard", "selfdrive.controls.radard", only_onroad),
+  PythonProcess("vtsc_intervention_recorder", "tools.vtsc.vtsc_intervention_recorder", vtsc_intervention_recorder_enabled, enabled=not PC),
   PythonProcess("hardwared", "system.hardware.hardwared", always_run),
   PythonProcess("tombstoned", "system.tombstoned", always_run, enabled=not PC),
   PythonProcess("updated", "system.updated.updated", only_offroad, enabled=not PC),
