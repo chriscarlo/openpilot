@@ -321,10 +321,13 @@ def main() -> int:
   print("[vtsc_intervention] running. waiting for interventions...", flush=True)
 
   while True:
-    sm.update(100)
-    t_mono = float(time.monotonic())
-    if t_mono < next_sample_t:
+    now = float(time.monotonic())
+    if now < next_sample_t:
+      time.sleep(min(0.02, next_sample_t - now))
       continue
+    # Grab the latest available sample once per cadence tick.
+    sm.update(0)
+    t_mono = float(time.monotonic())
     next_sample_t = t_mono + dt
 
     if t_mono >= next_route_check_t:
