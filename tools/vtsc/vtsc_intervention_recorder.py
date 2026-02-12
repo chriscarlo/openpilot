@@ -269,9 +269,10 @@ def main() -> int:
 
   # Subscriptions: keep minimal but sufficient to decide "VTSC is limiting".
   services = [
-    "carState",
     "carControl",
+    "controlsState",
     "selfdriveState",
+    "onroadEvents",
     "longitudinalPlanSP",
     "rtiStateSP",
   ]
@@ -335,17 +336,21 @@ def main() -> int:
       next_route_check_t = t_mono + 2.0
 
     try:
-      cs = sm["carState"]
-    except Exception:
-      continue
-    try:
       cc = sm["carControl"]
     except Exception:
       cc = None
     try:
+      ctrls = sm["controlsState"]
+    except Exception:
+      ctrls = None
+    try:
       sds = sm["selfdriveState"]
     except Exception:
       sds = None
+    try:
+      events_msg = sm["onroadEvents"]
+    except Exception:
+      events_msg = None
     try:
       lp = sm["longitudinalPlanSP"]
     except Exception:
@@ -355,8 +360,14 @@ def main() -> int:
     except Exception:
       rti = None
 
-    gas = bool(getattr(cs, "gasPressed", False))
-    brake = bool(getattr(cs, "brakePressed", False))
+    event_names: set[str] = set()
+    if events_msg is not None:
+      try:
+        event_names = {str(e.name) for e in events_msg}
+      except Exception:
+        event_names = set()
+    gas = "gasPressedOverride" in event_names
+    brake = "pedalPressed" in event_names
 
     # Engagement gating (avoid spurious offroad presses).
     long_active = bool(getattr(cc, "longActive", False)) if cc is not None else False
@@ -365,25 +376,17 @@ def main() -> int:
 
     # Cruise setpoint is in kph; convert to m/s.
     try:
-      v_cruise_mps = float(getattr(cs, "vCruise", 0.0)) * float(CV.KPH_TO_MS)
+      v_cruise_mps = float(getattr(ctrls, "vCruiseDEPRECATED", 0.0)) * float(CV.KPH_TO_MS) if ctrls is not None else 0.0
     except Exception:
       v_cruise_mps = 0.0
     try:
-      v_ego = float(getattr(cs, "vEgo", 0.0))
+      v_ego = float(getattr(ctrls, "vEgoDEPRECATED", 0.0)) if ctrls is not None else 0.0
     except Exception:
       v_ego = 0.0
     try:
-      a_ego = float(getattr(cs, "aEgo", 0.0))
+      a_ego = float(getattr(ctrls, "aEgoDEPRECATED", 0.0)) if ctrls is not None else 0.0
     except Exception:
       a_ego = 0.0
-    try:
-      brake_val = float(getattr(cs, "brake", 0.0))
-    except Exception:
-      brake_val = 0.0
-    try:
-      regen = bool(getattr(cs, "regenBraking", False))
-    except Exception:
-      regen = False
 
     # VTSC + SLC details from longitudinalPlanSP (published every planner cycle).
     vtsc_state = None
@@ -445,8 +448,6 @@ def main() -> int:
       "enabled": enabled,
       "latActive": lat_active,
       "longActive": long_active,
-      "brakeVal": brake_val,
-      "regenBraking": regen,
       "vCruiseMps": v_cruise_mps,
       "vtscState": vtsc_state,
       "vtscVelMps": vtsc_vel,
