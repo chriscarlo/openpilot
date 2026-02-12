@@ -255,6 +255,7 @@ def main() -> int:
   ap.add_argument("--pre-seconds", type=float, default=10.0)
   ap.add_argument("--post-seconds", type=float, default=10.0)
   ap.add_argument("--buffer-seconds", type=float, default=30.0)
+  ap.add_argument("--sample-hz", type=float, default=10.0, help="Trace sampling rate; lower values reduce CPU.")
   ap.add_argument("--max-total-mb", type=int, default=DEFAULT_MAX_TOTAL_MB)
   ap.add_argument("--min-vtsc-delta-mps", type=float, default=0.5, help="Require VTSC to be this much below the next-best source.")
   ap.add_argument("--min-pred-lat-accel", type=float, default=0.8, help="Minimum maxPredictedLateralAccel to consider 'real turn'.")
@@ -270,17 +271,18 @@ def main() -> int:
   services = [
     "carState",
     "carControl",
-    "controlsState",
     "selfdriveState",
     "longitudinalPlanSP",
     "rtiStateSP",
   ]
-  sm = messaging.SubMaster(services)
+  sm = messaging.SubMaster(services, poll="longitudinalPlanSP")
 
   # Rolling trace buffer for precise 10s pre/post without depending on route segmentation.
-  dt = 0.05  # 20 Hz
+  sample_hz = max(1.0, float(args.sample_hz))
+  dt = 1.0 / sample_hz
   buf_len = int(max(20, buf_s / dt))
   trace = collections.deque(maxlen=buf_len)
+  next_sample_t = 0.0
 
   gas_prev = False
   brake_prev = False
@@ -319,8 +321,11 @@ def main() -> int:
   print("[vtsc_intervention] running. waiting for interventions...", flush=True)
 
   while True:
-    sm.update(int(dt * 1000))
+    sm.update(100)
     t_mono = float(time.monotonic())
+    if t_mono < next_sample_t:
+      continue
+    next_sample_t = t_mono + dt
 
     if t_mono >= next_route_check_t:
       route_cache = _safe_read_current_route()
@@ -346,10 +351,6 @@ def main() -> int:
       rti = sm["rtiStateSP"]
     except Exception:
       rti = None
-    try:
-      ctrls = sm["controlsState"]
-    except Exception:
-      ctrls = None
 
     gas = bool(getattr(cs, "gasPressed", False))
     brake = bool(getattr(cs, "brakePressed", False))
@@ -380,44 +381,6 @@ def main() -> int:
       regen = bool(getattr(cs, "regenBraking", False))
     except Exception:
       regen = False
-
-    # ControlsState fields are helpful for offline triage (curvature + accel commands).
-    ctrl_curv = None
-    ctrl_des_curv = None
-    up_accel = None
-    ui_accel = None
-    uf_accel = None
-    long_ctrl_state = None
-    force_decel = None
-    if ctrls is not None:
-      try:
-        ctrl_curv = float(getattr(ctrls, "curvature", 0.0))
-      except Exception:
-        ctrl_curv = None
-      try:
-        ctrl_des_curv = float(getattr(ctrls, "desiredCurvature", 0.0))
-      except Exception:
-        ctrl_des_curv = None
-      try:
-        up_accel = float(getattr(ctrls, "upAccelCmd", 0.0))
-      except Exception:
-        up_accel = None
-      try:
-        ui_accel = float(getattr(ctrls, "uiAccelCmd", 0.0))
-      except Exception:
-        ui_accel = None
-      try:
-        uf_accel = float(getattr(ctrls, "ufAccelCmd", 0.0))
-      except Exception:
-        uf_accel = None
-      try:
-        long_ctrl_state = int(getattr(ctrls, "longControlState", 0))
-      except Exception:
-        long_ctrl_state = None
-      try:
-        force_decel = bool(getattr(ctrls, "forceDecel", False))
-      except Exception:
-        force_decel = None
 
     # VTSC + SLC details from longitudinalPlanSP (published every planner cycle).
     vtsc_state = None
@@ -482,13 +445,6 @@ def main() -> int:
       "brakeVal": brake_val,
       "regenBraking": regen,
       "vCruiseMps": v_cruise_mps,
-      "ctrlCurvature": ctrl_curv,
-      "ctrlDesiredCurvature": ctrl_des_curv,
-      "ctrlUpAccelCmd": up_accel,
-      "ctrlUiAccelCmd": ui_accel,
-      "ctrlUfAccelCmd": uf_accel,
-      "ctrlLongControlState": long_ctrl_state,
-      "ctrlForceDecel": force_decel,
       "vtscState": vtsc_state,
       "vtscVelMps": vtsc_vel,
       "vtscMaxPredLatAcc": pred_lat_acc,
