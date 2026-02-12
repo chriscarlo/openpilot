@@ -747,11 +747,18 @@ class VisionTurnController:
     self._overshoot_safety_margin = 1.2         # VisionTurnSpeedControlOvershootSafetyMargin (multiplier)
     self._overshoot_min_distance = 10.0         # VisionTurnSpeedControlOvershootMinDistance (m)
     self._anticipation_target_reduction = 0.95  # VisionTurnSpeedControlAnticipationTargetReduction
+    # Time-to-brake trigger for planner-facing overshoot cap.
+    # <= 0 means we should already be applying overshoot braking.
+    self._overshoot_trigger_in_s = float('inf')
+    self._overshoot_cap_active = False
 
     # Apex detection and tracking
     self._apex_indices = []  # Indices of detected apexes in trajectory
     self._last_apex_passed_time = 0.0  # For hysteresis
     self._distance_past_apex = 0.0  # Meters past most recent apex
+    self._apex_exit_ready = False
+    self._apex_trigger_idx = 0
+    self._curve_sample_idx = 0
     # Detection
     self._apex_threshold = 5e-5          # VisionTurnSpeedControlApexThreshold
     self._apex_prominence = 1e-4         # VisionTurnSpeedControlApexProminence
@@ -1046,6 +1053,12 @@ class VisionTurnController:
         'consider_occl_gate': bool(getattr(self, '_dbg_consider_occl', False)),
         'double_cap_guard': bool(getattr(self, '_dbg_double_cap_guard', False)),
         'pre_cap_target': float(getattr(self, '_pre_cap_target_speed', 0.0)),
+        # Phase-offset diagnostics
+        'curve_sample_idx': int(getattr(self, '_curve_sample_idx', 0)),
+        'overshoot_trigger_in_s': float(getattr(self, '_overshoot_trigger_in_s', 0.0)),
+        'overshoot_cap_active': bool(getattr(self, '_overshoot_cap_active', False)),
+        'apex_trigger_idx': int(getattr(self, '_apex_trigger_idx', 0)),
+        'apex_exit_ready': bool(getattr(self, '_apex_exit_ready', False)),
         # Duplicated with _dbg_* names for watcher compatibility
         '_dbg_psi_est': float(getattr(self, '_dbg_psi_est', 0.0)),
         '_dbg_psi_thresh': float(getattr(self, '_psi_thresh_rad', PSI_THRESH_RAD)),
@@ -1174,6 +1187,8 @@ class VisionTurnController:
     self._max_pred_lat_acc = 0.
     self._v_overshoot_distance = 200.
     self._lat_acc_overshoot_ahead = False
+    self._overshoot_trigger_in_s = float('inf')
+    self._overshoot_cap_active = False
 
     # Reset adaptive deceleration system
     self._current_decel = 0.0
@@ -1186,6 +1201,9 @@ class VisionTurnController:
     # Reset apex tracking
     self._apex_indices = []
     self._distance_past_apex = 0.0
+    self._apex_exit_ready = False
+    self._apex_trigger_idx = 0
+    self._curve_sample_idx = 0
     self._curvature_trajectory = []
 
     # Reset advanced controller state (preserve current_accel to avoid jerk spikes)
@@ -1465,6 +1483,9 @@ class VisionTurnController:
     current_curvature_signed = 0.0
     current_curvature = float(getattr(self, '_filtered_curvature', 0.0))
     max_pred_curvature = current_curvature
+    # Recomputed per-frame; used to gate planner-facing overshoot cap timing.
+    self._overshoot_trigger_in_s = float('inf')
+    self._curve_sample_idx = 0
 
     # Lead-aware occlusion bypass activation
     try:
@@ -1504,6 +1525,7 @@ class VisionTurnController:
         phase_advance_s = float(clip(base_phase_advance_s - curve_phase_offset_s, 0.0, float(times_nominal[-1])))
         lead_idx = int(np.searchsorted(times_nominal, phase_advance_s, side='left'))
         lead_idx = int(min(max(lead_idx, 0), n_points - 1))
+        self._curve_sample_idx = int(lead_idx)
         times_for_planning = np.maximum(0.0, times_nominal - phase_advance_s)
         # FIXED: Preserve sign information - don't use np.abs() here!
         orientation_rate_signed = np.array(list(orientation_rate_raw)[:n_points], dtype=float)
@@ -1533,8 +1555,9 @@ class VisionTurnController:
         # This is more accurate than steering angle at highway speeds
         # Use the current model-predicted curvature WITH SIGN preserved
         if len(curvature_array_signed) > 0:
-          current_curvature = float(curvature_array_abs[0])  # Absolute value for calculations
-          current_curvature_signed = float(curvature_array_signed[0])  # Signed value for lateral accel
+          sample_idx = int(min(max(self._curve_sample_idx, 0), len(curvature_array_signed) - 1))
+          current_curvature = float(curvature_array_abs[sample_idx])  # Absolute value for calculations
+          current_curvature_signed = float(curvature_array_signed[sample_idx])  # Signed value for lateral accel
 
         # Steering-curvature fallback when:
         # - vision confidence is SEVERE, and
@@ -1660,15 +1683,15 @@ class VisionTurnController:
           if getattr(self, '_fixed_lead_time_s', 0.0) > 0.0:
             anticipation_time = clip(self._fixed_lead_time_s, 0.1, 10.0)
 
-          # Signed user timing offset for overshoot-based braking onset.
-          # Lower values (negative) begin slowing earlier; higher values delay onset.
-          overshoot_phase_offset_s = float(getattr(self, '_overshoot_phase_offset_s', 0.0))
-          anticipation_time = clip(anticipation_time - overshoot_phase_offset_s, 0.0, 10.0)
-
           # Adjust the overshoot distance to start deceleration earlier
           # This makes us reach target speed BEFORE the apex
           anticipation_distance = anticipation_time * self._v_ego
-          self._v_overshoot_distance = max(self._v_overshoot_distance - anticipation_distance, float(self._overshoot_min_distance))
+          raw_trigger_distance = float(self._v_overshoot_distance - anticipation_distance)
+          # Signed user timing offset for overshoot-based braking onset.
+          # Lower values (negative) begin slowing earlier; higher values delay onset.
+          overshoot_phase_offset_s = float(getattr(self, '_overshoot_phase_offset_s', 0.0))
+          self._overshoot_trigger_in_s = raw_trigger_distance / max(self._v_ego, 0.1) + overshoot_phase_offset_s
+          self._v_overshoot_distance = max(raw_trigger_distance, float(self._overshoot_min_distance))
 
           _debug(f'TVC: Advanced High LatAcc. Dist: {self._v_overshoot_distance:.2f}, v: {self._v_overshoot * CV.MS_TO_KPH:.2f}, anticipation: {anticipation_time:.1f}s')
 
@@ -1693,8 +1716,10 @@ class VisionTurnController:
       # Default conservative distance handling when vision not good: ensure a reasonable floor
       default_floor = max(20.0, 2.0 * float(self._overshoot_min_distance))
       self._v_overshoot_distance = max(getattr(self, '_v_overshoot_distance', default_floor), default_floor)
+      self._overshoot_trigger_in_s = self._v_overshoot_distance / max(self._v_ego, 0.1)
     else:
       self._v_overshoot_distance = getattr(self, '_v_overshoot_distance', 200.0)
+      self._overshoot_trigger_in_s = float('inf')
     
     # Track curvature change rate for anticipation moderation (20 Hz assumed)
     try:
@@ -1807,12 +1832,21 @@ class VisionTurnController:
       v_target_cap = float(raw_target)
     except Exception:
       v_target_cap = float(self._v_cruise_setpoint)
-    # Honor immediate overshoot cap when present (current curvature implies we are too fast).
+    # Overshoot cap timing gate:
+    # - Engage once computed "time-to-start-braking" is reached.
+    # - Release this extra cap once apex-exit logic says we're past apex in an easing phase, so the
+    #   planner can start accelerating out while still obeying the visible-curve cap.
+    self._overshoot_cap_active = False
     try:
       if bool(getattr(self, '_lat_acc_overshoot_ahead', False)):
-        v_target_cap = min(v_target_cap, float(getattr(self, '_v_overshoot', v_target_cap)))
+        trigger_in_s = float(getattr(self, '_overshoot_trigger_in_s', float('inf')))
+        should_start = bool(trigger_in_s <= 0.0)
+        apex_release = bool(getattr(self, '_apex_exit_ready', False) and getattr(self, '_is_easing', False))
+        if should_start and not apex_release:
+          v_target_cap = min(v_target_cap, float(getattr(self, '_v_overshoot', v_target_cap)))
+          self._overshoot_cap_active = True
     except Exception:
-      pass
+      self._overshoot_cap_active = False
 
     # ===== Freeway sanity guard (fail-open) =====
     try:
@@ -2577,6 +2611,8 @@ class VisionTurnController:
 
   def _plan_advanced_speed_trajectory(self) -> float:
     """SIMPLIFIED: Always calculate physics-based speed, let longitudinal planner handle activation."""
+    self._apex_exit_ready = False
+    self._apex_trigger_idx = int(getattr(self, '_apex_near_index', 3))
 
     # Always calculate physics-based speed regardless of curvature amount
     # On straight roads: will return cruise setpoint, longitudinal planner ignores
@@ -2631,6 +2667,7 @@ class VisionTurnController:
       base_apex_idx = int(self._apex_near_index)
       trigger_apex_idx = int(round(base_apex_idx - apex_exit_offset_s * idx_per_second))
       trigger_apex_idx = int(clip(trigger_apex_idx, 1, 50))
+      self._apex_trigger_idx = int(trigger_apex_idx)
 
       # Simple heuristic: if apex is in first trigger indices, we're very close or past it
       if nearest_apex_idx < trigger_apex_idx:
@@ -2647,6 +2684,7 @@ class VisionTurnController:
       # Apply boost if we're 0-50m past apex and in a real curve
       if is_past_apex and self._distance_past_apex < float(self._apex_boost_distance):
         apply_boost = True
+      self._apex_exit_ready = bool(is_past_apex)
 
     if apply_boost and lateral_accel > float(self._apex_boost_min_lat_accel):  # Only boost if actually in a curve
       # Apply physics-based boost for acceleration out of apex
