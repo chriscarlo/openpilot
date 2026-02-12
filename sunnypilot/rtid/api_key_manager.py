@@ -2,26 +2,25 @@
 """
 API Key Manager for RTI System
 
-Helper utilities for managing RapidAPI key persistence across the RTI system.
+Helper utilities for managing OpenWeb Ninja API key persistence across RTI.
 """
 
 import os
 
-# Priority order for API key locations
+# One canonical filename, two environment-specific locations.
+API_KEY_FILENAME = 'openwebninja_waze_api_key'
 API_KEY_PATHS = [
-    '/data/persist/rapidapi_key',           # Standard openpilot persist location
-    '/persist/rapidapi_key',                # Alternative persist location
-    '/data/openpilot/persist/rapidapi_key', # Local project persist
-    '/data/openpilot/rapidapi_key'          # Project root fallback
+    f'/persist/{API_KEY_FILENAME}',            # TICI persistent storage
+    f'/projects/chauffeur/persist/{API_KEY_FILENAME}',  # Dev fallback
 ]
 
-# Environment variable names to check
-ENV_VAR_NAMES = ['RAPIDAPI_KEY', 'WAZE_API_KEY', 'RTI_API_KEY']
+# Environment variable names to check (new first, legacy kept for compatibility)
+ENV_VAR_NAMES = ['OPENWEBNINJA_API_KEY', 'RTI_API_KEY', 'WAZE_API_KEY', 'RAPIDAPI_KEY']
 
 
 def get_api_key() -> str | None:
     """
-    Get the RapidAPI key from environment variables or persistent files.
+    Get the API key from environment variables or persistent files.
     
     Returns:
         API key string if found, None otherwise
@@ -99,7 +98,7 @@ def validate_api_key(api_key: str | None) -> bool:
 
     key = api_key.strip()
 
-    # RapidAPI keys are typically 50 characters with mixed alphanumeric
+    # OpenWeb Ninja keys are typically long mixed-alphanumeric tokens.
     return (
         len(key) >= 40 and                    # Minimum reasonable length
         len(key) <= 60 and                    # Maximum reasonable length

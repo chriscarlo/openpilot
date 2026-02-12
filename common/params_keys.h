@@ -411,6 +411,8 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"RTIDetectionRadius", {PERSISTENT | BACKUP, INT}},
     {"RTIForwardSlowdownRange", {PERSISTENT | BACKUP, INT}},
     {"RTIResumeSpeedDistance", {PERSISTENT | BACKUP, INT}},
+    {"RTIDuplicateCollapseRadius", {PERSISTENT | BACKUP, INT, "110"}},
+    {"RTIPoliceCollapseRadius", {PERSISTENT | BACKUP, INT, "140"}},
     {"RTIHUDEnabled", {PERSISTENT | BACKUP, BOOL}},
     {"RTIAudioAlerts", {PERSISTENT | BACKUP, BOOL}},
     {"RTIManualApiEndpoint", {PERSISTENT | BACKUP, STRING}},

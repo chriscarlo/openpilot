@@ -2,8 +2,8 @@
 """
 Waze API Client for RTI System
 
-Handles communication with Waze traffic data via RapidAPI, including:
-- Rate limiting (respecting ~100 req/min quota)
+Handles communication with Waze traffic data via OpenWeb Ninja, including:
+- Rate limiting (respecting provider quota)
 - Response caching (LRU cache keyed by location tile + minute)
 - Error handling and retry logic
 - Security (API key scrubbing from logs)
@@ -25,7 +25,7 @@ except ImportError:
     # Fallback for standalone usage
     def get_api_key():
         import os
-        return os.getenv('RAPIDAPI_KEY')
+        return os.getenv('OPENWEBNINJA_API_KEY')
 
 
 
@@ -196,9 +196,9 @@ class LRUCache:
 class WazeAPIClient:
     """Waze API client with rate limiting, caching, and error handling."""
 
-    # Real Waze API endpoints via RapidAPI
-    BASE_URL = "https://waze.p.rapidapi.com"
-    ALERTS_ENDPOINT = "/alerts-and-jams"  # Try alternative endpoint if this fails
+    # OpenWeb Ninja Waze API
+    BASE_URL = "https://api.openwebninja.com/waze"
+    ALERTS_ENDPOINT = "/alerts-and-jams"
 
     def __init__(self, api_key: str):
         """Initialize with API key."""
@@ -228,8 +228,8 @@ class WazeAPIClient:
         api_key = get_api_key()
         if not api_key:
             raise ValueError(
-                "No API key found. Please set RAPIDAPI_KEY environment variable "
-                "or save key to /data/persist/rapidapi_key"
+                "No API key found. Please set OPENWEBNINJA_API_KEY "
+                "or save key to /persist/openwebninja_waze_api_key"
             )
         return cls(api_key)
 
@@ -238,8 +238,7 @@ class WazeAPIClient:
         self.session = aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=10),
             headers={
-                'X-RapidAPI-Key': self.api_key,
-                'X-RapidAPI-Host': 'waze.p.rapidapi.com',
+                'x-api-key': self.api_key,
                 'User-Agent': 'openpilot-rti/1.0'
             }
         )
@@ -370,7 +369,8 @@ class WazeAPIClient:
             response_data = await self._make_request(self.ALERTS_ENDPOINT, params, latitude, longitude)
 
             alerts = []
-            if response_data and response_data.get('status') == 'OK':
+            status = str(response_data.get('status', '')).lower() if response_data else ''
+            if response_data and status in ('ok', 'success'):
                 data = response_data.get('data', {})
 
                 # Parse alerts

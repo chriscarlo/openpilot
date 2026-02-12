@@ -42,6 +42,7 @@ class RTIController:
         self._speed_recommendation = V_CRUISE_UNSET
         self._threat_ahead = False
         self._threat_distance = 0.0
+        self._threat_direction = None
         self._threat_type = None
         self._confidence = 0.0
         self._active_threat_id = None
@@ -182,6 +183,15 @@ class RTIController:
         # Find relevant threats based on direction and distance
         relevant_threat = None
         prev_active_threat_id = self._active_threat_id
+
+        def _direction_name(direction) -> str:
+            if isinstance(direction, str):
+                return direction.lower()
+            # capnp enums often stringify as "ahead"/"RtiStateSP.Direction.ahead"
+            d = str(direction)
+            if '.' in d:
+                d = d.split('.')[-1]
+            return d.lower()
         
         # Live-read user filter as extra defense (daemon also filters)
         def _filter_allows(threat_type) -> bool:
@@ -209,8 +219,12 @@ class RTIController:
             # Respect user-selected filter (belt-and-suspenders; rtid already applies it)
             if not _filter_allows(getattr(threat, 'type', None)):
                 continue
+            # Only let same-road threats affect longitudinal control.
+            # HUD can still display off-road threats for awareness.
+            if not bool(getattr(threat, 'onSameRoad', True)):
+                continue
             threat_distance = threat.distance
-            threat_direction = threat.direction
+            threat_direction = _direction_name(getattr(threat, 'direction', ''))
             
             # Check threats ahead within activation distance
             if threat_direction == 'ahead' and threat_distance <= self._threat_activation_distance:
@@ -228,6 +242,8 @@ class RTIController:
         if relevant_threat is None and self._is_active and prev_active_threat_id:
             for threat in rti_state.threats:
                 if not _filter_allows(getattr(threat, 'type', None)):
+                    continue
+                if not bool(getattr(threat, 'onSameRoad', True)):
                     continue
 
                 try:
@@ -250,9 +266,9 @@ class RTIController:
             return
 
         # Store threat information
-        self._threat_ahead = (relevant_threat.direction == 'ahead')
+        self._threat_direction = _direction_name(getattr(relevant_threat, 'direction', ''))
+        self._threat_ahead = (self._threat_direction == 'ahead')
         self._threat_distance = relevant_threat.distance
-        self._threat_direction = relevant_threat.direction
         self._threat_type = relevant_threat.type
         self._confidence = relevant_threat.confidence
         self._active_threat_id = str(getattr(relevant_threat, 'id', '')) or None
@@ -371,6 +387,7 @@ class RTIController:
         self._speed_recommendation = V_CRUISE_UNSET
         self._threat_ahead = False
         self._threat_distance = 0.0
+        self._threat_direction = None
         self._threat_type = None
         self._confidence = 0.0
         self._ramped_speed = None

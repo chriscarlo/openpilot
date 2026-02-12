@@ -10,6 +10,7 @@ Architecture: fetch → detect → publish at 1Hz
 """
 
 import asyncio
+import inspect
 import json
 import os
 import time
@@ -59,22 +60,41 @@ class RTIDaemon:
         self.cached_data_location = None
         self.cached_data_timestamp = 0
         self.max_data_age = 300  # 5 minutes max staleness
+        self.dev_fallback_location = self._parse_dev_fallback_location()
 
         api_calls_per_hour = 3600 / self.api_fetch_interval
         cloudlog.info(f"RTI Daemon initialized - API interval: {self.api_fetch_interval}s ({api_calls_per_hour:.0f} calls/hr max)")
 
+    @staticmethod
+    def _parse_dev_fallback_location() -> tuple[float, float] | None:
+        """Parse optional dev-only fallback GPS location from env.
+
+        Set `RTID_DEV_LOCATION` as `lat,lon` (for example `37.7749,-122.4194`).
+        """
+        raw = os.getenv("RTID_DEV_LOCATION")
+        if not raw:
+            return None
+        try:
+            lat_str, lon_str = [x.strip() for x in raw.split(",", 1)]
+            lat = float(lat_str)
+            lon = float(lon_str)
+            if -90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0:
+                cloudlog.warning(f"RTI dev fallback location enabled via RTID_DEV_LOCATION: {lat:.5f},{lon:.5f}")
+                return (lat, lon)
+        except Exception:
+            pass
+        cloudlog.error(f"RTI invalid RTID_DEV_LOCATION format: {raw!r} (expected 'lat,lon')")
+        return None
+
     def _load_api_key(self) -> str | None:
-        """Load Waze API key from params/env/persist locations.
+        """Load Waze API key from params then environment/file manager.
 
         Supported sources (in priority order):
         - Params `RTIManualApiKey` (set by RTISettingsPanel on-device)
-        - Env vars `RAPIDAPI_KEY`, `WAZE_API_KEY`, `RTI_API_KEY`
-        - JSON key files (legacy + UI paths):
-          - `/persist/waze/waze_rapidapi.json`
-          - `/data/persist/waze/waze_rapidapi.json`
-          - `/persist/waze/rapidapi_key.json`
-          - `/data/persist/waze/rapidapi_key.json`
-        - Plain-text key files via `api_key_manager.get_api_key()`
+        - `api_key_manager.get_api_key()`:
+          - Env vars (new + legacy compatibility)
+          - `/persist/openwebninja_waze_api_key` (TICI)
+          - `/projects/chauffeur/persist/openwebninja_waze_api_key` (dev)
         """
 
         # 1) Params (preferred on-device; avoids hard dependency on a specific file name)
@@ -88,42 +108,12 @@ class RTIDaemon:
         except Exception as e:
             cloudlog.debug(f"RTI: Could not read RTIManualApiKey from Params: {e}")
 
-        # 2) Env vars (useful for dev and CI)
-        for env_var in ("RAPIDAPI_KEY", "WAZE_API_KEY", "RTI_API_KEY"):
-            env_val = os.getenv(env_var)
-            if isinstance(env_val, str) and env_val.strip():
-                cloudlog.info(f"RTI API key loaded from env var {env_var}")
-                return env_val.strip()
-
-        # 3) JSON config files (support both historical and UI paths/keys)
-        key_paths = [
-            '/persist/waze/waze_rapidapi.json',       # Legacy production TICI path
-            '/data/persist/waze/waze_rapidapi.json',  # Legacy dev fallback
-            '/persist/waze/rapidapi_key.json',        # UI path (RTISettingsPanel)
-            '/data/persist/waze/rapidapi_key.json',   # Dev fallback for UI path
-        ]
-
-        for key_path in key_paths:
-            if not os.path.exists(key_path):
-                continue
-            try:
-                with open(key_path) as f:
-                    key_data = json.load(f)
-                api_key_val = None
-                if isinstance(key_data, dict):
-                    api_key_val = key_data.get('api_key') or key_data.get('apiKey') or key_data.get('key')
-                if isinstance(api_key_val, str) and api_key_val.strip():
-                    cloudlog.info(f"RTI API key loaded from {key_path}")
-                    return api_key_val.strip()
-            except (OSError, json.JSONDecodeError) as e:
-                cloudlog.error(f"RTI failed to load API key from {key_path}: {e}")
-
-        # 4) Plain-text persist locations
+        # 2) Environment and file-based key loading
         try:
             from .api_key_manager import get_api_key
             api_key_val = get_api_key()
             if isinstance(api_key_val, str) and api_key_val.strip():
-                cloudlog.info("RTI API key loaded from api_key_manager persist paths")
+                cloudlog.info("RTI API key loaded from env/persist key manager")
                 return api_key_val.strip()
         except Exception as e:
             cloudlog.debug(f"RTI: api_key_manager.get_api_key() failed: {e}")
@@ -173,6 +163,10 @@ class RTIDaemon:
             # Check for valid coordinates (not 0,0)
             if lat != 0.0 and lon != 0.0:
                 return (lat, lon)
+
+        # Optional dev-only fallback for testing in environments without live GPS.
+        if self.dev_fallback_location is not None:
+            return self.dev_fallback_location
 
         return None
 
@@ -566,7 +560,7 @@ class RTIDaemon:
         has_valid_location = False
         display_angle = 0.0
 
-        if ego_location and hasattr(threat, 'latitude') and hasattr(threat, 'longitude'):
+        if ego_location and ego_heading_deg is not None and hasattr(threat, 'latitude') and hasattr(threat, 'longitude'):
             ego_lat, ego_lon = ego_location
             if self._is_valid_gps_pair(ego_lat, ego_lon, threat.latitude, threat.longitude):
                 has_valid_location = True
@@ -652,7 +646,11 @@ class RTIDaemon:
     async def cleanup(self):
         """Cleanup resources on daemon shutdown."""
         if self.waze_client:
-            await self.waze_client.close()
+            close_fn = getattr(self.waze_client, "close", None)
+            if callable(close_fn):
+                maybe_coro = close_fn()
+                if inspect.isawaitable(maybe_coro):
+                    await maybe_coro
             cloudlog.info("RTI Daemon cleaned up resources")
 
     async def run(self):

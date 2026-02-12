@@ -11,7 +11,7 @@ import json
 import os
 import tempfile
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch, mock_open
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from sunnypilot.rtid.rtid import RTIDaemon
 from sunnypilot.rtid.threat_detector import RTIState
@@ -44,17 +44,12 @@ class TestRTIDaemon:
             assert daemon.loop_count == 0
 
     def test_api_key_loading_from_persist(self, mock_messaging, mock_params):
-        """Test API key loading from /persist location."""
+        """Test API key loading from shared key manager."""
         test_key = "test-api-key-persist"
-        key_data = {"api_key": test_key}
 
-        with patch("os.path.exists") as mock_exists, \
-             patch("builtins.open", mock_open(read_data=json.dumps(key_data))), \
+        with patch("sunnypilot.rtid.api_key_manager.get_api_key", return_value=test_key), \
              patch('sunnypilot.rtid.rtid.WazeAPIClient') as mock_client_class, \
              patch('sunnypilot.rtid.rtid.ThreatDetector'):
-
-            # Mock /persist path exists, /data/persist doesn't
-            mock_exists.side_effect = lambda path: path == '/persist/waze/waze_rapidapi.json'
 
             daemon = RTIDaemon()
 
@@ -62,17 +57,12 @@ class TestRTIDaemon:
             mock_client_class.assert_called_once_with(test_key)
 
     def test_api_key_loading_from_data_persist(self, mock_messaging, mock_params):
-        """Test API key loading from /data/persist location."""
+        """Test API key loading from dev fallback path via key manager."""
         test_key = "test-api-key-data"
-        key_data = {"api_key": test_key}
 
-        with patch("os.path.exists") as mock_exists, \
-             patch("builtins.open", mock_open(read_data=json.dumps(key_data))), \
+        with patch("sunnypilot.rtid.api_key_manager.get_api_key", return_value=test_key), \
              patch('sunnypilot.rtid.rtid.WazeAPIClient') as mock_client_class, \
              patch('sunnypilot.rtid.rtid.ThreatDetector'):
-
-            # Mock /data/persist path exists, /persist doesn't
-            mock_exists.side_effect = lambda path: path == '/data/persist/waze/waze_rapidapi.json'
 
             daemon = RTIDaemon()
 
@@ -81,7 +71,7 @@ class TestRTIDaemon:
 
     def test_api_key_loading_failure_offline_mode(self, mock_messaging, mock_params):
         """Test graceful handling of API key loading failure."""
-        with patch("os.path.exists", return_value=False), \
+        with patch("sunnypilot.rtid.api_key_manager.get_api_key", return_value=None), \
              patch('sunnypilot.rtid.rtid.WazeAPIClient') as mock_client_class, \
              patch('sunnypilot.rtid.rtid.ThreatDetector'):
 
@@ -97,7 +87,7 @@ class TestRTIDaemon:
 
         mock_params.get.return_value = test_key
 
-        with patch("os.path.exists", return_value=False), \
+        with patch("sunnypilot.rtid.api_key_manager.get_api_key", return_value=None), \
              patch('sunnypilot.rtid.rtid.WazeAPIClient') as mock_client_class, \
              patch('sunnypilot.rtid.rtid.ThreatDetector'):
 
@@ -106,31 +96,25 @@ class TestRTIDaemon:
             assert daemon.api_key == test_key.decode("utf-8")
             mock_client_class.assert_called_once_with(test_key.decode("utf-8"))
 
-    def test_api_key_loading_from_ui_json_path(self, mock_messaging, mock_params):
-        """Test API key loading from the UI JSON path (/persist/waze/rapidapi_key.json)."""
-        test_key = "test-api-key-ui-json"
-        key_data = {"apiKey": test_key}
+    def test_api_key_loading_from_manager_fallback(self, mock_messaging, mock_params):
+        """Test API key loading from key manager fallback path(s)."""
+        test_key = "test-api-key-manager"
 
         # Ensure Params doesn't short-circuit this test
         mock_params.get.return_value = None
 
-        with patch("os.path.exists") as mock_exists, \
-             patch("builtins.open", mock_open(read_data=json.dumps(key_data))), \
+        with patch("sunnypilot.rtid.api_key_manager.get_api_key", return_value=test_key), \
              patch('sunnypilot.rtid.rtid.WazeAPIClient') as mock_client_class, \
              patch('sunnypilot.rtid.rtid.ThreatDetector'):
-
-            mock_exists.side_effect = lambda path: path == '/persist/waze/rapidapi_key.json'
 
             daemon = RTIDaemon()
 
             assert daemon.api_key == test_key
             mock_client_class.assert_called_once_with(test_key)
 
-    def test_api_key_loading_malformed_json(self, mock_messaging, mock_params):
-        """Test handling of malformed API key file."""
-        with patch("os.path.exists", return_value=True), \
-             patch("builtins.open", mock_open(read_data="invalid json")), \
-             patch("sunnypilot.rtid.api_key_manager.get_api_key", return_value=None), \
+    def test_api_key_loading_manager_error(self, mock_messaging, mock_params):
+        """Test graceful handling when key manager raises an exception."""
+        with patch("sunnypilot.rtid.api_key_manager.get_api_key", side_effect=RuntimeError("boom")), \
              patch('sunnypilot.rtid.rtid.WazeAPIClient') as mock_client_class, \
              patch('sunnypilot.rtid.rtid.ThreatDetector'):
 
@@ -607,8 +591,8 @@ class TestRTIDaemonHelpers:
             # Initialization should log
             mock_log.info.assert_called_with("RTI Daemon initialized - API interval: 30s (120 calls/hr max)")
 
-            # Test warning for missing API key by creating a new daemon with no key files
-            with patch("os.path.exists", return_value=False):
+            # Test warning for missing API key by creating a new daemon with no key source
+            with patch("sunnypilot.rtid.api_key_manager.get_api_key", return_value=None):
                 daemon2 = RTIDaemon()
 
             # Should have logged offline mode warning during daemon2 initialization

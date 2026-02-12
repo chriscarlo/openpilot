@@ -107,6 +107,8 @@ private:
   RTIRangeControl *detectionRadiusControl;
   RTIRangeControl *forwardSlowdownControl;
   RTIRangeControl *resumeSpeedControl;
+  RTIRangeControl *duplicateCollapseControl;
+  RTIRangeControl *policeCollapseControl;
   RTISpeedReductionControl *speedReductionControl;
   ToggleSP *hudToggle;
   ToggleSP *audioToggle;

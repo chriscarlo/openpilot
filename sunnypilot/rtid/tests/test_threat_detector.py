@@ -178,6 +178,31 @@ class TestRoadMatcher:
         )
         assert direction_left == 'left'
 
+    def test_street_name_mismatch_does_not_fallback_to_distance(self, road_matcher):
+        # Nearby threat, but explicit street mismatch should be treated as off-road.
+        ego_lat, ego_lon = 37.4221, -122.0841
+        threat_lat, threat_lon = 37.4222, -122.0842  # ~15m
+
+        is_same, conf = road_matcher.is_same_road(
+            ego_lat, ego_lon, threat_lat, threat_lon, 15.0,
+            ego_street="El Camino Real", threat_street="Castro St",
+        )
+        assert not is_same
+        assert conf <= 0.2
+
+    def test_heading_gated_distance_fallback_rejects_side_street(self, road_matcher):
+        # Without street names, heading gate should reject close lateral threats at driving speed.
+        ego_lat, ego_lon = 37.4221, -122.0841
+        # Threat roughly east (right) around 35m away
+        threat_lat, threat_lon = 37.4221, -122.0837
+
+        is_same, conf = road_matcher.is_same_road(
+            ego_lat, ego_lon, threat_lat, threat_lon, 20.0,
+            ego_heading_deg=0.0,  # traveling north
+        )
+        assert not is_same
+        assert conf <= 0.2
+
 
 @pytest.mark.unit
 class TestSpeedRecommendationEngine:
@@ -337,7 +362,7 @@ class TestThreatDetector:
 
         with patch.object(threat_detector.speed_engine, 'calculate_recommendation') as mock_calc:
             # Mock an unsafe recommendation
-            mock_calc.return_value = (60.0, True)  # Much higher than current speed
+            mock_calc.return_value = (60.0, True, 'unsafe')  # Much higher than current speed
 
             state = threat_detector.process_threats(
                 traffic_data=[unsafe_alert],
@@ -349,6 +374,74 @@ class TestThreatDetector:
             # Safety validation should reject unsafe recommendation
             assert state.recommended_speed == 0.0
             assert state.threat_ahead is False
+
+    def test_duplicate_police_reports_on_same_road_collapse_to_single_alert(self, threat_detector):
+        from sunnypilot.rtid.waze_api_client import WazeAlert
+
+        ego_location = (37.4221, -122.0841)
+        # ~91m separation between reports (about 100 yards)
+        lat_step = 91.0 / 110540.0
+        base_lat = 37.4230
+
+        duplicate_police = []
+        for i in range(5):
+            duplicate_police.append(WazeAlert(
+                id=f'cop-{i}',
+                type='police',
+                latitude=base_lat + i * lat_step,
+                longitude=-122.0841,
+                confidence=0.7 + i * 0.02,
+                street='US-101 N',
+                raw_data={}
+            ))
+
+        state = threat_detector.process_threats(
+            traffic_data=duplicate_police,
+            current_location=ego_location,
+            current_speed=28.0,
+            timestamp=1234567890,
+            current_heading_deg=0.0,
+            current_road_name='US-101 N'
+        )
+
+        assert len(state.threats) == 1
+        assert state.threats[0].type == 'police'
+
+    def test_nearby_police_reports_on_different_roads_do_not_collapse(self, threat_detector):
+        from sunnypilot.rtid.waze_api_client import WazeAlert
+
+        # Nearby coordinates (~30-40m apart), but different streets.
+        same_road_police = WazeAlert(
+            id='same-road-cop',
+            type='police',
+            latitude=37.4230,
+            longitude=-122.0841,
+            confidence=0.85,
+            street='El Camino Real',
+            raw_data={}
+        )
+        side_street_police = WazeAlert(
+            id='side-street-cop',
+            type='police',
+            latitude=37.4232,
+            longitude=-122.0839,
+            confidence=0.9,
+            street='Castro St',
+            raw_data={}
+        )
+
+        state = threat_detector.process_threats(
+            traffic_data=[same_road_police, side_street_police],
+            current_location=(37.4221, -122.0841),
+            current_speed=18.0,
+            timestamp=1234567890,
+            current_heading_deg=0.0,
+            current_road_name='El Camino Real'
+        )
+
+        ids = {t.id for t in state.threats}
+        assert len(state.threats) == 2
+        assert ids == {'same-road-cop', 'side-street-cop'}
 
     @pytest.mark.performance
     def test_processing_performance_budget(self, threat_detector, sample_waze_alerts, performance_timer):

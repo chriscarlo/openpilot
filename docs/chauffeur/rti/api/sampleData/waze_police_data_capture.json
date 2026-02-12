@@ -9,5 +9,5 @@
   "all_raw_alerts": [],
   "api_response_metadata": {},
   "data_fields_found": [],
-  "error": "No API key found. Please set RAPIDAPI_KEY environment variable or save key to /data/persist/rapidapi_key"
+  "error": "No API key found. Please set OPENWEBNINJA_API_KEY or save key to /persist/openwebninja_waze_api_key"
 }

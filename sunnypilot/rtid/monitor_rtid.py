@@ -11,7 +11,6 @@ Usage: python monitor_rtid.py
 """
 
 import asyncio
-import json
 import os
 import sys
 import time
@@ -82,34 +81,7 @@ class RTIDMonitor:
         except Exception:
             pass
 
-        # 2) Env var (dev/CI convenience)
-        for env_var in ("RAPIDAPI_KEY", "WAZE_API_KEY", "RTI_API_KEY"):
-            env_val = os.getenv(env_var)
-            if isinstance(env_val, str) and env_val.strip():
-                return env_val.strip()
-
-        # 3) JSON config files (legacy + UI)
-        key_paths = [
-            '/persist/waze/waze_rapidapi.json',
-            '/data/persist/waze/waze_rapidapi.json',
-            '/persist/waze/rapidapi_key.json',
-            '/data/persist/waze/rapidapi_key.json',
-        ]
-
-        for path in key_paths:
-            if not os.path.exists(path):
-                continue
-            try:
-                with open(path) as f:
-                    data = json.load(f)
-                if isinstance(data, dict):
-                    val = data.get('api_key') or data.get('apiKey') or data.get('key')
-                    if isinstance(val, str) and val.strip():
-                        return val.strip()
-            except Exception:
-                continue
-
-        # 4) Plain-text persist locations
+        # 2) Env vars and persist paths via shared manager
         try:
             from api_key_manager import get_api_key
             val = get_api_key()

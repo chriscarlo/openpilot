@@ -448,6 +448,32 @@ void RTISettingsPanel::setupMainLayout() {
     this
   );
   rangeLayout->addWidget(resumeSpeedControl);
+
+  rangeLayout->addSpacing(20);
+
+  QLabel *dedupeLabel = new QLabel(tr("Duplicate Alert Merging"));
+  dedupeLabel->setStyleSheet("font-size: 42px; font-weight: 500; color: #E4E4E4; padding-top: 10px; padding-bottom: 15px;");
+  rangeLayout->addWidget(dedupeLabel);
+
+  duplicateCollapseControl = new RTIRangeControl(
+    tr("General Merge Radius"),
+    tr("Merge nearby duplicate reports of the same hazard on your current road into one displayed alert"),
+    "RTIDuplicateCollapseRadius",
+    0.02f, 0.50f, 0.01f, 110.0f * METERS_TO_MILES, "mi",
+    this
+  );
+  rangeLayout->addWidget(duplicateCollapseControl);
+
+  rangeLayout->addSpacing(20);
+
+  policeCollapseControl = new RTIRangeControl(
+    tr("Police Merge Radius"),
+    tr("Use a larger merge radius for police reports (for example multiple reports about one officer)"),
+    "RTIPoliceCollapseRadius",
+    0.02f, 0.75f, 0.01f, 140.0f * METERS_TO_MILES, "mi",
+    this
+  );
+  rangeLayout->addWidget(policeCollapseControl);
   
   mainLayout->addWidget(rangeFrame);
   
@@ -540,49 +566,40 @@ void RTISettingsPanel::showEvent(QShowEvent *event) {
 }
 
 void RTISettingsPanel::loadWazeApiKey() {
-  // Try to load the Waze API key from the JSON file
-  std::string apiKeyPath = "/persist/waze/rapidapi_key.json";
   std::string apiKey;
-  
-  // First check environment variable
-  const char* envKey = std::getenv("RAPIDAPI_KEY");
+
+  // First check environment variables (new provider first, then compatibility aliases)
+  const char* envKey = std::getenv("OPENWEBNINJA_API_KEY");
+  if (!envKey || strlen(envKey) == 0) {
+    envKey = std::getenv("RTI_API_KEY");
+  }
+  if (!envKey || strlen(envKey) == 0) {
+    envKey = std::getenv("WAZE_API_KEY");
+  }
+  if (!envKey || strlen(envKey) == 0) {
+    envKey = std::getenv("RAPIDAPI_KEY");
+  }
+
   if (envKey && strlen(envKey) > 0) {
     apiKey = envKey;
   } else {
-    // Try to read the JSON file
-    std::ifstream file(apiKeyPath);
-    if (file.is_open()) {
-      std::string jsonContent;
+    // File lookup order:
+    // 1) TICI persistent storage
+    // 2) Dev environment fallback
+    const std::vector<std::string> keyPaths = {
+      "/persist/openwebninja_waze_api_key",
+      "/projects/chauffeur/persist/openwebninja_waze_api_key",
+    };
+
+    for (const std::string& apiKeyPath : keyPaths) {
+      std::ifstream file(apiKeyPath);
+      if (!file.is_open()) {
+        continue;
+      }
       std::string line;
-      while (std::getline(file, line)) {
-        jsonContent += line;
-      }
-      file.close();
-      
-      // Simple JSON parsing for "api_key" field
-      // Looking for pattern: "api_key": "value" or "apiKey": "value" or "key": "value"
-      size_t keyPos = jsonContent.find("\"api_key\"");
-      if (keyPos == std::string::npos) {
-        keyPos = jsonContent.find("\"apiKey\"");
-      }
-      if (keyPos == std::string::npos) {
-        keyPos = jsonContent.find("\"key\"");
-      }
-      
-      if (keyPos != std::string::npos) {
-        // Find the colon after the key
-        size_t colonPos = jsonContent.find(":", keyPos);
-        if (colonPos != std::string::npos) {
-          // Find the opening quote of the value
-          size_t startQuote = jsonContent.find("\"", colonPos);
-          if (startQuote != std::string::npos) {
-            // Find the closing quote of the value
-            size_t endQuote = jsonContent.find("\"", startQuote + 1);
-            if (endQuote != std::string::npos) {
-              apiKey = jsonContent.substr(startQuote + 1, endQuote - startQuote - 1);
-            }
-          }
-        }
+      if (std::getline(file, line) && !line.empty()) {
+        apiKey = line;
+        break;
       }
     }
   }
@@ -590,8 +607,8 @@ void RTISettingsPanel::loadWazeApiKey() {
   // Store the API key and configure Waze endpoint
   if (!apiKey.empty()) {
     params.put("RTIManualApiKey", apiKey);
-    params.put("RTIManualApiEndpoint", "https://waze.p.rapidapi.com/alerts-and-jams");
-    params.put("RTIManualApiFormat", "waze_rapid");
+    params.put("RTIManualApiEndpoint", "https://api.openwebninja.com/waze/alerts-and-jams");
+    params.put("RTIManualApiFormat", "waze_openwebninja");
     // Force Waze as the data source
     params.put("RTIDataSource", "1");
   }

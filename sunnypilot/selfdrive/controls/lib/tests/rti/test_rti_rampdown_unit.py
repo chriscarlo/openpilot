@@ -193,6 +193,43 @@ def test_rti_filtering_respected(monkeypatch):
     assert ctrl.speed_recommendation <= 24.0 + 0.3
 
 
+def test_rti_ignores_offroad_threats_even_if_ahead(monkeypatch):
+    make_stubs()
+    force_params_stub()
+    from sunnypilot.selfdrive.controls.lib.rti_controller import RTIController
+
+    class FakeThreat:
+        def __init__(self, distance, direction, type_name, speed_limit_ms, on_same_road, confidence=0.9):
+            self.id = "threat-offroad"
+            self.distance = distance
+            self.direction = direction
+            self.type = type_name
+            self.speedLimitMs = speed_limit_ms
+            self.onSameRoad = on_same_road
+            self.confidence = confidence
+
+    class FakeState:
+        def __init__(self, threats):
+            self.threats = threats
+            self.recommendedSpeed = 0.0
+
+    ctrl = RTIController(CP=None)
+    ctrl.params.put_bool('RTIEnabled', True)
+    ctrl.params.put('RTISpeedReductionMode', 'posted')
+    ctrl.params.put('RTIThreatFilter', '1')  # police
+
+    ctrl._v_cruise = 33.53
+    ctrl._v_ego = 30.0
+
+    # Ahead + close + matching type, but explicitly off-road.
+    threat = FakeThreat(200.0, 'ahead', 'police', 25.0, on_same_road=False)
+    state = FakeState([threat])
+    ctrl._process_rti_state(state, dt=0.1)
+
+    assert not ctrl.is_active
+    assert ctrl.speed_recommendation == 255  # V_CRUISE_UNSET in stub
+
+
 def test_rti_no_speed_spike_on_direction_transition_jitter(monkeypatch):
     """Regression: avoid brief RTI dropouts when threat direction becomes ambiguous at the alert location.
 

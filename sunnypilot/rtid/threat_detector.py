@@ -185,12 +185,26 @@ class RoadMatcher:
         # Distance thresholds for fallback when street names unavailable
         self.road_proximity_threshold_m = 50  # Assume same road if within 50m
         self.highway_proximity_threshold_m = 200  # Highways are wider
+        # If names are unavailable, use heading + bearing to reject likely side-street threats.
+        self.heading_gate_min_speed_ms = 8.0
+        self.side_street_bearing_threshold_deg = 60.0
+        self.side_street_min_distance_m = 25.0
+
+    @staticmethod
+    def _normalize_180(angle: float) -> float:
+        """Normalize angle to [-180, 180] range."""
+        while angle > 180.0:
+            angle -= 360.0
+        while angle < -180.0:
+            angle += 360.0
+        return angle
 
     def is_same_road(self, ego_lat: float, ego_lon: float,
                     threat_lat: float, threat_lon: float,
                     ego_speed_ms: float,
                     ego_street: str | None = None,
-                    threat_street: str | None = None) -> tuple[bool, float]:
+                    threat_street: str | None = None,
+                    ego_heading_deg: float | None = None) -> tuple[bool, float]:
         """
         Determine if threat is on the same road as ego vehicle with confidence.
 
@@ -202,6 +216,7 @@ class RoadMatcher:
             ego_speed_ms: Current vehicle speed in m/s
             ego_street: Current street name from map data (optional)
             threat_street: Threat street name from Waze API (optional)
+            ego_heading_deg: Current vehicle heading in degrees (optional)
 
         Returns:
             Tuple of (is_same_road: bool, confidence: float)
@@ -218,11 +233,11 @@ class RoadMatcher:
                 ego_street, threat_street, strict_direction
             )
 
-            if match_result.confidence >= 0.7:
+            if match_result.is_match and match_result.confidence >= 0.7:
                 # High confidence match
                 cloudlog.debug(f"RTI street match: {match_result.reason}")
                 return match_result.is_match, match_result.confidence
-            elif match_result.confidence >= 0.5:
+            elif match_result.is_match and match_result.confidence >= 0.5:
                 # Medium confidence - also check distance
                 distance = GeoUtils.haversine_distance(ego_lat, ego_lon, threat_lat, threat_lon)
                 threshold = (self.highway_proximity_threshold_m if ego_speed_ms > 25
@@ -235,9 +250,10 @@ class RoadMatcher:
                 elif match_result.is_match:
                     # Street matches but distance doesn't confirm
                     return match_result.is_match, match_result.confidence * 0.8
-                else:
-                    # No match with medium confidence
-                    return False, match_result.confidence
+
+            # If both street names are present and don't match, do not trust pure proximity fallback.
+            cloudlog.debug(f"RTI street mismatch: {match_result.reason}")
+            return False, 0.05
 
         # Fall back to distance-based heuristics
         distance = GeoUtils.haversine_distance(ego_lat, ego_lon, threat_lat, threat_lon)
@@ -247,6 +263,22 @@ class RoadMatcher:
                     else self.road_proximity_threshold_m)
 
         is_same = distance <= threshold
+
+        # Optional heading-gated fallback: when we only have proximity, reject likely side-street threats.
+        if (
+            is_same and
+            ego_heading_deg is not None and
+            ego_speed_ms >= self.heading_gate_min_speed_ms and
+            distance >= self.side_street_min_distance_m
+        ):
+            threat_bearing = GeoUtils.bearing(ego_lat, ego_lon, threat_lat, threat_lon)
+            relative_bearing = abs(self._normalize_180(threat_bearing - ego_heading_deg))
+            if self.side_street_bearing_threshold_deg <= relative_bearing <= (180.0 - self.side_street_bearing_threshold_deg):
+                cloudlog.debug(
+                    "RTI heading-gated reject: likely side-street threat "
+                    + f"(distance={distance:.1f}m, rel_bearing={relative_bearing:.1f}deg)"
+                )
+                return False, 0.15
 
         # Calculate confidence based on distance proximity
         if is_same:
@@ -466,6 +498,16 @@ class ThreatDetector:
         # Performance tracking
         self.last_process_time = 0
 
+        # Second-pass collapse for duplicate same-road hazards shown on HUD.
+        # This is intentionally separate from raw alert clustering so we can use
+        # onSameRoad + direction heuristics from processed threats.
+        self.duplicate_collapse_radius_m = self._read_optional_float_param(
+            params, "RTIDuplicateCollapseRadius", 110.0
+        )
+        self.police_collapse_radius_m = self._read_optional_float_param(
+            params, "RTIPoliceCollapseRadius", 140.0
+        )
+
     def process_threats(self, traffic_data: list[WazeAlert] | None,
                        current_location: tuple[float, float],
                        current_speed: float,
@@ -503,17 +545,17 @@ class ThreatDetector:
                 # Step 1: Apply threat filter
                 filtered_threats = self._apply_threat_filter(traffic_data)
 
-                # Step 2: Deduplicate threats
-                deduplicated_threats = self.clusterer.deduplicate_threats(filtered_threats)
-
-                # Step 3: Process each threat with actual speed limit and road name
-                for threat in deduplicated_threats:
+                # Step 2: Process each threat with actual speed limit and road name
+                for threat in filtered_threats:
                     processed_threat = self._process_single_threat(
                         threat, current_location, current_speed, current_heading_deg,
                         posted_speed_limit, current_road_name
                     )
                     if processed_threat:
                         processed_threats.append(processed_threat)
+
+                # Step 3: Collapse duplicate same-road hazards for HUD and control logic.
+                processed_threats = self._collapse_duplicate_threats(processed_threats)
 
                 # Step 4: Generate speed recommendation
                 recommended_speed, threat_ahead, active_threat_id = self.speed_engine.calculate_recommendation(
@@ -566,6 +608,121 @@ class ThreatDetector:
         else:  # Custom (currently same as all)
             return threats
 
+    @staticmethod
+    def _threat_family(threat_type: str) -> str:
+        """Normalize related threat types into a merge family."""
+        if threat_type in ('police', 'policeHiding'):
+            return 'police'
+        return threat_type
+
+    @staticmethod
+    def _read_optional_float_param(params, key: str, default: float) -> float:
+        """
+        Read a float param safely.
+
+        Unknown keys in Params can raise, so treat missing/invalid as default.
+        """
+        try:
+            raw = params.get(key)
+        except Exception:
+            return default
+
+        if not raw:
+            return default
+
+        try:
+            return float(raw)
+        except (ValueError, TypeError):
+            return default
+
+    @staticmethod
+    def _direction_bucket(direction: str) -> str:
+        """
+        Bucket directions for duplicate collapsing.
+
+        Treat ahead/behind as one longitudinal lane bucket so nearby duplicate
+        pins from the same cop still collapse when one report lags behind.
+        """
+        if direction in ('ahead', 'behind'):
+            return 'longitudinal'
+        return direction
+
+    def _collapse_merge_radius(self, threat: ProcessedThreat) -> float:
+        """Return merge radius in meters for a processed threat."""
+        if self._threat_family(threat.type) == 'police':
+            return self.police_collapse_radius_m
+        return self.duplicate_collapse_radius_m
+
+    def _can_collapse_pair(self, a: ProcessedThreat, b: ProcessedThreat) -> bool:
+        """Check whether two processed threats should be collapsed into one."""
+        if not a.on_same_road or not b.on_same_road:
+            return False
+
+        if self._threat_family(a.type) != self._threat_family(b.type):
+            return False
+
+        if self._direction_bucket(a.direction) != self._direction_bucket(b.direction):
+            return False
+
+        return True
+
+    def _collapse_duplicate_threats(self, threats: list[ProcessedThreat]) -> list[ProcessedThreat]:
+        """
+        Collapse near-duplicate processed threats (especially police clusters)
+        into one representative threat for cleaner HUD output.
+        """
+        if len(threats) <= 1:
+            return threats
+
+        collapsed: list[ProcessedThreat] = []
+        used: set[int] = set()
+
+        for i, threat in enumerate(threats):
+            if i in used:
+                continue
+
+            cluster_indices = {i}
+            frontier = [i]
+            used.add(i)
+
+            # Transitive merge: A~B and B~C implies A/B/C are one displayed hazard.
+            while frontier:
+                current_idx = frontier.pop()
+                current = threats[current_idx]
+
+                for j, candidate in enumerate(threats):
+                    if j in cluster_indices or j in used:
+                        continue
+
+                    if not self._can_collapse_pair(current, candidate):
+                        continue
+
+                    merge_radius = max(
+                        self._collapse_merge_radius(current),
+                        self._collapse_merge_radius(candidate),
+                    )
+                    distance_between = GeoUtils.haversine_distance(
+                        current.latitude, current.longitude,
+                        candidate.latitude, candidate.longitude,
+                    )
+
+                    if distance_between <= merge_radius:
+                        cluster_indices.add(j)
+                        used.add(j)
+                        frontier.append(j)
+
+            if len(cluster_indices) == 1:
+                collapsed.append(threat)
+                continue
+
+            cluster = [threats[idx] for idx in cluster_indices]
+
+            # Prefer highest confidence; break ties toward the closest threat.
+            representative = max(cluster, key=lambda t: (t.confidence, -t.distance))
+            collapsed.append(representative)
+
+        return collapsed
+
     def _process_single_threat(self, threat: WazeAlert,
                              current_location: tuple[float, float],
                              current_speed: float,
@@ -600,7 +757,8 @@ class ThreatDetector:
             # Determine if on same road using street names when available
             on_same_road, road_match_confidence = self.road_matcher.is_same_road(
                 ego_lat, ego_lon, threat.latitude, threat.longitude, current_speed,
-                ego_street=current_road_name, threat_street=threat.street
+                ego_street=current_road_name, threat_street=threat.street,
+                ego_heading_deg=current_heading_deg
             )
 
             # Determine direction relative to ego
