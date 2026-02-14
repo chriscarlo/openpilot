@@ -337,6 +337,33 @@ def test_severe_confidence_model_flat_steering_fallback_slows_for_sharp_curve():
   assert trace[idx_check]['v_turn'] <= v_safe + 2.5
 
 
+def test_steering_fallback_ignored_below_min_speed():
+  # Guard: steering fallback should not engage at low speeds.
+  v0 = 10.0
+  v_cruise = 12.0
+  dt = 0.05
+  conf = 0.95
+  k_curve = 0.02
+
+  vtsc = mk_vtsc_with_params()
+  assert getattr(vtsc, '_vm', None) is not None, "VehicleModel required for steering-curvature fallback"
+
+  sa_rad = float(vtsc._vm.get_steer_from_curvature(k_curve, v0, 0.0))
+  sa_deg = float(math.degrees(sa_rad))
+
+  steps = [Step(curvature=0.0, curvature_ahead=0.0, confidence=conf, steering_angle_deg=sa_deg) for _ in range(10)]
+  trace = simulate_sequence_trace(
+    steps=steps,
+    vtsc=vtsc,
+    v0_mps=v0,
+    v_cruise_mps=v_cruise,
+    dt=dt,
+    integrate_ego=False,
+  )
+  assert trace
+  assert trace[0]['v_turn'] >= v_cruise - 0.2
+
+
 def test_severe_confidence_overshoot_is_mildly_conservative_for_blind_curves():
   # Regression-style guard:
   #

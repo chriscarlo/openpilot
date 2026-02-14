@@ -189,6 +189,20 @@ def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
   os.replace(tmp, path)
 
 
+def _merge_json(path: Path, patch: dict[str, Any]) -> None:
+  try:
+    base: dict[str, Any] = {}
+    if path.exists():
+      with open(path, "r", encoding="utf-8") as f:
+        loaded = json.load(f)
+        if isinstance(loaded, dict):
+          base = loaded
+  except Exception:
+    base = {}
+  base.update(patch)
+  _write_json(path, base)
+
+
 def _extract_vtsc_snapshots_window(out_path: Path, *, t0_mono: float, pre_s: float, post_s: float) -> int:
   src = VTSC_DEBUG_DIR / "vtsc_snapshots.jsonl"
   if not src.exists():
@@ -214,6 +228,143 @@ def _extract_vtsc_snapshots_window(out_path: Path, *, t0_mono: float, pre_s: flo
   if rows:
     _write_jsonl(out_path, rows)
   return len(rows)
+
+
+def _summarize_vtsc_snapshots(path: Path) -> dict[str, Any]:
+  if not path.exists():
+    return {}
+  rows = 0
+  ts_min = None
+  ts_max = None
+  vision_counts: dict[str, int] = {}
+  active_cap_counts: dict[str, int] = {}
+  cap_source_counts: dict[str, int] = {}
+  conf_vals: list[float] = []
+  vtsc_cmd_vals: list[float] = []
+  cap_visible_vals: list[float] = []
+  cap_occl_vals: list[float] = []
+  cap_map_vals: list[float] = []
+  map_cap_vals: list[float] = []
+  map_cov_vals: list[float] = []
+  k_steer_vals: list[float] = []
+  occluded_cnt = 0
+  fail_open_cnt = 0
+  map_tail_cnt = 0
+  steer_fallback_cnt = 0
+
+  def _f(v):
+    try:
+      return float(v)
+    except Exception:
+      return None
+
+  try:
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+      for line in f:
+        try:
+          d = json.loads(line)
+        except Exception:
+          continue
+        if not isinstance(d, dict):
+          continue
+        rows += 1
+        ts = _f(d.get("ts"))
+        if ts is not None:
+          ts_min = ts if ts_min is None else min(ts_min, ts)
+          ts_max = ts if ts_max is None else max(ts_max, ts)
+        vision = str(d.get("vision_status", "") or "")
+        if vision:
+          vision_counts[vision] = vision_counts.get(vision, 0) + 1
+        active_cap = str(d.get("active_cap", "") or "")
+        if active_cap:
+          active_cap_counts[active_cap] = active_cap_counts.get(active_cap, 0) + 1
+        cap_source = str(d.get("cap_source", "") or "")
+        if cap_source:
+          cap_source_counts[cap_source] = cap_source_counts.get(cap_source, 0) + 1
+        conf = _f(d.get("conf"))
+        if conf is not None:
+          conf_vals.append(conf)
+        vtsc_cmd = _f(d.get("vtsc_cmd"))
+        if vtsc_cmd is not None:
+          vtsc_cmd_vals.append(vtsc_cmd)
+        vmin_vis = _f(d.get("cap_visible_vmin"))
+        if vmin_vis is not None and vmin_vis > 0:
+          cap_visible_vals.append(vmin_vis)
+        vmin_occ = _f(d.get("cap_occl_vmin"))
+        if vmin_occ is not None and vmin_occ > 0:
+          cap_occl_vals.append(vmin_occ)
+        vmin_map = _f(d.get("cap_map_vmin"))
+        if vmin_map is not None and vmin_map > 0:
+          cap_map_vals.append(vmin_map)
+        k_steer = _f(d.get("k_steer"))
+        if k_steer is not None:
+          k_steer_vals.append(k_steer)
+        if bool(d.get("occluded")):
+          occluded_cnt += 1
+        if bool(d.get("fail_open")):
+          fail_open_cnt += 1
+        if bool(d.get("map_tail_active")):
+          map_tail_cnt += 1
+          vcap = _f(d.get("map_tail_cap"))
+          if vcap is not None and vcap > 0:
+            map_cap_vals.append(vcap)
+          cov = _f(d.get("map_tail_coverage"))
+          if cov is not None and cov >= 0:
+            map_cov_vals.append(cov)
+        if bool(d.get("steer_fallback_active")):
+          steer_fallback_cnt += 1
+  except Exception:
+    return {}
+
+  if rows <= 0:
+    return {}
+
+  def _minmax(vals: list[float]) -> tuple[float | None, float | None]:
+    if not vals:
+      return None, None
+    return min(vals), max(vals)
+
+  conf_min, conf_max = _minmax(conf_vals)
+  vcmd_min, vcmd_max = _minmax(vtsc_cmd_vals)
+  vis_min, vis_max = _minmax(cap_visible_vals)
+  occ_min, occ_max = _minmax(cap_occl_vals)
+  map_min, map_max = _minmax(cap_map_vals)
+  mt_cap_min, mt_cap_max = _minmax(map_cap_vals)
+  mt_cov_min, mt_cov_max = _minmax(map_cov_vals)
+  k_steer_min, k_steer_max = _minmax(k_steer_vals)
+
+  return {
+    "rows": rows,
+    "ts_min": ts_min,
+    "ts_max": ts_max,
+    "duration_s": (ts_max - ts_min) if (ts_min is not None and ts_max is not None) else None,
+    "vision_status_counts": vision_counts,
+    "active_cap_counts": active_cap_counts,
+    "cap_source_counts": cap_source_counts,
+    "conf_min": conf_min,
+    "conf_max": conf_max,
+    "vtsc_cmd_min": vcmd_min,
+    "vtsc_cmd_max": vcmd_max,
+    "cap_visible_vmin_min": vis_min,
+    "cap_visible_vmin_max": vis_max,
+    "cap_occl_vmin_min": occ_min,
+    "cap_occl_vmin_max": occ_max,
+    "cap_map_vmin_min": map_min,
+    "cap_map_vmin_max": map_max,
+    "occluded_ratio": float(occluded_cnt) / float(rows),
+    "fail_open_ratio": float(fail_open_cnt) / float(rows),
+    "fail_open_any": bool(fail_open_cnt),
+    "map_tail_active_ratio": float(map_tail_cnt) / float(rows),
+    "map_tail_active_any": bool(map_tail_cnt),
+    "map_tail_cap_min": mt_cap_min,
+    "map_tail_cap_max": mt_cap_max,
+    "map_tail_coverage_min": mt_cov_min,
+    "map_tail_coverage_max": mt_cov_max,
+    "steer_fallback_active_ratio": float(steer_fallback_cnt) / float(rows),
+    "steer_fallback_active_any": bool(steer_fallback_cnt),
+    "k_steer_min": k_steer_min,
+    "k_steer_max": k_steer_max,
+  }
 
 
 def _tail_text_files(glob_paths: list[str], *, grep_pat: str, max_lines: int) -> list[str]:
@@ -471,6 +622,10 @@ def main() -> int:
       window = [r for r in list(trace) if (t0 - pre_s) <= float(r.get("t", 0.0)) <= (t0 + post_s)]
       _write_jsonl(ev_dir / "trace_20s.jsonl", window)
       n_snap = _extract_vtsc_snapshots_window(ev_dir / "vtsc_snapshots_20s.jsonl", t0_mono=t0, pre_s=pre_s, post_s=post_s)
+      snap_summary = _summarize_vtsc_snapshots(ev_dir / "vtsc_snapshots_20s.jsonl")
+      if snap_summary:
+        _write_json(ev_dir / "vtsc_snapshots_summary.json", snap_summary)
+        _merge_json(ev_dir / "event.json", {"snapshots_summary": snap_summary, "snapshots_rows": int(n_snap)})
       # Best-effort tails for quick human triage
       try:
         vtsc_watch_tail = []

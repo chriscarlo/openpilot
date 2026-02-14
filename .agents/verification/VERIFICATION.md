@@ -46,3 +46,18 @@ python -m py_compile \
   tools/vtsc/vtsc_intervention_recorder.py \
   tools/vtsc/extract_vtsc_rca_fixture.py
 ```
+
+### VTSC steering fallback + recorder summary (2026-02-14)
+Baseline quick check:
+```bash
+cd /home/chris/repos/chauffeur-dev4
+/home/chris/.venv-openpilot/bin/pytest -m 'not slow'
+```
+Result: failed (missing deps: parameterized, hypothesis, jinja2, casadi, aiohttp, etc.).
+
+Targeted checks:
+```bash
+cd /home/chris/repos/chauffeur-dev4
+/home/chris/.venv-openpilot/bin/pytest sunnypilot/selfdrive/controls/lib/tests/vtsc/test_scenarios.py -k "steering_fallback"
+/home/chris/.venv-openpilot/bin/python -m py_compile tools/vtsc/vtsc_intervention_recorder.py
+```

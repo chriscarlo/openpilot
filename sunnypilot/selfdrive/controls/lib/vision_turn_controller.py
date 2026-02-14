@@ -55,10 +55,11 @@ VTSC_TRAJECTORY_PHASE_ADVANCE_S = 1.0
 INF_SPEED = 1e9
 
 # ===== Steering-curvature fallback =====
-# When vision confidence is SEVERE and the model curvature stays ~0 ("fail open"),
-# use steering-derived curvature as a last-resort signal to avoid entering a real curve at cruise.
-STEER_CURVATURE_FALLBACK_MODEL_KAPPA_MAX = 0.002  # 1/m: model says "straight"
-STEER_CURVATURE_FALLBACK_MIN_KAPPA = 0.008        # 1/m: car is actually turning
+# If the model curvature stays near-flat while the steering input indicates a real curve,
+# use steering-derived curvature as a last-resort signal to avoid entering a curve at cruise.
+STEER_CURVATURE_FALLBACK_MODEL_KAPPA_MAX = 0.003  # 1/m: model says "straight-ish"
+STEER_CURVATURE_FALLBACK_MIN_KAPPA = 0.003        # 1/m: car is actually turning
+STEER_CURVATURE_FALLBACK_MIN_V_MPS = 13.0         # only consider at ~29 mph+
 
 # ===== Severe-confidence overshoot conservatism =====
 # If lane-line confidence is extremely low, the model often "discovers" tight off-ramp curvature late.
@@ -967,6 +968,8 @@ class VisionTurnController:
       hw = float(getattr(self, '_lead_headway_s', 99.0))
       conf = float(getattr(self._occlusion_state, 'smoothed_confidence', 0.0))
       k_model = float(getattr(self, '_dbg_k_model', 0.0))
+      k_steer = float(getattr(self, '_dbg_k_steer', 0.0))
+      steer_fallback_active = bool(getattr(self, '_dbg_steer_fallback_active', False))
       k_est = float(getattr(self._occlusion_state, 'est_curvature', 0.0))
       k_vis = float(getattr(self._occlusion_state, 'last_valid_curvature', 0.0))
       is_easing = bool(getattr(self, '_is_easing', False))
@@ -1023,7 +1026,8 @@ class VisionTurnController:
       return {
         'v': v_ego, 'cruise': v_cruise, 'lead': lead, 'hw': hw,
         'conf': conf, 'vision_status': self._vision_status_str(),
-        'k_model': k_model, 'k_occ': k_est, 'k_vis_last': k_vis,
+        'k_model': k_model, 'k_steer': k_steer, 'steer_fallback_active': steer_fallback_active,
+        'k_occ': k_est, 'k_vis_last': k_vis,
         'is_easing': is_easing, 'abs_curv_rate': abs_cr,
         'v_base': v_phys_base, 'v_occ': v_occ, 'v_vis': v_vis,
         'raw': raw, 'final': final,
@@ -1559,12 +1563,9 @@ class VisionTurnController:
           current_curvature = float(curvature_array_abs[sample_idx])  # Absolute value for calculations
           current_curvature_signed = float(curvature_array_signed[sample_idx])  # Signed value for lateral accel
 
-        # Steering-curvature fallback when:
-        # - vision confidence is SEVERE, and
-        # - the model curvature horizon is flat/near-zero, but
-        # - steering indicates we are actually turning.
-        #
-        # This avoids "fail open" behavior when model outputs degrade during sudden sharp off-ramps.
+        # Steering-curvature fallback when the model says "straight" but steering indicates a
+        # real curve. This avoids "fail open" behavior on sharp bends when the model curvature
+        # momentarily flattens.
         self._dbg_k_steer = 0.0
         self._dbg_steer_fallback_active = False
         try:
@@ -1573,9 +1574,8 @@ class VisionTurnController:
         except Exception:
           vision_confidence = 1.0
         try:
-          if (vision_confidence < CONFIDENCE_ENTER_SEVERE and
-              float(max_pred_curvature) <= STEER_CURVATURE_FALLBACK_MODEL_KAPPA_MAX and
-              self._vm is not None):
+          if (float(max_pred_curvature) <= STEER_CURVATURE_FALLBACK_MODEL_KAPPA_MAX and
+              self._vm is not None and float(self._v_ego) >= STEER_CURVATURE_FALLBACK_MIN_V_MPS):
             sa_rad = math.radians(float(getattr(self, '_steering_angle_deg', 0.0)))
             kappa_steer = float(self._vm.calc_curvature(sa_rad, float(self._v_ego), 0.0))
             kappa_steer_abs = abs(kappa_steer)

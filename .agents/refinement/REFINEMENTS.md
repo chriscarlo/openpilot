@@ -79,3 +79,19 @@
 - **Diverges from user proposal:** no
 - **Files touched:** none
 - **Notes:** Candidate design is a gated, fail-open, low-frequency secondary classifier; not implemented in this pass due safety/latency and dependency implications.
+
+### No Refinements (VTSC steering fallback + recorder summaries)
+- **Date:** 2026-02-14
+- **Classification:** A
+- **Category:** Code
+- **Status:** applied
+- **Approval:** na
+- **User-visible change:** no
+- **Behavior/semantics change:** no
+- **Concurrency/threading change:** no
+- **Bounded?** na
+- **Structured?** na
+- **Potential downstream load increase:** no
+- **Diverges from user proposal:** no
+- **Files touched:** `sunnypilot/selfdrive/controls/lib/vision_turn_controller.py`, `tools/vtsc/vtsc_intervention_recorder.py`, `sunnypilot/selfdrive/controls/lib/tests/vtsc/test_scenarios.py`
+- **Notes:** No separate refinement beyond the requested VTSC fixes and diagnostics.
