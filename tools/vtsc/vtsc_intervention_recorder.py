@@ -400,6 +400,40 @@ def _compute_sources(sample: dict[str, Any]) -> tuple[str, float, dict[str, floa
   return name, float(val), sources
 
 
+def _read_cruise_set_speed_mps(car_state: Any, ctrls: Any) -> tuple[float, str]:
+  """
+  Read set cruise speed robustly across schema variants.
+
+  Priority:
+  1) carState.vCruise (kph) in this fork
+  2) carState.vCruiseCluster (kph)
+  3) controlsState.vCruiseDEPRECATED / vCruiseClusterDEPRECATED (kph)
+  """
+  def _read_kph(obj: Any, attr: str) -> float | None:
+    if obj is None:
+      return None
+    try:
+      v = float(getattr(obj, attr, 0.0))
+    except Exception:
+      return None
+    if v <= 0.0:
+      return None
+    return v
+
+  candidates: list[tuple[Any, str, str]] = [
+    (car_state, "vCruise", "carState.vCruise"),
+    (car_state, "vCruiseCluster", "carState.vCruiseCluster"),
+    (ctrls, "vCruiseDEPRECATED", "controlsState.vCruiseDEPRECATED"),
+    (ctrls, "vCruiseClusterDEPRECATED", "controlsState.vCruiseClusterDEPRECATED"),
+  ]
+  for obj, attr, src in candidates:
+    kph = _read_kph(obj, attr)
+    if kph is not None:
+      return kph * float(CV.KPH_TO_MS), src
+
+  return 0.0, "none"
+
+
 def main() -> int:
   ap = argparse.ArgumentParser()
   ap.add_argument("--events-dir", type=str, default=str(EVENTS_DIR_DEFAULT))
@@ -410,6 +444,8 @@ def main() -> int:
   ap.add_argument("--max-total-mb", type=int, default=DEFAULT_MAX_TOTAL_MB)
   ap.add_argument("--min-vtsc-delta-mps", type=float, default=0.5, help="Require VTSC to be this much below the next-best source.")
   ap.add_argument("--min-pred-lat-accel", type=float, default=0.8, help="Minimum maxPredictedLateralAccel to consider 'real turn'.")
+  ap.add_argument("--engagement-lookback-seconds", type=float, default=3.0,
+                  help="Lookback window to recover pre-intervention engagement/limiter truth from recent samples.")
   ap.add_argument("--cooldown-seconds", type=float, default=6.0)
   args = ap.parse_args()
 
@@ -420,6 +456,7 @@ def main() -> int:
 
   # Subscriptions: keep minimal but sufficient to decide "VTSC is limiting".
   services = [
+    "carState",
     "carControl",
     "controlsState",
     "selfdriveState",
@@ -487,6 +524,10 @@ def main() -> int:
       next_route_check_t = t_mono + 2.0
 
     try:
+      car_state = sm["carState"]
+    except Exception:
+      car_state = None
+    try:
       cc = sm["carControl"]
     except Exception:
       cc = None
@@ -525,11 +566,7 @@ def main() -> int:
     lat_active = bool(getattr(cc, "latActive", False)) if cc is not None else False
     enabled = bool(getattr(sds, "enabled", False)) if sds is not None else False
 
-    # Cruise setpoint is in kph; convert to m/s.
-    try:
-      v_cruise_mps = float(getattr(ctrls, "vCruiseDEPRECATED", 0.0)) * float(CV.KPH_TO_MS) if ctrls is not None else 0.0
-    except Exception:
-      v_cruise_mps = 0.0
+    v_cruise_mps, v_cruise_src = _read_cruise_set_speed_mps(car_state, ctrls)
     try:
       v_ego = float(getattr(ctrls, "vEgoDEPRECATED", 0.0)) if ctrls is not None else 0.0
     except Exception:
@@ -574,7 +611,9 @@ def main() -> int:
         pass
 
     # Build sources and determine whether VTSC is the winning limiter.
-    sources: dict[str, float] = {"cruise": float(v_cruise_mps)}
+    sources: dict[str, float] = {}
+    if v_cruise_mps > 0.0:
+      sources["cruise"] = float(v_cruise_mps)
     if vtsc_vel is not None and vtsc_vel > 0.0:
       sources["vtsc"] = float(vtsc_vel)
     if slc_offseted is not None and slc_offseted > 0.0:
@@ -600,6 +639,7 @@ def main() -> int:
       "latActive": lat_active,
       "longActive": long_active,
       "vCruiseMps": v_cruise_mps,
+      "vCruiseSource": v_cruise_src,
       "vtscState": vtsc_state,
       "vtscVelMps": vtsc_vel,
       "vtscMaxPredLatAcc": pred_lat_acc,
@@ -661,9 +701,9 @@ def main() -> int:
 
     # Only care while OP is actively controlling longitudinal, and VTSC is the limiting source.
     #
-    # NOTE: a pedal intervention can flip longActive/latActive in the same cycle, so use a short
-    # trailing window as "pre-intervention" truth.
-    recent_n = int(max(1, 0.75 / dt))  # ~0.75s window
+    # NOTE: a pedal intervention can flip longActive/latActive before onroadEvents
+    # reflects gas/brake, so use a short trailing window as "pre-intervention" truth.
+    recent_n = int(max(1, float(args.engagement_lookback_seconds) / dt))
     recent = list(trace)[-recent_n:]
     was_engaged = any(bool(r.get("enabled")) and bool(r.get("latActive")) and bool(r.get("longActive")) for r in recent)
     was_vtsc_limiting = any(bool(r.get("vtscLimiting")) for r in recent)
@@ -704,6 +744,7 @@ def main() -> int:
       "longActive": long_active,
       "vEgo": v_ego,
       "vCruiseMps": v_cruise_mps,
+      "vCruiseSource": v_cruise_src,
       "vtscState": vtsc_state,
       "vtscVelMps": vtsc_vel,
       "vtscMaxPredLatAcc": pred_lat_acc,

@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "cereal/gen/cpp/custom.capnp.h"
+#include "sunnypilot/chauffeurNav/strip_map_model.h"
 #include "selfdrive/ui/qt/onroad/hud.h"
 
 // Use cereal threat types directly instead of duplicating the enum
@@ -55,6 +56,11 @@ protected:
   void updateRTIThreats(const UIState &s);
   double smoothAngleForThreat(const std::string &id, double raw_angle_deg) const;
   double smoothYForThreat(const std::string &id, double target_y, double initial_y) const;
+
+  // Strip map + compass
+  void updateStripMap(const UIState &s);
+  void drawStripMap(QPainter &p, const QRect &surface_rect);
+  void drawCompassRose(QPainter &p, const QRect &surface_rect);
   
   // RTI state variables
   bool rti_enabled = false;  // Master RTI enabled switch
@@ -88,4 +94,9 @@ protected:
   // Smoothed Y positions (top of box) per threat id
   mutable std::unordered_map<std::string, double> smoothed_y_top_;
   mutable QMutex smoothed_y_mutex_;
+
+  // Strip map state
+  StripMapScene strip_map_scene_;
+  float smoothed_heading_deg_ = 0.0f;
+  bool strip_heading_initialized_ = false;
 };

@@ -14,6 +14,7 @@
 #include <QTransform>
 #include <QTime>
 #include <QMutexLocker>
+#include <QLinearGradient>
 #include <unordered_set>
 #include <unordered_map>
 #include <limits>
@@ -107,6 +108,11 @@ static const std::unordered_map<RTIThreatType, ThreatTypeInfo> kThreatTypeMap = 
 
 static const ThreatTypeInfo kDefaultThreatInfo = {"ALERT", QColor(80, 80, 80)};
 
+// Strip map constants
+static constexpr float kMileM = 1609.34f;
+static constexpr float kStripForwardM = 0.85f * kMileM;
+static constexpr float kStripBehindM = 0.15f * kMileM;
+
 HudRendererSP::HudRendererSP() {
   // RTI state initialized with safe defaults
   // rti_enabled will be updated periodically in updateState()
@@ -199,16 +205,22 @@ void HudRendererSP::updateState(const UIState &s) {
       rti_active = false;
     }
   }
+
+  updateStripMap(s);
 }
 
 void HudRendererSP::draw(QPainter &p, const QRect &surface_rect) {
   // Draw base HUD elements
   HudRenderer::draw(p, surface_rect);
+
+  drawStripMap(p, surface_rect);
   
   // Draw RTI widget when enabled (multi-threat only)
   if (rti_enabled && rti_hud_enabled) {
     drawRTIThreatIndicatorMulti(p, surface_rect);
   }
+
+  drawCompassRose(p, surface_rect);
 }
 
 
@@ -572,4 +584,205 @@ double HudRendererSP::smoothYForThreat(const std::string &id, double target_y, d
   double next = current + alpha * (target_y - current);
   it->second = next;
   return next;
+}
+
+void HudRendererSP::updateStripMap(const UIState &s) {
+  strip_map_scene_.valid = false;
+  if (!s.sm) return;
+
+  const SubMaster &sm = *(s.sm);
+  if (sm.rcv_frame("liveMapDataSP") <= s.scene.started_frame) return;
+
+  const auto live_map = sm["liveMapDataSP"].getLiveMapDataSP();
+  if (!live_map.getRoadGeometryValid()) return;
+
+  if (sm.rcv_frame("gpsLocationExternal") == 0) return;
+  const auto gps = sm["gpsLocationExternal"].getGpsLocationExternal();
+
+  const double lat = gps.getLatitude();
+  const double lon = gps.getLongitude();
+  if (!std::isfinite(lat) || !std::isfinite(lon)) return;
+  if (std::abs(lat) < 1e-6 && std::abs(lon) < 1e-6) return;
+
+  float heading_deg = gps.getBearingDeg();
+  bool heading_ok = std::isfinite(heading_deg) && heading_deg >= 0.0f && heading_deg <= 360.0f;
+  if (!heading_ok) {
+    const float road_dir = live_map.getCurrentRoadSegment().getRoadDirection();
+    if (std::isfinite(road_dir)) {
+      heading_deg = road_dir;
+      heading_ok = true;
+    }
+  }
+
+  if (!heading_ok) {
+    heading_deg = smoothed_heading_deg_;
+  }
+
+  if (!strip_heading_initialized_) {
+    smoothed_heading_deg_ = heading_deg;
+    strip_heading_initialized_ = true;
+  } else {
+    const float delta = static_cast<float>(normalize180(heading_deg - smoothed_heading_deg_));
+    smoothed_heading_deg_ = static_cast<float>(normalize180(smoothed_heading_deg_ + delta * 0.2f));
+  }
+
+  strip_map_scene_ = build_strip_map_scene(live_map, lat, lon, smoothed_heading_deg_, kStripForwardM, kStripBehindM);
+}
+
+void HudRendererSP::drawStripMap(QPainter &p, const QRect &surface_rect) {
+  if (!strip_map_scene_.valid) return;
+
+  const int map_width = std::clamp(static_cast<int>(surface_rect.width() * 0.22f), 300, 420);
+  const int map_height = std::clamp(static_cast<int>(surface_rect.height() * 0.55f), 520, 760);
+  const int right_margin = 60;
+  const int map_x = surface_rect.width() - right_margin - map_width;
+  const int map_y = (surface_rect.height() - map_height) / 2;
+  const QRect map_rect(map_x, map_y, map_width, map_height);
+
+  const float span_m = strip_map_scene_.forward_m + strip_map_scene_.behind_m;
+  if (span_m <= 1e-3f) return;
+
+  const float scale = static_cast<float>(map_rect.height()) / span_m;
+  const QPointF ego_anchor(map_rect.center().x(), map_rect.y() + map_rect.height() * 0.85f);
+
+  constexpr double kPi = 3.14159265358979323846;
+  const double heading_rad = strip_map_scene_.heading_deg * kPi / 180.0;
+  const double cos_h = std::cos(-heading_rad);
+  const double sin_h = std::sin(-heading_rad);
+
+  auto map_point = [&](const QPointF &pt) -> QPointF {
+    const double rx = pt.x() * cos_h - pt.y() * sin_h;
+    const double ry = pt.x() * sin_h + pt.y() * cos_h;
+    return QPointF(ego_anchor.x() + rx * scale, ego_anchor.y() - ry * scale);
+  };
+
+  p.save();
+  p.setRenderHint(QPainter::Antialiasing);
+  p.setClipRect(map_rect);
+
+  for (const auto &poly : strip_map_scene_.polylines) {
+    if (poly.points_m.size() < 2) continue;
+
+    QPainterPath path;
+    const QPointF first = map_point(poly.points_m.front());
+    path.moveTo(first);
+    for (size_t i = 1; i < poly.points_m.size(); ++i) {
+      path.lineTo(map_point(poly.points_m[i]));
+    }
+
+    if (poly.is_current_road) {
+      QPen shadow(QColor(0, 0, 0, 60), 12.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+      p.setPen(shadow);
+      p.setBrush(Qt::NoBrush);
+      p.drawPath(path);
+
+      QPen road(QColor(245, 245, 245, 230), 8.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+      p.setPen(road);
+      p.drawPath(path);
+    } else if (poly.is_stub) {
+      const QPointF last = map_point(poly.points_m.back());
+      QLinearGradient grad(first, last);
+      grad.setColorAt(0.0, QColor(245, 245, 245, 0));
+      grad.setColorAt(0.2, QColor(245, 245, 245, 210));
+      grad.setColorAt(0.8, QColor(245, 245, 245, 210));
+      grad.setColorAt(1.0, QColor(245, 245, 245, 0));
+
+      QPen stub(QBrush(grad), 4.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+      p.setPen(stub);
+      p.setBrush(Qt::NoBrush);
+      p.drawPath(path);
+    }
+  }
+
+  // Ego arrow
+  QPainterPath arrow;
+  const double arrow_h = 26.0;
+  const double arrow_w = 18.0;
+  arrow.moveTo(ego_anchor.x(), ego_anchor.y() - arrow_h * 0.6);
+  arrow.lineTo(ego_anchor.x() - arrow_w * 0.5, ego_anchor.y() + arrow_h * 0.4);
+  arrow.lineTo(ego_anchor.x() + arrow_w * 0.5, ego_anchor.y() + arrow_h * 0.4);
+  arrow.closeSubpath();
+
+  QPainterPath shadow = arrow.translated(0.0, 2.0);
+  p.setPen(Qt::NoPen);
+  p.setBrush(QColor(0, 0, 0, 90));
+  p.drawPath(shadow);
+
+  p.setBrush(QColor(245, 245, 245, 245));
+  p.drawPath(arrow);
+
+  p.restore();
+}
+
+void HudRendererSP::drawCompassRose(QPainter &p, const QRect &surface_rect) {
+  const int rose_size = 192;
+  const QSize default_size(172, 204);
+  const QSize set_speed_size = is_metric ? QSize(200, 204) : default_size;
+  const int set_speed_x = 60 + (default_size.width() - set_speed_size.width()) / 2;
+  const int set_speed_y = 45;
+  const QRect set_speed_rect(QPoint(set_speed_x, set_speed_y), set_speed_size);
+
+  const int center_x = set_speed_rect.center().x();
+  const int bottom_margin = 25;
+  int rose_y = surface_rect.height() - bottom_margin - rose_size;
+
+  if (rti_enabled && rti_hud_enabled && !rti_threats.empty()) {
+    const int widget_width = 744;
+    const int widget_height = 520;
+    const int left_margin = 15;
+    const int bottom_margin_rti = 15;
+    const QRect rti_rect(left_margin, surface_rect.height() - widget_height - bottom_margin_rti, widget_width, widget_height);
+    const int above_rti = rti_rect.y() - 15 - rose_size;
+    if (above_rti < rose_y) rose_y = above_rti;
+  }
+
+  if (rose_y < 0) return;
+  const QRect rose_rect(center_x - rose_size / 2, rose_y, rose_size, rose_size);
+
+  p.save();
+  p.setRenderHint(QPainter::Antialiasing);
+
+  const QRectF ring_rect = rose_rect.adjusted(6, 6, -6, -6);
+  p.setPen(QPen(QColor(245, 245, 245, 180), 3));
+  p.setBrush(Qt::NoBrush);
+  p.drawEllipse(ring_rect);
+
+  const QPointF c = ring_rect.center();
+  const double ring_r = ring_rect.width() * 0.5;
+  const double tip_ext = 8.0;
+
+  auto draw_tip = [&](float angle_deg, float base_w, const QColor &color) {
+    constexpr double kPi = 3.14159265358979323846;
+    const double rad = (angle_deg - 90.0) * kPi / 180.0;
+    const double dx = std::cos(rad);
+    const double dy = std::sin(rad);
+    const QPointF tip(c.x() + (ring_r + tip_ext) * dx, c.y() + (ring_r + tip_ext) * dy);
+    const QPointF base_center(c.x() + ring_r * dx, c.y() + ring_r * dy);
+    const QPointF perp(-dy, dx);
+
+    QPainterPath tri;
+    tri.moveTo(tip);
+    tri.lineTo(base_center + perp * (base_w * 0.5));
+    tri.lineTo(base_center - perp * (base_w * 0.5));
+    tri.closeSubpath();
+
+    p.setPen(Qt::NoPen);
+    p.setBrush(color);
+    p.drawPath(tri);
+  };
+
+  draw_tip(0.0f, 18.0f, QColor(245, 245, 245, 230));
+  draw_tip(90.0f, 14.0f, QColor(245, 245, 245, 180));
+  draw_tip(180.0f, 14.0f, QColor(245, 245, 245, 180));
+  draw_tip(270.0f, 14.0f, QColor(245, 245, 245, 180));
+
+  p.setPen(QPen(QColor(245, 245, 245, 140), 2));
+  p.drawLine(QPointF(c.x(), c.y() - ring_r * 0.6), QPointF(c.x(), c.y() + ring_r * 0.6));
+  p.drawLine(QPointF(c.x() - ring_r * 0.6, c.y()), QPointF(c.x() + ring_r * 0.6, c.y()));
+
+  p.setPen(Qt::NoPen);
+  p.setBrush(QColor(245, 245, 245, 200));
+  p.drawEllipse(c, 3.0, 3.0);
+
+  p.restore();
 }

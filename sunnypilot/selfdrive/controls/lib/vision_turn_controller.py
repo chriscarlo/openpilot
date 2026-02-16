@@ -797,6 +797,11 @@ class VisionTurnController:
     self._map_tail_last_cap = None
     self._map_tail_last_start = 0.0
     self._map_tail_last_coverage = 0.0
+    self._mtsc_health_last_ts = 0.0
+    self._mtsc_health_curv_count = 0
+    self._mtsc_health_gps_has_bearing = False
+    self._mtsc_health_gps_bearing_deg = 0.0
+    self._mtsc_health_status = "unknown"
 
     # Lead-aware occlusion bypass
     self._occl_bypass_with_lead = True
@@ -994,6 +999,8 @@ class VisionTurnController:
       map_cap = float(getattr(self, '_map_tail_last_cap', 0.0) or 0.0)
       map_start = float(getattr(self, '_map_tail_last_start', 0.0) or 0.0)
       map_cov = float(getattr(self, '_map_tail_last_coverage', 0.0) or 0.0)
+      mtsc_curv_count, mtsc_gps_has_bearing, mtsc_gps_bearing_deg, mtsc_status = self._read_mtsc_health()
+      mtsc_enabled = bool(self._get_bool_param('MTSCLookaheadEnabled', False))
       # Limits and commands
       comfort = float(getattr(self, '_comfort_decel_limit', -1.47))
       max_adapt = float(getattr(self, '_max_adaptive_decel', -6.0))
@@ -1036,6 +1043,8 @@ class VisionTurnController:
         'fov_occluded': fov_occ,
         'vis_horizon_s': vis_h, 'tail_frac': tail_frac, 's_tail': s_tail, 'early_no_raise': enr,
         'map_tail_active': map_active, 'map_tail_cap': map_cap, 'map_tail_start_m': map_start, 'map_tail_coverage': map_cov,
+        'mtsc_enabled': mtsc_enabled, 'mtsc_status': mtsc_status, 'mtsc_curv_count': int(mtsc_curv_count),
+        'mtsc_gps_has_bearing': bool(mtsc_gps_has_bearing), 'mtsc_gps_bearing_deg': float(mtsc_gps_bearing_deg),
         'comfort_decel': comfort, 'max_adaptive_decel': max_adapt, 'decel_cmd': decel_cmd, 'jerk_cmd': jerk_cmd, 'a_cmd': a_cmd,
         # New fields for quick triage on road
         'active_cap': active_cap, 'vtsc_cmd': vtsc_cmd,
@@ -2816,6 +2825,74 @@ class VisionTurnController:
       self._map_curv_last_ts = now
       return []
 
+  def _read_mtsc_health(self) -> tuple[int, bool, float, str]:
+    """Return (curvature_count, gps_has_bearing, gps_bearing_deg, status)."""
+    now = time.time()
+    if (now - float(getattr(self, '_mtsc_health_last_ts', 0.0))) < 0.25:
+      return (
+        int(getattr(self, '_mtsc_health_curv_count', 0)),
+        bool(getattr(self, '_mtsc_health_gps_has_bearing', False)),
+        float(getattr(self, '_mtsc_health_gps_bearing_deg', 0.0)),
+        str(getattr(self, '_mtsc_health_status', 'unknown')),
+      )
+
+    curv_count = 0
+    gps_has_bearing = False
+    gps_bearing = 0.0
+    status = "unknown"
+    try:
+      mtsc_enabled = bool(self._get_bool_param('MTSCLookaheadEnabled', False))
+    except Exception:
+      mtsc_enabled = False
+
+    try:
+      raw_curv = self._mem_params.get('MapCurvatures') or self._params.get('MapCurvatures')
+      if raw_curv:
+        s_curv = raw_curv if isinstance(raw_curv, str) else raw_curv.decode('utf-8')
+        arr = json.loads(s_curv)
+        if isinstance(arr, list):
+          curv_count = len(arr)
+    except Exception:
+      curv_count = 0
+
+    try:
+      raw_gps = self._mem_params.get('LastGPSPosition') or self._params.get('LastGPSPosition')
+      if raw_gps:
+        s_gps = raw_gps if isinstance(raw_gps, str) else raw_gps.decode('utf-8')
+        obj = json.loads(s_gps)
+        bearing = obj.get('bearing', None) if isinstance(obj, dict) else None
+        if bearing is not None:
+          b = float(bearing)
+          if math.isfinite(b):
+            gps_has_bearing = True
+            gps_bearing = b
+    except Exception:
+      gps_has_bearing = False
+      gps_bearing = 0.0
+
+    if not mtsc_enabled:
+      status = "disabled"
+    elif not gps_has_bearing:
+      status = "missing_gps_bearing"
+    elif curv_count <= 0 and float(getattr(self, '_v_ego', 0.0)) > 5.0:
+      status = "no_curvature_while_moving"
+    elif curv_count <= 0:
+      status = "no_curvature"
+    else:
+      status = "ok"
+
+    self._mtsc_health_curv_count = int(curv_count)
+    self._mtsc_health_gps_has_bearing = bool(gps_has_bearing)
+    self._mtsc_health_gps_bearing_deg = float(gps_bearing)
+    self._mtsc_health_status = str(status)
+    self._mtsc_health_last_ts = now
+    return (
+      int(curv_count),
+      bool(gps_has_bearing),
+      float(gps_bearing),
+      str(status),
+    )
+
   def _map_tail_cap(self) -> tuple[float | None, float, float]:
     """
     Compute a comfort-reachable cap on current speed from map curvature tail.
@@ -2954,6 +3031,19 @@ class VisionTurnController:
         snap = self.snapshot_debug_state()
         if snap:
           cloudlog.debug("VTSCDBG %s", json.dumps(snap, separators=(',', ':')))
+          health = {
+            'mtsc_enabled': bool(snap.get('mtsc_enabled', False)),
+            'mtsc_status': str(snap.get('mtsc_status', 'unknown')),
+            'mtsc_curv_count': int(snap.get('mtsc_curv_count', 0) or 0),
+            'mtsc_gps_has_bearing': bool(snap.get('mtsc_gps_has_bearing', False)),
+            'mtsc_gps_bearing_deg': float(snap.get('mtsc_gps_bearing_deg', 0.0) or 0.0),
+            'map_tail_active': bool(snap.get('map_tail_active', False)),
+            'active_cap': str(snap.get('active_cap', '') or ''),
+            'cap_source': str(snap.get('cap_source', '') or ''),
+            'v': float(snap.get('v', 0.0) or 0.0),
+            'vtsc_cmd': float(snap.get('vtsc_cmd', 0.0) or 0.0),
+          }
+          cloudlog.debug("MTSCHEALTH %s", json.dumps(health, separators=(',', ':')))
           if bool(getattr(self, '_dbg_write_file', False)):
             self._append_snapshot_to_file(snap, now_s)
       except Exception:

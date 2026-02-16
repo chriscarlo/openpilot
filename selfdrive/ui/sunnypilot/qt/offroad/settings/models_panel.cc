@@ -345,7 +345,21 @@ void ModelsPanel::handleCurrentModelLblBtnClicked() {
   const QString selectedBundleName = TreeOptionDialog::getSelection(
     tr("Select a Model"), items, GetActiveModelName(), this);
 
-  if (selectedBundleName.isEmpty() || !canContinueOnMeteredDialog()) {
+  if (selectedBundleName.isEmpty()) {
+    updateLabels();
+    return;
+  }
+
+  // Keep model browsing available while driving, but block model downloads/installs.
+  const bool sameModelSelected = (selectedBundleName == GetActiveModelName());
+  if (!sameModelSelected && selectedBundleName != DEFAULT_MODEL && is_onroad) {
+    ConfirmationDialog::alert(tr("Models may only be downloaded with the vehicle powered off."), this);
+    updateLabels();
+    return;
+  }
+
+  if (!canContinueOnMeteredDialog()) {
+    updateLabels();
     return;
   }
 
@@ -378,10 +392,18 @@ void ModelsPanel::updateLabels() {
     return;
   }
 
+  is_onroad = uiState()->scene.started;
   updateModelManagerState();
   handleBundleDownloadProgress();
-  currentModelLblBtn->setEnabled(!is_onroad && !isDownloading());
-  currentModelLblBtn->setValue(GetActiveModelInternalName());
+  const bool download_allowed = !is_onroad;
+  currentModelLblBtn->setEnabled(!isDownloading());
+  currentModelLblBtn->setText(download_allowed ? tr("SELECT") : tr("VIEW"));
+  currentModelLblBtn->setValue(GetActiveModelInternalName(), download_allowed ? "#FFFFFF" : "#9A9A9A");
+  currentModelLblBtn->setDescription(download_allowed
+    ? tr("Browse available model bundles and download/install a selection.")
+    : tr("Browsing model bundles is available while driving. Downloads and installs are disabled until the vehicle is powered off."));
+  refreshAvailableModelsBtn->setEnabled(true);
+  refreshAvailableModelsBtn->setDescription(tr("Refreshes the model list in any vehicle state."));
   dynamicModeldOutputs->setEnabled(!is_onroad);
 
   // Set description for dynamic outputs based on offroad state
