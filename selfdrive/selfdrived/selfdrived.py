@@ -87,6 +87,19 @@ class SelfdriveD(CruiseHelper):
     self.car_state_sock = messaging.sub_sock('carState', timeout=20)
 
     ignore = self.sensor_packets + self.gps_packets + ['alertDebug']
+    # These services carry their own internal validity semantics and have dedicated
+    # event handling paths below; treating outer msg.valid as a hard comm gate can
+    # trigger false commIssue NO_ENTRY while all producers are alive and updating.
+    ignore_valid_only = [
+      'liveCalibration',
+      'driverMonitoringState',
+      'longitudinalPlan',
+      'liveDelay',
+      'liveParameters',
+      'radarState',
+      'liveTorqueParameters',
+      'driverAssistance',
+    ]
     if SIMULATION:
       ignore += ['driverCameraState', 'managerState']
     if REPLAY:
@@ -98,7 +111,7 @@ class SelfdriveD(CruiseHelper):
                                    'controlsState', 'carControl', 'driverAssistance', 'alertDebug', 'userBookmark', 'audioFeedback'] + \
                                    self.camera_packets + self.sensor_packets + self.gps_packets,
                                   ignore_alive=ignore, ignore_avg_freq=ignore,
-                                  ignore_valid=ignore, frequency=int(1/DT_CTRL))
+                                  ignore_valid=ignore + ignore_valid_only, frequency=int(1/DT_CTRL))
 
     # read params
     self.is_metric = self.params.get_bool("IsMetric")
