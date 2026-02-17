@@ -55,11 +55,7 @@ class OsmMapData(BaseMapData):
         self.road_geometry_extractor = OSMRoadGeometryExtractor(db_path)
         cloudlog.info(f"Road geometry extractor initialized with database: {db_path}")
       else:
-        offline_root = os.path.join(mapd_root, "offline")
-        if os.path.isdir(offline_root):
-          cloudlog.info("No OSM sqlite DB found; live map speed/curvature remains available via mapd")
-        else:
-          cloudlog.warning("No OSM database found for road geometry extraction")
+        cloudlog.warning("No OSM database found for road geometry extraction")
 
     except Exception as e:
       cloudlog.error(f"Failed to initialize road geometry extractor: {e}")
@@ -73,7 +69,6 @@ class OsmMapData(BaseMapData):
       "latitude": self.last_position.latitude,
       "longitude": self.last_position.longitude,
       "altitude": self.last_altitude,
-      "bearing": float(getattr(self, 'last_bearing', 0.0) or 0.0),
     }
 
     self.mem_params.put("LastGPSPosition", json.dumps(params))
