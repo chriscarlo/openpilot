@@ -4,6 +4,7 @@ Copyright (c) 2021-, Haibin Wen, sunnypilot, and a number of other contributors.
 This file is part of sunnypilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 """
+import math
 import time
 from abc import abstractmethod, ABC
 from typing import TYPE_CHECKING
@@ -28,6 +29,7 @@ class BaseMapData(ABC):
 
     self.last_position = coordinate_from_param("LastGPSPosition", self.params)
     self.last_altitude = None
+    self.last_bearing = 0.0
 
   @abstractmethod
   def update_location(self) -> None:
@@ -69,6 +71,36 @@ class BaseMapData(ABC):
     # livePose has these data, but aren't on cereal
     self.last_position = Coordinate(gps.latitude, gps.longitude)
     self.last_altitude = gps.altitude
+    self.last_bearing = self.extract_bearing_deg(gps)
+
+  @staticmethod
+  def extract_bearing_deg(gps) -> float:
+    # Prefer explicit bearing fields when available.
+    for key in ("bearingDeg", "bearing"):
+      try:
+        val = float(getattr(gps, key))
+        if math.isfinite(val):
+          return val
+      except Exception:
+        pass
+
+    # Fallback: derive heading from N/E velocity components when present.
+    try:
+      v_ned = getattr(gps, "vNED", None)
+      if v_ned is not None:
+        if hasattr(v_ned, "vN") and hasattr(v_ned, "vE"):
+          v_n = float(v_ned.vN)
+          v_e = float(v_ned.vE)
+        else:
+          vals = [float(v) for v in v_ned]
+          v_n = vals[0] if len(vals) > 0 else 0.0
+          v_e = vals[1] if len(vals) > 1 else 0.0
+        if math.hypot(v_n, v_e) > 0.1:
+          return (math.degrees(math.atan2(v_e, v_n)) + 360.0) % 360.0
+    except Exception:
+      pass
+
+    return 0.0
 
   def publish(self) -> None:
     speed_limit = self.get_current_speed_limit()

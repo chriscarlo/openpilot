@@ -69,6 +69,7 @@ class OsmMapData(BaseMapData):
       "latitude": self.last_position.latitude,
       "longitude": self.last_position.longitude,
       "altitude": self.last_altitude,
+      "bearing": float(getattr(self, 'last_bearing', 0.0) or 0.0),
     }
 
     self.mem_params.put("LastGPSPosition", json.dumps(params))
