@@ -5,6 +5,7 @@ This file is part of sunnypilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 """
 import json
+import math
 import os
 import platform
 
@@ -72,6 +73,12 @@ class OsmMapData(BaseMapData):
       gps = self.sm[self.gps_location_service]
       bearing_deg = float(getattr(gps, "bearingDeg", 0.0))
     except Exception:
+      bearing_deg = 0.0
+
+    # Avoid serializing NaN/Inf into params JSON. Go's json parser rejects these.
+    if not math.isfinite(bearing_deg):
+      bearing_deg = float(getattr(self, 'last_bearing', 0.0) or 0.0)
+    if not math.isfinite(bearing_deg):
       bearing_deg = 0.0
 
     params = {
