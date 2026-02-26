@@ -162,7 +162,8 @@ def test_fov_occlusion_clears_on_straight_even_with_mediocre_confidence():
 
   def saw_positive_accel_soon(trace, start_idx: int) -> bool:
     # Allow a little time for jerk-limited recovery back to positive accel.
-    return any(s['a_target'] > 0.05 for s in trace[start_idx:start_idx + int(1.5 / dt)])
+    # Include the boundary sample at exactly 1.5s (30 frames at 20 Hz).
+    return any(s['a_target'] > 0.05 for s in trace[start_idx:start_idx + int(1.5 / dt) + 1])
 
   trace_no_lead = run(None)
   assert any(s['fov_occluded'] for s in trace_no_lead[:n_curve]), "Expected FOV occlusion latch during curve phase"
@@ -609,7 +610,6 @@ def test_map_lookahead_cap_applies_when_available(monkeypatch):
     return bool(orig_get_bool(key, default))
   monkeypatch.setattr(vtsc, "_get_bool_param", _get_bool, raising=True)
   # Enable map lookahead via get_bool and patch data providers
-  import types
   def _gps():
     return (37.0, -122.0)
   def _map_pts():
@@ -721,6 +721,50 @@ def test_map_lookahead_absent_no_cap(monkeypatch):
   )
   assert snap
   assert bool(snap['map_tail_active']) is False
+
+
+def test_map_lookahead_reason_toggle_off_by_default():
+  # With map lookahead toggle OFF, diagnostics should make that explicit.
+  v0 = 25.0
+  v_cruise = 30.0
+  vtsc = mk_vtsc_with_params()
+  snap = simulate_sequence(
+    steps=_steps_constant(curvature=0.0, confidence=0.95, n=20),
+    vtsc=vtsc,
+    v0_mps=v0,
+    v_cruise_mps=v_cruise,
+    dt=0.05,
+  )
+  assert snap
+  assert snap.get('map_tail_reason') == 'toggle_off'
+  assert bool(snap.get('map_tail_active')) is False
+
+
+def test_map_lookahead_reason_no_gps_when_enabled(monkeypatch):
+  # With map lookahead enabled but no GPS, diagnostics should report no_gps.
+  v0 = 25.0
+  v_cruise = 30.0
+  vtsc = mk_vtsc_with_params()
+
+  orig_get_bool = vtsc._get_bool_param
+  def _get_bool(key: str, default: bool = False) -> bool:
+    if key == 'MTSCLookaheadEnabled':
+      return True
+    return bool(orig_get_bool(key, default))
+  monkeypatch.setattr(vtsc, "_get_bool_param", _get_bool, raising=True)
+  monkeypatch.setattr(vtsc, "_get_last_gps", lambda: None, raising=True)
+
+  snap = simulate_sequence(
+    steps=_steps_constant(curvature=0.0, confidence=0.95, n=20),
+    vtsc=vtsc,
+    v0_mps=v0,
+    v_cruise_mps=v_cruise,
+    dt=0.05,
+  )
+  assert snap
+  assert bool(snap.get('map_tail_active')) is False
+  assert snap.get('map_tail_reason') == 'no_gps'
+  assert snap.get('map_tail_compute_reason') == 'no_gps'
 
 
 def test_occlusion_dwell_hysteresis_stability():

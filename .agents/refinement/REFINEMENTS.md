@@ -95,3 +95,66 @@
 - **Diverges from user proposal:** no
 - **Files touched:** `sunnypilot/selfdrive/controls/lib/vision_turn_controller.py`, `tools/vtsc/vtsc_intervention_recorder.py`, `sunnypilot/selfdrive/controls/lib/tests/vtsc/test_scenarios.py`
 - **Notes:** No separate refinement beyond the requested VTSC fixes and diagnostics.
+
+### VTSC Map-Lookahead Inactive Reason Diagnostics
+- **Date:** 2026-02-25
+- **Classification:** A
+- **Category:** Code
+- **Status:** applied
+- **Approval:** na (user requested patch)
+- **User-visible change:** no
+- **Behavior/semantics change:** no (telemetry-only)
+- **Concurrency/threading change:** no
+- **Bounded?** na
+- **Structured?** na
+- **Potential downstream load increase:** negligible (added snapshot keys only)
+- **Diverges from user proposal:** no
+- **Files touched:** `sunnypilot/selfdrive/controls/lib/vision_turn_controller.py`, `sunnypilot/selfdrive/controls/lib/tests/vtsc/test_scenarios.py`
+- **Notes:** Added explicit map lookahead reason fields (`map_tail_reason`, `map_tail_compute_reason`) to VTSC debug snapshots to disambiguate inactive map-tail causes (`toggle_off`, `no_gps`, `no_map_curvatures`, `vision_suppressed`, etc.).
+
+### VTSC Intervention Recorder: Fix vEgo/vCruise Source (Deprecated ControlsState)
+- **Date:** 2026-02-26
+- **Classification:** C
+- **Category:** Code
+- **Status:** applied
+- **Approval:** na (bugfix for requested offline RCA capture)
+- **User-visible change:** yes (event bundles can now trigger when the toggle is enabled)
+- **Behavior/semantics change:** yes (source arbitration now uses correct speed values)
+- **Concurrency/threading change:** no
+- **Bounded?** na
+- **Structured?** na
+- **Potential downstream load increase:** bounded (more events may be recorded, but guarded by toggle + size cap)
+- **Diverges from user proposal:** no
+- **Files touched:** `tools/vtsc/vtsc_intervention_recorder.py`
+- **Notes:** `controlsState.*DEPRECATED` speed fields are 0 in this branch; recorder now uses `carState.vEgo/aEgo` and `carControl.hudControl.setSpeed` (m/s) so `vtscLimiting` arbitration and triggers work as intended.
+
+### Mapd: Include Bearing In LastGPSPosition For Way Matching
+- **Date:** 2026-02-26
+- **Classification:** C
+- **Category:** Code
+- **Status:** applied
+- **Approval:** implicit (user requested MTSC/map lookahead investigation and suspected mapd path issue)
+- **User-visible change:** potentially yes (may enable MapCurvatures population and MTSC/map-tail lookahead once deployed)
+- **Behavior/semantics change:** yes (extends LastGPSPosition JSON payload)
+- **Concurrency/threading change:** no
+- **Bounded?** na
+- **Structured?** na
+- **Potential downstream load increase:** no (same write rate, small extra field)
+- **Diverges from user proposal:** small (not a directory change; fixes a likely input mismatch for mapd)
+- **Files touched:** `sunnypilot/mapd/live_map_data/osm_map_data.py`
+- **Notes:** `openpilot-mapd` uses `bearing` to disambiguate forward direction on one-way roads. Without this field, map matching can fail and keep `MapCurvatures` empty (`[]`), disabling VTSC map-tail lookahead.
+
+### VTSC + Mapd Stabilization For Commit Gate (2026-02-26)
+- **Classification:** A
+- **Category:** Code
+- **Status:** applied
+- **Approval:** na (internal equivalent refactors/bugfixes to satisfy requested test/lint gate)
+- **User-visible change:** no direct UI/workflow changes
+- **Behavior/semantics change:** yes (fixes two VTSC regression paths and hardens mapd geometry fallback)
+- **Concurrency/threading change:** no
+- **Bounded?** na
+- **Structured?** na
+- **Potential downstream load increase:** no
+- **Diverges from user proposal:** no
+- **Files touched:** `sunnypilot/selfdrive/controls/lib/vision_turn_controller.py`, `sunnypilot/selfdrive/controls/lib/tests/vtsc/test_scenarios.py`, `sunnypilot/mapd/live_map_data/osm_map_data.py`, `sunnypilot/mapd/tests/test_integration.py`, `tools/vtsc/vtsc_intervention_recorder.py`
+- **Notes:** Restored missing hold-threshold constant used by occluded hold gating, added map-tail reason diagnostics/tests, fixed mapd integration test patch targets/param fixtures, and hardened `update_location()` against geometry-update exceptions while preserving legacy behavior.

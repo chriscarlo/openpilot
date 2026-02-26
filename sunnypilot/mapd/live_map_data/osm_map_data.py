@@ -65,17 +65,31 @@ class OsmMapData(BaseMapData):
     if self.last_position is None or self.last_altitude is None:
       return
 
+    # openpilot-mapd expects LastGPSPosition to include `bearing` (degrees) to
+    # disambiguate direction on one-way roads. Without it, mapd can fail to match
+    # the current way and MTSC/MapCurvatures can stay empty (`[]`).
+    try:
+      gps = self.sm[self.gps_location_service]
+      bearing_deg = float(getattr(gps, "bearingDeg", 0.0))
+    except Exception:
+      bearing_deg = 0.0
+
     params = {
       "latitude": self.last_position.latitude,
       "longitude": self.last_position.longitude,
       "altitude": self.last_altitude,
-      "bearing": float(getattr(self, 'last_bearing', 0.0) or 0.0),
+      "bearing": bearing_deg,
     }
 
     self.mem_params.put("LastGPSPosition", json.dumps(params))
 
-    # Update road geometry information
-    self._update_road_geometry()
+    # Update road geometry information, but never let geometry failures break
+    # legacy mapd behavior.
+    try:
+      self._update_road_geometry()
+    except Exception as e:
+      cloudlog.error(f"Error updating road geometry: {e}")
+      self.road_geometry_valid = False
 
   def _update_road_geometry(self):
     """Update road geometry data for current position."""
@@ -110,7 +124,7 @@ class OsmMapData(BaseMapData):
     except Exception:
       pass
     # Fallback to legacy shared memory param if available
-    return str(self.mem_params.get("RoadName"))
+    return str(self.mem_params.get("RoadName") or "")
 
   def get_next_speed_limit_and_distance(self) -> tuple[float, float]:
     next_speed_limit_section_str = self.mem_params.get("NextMapSpeedLimit")

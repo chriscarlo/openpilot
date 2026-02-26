@@ -8,10 +8,28 @@ road geometry features without breaking existing functionality.
 
 import unittest
 import time
+import json
 from unittest.mock import patch, MagicMock
 
 from openpilot.sunnypilot.mapd.live_map_data.osm_map_data import OsmMapData
 from openpilot.sunnypilot.navd.helpers import Coordinate
+
+
+def _make_mock_params():
+    params = MagicMock()
+
+    def _get(key, *args, **kwargs):
+        if key == "LastGPSPosition":
+            return "{}"
+        if key in ("MapSpeedLimit", "NextMapSpeedLimit", "RoadName"):
+            return None
+        return None
+
+    params.get.side_effect = _get
+    params.get_bool.return_value = False
+    params.put.return_value = None
+    params.put_bool.return_value = None
+    return params
 
 
 class TestMapdIntegration(unittest.TestCase):
@@ -25,7 +43,7 @@ class TestMapdIntegration(unittest.TestCase):
         self.mock_mapd_root.return_value = "/tmp/test_mapd"
 
         # Mock messaging components
-        self.messaging_patcher = patch('cereal.messaging')
+        self.messaging_patcher = patch('openpilot.sunnypilot.mapd.live_map_data.base_map_data.messaging')
         self.mock_messaging = self.messaging_patcher.start()
 
         # Create mock message objects
@@ -36,20 +54,26 @@ class TestMapdIntegration(unittest.TestCase):
         self.mock_messaging.new_message.return_value = MagicMock()
 
         # Mock GPS service
-        self.gps_patcher = patch('openpilot.common.gps.get_gps_location_service')
+        self.gps_patcher = patch('openpilot.sunnypilot.mapd.live_map_data.base_map_data.get_gps_location_service')
         self.mock_gps_service = self.gps_patcher.start()
         self.mock_gps_service.return_value = 'gpsLocationExternal'
 
-        # Mock params
-        self.params_patcher = patch('openpilot.common.params.Params')
-        self.mock_params = self.params_patcher.start()
+        # Mock params used in both BaseMapData and OsmMapData modules
+        self.params_patcher_base = patch('openpilot.sunnypilot.mapd.live_map_data.base_map_data.Params')
+        self.mock_params_base = self.params_patcher_base.start()
+        self.params_patcher_osm = patch('openpilot.sunnypilot.mapd.live_map_data.osm_map_data.Params')
+        self.mock_params_osm = self.params_patcher_osm.start()
+        params_instance = _make_mock_params()
+        self.mock_params_base.return_value = params_instance
+        self.mock_params_osm.return_value = params_instance
 
     def tearDown(self):
         """Clean up test environment."""
         self.mapd_patcher.stop()
         self.messaging_patcher.stop()
         self.gps_patcher.stop()
-        self.params_patcher.stop()
+        self.params_patcher_base.stop()
+        self.params_patcher_osm.stop()
 
     def test_osm_map_data_initialization(self):
         """Test that OsmMapData initializes without errors."""
@@ -97,6 +121,35 @@ class TestMapdIntegration(unittest.TestCase):
             self.assertFalse(map_data.road_geometry_valid)
         except Exception as e:
             self.fail(f"update_location failed with no database: {e}")
+
+    def test_update_location_writes_last_gps_with_bearing(self):
+        """LastGPSPosition should include bearing for mapd one-way matching."""
+        map_data = OsmMapData()
+        map_data.mem_params = MagicMock()
+
+        map_data.last_position = Coordinate(38.73152, -120.78821)
+        map_data.last_altitude = 1012.5
+
+        # Mock GPS feed with bearing from cereal gpsLocation service
+        gps_msg = MagicMock()
+        gps_msg.bearingDeg = 274.83
+        map_data.sm = MagicMock()
+        map_data.sm.__getitem__.return_value = gps_msg
+
+        # Isolate this test from road geometry extractor side effects
+        with patch.object(map_data, "_update_road_geometry", return_value=None):
+            map_data.update_location()
+
+        # Validate payload written to LastGPSPosition includes bearing
+        self.assertTrue(map_data.mem_params.put.called)
+        args, _kwargs = map_data.mem_params.put.call_args
+        self.assertGreaterEqual(len(args), 2)
+        self.assertEqual(args[0], "LastGPSPosition")
+        payload = json.loads(args[1])
+        self.assertAlmostEqual(payload.get("latitude"), 38.73152, places=5)
+        self.assertAlmostEqual(payload.get("longitude"), -120.78821, places=5)
+        self.assertAlmostEqual(payload.get("altitude"), 1012.5, places=1)
+        self.assertAlmostEqual(payload.get("bearing"), 274.83, places=2)
 
     def test_publish_with_no_road_data(self):
         """Test publish method works when no road geometry data is available."""
@@ -198,7 +251,7 @@ class TestMapdFallbackBehavior(unittest.TestCase):
         self.patches.append(hw_patch)
 
         # Mock messaging
-        msg_patch = patch('cereal.messaging')
+        msg_patch = patch('openpilot.sunnypilot.mapd.live_map_data.base_map_data.messaging')
         self.mock_messaging = msg_patch.start()
         self.mock_pm = MagicMock()
         self.mock_sm = MagicMock()
@@ -207,15 +260,21 @@ class TestMapdFallbackBehavior(unittest.TestCase):
         self.patches.append(msg_patch)
 
         # Mock GPS
-        gps_patch = patch('openpilot.common.gps.get_gps_location_service')
+        gps_patch = patch('openpilot.sunnypilot.mapd.live_map_data.base_map_data.get_gps_location_service')
         self.mock_gps_service = gps_patch.start()
         self.mock_gps_service.return_value = 'gpsLocationExternal'
         self.patches.append(gps_patch)
 
-        # Mock params
-        params_patch = patch('openpilot.common.params.Params')
-        self.mock_params = params_patch.start()
-        self.patches.append(params_patch)
+        # Mock params used in both BaseMapData and OsmMapData modules
+        params_base_patch = patch('openpilot.sunnypilot.mapd.live_map_data.base_map_data.Params')
+        self.mock_params_base = params_base_patch.start()
+        self.patches.append(params_base_patch)
+        params_osm_patch = patch('openpilot.sunnypilot.mapd.live_map_data.osm_map_data.Params')
+        self.mock_params_osm = params_osm_patch.start()
+        self.patches.append(params_osm_patch)
+        params_instance = _make_mock_params()
+        self.mock_params_base.return_value = params_instance
+        self.mock_params_osm.return_value = params_instance
 
     def tearDown(self):
         """Clean up patches."""

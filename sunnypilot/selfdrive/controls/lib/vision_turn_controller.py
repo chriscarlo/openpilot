@@ -45,6 +45,8 @@ VTURN_HOLD_S = 1.2            # tuned from rlogs: typical planner response ≈ 0
 # Under degraded vision we still want a hold, but make it shorter to avoid "sticky" slowdowns after
 # a curve ends (especially when the UI state machine keeps predicted curvature slightly non-zero).
 VTURN_HOLD_S_OCCLUDED = 0.85
+# Minimum predicted lateral acceleration (m/s^2) to treat as real turn evidence for hold gating.
+_ENTERING_PRED_LAT_ACC_TH = 1.3
 
 # Global model-horizon phase advance (seconds). Shifts both braking onset and post-apex
 # release earlier to compensate planner/actuation latency.
@@ -797,6 +799,9 @@ class VisionTurnController:
     self._map_tail_last_cap = None
     self._map_tail_last_start = 0.0
     self._map_tail_last_coverage = 0.0
+    # Debug-only map lookahead diagnostics (why map cap is inactive this frame)
+    self._map_tail_reason = "init"
+    self._map_tail_compute_reason = "init"
 
     # Lead-aware occlusion bypass
     self._occl_bypass_with_lead = True
@@ -994,6 +999,8 @@ class VisionTurnController:
       map_cap = float(getattr(self, '_map_tail_last_cap', 0.0) or 0.0)
       map_start = float(getattr(self, '_map_tail_last_start', 0.0) or 0.0)
       map_cov = float(getattr(self, '_map_tail_last_coverage', 0.0) or 0.0)
+      map_reason = str(getattr(self, '_map_tail_reason', '') or '')
+      map_compute_reason = str(getattr(self, '_map_tail_compute_reason', '') or '')
       # Limits and commands
       comfort = float(getattr(self, '_comfort_decel_limit', -1.47))
       max_adapt = float(getattr(self, '_max_adaptive_decel', -6.0))
@@ -1036,6 +1043,7 @@ class VisionTurnController:
         'fov_occluded': fov_occ,
         'vis_horizon_s': vis_h, 'tail_frac': tail_frac, 's_tail': s_tail, 'early_no_raise': enr,
         'map_tail_active': map_active, 'map_tail_cap': map_cap, 'map_tail_start_m': map_start, 'map_tail_coverage': map_cov,
+        'map_tail_reason': map_reason, 'map_tail_compute_reason': map_compute_reason,
         'comfort_decel': comfort, 'max_adaptive_decel': max_adapt, 'decel_cmd': decel_cmd, 'jerk_cmd': jerk_cmd, 'a_cmd': a_cmd,
         # New fields for quick triage on road
         'active_cap': active_cap, 'vtsc_cmd': vtsc_cmd,
@@ -1693,7 +1701,10 @@ class VisionTurnController:
           self._overshoot_trigger_in_s = raw_trigger_distance / max(self._v_ego, 0.1) + overshoot_phase_offset_s
           self._v_overshoot_distance = max(raw_trigger_distance, float(self._overshoot_min_distance))
 
-          _debug(f'TVC: Advanced High LatAcc. Dist: {self._v_overshoot_distance:.2f}, v: {self._v_overshoot * CV.MS_TO_KPH:.2f}, anticipation: {anticipation_time:.1f}s')
+          _debug(
+            f"TVC: Advanced High LatAcc. Dist: {self._v_overshoot_distance:.2f}, "
+            f"v: {self._v_overshoot * CV.MS_TO_KPH:.2f}, anticipation: {anticipation_time:.1f}s"
+          )
 
         return  # Successfully processed vision data
 
@@ -1781,8 +1792,10 @@ class VisionTurnController:
     # Optional: apply map-based lookahead cap to extend horizon.
     # Map is "advance warning only": once vision has confident in-range turn evidence,
     # suppress map capping so vision remains the source of truth.
+    self._map_tail_reason = "toggle_off"
     try:
       if self._get_bool_param('MTSCLookaheadEnabled', False):
+        self._map_tail_reason = "enabled_no_cap"
         v_cap, s_start, coverage = self._map_tail_cap()
         if v_cap is not None:
           v_cap_f = float(v_cap)
@@ -1814,12 +1827,16 @@ class VisionTurnController:
           if map_cap_allowed:
             raw_target = min(raw_target, v_cap_f)
             self._map_tail_active = True
+            self._map_tail_reason = "applied"
           else:
             self._map_tail_active = False
+            self._map_tail_reason = "vision_suppressed"
         else:
           self._map_tail_active = False
+          self._map_tail_reason = str(getattr(self, '_map_tail_compute_reason', '') or 'no_cap')
     except Exception:
       self._map_tail_active = False
+      self._map_tail_reason = "exception"
     # Debug: record final target after map caps
     try:
       self._dbg_target_final = float(raw_target)
@@ -1881,7 +1898,6 @@ class VisionTurnController:
     # Pre-trigger by time-to-FOV-exit (TTFOV)
     k_min = float(getattr(self, '_fov_k_min', 2e-4))
     k_free = float(getattr(self, '_fov_k_freeway', FREEWAY_CURV_EPS))
-    s_long = float(getattr(self, '_fov_s_long_m', FREEWAY_MIN_VISIBLE_M))
     try:
       delta_psi = max(0.0, self._dbg_psi_thresh - self._dbg_psi_vis)
       delta_s_to_exit = delta_psi / max(abs(kappa_gate), 1e-9)
@@ -2152,15 +2168,14 @@ class VisionTurnController:
           else:
             # Interpolate from 0.10 at 0.004 to 0.90 at 0.008 (match harness diagnostics)
             tail_frac = 0.10 + 0.80 * ((k_now - 0.004) / 0.004)
-          try:
-            v_cap_tail = math.sqrt(max(0.0, v_now * v_now - 2.0 * a_cap * (tail_frac * s_tail)))
-          except Exception:
-            v_cap_tail = v_now
           # Speed-based gating: ignore tail floor above ~55 mph (pure physics) and taper between 50–55 mph
           v_gate_lo = 22.35  # m/s ~50 mph
           v_gate_hi = 24.5872  # m/s ~55 mph
           v_now_for_gate = max(0.0, self._v_ego)
-          blend = 0.0 if v_now_for_gate <= v_gate_lo else (1.0 if v_now_for_gate >= v_gate_hi else (v_now_for_gate - v_gate_lo) / max(1e-6, (v_gate_hi - v_gate_lo)))
+          blend = (
+            0.0 if v_now_for_gate <= v_gate_lo else
+            (1.0 if v_now_for_gate >= v_gate_hi else (v_now_for_gate - v_gate_lo) / max(1e-6, (v_gate_hi - v_gate_lo)))
+          )
           tail_frac_eff = tail_frac * (1.0 - blend)
           try:
             v_cap_tail_eff = math.sqrt(max(0.0, v_now * v_now - 2.0 * a_cap * (tail_frac_eff * s_tail)))
@@ -2174,7 +2189,6 @@ class VisionTurnController:
           except Exception:
             v_cap_tail_h = v_now
           v_far_h = min(v_occ_raw, v_cap_tail_h, self._v_cruise_setpoint)
-          d_req_gate = max(0.0, (v_now * v_now - v_far_gate * v_far_gate) / max(2e-3, 2.0 * a_cap))
           d_req_h = max(0.0, (v_now * v_now - v_far_h * v_far_h) / max(2e-3, 2.0 * a_cap))
           margin_dist = float(getattr(self, '_vis_margin_m', 10.0))
           # Use harness-equivalent margin for gating decisions with small buffer (≈2 m)
@@ -2556,7 +2570,10 @@ class VisionTurnController:
         conf = float(getattr(self._occlusion_state, "smoothed_confidence", 1.0))
         occ_start = float(getattr(self._occlusion_state, "occlusion_start_time", 0.0))
         now_t = time.time()
-        if (conf <= float(getattr(self, "_occl_conf_floor", OCCL_CONF_FLOOR))) and (now_t - occ_start >= float(getattr(self, "_fov_exit_relax_s", FOV_EXIT_RELAX_S))):
+        if (
+          conf <= float(getattr(self, "_occl_conf_floor", OCCL_CONF_FLOOR))
+          and (now_t - occ_start >= float(getattr(self, "_fov_exit_relax_s", FOV_EXIT_RELAX_S)))
+        ):
           cap_occl_vmin = min(cap_visible_vmin, cap_occl_vmin + float(getattr(self, "_occl_vmin_nudge_mps", OCCL_VMIN_NUDGE_MPS)))
       except Exception:
         pass
@@ -2822,12 +2839,15 @@ class VisionTurnController:
 
     Returns (v_cap_mps|None, start_distance_m, coverage_frac)
     """
+    self._map_tail_compute_reason = "unknown"
     gps = self._get_last_gps()
     if gps is None:
+      self._map_tail_compute_reason = "no_gps"
       return (None, 0.0, 0.0)
     lat0, lon0 = gps
     pts = self._load_map_curvatures()
     if len(pts) < 3:
+      self._map_tail_compute_reason = "no_map_curvatures"
       return (None, 0.0, 0.0)
 
     # Find nearest index to ego
@@ -2846,6 +2866,7 @@ class VisionTurnController:
       s_list = s_list[1:]
     k_list = [max(0.0, pts[j][2]) for j in range(i0+1, len(pts))]
     if not s_list or not k_list:
+      self._map_tail_compute_reason = "insufficient_map_points"
       return (None, 0.0, 0.0)
 
     # Limit horizon to ~800 m
@@ -2898,9 +2919,11 @@ class VisionTurnController:
         v_allow = v_now
       v_cap = min(v_cap, v_allow)
     if not any_future:
+      self._map_tail_compute_reason = "no_future_points_beyond_start"
       return (None, s_start, float(min(1.0, s_list[-1] / max(1e-3, s_start))))
 
     coverage = float(min(1.0, (s_list[-1] - s_start) / max(1e-3, (S_MAX - s_start)))) if s_list[-1] > s_start else 0.0
+    self._map_tail_compute_reason = "cap_available"
     return (max(0.0, v_cap), s_start, coverage)
 
   def update(self, sm, enabled, v_ego, a_ego, v_cruise_setpoint, v_cruise_cluster_setpoint=None):

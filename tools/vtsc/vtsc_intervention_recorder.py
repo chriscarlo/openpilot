@@ -32,8 +32,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
   sys.path.insert(0, str(REPO_ROOT))
 
-from cereal import messaging
-from opendbc.car.common.conversions import Conversions as CV
+from cereal import messaging  # noqa: E402
 
 
 REALDATA_DIR = Path("/data/media/0/realdata")
@@ -421,7 +420,7 @@ def main() -> int:
   # Subscriptions: keep minimal but sufficient to decide "VTSC is limiting".
   services = [
     "carControl",
-    "controlsState",
+    "carState",
     "selfdriveState",
     "onroadEvents",
     "longitudinalPlanSP",
@@ -491,9 +490,9 @@ def main() -> int:
     except Exception:
       cc = None
     try:
-      ctrls = sm["controlsState"]
+      cs = sm["carState"]
     except Exception:
-      ctrls = None
+      cs = None
     try:
       sds = sm["selfdriveState"]
     except Exception:
@@ -525,17 +524,18 @@ def main() -> int:
     lat_active = bool(getattr(cc, "latActive", False)) if cc is not None else False
     enabled = bool(getattr(sds, "enabled", False)) if sds is not None else False
 
-    # Cruise setpoint is in kph; convert to m/s.
+    # Cruise setpoint is already published in m/s as CarControl.HUDControl.setSpeed in this fork.
     try:
-      v_cruise_mps = float(getattr(ctrls, "vCruiseDEPRECATED", 0.0)) * float(CV.KPH_TO_MS) if ctrls is not None else 0.0
+      v_cruise_mps = float(getattr(getattr(cc, "hudControl", None), "setSpeed", 0.0)) if cc is not None else 0.0
     except Exception:
       v_cruise_mps = 0.0
+    # Ego speed/accel from CarState (m/s, m/s^2). `controlsState` DEPRECATED fields are 0 in this branch.
     try:
-      v_ego = float(getattr(ctrls, "vEgoDEPRECATED", 0.0)) if ctrls is not None else 0.0
+      v_ego = float(getattr(cs, "vEgo", 0.0)) if cs is not None else 0.0
     except Exception:
       v_ego = 0.0
     try:
-      a_ego = float(getattr(ctrls, "aEgoDEPRECATED", 0.0)) if ctrls is not None else 0.0
+      a_ego = float(getattr(cs, "aEgo", 0.0)) if cs is not None else 0.0
     except Exception:
       a_ego = 0.0
 
