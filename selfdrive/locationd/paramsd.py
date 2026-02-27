@@ -172,11 +172,17 @@ class VehicleParamsLearner:
     liveParameters.stiffnessFactorValid = 0.2 <= liveParameters.stiffnessFactor <= 5.0
     liveParameters.angleOffsetAverageValid = bool(self.avg_offset_valid)
     liveParameters.angleOffsetValid = bool(self.total_offset_valid)
+    # Roll estimate is weakly observable at low speed and can briefly spike its
+    # uncertainty during parking-lot turn-in/out maneuvers. Keep strict roll
+    # gating only when the learner is actively observing at road speed.
+    roll_confident = True
+    if self.active and self.observed_speed > LOW_ACTIVE_SPEED:
+      roll_confident = self.roll_valid and (roll_std < ROLL_STD_MAX)
+
     liveParameters.valid = all((
       liveParameters.angleOffsetAverageValid,
       liveParameters.angleOffsetValid ,
-      self.roll_valid,
-      roll_std < ROLL_STD_MAX,
+      roll_confident,
       liveParameters.stiffnessFactorValid,
       liveParameters.steerRatioValid,
     ))
