@@ -158,3 +158,19 @@
 - **Diverges from user proposal:** no
 - **Files touched:** `sunnypilot/selfdrive/controls/lib/vision_turn_controller.py`, `sunnypilot/selfdrive/controls/lib/tests/vtsc/test_scenarios.py`, `sunnypilot/mapd/live_map_data/osm_map_data.py`, `sunnypilot/mapd/tests/test_integration.py`, `tools/vtsc/vtsc_intervention_recorder.py`
 - **Notes:** Restored missing hold-threshold constant used by occluded hold gating, added map-tail reason diagnostics/tests, fixed mapd integration test patch targets/param fixtures, and hardened `update_location()` against geometry-update exceptions while preserving legacy behavior.
+
+### Paramsd Roll-Confidence A/B Validation Harness
+- **Date:** 2026-02-27
+- **Classification:** A
+- **Category:** Reliability
+- **Status:** applied
+- **Approval:** na (validation-only work requested by user)
+- **User-visible change:** no
+- **Behavior/semantics change:** no
+- **Concurrency/threading change:** no
+- **Bounded?** na
+- **Structured?** na
+- **Potential downstream load increase:** no
+- **Diverges from user proposal:** no
+- **Files touched:** `.agents/verification/VERIFICATION.md`, `.agents/refinement/REFINEMENTS.md`
+- **Notes:** Added deterministic A/B proof harness and command evidence to validate root cause and non-regression claims for `paramsd` roll-confidence gating without introducing runtime code changes.

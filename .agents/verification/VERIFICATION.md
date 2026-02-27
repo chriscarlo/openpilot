@@ -148,3 +148,150 @@ Results:
 
 Notes:
 - Repo-wide lint script (`scripts/lint/lint.sh`) reports broad pre-existing baseline issues outside this change set (docs/hooks/shebang/codespell/mypy across unrelated files).
+
+### Paramsd roll-confidence A/B root-cause proof (2026-02-27)
+
+Quick checks:
+```bash
+cd /home/chris/repos/chauffeur-dev4
+python3 -m py_compile selfdrive/locationd/paramsd.py selfdrive/selfdrived/selfdrived.py
+
+cd /home/chris/repos/chauffeur-dev4-ab
+python3 -m py_compile selfdrive/locationd/paramsd.py selfdrive/selfdrived/selfdrived.py
+```
+Result: passed.
+
+Targeted deterministic A/B assertion harness:
+```bash
+/home/chris/.venvs/chffrverify/bin/python - <<'PY'
+import json
+import os
+import subprocess
+import textwrap
+
+PYTHON = '/home/chris/.venvs/chffrverify/bin/python'
+BASE = '/home/chris/repos/chauffeur-dev4-ab'      # db285c8c8 (pre-fix)
+PATCHED = '/home/chris/repos/chauffeur-dev4'      # 9529c237e (with fix)
+
+child_code = textwrap.dedent('''
+import json
+import numpy as np
+from types import SimpleNamespace
+from openpilot.selfdrive.locationd.paramsd import VehicleParamsLearner, States, ROLL_STD_MAX, LOW_ACTIVE_SPEED
+
+def build_dummy(*, active: bool, speed: float, roll_std: float, roll_valid_seed: bool = True, steer_ratio: float = 1.0, stiffness: float = 1.0, angle_offset_deg: float = 0.0, road_roll_rad: float = 0.0, yaw_rate: float = 0.0):
+  x = np.zeros((9, 1), dtype=float)
+  x[States.STEER_RATIO] = steer_ratio
+  x[States.STIFFNESS] = stiffness
+  x[States.ANGLE_OFFSET] = np.radians(angle_offset_deg)
+  x[States.ANGLE_OFFSET_FAST] = 0.0
+  x[States.ROAD_ROLL] = road_roll_rad
+  x[States.YAW_RATE] = yaw_rate
+
+  P = np.eye(9, dtype=float) * 1e-6
+  P[States.ROAD_ROLL, States.ROAD_ROLL] = roll_std ** 2
+
+  return SimpleNamespace(
+    kf=SimpleNamespace(x=x, P=P),
+    angle_offset=angle_offset_deg,
+    avg_angle_offset=angle_offset_deg,
+    roll=road_roll_rad,
+    active=active,
+    observed_speed=speed,
+    observed_yaw_rate=0.0,
+    avg_offset_valid=True,
+    total_offset_valid=True,
+    roll_valid=roll_valid_seed,
+    min_sr=0.5,
+    max_sr=2.0,
+    reset=lambda _t: None,
+  )
+
+def run_case(**kwargs):
+  dummy = build_dummy(**kwargs)
+  msg = VehicleParamsLearner.get_msg(dummy, valid=True, debug=False)
+  lp = msg.liveParameters
+  return {
+    'lp_valid': bool(lp.valid),
+    'msg_valid': bool(msg.valid),
+    'sensor_valid': bool(lp.sensorValid),
+    'steer_ratio_valid': bool(lp.steerRatioValid),
+  }
+
+rs = {
+  'meta': {
+    'roll_std_max': float(ROLL_STD_MAX),
+    'low_active_speed': float(LOW_ACTIVE_SPEED),
+  },
+  'cases': {
+    'low_speed_high_roll_std': run_case(active=True, speed=5.0, roll_std=ROLL_STD_MAX * 1.30),
+    'high_speed_high_roll_std': run_case(active=True, speed=20.0, roll_std=ROLL_STD_MAX * 1.30),
+    'high_speed_good_roll_std': run_case(active=True, speed=20.0, roll_std=ROLL_STD_MAX * 0.25),
+    'low_speed_bad_steer_ratio': run_case(active=True, speed=5.0, roll_std=ROLL_STD_MAX * 0.25, steer_ratio=2.5),
+  },
+}
+print(json.dumps(rs))
+''')
+
+def run(repo):
+  env = os.environ.copy()
+  env['PYTHONPATH'] = repo
+  out = subprocess.check_output([PYTHON, '-c', child_code], env=env, text=True)
+  return json.loads(out)
+
+base = run(BASE)
+patched = run(PATCHED)
+
+# Root-cause proof: pre-fix invalid at low speed + high roll_std; patched valid
+assert base['cases']['low_speed_high_roll_std']['lp_valid'] is False
+assert patched['cases']['low_speed_high_roll_std']['lp_valid'] is True
+
+# Non-regression: high-speed roll gating unchanged
+assert base['cases']['high_speed_high_roll_std']['lp_valid'] is False
+assert patched['cases']['high_speed_high_roll_std']['lp_valid'] is False
+assert base['cases']['high_speed_good_roll_std']['lp_valid'] is True
+assert patched['cases']['high_speed_good_roll_std']['lp_valid'] is True
+
+# Non-regression: unrelated validity checks remain enforced
+assert base['cases']['low_speed_bad_steer_ratio']['lp_valid'] is False
+assert patched['cases']['low_speed_bad_steer_ratio']['lp_valid'] is False
+
+# Message-level valid pass-through unchanged
+for label in base['cases']:
+  assert base['cases'][label]['msg_valid'] is True
+  assert patched['cases'][label]['msg_valid'] is True
+
+print('AB_PARAMS_ROOTCAUSE_CHECK: PASS')
+print(json.dumps({'baseline': base, 'patched': patched}, indent=2))
+PY
+```
+Result: passed (`AB_PARAMS_ROOTCAUSE_CHECK: PASS`).
+
+Build/module gate (required runtime modules in both trees):
+```bash
+# baseline worktree
+cd /home/chris/repos/chauffeur-dev4-ab
+PATH=/home/chris/.venvs/chffrverify/bin:$PATH /home/chris/.venvs/chffrverify/bin/scons -j"$(nproc)" -u common/params_pyx.so msgq_repo/msgq/ipc_pyx.so
+PATH=/home/chris/.venvs/chffrverify/bin:$PATH /home/chris/.venvs/chffrverify/bin/scons -j"$(nproc)" -u common/transformations/transformations.so
+PATH=/home/chris/.venvs/chffrverify/bin:$PATH /home/chris/.venvs/chffrverify/bin/scons -j"$(nproc)" -u rednose/helpers/ekf_sym_pyx.so
+PATH=/home/chris/.venvs/chffrverify/bin:$PATH /home/chris/.venvs/chffrverify/bin/scons -j"$(nproc)" -u selfdrive/pandad/pandad_api_impl.so
+
+# patched tree
+cd /home/chris/repos/chauffeur-dev4
+PATH=/home/chris/.venvs/chffrverify/bin:$PATH /home/chris/.venvs/chffrverify/bin/scons -j"$(nproc)" -u rednose/helpers/ekf_sym_pyx.so
+PATH=/home/chris/.venvs/chffrverify/bin:$PATH /home/chris/.venvs/chffrverify/bin/scons -j"$(nproc)" -u selfdrive/pandad/pandad_api_impl.so
+```
+Result: passed.
+
+Known skips:
+- Device integration drive/replay verification for this specific event path.
+- Reason: device currently unreachable from office network.
+- Follow-up: run the same branch on device and confirm no `paramsdTemporaryError` during parking-lot turn-in/out while retaining high-speed roll safeguards.
+
+#### Re-validation on updated dev4 tip (2026-02-27)
+
+After fast-forwarding `chauffeur-dev4` to `67df2ecd88a020855fe7065560723849f551e001` (docs-hygiene/AGENTS update), re-ran the same deterministic A/B assertion harness against:
+- baseline worktree: `/home/chris/repos/chauffeur-dev4-ab` (`db285c8c8`)
+- patched tree: `/home/chris/repos/chauffeur-dev4` (`67df2ecd8`)
+
+Result: passed (`AB_PARAMS_ROOTCAUSE_CHECK_DEV4_HEAD: PASS`).
