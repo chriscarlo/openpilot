@@ -43,21 +43,32 @@
 - Mark long tests with `@pytest.mark.slow`; device-only with `@pytest.mark.tici`.
 - Name tests `test_*.py`; place next to code or under a module `tests/` dir.
 
+## Debug Tasks
+- If your environment supports named *Skills*, use the `root-cause-debugger` skill for any debugging intent. If it does not, follow the same intent: prove a root cause (repro → isolate → fix → validate), not symptom suppression.
+- Treat both explicit and implicit wording as debug intent (for example: "debug X", "figure out what's wrong with this feature and fix it", "why is this test flaky/failing", "find the cause of this regression").
+- Do not treat debug intent as feature work until root cause is proven and validated.
+
+## Documentation Tasks
+- If your environment supports named *Skills*, always use the `docs-hygiene` skill for any documentation intent (writing/updating `docs/` or `docs/chauffeur/`, adding debug/experiment writeups, or curating artifacts/logs). If it does not, still follow the same hygiene rules (keep docs under `docs/`, keep raw artifacts under `.cache/`, avoid `final-final-*` naming).
+
 ## Commit & Pull Request Guidelines
 - Commits: imperative mood with scoped prefix, e.g., `selfdrive: fix MPC latency`.
-- Branch policy: work only on `chauffeur-dev3` in this workspace. PRs target `chauffeur-dev3`.
+- Branch policy: work only on `chauffeur-dev4` in this workspace. PRs target `chauffeur-dev4`.
+  - If you are asked to do work while *not* on `chauffeur-dev4`, stop and verify with the user before proceeding.
+  - Do not switch branches without explicit user confirmation (offer to switch to `chauffeur-dev4`).
   - Note: `chubbs-merge` is not an active development branch right now; use it only for debugging comparisons or targeted ports when explicitly requested.
   - Note: `chauffeur-dev2` is deprecated.
 - PRs: include rationale, verification steps (routes/logs for car changes), linked issues, and tests. Use templates in `.github/pull_request_template.md`.
 
-## Agent Planning (update_plan tool)
+## Agent Planning (tool-optional)
 
-- When the plan tool is available (session launched with `-c include_plan_tool=true`), always maintain a concise task plan using the `update_plan` tool.
+- If you have an `update_plan` tool, maintain a concise task plan with it.
 - Create the plan at task start, then update it after each meaningful change (file edits, commands, test runs).
 - Keep 3–6 steps total. Use statuses: `pending`, `in_progress`, `completed`.
 - Exactly one step may be `in_progress` at a time.
 - Prefer small, verifiable steps; revise instead of appending long tails.
-- If the tool is not enabled, ask to enable it: “Launch Codex with `-c include_plan_tool=true` (e.g., `codexh`/`codexl`) so I can publish plan updates.”
+- If you do **not** have an `update_plan` tool, keep an equivalent short plan in the conversation and update it as you go.
+- Codex/GPT-only: If you are running in Codex CLI and `update_plan` is unavailable, ask the user to relaunch with `-c include_plan_tool=true` (e.g., `codexh`/`codexl`). If you are not running in Codex CLI, ignore this note.
 
 Example intent (do not paste literally; invoke the tool):
 - explanation: short reason for changes when the plan structure shifts

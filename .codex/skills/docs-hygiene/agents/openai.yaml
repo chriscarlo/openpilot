@@ -1,0 +1,4 @@
+interface:
+  display_name: "Docs Hygiene"
+  short_description: "Write reproducible docs and tidy artifacts"
+  default_prompt: "Use $docs-hygiene to write a reproducible debug/experiment note and organize artifacts without 'final-final' filenames."
