@@ -22,7 +22,7 @@ def dmonitoringd_thread():
       # iterate when model has new output
       continue
 
-    valid = sm.all_checks()
+    valid = sm.all_checks(service_list=['driverStateV2', 'liveCalibration', 'selfdriveState', 'modelV2', 'carControl'])
     if valid:
       DM.run_step(sm)
 

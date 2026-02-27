@@ -379,7 +379,8 @@ def main():
 
   while True:
     sm.update()
-    if sm.all_checks():
+    all_checks = sm.all_checks(service_list=['livePose', 'liveCalibration', 'controlsState', 'carControl'])
+    if all_checks:
       for which in sorted(sm.updated.keys(), key=lambda x: sm.logMonoTime[x]):
         if sm.updated[which]:
           t = sm.logMonoTime[which] * 1e-9
@@ -389,7 +390,7 @@ def main():
     # 4Hz driven by livePose
     if sm.frame % 5 == 0:
       lag_learner.update_estimate()
-      lag_msg = lag_learner.get_msg(sm.all_checks(), DEBUG)
+      lag_msg = lag_learner.get_msg(all_checks, DEBUG)
       lag_msg_dat = lag_msg.to_bytes()
       pm.send('liveDelay', lag_msg_dat)
 

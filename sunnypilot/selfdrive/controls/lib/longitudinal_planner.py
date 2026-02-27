@@ -105,7 +105,7 @@ class LongitudinalPlannerSP:
   def publish_longitudinal_plan_sp(self, sm: messaging.SubMaster, pm: messaging.PubMaster) -> None:
     plan_sp_send = messaging.new_message('longitudinalPlanSP')
 
-    plan_sp_send.valid = sm.all_checks(service_list=['carState', 'controlsState'])
+    plan_sp_send.valid = sm.all_checks(service_list=['controlsState'])
 
     longitudinalPlanSP = plan_sp_send.longitudinalPlanSP
     longitudinalPlanSP.events = self.events_sp.to_msg()

@@ -291,14 +291,15 @@ def main():
 
   while True:
     sm.update()
-    if sm.all_checks():
+    all_checks = sm.all_checks(service_list=['livePose', 'liveCalibration'])
+    if all_checks:
       for which in sorted(sm.updated.keys(), key=lambda x: sm.logMonoTime[x]):
         if sm.updated[which]:
           t = sm.logMonoTime[which] * 1e-9
           learner.handle_log(t, which, sm[which])
 
     if sm.updated['livePose']:
-      msg = learner.get_msg(sm.all_checks(), debug=DEBUG)
+      msg = learner.get_msg(all_checks, debug=DEBUG)
 
       msg_dat = msg.to_bytes()
       if sm.frame % 1200 == 0:  # once a minute

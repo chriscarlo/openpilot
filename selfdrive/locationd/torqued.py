@@ -254,7 +254,8 @@ def main(demo=False):
 
   while True:
     sm.update()
-    if sm.all_checks():
+    all_checks = sm.all_checks(service_list=['carControl', 'carOutput', 'liveCalibration', 'livePose', 'liveDelay'])
+    if all_checks:
       for which in sm.updated.keys():
         if sm.updated[which]:
           t = sm.logMonoTime[which] * 1e-9
@@ -262,11 +263,11 @@ def main(demo=False):
 
     # 4Hz driven by livePose
     if sm.frame % 5 == 0:
-      pm.send('liveTorqueParameters', estimator.get_msg(valid=sm.all_checks()))
+      pm.send('liveTorqueParameters', estimator.get_msg(valid=all_checks))
 
     # Cache points every 60 seconds while onroad
     if sm.frame % 240 == 0:
-      msg = estimator.get_msg(valid=sm.all_checks(), with_points=True)
+      msg = estimator.get_msg(valid=all_checks, with_points=True)
       params.put_nonblocking("LiveTorqueParameters", msg.to_bytes())
 
 
