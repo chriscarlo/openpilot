@@ -107,8 +107,8 @@ class BaseMapData(ABC):
     next_speed_limit, next_speed_limit_distance = self.get_next_speed_limit_and_distance()
 
     mapd_sp_send = messaging.new_message('liveMapDataSP')
-    # Follow chubbs wiring: valid only when GPS/livePose checks pass
-    mapd_sp_send.valid = self.sm.all_checks(service_list=[self.gps_location_service, 'livePose'])
+    # mapd publishes at 1 Hz, so do not apply avg-frequency checks to 20 Hz livePose here.
+    mapd_sp_send.valid = self.sm.all_checks(service_list=[self.gps_location_service]) and self.sm.all_alive(service_list=['livePose']) and self.sm.all_valid(service_list=['livePose'])
     live_map_data = mapd_sp_send.liveMapDataSP
 
     # Existing fields
