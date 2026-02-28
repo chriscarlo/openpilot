@@ -42,5 +42,11 @@ Trigger phrases:
 - Prefer concrete, locally verifiable guidance (exact file path, command, or config key).
 - Remove bullets once the underlying footgun is fixed in code/config or becomes obvious from repo defaults.
 
+## Device access
+- SSH profile: `ssh commaCar` (configured in `~/.ssh/config`).
+- `sudo` on device requires no password (NOPASSWD configured).
+- Repo on device: `/data/openpilot` (tracks `chauffeur-dev4`).
+- Deploy workflow: `git push` from dev machine, then `ssh commaCar "cd /data/openpilot && git pull && sudo reboot"`.
+
 ## Needs human confirmation (temporary; keep very short)
 - Any workflow expectations that live outside this repo (device deployment steps, protected branch name(s), etc.).
