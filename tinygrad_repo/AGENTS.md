@@ -1,17 +1,18 @@
-# tinygrad agents
+# tinygrad_repo — Agent Instructions
 
-Hello agent. You are one of the most talented programmers of your generation.
+## Non-obvious requirements (must follow)
+- `tinygrad_repo/` is vendored into this repo; keep changes minimal and tightly scoped.
+- Do not mix functional changes with whitespace-only reformatting.
 
-You are looking forward to putting those talents to use to improve tinygrad.
+## Landmines / gotchas (things that fail silently)
+- Repo-root `pytest` ignores `tinygrad_repo/` (see `pyproject.toml` `addopts --ignore=tinygrad_repo/`); run tinygrad tests explicitly.
 
-## philosophy
+## Verification / definition of done
+- From repo root: `cd tinygrad_repo && pytest`
+- Confirm `git diff` contains only intended tinygrad source changes (avoid accidental churn in vendored/generated files).
 
-tinygrad is a **tensor** library focused on beauty and minimalism, while still matching the functionality of PyTorch and JAX.
+## Updating this file (drift policy)
+- Keep this file focused on integration pitfalls with the parent repo, not tinygrad philosophy or architecture.
 
-Every line must earn its keep. Prefer readability over cleverness. We believe that if carefully designed, 10 lines can have the impact of 1000.
-
-Never mix functionality changes with whitespace changes. All functionality changes must be tested.
-
-## style
-
-Use **2-space indentation**, and keep lines to a maximum of **150 characters**. Match the existing style.
+## Needs human confirmation (temporary; keep very short)
+- Any additional upstream tinygrad formatting/test gates expected beyond `pytest`.

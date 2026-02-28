@@ -1,19 +1,18 @@
-**VTSC Debug Docs Structure**
-- **Root:** `docs/chauffeur/vtsc/debug/`
-- **Daily Folders:** `debug_YYYY-MM-DD` (or `debug_YYYYMMDD_HHMM` for multiple sessions in a day)
-- **Per-Day Contents:**
-  - `NOTES.md`: summary, issues found, changelog (what files changed and why), next steps, and any results.
-  - `monitor_vtsc_checklist.md`: step-by-step on-device monitoring checklist.
-  - `artifacts/`: optional subfolder for copied snippets, small TSVs/plots, watcher output samples.
-  - Links to routes/segments reviewed (paths under `/data/media/0/realdata/...`).
+# docs/chauffeur/vtsc — Agent Instructions
 
-**Conventions**
-- Keep entries concise and time-stamped; prefer links/paths over pasted logs.
-- Place ad-hoc scripts under `tools/vtsc/` and reference them in the notes.
-- When asked to “monitor VTSC debugging”, use the latest `monitor_vtsc_checklist.md` in the most recent daily folder.
+## Non-obvious requirements (must follow)
+- Prefer durable writeups under `docs/chauffeur/vtsc/` and keep raw/large artifacts untracked under `.cache/` unless explicitly requested.
+- For debug sessions, create/extend a dated folder under `docs/chauffeur/vtsc/debug/` (existing convention: `debug_YYYY-MM-DD/`) and include a clear human summary (`NOTES.md` or equivalent).
 
-**Key On‑Device Sources**
-- Snapshots (if enabled): `/data/media/0/VTSCDebug/vtsc_snapshots.jsonl`
-- Swaglogs (rotating): `/data/log/swaglog.*`
-- Watcher: `tools/vtsc/vtsc_watch.py` → prints compact VTSC lines in real time.
+## Landmines / gotchas (things that fail silently)
+- On-device paths referenced in VTSC docs (`/data/media/0/...`, `/data/log/...`) vary by device/setup; confirm before hardcoding or assuming they exist.
 
+## Verification / definition of done
+- Any new/updated workflow doc includes: environment assumptions, exact commands, and expected outputs/paths.
+- If you add/modify a script under `docs/chauffeur/vtsc/` or `tools/vtsc/`, run it at least once on a small input (or validate `--help`/usage).
+
+## Updating this file (drift policy)
+- Keep this file small; move detailed procedures into the specific doc they belong to.
+
+## Needs human confirmation (temporary; keep very short)
+- None.

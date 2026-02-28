@@ -12,6 +12,8 @@ Outputs concise lines with key fields and flags to detect:
 - freeway_failopen_missed: physics/visibility indicate fail-open, but occlusion cap active
 - double_occl_cap_suspect: raw target ~= occl cap while occl cap also active in active_cap
 - pretrigger_with_high_conf: pretrigger reason while conf is good
+- psi_below_thresh: occlusion active but psi_vis < psi_thresh
+- map_low_coverage: map cap winning with sparse coverage (<30%) and cap significantly below v_base
 
 Usage:
   python tools/vtsc/vtsc_watch.py [--snapshots] [--swaglog]
@@ -112,6 +114,12 @@ def evaluate_flags(d):
   # Occlusion while psi below threshold: gating inconsistency
   if cap == 'occlusion' and psi_vis < psi_thresh - 0.05:
     flags.append('psi_below_thresh')
+  # Map low coverage: map cap winning but coverage is sparse and cap is significantly below base
+  map_cov = float(d.get('map_tail_coverage', 1.0))
+  cap_map = float(d.get('cap_map_vmin', 0.0))
+  v_base = float(d.get('v_base', 0.0))
+  if cap == 'map' and map_cov < 0.3 and v_base > 0.0 and cap_map < (v_base - 1.0):
+    flags.append('map_low_coverage')
   return flags
 
 def render_line(d, src):
@@ -124,6 +132,7 @@ def render_line(d, src):
   cap = d.get('active_cap')
   cap_vis = fmt_float(d.get('cap_visible_vmin'))
   cap_occ = fmt_float(d.get('cap_occl_vmin'))
+  cap_map = fmt_float(d.get('cap_map_vmin'))
   psi = fmt_float(d.get('psi_vis'))
   psi_th = fmt_float(d.get('psi_thresh'))
   conf = fmt_float(d.get('conf', d.get('path_conf')))
@@ -133,7 +142,7 @@ def render_line(d, src):
   flags = evaluate_flags(d)
   flags_s = (",".join(flags)) if flags else "-"
   return (
-    f"[{src}] v={v} base={base} raw={raw} final={final} | cap={cap} vis={cap_vis} occ={cap_occ} | "
+    f"[{src}] v={v} base={base} raw={raw} final={final} | cap={cap} vis={cap_vis} occ={cap_occ} map={cap_map} | "
     f"v_vis={v_vis} v_occ={v_occ} conf={conf} psi={psi}/{psi_th} reason={reason} tail={tail}@{s_tail} | flags={flags_s}"
   )
 

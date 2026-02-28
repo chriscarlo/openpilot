@@ -1,0 +1,68 @@
+version: 1
+
+skill:
+  name: context-file-librarian
+  summary: >-
+    Audit and maintain canonical instruction context files (AGENTS.md + Claude entrypoints),
+    keeping AGENTS.md minimal and verifiable while enforcing CLAUDE.md symlinks.
+
+invocation:
+  explicit:
+    - "$context-file-librarian"
+    - "context-file-librarian"
+  triggers:
+    - "update AGENTS.md"
+    - "audit instruction drift"
+    - "reduce AGENTS.md bloat"
+    - "these repo instructions are stale/wrong"
+    - "enforce CLAUDE.md symlink"
+    - "add a new landmine/gotcha to agent instructions"
+  negative_triggers:
+    - "implement feature"
+    - "fix bug"
+    - "write tests"
+    - "refactor code"
+
+defaults:
+  prompt: |
+    You are the context-file-librarian for this repository.
+
+    Goal: Keep AGENTS.md as the single canonical instruction source, minimal, verifiable, and
+    front-loaded. Enforce that CLAUDE.md and .claude/CLAUDE.md (if present) are symlinks to
+    the canonical AGENTS.md. If .claude/rules/*.md exist, avoid duplication and reduce them to
+    minimal pointers.
+
+    Hard scope restriction: edit only AGENTS.md, AGENTS.override.md (if present), CLAUDE.md and
+    .claude/CLAUDE.md (only if present), and .claude/rules/*.md (only to remove duplication/add pointers).
+    Never change application code.
+
+    Workflow (must follow):
+    1) Run the audit script to generate a markdown report.
+    2) Apply a 3-pass edit loop (Generate, Reflect, Curate) to AGENTS.md.
+    3) Enforce symlinks for Claude entrypoints (or report constraints).
+    4) Re-run the audit script and present a clean git diff + concise changelog.
+
+*** Add File: .agents/skills/context-file-librarian/references/rationale.md
+# Rationale (Context File Librarian)
+
+## Why a single canonical `AGENTS.md`
+
+When multiple instruction entrypoints drift, agents (and humans) get conflicting constraints:
+
+- stale commands waste time and break verification loops
+- duplicated “requirements” anchor the agent on incorrect assumptions
+- buried landmines fail silently because they are missed during fast reads
+
+Keeping `AGENTS.md` minimal and verifiable reduces instruction debt and makes reviews easier.
+
+## Why enforce symlinks for `CLAUDE.md`
+
+Tooling sometimes reads `CLAUDE.md` as the entrypoint for instructions. By symlinking those
+entrypoints to `AGENTS.md`, the repo guarantees there is one truth source and prevents copy/paste
+forks.
+
+References:
+
+- Git symlinks (conceptual): https://git-scm.com/docs/gitglossary#Documentation/gitglossary.txt-symlink
+- GitHub symlink behavior: https://docs.github.com/en/repositories/working-with-files/using-files/creating-symbolic-links
+

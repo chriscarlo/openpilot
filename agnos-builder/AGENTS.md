@@ -1,19 +1,18 @@
-Purpose
-- This directory is NOT the canonical agnos-builder. It is a placeholder and warning guard only.
+# agnos-builder (placeholder) — Agent Instructions
 
-Canonical Location
-- Use and modify only: `/projects/agnos/agnos-builder`
+## Non-obvious requirements (must follow)
+- This `agnos-builder/` directory is a placeholder/warning guard; do not treat it as the canonical project.
+- If you need the real builder sources, use `/projects/agnos/agnos-builder` (this path exists in this workspace).
 
-Rules (must follow)
-- Do not build, patch, or push artifacts from this path to any device.
-- Do not open PRs or commits against this copy.
-- Treat any content that appears here as archived reference only.
-- If you believe changes were “made here”, reconcile them into the canonical `/projects/agnos/agnos-builder` and delete stray files here.
+## Landmines / gotchas (things that fail silently)
+- Building/patching/deploying from this placeholder path can produce “successful” artifacts from the wrong codebase.
 
-Background
-- A repo-local `agnos-builder` copy previously lived at this path and caused confusion during Bluetooth bring-up. That copy has been moved to:
-  - `/projects/chauffeur/data/openpilot/docs/chauffeur/bluetooth3x/archived/agnos-builder_local-YYYYMMDD-HHMMSS`
-- The placeholder remains so agents and tools see a clear warning and pointer.
+## Verification / definition of done
+- Before producing build artifacts, confirm `pwd` is not under `.../openpilot/agnos-builder/`.
+- Confirm `git diff` has no changes under `agnos-builder/` unless the user explicitly asked.
 
-Contact
-- If you need the archived state for forensics, look under `docs/chauffeur/bluetooth3x/archived/` or ask the maintainer.
+## Updating this file (drift policy)
+- Add rules only after a real confusion incident involving this placeholder path.
+
+## Needs human confirmation (temporary; keep very short)
+- Owner/contact and intended update workflow for `/projects/agnos/agnos-builder`.

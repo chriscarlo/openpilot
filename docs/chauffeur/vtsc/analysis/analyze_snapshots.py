@@ -9,7 +9,9 @@ Usage:
   python docs/chauffeur/vtsc/analysis/analyze_snapshots.py /path/to/vtsc_snapshots.jsonl [--dump-tsv out.tsv]
 
 No external deps; prints a concise summary and flags common issues. Optional TSV
-dump includes: ts, v (v_ego), v_base, v_vis, v_occ, v_lkg, cap_vis, cap_occ, final.
+dump includes 17 columns: ts, v, v_base, v_vis, v_occ, v_lkg, cap_visible, cap_occl,
+cap_map, map_cov, s_visible, v_target, a_req, comfort_margin, adaptive_margin,
+active_cap, final.
 """
 from __future__ import annotations
 
