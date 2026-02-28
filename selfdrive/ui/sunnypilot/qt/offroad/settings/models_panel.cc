@@ -349,6 +349,13 @@ void ModelsPanel::handleCurrentModelLblBtnClicked() {
     return;
   }
 
+  if (uiState()->scene.ignition) {
+    ConfirmationDialog::alert(
+      tr("Please power off the vehicle completely to install a different model."), this);
+    updateLabels();
+    return;
+  }
+
   // Handle "Stock" selection differently
   if (selectedBundleName == DEFAULT_MODEL) {
     params.remove("ModelManager_ActiveBundle");
@@ -380,7 +387,7 @@ void ModelsPanel::updateLabels() {
 
   updateModelManagerState();
   handleBundleDownloadProgress();
-  currentModelLblBtn->setEnabled(!is_onroad && !isDownloading());
+  currentModelLblBtn->setEnabled(!isDownloading());
   currentModelLblBtn->setValue(GetActiveModelInternalName());
   dynamicModeldOutputs->setEnabled(!is_onroad);
 
