@@ -179,9 +179,16 @@ class VehicleParamsLearner:
     if self.active and self.observed_speed > LOW_ACTIVE_SPEED:
       roll_confident = self.roll_valid and (roll_std < ROLL_STD_MAX)
 
+    # The fast angle offset component (ANGLE_OFFSET_FAST) is weakly observable
+    # at low speed and can drift when the KF receives asymmetric observations
+    # (yaw rate without matching steer angle). When inactive or at low speed,
+    # gate only on the stable average offset which is what controls actually use.
+    angle_offset_confident = liveParameters.angleOffsetAverageValid
+    if self.active and self.observed_speed > LOW_ACTIVE_SPEED:
+      angle_offset_confident = liveParameters.angleOffsetAverageValid and liveParameters.angleOffsetValid
+
     liveParameters.valid = all((
-      liveParameters.angleOffsetAverageValid,
-      liveParameters.angleOffsetValid ,
+      angle_offset_confident,
       roll_confident,
       liveParameters.stiffnessFactorValid,
       liveParameters.steerRatioValid,
@@ -297,7 +304,11 @@ def main():
 
   while True:
     sm.update()
-    all_checks = sm.all_checks(service_list=['livePose', 'liveCalibration'])
+    # paramsd needs synchronized livePose + carState for its Kalman filter.
+    # Without carState in the gate, yaw_rate observations (from livePose) can
+    # run without matching steer_angle observations (from carState), causing
+    # ANGLE_OFFSET_FAST to drift due to asymmetric KF updates.
+    all_checks = sm.all_checks(service_list=['livePose', 'liveCalibration', 'carState'])
     if all_checks:
       for which in sorted(sm.updated.keys(), key=lambda x: sm.logMonoTime[x]):
         if sm.updated[which]:
