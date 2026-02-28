@@ -11,6 +11,8 @@
 #include <cmath>
 #include <chrono>
 #include <QPainterPath>
+#include <QLinearGradient>
+#include <QRadialGradient>
 #include <QTransform>
 #include <QTime>
 #include <QMutexLocker>
@@ -116,10 +118,31 @@ void HudRendererSP::updateState(const UIState &s) {
   // Update base HUD state
   HudRenderer::updateState(s);
   
+  // Update subsystem readiness from selfdriveStateSP
+  if (s.sm && s.sm->valid("selfdriveStateSP") && s.sm->updated("selfdriveStateSP")) {
+    try {
+      const auto ss_sp = (*s.sm)["selfdriveStateSP"].getSelfdriveStateSP();
+      all_systems_ready_ = ss_sp.getAllSystemsReady();
+      auto statuses = ss_sp.getSubsystemStatuses();
+      subsystem_statuses_.clear();
+      subsystem_statuses_.reserve(statuses.size());
+      for (const auto &st : statuses) {
+        subsystem_statuses_.emplace_back(std::string(st.getName().cStr()), static_cast<int>(st.getStatus()));
+      }
+    } catch (const std::exception&) {
+      // Keep previous state on error
+    }
+  }
+
+  // Fade readiness column when engaged + all green
+  float target_opacity = (status == STATUS_ENGAGED && all_systems_ready_) ? 0.3f : 1.0f;
+  readiness_opacity_ += 0.05f * (target_opacity - readiness_opacity_);
+
   // Update RTI parameters more frequently (every 5 frames = 250ms) to reduce race condition
   if (s.sm && s.sm->frame % 5 == 0) {
     rti_enabled = Params().getBool("RTIEnabled");  // Master switch
     rti_hud_enabled = Params().getBool("RTIHUDEnabled");  // HUD display switch
+    vtsc_copilot_hud_enabled_ = Params().getBool("VTSCRallyCoPilotHUDEnabled");
   }
   
   // Update multiple threats only if RTI HUD is enabled
@@ -199,18 +222,211 @@ void HudRendererSP::updateState(const UIState &s) {
       rti_active = false;
     }
   }
+
+  // ===== VTSC Rally Co-Pilot curve preview (HUD) =====
+  vtsc_copilot_visible_ = false;
+  if (!vtsc_copilot_hud_enabled_ || !s.sm) {
+    // Hard-disable: do not animate, do not keep stale geometry.
+    vtsc_copilot_alpha_ = 0.0f;
+    vtsc_copilot_curve_points_m_.clear();
+    vtsc_copilot_visible_prev_ = false;
+    return;
+  }
+
+  bool got_live_data = false;
+  bool preview_valid = false;
+  bool have_points = false;
+
+  try {
+    if (s.sm->valid("longitudinalPlanSP")) {
+      got_live_data = true;
+      const auto lp_sp = (*s.sm)["longitudinalPlanSP"].getLongitudinalPlanSP();
+      const auto vtsc = lp_sp.getVisionTurnSpeedControl();
+
+      // Preview geometry + metadata (already computed by VTSC map enrichment; HUD only renders)
+      preview_valid = vtsc.getCurvePreviewValid();
+      vtsc_copilot_curve_distance_m_ = vtsc.getCurveDistanceM();
+      vtsc_copilot_curve_time_to_s_ = vtsc.getCurveTimeToS();
+      vtsc_copilot_curve_kappa_max_ = vtsc.getCurveMaxCurvature();
+      vtsc_copilot_curve_direction_ = static_cast<int>(vtsc.getCurveDirection());
+      vtsc_copilot_curve_severity_ = static_cast<int>(vtsc.getCurveSeverity());
+
+      // VTSC target speed (m/s) for display.
+      vtsc_target_speed_mps_ = vtsc.getVelocity();
+
+      // Only update geometry when the producer says it's valid.
+      if (preview_valid) {
+        std::vector<QPointF> new_pts;
+        auto pts = vtsc.getCurvePreviewPoints();
+        new_pts.reserve(static_cast<size_t>(pts.size()));
+        for (const auto &pt : pts) {
+          new_pts.emplace_back(pt.getXFwdM(), pt.getYLeftM());
+        }
+        have_points = (new_pts.size() >= 3);
+        if (have_points) {
+          vtsc_copilot_curve_points_m_ = std::move(new_pts);
+        }
+      }
+    }
+
+    const float kappa_max = vtsc_copilot_curve_kappa_max_;
+    constexpr float KAPPA_SHOW_MIN = 2.2e-3f;  // "just above slight" for first pass
+    constexpr float KAPPA_HOLD_MIN = 2.1e-3f;  // small hysteresis to avoid flicker
+    const bool kappa_entry = std::isfinite(kappa_max) && kappa_max >= KAPPA_SHOW_MIN;
+    const bool kappa_hold = std::isfinite(kappa_max) && kappa_max >= KAPPA_HOLD_MIN;
+
+    if (preview_valid && have_points) {
+      vtsc_copilot_visible_ = vtsc_copilot_visible_prev_ ? kappa_hold : kappa_entry;
+    } else {
+      vtsc_copilot_visible_ = false;
+    }
+
+    vtsc_copilot_visible_prev_ = vtsc_copilot_visible_;
+  } catch (const std::exception&) {
+    got_live_data = false;
+    vtsc_copilot_visible_ = false;
+    vtsc_copilot_visible_prev_ = false;
+  }
+
+  // Fade in/out for a game-HUD feel. Keep last geometry during fade-out.
+  const float target_alpha = vtsc_copilot_visible_ ? 1.0f : 0.0f;
+  const float k = vtsc_copilot_visible_ ? 0.22f : 0.12f;
+  vtsc_copilot_alpha_ += k * (target_alpha - vtsc_copilot_alpha_);
+  vtsc_copilot_alpha_ = std::clamp(vtsc_copilot_alpha_, 0.0f, 1.0f);
+
+  if ((vtsc_copilot_alpha_ < 0.01f) && !vtsc_copilot_visible_ && got_live_data) {
+    // Only clear when we've actually processed live data and fully faded out.
+    vtsc_copilot_curve_points_m_.clear();
+  }
 }
 
 void HudRendererSP::draw(QPainter &p, const QRect &surface_rect) {
   // Draw base HUD elements
   HudRenderer::draw(p, surface_rect);
-  
+
+  // Draw system readiness indicator
+  drawSystemReadiness(p, surface_rect);
+
+  // Draw VTSC rally co-pilot curve preview when enabled and visible (with fade)
+  if (vtsc_copilot_hud_enabled_ && vtsc_copilot_alpha_ > 0.01f) {
+    drawVTSCCoPilotCurve(p, surface_rect);
+  }
+
   // Draw RTI widget when enabled (multi-threat only)
   if (rti_enabled && rti_hud_enabled) {
     drawRTIThreatIndicatorMulti(p, surface_rect);
   }
 }
 
+
+void HudRendererSP::drawSystemReadiness(QPainter &p, const QRect &surface_rect) {
+  if (subsystem_statuses_.empty()) return;
+
+  p.save();
+  p.setRenderHint(QPainter::Antialiasing, true);
+
+  const float opacity = readiness_opacity_;
+  const bool show_labels = !all_systems_ready_;
+
+  // Dot sizing and layout
+  const int dot_r = 6;       // small dot radius (12px diameter)
+  const int master_r = 10;   // master dot radius (20px diameter)
+  const int spacing = 28;    // vertical spacing between dot centers
+  const int master_gap = 8;  // extra gap before master dot
+  const int label_gap = 6;   // gap between dot and label
+
+  // Total column height: N subsystem dots + gap + master dot
+  const int n = static_cast<int>(subsystem_statuses_.size());
+  const int col_h = (n - 1) * spacing + 2 * dot_r + master_gap + 2 * master_r;
+  const int x_center = 30;   // dot center x from left edge
+  const int y_top = (surface_rect.height() - col_h) / 2;
+
+  // Colors
+  static const QColor kRed(0xFF, 0x33, 0x33);
+  static const QColor kYellow(0xFF, 0xCC, 0x00);
+  static const QColor kGreen(0x33, 0xCC, 0x33);
+
+  auto colorForStatus = [&](int st) -> QColor {
+    if (st == 0) return kRed;
+    if (st == 1) return kYellow;
+    return kGreen;
+  };
+
+  // Background pill
+  const int pill_pad = 8;
+  int pill_w = show_labels ? 80 : 36;
+  QRect pill(x_center - pill_w / 2, y_top - pill_pad,
+             pill_w, col_h + 2 * pill_pad);
+  p.setPen(Qt::NoPen);
+  p.setBrush(QColor(0, 0, 0, static_cast<int>(100 * opacity)));
+  p.drawRoundedRect(pill, 12, 12);
+
+  // Draw subsystem dots (bottom to top: index 0 at bottom)
+  for (int i = 0; i < n; i++) {
+    const auto &[name, st] = subsystem_statuses_[i];
+    QColor c = colorForStatus(st);
+
+    // Y position: first dot at bottom, last at top
+    int y = y_top + col_h - 2 * master_r - master_gap - dot_r - i * spacing;
+
+    // Glow (larger circle at reduced opacity)
+    QColor glow = c;
+    glow.setAlphaF(0.3 * opacity);
+    p.setPen(Qt::NoPen);
+    p.setBrush(glow);
+    p.drawEllipse(QPoint(x_center, y), dot_r + 4, dot_r + 4);
+
+    // Dot
+    c.setAlphaF(opacity);
+    p.setBrush(c);
+    p.drawEllipse(QPoint(x_center, y), dot_r, dot_r);
+
+    // Label (only when not all green)
+    if (show_labels) {
+      QFont lbl_font = InterFont(18, QFont::DemiBold);
+      p.setFont(lbl_font);
+      c.setAlphaF(0.9 * opacity);
+      p.setPen(c);
+      p.drawText(x_center + dot_r + label_gap, y + 5, QString::fromStdString(name));
+    }
+  }
+
+  // Master dot at top
+  int master_y = y_top + master_r;
+  QColor master_c = all_systems_ready_ ? kGreen : kRed;
+
+  // Pulse effect when not all green
+  if (!all_systems_ready_) {
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now().time_since_epoch()).count();
+    float pulse = 0.6f + 0.4f * static_cast<float>(std::sin(ms / 500.0 * M_PI));
+    master_c.setAlphaF(pulse * opacity);
+  } else {
+    master_c.setAlphaF(opacity);
+  }
+
+  // Master glow
+  QColor master_glow = master_c;
+  master_glow.setAlphaF(0.3 * opacity);
+  p.setPen(Qt::NoPen);
+  p.setBrush(master_glow);
+  p.drawEllipse(QPoint(x_center, master_y), master_r + 5, master_r + 5);
+
+  // Master dot
+  p.setBrush(master_c);
+  p.drawEllipse(QPoint(x_center, master_y), master_r, master_r);
+
+  // Master label
+  if (show_labels) {
+    QFont lbl_font = InterFont(18, QFont::Bold);
+    p.setFont(lbl_font);
+    master_c.setAlphaF(0.9 * opacity);
+    p.setPen(master_c);
+    p.drawText(x_center + master_r + label_gap, master_y + 5, "ALL");
+  }
+
+  p.restore();
+}
 
 QColor HudRendererSP::getRTIThreatColor(float distance) const {
   // Arrows are always white by default
@@ -517,6 +733,385 @@ QString HudRendererSP::formatDistance(float distance_m) const {
       return QString("%1mi").arg(distance_mi, 0, 'f', 1);
     }
   }
+}
+
+static QString formatCurveDistance(float distance_m, bool is_metric) {
+  if (is_metric) {
+    if (distance_m < 1000.0f) {
+      return QString("%1m").arg(static_cast<int>(distance_m));
+    }
+    return QString("%1km").arg(distance_m / 1000.0f, 0, 'f', 1);
+  }
+
+  const float ft = distance_m * 3.28084f;
+  if (ft < 1000.0f) {
+    return QString("%1ft").arg(static_cast<int>(ft));
+  }
+  const float mi = distance_m / 1609.344f;
+  return QString("%1mi").arg(mi, 0, 'f', 1);
+}
+
+static QString formatCurveTime(float time_s) {
+  if (!std::isfinite(time_s) || time_s <= 0.0f) {
+    return QString("0.0s");
+  }
+  if (time_s < 60.0f) {
+    return QString("%1s").arg(time_s, 0, 'f', 1);
+  }
+  const int total = static_cast<int>(std::lround(time_s));
+  const int mm = total / 60;
+  const int ss = total % 60;
+  return QString("%1:%2").arg(mm).arg(ss, 2, 10, QChar('0'));
+}
+
+static QPainterPath buildSmoothStripMapPath(const std::vector<QPointF> &pts, float tension = 0.9f) {
+  // Catmull-Rom spline converted to cubic Beziers.
+  // This is a display-only smoothing step; the curve geometry itself is produced by VTSC map enrichment.
+  QPainterPath path;
+  if (pts.empty()) return path;
+  path.moveTo(pts.front());
+  if (pts.size() < 2) return path;
+
+  const float t = std::clamp(tension, 0.0f, 1.0f);
+  const float s = t / 6.0f;
+
+  for (size_t i = 0; i + 1 < pts.size(); i++) {
+    const QPointF &p0 = (i == 0) ? pts[0] : pts[i - 1];
+    const QPointF &p1 = pts[i];
+    const QPointF &p2 = pts[i + 1];
+    const QPointF &p3 = (i + 2 < pts.size()) ? pts[i + 2] : pts.back();
+
+    const QPointF c1 = p1 + (p2 - p0) * s;
+    const QPointF c2 = p2 - (p3 - p1) * s;
+    path.cubicTo(c1, c2, p2);
+  }
+
+  return path;
+}
+
+void HudRendererSP::drawCurveDirectionIcon(QPainter &p, const QRect &icon_rect, int direction) const {
+  p.save();
+  p.setRenderHint(QPainter::Antialiasing, true);
+
+  // Unknown: draw a simple dot.
+  if (direction != 1 && direction != 2) {
+    p.setPen(Qt::NoPen);
+    p.setBrush(QColor(255, 255, 255, 220));
+    p.drawEllipse(icon_rect.center(), icon_rect.width() / 8, icon_rect.height() / 8);
+    p.restore();
+    return;
+  }
+
+  // Build in a local coordinate system centered in icon_rect.
+  p.translate(icon_rect.center());
+  const bool is_right = (direction == 2);
+  if (is_right) {
+    p.scale(-1.0, 1.0);  // mirror horizontally for right curves
+  }
+
+  const float w = static_cast<float>(icon_rect.width());
+  const float h = static_cast<float>(icon_rect.height());
+  const float stroke = std::max(4.0f, std::min(w, h) * 0.12f);
+
+  QPainterPath path;
+  const QPointF p0(+0.35f * w, +0.30f * h);
+  const QPointF c1(+0.10f * w, +0.05f * h);
+  const QPointF c2(-0.15f * w, -0.05f * h);
+  const QPointF p3(-0.25f * w, -0.32f * h);
+  path.moveTo(p0);
+  path.cubicTo(c1, c2, p3);
+
+  p.setBrush(Qt::NoBrush);
+  p.setPen(QPen(QColor(255, 255, 255, 235), stroke, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+  p.drawPath(path);
+
+  // Arrow head at the end of the curve.
+  const QPointF tip = p3;
+  const QPointF a(tip.x() + 0.18f * w, tip.y() + 0.03f * h);
+  const QPointF b(tip.x() + 0.03f * w, tip.y() + 0.18f * h);
+  QPainterPath arrow;
+  arrow.moveTo(tip);
+  arrow.lineTo(a);
+  arrow.lineTo(b);
+  arrow.closeSubpath();
+  p.setPen(Qt::NoPen);
+  p.setBrush(QColor(255, 255, 255, 235));
+  p.drawPath(arrow);
+
+  p.restore();
+}
+
+void HudRendererSP::drawVTSCCoPilotCurve(QPainter &p, const QRect &surface_rect) {
+  // NOTE: We draw during fade-out too; don't gate on `vtsc_copilot_visible_` here.
+  if (vtsc_copilot_curve_points_m_.size() < 3 || vtsc_copilot_alpha_ < 0.01f) {
+    return;
+  }
+
+  // The `surface_rect` includes the engaged border; do not include that border when computing the right-third layout.
+  const QRect inner = surface_rect.adjusted(UI_BORDER_SIZE, UI_BORDER_SIZE, -UI_BORDER_SIZE, -UI_BORDER_SIZE);
+  const QRect right_third(inner.left() + (2 * inner.width()) / 3, inner.top(), inner.width() / 3, inner.height());
+
+  p.save();
+  p.setRenderHint(QPainter::Antialiasing, true);
+  p.setRenderHint(QPainter::TextAntialiasing, true);
+  p.setOpacity(p.opacity() * static_cast<qreal>(vtsc_copilot_alpha_));
+
+  // Global scale for this widget. User asked for 2x size and thickness.
+  constexpr float kScale = 2.5f;
+
+  // Geometry + labels live in an invisible bounding box, centered in the right third.
+  // (No card/container per user request.)
+  const int box_w = static_cast<int>(right_third.width() * 0.995f);
+  const int box_h = std::min(static_cast<int>(inner.height() * 0.875f), 950);
+
+  // Vertical placement: bias down to avoid the top-right steering mode indicator, but keep a safe
+  // bottom padding so we don't collide with the ACC Active border.
+  const int bottom_safe = static_cast<int>(14 * kScale);
+  const int box_left = right_third.center().x() - box_w / 2;
+  const int box_top = std::max(inner.top(), inner.bottom() - bottom_safe - box_h + 1);
+  const QRect box(box_left, box_top, box_w, box_h);
+
+  // 360-degree feathered halo (no hard container): dark behind the curve/text, fading to transparent.
+  // This matches the "header gradient" intent (contrast without a card) but in 360 degrees.
+  // Use a radius that reaches the nearest edge so the box boundary itself stays fully transparent.
+  const float radius = 0.50f * std::min(static_cast<float>(box.width()), static_cast<float>(box.height()));
+  QRadialGradient vignette(box.center(), radius);
+  vignette.setColorAt(0.00, QColor::fromRgbF(0, 0, 0, 0.40));
+  vignette.setColorAt(0.55, QColor::fromRgbF(0, 0, 0, 0.14));
+  vignette.setColorAt(1.00, QColor::fromRgbF(0, 0, 0, 0.00));
+  p.setPen(Qt::NoPen);
+  p.setBrush(vignette);
+  p.drawRect(box);
+
+  // Layout within the halo bounds.
+  const int pad = static_cast<int>(18 * kScale);
+  const int gap = static_cast<int>(12 * kScale);
+  const int top_h = static_cast<int>(32 * kScale);
+  const int bottom_h = static_cast<int>(34 * kScale);
+  const QRect speed_rect(box.left() + pad, box.top() + pad, box.width() - 2 * pad, top_h);
+  const QRect bottom_rect(box.left() + pad, box.bottom() - pad - bottom_h, box.width() - 2 * pad, bottom_h);
+  const int curve_top = speed_rect.bottom() + gap;
+  const int curve_bottom = bottom_rect.top() - gap;
+  const QRect curve_area(box.left() + pad, curve_top, box.width() - 2 * pad, std::max(0, curve_bottom - curve_top));
+
+  const QString dist_txt = formatCurveDistance(vtsc_copilot_curve_distance_m_, is_metric);
+  const QString time_txt = formatCurveTime(vtsc_copilot_curve_time_to_s_);
+
+  QString v_txt = "--";
+  if (std::isfinite(vtsc_target_speed_mps_) && vtsc_target_speed_mps_ > 0.1f) {
+    const float v_disp = vtsc_target_speed_mps_ * (is_metric ? MS_TO_KPH : MS_TO_MPH);
+    v_txt = QString("%1%2").arg(v_disp, 0, 'f', 0).arg(is_metric ? "km/h" : "mph");
+  }
+
+  auto drawTextShadowed = [&](const QRect &r, const QString &txt, const QFont &font, const QColor &fg) {
+    p.setFont(font);
+    QColor shadow(0, 0, 0, 190);
+    p.setPen(shadow);
+    p.drawText(r.translated(static_cast<int>(2 * kScale), static_cast<int>(2 * kScale)), Qt::AlignLeft | Qt::AlignVCenter, txt);
+    p.setPen(fg);
+    p.drawText(r, Qt::AlignLeft | Qt::AlignVCenter, txt);
+  };
+
+  auto drawTextShadowedCentered = [&](const QRect &r, const QString &txt, const QFont &font, const QColor &fg) {
+    p.setFont(font);
+    QColor shadow(0, 0, 0, 190);
+    p.setPen(shadow);
+    p.drawText(r.translated(static_cast<int>(2 * kScale), static_cast<int>(2 * kScale)), Qt::AlignHCenter | Qt::AlignVCenter, txt);
+    p.setPen(fg);
+    p.drawText(r, Qt::AlignHCenter | Qt::AlignVCenter, txt);
+  };
+
+  // Curve strip-map rendering (actual geometry from map preview points, ego frame):
+  // - x (forward) maps to screen Y (bottom=now, up=ahead)
+  // - y (left) maps to screen X (left/right)
+  std::vector<QPointF> pts_m;
+  pts_m.reserve(vtsc_copilot_curve_points_m_.size());
+  for (const auto &pt : vtsc_copilot_curve_points_m_) {
+    const float xf = static_cast<float>(pt.x());
+    if (!std::isfinite(xf) || xf < 0.0f) continue;  // only preview "ahead"
+    const float yl = static_cast<float>(pt.y());
+    if (!std::isfinite(yl)) continue;
+    pts_m.emplace_back(xf, yl);
+  }
+
+  if (pts_m.size() < 3) {
+    p.restore();
+    return;
+  }
+
+  if (curve_area.height() < static_cast<int>(80 * kScale) || curve_area.width() < static_cast<int>(80 * kScale)) {
+    p.restore();
+    return;
+  }
+
+  float x_max = 0.0f;
+  float y_abs = 0.0f;
+  for (const auto &pt : pts_m) {
+    x_max = std::max(x_max, static_cast<float>(pt.x()));
+    y_abs = std::max(y_abs, std::abs(static_cast<float>(pt.y())));
+  }
+  x_max = std::max(20.0f, x_max);
+  y_abs = std::max(1.0f, y_abs);
+
+  const float x_scale = static_cast<float>(curve_area.height()) / x_max;
+  const float fwd_scale = x_scale;
+  float lat_scale = (0.48f * static_cast<float>(curve_area.width())) / y_abs;
+  // Clamp lateral exaggeration for stability.
+  lat_scale = std::min(lat_scale, fwd_scale * 4.0f);
+
+  auto toPx = [&](float x_fwd_m, float y_left_m) -> QPointF {
+    const float t = std::clamp(x_fwd_m / x_max, 0.0f, 1.0f);
+    // Mild perspective: taper lateral excursions farther away so the curve reads "ahead".
+    float persp = 1.0f - 0.35f * t;
+    persp = std::clamp(persp, 0.65f, 1.0f);
+
+    const float x_px = static_cast<float>(curve_area.center().x()) - y_left_m * lat_scale * persp;
+    const float y_px = static_cast<float>(curve_area.bottom()) - x_fwd_m * x_scale;
+    return QPointF(x_px, y_px);
+  };
+
+  std::vector<QPointF> px_pts;
+  px_pts.reserve(pts_m.size());
+  for (const auto &pt : pts_m) {
+    px_pts.emplace_back(toPx(static_cast<float>(pt.x()), static_cast<float>(pt.y())));
+  }
+
+  // Best-effort curve-start tick mark: locate the point at `curveDistanceM` and draw a perpendicular tick.
+  bool have_marker = std::isfinite(vtsc_copilot_curve_distance_m_) && vtsc_copilot_curve_distance_m_ >= 0.0f;
+  QPointF marker_px;
+  QPointF marker_tangent;
+  bool marker_ok = false;
+  if (have_marker) {
+    const float xm = vtsc_copilot_curve_distance_m_;
+    for (size_t i = 0; i + 1 < pts_m.size(); i++) {
+      const float x0 = static_cast<float>(pts_m[i].x());
+      const float x1 = static_cast<float>(pts_m[i + 1].x());
+      if ((x0 <= xm && xm <= x1) || (x1 <= xm && xm <= x0)) {
+        const float denom = (x1 - x0);
+        const float t = (std::abs(denom) > 1e-3f) ? ((xm - x0) / denom) : 0.0f;
+        const float y0 = static_cast<float>(pts_m[i].y());
+        const float y1 = static_cast<float>(pts_m[i + 1].y());
+        const float ym = y0 + t * (y1 - y0);
+        const QPointF p0_px = toPx(x0, y0);
+        const QPointF p1_px = toPx(x1, y1);
+        marker_px = toPx(xm, ym);
+        marker_tangent = (p1_px - p0_px);
+        marker_ok = (std::hypot(marker_tangent.x(), marker_tangent.y()) > 1e-3);
+        break;
+      }
+    }
+  }
+
+  // Split the path into "lead-in" (dim) and "curve region" (bright) around the marker.
+  std::vector<QPointF> lead_px;
+  std::vector<QPointF> curve_px;
+  if (marker_ok) {
+    lead_px.reserve(px_pts.size());
+    curve_px.reserve(px_pts.size());
+
+    // Rebuild in-order, inserting marker point once.
+    const float xm = vtsc_copilot_curve_distance_m_;
+    bool inserted = false;
+    for (size_t i = 0; i + 1 < pts_m.size(); i++) {
+      const float x0 = static_cast<float>(pts_m[i].x());
+      const float x1 = static_cast<float>(pts_m[i + 1].x());
+      const QPointF p0_px = px_pts[i];
+      if (!inserted) {
+        lead_px.push_back(p0_px);
+      } else {
+        curve_px.push_back(p0_px);
+      }
+      if (!inserted && ((x0 <= xm && xm <= x1) || (x1 <= xm && xm <= x0))) {
+        // Insert the curve-start marker into both segments so smoothing doesn't gap.
+        lead_px.push_back(marker_px);
+        curve_px.push_back(marker_px);
+        inserted = true;
+      }
+    }
+    // Push the last point.
+    if (!px_pts.empty()) {
+      if (!inserted) {
+        lead_px.push_back(px_pts.back());
+      } else {
+        curve_px.push_back(px_pts.back());
+      }
+    }
+  } else {
+    lead_px = px_pts;
+  }
+
+  // Smooth the polylines for a strip-map look (display-only).
+  const QPainterPath lead_path = buildSmoothStripMapPath(lead_px, 0.9f);
+  const QPainterPath curve_path = buildSmoothStripMapPath(curve_px, 0.9f);
+
+  // Clip to our vignette bounds so the glow doesn't leak.
+  p.setClipRect(box);
+
+  // Multi-pass drawing for crisp "pace-note" backbone.
+  auto drawBackbone = [&](const QPainterPath &path, const QColor &base, int w_glow, int w_outline, int w_main) {
+    if (path.isEmpty()) return;
+    p.setBrush(Qt::NoBrush);
+
+    QColor glow = base;
+    glow.setAlpha(28);
+    p.setPen(QPen(glow, w_glow, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    p.drawPath(path);
+
+    p.setPen(QPen(QColor(0, 0, 0, 140), w_outline, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    p.drawPath(path);
+
+    p.setPen(QPen(base, w_main, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    p.drawPath(path);
+  };
+
+  // Lead-in: dimmer.
+  drawBackbone(lead_path, QColor(255, 255, 255, 170), static_cast<int>(18 * kScale), static_cast<int>(10 * kScale), static_cast<int>(6 * kScale));
+  // Curve region: emphasize (brighter).
+  drawBackbone(curve_path, QColor(255, 255, 255, 235), static_cast<int>(20 * kScale), static_cast<int>(10 * kScale), static_cast<int>(7 * kScale));
+
+  // Curve-start tick mark (perpendicular to local tangent) + dot.
+  if (marker_ok) {
+    const float len = 22.0f * kScale;
+    const float tlen = std::hypot(static_cast<float>(marker_tangent.x()), static_cast<float>(marker_tangent.y()));
+    const float tx = static_cast<float>(marker_tangent.x()) / tlen;
+    const float ty = static_cast<float>(marker_tangent.y()) / tlen;
+    const QPointF perp(-ty, tx);
+
+    const QPointF a = marker_px + perp * (len * 0.5f);
+    const QPointF b = marker_px - perp * (len * 0.5f);
+    p.setPen(QPen(QColor(0, 0, 0, 180), static_cast<int>(6 * kScale), Qt::SolidLine, Qt::RoundCap));
+    p.drawLine(a, b);
+    p.setPen(QPen(QColor(255, 255, 255, 240), static_cast<int>(3 * kScale), Qt::SolidLine, Qt::RoundCap));
+    p.drawLine(a, b);
+
+    p.setPen(Qt::NoPen);
+    p.setBrush(QColor(0, 0, 0, 190));
+    p.drawEllipse(marker_px, 7 * kScale, 7 * kScale);
+    p.setBrush(QColor(255, 255, 255, 245));
+    p.drawEllipse(marker_px, 4 * kScale, 4 * kScale);
+  }
+
+  // Bottom: distance + time to curve start, centered, larger and with more spacing.
+  {
+    const QFont bottom_font = InterFont(static_cast<int>(24 * kScale), QFont::DemiBold);
+    p.setFont(bottom_font);
+    const QFontMetrics fm(bottom_font);
+    const int w_dist = fm.horizontalAdvance(dist_txt);
+    const int w_time = fm.horizontalAdvance(time_txt);
+    const int sep = static_cast<int>(26 * kScale);  // extra spacing between the two labels
+    const int total = w_dist + sep + w_time;
+    const int x0 = bottom_rect.center().x() - total / 2;
+
+    const QRect dist_r(x0, bottom_rect.top(), w_dist, bottom_rect.height());
+    const QRect time_r(x0 + w_dist + sep, bottom_rect.top(), w_time, bottom_rect.height());
+    drawTextShadowed(dist_r, dist_txt, bottom_font, QColor(255, 255, 255, 235));
+    drawTextShadowed(time_r, time_txt, bottom_font, QColor(255, 255, 255, 235));
+  }
+
+  // Top: recommended speed. Draw last so it's always on top of the curve/glow.
+  drawTextShadowedCentered(speed_rect, v_txt, InterFont(static_cast<int>(22 * kScale), QFont::DemiBold), QColor(255, 255, 255, 235));
+
+  p.restore();
 }
 
 

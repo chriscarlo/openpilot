@@ -13,6 +13,7 @@
 #include <QString>
 #include <QMutex>
 #include <vector>
+#include <QPointF>
 
 #include "cereal/gen/cpp/custom.capnp.h"
 #include "selfdrive/ui/qt/onroad/hud.h"
@@ -45,6 +46,10 @@ public:
   void draw(QPainter &p, const QRect &surface_rect) override;
 
 protected:
+  // VTSC Rally Co-Pilot curve preview (HUD-only rendering)
+  void drawVTSCCoPilotCurve(QPainter &p, const QRect &surface_rect);
+  void drawCurveDirectionIcon(QPainter &p, const QRect &icon_rect, int direction) const;
+
   // RTI drawing methods
   void drawRTIThreatIndicatorMulti(QPainter &p, const QRect &surface_rect);
   void drawRTIArrowCompact(QPainter &p, const QRect &arrow_rect, double relative_bearing, const QColor &color);
@@ -88,4 +93,23 @@ protected:
   // Smoothed Y positions (top of box) per threat id
   mutable std::unordered_map<std::string, double> smoothed_y_top_;
   mutable QMutex smoothed_y_mutex_;
+
+  // System readiness HUD
+  void drawSystemReadiness(QPainter &p, const QRect &surface_rect);
+  std::vector<std::pair<std::string, int>> subsystem_statuses_;
+  bool all_systems_ready_ = false;
+  float readiness_opacity_ = 1.0f;  // fades when engaged + all green
+
+  // Rally co-pilot curve preview state (fed by longitudinalPlanSP.visionTurnSpeedControl)
+  bool vtsc_copilot_hud_enabled_ = false;
+  bool vtsc_copilot_visible_ = false;
+  bool vtsc_copilot_visible_prev_ = false;
+  float vtsc_copilot_alpha_ = 0.0f;  // fade in/out for game-style HUD feel
+  float vtsc_target_speed_mps_ = 0.0f;
+  float vtsc_copilot_curve_distance_m_ = 0.0f;
+  float vtsc_copilot_curve_time_to_s_ = 0.0f;
+  float vtsc_copilot_curve_kappa_max_ = 0.0f;
+  int vtsc_copilot_curve_direction_ = 0;  // TurnDirection (unknown=0, left=1, right=2)
+  int vtsc_copilot_curve_severity_ = 0;   // CurveSeverity (unknown=0, gentle=1, medium=2, tight=3)
+  std::vector<QPointF> vtsc_copilot_curve_points_m_;
 };

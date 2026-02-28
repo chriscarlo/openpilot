@@ -164,6 +164,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"RainbowMode", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"ShowAdvancedControls", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"VisionTurnSpeedControl", {PERSISTENT | BACKUP, BOOL, "0"}},
+    {"VTSCRallyCoPilotHUDEnabled", {PERSISTENT | BACKUP, BOOL, "0"}},
     // Aggressiveness multiplier for anticipatory slowing before curves (legacy default = 1)
     {"VisionTurnSpeedControlAggressiveness", {PERSISTENT | BACKUP, INT, "1"}},
     // Optional fixed lead time override in seconds (0 = disabled, use automatic timing)

@@ -48,6 +48,13 @@ struct LeadData {
 
 struct SelfdriveStateSP @0x81c2f05a394cf4af {
   mads @0 :ModularAssistiveDrivingSystem;
+  subsystemStatuses @1 :List(SubsystemStatus);
+  allSystemsReady @2 :Bool;
+
+  struct SubsystemStatus {
+    name @0 :Text;
+    status @1 :UInt8;  # 0=red (not alive), 1=yellow (degraded), 2=green (OK)
+  }
 }
 
 struct ModelManagerSP @0xaedffd8f31e7b55d {
@@ -143,6 +150,34 @@ struct LongitudinalPlanSP @0xf35cc4560bbf6ec2 {
     velocity @1 :Float32;
     currentLateralAccel @2 :Float32;
     maxPredictedLateralAccel @3 :Float32;
+
+    # Rally co-pilot curve preview (map-enriched).
+    # Produced by VTSC's existing map lookahead pipeline; the HUD only renders.
+    curvePreviewValid @4 :Bool;
+    curveDistanceM @5 :Float32;   # distance to curve start (m)
+    curveTimeToS @6 :Float32;     # estimated time to curve start (s)
+    curveDirection @7 :TurnDirection;
+    curveSeverity @8 :CurveSeverity;
+    curvePreviewPoints @9 :List(StripMapPoint);  # <=32 points, ego-local (x forward, y left)
+    curveMaxCurvature @10 :Float32;  # peak abs curvature within the previewed curve region (1/m)
+
+    struct StripMapPoint {
+      xFwdM @0 :Float32;
+      yLeftM @1 :Float32;
+    }
+
+    enum TurnDirection {
+      unknown @0;
+      left @1;
+      right @2;
+    }
+
+    enum CurveSeverity {
+      unknown @0;
+      gentle @1;
+      medium @2;
+      tight @3;
+    }
 
     enum VisionTurnSpeedControlState {
       disabled @0; # No predicted substantial turn on vision range or feature disabled.

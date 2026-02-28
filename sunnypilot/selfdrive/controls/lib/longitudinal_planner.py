@@ -9,7 +9,8 @@ import math
 from cereal import messaging, custom
 from opendbc.car import structs
 from opendbc.car.interfaces import ACCEL_MIN
-from openpilot.selfdrive.car.cruise import V_CRUISE_UNSET
+from openpilot.common.constants import CV
+from openpilot.selfdrive.car.cruise import V_CRUISE_MAX, V_CRUISE_UNSET
 from openpilot.sunnypilot.selfdrive.controls.lib.dec.dec import DynamicExperimentalController
 from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit_controller.speed_limit_controller import SpeedLimitController
 from openpilot.sunnypilot.selfdrive.selfdrived.events import EventsSP
@@ -51,8 +52,15 @@ class LongitudinalPlannerSP:
 
     v_cruise_slc = self.slc.speed_limit_offseted if self.slc.is_active else V_CRUISE_UNSET
 
-    self.v_tsc.update(sm, sm['carControl'].longActive, v_ego, a_ego, v_cruise)
-    v_cruise_v_tsc = self.v_tsc.v_turn if self.v_tsc.is_active else V_CRUISE_UNSET
+    # VTSC (with map enrichment) should compute continuously onroad so the HUD can
+    # show curve previews even when openpilot is not engaged. Only apply VTSC as a
+    # speed source when longitudinal control is active.
+    apply_vtsc = bool(sm['carControl'].longActive)
+    # When not engaged, there may be no meaningful cruise setpoint. Use a high cap
+    # so VTSC produces physics-based advisory speeds instead of collapsing to 0.
+    v_cruise_for_vtsc = float(v_cruise if apply_vtsc else (V_CRUISE_MAX * CV.KPH_TO_MS))
+    self.v_tsc.update(sm, True, v_ego, a_ego, v_cruise_for_vtsc)
+    v_cruise_v_tsc = self.v_tsc.v_turn if (apply_vtsc and self.v_tsc.is_active) else V_CRUISE_UNSET
 
     # Update RTI controller
     self.rti.update(sm, v_ego, a_ego, v_cruise)
@@ -122,6 +130,23 @@ class LongitudinalPlannerSP:
     visionTurnSpeedControl.velocity = float(self.v_tsc.v_turn)
     visionTurnSpeedControl.currentLateralAccel = float(self.v_tsc.current_lat_acc)
     visionTurnSpeedControl.maxPredictedLateralAccel = float(self.v_tsc.max_pred_lat_acc)
+    # Rally co-pilot curve preview (map-enriched). HUD-only telemetry.
+    try:
+      visionTurnSpeedControl.curvePreviewValid = bool(self.v_tsc.curve_preview_valid)
+      visionTurnSpeedControl.curveDistanceM = float(self.v_tsc.curve_preview_distance_m)
+      visionTurnSpeedControl.curveTimeToS = float(self.v_tsc.curve_preview_time_to_s)
+      visionTurnSpeedControl.curveMaxCurvature = float(self.v_tsc.curve_preview_kappa_max)
+      visionTurnSpeedControl.curveDirection = int(self.v_tsc.curve_preview_direction)
+      visionTurnSpeedControl.curveSeverity = int(self.v_tsc.curve_preview_severity)
+      pts = self.v_tsc.curve_preview_points
+      if pts:
+        out_pts = visionTurnSpeedControl.init('curvePreviewPoints', len(pts))
+        for i, (x_fwd, y_left) in enumerate(pts):
+          out_pts[i].xFwdM = float(x_fwd)
+          out_pts[i].yLeftM = float(y_left)
+    except Exception:
+      # Backward compatibility if capnp/python bindings are older.
+      pass
 
     # Speed Limit Control
     slc = longitudinalPlanSP.slc

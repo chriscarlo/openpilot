@@ -1,0 +1,4 @@
+interface:
+  display_name: "VTSC Rally Co-Pilot HUD"
+  short_description: "Iterate on VTSC rally curve HUD overlay"
+  default_prompt: "Work on the Sunnypilot VTSC Rally Co-Pilot curve preview HUD. Reuse existing MTSC/VTSC/mapd math (no new curve computation in HUD), keep the system readiness indicator intact, and validate changes with small targeted builds (scons) and quick message/param checks."

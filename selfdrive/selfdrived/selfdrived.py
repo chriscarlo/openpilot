@@ -52,7 +52,7 @@ class SelfdriveD(CruiseHelper):
     self.params = Params()
 
     # Ensure the current branch is cached, otherwise the first cycle lags
-    build_metadata = get_build_metadata()
+    get_build_metadata()
 
     if CP is None:
       cloudlog.info("selfdrived is waiting for CarParams")
@@ -155,9 +155,8 @@ class SelfdriveD(CruiseHelper):
       self.ignored_processes = {'loggerd', }
     self.ignored_processes.update({'mapd'})
 
-    # Determine startup event
-    is_remote = build_metadata.openpilot.comma_remote or build_metadata.openpilot.sunnypilot_remote
-    self.startup_event = EventName.startup if is_remote and build_metadata.tested_channel else EventName.startupMaster
+    # Determine startup event — only show if there's a real problem
+    self.startup_event = None
     if not car_recognized:
       self.startup_event = EventName.startupNoCar
     elif car_recognized and self.CP.passive:
@@ -557,6 +556,37 @@ class SelfdriveD(CruiseHelper):
     mads.enabled = self.mads.enabled
     mads.active = self.mads.active
     mads.available = self.mads.enabled_toggle
+
+    # Subsystem readiness statuses
+    SUBSYSTEM_SERVICES = [
+      ("VEH", ["pandaStates", "deviceState", "peripheralState"]),
+      ("CAM", ["roadCameraState", "driverCameraState", "wideRoadCameraState"]),
+      ("MDL", ["modelV2"]),
+      ("LOC", ["livePose"]),
+      ("CAL", ["liveCalibration"]),
+      ("PRM", ["liveParameters"]),
+      ("RAD", ["radarState"]),
+      ("DRV", ["driverMonitoringState"]),
+      ("CTL", ["controlsState", "carOutput", "carControl"]),
+      ("PLN", ["longitudinalPlan"]),
+    ]
+    statuses = ss_sp.init('subsystemStatuses', len(SUBSYSTEM_SERVICES))
+    all_green = True
+    for i, (name, services) in enumerate(SUBSYSTEM_SERVICES):
+      any_not_alive = any(not self.sm.alive.get(s, True) for s in services)
+      any_not_freq = any(not self.sm.freq_ok.get(s, True) for s in services)
+      any_not_valid = any(not self.sm.valid.get(s, True) for s in services)
+      if any_not_alive:
+        status = 0  # red
+      elif any_not_freq or any_not_valid:
+        status = 1  # yellow
+      else:
+        status = 2  # green
+      if status != 2:
+        all_green = False
+      statuses[i].name = name
+      statuses[i].status = status
+    ss_sp.allSystemsReady = all_green
 
     self.pm.send('selfdriveStateSP', ss_sp_msg)
 

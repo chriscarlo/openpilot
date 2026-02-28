@@ -129,6 +129,32 @@ void VTSCSettingsPanel::setupUI() {
     mapHelp->setWordWrap(true);
     mapLayout->addWidget(mapHelp);
   }
+
+  // Row: Rally co-pilot HUD curve preview
+  QHBoxLayout *copilotRow = new QHBoxLayout();
+  QLabel *copilotLbl = new QLabel(tr("Rally Co-Pilot Curve Preview (HUD)"));
+  copilotLbl->setStyleSheet("font-size: 36px; color: #E4E4E4;");
+  copilotRow->addWidget(copilotLbl);
+  copilotRow->addStretch();
+  ToggleSP *copilotTog = new ToggleSP();
+  copilotTog->setFixedSize(150, 80);
+  {
+    Params p; bool on = p.getBool("VTSCRallyCoPilotHUDEnabled");
+    if (copilotTog->on != on) copilotTog->togglePosition();
+  }
+  QObject::connect(copilotTog, &ToggleSP::stateChanged, [](bool s){ Params().putBool("VTSCRallyCoPilotHUDEnabled", s); });
+  copilotRow->addWidget(copilotTog);
+  mapLayout->addLayout(copilotRow);
+  {
+    QLabel *copilotHelp = new QLabel(tr(
+      "When ON, the onroad HUD shows a strip-map preview of the next curve (shape, distance, time-to-curve) "
+      "using offline map data, plus the VTSC recommended speed. The overlay is available even when not engaged, "
+      "and only appears for curves above a mild curvature threshold (ignores slight bends)."
+    ));
+    copilotHelp->setStyleSheet("font-size: 32px; color: #999999; padding-left: 10px; padding-bottom: 5px;");
+    copilotHelp->setWordWrap(true);
+    mapLayout->addWidget(copilotHelp);
+  }
   mainLayout->addWidget(mapFrame);
 
   // Section: Timing Alignment

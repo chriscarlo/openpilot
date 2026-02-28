@@ -110,6 +110,14 @@ def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
   c = 2*math.atan2(math.sqrt(a), math.sqrt(1-a))
   return EARTH_R_M * c
 
+def _xy_from_latlon_m(lat: float, lon: float, lat0: float, lon0: float) -> tuple[float, float]:
+  """Equirectangular approximation in meters in an (east, north) local frame around (lat0, lon0)."""
+  dlat = math.radians(lat - lat0)
+  dlon = math.radians(lon - lon0)
+  x_east = EARTH_R_M * dlon * math.cos(math.radians(lat0))
+  y_north = EARTH_R_M * dlat
+  return float(x_east), float(y_north)
+
 # ===== ADAPTIVE DECELERATION SYSTEM =====
 # Physics-based deceleration management for vision update lag scenarios
 # Goal: Target comfort rates, but escalate to minimum decel/jerk needed to reach target speed at curve
@@ -803,6 +811,19 @@ class VisionTurnController:
     self._map_tail_reason = "init"
     self._map_tail_compute_reason = "init"
 
+    # Rally co-pilot / HUD curve preview derived from VTSC's map lookahead inputs.
+    # The HUD must not compute curves; it only renders these fields.
+    self._curve_preview_valid = False
+    self._curve_preview_distance_m = 0.0
+    self._curve_preview_time_to_s = 0.0
+    self._curve_preview_kappa_max = 0.0
+    self._curve_preview_direction = 0  # VisionTurnSpeedControl.TurnDirection (unknown=0)
+    self._curve_preview_severity = 0   # VisionTurnSpeedControl.CurveSeverity (unknown=0)
+    self._curve_preview_points: list[tuple[float, float]] = []
+    self._curve_preview_last_ts = 0.0
+    self._curve_preview_last_cache_raw = None
+    self._curve_preview_last_latlon: tuple[float, float] | None = None
+
     # Lead-aware occlusion bypass
     self._occl_bypass_with_lead = True
     self._occl_bypass_headway_s = 3.0
@@ -1188,6 +1209,38 @@ class VisionTurnController:
   def distance(self):
     """Distance to lateral acceleration overshoot point."""
     return self._v_overshoot_distance if hasattr(self, '_v_overshoot_distance') else 200.0
+
+  # ===== Rally co-pilot / HUD curve preview (map-enriched) =====
+  @property
+  def curve_preview_valid(self) -> bool:
+    return bool(getattr(self, '_curve_preview_valid', False))
+
+  @property
+  def curve_preview_distance_m(self) -> float:
+    return float(getattr(self, '_curve_preview_distance_m', 0.0) or 0.0)
+
+  @property
+  def curve_preview_time_to_s(self) -> float:
+    return float(getattr(self, '_curve_preview_time_to_s', 0.0) or 0.0)
+
+  @property
+  def curve_preview_kappa_max(self) -> float:
+    return float(getattr(self, '_curve_preview_kappa_max', 0.0) or 0.0)
+
+  @property
+  def curve_preview_direction(self) -> int:
+    # capnp enum value for VisionTurnSpeedControl.TurnDirection
+    return int(getattr(self, '_curve_preview_direction', 0) or 0)
+
+  @property
+  def curve_preview_severity(self) -> int:
+    # capnp enum value for VisionTurnSpeedControl.CurveSeverity
+    return int(getattr(self, '_curve_preview_severity', 0) or 0)
+
+  @property
+  def curve_preview_points(self) -> list[tuple[float, float]]:
+    pts = getattr(self, '_curve_preview_points', None)
+    return list(pts) if isinstance(pts, list) else []
 
   def getCurrentLateralAccel(self):
     """Return current lateral acceleration for HUD display."""
@@ -1834,6 +1887,9 @@ class VisionTurnController:
         else:
           self._map_tail_active = False
           self._map_tail_reason = str(getattr(self, '_map_tail_compute_reason', '') or 'no_cap')
+      else:
+        # Ensure HUD preview does not persist when map lookahead is disabled.
+        self._clear_curve_preview()
     except Exception:
       self._map_tail_active = False
       self._map_tail_reason = "exception"
@@ -2833,6 +2889,202 @@ class VisionTurnController:
       self._map_curv_last_ts = now
       return []
 
+  def _clear_curve_preview(self) -> None:
+    self._curve_preview_valid = False
+    self._curve_preview_distance_m = 0.0
+    self._curve_preview_time_to_s = 0.0
+    self._curve_preview_kappa_max = 0.0
+    self._curve_preview_direction = 0
+    self._curve_preview_severity = 0
+    self._curve_preview_points = []
+
+  def _update_curve_preview_from_map(self, *, gps_lat: float, gps_lon: float, pts: list[tuple[float, float, float]], i0: int) -> None:
+    """Update HUD curve preview from mapd curvature samples.
+
+    This is intentionally display-oriented: the HUD must not run its own curve math.
+    """
+    now = time.time()
+    cache_raw = getattr(self, '_map_curv_cache_raw', None)
+    last_raw = getattr(self, '_curve_preview_last_cache_raw', None)
+    last_latlon = getattr(self, '_curve_preview_last_latlon', None)
+
+    moved_far = True
+    try:
+      if last_latlon is not None:
+        moved_far = _haversine_m(float(gps_lat), float(gps_lon), float(last_latlon[0]), float(last_latlon[1])) > 5.0
+    except Exception:
+      moved_far = True
+
+    # Recompute at most 5 Hz unless map changed or ego moved materially.
+    if (now - float(getattr(self, '_curve_preview_last_ts', 0.0) or 0.0)) < 0.2 and (cache_raw == last_raw) and (not moved_far):
+      # Still refresh time-to-curve using latest speed.
+      try:
+        self._curve_preview_time_to_s = float(self._curve_preview_distance_m) / max(0.1, float(self._v_ego))
+      except Exception:
+        pass
+      return
+
+    # Default to invalid; set valid only when we can build a sane preview.
+    self._clear_curve_preview()
+
+    # Build a short forward window (meters) starting at i0.
+    PREVIEW_S_MAX_M = 260.0
+    MAX_POINTS = 32
+    KAPPA_MIN = 2.0e-3  # 1/m, ~500 m radius
+    RUN = 3             # consecutive samples to start/end a curve
+
+    try:
+      i0 = int(max(0, min(len(pts) - 1, i0)))
+    except Exception:
+      i0 = 0
+
+    lat_ref = float(pts[i0][0])
+    lon_ref = float(pts[i0][1])
+    w_lat: list[float] = [lat_ref]
+    w_lon: list[float] = [lon_ref]
+    w_k: list[float] = [max(0.0, float(pts[i0][2]))]
+    s_pts: list[float] = [0.0]
+
+    s = 0.0
+    # Hard cap on iterations to keep this bounded even if points are dense.
+    for j in range(i0, min(len(pts) - 1, i0 + 80)):
+      ds = _haversine_m(float(pts[j][0]), float(pts[j][1]), float(pts[j+1][0]), float(pts[j+1][1]))
+      if not (ds > 0.05 and math.isfinite(ds)):
+        continue
+      s += float(ds)
+      w_lat.append(float(pts[j+1][0]))
+      w_lon.append(float(pts[j+1][1]))
+      w_k.append(max(0.0, float(pts[j+1][2])))
+      s_pts.append(float(s))
+      if s >= PREVIEW_S_MAX_M:
+        break
+
+    if len(w_lat) < 4:
+      return
+
+    # Convert to local EN (east, north) and find a stable initial tangent.
+    en: list[tuple[float, float]] = []
+    for la, lo in zip(w_lat, w_lon, strict=False):
+      en.append(_xy_from_latlon_m(float(la), float(lo), lat_ref, lon_ref))
+
+    fdx = fdy = 0.0
+    for idx in range(1, len(en)):
+      dx, dy = float(en[idx][0]), float(en[idx][1])
+      if math.hypot(dx, dy) > 1.0:
+        fdx, fdy = dx, dy
+        break
+    norm = math.hypot(fdx, fdy)
+    if not (norm > 1e-3 and math.isfinite(norm)):
+      return
+    fx, fy = fdx / norm, fdy / norm
+    lx, ly = -fy, fx
+
+    # Rotate into ego-local (x forward, y left).
+    fwd_left: list[tuple[float, float]] = []
+    for (xe, yn) in en:
+      x_fwd = float(xe) * fx + float(yn) * fy
+      y_left = float(xe) * lx + float(yn) * ly
+      fwd_left.append((x_fwd, y_left))
+
+    # Find the next curve region by curvature threshold persistence.
+    start_idx = None
+    consec = 0
+    for idx, k in enumerate(w_k):
+      if float(k) >= KAPPA_MIN:
+        consec += 1
+      else:
+        consec = 0
+      if consec >= RUN:
+        start_idx = idx - (RUN - 1)
+        break
+    if start_idx is None:
+      return
+
+    end_idx = len(w_k) - 1
+    consec_below = 0
+    for idx in range(int(start_idx), len(w_k)):
+      if float(w_k[idx]) < KAPPA_MIN:
+        consec_below += 1
+      else:
+        consec_below = 0
+      if consec_below >= RUN:
+        end_idx = max(int(start_idx), idx - RUN)
+        break
+
+    # Direction from polyline turning (cross product sign).
+    cross_sum = 0.0
+    for idx in range(int(start_idx), max(int(start_idx), int(end_idx) - 2)):
+      x1, y1 = fwd_left[idx]
+      x2, y2 = fwd_left[idx + 1]
+      x3, y3 = fwd_left[idx + 2]
+      v1x, v1y = (x2 - x1), (y2 - y1)
+      v2x, v2y = (x3 - x2), (y3 - y2)
+      cross_sum += (v1x * v2y - v1y * v2x)
+    if cross_sum > 1e-3:
+      direction = 1  # left
+    elif cross_sum < -1e-3:
+      direction = 2  # right
+    else:
+      direction = 0  # unknown
+
+    # Peak curvature (abs) within curve region for simple display gating.
+    try:
+      kappa_max = 0.0
+      for idx in range(int(start_idx), int(end_idx) + 1):
+        kappa_max = max(kappa_max, float(w_k[idx]))
+      if not (kappa_max > 0.0 and math.isfinite(kappa_max)):
+        kappa_max = 0.0
+    except Exception:
+      kappa_max = 0.0
+
+    # Severity from min safe speed within the curve region.
+    try:
+      vs_min = float('inf')
+      for idx in range(int(start_idx), int(end_idx) + 1):
+        vs_min = min(vs_min, float(curvature_to_speed(float(w_k[idx]))))
+      if not math.isfinite(vs_min):
+        severity = 0
+      elif vs_min < 12.0:
+        severity = 3  # tight
+      elif vs_min < 20.0:
+        severity = 2  # medium
+      else:
+        severity = 1  # gentle
+    except Exception:
+      severity = 0
+
+    # Decimate points to <= MAX_POINTS, preserving endpoints.
+    pts_out = fwd_left
+    if len(pts_out) > MAX_POINTS:
+      step = float(len(pts_out) - 1) / float(MAX_POINTS - 1)
+      idxs = []
+      for i in range(MAX_POINTS):
+        idxs.append(int(round(i * step)))
+      # ensure monotonic unique indices
+      uniq = []
+      last = -1
+      for ii in idxs:
+        ii = max(0, min(len(pts_out) - 1, int(ii)))
+        if ii != last:
+          uniq.append(ii)
+          last = ii
+      pts_out = [pts_out[ii] for ii in uniq]
+
+    # Publish preview fields (used by HUD only).
+    try:
+      self._curve_preview_valid = True
+      self._curve_preview_distance_m = float(s_pts[int(start_idx)])
+      self._curve_preview_time_to_s = float(self._curve_preview_distance_m) / max(0.1, float(self._v_ego))
+      self._curve_preview_kappa_max = float(kappa_max)
+      self._curve_preview_direction = int(direction)
+      self._curve_preview_severity = int(severity)
+      self._curve_preview_points = [(float(x), float(y)) for (x, y) in pts_out]
+      self._curve_preview_last_ts = float(now)
+      self._curve_preview_last_cache_raw = cache_raw
+      self._curve_preview_last_latlon = (float(gps_lat), float(gps_lon))
+    except Exception:
+      self._clear_curve_preview()
+
   def _map_tail_cap(self) -> tuple[float | None, float, float]:
     """
     Compute a comfort-reachable cap on current speed from map curvature tail.
@@ -2843,11 +3095,13 @@ class VisionTurnController:
     gps = self._get_last_gps()
     if gps is None:
       self._map_tail_compute_reason = "no_gps"
+      self._clear_curve_preview()
       return (None, 0.0, 0.0)
     lat0, lon0 = gps
     pts = self._load_map_curvatures()
     if len(pts) < 3:
       self._map_tail_compute_reason = "no_map_curvatures"
+      self._clear_curve_preview()
       return (None, 0.0, 0.0)
 
     # Find nearest index to ego
@@ -2867,7 +3121,15 @@ class VisionTurnController:
     k_list = [max(0.0, pts[j][2]) for j in range(i0+1, len(pts))]
     if not s_list or not k_list:
       self._map_tail_compute_reason = "insufficient_map_points"
+      self._clear_curve_preview()
       return (None, 0.0, 0.0)
+
+    # Update HUD preview from the same map lookahead inputs VTSC already uses.
+    try:
+      self._update_curve_preview_from_map(gps_lat=float(lat0), gps_lon=float(lon0), pts=pts, i0=i0)
+    except Exception:
+      # Never let preview failures affect longitudinal behavior.
+      self._clear_curve_preview()
 
     # Limit horizon to ~800 m
     S_MAX = 800.0
