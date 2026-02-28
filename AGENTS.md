@@ -43,10 +43,13 @@ Trigger phrases:
 - Remove bullets once the underlying footgun is fixed in code/config or becomes obvious from repo defaults.
 
 ## Device access
-- SSH profile: `ssh commaCar` (configured in `~/.ssh/config`).
-- `sudo` on device requires no password (NOPASSWD configured).
+- SSH profiles (in `~/.ssh/config`; which one works depends on current network/SSID):
+  - `commaHome` — home Wi-Fi (192.168.1.172)
+  - `commaCar` — car hotspot (192.168.0.229)
+  - `commaAdb` — USB via adb port-forward (127.0.0.1:2222, key `~/.ssh/id_comma_device`)
+- All use user `comma`. `sudo` requires no password (NOPASSWD).
 - Repo on device: `/data/openpilot` (tracks `chauffeur-dev4`).
-- Deploy workflow: `git push` from dev machine, then `ssh commaCar "cd /data/openpilot && git pull && sudo reboot"`.
+- Deploy workflow: `git push` from dev machine, then `ssh <profile> "cd /data/openpilot && git pull && sudo reboot"`.
 
 ## Needs human confirmation (temporary; keep very short)
 - Any workflow expectations that live outside this repo (device deployment steps, protected branch name(s), etc.).
