@@ -359,9 +359,13 @@ class SelfdriveD(CruiseHelper):
       self.events.add(EventName.canError)
 
     # generic catch-all. ideally, a more specific event should be added above instead
+    # Grace period: services need a few seconds to publish at target frequency after
+    # boot.  Without this, selfdrived on a less-contended core can start checking
+    # before livePose (locationd) has ramped up, causing a false commIssue/noEntry.
     has_disable_events = self.events.contains(ET.NO_ENTRY) and (self.events.contains(ET.SOFT_DISABLE) or self.events.contains(ET.IMMEDIATE_DISABLE))
     no_system_errors = (not has_disable_events) or (len(self.events) == num_events)
-    if not self.sm.all_checks() and no_system_errors:
+    startup_grace = self.sm.frame < 300  # 3 seconds at 100Hz
+    if not self.sm.all_checks() and no_system_errors and not startup_grace:
       if not self.sm.all_alive():
         self.events.add(EventName.commIssue)
       elif not self.sm.all_freq_ok():
