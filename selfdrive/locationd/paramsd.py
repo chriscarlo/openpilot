@@ -22,6 +22,7 @@ OFFSET_MAX = 10.0
 OFFSET_LOWERED_MAX = 8.0
 MIN_ACTIVE_SPEED = 1.0
 LOW_ACTIVE_SPEED = 10.0
+CARSTATE_MAX_AGE_FRAMES = 5  # at ~20Hz update cadence, accept up to ~250ms old carState
 
 
 class VehicleParamsLearner:
@@ -231,6 +232,14 @@ def parse_optional_float_param(param_value) -> float | None:
   return None
 
 
+def has_fresh_valid_carstate(sm: messaging.SubMaster, max_age_frames: int = CARSTATE_MAX_AGE_FRAMES) -> bool:
+  if not sm.seen.get('carState', False):
+    return False
+  if not sm.valid.get('carState', False):
+    return False
+  return (sm.frame - sm.recv_frame.get('carState', -10_000)) <= max_age_frames
+
+
 # TODO: Remove this function after few releases (added in 0.9.9)
 def migrate_cached_vehicle_params_if_needed(params: Params):
   last_parameters_data_old = params.get("LiveParameters")
@@ -319,10 +328,12 @@ def main():
   while True:
     sm.update()
     # paramsd needs synchronized livePose + carState for its Kalman filter.
-    # Without carState in the gate, yaw_rate observations (from livePose) can
-    # run without matching steer_angle observations (from carState), causing
-    # ANGLE_OFFSET_FAST to drift due to asymmetric KF updates.
-    all_checks = sm.all_checks(service_list=['livePose', 'liveCalibration', 'carState'])
+    # `carState` is non-polled here, so SubMaster freq tracking evaluates it at
+    # the poll cadence (~20Hz), not at service native rate (~100Hz), which can
+    # make all_checks permanently fail if we include carState frequency checks.
+    # Require core polled feeds to pass normal checks and carState to be fresh.
+    core_checks = sm.all_checks(service_list=['livePose', 'liveCalibration'])
+    all_checks = core_checks and has_fresh_valid_carstate(sm)
     if all_checks:
       for which in sorted(sm.updated.keys(), key=lambda x: sm.logMonoTime[x]):
         if sm.updated[which]:
