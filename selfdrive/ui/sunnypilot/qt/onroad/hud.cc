@@ -864,9 +864,10 @@ void HudRendererSP::drawVTSCCoPilotCurve(QPainter &p, const QRect &surface_rect)
   const int box_w = static_cast<int>(right_third.width() * 0.995f);
   const int box_h = std::min(static_cast<int>(inner.height() * 0.875f), 950);
 
-  // Vertical placement: bias down to avoid the top-right steering mode indicator, but keep a safe
-  // bottom padding so we don't collide with the ACC Active border.
-  const int bottom_safe = static_cast<int>(14 * kScale);
+  // Vertical placement: push the widget down so its bottom edge sits just above the
+  // engaged-border strip (UI_BORDER_SIZE = 30 px from screen edge; `inner` already
+  // excludes that border, so bottom_safe ≈ small padding keeps us clear).
+  const int bottom_safe = static_cast<int>(4 * kScale);
   const int box_left = right_third.center().x() - box_w / 2;
   const int box_top = std::max(inner.top(), inner.bottom() - bottom_safe - box_h + 1);
   const QRect box(box_left, box_top, box_w, box_h);
@@ -1064,32 +1065,12 @@ void HudRendererSP::drawVTSCCoPilotCurve(QPainter &p, const QRect &surface_rect)
     p.drawPath(path);
   };
 
-  // Lead-in: dimmer.
-  drawBackbone(lead_path, QColor(255, 255, 255, 170), static_cast<int>(18 * kScale), static_cast<int>(10 * kScale), static_cast<int>(6 * kScale));
+  // Lead-in: dimmer.  Line widths doubled for bolder strip-map.
+  drawBackbone(lead_path, QColor(255, 255, 255, 170), static_cast<int>(36 * kScale), static_cast<int>(20 * kScale), static_cast<int>(12 * kScale));
   // Curve region: emphasize (brighter).
-  drawBackbone(curve_path, QColor(255, 255, 255, 235), static_cast<int>(20 * kScale), static_cast<int>(10 * kScale), static_cast<int>(7 * kScale));
+  drawBackbone(curve_path, QColor(255, 255, 255, 235), static_cast<int>(40 * kScale), static_cast<int>(20 * kScale), static_cast<int>(14 * kScale));
 
-  // Curve-start tick mark (perpendicular to local tangent) + dot.
-  if (marker_ok) {
-    const float len = 22.0f * kScale;
-    const float tlen = std::hypot(static_cast<float>(marker_tangent.x()), static_cast<float>(marker_tangent.y()));
-    const float tx = static_cast<float>(marker_tangent.x()) / tlen;
-    const float ty = static_cast<float>(marker_tangent.y()) / tlen;
-    const QPointF perp(-ty, tx);
-
-    const QPointF a = marker_px + perp * (len * 0.5f);
-    const QPointF b = marker_px - perp * (len * 0.5f);
-    p.setPen(QPen(QColor(0, 0, 0, 180), static_cast<int>(6 * kScale), Qt::SolidLine, Qt::RoundCap));
-    p.drawLine(a, b);
-    p.setPen(QPen(QColor(255, 255, 255, 240), static_cast<int>(3 * kScale), Qt::SolidLine, Qt::RoundCap));
-    p.drawLine(a, b);
-
-    p.setPen(Qt::NoPen);
-    p.setBrush(QColor(0, 0, 0, 190));
-    p.drawEllipse(marker_px, 7 * kScale, 7 * kScale);
-    p.setBrush(QColor(255, 255, 255, 245));
-    p.drawEllipse(marker_px, 4 * kScale, 4 * kScale);
-  }
+  // (Curve-start tick mark / pip removed per user request.)
 
   // Bottom: distance + time to curve start, centered, larger and with more spacing.
   {
