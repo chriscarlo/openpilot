@@ -47,6 +47,20 @@ SafetyModel = car.CarParams.SafetyModel
 IGNORED_SAFETY_MODES = (SafetyModel.silent, SafetyModel.noOutput)
 
 
+def compute_subsystem_status(sm, services: list[str], ignore_valid_services: set[str], ignore_freq_services: set[str]) -> int:
+  any_not_alive = any(not sm.alive.get(s, True) for s in services)
+  any_not_freq = any((s not in ignore_freq_services) and (not sm.freq_ok.get(s, True)) for s in services)
+  # Keep readiness semantics aligned with selfdrived comm checks: some streams
+  # intentionally use internal validity semantics and should not go yellow on
+  # outer msg.valid alone.
+  any_not_valid = any((s not in ignore_valid_services) and (not sm.valid.get(s, True)) for s in services)
+  if any_not_alive:
+    return 0  # red
+  if any_not_freq or any_not_valid:
+    return 1  # yellow
+  return 2  # green
+
+
 class SelfdriveD(CruiseHelper):
   def __init__(self, CP=None, CP_SP=None):
     self.params = Params()
@@ -100,6 +114,11 @@ class SelfdriveD(CruiseHelper):
       'liveTorqueParameters',
       'driverAssistance',
     ]
+    # The liveParameters stream can briefly dip freq_ok during startup/windowed
+    # frequency tracking while remaining alive and valid.
+    ignore_freq_only = ['liveParameters']
+    self.ignore_valid_only = set(ignore_valid_only)
+    self.ignore_freq_only = set(ignore_freq_only)
     if SIMULATION:
       ignore += ['driverCameraState', 'managerState']
     if REPLAY:
@@ -111,7 +130,7 @@ class SelfdriveD(CruiseHelper):
                                    'controlsState', 'carControl', 'driverAssistance', 'alertDebug', 'userBookmark', 'audioFeedback'] + \
                                    self.camera_packets + self.sensor_packets + self.gps_packets,
                                   ignore_alive=ignore, ignore_avg_freq=ignore,
-                                  ignore_valid=ignore + ignore_valid_only, frequency=int(1/DT_CTRL))
+                                  ignore_valid=ignore + list(self.ignore_valid_only), frequency=int(1/DT_CTRL))
 
     # read params
     self.is_metric = self.params.get_bool("IsMetric")
@@ -572,16 +591,9 @@ class SelfdriveD(CruiseHelper):
     ]
     statuses = ss_sp.init('subsystemStatuses', len(SUBSYSTEM_SERVICES))
     all_green = True
+    ignore_valid_services = set(self.sm.ignore_valid)
     for i, (name, services) in enumerate(SUBSYSTEM_SERVICES):
-      any_not_alive = any(not self.sm.alive.get(s, True) for s in services)
-      any_not_freq = any(not self.sm.freq_ok.get(s, True) for s in services)
-      any_not_valid = any(not self.sm.valid.get(s, True) for s in services)
-      if any_not_alive:
-        status = 0  # red
-      elif any_not_freq or any_not_valid:
-        status = 1  # yellow
-      else:
-        status = 2  # green
+      status = compute_subsystem_status(self.sm, services, ignore_valid_services, self.ignore_freq_only)
       if status != 2:
         all_green = False
       statuses[i].name = name
