@@ -213,6 +213,24 @@ def check_valid_with_hysteresis(current_valid: bool, val: float, threshold: floa
   return current_valid
 
 
+def parse_optional_float_param(param_value) -> float | None:
+  if param_value is None:
+    return None
+  if isinstance(param_value, (int, float)):
+    return float(param_value)
+  if isinstance(param_value, bytes):
+    try:
+      param_value = param_value.decode('utf-8')
+    except Exception:
+      return None
+  if isinstance(param_value, str):
+    try:
+      return float(param_value)
+    except ValueError:
+      return None
+  return None
+
+
 # TODO: Remove this function after few releases (added in 0.9.9)
 def migrate_cached_vehicle_params_if_needed(params: Params):
   last_parameters_data_old = params.get("LiveParameters")
@@ -237,13 +255,7 @@ def retrieve_initial_vehicle_params(params: Params, CP: car.CarParams, replay: b
   last_carparams_data = params.get("CarParamsPrevRoute")
 
   # Check for live steering ratio override from GUI
-  live_steer_ratio_param = params.get("LiveSteerRatio")
-  live_steer_ratio = 0.0
-  if live_steer_ratio_param:
-    try:
-      live_steer_ratio = float(live_steer_ratio_param.decode('utf-8'))
-    except (ValueError, AttributeError):
-      live_steer_ratio = 0.0
+  live_steer_ratio = parse_optional_float_param(params.get("LiveSteerRatio")) or 0.0
 
   # Use live steering ratio if set (non-zero), otherwise use car default
   base_steer_ratio = live_steer_ratio if live_steer_ratio > 0.0 else CP.steerRatio
@@ -258,17 +270,19 @@ def retrieve_initial_vehicle_params(params: Params, CP: car.CarParams, replay: b
         if last_CP.carFingerprint != CP.carFingerprint:
           raise Exception("Car model mismatch")
 
-        # Check if starting values are sane
-        min_sr, max_sr = 0.5 * base_steer_ratio, 2.0 * base_steer_ratio
-        steer_ratio_sane = min_sr <= lp.steerRatio <= max_sr
-        if not steer_ratio_sane:
-          raise Exception(f"Invalid starting values found {lp}")
+        # Check if starting values are sane when no explicit override is set.
+        if live_steer_ratio <= 0.0:
+          min_sr, max_sr = 0.5 * base_steer_ratio, 2.0 * base_steer_ratio
+          steer_ratio_sane = min_sr <= lp.steerRatio <= max_sr
+          if not steer_ratio_sane:
+            raise Exception(f"Invalid starting values found {lp}")
 
         initial_filter_std = np.array(lp.debugFilterState.std)
         if debug and len(initial_filter_std) != 0:
           p_initial = np.diag(initial_filter_std)
 
-        steer_ratio, stiffness_factor, angle_offset_deg = lp.steerRatio, lp.stiffnessFactor, lp.angleOffsetAverageDeg
+        steer_ratio = base_steer_ratio if live_steer_ratio > 0.0 else lp.steerRatio
+        stiffness_factor, angle_offset_deg = lp.stiffnessFactor, lp.angleOffsetAverageDeg
         retrieve_success = True
     except Exception as e:
       cloudlog.error(f"Failed to retrieve initial values: {e}")
