@@ -306,7 +306,11 @@ def main():
   REPLAY = bool(int(os.getenv("REPLAY", "0")))
 
   pm = messaging.PubMaster(['liveParameters'])
-  sm = messaging.SubMaster(['livePose', 'liveCalibration', 'carState'], poll='livePose')
+  # `carState` is a high-subscriber service and can be unreliable to sample via
+  # non-polled `recv_one_or_none` (missed updates -> failed all_checks -> invalid
+  # liveParameters). Poll on `carState` for robust delivery and still publish at
+  # the `livePose` cadence below.
+  sm = messaging.SubMaster(['livePose', 'liveCalibration', 'carState'], poll='carState')
 
   params = Params()
   CP = messaging.log_from_bytes(params.get("CarParams", block=True), car.CarParams)
