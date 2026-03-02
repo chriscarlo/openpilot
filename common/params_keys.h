@@ -351,8 +351,14 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
 
     // mapd + MTSC
     {"MapAdvisorySpeedLimit", {CLEAR_ON_ONROAD_TRANSITION, FLOAT}},
+    {"MapCurvatures", {CLEAR_ON_ONROAD_TRANSITION, STRING}},
+    {"MapHazard", {CLEAR_ON_ONROAD_TRANSITION, STRING}},
     {"MapdVersion", {PERSISTENT, STRING, ""}},
     {"MapSpeedLimit", {CLEAR_ON_ONROAD_TRANSITION, FLOAT, "0.0"}},
+    {"MapTargetLatA", {CLEAR_ON_ONROAD_TRANSITION, STRING}},
+    {"MapTargetVelocities", {CLEAR_ON_ONROAD_TRANSITION, STRING}},
+    {"NextMapAdvisoryLimit", {CLEAR_ON_ONROAD_TRANSITION, STRING}},
+    {"NextMapHazard", {CLEAR_ON_ONROAD_TRANSITION, STRING}},
     {"NextMapSpeedLimit", {CLEAR_ON_ONROAD_TRANSITION, JSON}},
     {"Offroad_OSMUpdateRequired", {CLEAR_ON_MANAGER_START, JSON}},
     {"OsmDbUpdatesCheck", {CLEAR_ON_MANAGER_START, BOOL}},  // mapd database update happens with device ON, reset on boot
