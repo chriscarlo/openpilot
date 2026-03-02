@@ -46,6 +46,10 @@ SafetyModel = car.CarParams.SafetyModel
 
 IGNORED_SAFETY_MODES = (SafetyModel.silent, SafetyModel.noOutput)
 
+# Some streams are ignored for commIssue gating, but we still want to surface
+# their internal msg.valid state in the readiness widget.
+READINESS_FORCE_CHECK_VALID_SERVICES = {'liveParameters'}
+
 
 def compute_subsystem_status(sm, services: list[str], ignore_valid_services: set[str], ignore_freq_services: set[str]) -> int:
   any_not_alive = any(not sm.alive.get(s, True) for s in services)
@@ -53,7 +57,8 @@ def compute_subsystem_status(sm, services: list[str], ignore_valid_services: set
   # Keep readiness semantics aligned with selfdrived comm checks: some streams
   # intentionally use internal validity semantics and should not go yellow on
   # outer msg.valid alone.
-  any_not_valid = any((s not in ignore_valid_services) and (not sm.valid.get(s, True)) for s in services)
+  any_not_valid = any((((s not in ignore_valid_services) or (s in READINESS_FORCE_CHECK_VALID_SERVICES)) and
+                       (not sm.valid.get(s, True))) for s in services)
   if any_not_alive:
     return 0  # red
   if any_not_freq or any_not_valid:
@@ -114,11 +119,7 @@ class SelfdriveD(CruiseHelper):
       'liveTorqueParameters',
       'driverAssistance',
     ]
-    # The liveParameters stream can briefly dip freq_ok during startup/windowed
-    # frequency tracking while remaining alive and valid.
-    ignore_freq_only = ['liveParameters']
     self.ignore_valid_only = set(ignore_valid_only)
-    self.ignore_freq_only = set(ignore_freq_only)
     if SIMULATION:
       ignore += ['driverCameraState', 'managerState']
     if REPLAY:
@@ -593,7 +594,7 @@ class SelfdriveD(CruiseHelper):
     all_green = True
     ignore_valid_services = set(self.sm.ignore_valid)
     for i, (name, services) in enumerate(SUBSYSTEM_SERVICES):
-      status = compute_subsystem_status(self.sm, services, ignore_valid_services, self.ignore_freq_only)
+      status = compute_subsystem_status(self.sm, services, ignore_valid_services, set())
       if status != 2:
         all_green = False
       statuses[i].name = name
