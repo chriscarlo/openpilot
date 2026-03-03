@@ -178,6 +178,130 @@ void RTIRangeControl::reset() {
 }
 
 // ============================================================================
+// IntRangeControl Implementation (raw integer, no unit conversion)
+// ============================================================================
+
+IntRangeControl::IntRangeControl(const QString &title, const QString &description,
+                                 const QString &paramKey, int minVal, int maxVal,
+                                 int step, int defaultVal, const QString &units,
+                                 QWidget *parent)
+  : QFrame(parent), paramKey(paramKey), units(units),
+    minValue(minVal), maxValue(maxVal), stepSize(step), defaultValue(defaultVal) {
+
+  QVBoxLayout *mainLayout = new QVBoxLayout(this);
+  mainLayout->setContentsMargins(0, 0, 0, 0);
+
+  QLabel *titleLabel = new QLabel(title);
+  titleLabel->setStyleSheet("font-size: 42px; font-weight: 500; color: #E4E4E4;");
+  mainLayout->addWidget(titleLabel);
+
+  if (!description.isEmpty()) {
+    QLabel *descLabel = new QLabel(description);
+    descLabel->setWordWrap(true);
+    descLabel->setStyleSheet("font-size: 32px; color: #999999; margin-top: 5px; margin-bottom: 15px;");
+    mainLayout->addWidget(descLabel);
+  }
+
+  QHBoxLayout *controlLayout = new QHBoxLayout();
+  controlLayout->setSpacing(20);
+
+  minusBtn = new QPushButton("-");
+  minusBtn->setFixedSize(100, 100);
+  minusBtn->setStyleSheet(R"(
+    QPushButton { font-size: 60px; font-weight: 500; border-radius: 50px; background-color: #393939; color: #E4E4E4; }
+    QPushButton:pressed { background-color: #4a4a4a; }
+    QPushButton:disabled { background-color: #2a2a2a; color: #666666; }
+  )");
+  minusBtn->setFocusPolicy(Qt::NoFocus);
+  controlLayout->addWidget(minusBtn);
+
+  QVBoxLayout *valueLayout = new QVBoxLayout();
+  valueLayout->setAlignment(Qt::AlignCenter);
+
+  valueLabel = new QLabel("0");
+  valueLabel->setAlignment(Qt::AlignCenter);
+  valueLabel->setStyleSheet("font-size: 70px; font-weight: 500; color: #FFFFFF;");
+  valueLabel->setFixedWidth(300);
+  valueLayout->addWidget(valueLabel);
+
+  statusLabel = new QLabel(tr("(Default)"));
+  statusLabel->setAlignment(Qt::AlignCenter);
+  statusLabel->setStyleSheet("font-size: 32px; color: #999999;");
+  valueLayout->addWidget(statusLabel);
+
+  controlLayout->addLayout(valueLayout);
+
+  plusBtn = new QPushButton("+");
+  plusBtn->setFixedSize(100, 100);
+  plusBtn->setStyleSheet(minusBtn->styleSheet());
+  plusBtn->setFocusPolicy(Qt::NoFocus);
+  controlLayout->addWidget(plusBtn);
+
+  controlLayout->addStretch();
+
+  resetBtn = new QPushButton(tr("Reset"));
+  resetBtn->setFixedSize(150, 80);
+  resetBtn->setStyleSheet(R"(
+    QPushButton { font-size: 35px; font-weight: 500; border-radius: 20px; background-color: #393939; color: #E4E4E4; }
+    QPushButton:pressed { background-color: #4a4a4a; }
+    QPushButton:disabled { background-color: #2a2a2a; color: #666666; }
+  )");
+  resetBtn->setFocusPolicy(Qt::NoFocus);
+  controlLayout->addWidget(resetBtn);
+
+  mainLayout->addLayout(controlLayout);
+
+  // Load current value (stored as plain integer string)
+  QString storedValue = QString::fromStdString(params.get(paramKey.toStdString()));
+  if (storedValue.isEmpty()) {
+    currentValue = defaultValue;
+  } else {
+    currentValue = storedValue.toInt();
+  }
+
+  connect(minusBtn, &QPushButton::clicked, this, &IntRangeControl::decrement);
+  connect(plusBtn, &QPushButton::clicked, this, &IntRangeControl::increment);
+  connect(resetBtn, &QPushButton::clicked, this, &IntRangeControl::reset);
+
+  updateLabels();
+}
+
+void IntRangeControl::updateLabels() {
+  valueLabel->setText(QString::number(currentValue) + " " + units);
+
+  bool isDefault = (currentValue == defaultValue);
+  if (isDefault) {
+    statusLabel->setText(tr("(Default)"));
+    statusLabel->setStyleSheet("font-size: 32px; color: #999999;");
+  } else {
+    statusLabel->setText(tr("(Modified)"));
+    statusLabel->setStyleSheet("font-size: 32px; color: #FFC107;");
+  }
+
+  minusBtn->setEnabled(currentValue > minValue);
+  plusBtn->setEnabled(currentValue < maxValue);
+  resetBtn->setEnabled(!isDefault);
+}
+
+void IntRangeControl::increment() {
+  currentValue = std::min(currentValue + stepSize, maxValue);
+  params.put(paramKey.toStdString(), std::to_string(currentValue));
+  updateLabels();
+}
+
+void IntRangeControl::decrement() {
+  currentValue = std::max(currentValue - stepSize, minValue);
+  params.put(paramKey.toStdString(), std::to_string(currentValue));
+  updateLabels();
+}
+
+void IntRangeControl::reset() {
+  currentValue = defaultValue;
+  params.put(paramKey.toStdString(), std::to_string(currentValue));
+  updateLabels();
+}
+
+// ============================================================================
 // RTISpeedReductionControl Implementation
 // ============================================================================
 
@@ -541,7 +665,87 @@ void RTISettingsPanel::setupMainLayout() {
   alertsLayout->addLayout(audioLayout);
   
   mainLayout->addWidget(alertsFrame);
-  
+
+  // ================================================================
+  // Inclement Weather Section
+  // ================================================================
+  QFrame *weatherFrame = createSectionFrame();
+  QVBoxLayout *weatherLayout = new QVBoxLayout(weatherFrame);
+
+  QLabel *weatherSectionLabel = new QLabel(tr("Inclement Weather"));
+  weatherSectionLabel->setStyleSheet("font-size: 42px; font-weight: 500; color: #E4E4E4; padding-bottom: 5px;");
+  weatherLayout->addWidget(weatherSectionLabel);
+
+  QLabel *weatherDesc = new QLabel(tr("Automatically reduce cruise speed based on real-time precipitation data"));
+  weatherDesc->setWordWrap(true);
+  weatherDesc->setStyleSheet("font-size: 32px; color: #999999; padding-bottom: 20px;");
+  weatherLayout->addWidget(weatherDesc);
+
+  // Master toggle
+  QHBoxLayout *weatherToggleLayout = new QHBoxLayout();
+  QLabel *weatherToggleLabel = new QLabel(tr("Weather-Aware Speed Control"));
+  weatherToggleLabel->setStyleSheet("font-size: 36px; color: #E4E4E4;");
+  weatherToggleLayout->addWidget(weatherToggleLabel);
+  weatherToggleLayout->addStretch();
+
+  weatherToggle = new ToggleSP();
+  weatherToggle->setFixedSize(150, 80);
+  {
+    bool weather_on = params.getBool("WeatherAwareControlEnabled");
+    if (weatherToggle->on != weather_on) {
+      weatherToggle->togglePosition();
+    }
+  }
+  weatherToggleLayout->addWidget(weatherToggle);
+  weatherLayout->addLayout(weatherToggleLayout);
+
+  weatherLayout->addSpacing(20);
+
+  // Speed reduction controls (disabled when toggle is OFF)
+  weatherControlsFrame = new QFrame();
+  weatherControlsFrame->setStyleSheet("background-color: transparent;");
+  QVBoxLayout *weatherControlsLayout = new QVBoxLayout(weatherControlsFrame);
+  weatherControlsLayout->setContentsMargins(0, 0, 0, 0);
+
+  weatherLightControl = new IntRangeControl(
+    tr("Light Rain Reduction"),
+    tr("Speed reduction during light rain or drizzle"),
+    "WeatherSpeedReductionLight",
+    0, 20, 1, 5, "mph",
+    this
+  );
+  weatherControlsLayout->addWidget(weatherLightControl);
+  weatherControlsLayout->addSpacing(15);
+
+  weatherModerateControl = new IntRangeControl(
+    tr("Moderate Rain Reduction"),
+    tr("Speed reduction during moderate rain or showers"),
+    "WeatherSpeedReductionModerate",
+    0, 25, 1, 10, "mph",
+    this
+  );
+  weatherControlsLayout->addWidget(weatherModerateControl);
+  weatherControlsLayout->addSpacing(15);
+
+  weatherHeavyControl = new IntRangeControl(
+    tr("Heavy Rain Reduction"),
+    tr("Speed reduction during heavy rain, storms, or freezing rain"),
+    "WeatherSpeedReductionHeavy",
+    0, 30, 1, 15, "mph",
+    this
+  );
+  weatherControlsLayout->addWidget(weatherHeavyControl);
+
+  weatherLayout->addWidget(weatherControlsFrame);
+  weatherControlsFrame->setVisible(params.getBool("WeatherAwareControlEnabled"));
+
+  connect(weatherToggle, &ToggleSP::stateChanged, [this](bool checked) {
+    params.putBool("WeatherAwareControlEnabled", checked);
+    weatherControlsFrame->setVisible(checked);
+  });
+
+  mainLayout->addWidget(weatherFrame);
+
   // Add stretch at the end
   mainLayout->addStretch();
 }
@@ -562,6 +766,11 @@ void RTISettingsPanel::showEvent(QShowEvent *event) {
   if (audioToggle) {
     bool audio_on = params.getBool("RTIAudioAlerts");
     if (audioToggle->on != audio_on) audioToggle->togglePosition();
+  }
+  if (weatherToggle) {
+    bool weather_on = params.getBool("WeatherAwareControlEnabled");
+    if (weatherToggle->on != weather_on) weatherToggle->togglePosition();
+    if (weatherControlsFrame) weatherControlsFrame->setVisible(weather_on);
   }
 }
 

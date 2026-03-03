@@ -82,6 +82,38 @@ private:
   QPushButton *speedResetBtn;
 };
 
+// Simple integer range control (no unit conversion — stores raw int to Params)
+class IntRangeControl : public QFrame {
+  Q_OBJECT
+
+public:
+  IntRangeControl(const QString &title, const QString &description,
+                  const QString &paramKey, int minVal, int maxVal,
+                  int step, int defaultVal, const QString &units,
+                  QWidget *parent = nullptr);
+
+private:
+  void updateLabels();
+  void increment();
+  void decrement();
+  void reset();
+
+  Params params;
+  QString paramKey;
+  QString units;
+  int currentValue;
+  int defaultValue;
+  int minValue;
+  int maxValue;
+  int stepSize;
+
+  QLabel *valueLabel;
+  QLabel *statusLabel;
+  QPushButton *minusBtn;
+  QPushButton *plusBtn;
+  QPushButton *resetBtn;
+};
+
 // Main settings panel
 class RTISettingsPanel : public QFrame {
   Q_OBJECT
@@ -112,7 +144,14 @@ private:
   RTISpeedReductionControl *speedReductionControl;
   ToggleSP *hudToggle;
   ToggleSP *audioToggle;
-  
+
+  // Weather-Aware Speed Control
+  ToggleSP *weatherToggle;
+  IntRangeControl *weatherLightControl;
+  IntRangeControl *weatherModerateControl;
+  IntRangeControl *weatherHeavyControl;
+  QFrame *weatherControlsFrame;
+
   // Unit conversion helpers
   static constexpr float MILES_TO_METERS = 1609.344f;
   static constexpr float METERS_TO_MILES = 0.000621371f;

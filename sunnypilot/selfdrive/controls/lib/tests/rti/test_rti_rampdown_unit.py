@@ -287,3 +287,99 @@ def test_rti_no_speed_spike_on_direction_transition_jitter(monkeypatch):
     ctrl._process_rti_state(state, dt=0.1)
     assert ctrl.is_active
     assert ctrl.speed_recommendation != 255
+
+
+def test_rti_activates_when_v_ego_equals_v_cruise_in_posted_mode(monkeypatch):
+    """Regression: RTI must begin slowing even when v_ego == v_cruise.
+
+    Real-world symptom: when cruising exactly at the set speed (common with SLC),
+    RTI never becomes active because it only "activates" once the recommendation
+    is strictly below v_cruise, but the initial ramp starts at v_cruise.
+    """
+    make_stubs()
+    force_params_stub()
+    from sunnypilot.selfdrive.controls.lib.rti_controller import RTIController
+
+    class FakeThreat:
+        def __init__(self, threat_id, distance, direction, type_name, speed_limit_ms, confidence=0.9):
+            self.id = threat_id
+            self.distance = distance
+            self.direction = direction
+            self.type = type_name
+            self.speedLimitMs = speed_limit_ms
+            self.confidence = confidence
+
+    class FakeState:
+        def __init__(self, threats):
+            self.threats = threats
+            self.recommendedSpeed = 0.0
+
+    ctrl = RTIController(CP=None)
+    ctrl.params.put_bool('RTIEnabled', True)
+    ctrl.params.put('RTISpeedReductionMode', 'posted')
+    ctrl.params.put('RTIThreatFilter', '1')  # police
+    ctrl.params.put('RTIDecelRate', 1.5)
+
+    # Steady-state: ego exactly at cruise (no lead, flat road)
+    v_cruise = 31.29  # ~70 mph in m/s
+    posted_ms = 29.06  # ~65 mph in m/s
+    ctrl._v_cruise = v_cruise
+    ctrl._v_ego = v_cruise
+
+    threat = FakeThreat("police-002", distance=500.0, direction='ahead', type_name='police', speed_limit_ms=posted_ms)
+    state = FakeState([threat])
+
+    # Even without ego speed already dropping, RTI should activate and start ramping down.
+    ctrl._process_rti_state(state, dt=0.1)
+    assert ctrl.is_active, "RTI should activate when posted limit < v_cruise, even if v_ego == v_cruise"
+    assert ctrl.speed_recommendation != 255  # V_CRUISE_UNSET (stub)
+
+
+def test_rti_uses_slc_posted_limit_when_alert_missing_speed_limit(monkeypatch):
+    """RTI should pin to SLC's posted limit even when alert payload has no speedLimit."""
+    make_stubs()
+    force_params_stub()
+    from sunnypilot.selfdrive.controls.lib.rti_controller import RTIController
+
+    class FakeThreat:
+        def __init__(self, threat_id, distance, direction, type_name, confidence=0.9):
+            self.id = threat_id
+            self.distance = distance
+            self.direction = direction
+            self.type = type_name
+            self.confidence = confidence
+            self.speedLimitMs = 0.0  # simulate "no speedLimit" in alert
+
+    class FakeState:
+        def __init__(self, threats):
+            self.threats = threats
+            self.recommendedSpeed = 0.0  # posted mode in rtid would emit 0 when no speed limit is available
+
+    ctrl = RTIController(CP=None)
+    ctrl.params.put_bool('RTIEnabled', True)
+    ctrl.params.put('RTISpeedReductionMode', 'posted')
+    ctrl.params.put('RTIThreatFilter', '1')  # police
+    ctrl.params.put('RTIDecelRate', 1.5)
+
+    v_cruise = 31.29  # ~70 mph in m/s (e.g., speed limit + offset)
+    posted_ms = 29.06  # ~65 mph in m/s (actual posted limit from SLC source)
+
+    # What planner passes in via RTIController.update(... posted_speed_limit=slc.speed_limit)
+    ctrl._posted_speed_limit = posted_ms
+    ctrl._v_cruise = v_cruise
+    ctrl._v_ego = v_cruise
+
+    threat = FakeThreat("police-003", distance=400.0, direction='ahead', type_name='police')
+    state = FakeState([threat])
+
+    # First step (dt=0 is common right after activation), controller should still go active.
+    ctrl._process_rti_state(state, dt=0.0)
+    assert ctrl.is_active
+    assert ctrl.speed_recommendation != 255  # V_CRUISE_UNSET (stub)
+
+    # Then it should ramp down toward posted limit even if ego speed hasn't started dropping yet.
+    for _ in range(50):  # 5 seconds at 10Hz
+        ctrl._v_ego = v_cruise
+        ctrl._process_rti_state(state, dt=0.1)
+
+    assert abs(ctrl.speed_recommendation - posted_ms) < 0.5

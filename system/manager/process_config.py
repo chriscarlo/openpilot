@@ -96,6 +96,10 @@ def rti_enabled(started: bool, params: Params, CP: car.CarParams) -> bool:
   """Check if RTI (Realtime Traffic Intelligence) is enabled."""
   return started and params.get_bool("RTIEnabled")
 
+def weather_enabled(started: bool, params: Params, CP: car.CarParams) -> bool:
+  """Check if Weather-Aware Speed Control is enabled."""
+  return started and params.get_bool("WeatherAwareControlEnabled")
+
 def mtsc_enabled(started: bool, params: Params, CP: car.CarParams) -> bool:
   # Deprecated: MTSC publisher removed in favor of direct VTSC map lookahead.
   return False
@@ -189,6 +193,9 @@ procs += [
 
   # RTI (Realtime Traffic Intelligence)
   PythonProcess("rtid", "sunnypilot.rtid.rtid", rti_enabled),
+
+  # Weather-Aware Speed Control
+  PythonProcess("weatherd", "sunnypilot.weatherd.weatherd", weather_enabled),
 ]
 
 if os.path.exists("./github_runner.sh"):

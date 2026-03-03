@@ -16,6 +16,7 @@ from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit_controller.speed_li
 from openpilot.sunnypilot.selfdrive.selfdrived.events import EventsSP
 from openpilot.sunnypilot.selfdrive.controls.lib.vision_turn_controller import VisionTurnController
 from openpilot.sunnypilot.selfdrive.controls.lib.rti_controller import RTIController
+from openpilot.sunnypilot.selfdrive.controls.lib.weather_controller import WeatherController
 from openpilot.sunnypilot.models.helpers import get_active_bundle
 
 from openpilot.sunnypilot.selfdrive.controls.lib.vibe_personality.vibe_personality import VibePersonalityController
@@ -31,6 +32,7 @@ class LongitudinalPlannerSP:
     self.v_tsc = VisionTurnController(CP)
     self.slc = SpeedLimitController(CP)
     self.rti = RTIController(CP)
+    self.weather = WeatherController()
     model_bundle = get_active_bundle()
     self.generation = int(model_bundle.generation) if (model_bundle := get_active_bundle()) else None
 
@@ -63,8 +65,12 @@ class LongitudinalPlannerSP:
     v_cruise_v_tsc = self.v_tsc.v_turn if (apply_vtsc and self.v_tsc.is_active) else V_CRUISE_UNSET
 
     # Update RTI controller
-    self.rti.update(sm, v_ego, a_ego, v_cruise)
+    self.rti.update(sm, v_ego, a_ego, v_cruise, posted_speed_limit=self.slc.speed_limit)
     v_cruise_rti = self.rti.speed_recommendation if self.rti.is_active else V_CRUISE_UNSET
+
+    # Update Weather controller
+    self.weather.update(v_ego, v_cruise)
+    v_cruise_weather = self.weather.speed_recommendation if self.weather.is_active else V_CRUISE_UNSET
 
     cruise_speeds = [v_cruise]
 
@@ -76,6 +82,8 @@ class LongitudinalPlannerSP:
       cruise_speeds.append(v_cruise_slc)
     if self.rti.is_active and v_cruise_rti != V_CRUISE_UNSET:
       cruise_speeds.append(v_cruise_rti)
+    if self.weather.is_active and v_cruise_weather != V_CRUISE_UNSET:
+      cruise_speeds.append(v_cruise_weather)
 
     v_cruise_final = min(cruise_speeds)
     return v_cruise_final

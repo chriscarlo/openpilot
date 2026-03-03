@@ -51,6 +51,10 @@ class RTIController:
         self._v_ego = 0.0
         self._a_ego = 0.0
         self._v_cruise = V_CRUISE_UNSET
+        # Posted speed limit from Speed Limit Controller (raw/un-offseted), m/s.
+        # This is optional, but allows RTI to "pin" to the same limit source SLC chose
+        # even when the alert itself doesn't include a speed limit.
+        self._posted_speed_limit = 0.0
 
         # Ramped decel state for RTI-only speed target shaping
         self._ramped_speed = None  # m/s, internal smoothed recommendation
@@ -120,7 +124,8 @@ class RTIController:
         else:
             self._rti_decel_rate = 1.4
 
-    def update(self, sm: messaging.SubMaster, v_ego: float, a_ego: float, v_cruise: float) -> None:
+    def update(self, sm: messaging.SubMaster, v_ego: float, a_ego: float, v_cruise: float,
+               posted_speed_limit: float = 0.0) -> None:
         """
         Update RTI controller state based on current conditions.
 
@@ -129,11 +134,16 @@ class RTIController:
             v_ego: Current ego velocity in m/s
             a_ego: Current ego acceleration in m/s²
             v_cruise: Current cruise setpoint in m/s
+            posted_speed_limit: Posted speed limit in m/s selected by SLC (no offset)
         """
         # Store vehicle state
         self._v_ego = v_ego
         self._a_ego = a_ego
         self._v_cruise = v_cruise
+        try:
+            self._posted_speed_limit = float(posted_speed_limit) if posted_speed_limit else 0.0
+        except (ValueError, TypeError):
+            self._posted_speed_limit = 0.0
 
         # Check if RTI is enabled
         self._enabled = self.params.get_bool("RTIEnabled")
@@ -274,9 +284,17 @@ class RTIController:
         self._active_threat_id = str(getattr(relevant_threat, 'id', '')) or None
 
         # Determine target speed based on threat and user settings
-        if self._speed_reduction_mode == "posted" and relevant_threat.speedLimitMs > 0:
-            # Use posted speed limit from threat
-            target_speed = relevant_threat.speedLimitMs
+        if self._speed_reduction_mode == "posted":
+            # Prefer the posted speed limit selected by the Speed Limit Controller (SLC),
+            # since RTI alerts (especially police) often lack a speedLimit field.
+            if self._posted_speed_limit > 0:
+                target_speed = self._posted_speed_limit
+            elif relevant_threat.speedLimitMs > 0:
+                # Use posted speed limit carried with the threat
+                target_speed = relevant_threat.speedLimitMs
+            else:
+                # Fall back to RTI's recommended speed (may be 0 in posted mode)
+                target_speed = rti_state.recommendedSpeed
         elif self._speed_reduction_mode == "custom":
             # Apply custom speed reduction from current cruise speed
             if self._v_cruise > 0:
@@ -318,7 +336,12 @@ class RTIController:
         final_reco = min(final_reco, V_CRUISE_MAX)
 
         # Apply safety validations
-        if final_reco > 0 and (self._v_cruise <= 0 or final_reco < self._v_cruise):
+        # Be active whenever there is a meaningful target below the current cruise setpoint.
+        # This avoids a chicken-and-egg where the ramp initializes at v_cruise and the old
+        # "< v_cruise" gate would prevent RTI from ever engaging in steady-state cruising.
+        eps = 0.01  # m/s, ~0.02 mph
+        want_active = final_reco > 0 and (self._v_cruise <= 0 or base_target < (self._v_cruise - eps))
+        if want_active:
             self._speed_recommendation = final_reco
             self._is_active = True
         else:
