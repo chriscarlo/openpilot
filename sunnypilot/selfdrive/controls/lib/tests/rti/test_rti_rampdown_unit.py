@@ -435,3 +435,97 @@ def test_rti_uses_slc_posted_limit_when_alert_missing_speed_limit(monkeypatch):
         ctrl._process_rti_state(state, dt=0.1)
 
     assert abs(ctrl.speed_recommendation - posted_ms) < 0.5
+
+
+def test_rti_stays_inactive_when_threat_outside_user_windows(monkeypatch):
+    """RTI must not constrain cruise when threats are outside approach/resume windows."""
+    make_stubs()
+    force_params_stub()
+    from sunnypilot.selfdrive.controls.lib.rti_controller import RTIController
+
+    class FakeThreat:
+        def __init__(self, threat_id, distance, direction, type_name, speed_limit_ms, confidence=0.9):
+            self.id = threat_id
+            self.distance = distance
+            self.direction = direction
+            self.type = type_name
+            self.speedLimitMs = speed_limit_ms
+            self.confidence = confidence
+            self.onSameRoad = True
+
+    class FakeState:
+        def __init__(self, threats):
+            self.threats = threats
+            self.recommendedSpeed = 0.0
+
+    ctrl = RTIController(CP=None)
+    ctrl.params.put_bool('RTIEnabled', True)
+    ctrl.params.put('RTISpeedReductionMode', 'posted')
+    ctrl.params.put('RTIThreatFilter', '1')  # police
+    ctrl.params.put('RTIForwardSlowdownRange', 200)  # meters
+    ctrl.params.put('RTIResumeSpeedDistance', 150)   # meters
+    ctrl._load_user_params()
+
+    v_cruise = 31.29  # ~70 mph in m/s
+    posted_ms = 26.82  # ~60 mph in m/s
+    ctrl._posted_speed_limit = posted_ms
+    ctrl._v_cruise = v_cruise
+    ctrl._v_ego = v_cruise
+
+    # Both directions are outside their respective user windows.
+    ahead_outside = FakeThreat("police-ahead", distance=260.0, direction='ahead', type_name='police', speed_limit_ms=0.0)
+    behind_outside = FakeThreat("police-behind", distance=220.0, direction='behind', type_name='police', speed_limit_ms=0.0)
+
+    ctrl._process_rti_state(FakeState([ahead_outside, behind_outside]), dt=0.1)
+    assert not ctrl.is_active
+    assert ctrl.speed_recommendation == 255  # V_CRUISE_UNSET in stub
+
+
+def test_rti_deactivates_after_leaving_user_windows(monkeypatch):
+    """RTI should release control once a threat exits approach/resume distance windows."""
+    make_stubs()
+    force_params_stub()
+    from sunnypilot.selfdrive.controls.lib.rti_controller import RTIController
+
+    class FakeThreat:
+        def __init__(self, threat_id, distance, direction, type_name, speed_limit_ms, confidence=0.9):
+            self.id = threat_id
+            self.distance = distance
+            self.direction = direction
+            self.type = type_name
+            self.speedLimitMs = speed_limit_ms
+            self.confidence = confidence
+            self.onSameRoad = True
+
+    class FakeState:
+        def __init__(self, threats):
+            self.threats = threats
+            self.recommendedSpeed = 0.0
+
+    ctrl = RTIController(CP=None)
+    ctrl.params.put_bool('RTIEnabled', True)
+    ctrl.params.put('RTISpeedReductionMode', 'posted')
+    ctrl.params.put('RTIThreatFilter', '1')  # police
+    ctrl.params.put('RTIForwardSlowdownRange', 200)  # meters
+    ctrl.params.put('RTIResumeSpeedDistance', 150)   # meters
+    ctrl._load_user_params()
+
+    v_cruise = 31.29
+    posted_ms = 26.82
+    ctrl._posted_speed_limit = posted_ms
+    ctrl._v_cruise = v_cruise
+    ctrl._v_ego = v_cruise
+
+    threat = FakeThreat("police-window", distance=180.0, direction='ahead', type_name='police', speed_limit_ms=0.0)
+
+    # Inside approach window -> RTI should activate.
+    ctrl._process_rti_state(FakeState([threat]), dt=0.1)
+    assert ctrl.is_active
+    assert ctrl.speed_recommendation != 255
+
+    # Move outside both windows -> RTI should release and stop constraining cruise.
+    threat.distance = 260.0
+    threat.direction = 'ahead'
+    ctrl._process_rti_state(FakeState([threat]), dt=0.1)
+    assert not ctrl.is_active
+    assert ctrl.speed_recommendation == 255
