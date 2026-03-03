@@ -6,7 +6,13 @@
 #include <atomic>
 
 #define DEFAULT_SEGMENT_SIZE (10 * 1024 * 1024)
-#define NUM_READERS 15
+// Reader slots per message endpoint.
+//
+// In this fork we can exceed the upstream default on heavily used services
+// (notably `carState`) once Sunnypilot extras and debug tooling are enabled.
+// When `NUM_READERS` is exceeded, msgq evicts *all* subscribers, which can
+// manifest as UI lag / timing hiccups and false readiness alerts.
+#define NUM_READERS 32
 #define ALIGN(n) ((n + (8 - 1)) & -8)
 
 #define UNUSED(x) (void)x
