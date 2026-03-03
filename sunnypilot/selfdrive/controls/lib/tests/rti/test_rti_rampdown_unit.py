@@ -66,21 +66,73 @@ def make_stubs():
 
 
 def force_params_stub():
-    """Force using the lightweight Python Params stub instead of the compiled extension.
+    """Force using a lightweight Params stub instead of the compiled extension.
 
-    This avoids importing openpilot.common.swaglog and hardware paths during tests.
+    This test suite is intended to run without compiled extensions or full runtime deps.
     """
     import types as _types
     import sys as _sys
+
     modname = 'openpilot.common.params_pyx'
     if modname in _sys.modules:
         return
-    stub_path = Path('openpilot/common/params_pyx.py')
-    if stub_path.exists():
-        code = stub_path.read_text()
-        module = _types.ModuleType(modname)
-        exec(compile(code, str(stub_path), 'exec'), module.__dict__)
-        _sys.modules[modname] = module
+
+    try:
+        __import__(modname)
+        return
+    except Exception:
+        pass
+
+    module = _types.ModuleType(modname)
+
+    class UnknownKeyName(Exception):
+        pass
+
+    class ParamKeyFlag:
+        pass
+
+    class ParamKeyType:
+        pass
+
+    class Params:
+        def __init__(self):
+            self._vals = {}
+
+        def check_key(self, key):
+            return True
+
+        def get(self, key, block=False):
+            val = self._vals.get(key, None)
+            if val is None:
+                return None
+            if isinstance(val, (bytes, bytearray)):
+                return bytes(val)
+            if isinstance(val, str):
+                return val.encode('utf-8')
+            return val
+
+        def put(self, key, val):
+            self._vals[key] = val
+
+        def get_bool(self, key):
+            val = self._vals.get(key, False)
+            if isinstance(val, (bytes, bytearray)):
+                try:
+                    val = val.decode('utf-8')
+                except Exception:
+                    return bool(val)
+            if isinstance(val, str):
+                return val.strip().lower() in ("1", "true", "t", "yes", "y", "on")
+            return bool(val)
+
+        def put_bool(self, key, val):
+            self._vals[key] = bool(val)
+
+    module.Params = Params
+    module.ParamKeyFlag = ParamKeyFlag
+    module.ParamKeyType = ParamKeyType
+    module.UnknownKeyName = UnknownKeyName
+    _sys.modules[modname] = module
 
 
 def test_rti_posted_rampdown_and_no_overshoot(monkeypatch):
