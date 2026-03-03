@@ -3198,17 +3198,17 @@ class VisionTurnController:
     if severe_vision:
       s_start = max(0.0, vis_margin)
     else:
-      # Use half the vision horizon so map data nearer to ego is considered —
-      # the full horizon was skipping curves that vision couldn't see (blind).
-      s_start = max(0.0, self._v_ego * float(getattr(self, '_vis_horizon_s', 1.4)) * 0.5 + vis_margin)
+      s_start = max(0.0, self._v_ego * float(getattr(self, '_vis_horizon_s', 1.4)) + vis_margin)
     # Planning decel: use half of comfort decel for the reachable-cap so braking
     # begins earlier and more gently, instead of last-second emergency braking.
     a_comf_full = float(max(0.1, getattr(self, '_max_decel', 3.5)))
     a_plan = a_comf_full * 0.5
 
-    # Reachable cap for current speed from future safe speeds
+    # Reachable cap: start from cruise setpoint, not v_ego.  Starting from v_ego
+    # creates a one-way ratchet that pins the cap at current speed when exiting a
+    # curve, preventing acceleration even when the next curve is far ahead.
     v_now = float(self._v_ego)
-    v_cap = v_now
+    v_cap = float(self._v_cruise_setpoint)
     any_future = False
     for vi, di in zip(vsafe, s_list, strict=False):
       if di < s_start:
