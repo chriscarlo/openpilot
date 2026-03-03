@@ -252,32 +252,67 @@ void HudRendererSP::updateState(const UIState &s) {
 
       // Preview geometry + metadata (already computed by VTSC map enrichment; HUD only renders)
       preview_valid = vtsc.getCurvePreviewValid();
-      vtsc_copilot_curve_distance_m_ = vtsc.getCurveDistanceM();
-      vtsc_copilot_curve_time_to_s_ = vtsc.getCurveTimeToS();
+
+      // Determine whether ego is currently negotiating (past the curve-start marker) before
+      // overwriting any state.  When in-curve, hold the locked geometry and distance so the
+      // display doesn't snap to the exit/tail of the bend being re-detected as a "new" nearby
+      // curve by the producer.
+      const bool was_in_curve = (!vtsc_copilot_curve_points_m_.empty() &&
+                                  vtsc_copilot_ego_advance_m_ >= vtsc_copilot_curve_distance_m_);
+      const float new_dist_m = vtsc.getCurveDistanceM();
+      // Accept a fresh snapshot only when the incoming curve start is far enough ahead to be
+      // a genuinely new curve, not just the current bend re-detected at ~0 m.
+      constexpr float kCurveHoldNewDistMin = 30.0f;  // metres
+      const bool allow_geom_update = !was_in_curve || (new_dist_m >= kCurveHoldNewDistMin);
+
+      // Ancillary scalars (kappa drives the fade logic so always update).
       vtsc_copilot_curve_kappa_max_ = vtsc.getCurveMaxCurvature();
       vtsc_copilot_curve_direction_ = static_cast<int>(vtsc.getCurveDirection());
       vtsc_copilot_curve_severity_ = static_cast<int>(vtsc.getCurveSeverity());
-
-      // VTSC target speed (m/s) for display.
       vtsc_target_speed_mps_ = vtsc.getVelocity();
 
-      // Only update geometry when the producer says it's valid.
-      if (preview_valid) {
+      // Distance/time labels stay anchored to the locked geometry when in-curve.
+      if (allow_geom_update) {
+        vtsc_copilot_curve_distance_m_ = new_dist_m;
+        vtsc_copilot_curve_time_to_s_ = vtsc.getCurveTimeToS();
+      }
+
+      // Only update geometry when the producer says it's valid AND we are not locked mid-curve.
+      if (preview_valid && allow_geom_update) {
         std::vector<QPointF> new_pts;
         auto pts = vtsc.getCurvePreviewPoints();
         new_pts.reserve(static_cast<size_t>(pts.size()));
         for (const auto &pt : pts) {
           new_pts.emplace_back(pt.getXFwdM(), pt.getYLeftM());
         }
-        have_points = (new_pts.size() >= 3);
-        if (have_points) {
+        if (new_pts.size() >= 3) {
+          // Detect whether geometry actually changed.  The producer throttles to
+          // ~5 Hz but the planner re-publishes the same points at 20 Hz.  Resetting
+          // ego-advance on every identical re-publish kills smooth interpolation.
+          bool geom_changed = (new_pts.size() != vtsc_copilot_curve_points_m_.size());
+          if (!geom_changed) {
+            constexpr float kEps = 0.05f;  // 5 cm tolerance
+            const size_t mid = new_pts.size() / 2;
+            const size_t last_idx = new_pts.size() - 1;
+            for (size_t idx : {size_t(0), mid, last_idx}) {
+              if (std::abs(new_pts[idx].x() - vtsc_copilot_curve_points_m_[idx].x()) > kEps ||
+                  std::abs(new_pts[idx].y() - vtsc_copilot_curve_points_m_[idx].y()) > kEps) {
+                geom_changed = true;
+                break;
+              }
+            }
+          }
           vtsc_copilot_curve_points_m_ = std::move(new_pts);
-          // Reset ego-advance on fresh producer data so the view snaps to
-          // the new point set and then smoothly scrolls until the next update.
-          vtsc_copilot_ego_advance_m_ = 0.0f;
-          vtsc_copilot_last_draw_time_valid_ = false;
+          if (geom_changed) {
+            // Reset ego-advance on genuinely new producer data so the view snaps to
+            // the new point set and then smoothly scrolls until the next update.
+            vtsc_copilot_ego_advance_m_ = 0.0f;
+            vtsc_copilot_last_draw_time_valid_ = false;
+          }
         }
       }
+      // Locked geometry counts as valid points for visibility gating.
+      have_points = (vtsc_copilot_curve_points_m_.size() >= 3);
     }
 
     const float kappa_max = vtsc_copilot_curve_kappa_max_;
@@ -783,7 +818,7 @@ static QPainterPath buildSmoothStripMapPath(const std::vector<QPointF> &pts, flo
   path.moveTo(pts.front());
   if (pts.size() < 2) return path;
 
-  const float t = std::clamp(tension, 0.0f, 1.0f);
+  const float t = std::clamp(tension, 0.0f, 3.0f);
   const float s = t / 6.0f;
 
   for (size_t i = 0; i + 1 < pts.size(); i++) {
@@ -1026,79 +1061,14 @@ void HudRendererSP::drawVTSCCoPilotCurve(QPainter &p, const QRect &surface_rect)
     px_pts.emplace_back(toPx(static_cast<float>(pt.x()), static_cast<float>(pt.y())));
   }
 
-  // Best-effort curve-start tick mark: locate the point at `curveDistanceM` (ego-advance adjusted).
-  const float marker_dist = std::max(0.0f, vtsc_copilot_curve_distance_m_ - ego_adv);
-  bool have_marker = std::isfinite(vtsc_copilot_curve_distance_m_) && marker_dist >= 0.0f;
-  QPointF marker_px;
-  QPointF marker_tangent;
-  bool marker_ok = false;
-  if (have_marker) {
-    const float xm = marker_dist;
-    for (size_t i = 0; i + 1 < pts_m.size(); i++) {
-      const float x0 = static_cast<float>(pts_m[i].x());
-      const float x1 = static_cast<float>(pts_m[i + 1].x());
-      if ((x0 <= xm && xm <= x1) || (x1 <= xm && xm <= x0)) {
-        const float denom = (x1 - x0);
-        const float t = (std::abs(denom) > 1e-3f) ? ((xm - x0) / denom) : 0.0f;
-        const float y0 = static_cast<float>(pts_m[i].y());
-        const float y1 = static_cast<float>(pts_m[i + 1].y());
-        const float ym = y0 + t * (y1 - y0);
-        const QPointF p0_px = toPx(x0, y0);
-        const QPointF p1_px = toPx(x1, y1);
-        marker_px = toPx(xm, ym);
-        marker_tangent = (p1_px - p0_px);
-        marker_ok = (std::hypot(marker_tangent.x(), marker_tangent.y()) > 1e-3);
-        break;
-      }
-    }
-  }
-
-  // Split the path into "lead-in" (dim) and "curve region" (bright) around the marker.
-  std::vector<QPointF> lead_px;
-  std::vector<QPointF> curve_px;
-  if (marker_ok) {
-    lead_px.reserve(px_pts.size());
-    curve_px.reserve(px_pts.size());
-
-    // Rebuild in-order, inserting marker point once (ego-advance adjusted).
-    const float xm = marker_dist;
-    bool inserted = false;
-    for (size_t i = 0; i + 1 < pts_m.size(); i++) {
-      const float x0 = static_cast<float>(pts_m[i].x());
-      const float x1 = static_cast<float>(pts_m[i + 1].x());
-      const QPointF p0_px = px_pts[i];
-      if (!inserted) {
-        lead_px.push_back(p0_px);
-      } else {
-        curve_px.push_back(p0_px);
-      }
-      if (!inserted && ((x0 <= xm && xm <= x1) || (x1 <= xm && xm <= x0))) {
-        // Insert the curve-start marker into both segments so smoothing doesn't gap.
-        lead_px.push_back(marker_px);
-        curve_px.push_back(marker_px);
-        inserted = true;
-      }
-    }
-    // Push the last point.
-    if (!px_pts.empty()) {
-      if (!inserted) {
-        lead_px.push_back(px_pts.back());
-      } else {
-        curve_px.push_back(px_pts.back());
-      }
-    }
-  } else {
-    lead_px = px_pts;
-  }
-
-  // Smooth the polylines for a strip-map look (display-only).
-  const QPainterPath lead_path = buildSmoothStripMapPath(lead_px, 0.9f);
-  const QPainterPath curve_path = buildSmoothStripMapPath(curve_px, 0.9f);
+  // Build a single smooth path (unified — no lead/curve brightness split).
+  const QPainterPath strip_path = buildSmoothStripMapPath(px_pts, 2.0f);
 
   // Clip to our vignette bounds so the glow doesn't leak.
   p.setClipRect(box);
 
   // Multi-pass drawing for crisp "pace-note" backbone.
+  constexpr int kRoadMainWidth = 13;  // pixels before kScale — also used for ego dot diameter
   auto drawBackbone = [&](const QPainterPath &path, const QColor &base, int w_glow, int w_outline, int w_main) {
     if (path.isEmpty()) return;
     p.setBrush(Qt::NoBrush);
@@ -1115,12 +1085,35 @@ void HudRendererSP::drawVTSCCoPilotCurve(QPainter &p, const QRect &surface_rect)
     p.drawPath(path);
   };
 
-  // Lead-in: dimmer.  Line widths doubled for bolder strip-map.
-  drawBackbone(lead_path, QColor(255, 255, 255, 170), static_cast<int>(36 * kScale), static_cast<int>(20 * kScale), static_cast<int>(12 * kScale));
-  // Curve region: emphasize (brighter).
-  drawBackbone(curve_path, QColor(255, 255, 255, 235), static_cast<int>(40 * kScale), static_cast<int>(20 * kScale), static_cast<int>(14 * kScale));
+  // Unified road backbone — bright (matches former curve-region emphasis).
+  drawBackbone(strip_path, QColor(255, 255, 255, 235),
+               static_cast<int>(40 * kScale), static_cast<int>(20 * kScale), static_cast<int>(14 * kScale));
 
-  // (Curve-start tick mark / pip removed per user request.)
+  // --- Ego dot: filled circle at ego's position, visible once ego enters the curve. ---
+  // Apple systemRed (#FF3B30) — the "pop" red used for recording indicators and alert buttons.
+  {
+    const float raw_curve_dist = vtsc_copilot_curve_distance_m_ - ego_adv;
+    const bool ego_in_curve = std::isfinite(vtsc_copilot_curve_distance_m_) && raw_curve_dist <= 0.0f;
+    if (ego_in_curve && !px_pts.empty()) {
+      const QPointF dot_center = px_pts.front();  // bottom of strip map = ego position
+      const qreal dot_r = static_cast<qreal>(kRoadMainWidth * kScale) * 0.5;
+
+      // Red glow behind the dot.
+      p.setPen(Qt::NoPen);
+      p.setBrush(QColor(255, 59, 48, 50));
+      p.drawEllipse(dot_center, dot_r + 3.0 * kScale, dot_r + 3.0 * kScale);
+
+      // Black outline ring.
+      p.setBrush(Qt::NoBrush);
+      p.setPen(QPen(QColor(0, 0, 0, 200), 2.0 * kScale, Qt::SolidLine));
+      p.drawEllipse(dot_center, dot_r, dot_r);
+
+      // Solid Apple systemRed fill.
+      p.setPen(Qt::NoPen);
+      p.setBrush(QColor(255, 59, 48, 240));
+      p.drawEllipse(dot_center, dot_r - 1.0 * kScale, dot_r - 1.0 * kScale);
+    }
+  }
 
   // Bottom: distance + time to curve start, centered, larger and with more spacing.
   {
