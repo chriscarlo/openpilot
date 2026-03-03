@@ -2391,15 +2391,24 @@ class VisionTurnController:
       # If a speed-limit down-step occurred, suppress raising entirely until vision is good again
       if getattr(self, '_suppress_raise_due_to_limit', False):
         early_no_raise = True
+      # Straight-road exemption: when curvature is near-zero, there is no hidden turn
+      # to protect against.  Holding the cap at v_ego on a straight road after a lead
+      # car turns off traps the system at low speed with no hazard justification.
+      try:
+        _k_for_noraise = float(abs(getattr(self, '_filtered_curvature', 0.0)))
+      except Exception:
+        _k_for_noraise = 1.0  # fail conservative
+      straight_road = (_k_for_noraise < 5e-4)  # ~2000m radius — effectively straight
       if (not occl_positive_margin) or early_no_raise:
-        accel_cmd = min(accel_cmd, 0.0)
-        # Mirror the "no-raise" behavior in the published speed cap:
-        # if we are occluded and disallowing positive accel, we must not publish a cap above v_ego
-        # (otherwise the planner/MPC will accelerate).
-        try:
-          v_target_cap = min(float(v_target_cap), float(self._v_ego))
-        except Exception:
-          pass
+        if not straight_road:
+          accel_cmd = min(accel_cmd, 0.0)
+          # Mirror the "no-raise" behavior in the published speed cap:
+          # if we are occluded and disallowing positive accel, we must not publish a cap above v_ego
+          # (otherwise the planner/MPC will accelerate).
+          try:
+            v_target_cap = min(float(v_target_cap), float(self._v_ego))
+          except Exception:
+            pass
     # record for telemetry
     self._dbg_occl_positive_margin = bool(occl_positive_margin)
     self._dbg_early_no_raise = bool(early_no_raise)
@@ -2927,11 +2936,11 @@ class VisionTurnController:
     # Default to invalid; set valid only when we can build a sane preview.
     self._clear_curve_preview()
 
-    # Build a short forward window (meters) starting at i0.
-    PREVIEW_S_MAX_M = 260.0
-    MAX_POINTS = 32
-    KAPPA_MIN = 2.0e-3  # 1/m, ~500 m radius
-    RUN = 3             # consecutive samples to start/end a curve
+    # Build a forward window scaled to ~10s lookahead at current speed.
+    PREVIEW_S_MAX_M = max(200.0, min(float(self._v_ego) * 10.0, 600.0))
+    MAX_POINTS = 48
+    KAPPA_MIN = 1.0e-3  # 1/m, ~1000 m radius (detect gentler curves)
+    RUN = 2             # consecutive samples to start/end a curve
 
     try:
       i0 = int(max(0, min(len(pts) - 1, i0)))
@@ -2947,7 +2956,7 @@ class VisionTurnController:
 
     s = 0.0
     # Hard cap on iterations to keep this bounded even if points are dense.
-    for j in range(i0, min(len(pts) - 1, i0 + 80)):
+    for j in range(i0, min(len(pts) - 1, i0 + 120)):
       ds = _haversine_m(float(pts[j][0]), float(pts[j][1]), float(pts[j+1][0]), float(pts[j+1][1]))
       if not (ds > 0.05 and math.isfinite(ds)):
         continue
@@ -2998,6 +3007,33 @@ class VisionTurnController:
         start_idx = idx - (RUN - 1)
         break
     if start_idx is None:
+      # No curve detected — emit the full road polyline with zero metadata so
+      # the HUD has points pre-cached for an instant transition when a curve
+      # does appear.  The HUD gates visibility on kappa_max, so this won't show.
+      pts_out = fwd_left
+      if len(pts_out) > MAX_POINTS:
+        step = float(len(pts_out) - 1) / float(MAX_POINTS - 1)
+        idxs = [int(round(i * step)) for i in range(MAX_POINTS)]
+        uniq, last = [], -1
+        for ii in idxs:
+          ii = max(0, min(len(pts_out) - 1, int(ii)))
+          if ii != last:
+            uniq.append(ii)
+            last = ii
+        pts_out = [pts_out[ii] for ii in uniq]
+      try:
+        self._curve_preview_valid = True
+        self._curve_preview_distance_m = 0.0
+        self._curve_preview_time_to_s = 0.0
+        self._curve_preview_kappa_max = 0.0
+        self._curve_preview_direction = 0
+        self._curve_preview_severity = 0
+        self._curve_preview_points = [(float(x), float(y)) for (x, y) in pts_out]
+        self._curve_preview_last_ts = float(now)
+        self._curve_preview_last_cache_raw = cache_raw
+        self._curve_preview_last_latlon = (float(gps_lat), float(gps_lon))
+      except Exception:
+        self._clear_curve_preview()
       return
 
     end_idx = len(w_k) - 1
@@ -3162,9 +3198,13 @@ class VisionTurnController:
     if severe_vision:
       s_start = max(0.0, vis_margin)
     else:
-      s_start = max(0.0, self._v_ego * float(getattr(self, '_vis_horizon_s', 1.4)) + vis_margin)
-    # Comfort decel
-    a_comf = float(max(0.1, getattr(self, '_max_decel', 3.5)))
+      # Use half the vision horizon so map data nearer to ego is considered —
+      # the full horizon was skipping curves that vision couldn't see (blind).
+      s_start = max(0.0, self._v_ego * float(getattr(self, '_vis_horizon_s', 1.4)) * 0.5 + vis_margin)
+    # Planning decel: use half of comfort decel for the reachable-cap so braking
+    # begins earlier and more gently, instead of last-second emergency braking.
+    a_comf_full = float(max(0.1, getattr(self, '_max_decel', 3.5)))
+    a_plan = a_comf_full * 0.5
 
     # Reachable cap for current speed from future safe speeds
     v_now = float(self._v_ego)
@@ -3176,7 +3216,7 @@ class VisionTurnController:
       any_future = True
       d = max(0.0, di - s_start)
       try:
-        v_allow = math.sqrt(max(0.0, vi*vi + 2.0 * a_comf * d))
+        v_allow = math.sqrt(max(0.0, vi*vi + 2.0 * a_plan * d))
       except Exception:
         v_allow = v_now
       v_cap = min(v_cap, v_allow)

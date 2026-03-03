@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <QPainter>
 #include <unordered_map>
 #include <string>
@@ -112,4 +113,10 @@ protected:
   int vtsc_copilot_curve_direction_ = 0;  // TurnDirection (unknown=0, left=1, right=2)
   int vtsc_copilot_curve_severity_ = 0;   // CurveSeverity (unknown=0, gentle=1, medium=2, tight=3)
   std::vector<QPointF> vtsc_copilot_curve_points_m_;
+
+  // Ego-advance interpolation for smooth 60 Hz scrolling between 5 Hz producer updates.
+  float vtsc_copilot_v_ego_mps_ = 0.0f;
+  float vtsc_copilot_ego_advance_m_ = 0.0f;
+  std::chrono::steady_clock::time_point vtsc_copilot_last_draw_time_{};
+  bool vtsc_copilot_last_draw_time_valid_ = false;
 };

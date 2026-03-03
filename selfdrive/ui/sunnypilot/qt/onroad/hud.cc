@@ -233,6 +233,13 @@ void HudRendererSP::updateState(const UIState &s) {
     return;
   }
 
+  // Cache v_ego for ego-advance interpolation (smooth scrolling between producer updates).
+  try {
+    if (s.sm->valid("carState")) {
+      vtsc_copilot_v_ego_mps_ = (*s.sm)["carState"].getCarState().getVEgo();
+    }
+  } catch (const std::exception&) {}
+
   bool got_live_data = false;
   bool preview_valid = false;
   bool have_points = false;
@@ -265,13 +272,17 @@ void HudRendererSP::updateState(const UIState &s) {
         have_points = (new_pts.size() >= 3);
         if (have_points) {
           vtsc_copilot_curve_points_m_ = std::move(new_pts);
+          // Reset ego-advance on fresh producer data so the view snaps to
+          // the new point set and then smoothly scrolls until the next update.
+          vtsc_copilot_ego_advance_m_ = 0.0f;
+          vtsc_copilot_last_draw_time_valid_ = false;
         }
       }
     }
 
     const float kappa_max = vtsc_copilot_curve_kappa_max_;
-    constexpr float KAPPA_SHOW_MIN = 2.2e-3f;  // "just above slight" for first pass
-    constexpr float KAPPA_HOLD_MIN = 2.1e-3f;  // small hysteresis to avoid flicker
+    constexpr float KAPPA_SHOW_MIN = 1.1e-3f;  // detect curves ≤ ~900m radius
+    constexpr float KAPPA_HOLD_MIN = 1.0e-3f;  // small hysteresis to avoid flicker
     const bool kappa_entry = std::isfinite(kappa_max) && kappa_max >= KAPPA_SHOW_MIN;
     const bool kappa_hold = std::isfinite(kappa_max) && kappa_max >= KAPPA_HOLD_MIN;
 
@@ -895,8 +906,26 @@ void HudRendererSP::drawVTSCCoPilotCurve(QPainter &p, const QRect &surface_rect)
   const int curve_bottom = bottom_rect.top() - gap;
   const QRect curve_area(box.left() + pad, curve_top, box.width() - 2 * pad, std::max(0, curve_bottom - curve_top));
 
-  const QString dist_txt = formatCurveDistance(vtsc_copilot_curve_distance_m_, is_metric);
-  const QString time_txt = formatCurveTime(vtsc_copilot_curve_time_to_s_);
+  // --- Ego-advance: smooth 60 Hz scrolling between 5 Hz producer refreshes ---
+  // Increment the accumulated ego advance by v_ego * dt each frame.
+  {
+    const auto now_tp = std::chrono::steady_clock::now();
+    if (vtsc_copilot_last_draw_time_valid_) {
+      const float dt = std::chrono::duration<float>(now_tp - vtsc_copilot_last_draw_time_).count();
+      // Clamp dt to avoid jumps from frame drops or pauses.
+      const float dt_clamped = std::min(dt, 0.1f);
+      vtsc_copilot_ego_advance_m_ += vtsc_copilot_v_ego_mps_ * dt_clamped;
+    }
+    vtsc_copilot_last_draw_time_ = now_tp;
+    vtsc_copilot_last_draw_time_valid_ = true;
+  }
+  const float ego_adv = vtsc_copilot_ego_advance_m_;
+
+  // Adjust distance/time labels for ego-advance so they count down smoothly.
+  const float adj_dist = std::max(0.0f, vtsc_copilot_curve_distance_m_ - ego_adv);
+  const float adj_time = (vtsc_copilot_v_ego_mps_ > 0.1f) ? (adj_dist / vtsc_copilot_v_ego_mps_) : vtsc_copilot_curve_time_to_s_;
+  const QString dist_txt = formatCurveDistance(adj_dist, is_metric);
+  const QString time_txt = formatCurveTime(adj_time);
 
   QString v_txt = "--";
   if (std::isfinite(vtsc_target_speed_mps_) && vtsc_target_speed_mps_ > 0.1f) {
@@ -925,13 +954,33 @@ void HudRendererSP::drawVTSCCoPilotCurve(QPainter &p, const QRect &surface_rect)
   // Curve strip-map rendering (actual geometry from map preview points, ego frame):
   // - x (forward) maps to screen Y (bottom=now, up=ahead)
   // - y (left) maps to screen X (left/right)
+  // Subtract ego_advance from each point's forward distance, then clip behind-ego.
   std::vector<QPointF> pts_m;
   pts_m.reserve(vtsc_copilot_curve_points_m_.size());
+  QPointF prev_raw;
+  bool have_prev = false;
   for (const auto &pt : vtsc_copilot_curve_points_m_) {
-    const float xf = static_cast<float>(pt.x());
-    if (!std::isfinite(xf) || xf < 0.0f) continue;  // only preview "ahead"
+    const float xf_raw = static_cast<float>(pt.x());
     const float yl = static_cast<float>(pt.y());
-    if (!std::isfinite(yl)) continue;
+    if (!std::isfinite(xf_raw) || !std::isfinite(yl)) { have_prev = false; continue; }
+    const float xf = xf_raw - ego_adv;
+    if (xf < 0.0f) {
+      // Point is behind ego; remember it for interpolation.
+      prev_raw = QPointF(xf_raw, yl);
+      have_prev = true;
+      continue;
+    }
+    // If the previous point was behind ego, interpolate the crossing for smooth clipping.
+    if (have_prev && pts_m.empty()) {
+      const float x_prev = static_cast<float>(prev_raw.x()) - ego_adv;
+      const float y_prev = static_cast<float>(prev_raw.y());
+      const float denom = xf - x_prev;
+      if (std::abs(denom) > 1e-6f) {
+        const float t = -x_prev / denom;
+        pts_m.emplace_back(0.0f, y_prev + t * (yl - y_prev));
+      }
+    }
+    have_prev = false;
     pts_m.emplace_back(xf, yl);
   }
 
@@ -977,13 +1026,14 @@ void HudRendererSP::drawVTSCCoPilotCurve(QPainter &p, const QRect &surface_rect)
     px_pts.emplace_back(toPx(static_cast<float>(pt.x()), static_cast<float>(pt.y())));
   }
 
-  // Best-effort curve-start tick mark: locate the point at `curveDistanceM` and draw a perpendicular tick.
-  bool have_marker = std::isfinite(vtsc_copilot_curve_distance_m_) && vtsc_copilot_curve_distance_m_ >= 0.0f;
+  // Best-effort curve-start tick mark: locate the point at `curveDistanceM` (ego-advance adjusted).
+  const float marker_dist = std::max(0.0f, vtsc_copilot_curve_distance_m_ - ego_adv);
+  bool have_marker = std::isfinite(vtsc_copilot_curve_distance_m_) && marker_dist >= 0.0f;
   QPointF marker_px;
   QPointF marker_tangent;
   bool marker_ok = false;
   if (have_marker) {
-    const float xm = vtsc_copilot_curve_distance_m_;
+    const float xm = marker_dist;
     for (size_t i = 0; i + 1 < pts_m.size(); i++) {
       const float x0 = static_cast<float>(pts_m[i].x());
       const float x1 = static_cast<float>(pts_m[i + 1].x());
@@ -1010,8 +1060,8 @@ void HudRendererSP::drawVTSCCoPilotCurve(QPainter &p, const QRect &surface_rect)
     lead_px.reserve(px_pts.size());
     curve_px.reserve(px_pts.size());
 
-    // Rebuild in-order, inserting marker point once.
-    const float xm = vtsc_copilot_curve_distance_m_;
+    // Rebuild in-order, inserting marker point once (ego-advance adjusted).
+    const float xm = marker_dist;
     bool inserted = false;
     for (size_t i = 0; i + 1 < pts_m.size(); i++) {
       const float x0 = static_cast<float>(pts_m[i].x());
