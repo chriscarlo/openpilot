@@ -73,7 +73,12 @@ class ModelParser:
 
   @staticmethod
   def parse_models(json_data: dict) -> list[custom.ModelManagerSP.ModelBundle]:
-    found_bundles = [ModelParser._parse_bundle(bundle) for bundle in json_data.get("bundles", [])]
+    found_bundles = []
+    for bundle in json_data.get("bundles", []):
+      try:
+        found_bundles.append(ModelParser._parse_bundle(bundle))
+      except Exception as e:
+        cloudlog.warning(f"Skipping unparseable bundle {bundle.get('display_name', '?')}: {e}")
     return [bundle for bundle in found_bundles if is_bundle_version_compatible(bundle.to_dict())]
 
 
