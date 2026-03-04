@@ -187,7 +187,7 @@ def run(args):
         t_last_new = now
       elapsed = now - t_start
       settled_for = now - t_last_new
-      if elapsed >= args.min_baseline and settled_for >= args.settle:
+      if elapsed >= args.min_baseline and settled_for >= args.settle and len(dat) > 0:
         break
       time.sleep(0.02)
 
