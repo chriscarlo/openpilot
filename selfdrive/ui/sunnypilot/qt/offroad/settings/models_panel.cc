@@ -102,6 +102,11 @@ ModelsPanel::ModelsPanel(QWidget *parent) : QWidget(parent) {
   policyFrame = createModelDetailFrame(this, policyType, policyProgressBar);
   list->addItem(policyFrame);
 
+  offPolicyProgressBar = createProgressBar(this);
+  QString offPolicyType = tr("Off-Policy Model");
+  offPolicyFrame = createModelDetailFrame(this, offPolicyType, offPolicyProgressBar);
+  list->addItem(offPolicyFrame);
+
   list->addItem(horizontal_line());
 
   // Dynamic Modeld Outputs toggle
@@ -172,6 +177,7 @@ void ModelsPanel::handleBundleDownloadProgress() {
   supercomboFrame->setVisible(false);
   visionFrame->setVisible(false);
   policyFrame->setVisible(false);
+  offPolicyFrame->setVisible(false);
   navigationFrame->setVisible(false);
 
   using DS = cereal::ModelManagerSP::DownloadStatus;
@@ -209,6 +215,10 @@ void ModelsPanel::handleBundleDownloadProgress() {
       case cereal::ModelManagerSP::Model::Type::POLICY:
         progressBar = policyProgressBar;
         modelFrame = policyFrame;
+        break;
+      case cereal::ModelManagerSP::Model::Type::OFF_POLICY:
+        progressBar = offPolicyProgressBar;
+        modelFrame = offPolicyFrame;
         break;
     }
 

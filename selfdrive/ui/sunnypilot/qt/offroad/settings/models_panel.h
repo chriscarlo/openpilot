@@ -78,6 +78,8 @@ private:
   QFrame *visionFrame;
   QProgressBar *policyProgressBar;
   QFrame *policyFrame;
+  QProgressBar *offPolicyProgressBar;
+  QFrame *offPolicyFrame;
   Params params;
   ButtonControlSP *clearModelCacheBtn;
   ButtonControlSP *refreshAvailableModelsBtn;
