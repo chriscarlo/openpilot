@@ -63,6 +63,9 @@ class ModelManagerSP:
             f.write(chunk)
             bytes_downloaded += len(chunk)
 
+            if not self.params.get("ModelManager_DownloadIndex"):
+              raise Exception("Download cancelled")
+
             if total_size > 0:
               progress = (bytes_downloaded / total_size) * 100
               model.downloadProgress.status = custom.ModelManagerSP.DownloadStatus.downloading
@@ -168,7 +171,7 @@ class ModelManagerSP:
         self.available_models = self.model_fetcher.get_available_bundles()
         self.active_bundle = get_active_bundle(self.params)
 
-        if index_to_download := self.params.get("ModelManager_DownloadIndex"):
+        if (index_to_download := self.params.get("ModelManager_DownloadIndex")) is not None:
           if model_to_download := next((model for model in self.available_models if model.index == index_to_download), None):
             try:
               self.download(model_to_download, Paths.model_root())
@@ -176,6 +179,7 @@ class ModelManagerSP:
               cloudlog.exception(e)
             finally:
               self.params.remove("ModelManager_DownloadIndex")
+              self.selected_bundle = None
 
         if self.params.get("ModelManager_ClearCache"):
             self.clear_model_cache()
