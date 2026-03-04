@@ -1,0 +1,3 @@
+interface:
+  display_name: "Model Manager Updater"
+  short_description: "Update sunnypilot model manager versions, URLs, and model types"

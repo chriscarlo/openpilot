@@ -1,0 +1,200 @@
+---
+name: model-manager-updater
+description: >
+  Update the Sunnypilot model manager to support a new upstream model list
+  version, new model types, or selector version bumps. Use when the user
+  reports "only the default model shows", asks to bump the model selector
+  version, switch the model list URL, or sync model-manager changes from
+  upstream sunnypilot. Triggers include "model manager", "model list",
+  "selector version", "driving_models_v", "MODEL_URL",
+  "ModelManagerSP", "offPolicy", "model type enum".
+---
+
+# Model Manager Updater
+
+## Overview
+
+The Sunnypilot model manager lets users select community driving models
+from a remote JSON model list. Updating it typically means bumping
+version constants, switching the model list URL, and handling any new
+model types or schema changes introduced by the new list.
+
+Every update touches a **fixed set of files** that must stay in sync.
+Missing any one of them causes a different silent or runtime failure.
+
+## File Inventory (ordered by dependency)
+
+| File | What to check |
+|------|---------------|
+| `cereal/custom.capnp` | `ModelManagerSP.Model.Type` enum — must include every `type` string present in the new JSON model list |
+| `sunnypilot/models/helpers.py` | `CURRENT_SELECTOR_VERSION`, `REQUIRED_MIN_SELECTOR_VERSION`, `is_bundle_version_compatible()` |
+| `sunnypilot/models/fetcher.py` | `MODEL_URL`, `ModelParser._parse_model()`, `ModelParser.parse_models()` |
+| `sunnypilot/models/manager.py` | Download loop, param read/write, index checks |
+| `selfdrive/ui/sunnypilot/qt/offroad/settings/models_panel.cc` | C++ `switch(model.getType())` — must have a case for every capnp enum value; progress bar + frame per type |
+| `selfdrive/ui/sunnypilot/qt/offroad/settings/models_panel.h` | Declares `QProgressBar*` and `QFrame*` members for each model type |
+
+## Step-by-Step Workflow
+
+### 1. Identify what changed upstream
+
+```bash
+# Fetch upstream sunnypilot
+git fetch sp master --depth=1
+
+# Compare key files
+git diff HEAD..sp/master -- sunnypilot/models/helpers.py sunnypilot/models/fetcher.py sunnypilot/models/manager.py cereal/custom.capnp
+```
+
+Or if bumping manually, inspect the new model list JSON:
+
+```bash
+curl -s '<NEW_MODEL_URL>' | python3 -c '
+import sys, json
+d = json.load(sys.stdin)
+types = set()
+for b in d.get("bundles", []):
+    for m in b.get("models", []):
+        types.add(m.get("type"))
+print("Model types in JSON:", sorted(types))
+print("Bundle count:", len(d.get("bundles", [])))
+versions = [b.get("minimum_selector_version") for b in d.get("bundles", [])]
+print("min_selector_version range:", min(versions), "-", max(versions))
+'
+```
+
+### 2. Update version constants (`helpers.py`)
+
+```python
+CURRENT_SELECTOR_VERSION = <new_version>
+REQUIRED_MIN_SELECTOR_VERSION = <new_min>
+```
+
+The compatibility window is: `REQUIRED_MIN <= bundle.minimumSelectorVersion <= CURRENT`.
+
+### 3. Update model list URL (`fetcher.py`)
+
+```python
+MODEL_URL = "https://raw.githubusercontent.com/sunnypilot/sunnypilot-docs/refs/heads/gh-pages/docs/driving_models_v<N>.json"
+```
+
+### 4. Add any new model types to the capnp enum
+
+Check the JSON `type` values against `cereal/custom.capnp` → `ModelManagerSP.Model.Type`.
+**New types must be appended** (capnp enums are positional — never reorder or insert).
+
+### 5. Add UI support for new model types (`models_panel.cc` + `.h`)
+
+For each new enum value, follow the existing pattern — declare `QProgressBar*` and
+`QFrame*` in the header, create them in the constructor, add visibility reset in
+`handleBundleDownloadProgress()`, and add a `case` in the `switch(model.getType())`.
+
+### 6. Build and deploy
+
+```bash
+# Local C++ check (fast — just the one object file)
+scons -j$(nproc) selfdrive/ui/sunnypilot/qt/offroad/settings/models_panel.o
+
+# On-device
+git push && ssh commaCar "cd /data/openpilot && git pull && sudo reboot"
+```
+
+### 7. Verify on device
+
+```bash
+ssh commaCar "cd /data/openpilot && source /usr/local/venv/bin/activate && python3 -c '
+from sunnypilot.models.fetcher import ModelFetcher
+from openpilot.common.params import Params
+f = ModelFetcher(Params())
+bundles = f.get_available_bundles()
+print(f\"Bundles: {len(bundles)}\")
+for b in bundles[:5]:
+    print(f\"  {b.displayName} msv={b.minimumSelectorVersion}\")
+'"
+```
+
+## Pitfalls, Gotchas, and Foot Guns
+
+### Silent total failure: capnp enum miss
+If the JSON model list introduces a type string not in the capnp enum,
+`_parse_model()` throws `AttributeError` from pycapnp. If `parse_models()`
+uses a bare list comprehension, the entire model list returns empty with
+no user-visible error. Always wrap per-bundle parsing in try/except.
+
+### C++ `-Werror` build failure on unhandled enum
+Adding a capnp enum value generates a new C++ enumerant. Any
+`switch(model.getType())` without a case for it fails scons with `-Werror`.
+Catch this locally with `scons ... models_panel.o` before deploying.
+
+### `index == 0` truthiness bug
+`if (x := params.get("ModelManager_DownloadIndex")):` is falsy when the
+model index is `0`. Always use `is not None`.
+
+### Params type mismatches
+`ModelManager_LastSyncTime` is stored as int→str. `ModelManager_ModelsCache`
+is stored as JSON string. Upstream syncs sometimes reintroduce raw dict
+writes — verify the cache round-trips.
+
+### capnp enum ordering
+Capnp enums are positional (`@N` ordinals). Never reorder or insert.
+Always append with the next `@N`.
+
+### Full rebuild after capnp changes
+Any `cereal/custom.capnp` change invalidates the scons cache for most C++
+targets. Expect 15-20 minute full rebuild on-device.
+
+### Upstream sync overwrites local fixes
+Upstream sunnypilot syncs may completely replace `helpers.py`, `fetcher.py`,
+and `manager.py`. Re-verify defensive patterns (try/except in parser,
+`is not None` checks, JSON encode/decode in cache) after every sync.
+
+### JSON keys vs capnp field names
+Remote JSON uses `snake_case` (`minimum_selector_version`). Capnp uses
+`camelCase` (`minimumSelectorVersion`). `_parse_bundle()` reads snake_case.
+`is_bundle_version_compatible()` reads camelCase from `.to_dict()`.
+
+## Skill Self-Improvement (mandatory on every invocation)
+
+After completing any model-manager update task, **before finishing**,
+review what happened during this session and update both copies of this
+skill with any new information learned. This is not optional.
+
+### What to update
+
+- **New gotchas/foot guns** — any failure mode you hit that isn't already
+  documented above. Add it to the "Pitfalls" section.
+- **New files touched** — if the update required changing a file not in
+  the File Inventory table, add it.
+- **Version history** — append the new version bump to
+  `references/version_history.md` with commit hash, version numbers,
+  URL, and a short note about what was new/different.
+- **New model types** — update the Model Type Evolution table in
+  `references/version_history.md`.
+- **Workflow changes** — if a step in the workflow proved wrong, incomplete,
+  or needed reordering, fix it.
+- **Corrections** — if any existing guidance was wrong or misleading,
+  correct it rather than adding a contradictory note.
+
+### Where to update (both locations, always)
+
+1. **Claude Code**: `~/.claude/skills/model-manager-updater/SKILL.md`
+   and `~/.claude/skills/model-manager-updater/references/version_history.md`
+2. **Codex CLI**: `.codex/skills/model-manager-updater/SKILL.md`
+   and `.codex/skills/model-manager-updater/references/version_history.md`
+
+Keep both copies substantively in sync. The only expected differences are
+path references (Codex uses `.codex/skills/...` paths, Claude Code uses
+`~/.claude/skills/...` paths).
+
+### Quality bar
+
+- Only add things that caused real failures or wasted real time.
+- Prefer concrete guidance (file path, command, config key) over vague warnings.
+- Remove bullets that become obsolete (e.g., a bug was fixed in code/config).
+- Keep the skill under 250 lines — if it grows past that, factor details
+  into `references/` files and link to them.
+
+## References
+
+- Version history: `.codex/skills/model-manager-updater/references/version_history.md`
+- Upstream remote: `sp` → `https://github.com/sunnypilot/sunnypilot.git`
+- Model list URL pattern: `https://raw.githubusercontent.com/sunnypilot/sunnypilot-docs/refs/heads/gh-pages/docs/driving_models_v<N>.json`
