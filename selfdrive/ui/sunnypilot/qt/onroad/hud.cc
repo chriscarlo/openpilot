@@ -72,6 +72,22 @@ static inline int roundToInt(double value) {
   return static_cast<int>(std::lround(value));
 }
 
+static float readParamFloatClamped(Params &params, const char *key, float fallback, float lo, float hi) {
+  try {
+    const std::string raw = params.get(key);
+    if (raw.empty()) {
+      return fallback;
+    }
+    const float v = std::stof(raw);
+    if (!std::isfinite(v)) {
+      return fallback;
+    }
+    return std::clamp(v, lo, hi);
+  } catch (const std::exception&) {
+    return fallback;
+  }
+}
+
 
 
 // Template function for pruning caches based on active IDs
@@ -114,6 +130,41 @@ HudRendererSP::HudRendererSP() {
   // rti_enabled will be updated periodically in updateState()
 }
 
+void HudRendererSP::refreshVTSCCoPilotTuning() {
+  VTSCCoPilotHudTuning tuning{};
+  Params params;
+
+  // Expert gate prevents stale unsafe values from silently applying.
+  if (!params.getBool("VTSCExpertModeEnabled")) {
+    vtsc_copilot_tuning_ = tuning;
+    return;
+  }
+
+  tuning.curve_hold_new_dist_min_m = readParamFloatClamped(params, "VTSCHUD.CurveHoldNewDistMinM", tuning.curve_hold_new_dist_min_m, 0.0f, 250.0f);
+  tuning.geometry_epsilon_m = readParamFloatClamped(params, "VTSCHUD.GeometryEpsilonM", tuning.geometry_epsilon_m, 0.001f, 1.0f);
+  tuning.kappa_show_min = readParamFloatClamped(params, "VTSCHUD.KappaShowMin", tuning.kappa_show_min, 1e-6f, 0.05f);
+  tuning.kappa_hold_min = readParamFloatClamped(params, "VTSCHUD.KappaHoldMin", tuning.kappa_hold_min, 1e-6f, 0.05f);
+  tuning.kappa_hold_min = std::min(tuning.kappa_hold_min, tuning.kappa_show_min);
+  tuning.fade_in_alpha = readParamFloatClamped(params, "VTSCHUD.FadeInAlpha", tuning.fade_in_alpha, 0.01f, 0.95f);
+  tuning.fade_out_alpha = readParamFloatClamped(params, "VTSCHUD.FadeOutAlpha", tuning.fade_out_alpha, 0.01f, 0.95f);
+  tuning.scale = readParamFloatClamped(params, "VTSCHUD.Scale", tuning.scale, 0.5f, 4.0f);
+  tuning.bottom_safe_px_at_scale1 = readParamFloatClamped(params, "VTSCHUD.BottomSafePxAtScale1", tuning.bottom_safe_px_at_scale1, 0.0f, 120.0f);
+  tuning.pad_px_at_scale1 = readParamFloatClamped(params, "VTSCHUD.PadPxAtScale1", tuning.pad_px_at_scale1, 2.0f, 80.0f);
+  tuning.gap_px_at_scale1 = readParamFloatClamped(params, "VTSCHUD.GapPxAtScale1", tuning.gap_px_at_scale1, 0.0f, 80.0f);
+  tuning.top_height_px_at_scale1 = readParamFloatClamped(params, "VTSCHUD.TopHeightPxAtScale1", tuning.top_height_px_at_scale1, 8.0f, 120.0f);
+  tuning.bottom_height_px_at_scale1 = readParamFloatClamped(params, "VTSCHUD.BottomHeightPxAtScale1", tuning.bottom_height_px_at_scale1, 8.0f, 140.0f);
+  tuning.min_curve_area_px_at_scale1 = readParamFloatClamped(params, "VTSCHUD.MinCurveAreaPxAtScale1", tuning.min_curve_area_px_at_scale1, 16.0f, 240.0f);
+  tuning.road_main_width_px_at_scale1 = readParamFloatClamped(params, "VTSCHUD.RoadMainWidthPxAtScale1", tuning.road_main_width_px_at_scale1, 2.0f, 48.0f);
+  tuning.glow_width_px_at_scale1 = readParamFloatClamped(params, "VTSCHUD.GlowWidthPxAtScale1", tuning.glow_width_px_at_scale1, 2.0f, 120.0f);
+  tuning.outline_width_px_at_scale1 = readParamFloatClamped(params, "VTSCHUD.OutlineWidthPxAtScale1", tuning.outline_width_px_at_scale1, 1.0f, 100.0f);
+  tuning.main_stroke_width_px_at_scale1 = readParamFloatClamped(params, "VTSCHUD.MainStrokeWidthPxAtScale1", tuning.main_stroke_width_px_at_scale1, 1.0f, 100.0f);
+  tuning.distance_label_sep_px_at_scale1 = readParamFloatClamped(params, "VTSCHUD.DistanceLabelSepPxAtScale1", tuning.distance_label_sep_px_at_scale1, 0.0f, 120.0f);
+  tuning.speed_font_px_at_scale1 = readParamFloatClamped(params, "VTSCHUD.SpeedFontPxAtScale1", tuning.speed_font_px_at_scale1, 8.0f, 80.0f);
+  tuning.bottom_font_px_at_scale1 = readParamFloatClamped(params, "VTSCHUD.BottomFontPxAtScale1", tuning.bottom_font_px_at_scale1, 8.0f, 80.0f);
+
+  vtsc_copilot_tuning_ = tuning;
+}
+
 void HudRendererSP::updateState(const UIState &s) {
   // Update base HUD state
   HudRenderer::updateState(s);
@@ -138,11 +189,12 @@ void HudRendererSP::updateState(const UIState &s) {
   float target_opacity = (status == STATUS_ENGAGED && all_systems_ready_) ? 0.3f : 1.0f;
   readiness_opacity_ += 0.05f * (target_opacity - readiness_opacity_);
 
-  // Update RTI parameters more frequently (every 5 frames = 250ms) to reduce race condition
-  if (s.sm && s.sm->frame % 5 == 0) {
+  // Refresh params at 5 Hz for live tuning responsiveness without per-frame overhead.
+  if (s.sm && s.sm->frame % 4 == 0) {
     rti_enabled = Params().getBool("RTIEnabled");  // Master switch
     rti_hud_enabled = Params().getBool("RTIHUDEnabled");  // HUD display switch
     vtsc_copilot_hud_enabled_ = Params().getBool("VTSCRallyCoPilotHUDEnabled");
+    refreshVTSCCoPilotTuning();
   }
   
   // Update multiple threats only if RTI HUD is enabled
@@ -262,8 +314,8 @@ void HudRendererSP::updateState(const UIState &s) {
       const float new_dist_m = vtsc.getCurveDistanceM();
       // Accept a fresh snapshot only when the incoming curve start is far enough ahead to be
       // a genuinely new curve, not just the current bend re-detected at ~0 m.
-      constexpr float kCurveHoldNewDistMin = 30.0f;  // metres
-      const bool allow_geom_update = !was_in_curve || (new_dist_m >= kCurveHoldNewDistMin);
+      const float curve_hold_new_dist_min = vtsc_copilot_tuning_.curve_hold_new_dist_min_m;
+      const bool allow_geom_update = !was_in_curve || (new_dist_m >= curve_hold_new_dist_min);
 
       // Ancillary scalars (kappa drives the fade logic so always update).
       vtsc_copilot_curve_kappa_max_ = vtsc.getCurveMaxCurvature();
@@ -291,12 +343,12 @@ void HudRendererSP::updateState(const UIState &s) {
           // ego-advance on every identical re-publish kills smooth interpolation.
           bool geom_changed = (new_pts.size() != vtsc_copilot_curve_points_m_.size());
           if (!geom_changed) {
-            constexpr float kEps = 0.05f;  // 5 cm tolerance
+            const float geom_eps_m = vtsc_copilot_tuning_.geometry_epsilon_m;
             const size_t mid = new_pts.size() / 2;
             const size_t last_idx = new_pts.size() - 1;
             for (size_t idx : {size_t(0), mid, last_idx}) {
-              if (std::abs(new_pts[idx].x() - vtsc_copilot_curve_points_m_[idx].x()) > kEps ||
-                  std::abs(new_pts[idx].y() - vtsc_copilot_curve_points_m_[idx].y()) > kEps) {
+              if (std::abs(new_pts[idx].x() - vtsc_copilot_curve_points_m_[idx].x()) > geom_eps_m ||
+                  std::abs(new_pts[idx].y() - vtsc_copilot_curve_points_m_[idx].y()) > geom_eps_m) {
                 geom_changed = true;
                 break;
               }
@@ -316,10 +368,10 @@ void HudRendererSP::updateState(const UIState &s) {
     }
 
     const float kappa_max = vtsc_copilot_curve_kappa_max_;
-    constexpr float KAPPA_SHOW_MIN = 1.1e-3f;  // detect curves ≤ ~900m radius
-    constexpr float KAPPA_HOLD_MIN = 1.0e-3f;  // small hysteresis to avoid flicker
-    const bool kappa_entry = std::isfinite(kappa_max) && kappa_max >= KAPPA_SHOW_MIN;
-    const bool kappa_hold = std::isfinite(kappa_max) && kappa_max >= KAPPA_HOLD_MIN;
+    const float kappa_show_min = vtsc_copilot_tuning_.kappa_show_min;
+    const float kappa_hold_min = vtsc_copilot_tuning_.kappa_hold_min;
+    const bool kappa_entry = std::isfinite(kappa_max) && kappa_max >= kappa_show_min;
+    const bool kappa_hold = std::isfinite(kappa_max) && kappa_max >= kappa_hold_min;
 
     if (preview_valid && have_points) {
       vtsc_copilot_visible_ = vtsc_copilot_visible_prev_ ? kappa_hold : kappa_entry;
@@ -336,7 +388,7 @@ void HudRendererSP::updateState(const UIState &s) {
 
   // Fade in/out for a game-HUD feel. Keep last geometry during fade-out.
   const float target_alpha = vtsc_copilot_visible_ ? 1.0f : 0.0f;
-  const float k = vtsc_copilot_visible_ ? 0.22f : 0.12f;
+  const float k = vtsc_copilot_visible_ ? vtsc_copilot_tuning_.fade_in_alpha : vtsc_copilot_tuning_.fade_out_alpha;
   vtsc_copilot_alpha_ += k * (target_alpha - vtsc_copilot_alpha_);
   vtsc_copilot_alpha_ = std::clamp(vtsc_copilot_alpha_, 0.0f, 1.0f);
 
@@ -902,8 +954,8 @@ void HudRendererSP::drawVTSCCoPilotCurve(QPainter &p, const QRect &surface_rect)
   p.setRenderHint(QPainter::TextAntialiasing, true);
   p.setOpacity(p.opacity() * static_cast<qreal>(vtsc_copilot_alpha_));
 
-  // Global scale for this widget. User asked for 2x size and thickness.
-  constexpr float kScale = 2.5f;
+  // Global scale for this widget.
+  const float kScale = std::max(0.5f, vtsc_copilot_tuning_.scale);
 
   // Geometry + labels live in an invisible bounding box, centered in the right third.
   // (No card/container per user request.)
@@ -913,7 +965,7 @@ void HudRendererSP::drawVTSCCoPilotCurve(QPainter &p, const QRect &surface_rect)
   // Vertical placement: push the widget down so its bottom edge sits just above the
   // engaged-border strip (UI_BORDER_SIZE = 30 px from screen edge; `inner` already
   // excludes that border, so bottom_safe ≈ small padding keeps us clear).
-  const int bottom_safe = static_cast<int>(4 * kScale);
+  const int bottom_safe = static_cast<int>(vtsc_copilot_tuning_.bottom_safe_px_at_scale1 * kScale);
   const int box_left = right_third.center().x() - box_w / 2;
   const int box_top = std::max(inner.top(), inner.bottom() - bottom_safe - box_h + 1);
   const QRect box(box_left, box_top, box_w, box_h);
@@ -931,10 +983,10 @@ void HudRendererSP::drawVTSCCoPilotCurve(QPainter &p, const QRect &surface_rect)
   p.drawRect(box);
 
   // Layout within the halo bounds.
-  const int pad = static_cast<int>(18 * kScale);
-  const int gap = static_cast<int>(12 * kScale);
-  const int top_h = static_cast<int>(32 * kScale);
-  const int bottom_h = static_cast<int>(34 * kScale);
+  const int pad = static_cast<int>(vtsc_copilot_tuning_.pad_px_at_scale1 * kScale);
+  const int gap = static_cast<int>(vtsc_copilot_tuning_.gap_px_at_scale1 * kScale);
+  const int top_h = static_cast<int>(vtsc_copilot_tuning_.top_height_px_at_scale1 * kScale);
+  const int bottom_h = static_cast<int>(vtsc_copilot_tuning_.bottom_height_px_at_scale1 * kScale);
   const QRect speed_rect(box.left() + pad, box.top() + pad, box.width() - 2 * pad, top_h);
   const QRect bottom_rect(box.left() + pad, box.bottom() - pad - bottom_h, box.width() - 2 * pad, bottom_h);
   const int curve_top = speed_rect.bottom() + gap;
@@ -1024,7 +1076,8 @@ void HudRendererSP::drawVTSCCoPilotCurve(QPainter &p, const QRect &surface_rect)
     return;
   }
 
-  if (curve_area.height() < static_cast<int>(80 * kScale) || curve_area.width() < static_cast<int>(80 * kScale)) {
+  const int min_curve_area_px = static_cast<int>(vtsc_copilot_tuning_.min_curve_area_px_at_scale1 * kScale);
+  if (curve_area.height() < min_curve_area_px || curve_area.width() < min_curve_area_px) {
     p.restore();
     return;
   }
@@ -1068,7 +1121,10 @@ void HudRendererSP::drawVTSCCoPilotCurve(QPainter &p, const QRect &surface_rect)
   p.setClipRect(box);
 
   // Multi-pass drawing for crisp "pace-note" backbone.
-  constexpr int kRoadMainWidth = 13;  // pixels before kScale — also used for ego dot diameter
+  const int kRoadMainWidth = std::max(1, static_cast<int>(vtsc_copilot_tuning_.road_main_width_px_at_scale1));
+  const int kGlowWidth = std::max(1, static_cast<int>(vtsc_copilot_tuning_.glow_width_px_at_scale1 * kScale));
+  const int kOutlineWidth = std::max(1, static_cast<int>(vtsc_copilot_tuning_.outline_width_px_at_scale1 * kScale));
+  const int kMainStrokeWidth = std::max(1, static_cast<int>(vtsc_copilot_tuning_.main_stroke_width_px_at_scale1 * kScale));
   auto drawBackbone = [&](const QPainterPath &path, const QColor &base, int w_glow, int w_outline, int w_main) {
     if (path.isEmpty()) return;
     p.setBrush(Qt::NoBrush);
@@ -1087,7 +1143,7 @@ void HudRendererSP::drawVTSCCoPilotCurve(QPainter &p, const QRect &surface_rect)
 
   // Unified road backbone — bright (matches former curve-region emphasis).
   drawBackbone(strip_path, QColor(255, 255, 255, 235),
-               static_cast<int>(40 * kScale), static_cast<int>(20 * kScale), static_cast<int>(14 * kScale));
+               kGlowWidth, kOutlineWidth, kMainStrokeWidth);
 
   // --- Ego dot: filled circle at ego's position, visible once ego enters the curve. ---
   // Apple systemRed (#FF3B30) — the "pop" red used for recording indicators and alert buttons.
@@ -1117,12 +1173,12 @@ void HudRendererSP::drawVTSCCoPilotCurve(QPainter &p, const QRect &surface_rect)
 
   // Bottom: distance + time to curve start, centered, larger and with more spacing.
   {
-    const QFont bottom_font = InterFont(static_cast<int>(24 * kScale), QFont::DemiBold);
+    const QFont bottom_font = InterFont(static_cast<int>(vtsc_copilot_tuning_.bottom_font_px_at_scale1 * kScale), QFont::DemiBold);
     p.setFont(bottom_font);
     const QFontMetrics fm(bottom_font);
     const int w_dist = fm.horizontalAdvance(dist_txt);
     const int w_time = fm.horizontalAdvance(time_txt);
-    const int sep = static_cast<int>(26 * kScale);  // extra spacing between the two labels
+    const int sep = static_cast<int>(vtsc_copilot_tuning_.distance_label_sep_px_at_scale1 * kScale);  // spacing between labels
     const int total = w_dist + sep + w_time;
     const int x0 = bottom_rect.center().x() - total / 2;
 
@@ -1133,7 +1189,7 @@ void HudRendererSP::drawVTSCCoPilotCurve(QPainter &p, const QRect &surface_rect)
   }
 
   // Top: recommended speed. Draw last so it's always on top of the curve/glow.
-  drawTextShadowedCentered(speed_rect, v_txt, InterFont(static_cast<int>(22 * kScale), QFont::DemiBold), QColor(255, 255, 255, 235));
+  drawTextShadowedCentered(speed_rect, v_txt, InterFont(static_cast<int>(vtsc_copilot_tuning_.speed_font_px_at_scale1 * kScale), QFont::DemiBold), QColor(255, 255, 255, 235));
 
   p.restore();
 }

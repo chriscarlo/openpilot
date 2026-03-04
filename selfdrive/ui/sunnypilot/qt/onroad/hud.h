@@ -50,6 +50,7 @@ protected:
   // VTSC Rally Co-Pilot curve preview (HUD-only rendering)
   void drawVTSCCoPilotCurve(QPainter &p, const QRect &surface_rect);
   void drawCurveDirectionIcon(QPainter &p, const QRect &icon_rect, int direction) const;
+  void refreshVTSCCoPilotTuning();
 
   // RTI drawing methods
   void drawRTIThreatIndicatorMulti(QPainter &p, const QRect &surface_rect);
@@ -119,4 +120,28 @@ protected:
   float vtsc_copilot_ego_advance_m_ = 0.0f;
   std::chrono::steady_clock::time_point vtsc_copilot_last_draw_time_{};
   bool vtsc_copilot_last_draw_time_valid_ = false;
+
+  struct VTSCCoPilotHudTuning {
+    float curve_hold_new_dist_min_m = 30.0f;
+    float geometry_epsilon_m = 0.05f;
+    float kappa_show_min = 1.1e-3f;
+    float kappa_hold_min = 1.0e-3f;
+    float fade_in_alpha = 0.22f;
+    float fade_out_alpha = 0.12f;
+    float scale = 2.5f;
+    float bottom_safe_px_at_scale1 = 4.0f;
+    float pad_px_at_scale1 = 18.0f;
+    float gap_px_at_scale1 = 12.0f;
+    float top_height_px_at_scale1 = 32.0f;
+    float bottom_height_px_at_scale1 = 34.0f;
+    float min_curve_area_px_at_scale1 = 80.0f;
+    float road_main_width_px_at_scale1 = 13.0f;
+    float glow_width_px_at_scale1 = 40.0f;
+    float outline_width_px_at_scale1 = 20.0f;
+    float main_stroke_width_px_at_scale1 = 14.0f;
+    float distance_label_sep_px_at_scale1 = 26.0f;
+    float speed_font_px_at_scale1 = 22.0f;
+    float bottom_font_px_at_scale1 = 24.0f;
+  };
+  VTSCCoPilotHudTuning vtsc_copilot_tuning_;
 };

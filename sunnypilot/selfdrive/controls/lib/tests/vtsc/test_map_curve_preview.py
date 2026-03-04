@@ -114,7 +114,8 @@ def test_vtsc_map_curve_preview_direction_and_severity(builder, expected_dir):
   assert 20.0 <= vtc.curve_preview_distance_m <= 80.0
   pts = vtc.curve_preview_points
   assert isinstance(pts, list)
-  assert 3 <= len(pts) <= 32
+  # Preview now retains a denser decimated polyline for HUD smoothness.
+  assert 3 <= len(pts) <= 48
 
 
 def test_vtsc_map_curve_preview_invalid_on_straight():
@@ -140,6 +141,9 @@ def test_vtsc_map_curve_preview_invalid_on_straight():
        patch("openpilot.sunnypilot.selfdrive.controls.lib.vision_turn_controller.time.monotonic", lambda: 0.0):
     vtc.update(sm, True, 25.0, 0.0, 40.0)
 
-  assert not vtc.curve_preview_valid
+  # Straight-road preview is intentionally pre-cached as valid geometry with zero curve metadata.
+  assert vtc.curve_preview_valid
   assert vtc.curve_preview_kappa_max == 0.0
-  assert vtc.curve_preview_points == []
+  assert vtc.curve_preview_direction == 0
+  assert vtc.curve_preview_severity == 0
+  assert 3 <= len(vtc.curve_preview_points) <= 48

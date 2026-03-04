@@ -37,7 +37,7 @@ class TestPhysicsCalculations(unittest.TestCase):
         # Mock Params to avoid file system access
         with patch('sunnypilot.selfdrive.controls.lib.vision_turn_controller.Params') as MockParams:
             mock_params = MagicMock()
-            mock_params.get_bool.return_value = True
+            mock_params.get_bool.side_effect = lambda key: key in ('VisionTurnSpeedControl', 'VisionTurnSpeedControlOcclBypassWithLead')
             mock_params.get.return_value = None
             MockParams.return_value = mock_params
             

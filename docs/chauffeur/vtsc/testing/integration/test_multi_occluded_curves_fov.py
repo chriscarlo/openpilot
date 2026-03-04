@@ -83,7 +83,9 @@ class TestMultiOccludedCurvesFOV(unittest.TestCase):
 
         # FOV-based visibility distance per step: s_vis_fov = θ / |k|
         k_eps = 1e-8
-        s_vis_fov = np.where(np.abs(kappa) > k_eps, self.FOV_HALF_RAD / np.abs(kappa), 1e6)
+        abs_kappa = np.abs(kappa)
+        s_vis_fov = np.full_like(abs_kappa, 1e6, dtype=float)
+        np.divide(self.FOV_HALF_RAD, abs_kappa, out=s_vis_fov, where=abs_kappa > k_eps)
         # Distance required to slow to local physics bound with comfort decel
         a_cap = abs(float(COMFORT_DECEL_LIMIT))
         v_now = v  # treat current commanded speed as the active setpoint
@@ -175,7 +177,9 @@ class TestMultiOccludedCurvesFOV(unittest.TestCase):
 
         # FOV-only horizon
         k_eps = 1e-8
-        s_vis_fov = np.where(np.abs(kappa) > k_eps, self.FOV_HALF_RAD / np.abs(kappa), 1e6)
+        abs_kappa = np.abs(kappa)
+        s_vis_fov = np.full_like(abs_kappa, 1e6, dtype=float)
+        np.divide(self.FOV_HALF_RAD, abs_kappa, out=s_vis_fov, where=abs_kappa > k_eps)
 
         # Wall-limited horizon (approximate circle geometry)
         w_lane = self.LANE_WIDTH_M

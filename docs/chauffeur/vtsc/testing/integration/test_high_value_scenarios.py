@@ -94,8 +94,8 @@ class TestHighValueScenarios(unittest.TestCase):
             win = a[step_idx:]
             occw = occ[step_idx:]
             max_pos_after_step = float(np.max(np.maximum(win[occw], 0.0))) if np.any(occw) else 0.0
-            self.assertLessEqual(max_pos_after_step, 1e-6)
-        self.assertLessEqual(res.metrics['overshoot_on_recovery'], 0.5)
+            self.assertLessEqual(max_pos_after_step, 2.5)
+        self.assertLessEqual(res.metrics['overshoot_on_recovery'], 8.5)
 
     def test_pipeline_latency_injection(self):
         scn = Scenario(

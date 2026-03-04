@@ -34,7 +34,7 @@ class TestParameterLoading(unittest.TestCase):
         """Helper to create VTSC with specific parameter values"""
         with patch('sunnypilot.selfdrive.controls.lib.vision_turn_controller.Params') as MockParams:
             mock_params = MagicMock()
-            mock_params.get_bool.return_value = True
+            mock_params.get_bool.side_effect = lambda key: key in ('VisionTurnSpeedControl', 'VisionTurnSpeedControlOcclBypassWithLead')
             
             # Set up parameter returns
             def get_param(key):
@@ -123,7 +123,7 @@ class TestParameterLoading(unittest.TestCase):
         with patch('sunnypilot.selfdrive.controls.lib.vision_turn_controller.Params') as MockParams:
             with patch('sunnypilot.selfdrive.controls.lib.vision_turn_controller.time.monotonic') as mock_time:
                 mock_params = MagicMock()
-                mock_params.get_bool.return_value = True
+                mock_params.get_bool.side_effect = lambda key: key in ('VisionTurnSpeedControl', 'VisionTurnSpeedControlOcclBypassWithLead')
                 
                 # Initial values
                 param_values = {
@@ -234,7 +234,7 @@ class TestParameterLoading(unittest.TestCase):
         class MockCP: pass
         with patch('sunnypilot.selfdrive.controls.lib.vision_turn_controller.Params') as MockParams:
             mp = MagicMock()
-            mp.get_bool.return_value = True
+            mp.get_bool.side_effect = lambda key: key in ('VisionTurnSpeedControl', 'VisionTurnSpeedControlOcclBypassWithLead')
             def _get(key):
                 if key.endswith('LowSpeedSpeedBiasMph'):
                     return b"4.0"  # mph
@@ -256,7 +256,7 @@ class TestParameterLoading(unittest.TestCase):
         with patch('sunnypilot.selfdrive.controls.lib.vision_turn_controller.Params') as MockParams:
             with patch('sunnypilot.selfdrive.controls.lib.vision_turn_controller.time.monotonic') as mock_time:
                 mp = MagicMock()
-                mp.get_bool.return_value = True
+                mp.get_bool.side_effect = lambda key: key in ('VisionTurnSpeedControl', 'VisionTurnSpeedControlOcclBypassWithLead')
 
                 # Start with valid values
                 values = {

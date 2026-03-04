@@ -3,6 +3,8 @@ import importlib
 
 from openpilot.common.numpy_fast import clip
 
+PARAM_REFRESH_S = 0.2  # 5 Hz live-tuning refresh
+
 
 def update_vtsc_params(ctrl, *, force: bool = False) -> None:
   """Refresh VisionTurnController tunables from Params.
@@ -21,7 +23,7 @@ def update_vtsc_params(ctrl, *, force: bool = False) -> None:
     except Exception:
       monotonic = time.monotonic
     tm = float(monotonic())
-    if tm <= float(getattr(ctrl, "_last_params_update", 0.0)) + 2.0:
+    if tm <= float(getattr(ctrl, "_last_params_update", 0.0)) + PARAM_REFRESH_S:
       return
   else:
     tm = float(time.monotonic())
@@ -30,6 +32,20 @@ def update_vtsc_params(ctrl, *, force: bool = False) -> None:
   getf = ctrl._get_float_param
   getb = ctrl._get_bool_param
   P = ctrl._params
+  expert_enabled = bool(getb("VTSCExpertModeEnabled", getattr(ctrl, "_expert_mode_enabled", False)))
+  ctrl._expert_mode_enabled = expert_enabled
+
+  def expf(key: str, default: float, lo: float, hi: float, mod_attr=None) -> float:
+    if not expert_enabled:
+      return float(default)
+    base = float(getattr(vtc_mod, mod_attr, default)) if mod_attr is not None else float(default)
+    return float(getf(key, base, lo, hi))
+
+  def expb(key: str, default: bool, mod_attr=None) -> bool:
+    if not expert_enabled:
+      return bool(default)
+    base = bool(getattr(vtc_mod, mod_attr, default)) if mod_attr is not None else bool(default)
+    return bool(getb(key, base))
 
   # Enable + high-level knobs
   ctrl._is_enabled = getb("VisionTurnSpeedControl", False)
@@ -329,6 +345,41 @@ def update_vtsc_params(ctrl, *, force: bool = False) -> None:
       setattr(vtc_mod, "PHYSICS_MAX_LAT_ACCEL", _min)
   except Exception:
     pass
+
+  # Expert-only module-level overrides. Disabled expert mode restores defaults.
+  setattr(vtc_mod, "FREEWAY_CURV_EPS", expf("VTSC.Expert.FreewayCurvEps", 1e-5, 1e-7, 1e-2, "FREEWAY_CURV_EPS"))
+  setattr(vtc_mod, "FREEWAY_MIN_VISIBLE_M", expf("VTSC.Expert.FreewayMinVisibleM", 120.0, 20.0, 400.0, "FREEWAY_MIN_VISIBLE_M"))
+  setattr(vtc_mod, "FREEWAY_MIN_CONF", expf("VTSC.Expert.FreewayMinConf", 0.60, 0.05, 0.99, "FREEWAY_MIN_CONF"))
+  highway_min_mps = expf("VTSC.Expert.HighwayMinMps", 24.5872, 8.0, 45.0, "HIGHWAY_MIN_MPS")
+  setattr(vtc_mod, "HIGHWAY_MIN_MPS", highway_min_mps)
+  setattr(vtc_mod, "VTURN_HOLD_MIN_V_MPS", expf("VTSC.Expert.VTurnHoldMinVMps", 27.0, 8.0, 45.0, "VTURN_HOLD_MIN_V_MPS"))
+  setattr(vtc_mod, "VTURN_HOLD_DELTA_MPS", expf("VTSC.Expert.VTurnHoldDeltaMps", 1.0, 0.1, 8.0, "VTURN_HOLD_DELTA_MPS"))
+  setattr(vtc_mod, "VTURN_HOLD_S", expf("VTSC.Expert.VTurnHoldS", 1.2, 0.1, 5.0, "VTURN_HOLD_S"))
+  setattr(vtc_mod, "VTURN_HOLD_S_OCCLUDED", expf("VTSC.Expert.VTurnHoldSOccluded", 0.85, 0.05, 3.0, "VTURN_HOLD_S_OCCLUDED"))
+  setattr(vtc_mod, "_ENTERING_PRED_LAT_ACC_TH", expf("VTSC.Expert.EnteringPredLatAccTh", 1.3, 0.2, 5.0, "_ENTERING_PRED_LAT_ACC_TH"))
+  setattr(vtc_mod, "VTSC_TRAJECTORY_PHASE_ADVANCE_S", expf("VTSC.Expert.TrajectoryPhaseAdvanceS", 1.0, -1.0, 4.0, "VTSC_TRAJECTORY_PHASE_ADVANCE_S"))
+  setattr(vtc_mod, "STEER_CURVATURE_FALLBACK_MODEL_KAPPA_MAX", expf("VTSC.Expert.SteerFallbackModelKappaMax", 0.003, 1e-5, 0.02, "STEER_CURVATURE_FALLBACK_MODEL_KAPPA_MAX"))
+  setattr(vtc_mod, "STEER_CURVATURE_FALLBACK_MIN_KAPPA", expf("VTSC.Expert.SteerFallbackMinKappa", 0.003, 1e-5, 0.03, "STEER_CURVATURE_FALLBACK_MIN_KAPPA"))
+  setattr(vtc_mod, "STEER_CURVATURE_FALLBACK_MIN_V_MPS", expf("VTSC.Expert.SteerFallbackMinVMps", 13.0, 1.0, 35.0, "STEER_CURVATURE_FALLBACK_MIN_V_MPS"))
+  setattr(vtc_mod, "SEVERE_OVERSHOOT_SPEED_SCALE_MIN", expf("VTSC.Expert.SevereOvershootSpeedScaleMin", 0.90, 0.5, 1.0, "SEVERE_OVERSHOOT_SPEED_SCALE_MIN"))
+  setattr(vtc_mod, "HIDDEN_TURN_ENABLED", expb("VTSC.Expert.HiddenTurnEnabled", False, "HIDDEN_TURN_ENABLED"))
+  setattr(vtc_mod, "HIDDEN_TURN_V_MAX_MPS", expf("VTSC.Expert.HiddenTurnVMaxMps", highway_min_mps, 5.0, 45.0, "HIDDEN_TURN_V_MAX_MPS"))
+  setattr(vtc_mod, "HIDDEN_TURN_T_H_S", expf("VTSC.Expert.HiddenTurnTHS", 1.8, 0.1, 5.0, "HIDDEN_TURN_T_H_S"))
+  setattr(vtc_mod, "HIDDEN_TURN_DELTA_V_MPS", expf("VTSC.Expert.HiddenTurnDeltaVMps", 2.0, 0.1, 10.0, "HIDDEN_TURN_DELTA_V_MPS"))
+  setattr(vtc_mod, "HIDDEN_TURN_MIN_OCC_S", expf("VTSC.Expert.HiddenTurnMinOccS", 0.30, 0.0, 5.0, "HIDDEN_TURN_MIN_OCC_S"))
+  setattr(vtc_mod, "HIDDEN_TURN_AVAIL_SCALE", expf("VTSC.Expert.HiddenTurnAvailScale", 0.50, 0.0, 2.0, "HIDDEN_TURN_AVAIL_SCALE"))
+  setattr(vtc_mod, "HIDDEN_TURN_PHASE_S", expf("VTSC.Expert.HiddenTurnPhaseS", 2.0, 0.1, 10.0, "HIDDEN_TURN_PHASE_S"))
+  setattr(vtc_mod, "HIDDEN_TURN_HEADING_WIN_S", expf("VTSC.Expert.HiddenTurnHeadingWinS", 1.2, 0.1, 5.0, "HIDDEN_TURN_HEADING_WIN_S"))
+  setattr(vtc_mod, "HIDDEN_TURN_VIS_HEADING_MAX_RAD", expf("VTSC.Expert.HiddenTurnVisHeadingMaxRad", 0.10472, 0.01, 0.8, "HIDDEN_TURN_VIS_HEADING_MAX_RAD"))
+  setattr(vtc_mod, "LOW_SPEED_MARGIN_MAX_V_MPS", expf("VTSC.Expert.LowSpeedMarginMaxVMps", 12.5, 1.0, 30.0, "LOW_SPEED_MARGIN_MAX_V_MPS"))
+  setattr(vtc_mod, "LOW_SPEED_MARGIN_CURV_THRESH", expf("VTSC.Expert.LowSpeedMarginCurvThresh", 3.5e-4, 1e-6, 0.01, "LOW_SPEED_MARGIN_CURV_THRESH"))
+  setattr(vtc_mod, "OCCL_BYPASS_HEADWAY_V_FLOOR_MPS", expf("VTSC.Expert.OcclBypassHeadwayVFloorMps", 5.0, 0.1, 20.0, "OCCL_BYPASS_HEADWAY_V_FLOOR_MPS"))
+  setattr(vtc_mod, "OCCL_BYPASS_LOW_SPEED_V_MPS", expf("VTSC.Expert.OcclBypassLowSpeedVMps", 7.0, 0.1, 25.0, "OCCL_BYPASS_LOW_SPEED_V_MPS"))
+  setattr(vtc_mod, "OCCL_BYPASS_LEAD_D_REL_MAX_M", expf("VTSC.Expert.OcclBypassLeadDRelMaxM", 27.0, 5.0, 200.0, "OCCL_BYPASS_LEAD_D_REL_MAX_M"))
+  conf_enter_severe = expf("VTSC.Expert.ConfidenceEnterSevere", 0.45, 0.10, 0.90, "CONFIDENCE_ENTER_SEVERE")
+  conf_exit_partial = expf("VTSC.Expert.ConfidenceExitToPartial", 0.55, max(conf_enter_severe + 1e-3, 0.11), 0.99, "CONFIDENCE_EXIT_TO_PARTIAL")
+  setattr(vtc_mod, "CONFIDENCE_ENTER_SEVERE", conf_enter_severe)
+  setattr(vtc_mod, "CONFIDENCE_EXIT_TO_PARTIAL", conf_exit_partial)
 
   # Occlusion dwell and tuning
   ctrl._occlusion_state.enter_dwell_s = getf(

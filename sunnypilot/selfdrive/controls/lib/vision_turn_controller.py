@@ -431,16 +431,16 @@ MAX_SPEED_DEFAULT = 70.0  # m/s, fallback for straight roads (overridden by para
 SPEED_INCREASE_FACTOR = 1.0  # Global multiplier on target speeds (overridden by param)
 
 # Physics sigmoid tunables (overridden by params)
-PHYSICS_A = -1.175100    # Amplitude
+PHYSICS_A = -2.300000    # Amplitude (deepened to keep tight-turn lat_accel ≈ D+A ≈ 1.97 m/s²)
 PHYSICS_B = -2000.000000 # Steepness
 PHYSICS_C = 0.004778     # Transition center (1/m)
-PHYSICS_D = 3.144734     # Baseline (m/s²)
+PHYSICS_D = 4.270000     # Baseline (m/s²; raised to target ~70 mph at k≈0.004 sweeper curvature)
 PHYSICS_MIN_LAT_ACCEL = 1.8
-PHYSICS_MAX_LAT_ACCEL = 3.12
+PHYSICS_MAX_LAT_ACCEL = 3.90  # raised to permit 70 mph at k=0.004 (was 3.12 → 61 mph)
 
 # Low-speed bias (applied as +Δ mph under a taper)
-LOW_SPEED_BIAS_MPH = 0.0
-LOW_SPEED_BIAS_END_MPH = 50.0
+LOW_SPEED_BIAS_MPH = 5.0         # +speed boost at tight curves (tapers to 0 by END_MPH)
+LOW_SPEED_BIAS_END_MPH = 55.0    # taper covers up to ~55 mph base speed (was 50.0)
 
 # ===== Hidden-turn early deceleration trigger (occlusion-only, sub-65 mph) =====
 # Allows jerk-limited early braking when a short-horizon physics deficit is provably large

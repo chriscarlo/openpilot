@@ -149,6 +149,7 @@ markers = [
   "skip_tici_setup: mark test to skip tici setup fixture",
   "accuracy: tests that validate algorithm accuracy",
   "schema: tests that validate schema synchronization",
+  "offroad: tests that require local/offroad artifacts and are not part of default onroad CI",
   "regression: known failing on-road regressions; run explicitly"
 ]
 testpaths = [

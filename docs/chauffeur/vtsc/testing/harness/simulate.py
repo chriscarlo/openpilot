@@ -66,7 +66,13 @@ def _mk_vtsc_with_params(aggr: float, alpha: float, hyst: float, bias: float,
     class MockCP: pass
     with patch('sunnypilot.selfdrive.controls.lib.vision_turn_controller.Params') as MockParams:
         mp = MagicMock()
-        mp.get_bool.return_value = True
+        # Be explicit: returning True for every bool key unintentionally enables
+        # experimental toggles and invalidates baseline harness expectations.
+        def _get_bool(key: str) -> bool:
+            if key in ('VisionTurnSpeedControl', 'VisionTurnSpeedControlOcclBypassWithLead'):
+                return True
+            return False
+        mp.get_bool.side_effect = _get_bool
         def _get(key: str):
             if key.endswith("Aggressiveness"):
                 return str(aggr).encode()
