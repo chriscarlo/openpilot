@@ -275,62 +275,27 @@ void HudRendererSP::updateState(const UIState &s) {
     }
   }
 
-  // ===== VTSC Rally Co-Pilot curve preview (HUD) =====
-  vtsc_copilot_visible_ = false;
+  // ===== VTSC Rally Co-Pilot: always-on road preview =====
   if (!vtsc_copilot_hud_enabled_ || !s.sm) {
-    // Hard-disable: do not animate, do not keep stale geometry.
     vtsc_copilot_alpha_ = 0.0f;
     vtsc_copilot_curve_points_m_.clear();
-    vtsc_copilot_visible_prev_ = false;
     return;
   }
 
-  // Cache v_ego for ego-advance interpolation (smooth scrolling between producer updates).
+  // Cache v_ego for ego-advance interpolation and speed-dependent lookahead.
   try {
     if (s.sm->valid("carState")) {
       vtsc_copilot_v_ego_mps_ = (*s.sm)["carState"].getCarState().getVEgo();
     }
   } catch (const std::exception&) {}
 
-  bool got_live_data = false;
-  bool preview_valid = false;
-  bool have_points = false;
-
+  // Grab road preview geometry — always accept updates, no kappa gating.
   try {
     if (s.sm->valid("longitudinalPlanSP")) {
-      got_live_data = true;
       const auto lp_sp = (*s.sm)["longitudinalPlanSP"].getLongitudinalPlanSP();
       const auto vtsc = lp_sp.getVisionTurnSpeedControl();
 
-      // Preview geometry + metadata (already computed by VTSC map enrichment; HUD only renders)
-      preview_valid = vtsc.getCurvePreviewValid();
-
-      // Determine whether ego is currently negotiating (past the curve-start marker) before
-      // overwriting any state.  When in-curve, hold the locked geometry and distance so the
-      // display doesn't snap to the exit/tail of the bend being re-detected as a "new" nearby
-      // curve by the producer.
-      const bool was_in_curve = (!vtsc_copilot_curve_points_m_.empty() &&
-                                  vtsc_copilot_ego_advance_m_ >= vtsc_copilot_curve_distance_m_);
-      const float new_dist_m = vtsc.getCurveDistanceM();
-      // Accept a fresh snapshot only when the incoming curve start is far enough ahead to be
-      // a genuinely new curve, not just the current bend re-detected at ~0 m.
-      const float curve_hold_new_dist_min = vtsc_copilot_tuning_.curve_hold_new_dist_min_m;
-      const bool allow_geom_update = !was_in_curve || (new_dist_m >= curve_hold_new_dist_min);
-
-      // Ancillary scalars (kappa drives the fade logic so always update).
-      vtsc_copilot_curve_kappa_max_ = vtsc.getCurveMaxCurvature();
-      vtsc_copilot_curve_direction_ = static_cast<int>(vtsc.getCurveDirection());
-      vtsc_copilot_curve_severity_ = static_cast<int>(vtsc.getCurveSeverity());
-      vtsc_target_speed_mps_ = vtsc.getVelocity();
-
-      // Distance/time labels stay anchored to the locked geometry when in-curve.
-      if (allow_geom_update) {
-        vtsc_copilot_curve_distance_m_ = new_dist_m;
-        vtsc_copilot_curve_time_to_s_ = vtsc.getCurveTimeToS();
-      }
-
-      // Only update geometry when the producer says it's valid AND we are not locked mid-curve.
-      if (preview_valid && allow_geom_update) {
+      if (vtsc.getCurvePreviewValid()) {
         std::vector<QPointF> new_pts;
         auto pts = vtsc.getCurvePreviewPoints();
         new_pts.reserve(static_cast<size_t>(pts.size()));
@@ -343,7 +308,7 @@ void HudRendererSP::updateState(const UIState &s) {
           // ego-advance on every identical re-publish kills smooth interpolation.
           bool geom_changed = (new_pts.size() != vtsc_copilot_curve_points_m_.size());
           if (!geom_changed) {
-            const float geom_eps_m = vtsc_copilot_tuning_.geometry_epsilon_m;
+            constexpr float geom_eps_m = 0.05f;
             const size_t mid = new_pts.size() / 2;
             const size_t last_idx = new_pts.size() - 1;
             for (size_t idx : {size_t(0), mid, last_idx}) {
@@ -356,46 +321,16 @@ void HudRendererSP::updateState(const UIState &s) {
           }
           vtsc_copilot_curve_points_m_ = std::move(new_pts);
           if (geom_changed) {
-            // Reset ego-advance on genuinely new producer data so the view snaps to
-            // the new point set and then smoothly scrolls until the next update.
             vtsc_copilot_ego_advance_m_ = 0.0f;
             vtsc_copilot_last_draw_time_valid_ = false;
           }
         }
       }
-      // Locked geometry counts as valid points for visibility gating.
-      have_points = (vtsc_copilot_curve_points_m_.size() >= 3);
     }
+  } catch (const std::exception&) {}
 
-    const float kappa_max = vtsc_copilot_curve_kappa_max_;
-    const float kappa_show_min = vtsc_copilot_tuning_.kappa_show_min;
-    const float kappa_hold_min = vtsc_copilot_tuning_.kappa_hold_min;
-    const bool kappa_entry = std::isfinite(kappa_max) && kappa_max >= kappa_show_min;
-    const bool kappa_hold = std::isfinite(kappa_max) && kappa_max >= kappa_hold_min;
-
-    if (preview_valid && have_points) {
-      vtsc_copilot_visible_ = vtsc_copilot_visible_prev_ ? kappa_hold : kappa_entry;
-    } else {
-      vtsc_copilot_visible_ = false;
-    }
-
-    vtsc_copilot_visible_prev_ = vtsc_copilot_visible_;
-  } catch (const std::exception&) {
-    got_live_data = false;
-    vtsc_copilot_visible_ = false;
-    vtsc_copilot_visible_prev_ = false;
-  }
-
-  // Fade in/out for a game-HUD feel. Keep last geometry during fade-out.
-  const float target_alpha = vtsc_copilot_visible_ ? 1.0f : 0.0f;
-  const float k = vtsc_copilot_visible_ ? vtsc_copilot_tuning_.fade_in_alpha : vtsc_copilot_tuning_.fade_out_alpha;
-  vtsc_copilot_alpha_ += k * (target_alpha - vtsc_copilot_alpha_);
-  vtsc_copilot_alpha_ = std::clamp(vtsc_copilot_alpha_, 0.0f, 1.0f);
-
-  if ((vtsc_copilot_alpha_ < 0.01f) && !vtsc_copilot_visible_ && got_live_data) {
-    // Only clear when we've actually processed live data and fully faded out.
-    vtsc_copilot_curve_points_m_.clear();
-  }
+  // Always visible when we have road geometry. No fade — instant on/off.
+  vtsc_copilot_alpha_ = (vtsc_copilot_curve_points_m_.size() >= 3) ? 1.0f : 0.0f;
 }
 
 void HudRendererSP::draw(QPainter &p, const QRect &surface_rect) {
@@ -833,35 +768,6 @@ QString HudRendererSP::formatDistance(float distance_m) const {
   }
 }
 
-static QString formatCurveDistance(float distance_m, bool is_metric) {
-  if (is_metric) {
-    if (distance_m < 1000.0f) {
-      return QString("%1m").arg(static_cast<int>(distance_m));
-    }
-    return QString("%1km").arg(distance_m / 1000.0f, 0, 'f', 1);
-  }
-
-  const float ft = distance_m * 3.28084f;
-  if (ft < 1000.0f) {
-    return QString("%1ft").arg(static_cast<int>(ft));
-  }
-  const float mi = distance_m / 1609.344f;
-  return QString("%1mi").arg(mi, 0, 'f', 1);
-}
-
-static QString formatCurveTime(float time_s) {
-  if (!std::isfinite(time_s) || time_s <= 0.0f) {
-    return QString("0.0s");
-  }
-  if (time_s < 60.0f) {
-    return QString("%1s").arg(time_s, 0, 'f', 1);
-  }
-  const int total = static_cast<int>(std::lround(time_s));
-  const int mm = total / 60;
-  const int ss = total % 60;
-  return QString("%1:%2").arg(mm).arg(ss, 2, 10, QChar('0'));
-}
-
 static QPainterPath buildSmoothStripMapPath(const std::vector<QPointF> &pts, float tension = 0.9f) {
   // Catmull-Rom spline converted to cubic Beziers.
   // This is a display-only smoothing step; the curve geometry itself is produced by VTSC map enrichment.
@@ -940,39 +846,35 @@ void HudRendererSP::drawCurveDirectionIcon(QPainter &p, const QRect &icon_rect, 
 }
 
 void HudRendererSP::drawVTSCCoPilotCurve(QPainter &p, const QRect &surface_rect) {
-  // NOTE: We draw during fade-out too; don't gate on `vtsc_copilot_visible_` here.
-  if (vtsc_copilot_curve_points_m_.size() < 3 || vtsc_copilot_alpha_ < 0.01f) {
+  if (vtsc_copilot_curve_points_m_.size() < 2 || vtsc_copilot_alpha_ < 0.01f) {
     return;
   }
 
-  // The `surface_rect` includes the engaged border; do not include that border when computing the right-third layout.
   const QRect inner = surface_rect.adjusted(UI_BORDER_SIZE, UI_BORDER_SIZE, -UI_BORDER_SIZE, -UI_BORDER_SIZE);
   const QRect right_third(inner.left() + (2 * inner.width()) / 3, inner.top(), inner.width() / 3, inner.height());
 
   p.save();
   p.setRenderHint(QPainter::Antialiasing, true);
-  p.setRenderHint(QPainter::TextAntialiasing, true);
-  p.setOpacity(p.opacity() * static_cast<qreal>(vtsc_copilot_alpha_));
 
-  // Global scale for this widget.
   const float kScale = std::max(0.5f, vtsc_copilot_tuning_.scale);
 
-  // Geometry + labels live in an invisible bounding box, centered in the right third.
-  // (No card/container per user request.)
+  // Widget bounding box — right third, bottom-aligned.
   const int box_w = static_cast<int>(right_third.width() * 0.995f);
   const int box_h = std::min(static_cast<int>(inner.height() * 0.875f), 950);
-
-  // Vertical placement: push the widget down so its bottom edge sits just above the
-  // engaged-border strip (UI_BORDER_SIZE = 30 px from screen edge; `inner` already
-  // excludes that border, so bottom_safe ≈ small padding keeps us clear).
   const int bottom_safe = static_cast<int>(vtsc_copilot_tuning_.bottom_safe_px_at_scale1 * kScale);
   const int box_left = right_third.center().x() - box_w / 2;
   const int box_top = std::max(inner.top(), inner.bottom() - bottom_safe - box_h + 1);
   const QRect box(box_left, box_top, box_w, box_h);
 
-  // 360-degree feathered halo (no hard container): dark behind the curve/text, fading to transparent.
-  // This matches the "header gradient" intent (contrast without a card) but in 360 degrees.
-  // Use a radius that reaches the nearest edge so the box boundary itself stays fully transparent.
+  // Full box for road rendering (no text labels).
+  const int pad = static_cast<int>(vtsc_copilot_tuning_.pad_px_at_scale1 * kScale);
+  const QRect curve_area(box.left() + pad, box.top() + pad, box.width() - 2 * pad, box.height() - 2 * pad);
+  if (curve_area.height() < 40 || curve_area.width() < 40) {
+    p.restore();
+    return;
+  }
+
+  // 360-degree feathered halo backdrop.
   const float radius = 0.50f * std::min(static_cast<float>(box.width()), static_cast<float>(box.height()));
   QRadialGradient vignette(box.center(), radius);
   vignette.setColorAt(0.00, QColor::fromRgbF(0, 0, 0, 0.40));
@@ -982,66 +884,39 @@ void HudRendererSP::drawVTSCCoPilotCurve(QPainter &p, const QRect &surface_rect)
   p.setBrush(vignette);
   p.drawRect(box);
 
-  // Layout within the halo bounds.
-  const int pad = static_cast<int>(vtsc_copilot_tuning_.pad_px_at_scale1 * kScale);
-  const int gap = static_cast<int>(vtsc_copilot_tuning_.gap_px_at_scale1 * kScale);
-  const int top_h = static_cast<int>(vtsc_copilot_tuning_.top_height_px_at_scale1 * kScale);
-  const int bottom_h = static_cast<int>(vtsc_copilot_tuning_.bottom_height_px_at_scale1 * kScale);
-  const QRect speed_rect(box.left() + pad, box.top() + pad, box.width() - 2 * pad, top_h);
-  const QRect bottom_rect(box.left() + pad, box.bottom() - pad - bottom_h, box.width() - 2 * pad, bottom_h);
-  const int curve_top = speed_rect.bottom() + gap;
-  const int curve_bottom = bottom_rect.top() - gap;
-  const QRect curve_area(box.left() + pad, curve_top, box.width() - 2 * pad, std::max(0, curve_bottom - curve_top));
-
-  // --- Ego-advance: smooth 60 Hz scrolling between 5 Hz producer refreshes ---
-  // Increment the accumulated ego advance by v_ego * dt each frame.
+  // --- Ego-advance: smooth scrolling between producer updates ---
   {
     const auto now_tp = std::chrono::steady_clock::now();
     if (vtsc_copilot_last_draw_time_valid_) {
       const float dt = std::chrono::duration<float>(now_tp - vtsc_copilot_last_draw_time_).count();
-      // Clamp dt to avoid jumps from frame drops or pauses.
-      const float dt_clamped = std::min(dt, 0.1f);
-      vtsc_copilot_ego_advance_m_ += vtsc_copilot_v_ego_mps_ * dt_clamped;
+      vtsc_copilot_ego_advance_m_ += vtsc_copilot_v_ego_mps_ * std::min(dt, 0.1f);
     }
     vtsc_copilot_last_draw_time_ = now_tp;
     vtsc_copilot_last_draw_time_valid_ = true;
   }
   const float ego_adv = vtsc_copilot_ego_advance_m_;
 
-  // Adjust distance/time labels for ego-advance so they count down smoothly.
-  const float adj_dist = std::max(0.0f, vtsc_copilot_curve_distance_m_ - ego_adv);
-  const float adj_time = (vtsc_copilot_v_ego_mps_ > 0.1f) ? (adj_dist / vtsc_copilot_v_ego_mps_) : vtsc_copilot_curve_time_to_s_;
-  const QString dist_txt = formatCurveDistance(adj_dist, is_metric);
-  const QString time_txt = formatCurveTime(adj_time);
+  // --- Speed-dependent lookahead ---
+  // 20 mph (8.94 m/s) → 5 seconds ahead; 70 mph (31.29 m/s) → 12 seconds ahead; linear.
+  constexpr float kMinSpeedMps = 8.94f;    // 20 mph
+  constexpr float kMaxSpeedMps = 31.29f;   // 70 mph
+  constexpr float kMinLookaheadS = 5.0f;
+  constexpr float kMaxLookaheadS = 12.0f;
+  constexpr float kMinLookaheadM = 20.0f;  // absolute floor so something always renders
 
-  QString v_txt = "--";
-  if (std::isfinite(vtsc_target_speed_mps_) && vtsc_target_speed_mps_ > 0.1f) {
-    const float v_disp = vtsc_target_speed_mps_ * (is_metric ? MS_TO_KPH : MS_TO_MPH);
-    v_txt = QString("%1%2").arg(v_disp, 0, 'f', 0).arg(is_metric ? "km/h" : "mph");
-  }
+  const float v_ego = vtsc_copilot_v_ego_mps_;
+  const float t_speed = std::clamp((v_ego - kMinSpeedMps) / (kMaxSpeedMps - kMinSpeedMps), 0.0f, 1.0f);
+  const float lookahead_s = kMinLookaheadS + t_speed * (kMaxLookaheadS - kMinLookaheadS);
+  const float target_lookahead_m = std::max(kMinLookaheadM, lookahead_s * v_ego);
 
-  auto drawTextShadowed = [&](const QRect &r, const QString &txt, const QFont &font, const QColor &fg) {
-    p.setFont(font);
-    QColor shadow(0, 0, 0, 190);
-    p.setPen(shadow);
-    p.drawText(r.translated(static_cast<int>(2 * kScale), static_cast<int>(2 * kScale)), Qt::AlignLeft | Qt::AlignVCenter, txt);
-    p.setPen(fg);
-    p.drawText(r, Qt::AlignLeft | Qt::AlignVCenter, txt);
-  };
+  // Smooth the lookahead for seamless zoom animation.
+  constexpr float kLookaheadSmooth = 0.06f;
+  vtsc_copilot_smoothed_lookahead_m_ += kLookaheadSmooth * (target_lookahead_m - vtsc_copilot_smoothed_lookahead_m_);
+  const float lookahead_m = vtsc_copilot_smoothed_lookahead_m_;
 
-  auto drawTextShadowedCentered = [&](const QRect &r, const QString &txt, const QFont &font, const QColor &fg) {
-    p.setFont(font);
-    QColor shadow(0, 0, 0, 190);
-    p.setPen(shadow);
-    p.drawText(r.translated(static_cast<int>(2 * kScale), static_cast<int>(2 * kScale)), Qt::AlignHCenter | Qt::AlignVCenter, txt);
-    p.setPen(fg);
-    p.drawText(r, Qt::AlignHCenter | Qt::AlignVCenter, txt);
-  };
-
-  // Curve strip-map rendering (actual geometry from map preview points, ego frame):
-  // - x (forward) maps to screen Y (bottom=now, up=ahead)
-  // - y (left) maps to screen X (left/right)
-  // Subtract ego_advance from each point's forward distance, then clip behind-ego.
+  // --- Build ego-shifted, lookahead-clipped point set ---
+  // x (forward) → screen Y (bottom=ego, up=ahead)
+  // y (left)    → screen X
   std::vector<QPointF> pts_m;
   pts_m.reserve(vtsc_copilot_curve_points_m_.size());
   QPointF prev_raw;
@@ -1052,59 +927,61 @@ void HudRendererSP::drawVTSCCoPilotCurve(QPainter &p, const QRect &surface_rect)
     if (!std::isfinite(xf_raw) || !std::isfinite(yl)) { have_prev = false; continue; }
     const float xf = xf_raw - ego_adv;
     if (xf < 0.0f) {
-      // Point is behind ego; remember it for interpolation.
       prev_raw = QPointF(xf_raw, yl);
       have_prev = true;
       continue;
     }
-    // If the previous point was behind ego, interpolate the crossing for smooth clipping.
+    // Clip to lookahead distance — interpolate the boundary point.
+    if (xf > lookahead_m) {
+      if (!pts_m.empty()) {
+        const auto &last = pts_m.back();
+        const float x_last = static_cast<float>(last.x());
+        const float y_last = static_cast<float>(last.y());
+        const float denom = xf - x_last;
+        if (std::abs(denom) > 1e-6f) {
+          const float frac = (lookahead_m - x_last) / denom;
+          pts_m.emplace_back(lookahead_m, y_last + frac * (yl - y_last));
+        }
+      }
+      break;
+    }
+    // Interpolate from behind-ego to exactly x=0 (ego position).
     if (have_prev && pts_m.empty()) {
       const float x_prev = static_cast<float>(prev_raw.x()) - ego_adv;
       const float y_prev = static_cast<float>(prev_raw.y());
       const float denom = xf - x_prev;
       if (std::abs(denom) > 1e-6f) {
-        const float t = -x_prev / denom;
-        pts_m.emplace_back(0.0f, y_prev + t * (yl - y_prev));
+        const float frac = -x_prev / denom;
+        pts_m.emplace_back(0.0f, y_prev + frac * (yl - y_prev));
       }
     }
     have_prev = false;
     pts_m.emplace_back(xf, yl);
   }
 
-  if (pts_m.size() < 3) {
+  if (pts_m.size() < 2) {
     p.restore();
     return;
   }
 
-  const int min_curve_area_px = static_cast<int>(vtsc_copilot_tuning_.min_curve_area_px_at_scale1 * kScale);
-  if (curve_area.height() < min_curve_area_px || curve_area.width() < min_curve_area_px) {
-    p.restore();
-    return;
-  }
-
+  // --- Scaling: forward fits display height, lateral proportional (consistent zoom) ---
   float x_max = 0.0f;
-  float y_abs = 0.0f;
   for (const auto &pt : pts_m) {
     x_max = std::max(x_max, static_cast<float>(pt.x()));
-    y_abs = std::max(y_abs, std::abs(static_cast<float>(pt.y())));
   }
-  x_max = std::max(20.0f, x_max);
-  y_abs = std::max(1.0f, y_abs);
+  x_max = std::max(10.0f, x_max);
 
-  const float x_scale = static_cast<float>(curve_area.height()) / x_max;
-  const float fwd_scale = x_scale;
-  float lat_scale = (0.48f * static_cast<float>(curve_area.width())) / y_abs;
-  // Clamp lateral exaggeration for stability.
-  lat_scale = std::min(lat_scale, fwd_scale * 4.0f);
+  const float fwd_scale = static_cast<float>(curve_area.height()) / x_max;
+  // Lateral scale proportional to forward — creates consistent "zoom" at all speeds.
+  // Multiplier > 1 exaggerates lateral motion so gentle highway curves are visible.
+  const float lat_scale = fwd_scale * 3.0f;
 
   auto toPx = [&](float x_fwd_m, float y_left_m) -> QPointF {
     const float t = std::clamp(x_fwd_m / x_max, 0.0f, 1.0f);
-    // Mild perspective: taper lateral excursions farther away so the curve reads "ahead".
-    float persp = 1.0f - 0.35f * t;
-    persp = std::clamp(persp, 0.65f, 1.0f);
-
+    // Mild perspective: taper lateral excursions farther away.
+    const float persp = std::clamp(1.0f - 0.35f * t, 0.65f, 1.0f);
     const float x_px = static_cast<float>(curve_area.center().x()) - y_left_m * lat_scale * persp;
-    const float y_px = static_cast<float>(curve_area.bottom()) - x_fwd_m * x_scale;
+    const float y_px = static_cast<float>(curve_area.bottom()) - x_fwd_m * fwd_scale;
     return QPointF(x_px, y_px);
   };
 
@@ -1114,82 +991,45 @@ void HudRendererSP::drawVTSCCoPilotCurve(QPainter &p, const QRect &surface_rect)
     px_pts.emplace_back(toPx(static_cast<float>(pt.x()), static_cast<float>(pt.y())));
   }
 
-  // Build a single smooth path (unified — no lead/curve brightness split).
+  // Build smooth spline path.
   const QPainterPath strip_path = buildSmoothStripMapPath(px_pts, 2.0f);
 
-  // Clip to our vignette bounds so the glow doesn't leak.
   p.setClipRect(box);
 
-  // Multi-pass drawing for crisp "pace-note" backbone.
+  // --- Draw road backbone (glow → outline → main stroke) ---
   const int kRoadMainWidth = std::max(1, static_cast<int>(vtsc_copilot_tuning_.road_main_width_px_at_scale1));
   const int kGlowWidth = std::max(1, static_cast<int>(vtsc_copilot_tuning_.glow_width_px_at_scale1 * kScale));
   const int kOutlineWidth = std::max(1, static_cast<int>(vtsc_copilot_tuning_.outline_width_px_at_scale1 * kScale));
   const int kMainStrokeWidth = std::max(1, static_cast<int>(vtsc_copilot_tuning_.main_stroke_width_px_at_scale1 * kScale));
-  auto drawBackbone = [&](const QPainterPath &path, const QColor &base, int w_glow, int w_outline, int w_main) {
-    if (path.isEmpty()) return;
+
+  p.setBrush(Qt::NoBrush);
+  p.setPen(QPen(QColor(255, 255, 255, 28), kGlowWidth, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+  p.drawPath(strip_path);
+  p.setPen(QPen(QColor(0, 0, 0, 140), kOutlineWidth, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+  p.drawPath(strip_path);
+  p.setPen(QPen(QColor(255, 255, 255, 235), kMainStrokeWidth, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+  p.drawPath(strip_path);
+
+  // --- Ego dot: always at the bottom of the strip map ---
+  if (!px_pts.empty()) {
+    const QPointF dot_center = px_pts.front();
+    const qreal dot_r = static_cast<qreal>(kRoadMainWidth * kScale) * 0.5;
+
+    // Red glow behind the dot.
+    p.setPen(Qt::NoPen);
+    p.setBrush(QColor(255, 59, 48, 50));
+    p.drawEllipse(dot_center, dot_r + 3.0 * kScale, dot_r + 3.0 * kScale);
+
+    // Black outline ring.
     p.setBrush(Qt::NoBrush);
+    p.setPen(QPen(QColor(0, 0, 0, 200), 2.0 * kScale, Qt::SolidLine));
+    p.drawEllipse(dot_center, dot_r, dot_r);
 
-    QColor glow = base;
-    glow.setAlpha(28);
-    p.setPen(QPen(glow, w_glow, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-    p.drawPath(path);
-
-    p.setPen(QPen(QColor(0, 0, 0, 140), w_outline, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-    p.drawPath(path);
-
-    p.setPen(QPen(base, w_main, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-    p.drawPath(path);
-  };
-
-  // Unified road backbone — bright (matches former curve-region emphasis).
-  drawBackbone(strip_path, QColor(255, 255, 255, 235),
-               kGlowWidth, kOutlineWidth, kMainStrokeWidth);
-
-  // --- Ego dot: filled circle at ego's position, visible once ego enters the curve. ---
-  // Apple systemRed (#FF3B30) — the "pop" red used for recording indicators and alert buttons.
-  {
-    const float raw_curve_dist = vtsc_copilot_curve_distance_m_ - ego_adv;
-    const bool ego_in_curve = std::isfinite(vtsc_copilot_curve_distance_m_) && raw_curve_dist <= 0.0f;
-    if (ego_in_curve && !px_pts.empty()) {
-      const QPointF dot_center = px_pts.front();  // bottom of strip map = ego position
-      const qreal dot_r = static_cast<qreal>(kRoadMainWidth * kScale) * 0.5;
-
-      // Red glow behind the dot.
-      p.setPen(Qt::NoPen);
-      p.setBrush(QColor(255, 59, 48, 50));
-      p.drawEllipse(dot_center, dot_r + 3.0 * kScale, dot_r + 3.0 * kScale);
-
-      // Black outline ring.
-      p.setBrush(Qt::NoBrush);
-      p.setPen(QPen(QColor(0, 0, 0, 200), 2.0 * kScale, Qt::SolidLine));
-      p.drawEllipse(dot_center, dot_r, dot_r);
-
-      // Solid Apple systemRed fill.
-      p.setPen(Qt::NoPen);
-      p.setBrush(QColor(255, 59, 48, 240));
-      p.drawEllipse(dot_center, dot_r - 1.0 * kScale, dot_r - 1.0 * kScale);
-    }
+    // Solid Apple systemRed fill.
+    p.setPen(Qt::NoPen);
+    p.setBrush(QColor(255, 59, 48, 240));
+    p.drawEllipse(dot_center, dot_r - 1.0 * kScale, dot_r - 1.0 * kScale);
   }
-
-  // Bottom: distance + time to curve start, centered, larger and with more spacing.
-  {
-    const QFont bottom_font = InterFont(static_cast<int>(vtsc_copilot_tuning_.bottom_font_px_at_scale1 * kScale), QFont::DemiBold);
-    p.setFont(bottom_font);
-    const QFontMetrics fm(bottom_font);
-    const int w_dist = fm.horizontalAdvance(dist_txt);
-    const int w_time = fm.horizontalAdvance(time_txt);
-    const int sep = static_cast<int>(vtsc_copilot_tuning_.distance_label_sep_px_at_scale1 * kScale);  // spacing between labels
-    const int total = w_dist + sep + w_time;
-    const int x0 = bottom_rect.center().x() - total / 2;
-
-    const QRect dist_r(x0, bottom_rect.top(), w_dist, bottom_rect.height());
-    const QRect time_r(x0 + w_dist + sep, bottom_rect.top(), w_time, bottom_rect.height());
-    drawTextShadowed(dist_r, dist_txt, bottom_font, QColor(255, 255, 255, 235));
-    drawTextShadowed(time_r, time_txt, bottom_font, QColor(255, 255, 255, 235));
-  }
-
-  // Top: recommended speed. Draw last so it's always on top of the curve/glow.
-  drawTextShadowedCentered(speed_rect, v_txt, InterFont(static_cast<int>(vtsc_copilot_tuning_.speed_font_px_at_scale1 * kScale), QFont::DemiBold), QColor(255, 255, 255, 235));
 
   p.restore();
 }

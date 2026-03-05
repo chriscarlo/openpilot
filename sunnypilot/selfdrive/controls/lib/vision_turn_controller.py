@@ -2936,8 +2936,9 @@ class VisionTurnController:
     # Default to invalid; set valid only when we can build a sane preview.
     self._clear_curve_preview()
 
-    # Build a forward window scaled to ~10s lookahead at current speed.
-    PREVIEW_S_MAX_M = max(200.0, min(float(self._v_ego) * 10.0, 600.0))
+    # Build a forward window — 14s lookahead at current speed ensures the HUD
+    # has enough road geometry for its 12-second preview at highway speeds.
+    PREVIEW_S_MAX_M = max(200.0, min(float(self._v_ego) * 14.0, 600.0))
     MAX_POINTS = 48
     KAPPA_MIN = 1.0e-3  # 1/m, ~1000 m radius (detect gentler curves)
     RUN = 2             # consecutive samples to start/end a curve

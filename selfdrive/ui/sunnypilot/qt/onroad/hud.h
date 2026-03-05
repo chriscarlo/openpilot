@@ -121,6 +121,9 @@ protected:
   std::chrono::steady_clock::time_point vtsc_copilot_last_draw_time_{};
   bool vtsc_copilot_last_draw_time_valid_ = false;
 
+  // Smoothed lookahead distance for seamless zoom animation as speed changes.
+  float vtsc_copilot_smoothed_lookahead_m_ = 50.0f;
+
   struct VTSCCoPilotHudTuning {
     float curve_hold_new_dist_min_m = 30.0f;
     float geometry_epsilon_m = 0.05f;
