@@ -55,7 +55,7 @@ def tail_swaglogs(out_q):
             with open(p, 'r', encoding='utf-8', errors='ignore') as f:
               f.seek(pos)
               for line in f:
-                if 'VTSCDBG ' in line:
+                if ('VTSCDBG ' in line) or ('LEADROLEDBG ' in line):
                   out_q.put(('swag', line))
           except Exception:
             pass
@@ -78,7 +78,10 @@ def parse_swag_line(s):
     msg = rec.get('msg')
     if isinstance(msg, str) and msg.startswith('VTSCDBG '):
       j = json.loads(msg.split('VTSCDBG ', 1)[1])
-      return j if isinstance(j, dict) else None
+      return ("vtscdbg", j) if isinstance(j, dict) else None
+    if isinstance(msg, str) and msg.startswith('LEADROLEDBG '):
+      j = json.loads(msg.split('LEADROLEDBG ', 1)[1])
+      return ("leadrole", j) if isinstance(j, dict) else None
   except Exception:
     return None
   return None
@@ -146,6 +149,20 @@ def render_line(d, src):
     f"v_vis={v_vis} v_occ={v_occ} conf={conf} psi={psi}/{psi_th} reason={reason} tail={tail}@{s_tail} | flags={flags_s}"
   )
 
+
+def render_leadrole_line(d, src):
+  roles = d.get("roles", {})
+  reasons = d.get("reasons", {})
+  raw = d.get("raw", {})
+  lead0 = raw.get("lead0", {})
+  lead1 = raw.get("lead1", {})
+  return (
+    f"[{src}] leadrole src={d.get('source')} v={fmt_float(d.get('vEgo'))} gate={d.get('gate_active')} "
+    f"dup={d.get('duplicate_pair')} drop={d.get('dropped_slot')} "
+    f"r0={roles.get('lead0')}({reasons.get('lead0')}) y0={fmt_float(lead0.get('yRel'))} d0={fmt_float(lead0.get('dRel'))} "
+    f"r1={roles.get('lead1')}({reasons.get('lead1')}) y1={fmt_float(lead1.get('yRel'))} d1={fmt_float(lead1.get('dRel'))}"
+  )
+
 def main():
   ap = argparse.ArgumentParser()
   ap.add_argument('--snapshots', action='store_true', help='Tail VTSC snapshots file')
@@ -180,13 +197,21 @@ def main():
       if src == 'snap':
         d = parse_snapshot_line(line)
         src_tag = 'snap'
+        kind = 'snap'
       elif src == 'swag':
-        d = parse_swag_line(line)
-        src_tag = 'swag'
+        parsed = parse_swag_line(line)
+        if parsed:
+          kind, d = parsed
+        else:
+          kind, d = None, None
+        src_tag = f"swag:{kind}" if kind else "swag"
       if not d:
         continue
       try:
-        print(render_line(d, src_tag))
+        if kind == 'leadrole':
+          print(render_leadrole_line(d, src_tag))
+        else:
+          print(render_line(d, src_tag))
       except Exception as e:
         print(f"[watch] render error: {e}")
   except KeyboardInterrupt:
@@ -194,4 +219,3 @@ def main():
 
 if __name__ == '__main__':
   main()
-

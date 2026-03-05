@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import json
 import os
 import time
 import numpy as np
@@ -9,6 +10,7 @@ from openpilot.common.swaglog import cloudlog
 # WARNING: imports outside of constants will not trigger a rebuild
 from openpilot.selfdrive.modeld.constants import index_function
 from openpilot.selfdrive.controls.radard import _LEAD_ACCEL_TAU
+from openpilot.selfdrive.controls.lib.lead_role_classifier import LeadRoleClassifier
 
 from openpilot.sunnypilot.selfdrive.controls.lib.vibe_personality.vibe_personality import VibePersonalityController
 
@@ -231,6 +233,9 @@ class LongitudinalMpc:
     self.reset()
     self.source = SOURCES[2]
     self.vibe_controller = VibePersonalityController()
+    self.lead_role_classifier = LeadRoleClassifier()
+    self.lead_role_debug = {}
+    self.last_lead_role_log_t = 0.0
 
   def reset(self):
     # self.solver = AcadosOcpSolverCython(MODEL_NAME, ACADOS_SOLVER_TYPE, N)
@@ -332,6 +337,7 @@ class LongitudinalMpc:
 
   def update(self, radarstate, v_cruise, x, v, a, j, personality=log.LongitudinalPersonality.standard):
     v_ego = self.x0[1]
+    now = time.monotonic()
 
     # Get following distance
     if self.vibe_controller.is_follow_enabled():
@@ -342,7 +348,11 @@ class LongitudinalMpc:
     else:
       t_follow = get_T_FOLLOW(personality)
 
-    self.status = radarstate.leadOne.status or radarstate.leadTwo.status
+    control_lead0, control_lead1, lead_role_debug = self.lead_role_classifier.classify(
+      v_ego, radarstate.leadOne, radarstate.leadTwo, now=now,
+    )
+    self.lead_role_debug = lead_role_debug
+    self.status = control_lead0.status or control_lead1.status
 
     # Get acceleration limits
     if self.vibe_controller.is_accel_enabled():
@@ -356,8 +366,8 @@ class LongitudinalMpc:
 
     a_cruise_min = min_accel
 
-    lead_xv_0 = self.process_lead(radarstate.leadOne)
-    lead_xv_1 = self.process_lead(radarstate.leadTwo)
+    lead_xv_0 = self.process_lead(control_lead0)
+    lead_xv_1 = self.process_lead(control_lead1)
 
     # To estimate a safe distance from a moving lead, we calculate how much stopping
     # distance that lead needs as a minimum. We can add that to the current distance
@@ -418,7 +428,7 @@ class LongitudinalMpc:
 
     self.run()
     if (np.any(lead_xv_0[FCW_IDXS,0] - self.x_sol[FCW_IDXS,0] < CRASH_DISTANCE) and
-            radarstate.leadOne.modelProb > 0.9):
+            control_lead0.modelProb > 0.9):
       self.crash_cnt += 1
     else:
       self.crash_cnt = 0
@@ -431,6 +441,30 @@ class LongitudinalMpc:
       if any((lead_1_obstacle - get_safe_obstacle_distance(self.x_sol[:,1], t_follow))- self.x_sol[:,0] < 0.0) and \
          (lead_1_obstacle[0] - lead_0_obstacle[0]):
         self.source = 'lead1'
+
+    if lead_role_debug.get("debug_log_enabled", False):
+      raw = lead_role_debug.get("raw", {})
+      has_raw_lead = bool(raw.get("lead0", {}).get("status")) or bool(raw.get("lead1", {}).get("status"))
+      log_period_s = 0.25 if lead_role_debug.get("duplicate_pair", False) else 1.0
+      should_log = has_raw_lead and (now - self.last_lead_role_log_t) >= log_period_s
+      if should_log:
+        self.last_lead_role_log_t = now
+        dbg_payload = {
+          "vEgo": float(v_ego),
+          "source": str(self.source),
+          "gate_active": bool(lead_role_debug.get("gate_active", False)),
+          "low_speed_bypass": bool(lead_role_debug.get("low_speed_bypass", False)),
+          "roles": lead_role_debug.get("roles", {}),
+          "reasons": lead_role_debug.get("reasons", {}),
+          "cutin_promoted": lead_role_debug.get("cutin_promoted", {}),
+          "toward_center_mps": lead_role_debug.get("toward_center_mps", {}),
+          "duplicate_pair": bool(lead_role_debug.get("duplicate_pair", False)),
+          "dropped_slot": lead_role_debug.get("dropped_slot", None),
+          "control_status": lead_role_debug.get("control_status", {}),
+          "raw": lead_role_debug.get("raw", {}),
+          "awareness": lead_role_debug.get("awareness", []),
+        }
+        cloudlog.info(f"LEADROLEDBG {json.dumps(dbg_payload, separators=(',', ':'), sort_keys=True)}")
 
   def run(self):
     # t0 = time.monotonic()

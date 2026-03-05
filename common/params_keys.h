@@ -308,6 +308,18 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"VTSC.Expert.OcclBypassLeadDRelMaxM", {PERSISTENT | BACKUP, FLOAT, "27.0"}},
     {"VTSC.Expert.ConfidenceEnterSevere", {PERSISTENT | BACKUP, FLOAT, "0.45"}},
     {"VTSC.Expert.ConfidenceExitToPartial", {PERSISTENT | BACKUP, FLOAT, "0.55"}},
+    // Adjacent lead gating (control-plane) while retaining awareness leads for logging/UI.
+    {"VTSC.Expert.AdjLeadControlEnabled", {PERSISTENT | BACKUP, BOOL, "1"}},
+    {"VTSC.Expert.AdjLeadCenterYAbsMaxM", {PERSISTENT | BACKUP, FLOAT, "2.2"}},
+    {"VTSC.Expert.AdjLeadCenterYAbsMinM", {PERSISTENT | BACKUP, FLOAT, "1.2"}},
+    {"VTSC.Expert.AdjLeadCenterHystM", {PERSISTENT | BACKUP, FLOAT, "0.35"}},
+    {"VTSC.Expert.AdjLeadCutInDRelMaxM", {PERSISTENT | BACKUP, FLOAT, "55.0"}},
+    {"VTSC.Expert.AdjLeadCutInYRateMinMps", {PERSISTENT | BACKUP, FLOAT, "0.8"}},
+    {"VTSC.Expert.AdjLeadLowSpeedBypassVMps", {PERSISTENT | BACKUP, FLOAT, "8.0"}},
+    {"VTSC.Expert.AdjLeadDedupeDRelEpsM", {PERSISTENT | BACKUP, FLOAT, "2.0"}},
+    {"VTSC.Expert.AdjLeadDedupeYRelEpsM", {PERSISTENT | BACKUP, FLOAT, "0.6"}},
+    {"VTSC.Expert.AdjLeadDedupeVRelEpsMps", {PERSISTENT | BACKUP, FLOAT, "1.5"}},
+    {"VTSC.Expert.AdjLeadDebugLogEnabled", {PERSISTENT | BACKUP, BOOL, "1"}},
 
     // VTSC Rally Co-Pilot HUD expert layout/gating knobs.
     {"VTSCHUD.KappaShowMin", {PERSISTENT | BACKUP, FLOAT, "0.0011"}},
