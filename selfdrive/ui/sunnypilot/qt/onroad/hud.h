@@ -49,6 +49,7 @@ public:
 protected:
   // VTSC Rally Co-Pilot curve preview (HUD-only rendering)
   void drawVTSCCoPilotCurve(QPainter &p, const QRect &surface_rect);
+  void drawVTSCCoPilotNavArrow(QPainter &p, const QPointF &center, float size_px) const;
   void drawCurveDirectionIcon(QPainter &p, const QRect &icon_rect, int direction) const;
   void refreshVTSCCoPilotTuning();
 
@@ -114,19 +115,17 @@ protected:
   int vtsc_copilot_curve_direction_ = 0;  // TurnDirection (unknown=0, left=1, right=2)
   int vtsc_copilot_curve_severity_ = 0;   // CurveSeverity (unknown=0, gentle=1, medium=2, tight=3)
   std::vector<QPointF> vtsc_copilot_curve_points_m_;
+  struct VTSCCoPilotBranchStubState {
+    bool highlighted = false;
+    std::vector<QPointF> points_m;
+  };
+  std::vector<VTSCCoPilotBranchStubState> vtsc_copilot_branch_stubs_;
 
   // Ego-advance interpolation for smooth 60 Hz scrolling between 5 Hz producer updates.
   float vtsc_copilot_v_ego_mps_ = 0.0f;
   float vtsc_copilot_ego_advance_m_ = 0.0f;
   std::chrono::steady_clock::time_point vtsc_copilot_last_draw_time_{};
   bool vtsc_copilot_last_draw_time_valid_ = false;
-
-  // Smoothed lookahead distance for seamless zoom animation as speed changes.
-  float vtsc_copilot_smoothed_lookahead_m_ = 50.0f;
-
-  // Smoothed ego lateral offset — prevents the strip map from drifting off-screen
-  // when road geometry has lateral displacement at the ego position (intersections, GPS jitter).
-  float vtsc_copilot_smoothed_ego_y_left_ = 0.0f;
 
   struct VTSCCoPilotHudTuning {
     float curve_hold_new_dist_min_m = 30.0f;

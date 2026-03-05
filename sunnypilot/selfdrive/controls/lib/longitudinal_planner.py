@@ -152,6 +152,17 @@ class LongitudinalPlannerSP:
         for i, (x_fwd, y_left) in enumerate(pts):
           out_pts[i].xFwdM = float(x_fwd)
           out_pts[i].yLeftM = float(y_left)
+      branch_stubs = self.v_tsc.curve_preview_branch_stubs
+      if branch_stubs:
+        out_stubs = visionTurnSpeedControl.init('curvePreviewBranchStubs', len(branch_stubs))
+        for i, stub in enumerate(branch_stubs):
+          out_stubs[i].highlighted = bool(stub.get('highlighted', False))
+          stub_pts = stub.get('points', [])
+          if stub_pts:
+            out_stub_pts = out_stubs[i].init('points', len(stub_pts))
+            for j, (x_fwd, y_left) in enumerate(stub_pts):
+              out_stub_pts[j].xFwdM = float(x_fwd)
+              out_stub_pts[j].yLeftM = float(y_left)
     except Exception:
       # Backward compatibility if capnp/python bindings are older.
       pass

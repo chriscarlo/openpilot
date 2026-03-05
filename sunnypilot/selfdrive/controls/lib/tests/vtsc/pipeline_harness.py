@@ -92,8 +92,12 @@ def make_radar_state(*, lead_d_rel_m: Optional[float]) -> Any:
   return SimpleNamespace(leadOne=SimpleNamespace(status=True, dRel=float(lead_d_rel_m)))
 
 
-def make_car_state(*, gas_pressed: bool = False) -> Any:
-  return SimpleNamespace(gasPressed=bool(gas_pressed))
+def make_car_state(*, gas_pressed: bool = False, left_blinker: bool = False, right_blinker: bool = False) -> Any:
+  return SimpleNamespace(
+    gasPressed=bool(gas_pressed),
+    leftBlinker=bool(left_blinker),
+    rightBlinker=bool(right_blinker),
+  )
 
 
 def make_car_control(*, long_active: bool = True, pitch_rad: float = 0.0) -> Any:

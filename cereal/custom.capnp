@@ -161,10 +161,16 @@ struct LongitudinalPlanSP @0xf35cc4560bbf6ec2 {
     curveSeverity @8 :CurveSeverity;
     curvePreviewPoints @9 :List(StripMapPoint);  # <=32 points, ego-local (x forward, y left)
     curveMaxCurvature @10 :Float32;  # peak abs curvature within the previewed curve region (1/m)
+    curvePreviewBranchStubs @11 :List(StripMapBranchStub);  # <=2 branch stubs near the previewed path
 
     struct StripMapPoint {
       xFwdM @0 :Float32;
       yLeftM @1 :Float32;
+    }
+
+    struct StripMapBranchStub {
+      highlighted @0 :Bool;  # emphasized when a matching blinker indicates intended turn side
+      points @1 :List(StripMapPoint);  # ego-local (x forward, y left)
     }
 
     enum TurnDirection {

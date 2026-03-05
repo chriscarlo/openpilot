@@ -118,6 +118,221 @@ def _xy_from_latlon_m(lat: float, lon: float, lat0: float, lon0: float) -> tuple
   y_north = EARTH_R_M * dlat
   return float(x_east), float(y_north)
 
+
+def _bearing_deg_to_unit_en(bearing_deg: float) -> tuple[float, float] | None:
+  if not math.isfinite(bearing_deg):
+    return None
+  heading_rad = math.radians(bearing_deg)
+  fx = math.sin(heading_rad)
+  fy = math.cos(heading_rad)
+  norm = math.hypot(fx, fy)
+  if not (norm > 1e-6 and math.isfinite(norm)):
+    return None
+  return (float(fx / norm), float(fy / norm))
+
+
+def _normalize_en_vec(x: float, y: float) -> tuple[float, float] | None:
+  norm = math.hypot(float(x), float(y))
+  if not (norm > 1e-6 and math.isfinite(norm)):
+    return None
+  return (float(x / norm), float(y / norm))
+
+
+def _sm_get_optional(sm, key: str):
+  try:
+    valid = getattr(sm, 'valid', None)
+    if isinstance(valid, dict) and key in valid and not bool(valid.get(key, False)):
+      return None
+  except Exception:
+    pass
+
+  try:
+    return sm[key]
+  except Exception:
+    pass
+
+  data = getattr(sm, '_data', None)
+  if isinstance(data, dict):
+    return data.get(key, None)
+  return getattr(sm, key, None)
+
+
+def _extract_centerline_coords(seg) -> list[tuple[float, float, float]]:
+  centerline = getattr(seg, 'centerline', None)
+  if centerline is None:
+    return []
+
+  coords: list[tuple[float, float, float]] = []
+  needs_synth_s = False
+  for coord in centerline:
+    try:
+      lat = float(getattr(coord, 'latitude'))
+      lon = float(getattr(coord, 'longitude'))
+    except Exception:
+      continue
+    if not (math.isfinite(lat) and math.isfinite(lon)):
+      continue
+    try:
+      s = float(getattr(coord, 'distanceFromStart'))
+    except Exception:
+      s = float('nan')
+    if not math.isfinite(s) or (coords and s < coords[-1][2]):
+      needs_synth_s = True
+    coords.append((lat, lon, s))
+
+  if len(coords) < 2:
+    return []
+
+  if needs_synth_s:
+    rebuilt = [(coords[0][0], coords[0][1], 0.0)]
+    cumulative = 0.0
+    for prev, cur in zip(coords, coords[1:], strict=False):
+      cumulative += _haversine_m(float(prev[0]), float(prev[1]), float(cur[0]), float(cur[1]))
+      rebuilt.append((float(cur[0]), float(cur[1]), float(cumulative)))
+    coords = rebuilt
+
+  return coords
+
+
+def _project_latlon_to_centerline(lat: float, lon: float, coords: list[tuple[float, float, float]]) -> dict | None:
+  best: dict | None = None
+  for p0, p1 in zip(coords, coords[1:], strict=False):
+    ax, ay = _xy_from_latlon_m(float(p0[0]), float(p0[1]), float(lat), float(lon))
+    bx, by = _xy_from_latlon_m(float(p1[0]), float(p1[1]), float(lat), float(lon))
+    dx = bx - ax
+    dy = by - ay
+    seg_len2 = dx * dx + dy * dy
+    if not (seg_len2 > 1e-6 and math.isfinite(seg_len2)):
+      continue
+
+    t = max(0.0, min(1.0, -((ax * dx) + (ay * dy)) / seg_len2))
+    proj_x = ax + t * dx
+    proj_y = ay + t * dy
+    d = math.hypot(proj_x, proj_y)
+    tangent_en = _normalize_en_vec(dx, dy)
+    if tangent_en is None:
+      continue
+
+    s = float(p0[2]) + (float(p1[2]) - float(p0[2])) * t
+    cand = {
+      'd': float(d),
+      's': float(s),
+      'proj_lat': float(p0[0] + (float(p1[0]) - float(p0[0])) * t),
+      'proj_lon': float(p0[1] + (float(p1[1]) - float(p0[1])) * t),
+      'tangent_en': tangent_en,
+    }
+    if best is None or cand['d'] < best['d']:
+      best = cand
+  return best
+
+
+def _interp_xy(p0: tuple[float, float], p1: tuple[float, float], t: float) -> tuple[float, float]:
+  return (
+    float(p0[0] + (p1[0] - p0[0]) * t),
+    float(p0[1] + (p1[1] - p0[1]) * t),
+  )
+
+
+def _append_point_if_distinct(out: list[tuple[float, float]], pt: tuple[float, float], eps: float = 1e-3) -> None:
+  if not out:
+    out.append((float(pt[0]), float(pt[1])))
+    return
+  last = out[-1]
+  if math.hypot(float(pt[0]) - float(last[0]), float(pt[1]) - float(last[1])) > eps:
+    out.append((float(pt[0]), float(pt[1])))
+
+
+def _clip_polyline_x(points: list[tuple[float, float]], x_min: float, x_max: float) -> list[tuple[float, float]]:
+  if len(points) < 2 or not math.isfinite(x_min) or not math.isfinite(x_max) or x_max <= x_min:
+    return list(points)
+
+  clipped: list[tuple[float, float]] = []
+  prev = (float(points[0][0]), float(points[0][1]))
+  if x_min <= prev[0] <= x_max:
+    clipped.append(prev)
+
+  for curr_raw in points[1:]:
+    curr = (float(curr_raw[0]), float(curr_raw[1]))
+    x0 = prev[0]
+    x1 = curr[0]
+    dx = x1 - x0
+
+    if abs(dx) > 1e-6:
+      for bound in (x_min, x_max):
+        crosses = (x0 < bound <= x1) or (x1 <= bound < x0)
+        if crosses:
+          t = max(0.0, min(1.0, (bound - x0) / dx))
+          _append_point_if_distinct(clipped, _interp_xy(prev, curr, t))
+
+    if x_min <= x1 <= x_max:
+      _append_point_if_distinct(clipped, curr)
+
+    if (x0 <= x_max < x1) or (x1 < x_min <= x0):
+      break
+    prev = curr
+
+  return clipped
+
+
+def _densify_polyline(points: list[tuple[float, float]], max_step_m: float) -> list[tuple[float, float]]:
+  if len(points) < 2 or not (max_step_m > 0.1 and math.isfinite(max_step_m)):
+    return list(points)
+
+  dense = [(float(points[0][0]), float(points[0][1]))]
+  for p0_raw, p1_raw in zip(points, points[1:], strict=False):
+    p0 = (float(p0_raw[0]), float(p0_raw[1]))
+    p1 = (float(p1_raw[0]), float(p1_raw[1]))
+    seg_len = math.hypot(p1[0] - p0[0], p1[1] - p0[1])
+    steps = max(1, int(math.ceil(seg_len / max_step_m)))
+    for step_idx in range(1, steps + 1):
+      dense.append(_interp_xy(p0, p1, float(step_idx) / float(steps)))
+  return dense
+
+
+def _chaikin_smooth_polyline(points: list[tuple[float, float]], passes: int = 1) -> list[tuple[float, float]]:
+  smoothed = [(float(x), float(y)) for x, y in points]
+  for _ in range(max(0, int(passes))):
+    if len(smoothed) < 3:
+      break
+    nxt = [smoothed[0]]
+    for p0, p1 in zip(smoothed, smoothed[1:], strict=False):
+      q = (0.75 * p0[0] + 0.25 * p1[0], 0.75 * p0[1] + 0.25 * p1[1])
+      r = (0.25 * p0[0] + 0.75 * p1[0], 0.25 * p0[1] + 0.75 * p1[1])
+      nxt.append((float(q[0]), float(q[1])))
+      nxt.append((float(r[0]), float(r[1])))
+    nxt.append(smoothed[-1])
+    smoothed = nxt
+  return smoothed
+
+
+def _resample_polyline(points: list[tuple[float, float]], count: int) -> list[tuple[float, float]]:
+  if not points or count <= 0:
+    return []
+  if len(points) == 1 or count == 1:
+    return [(float(points[0][0]), float(points[0][1]))]
+
+  cumulative = [0.0]
+  for p0, p1 in zip(points, points[1:], strict=False):
+    cumulative.append(cumulative[-1] + math.hypot(float(p1[0]) - float(p0[0]), float(p1[1]) - float(p0[1])))
+
+  total_len = cumulative[-1]
+  if not (total_len > 1e-6 and math.isfinite(total_len)):
+    return [(float(points[0][0]), float(points[0][1]))]
+
+  out: list[tuple[float, float]] = []
+  seg_idx = 0
+  for i in range(count):
+    target = total_len * (float(i) / float(max(1, count - 1)))
+    while seg_idx + 1 < len(cumulative) and cumulative[seg_idx + 1] < target:
+      seg_idx += 1
+    if seg_idx + 1 >= len(points):
+      out.append((float(points[-1][0]), float(points[-1][1])))
+      continue
+    span = cumulative[seg_idx + 1] - cumulative[seg_idx]
+    t = 0.0 if span < 1e-6 else (target - cumulative[seg_idx]) / span
+    out.append(_interp_xy(points[seg_idx], points[seg_idx + 1], t))
+  return out
+
 # ===== ADAPTIVE DECELERATION SYSTEM =====
 # Physics-based deceleration management for vision update lag scenarios
 # Goal: Target comfort rates, but escalate to minimum decel/jerk needed to reach target speed at curve
@@ -820,6 +1035,7 @@ class VisionTurnController:
     self._curve_preview_direction = 0  # VisionTurnSpeedControl.TurnDirection (unknown=0)
     self._curve_preview_severity = 0   # VisionTurnSpeedControl.CurveSeverity (unknown=0)
     self._curve_preview_points: list[tuple[float, float]] = []
+    self._curve_preview_branch_stubs: list[dict] = []
     self._curve_preview_last_ts = 0.0
     self._curve_preview_last_cache_raw = None
     self._curve_preview_last_latlon: tuple[float, float] | None = None
@@ -1241,6 +1457,34 @@ class VisionTurnController:
   def curve_preview_points(self) -> list[tuple[float, float]]:
     pts = getattr(self, '_curve_preview_points', None)
     return list(pts) if isinstance(pts, list) else []
+
+  @property
+  def curve_preview_branch_stubs(self) -> list[dict]:
+    stubs = getattr(self, '_curve_preview_branch_stubs', None)
+    if not isinstance(stubs, list):
+      return []
+
+    out: list[dict] = []
+    for stub in stubs:
+      if not isinstance(stub, dict):
+        continue
+      pts_raw = stub.get('points', [])
+      pts: list[tuple[float, float]] = []
+      if isinstance(pts_raw, list):
+        for pt in pts_raw:
+          try:
+            x_fwd = float(pt[0])
+            y_left = float(pt[1])
+          except Exception:
+            continue
+          if math.isfinite(x_fwd) and math.isfinite(y_left):
+            pts.append((x_fwd, y_left))
+      if len(pts) >= 2:
+        out.append({
+          'highlighted': bool(stub.get('highlighted', False)),
+          'points': pts,
+        })
+    return out
 
   def getCurrentLateralAccel(self):
     """Return current lateral acceleration for HUD display."""
@@ -1808,7 +2052,7 @@ class VisionTurnController:
       return
     self.state = VisionTurnControllerState.disabled
 
-  def _update_solution(self):
+  def _update_solution(self, sm=None):
     """SIMPLIFIED: Always run physics calculations - let longitudinal planner decide usage."""
     dt = 0.05  # 20Hz
 
@@ -1849,7 +2093,7 @@ class VisionTurnController:
     try:
       if self._get_bool_param('MTSCLookaheadEnabled', False):
         self._map_tail_reason = "enabled_no_cap"
-        v_cap, s_start, coverage = self._map_tail_cap()
+        v_cap, s_start, coverage = self._map_tail_cap(sm)
         if v_cap is not None:
           v_cap_f = float(v_cap)
           s_start_f = float(s_start)
@@ -2844,7 +3088,7 @@ class VisionTurnController:
 
     return float(target_speed)
 
-  def _get_last_gps(self) -> tuple[float, float] | None:
+  def _get_last_gps_pose(self) -> tuple[float, float, float | None] | None:
     try:
       raw = self._mem_params.get('LastGPSPosition') or self._params.get('LastGPSPosition')
       if not raw:
@@ -2854,12 +3098,27 @@ class VisionTurnController:
       lon = float(obj.get('longitude', 0.0))
       if lat == 0.0 and lon == 0.0:
         return None
-      return (lat, lon)
+      bearing = obj.get('bearing', None)
+      if bearing is None:
+        bearing = obj.get('bearingDeg', None)
+      try:
+        bearing_f = float(bearing) if bearing is not None else None
+      except Exception:
+        bearing_f = None
+      if bearing_f is not None and not math.isfinite(bearing_f):
+        bearing_f = None
+      return (lat, lon, bearing_f)
     except Exception:
       return None
 
+  def _get_last_gps(self) -> tuple[float, float] | None:
+    pose = self._get_last_gps_pose()
+    if pose is None:
+      return None
+    return (float(pose[0]), float(pose[1]))
+
   def _load_map_curvatures(self) -> list[tuple[float, float, float]]:
-    """Return list of (lat, lon, curvature) from mapd Params, decimated to ~80 points."""
+    """Return list of (lat, lon, curvature) from mapd Params, decimated to ~160 points."""
     now = time.time()
     # refresh at most 5 Hz
     if (now - self._map_curv_last_ts) < 0.2 and self._map_curv_cache:
@@ -2884,10 +3143,11 @@ class VisionTurnController:
           pts.append((lat, lon, max(0.0, k)))
         except Exception:
           continue
-      # decimate to <= 80 samples to keep things cheap
+      # Preserve enough source geometry that the HUD preview can be smoothed without
+      # collapsing long arcs into a few coarse segments.
       n = len(pts)
-      if n > 80:
-        step = max(1, n // 80)
+      if n > 160:
+        step = max(1, n // 160)
         pts = pts[::step]
       self._map_curv_cache_raw = s
       self._map_curv_cache = pts
@@ -2906,8 +3166,10 @@ class VisionTurnController:
     self._curve_preview_direction = 0
     self._curve_preview_severity = 0
     self._curve_preview_points = []
+    self._curve_preview_branch_stubs = []
 
-  def _update_curve_preview_from_map(self, *, gps_lat: float, gps_lon: float, pts: list[tuple[float, float, float]], i0: int) -> None:
+  def _update_curve_preview_from_map(self, *, gps_lat: float, gps_lon: float, pts: list[tuple[float, float, float]], i0: int,
+                                     gps_bearing_deg: float | None = None) -> None:
     """Update HUD curve preview from mapd curvature samples.
 
     This is intentionally display-oriented: the HUD must not run its own curve math.
@@ -2936,9 +3198,13 @@ class VisionTurnController:
     # Default to invalid; set valid only when we can build a sane preview.
     self._clear_curve_preview()
 
-    # Build a forward window — 14s lookahead at current speed ensures the HUD
-    # has enough road geometry for its 12-second preview at highway speeds.
-    PREVIEW_S_MAX_M = max(200.0, min(float(self._v_ego) * 14.0, 600.0))
+    PREVIEW_TIME_HORIZON_S = 10.0
+    PREVIEW_MIN_M = 30.0
+    PREVIEW_MAX_M = 350.0
+    PREVIEW_SOURCE_MARGIN_M = 25.0
+    PREVIEW_TRAILING_M = 8.0
+    PREVIEW_RESAMPLE_STEP_M = 4.0
+    SMOOTHING_PASSES = 2
     MAX_POINTS = 48
     KAPPA_MIN = 1.0e-3  # 1/m, ~1000 m radius (detect gentler curves)
     RUN = 2             # consecutive samples to start/end a curve
@@ -2947,17 +3213,18 @@ class VisionTurnController:
       i0 = int(max(0, min(len(pts) - 1, i0)))
     except Exception:
       i0 = 0
+    base_idx = max(0, i0 - 1)
+    preview_s_max_m = max(PREVIEW_MIN_M, min(float(self._v_ego) * PREVIEW_TIME_HORIZON_S, PREVIEW_MAX_M))
+    source_s_max_m = preview_s_max_m + PREVIEW_SOURCE_MARGIN_M
 
-    lat_ref = float(pts[i0][0])
-    lon_ref = float(pts[i0][1])
-    w_lat: list[float] = [lat_ref]
-    w_lon: list[float] = [lon_ref]
-    w_k: list[float] = [max(0.0, float(pts[i0][2]))]
+    w_lat: list[float] = [float(pts[base_idx][0])]
+    w_lon: list[float] = [float(pts[base_idx][1])]
+    w_k: list[float] = [max(0.0, float(pts[base_idx][2]))]
     s_pts: list[float] = [0.0]
 
     s = 0.0
     # Hard cap on iterations to keep this bounded even if points are dense.
-    for j in range(i0, min(len(pts) - 1, i0 + 120)):
+    for j in range(base_idx, min(len(pts) - 1, base_idx + 160)):
       ds = _haversine_m(float(pts[j][0]), float(pts[j][1]), float(pts[j+1][0]), float(pts[j+1][1]))
       if not (ds > 0.05 and math.isfinite(ds)):
         continue
@@ -2966,27 +3233,33 @@ class VisionTurnController:
       w_lon.append(float(pts[j+1][1]))
       w_k.append(max(0.0, float(pts[j+1][2])))
       s_pts.append(float(s))
-      if s >= PREVIEW_S_MAX_M:
+      if s >= source_s_max_m:
         break
 
     if len(w_lat) < 4:
       return
 
-    # Convert to local EN (east, north) and find a stable initial tangent.
+    # Convert to local EN (east, north) around the live ego pose rather than the
+    # nearest matched map sample so the strip map aligns with the road ahead.
     en: list[tuple[float, float]] = []
     for la, lo in zip(w_lat, w_lon, strict=False):
-      en.append(_xy_from_latlon_m(float(la), float(lo), lat_ref, lon_ref))
+      en.append(_xy_from_latlon_m(float(la), float(lo), float(gps_lat), float(gps_lon)))
 
-    fdx = fdy = 0.0
-    for idx in range(1, len(en)):
-      dx, dy = float(en[idx][0]), float(en[idx][1])
-      if math.hypot(dx, dy) > 1.0:
-        fdx, fdy = dx, dy
-        break
-    norm = math.hypot(fdx, fdy)
-    if not (norm > 1e-3 and math.isfinite(norm)):
+    # Prefer live GPS bearing at speed; otherwise fall back to the local map tangent.
+    basis = None
+    if gps_bearing_deg is not None and float(self._v_ego) >= 2.0:
+      basis = _bearing_deg_to_unit_en(float(gps_bearing_deg))
+    if basis is None:
+      for idx in range(1, len(en)):
+        dx = float(en[idx][0] - en[idx - 1][0])
+        dy = float(en[idx][1] - en[idx - 1][1])
+        norm = math.hypot(dx, dy)
+        if norm > 1.0 and math.isfinite(norm):
+          basis = (float(dx / norm), float(dy / norm))
+          break
+    if basis is None:
       return
-    fx, fy = fdx / norm, fdy / norm
+    fx, fy = basis
     lx, ly = -fy, fx
 
     # Rotate into ego-local (x forward, y left).
@@ -2995,6 +3268,38 @@ class VisionTurnController:
       x_fwd = float(xe) * fx + float(yn) * fy
       y_left = float(xe) * lx + float(yn) * ly
       fwd_left.append((x_fwd, y_left))
+
+    # Estimate the along-track offset between the nearest map point and the ego pose.
+    # This keeps distance-to-curve metadata counting down smoothly when GPS lies between
+    # sparse map samples.
+    s_zero_m = 0.0
+    have_zero = False
+    if fwd_left and fwd_left[0][0] >= 0.0:
+      have_zero = True
+      s_zero_m = float(s_pts[0])
+    for idx in range(1, len(fwd_left)):
+      x0 = float(fwd_left[idx - 1][0])
+      x1 = float(fwd_left[idx][0])
+      if x0 <= 0.0 <= x1 and abs(x1 - x0) > 1e-6:
+        t = max(0.0, min(1.0, -x0 / (x1 - x0)))
+        s_zero_m = float(s_pts[idx - 1] + t * (s_pts[idx] - s_pts[idx - 1]))
+        have_zero = True
+        break
+    if not have_zero and max((pt[0] for pt in fwd_left), default=-1.0) < 0.0:
+      return
+
+    pts_out = _clip_polyline_x(fwd_left, -PREVIEW_TRAILING_M, preview_s_max_m)
+    if len(pts_out) < 2:
+      return
+    pts_out = _densify_polyline(pts_out, PREVIEW_RESAMPLE_STEP_M)
+    pts_out = _chaikin_smooth_polyline(pts_out, passes=SMOOTHING_PASSES)
+    pts_out = _clip_polyline_x(pts_out, 0.0, preview_s_max_m)
+    if len(pts_out) < 2:
+      return
+    target_points = max(18, min(MAX_POINTS, int(math.ceil(preview_s_max_m / PREVIEW_RESAMPLE_STEP_M)) + 1))
+    pts_out = _resample_polyline(pts_out, target_points)
+    if pts_out:
+      pts_out[0] = (0.0, float(pts_out[0][1]))
 
     # Find the next curve region by curvature threshold persistence.
     start_idx = None
@@ -3008,20 +3313,8 @@ class VisionTurnController:
         start_idx = idx - (RUN - 1)
         break
     if start_idx is None:
-      # No curve detected — emit the full road polyline with zero metadata so
-      # the HUD has points pre-cached for an instant transition when a curve
-      # does appear.  The HUD gates visibility on kappa_max, so this won't show.
-      pts_out = fwd_left
-      if len(pts_out) > MAX_POINTS:
-        step = float(len(pts_out) - 1) / float(MAX_POINTS - 1)
-        idxs = [int(round(i * step)) for i in range(MAX_POINTS)]
-        uniq, last = [], -1
-        for ii in idxs:
-          ii = max(0, min(len(pts_out) - 1, int(ii)))
-          if ii != last:
-            uniq.append(ii)
-            last = ii
-        pts_out = [pts_out[ii] for ii in uniq]
+      # No curve detected — still publish a dense road-ahead polyline so the HUD can
+      # render the same road frame continuously as the next bend comes into view.
       try:
         self._curve_preview_valid = True
         self._curve_preview_distance_m = 0.0
@@ -3090,27 +3383,10 @@ class VisionTurnController:
     except Exception:
       severity = 0
 
-    # Decimate points to <= MAX_POINTS, preserving endpoints.
-    pts_out = fwd_left
-    if len(pts_out) > MAX_POINTS:
-      step = float(len(pts_out) - 1) / float(MAX_POINTS - 1)
-      idxs = []
-      for i in range(MAX_POINTS):
-        idxs.append(int(round(i * step)))
-      # ensure monotonic unique indices
-      uniq = []
-      last = -1
-      for ii in idxs:
-        ii = max(0, min(len(pts_out) - 1, int(ii)))
-        if ii != last:
-          uniq.append(ii)
-          last = ii
-      pts_out = [pts_out[ii] for ii in uniq]
-
     # Publish preview fields (used by HUD only).
     try:
       self._curve_preview_valid = True
-      self._curve_preview_distance_m = float(s_pts[int(start_idx)])
+      self._curve_preview_distance_m = max(0.0, float(s_pts[int(start_idx)]) - float(s_zero_m))
       self._curve_preview_time_to_s = float(self._curve_preview_distance_m) / max(0.1, float(self._v_ego))
       self._curve_preview_kappa_max = float(kappa_max)
       self._curve_preview_direction = int(direction)
@@ -3122,19 +3398,210 @@ class VisionTurnController:
     except Exception:
       self._clear_curve_preview()
 
-  def _map_tail_cap(self) -> tuple[float | None, float, float]:
+  def _update_curve_preview_branch_stubs(self, sm, *, gps_lat: float, gps_lon: float,
+                                         gps_bearing_deg: float | None = None) -> None:
+    self._curve_preview_branch_stubs = []
+    if not bool(getattr(self, '_curve_preview_valid', False)):
+      return
+
+    base_pts = getattr(self, '_curve_preview_points', None)
+    if not isinstance(base_pts, list) or len(base_pts) < 2:
+      return
+
+    map_data = _sm_get_optional(sm, 'liveMapDataSP')
+    if map_data is None or not bool(getattr(map_data, 'roadGeometryValid', False)):
+      return
+
+    current_seg = getattr(map_data, 'currentRoadSegment', None)
+    current_coords = _extract_centerline_coords(current_seg)
+    if len(current_coords) < 2:
+      return
+
+    ego_proj = _project_latlon_to_centerline(float(gps_lat), float(gps_lon), current_coords)
+    if ego_proj is None:
+      return
+
+    basis = None
+    if gps_bearing_deg is not None and float(self._v_ego) >= 1.0:
+      basis = _bearing_deg_to_unit_en(float(gps_bearing_deg))
+    if basis is None:
+      basis = ego_proj.get('tangent_en', None)
+    if basis is None:
+      return
+    fx, fy = basis
+    lx, ly = -fy, fx
+
+    lookahead_m = max(30.0, min(float(self._v_ego) * 10.0, 350.0))
+    conn_max_dist_m = 14.0
+    conn_back_margin_m = 4.0
+    conn_ahead_margin_m = 24.0
+    stub_length_m = 34.0
+    min_branch_angle_deg = 28.0
+    max_branch_angle_deg = 160.0
+
+    car_state = _sm_get_optional(sm, 'carState')
+    left_blinker = bool(getattr(car_state, 'leftBlinker', False))
+    right_blinker = bool(getattr(car_state, 'rightBlinker', False))
+    desired_side = 0
+    if left_blinker != right_blinker:
+      desired_side = 1 if left_blinker else -1
+
+    current_way_id = int(getattr(current_seg, 'wayId', 0) or 0)
+    current_level = int(getattr(current_seg, 'levelSeparation', 0) or 0)
+    candidates: list[dict] = []
+
+    nearby_segments = getattr(map_data, 'nearbyRoadSegments', [])
+    for seg in nearby_segments:
+      try:
+        way_id = int(getattr(seg, 'wayId', 0) or 0)
+      except Exception:
+        way_id = 0
+      if way_id == current_way_id:
+        continue
+
+      try:
+        level = int(getattr(seg, 'levelSeparation', 0) or 0)
+      except Exception:
+        level = current_level
+      if level != current_level:
+        continue
+
+      seg_coords = _extract_centerline_coords(seg)
+      if len(seg_coords) < 2:
+        continue
+
+      best_endpoint: dict | None = None
+      for endpoint_idx in (0, len(seg_coords) - 1):
+        end_lat = float(seg_coords[endpoint_idx][0])
+        end_lon = float(seg_coords[endpoint_idx][1])
+        conn = _project_latlon_to_centerline(end_lat, end_lon, current_coords)
+        if conn is None or float(conn['d']) > conn_max_dist_m:
+          continue
+
+        s_ahead = float(conn['s']) - float(ego_proj['s'])
+        if s_ahead < -conn_back_margin_m or s_ahead > lookahead_m + conn_ahead_margin_m:
+          continue
+
+        away_idx = 1 if endpoint_idx == 0 else len(seg_coords) - 2
+        end_x, end_y = _xy_from_latlon_m(end_lat, end_lon, float(gps_lat), float(gps_lon))
+        away_x, away_y = _xy_from_latlon_m(float(seg_coords[away_idx][0]), float(seg_coords[away_idx][1]),
+                                           float(gps_lat), float(gps_lon))
+        branch_tangent = _normalize_en_vec(away_x - end_x, away_y - end_y)
+        if branch_tangent is None:
+          continue
+
+        main_tangent = conn.get('tangent_en', None)
+        if main_tangent is None:
+          continue
+        dot = float(main_tangent[0]) * float(branch_tangent[0]) + float(main_tangent[1]) * float(branch_tangent[1])
+        cross = float(main_tangent[0]) * float(branch_tangent[1]) - float(main_tangent[1]) * float(branch_tangent[0])
+        angle_deg = abs(math.degrees(math.atan2(cross, dot)))
+        if angle_deg < min_branch_angle_deg or angle_deg > max_branch_angle_deg:
+          continue
+
+        side = 1 if cross > 0.0 else -1
+        endpoint_info = {
+          'endpoint_idx': int(endpoint_idx),
+          's_ahead': float(s_ahead),
+          'angle_deg': float(angle_deg),
+          'side': int(side),
+          'conn': conn,
+        }
+        if best_endpoint is None:
+          best_endpoint = endpoint_info
+          continue
+
+        prev_score = (abs(float(best_endpoint['s_ahead'])), -float(best_endpoint['angle_deg']))
+        curr_score = (abs(float(endpoint_info['s_ahead'])), -float(endpoint_info['angle_deg']))
+        if curr_score < prev_score:
+          best_endpoint = endpoint_info
+
+      if best_endpoint is None:
+        continue
+
+      endpoint_idx = int(best_endpoint['endpoint_idx'])
+      if endpoint_idx == 0:
+        branch_slice = seg_coords
+      else:
+        branch_slice = list(reversed(seg_coords))
+
+      branch_latlon: list[tuple[float, float]] = [
+        (float(best_endpoint['conn']['proj_lat']), float(best_endpoint['conn']['proj_lon'])),
+      ]
+      branch_accum_m = 0.0
+      for idx, pt in enumerate(branch_slice):
+        lat = float(pt[0])
+        lon = float(pt[1])
+        if idx > 0:
+          branch_accum_m += _haversine_m(float(branch_slice[idx - 1][0]), float(branch_slice[idx - 1][1]), lat, lon)
+        branch_latlon.append((lat, lon))
+        if branch_accum_m >= stub_length_m:
+          break
+
+      stub_pts: list[tuple[float, float]] = []
+      for lat, lon in branch_latlon:
+        x_east, y_north = _xy_from_latlon_m(float(lat), float(lon), float(gps_lat), float(gps_lon))
+        x_fwd = x_east * fx + y_north * fy
+        y_left = x_east * lx + y_north * ly
+        stub_pts.append((float(x_fwd), float(y_left)))
+
+      stub_pts = _densify_polyline(stub_pts, 5.0)
+      stub_pts = _chaikin_smooth_polyline(stub_pts, passes=1)
+      stub_pts = _clip_polyline_x(stub_pts, -2.0, lookahead_m + 8.0)
+      if len(stub_pts) < 2:
+        continue
+
+      if max((float(pt[0]) for pt in stub_pts), default=-1.0) < 0.0:
+        continue
+
+      resample_n = max(4, min(10, len(stub_pts)))
+      stub_pts = _resample_polyline(stub_pts, resample_n)
+
+      candidates.append({
+        'way_id': int(way_id),
+        'side': int(best_endpoint['side']),
+        's_ahead': float(best_endpoint['s_ahead']),
+        'angle_deg': float(best_endpoint['angle_deg']),
+        'highlighted': False,
+        'points': [(float(x), float(y)) for x, y in stub_pts],
+      })
+
+    if not candidates:
+      return
+
+    selected: list[dict] = []
+    if desired_side != 0:
+      same_side = [cand for cand in candidates if int(cand['side']) == desired_side]
+      if same_side:
+        same_side.sort(key=lambda cand: (abs(float(cand['s_ahead'])), -float(cand['angle_deg'])))
+        chosen = dict(same_side[0])
+        chosen['highlighted'] = True
+        selected = [chosen]
+
+    if not selected:
+      per_side: dict[int, dict] = {}
+      for cand in candidates:
+        side = int(cand['side'])
+        prev = per_side.get(side)
+        if prev is None or (abs(float(cand['s_ahead'])), -float(cand['angle_deg'])) < (abs(float(prev['s_ahead'])), -float(prev['angle_deg'])):
+          per_side[side] = cand
+      selected = [dict(cand) for _side, cand in sorted(per_side.items(), key=lambda item: item[1]['s_ahead'])]
+
+    self._curve_preview_branch_stubs = selected[:2]
+
+  def _map_tail_cap(self, sm=None) -> tuple[float | None, float, float]:
     """
     Compute a comfort-reachable cap on current speed from map curvature tail.
 
     Returns (v_cap_mps|None, start_distance_m, coverage_frac)
     """
     self._map_tail_compute_reason = "unknown"
-    gps = self._get_last_gps()
-    if gps is None:
+    gps_pose = self._get_last_gps_pose()
+    if gps_pose is None:
       self._map_tail_compute_reason = "no_gps"
       self._clear_curve_preview()
       return (None, 0.0, 0.0)
-    lat0, lon0 = gps
+    lat0, lon0, bearing_deg = gps_pose
     pts = self._load_map_curvatures()
     if len(pts) < 3:
       self._map_tail_compute_reason = "no_map_curvatures"
@@ -3163,10 +3630,27 @@ class VisionTurnController:
 
     # Update HUD preview from the same map lookahead inputs VTSC already uses.
     try:
-      self._update_curve_preview_from_map(gps_lat=float(lat0), gps_lon=float(lon0), pts=pts, i0=i0)
+      self._update_curve_preview_from_map(
+        gps_lat=float(lat0),
+        gps_lon=float(lon0),
+        gps_bearing_deg=None if bearing_deg is None else float(bearing_deg),
+        pts=pts,
+        i0=i0,
+      )
     except Exception:
       # Never let preview failures affect longitudinal behavior.
       self._clear_curve_preview()
+    else:
+      try:
+        if sm is not None:
+          self._update_curve_preview_branch_stubs(
+            sm,
+            gps_lat=float(lat0),
+            gps_lon=float(lon0),
+            gps_bearing_deg=None if bearing_deg is None else float(bearing_deg),
+          )
+      except Exception:
+        self._curve_preview_branch_stubs = []
 
     # Limit horizon to ~800 m
     S_MAX = 800.0
@@ -3269,7 +3753,7 @@ class VisionTurnController:
     self._update_params()
     self._update_calculations(sm)
     self._state_transition()
-    self._update_solution()
+    self._update_solution(sm)
     # Emit compact debug snapshot if enabled and rate allows
     try:
       now_s = float(getattr(time, 'monotonic', time.time)())

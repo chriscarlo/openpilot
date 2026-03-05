@@ -279,6 +279,7 @@ void HudRendererSP::updateState(const UIState &s) {
   if (!vtsc_copilot_hud_enabled_ || !s.sm) {
     vtsc_copilot_alpha_ = 0.0f;
     vtsc_copilot_curve_points_m_.clear();
+    vtsc_copilot_branch_stubs_.clear();
     return;
   }
 
@@ -297,10 +298,25 @@ void HudRendererSP::updateState(const UIState &s) {
 
       if (vtsc.getCurvePreviewValid()) {
         std::vector<QPointF> new_pts;
+        std::vector<VTSCCoPilotBranchStubState> new_stubs;
         auto pts = vtsc.getCurvePreviewPoints();
         new_pts.reserve(static_cast<size_t>(pts.size()));
         for (const auto &pt : pts) {
           new_pts.emplace_back(pt.getXFwdM(), pt.getYLeftM());
+        }
+        auto stubs = vtsc.getCurvePreviewBranchStubs();
+        new_stubs.reserve(static_cast<size_t>(stubs.size()));
+        for (const auto &stub : stubs) {
+          VTSCCoPilotBranchStubState state;
+          state.highlighted = stub.getHighlighted();
+          auto stub_pts = stub.getPoints();
+          state.points_m.reserve(static_cast<size_t>(stub_pts.size()));
+          for (const auto &pt : stub_pts) {
+            state.points_m.emplace_back(pt.getXFwdM(), pt.getYLeftM());
+          }
+          if (state.points_m.size() >= 2) {
+            new_stubs.push_back(std::move(state));
+          }
         }
         if (new_pts.size() >= 3) {
           // Detect whether geometry actually changed.  The producer throttles to
@@ -320,11 +336,15 @@ void HudRendererSP::updateState(const UIState &s) {
             }
           }
           vtsc_copilot_curve_points_m_ = std::move(new_pts);
+          vtsc_copilot_branch_stubs_ = std::move(new_stubs);
           if (geom_changed) {
             vtsc_copilot_ego_advance_m_ = 0.0f;
             vtsc_copilot_last_draw_time_valid_ = false;
           }
         }
+      } else {
+        vtsc_copilot_curve_points_m_.clear();
+        vtsc_copilot_branch_stubs_.clear();
       }
     }
   } catch (const std::exception&) {}
@@ -768,6 +788,40 @@ QString HudRendererSP::formatDistance(float distance_m) const {
   }
 }
 
+void HudRendererSP::drawVTSCCoPilotNavArrow(QPainter &p, const QPointF &center, float size_px) const {
+  p.save();
+  p.setRenderHint(QPainter::Antialiasing, true);
+  p.translate(center);
+
+  const float s = std::max(14.0f, size_px);
+  QPainterPath arrow;
+  arrow.moveTo(0.0f, -1.15f * s);
+  arrow.lineTo(0.58f * s, 0.34f * s);
+  arrow.lineTo(0.18f * s, 0.18f * s);
+  arrow.lineTo(0.0f, 1.08f * s);
+  arrow.lineTo(-0.18f * s, 0.18f * s);
+  arrow.lineTo(-0.58f * s, 0.34f * s);
+  arrow.closeSubpath();
+
+  QPainterPath shadow = arrow.translated(0.0f, 2.0f);
+  p.setPen(Qt::NoPen);
+  p.setBrush(QColor(0, 0, 0, 130));
+  p.drawPath(shadow);
+
+  QLinearGradient arrow_grad(QPointF(0.0f, -1.15f * s), QPointF(0.0f, 1.08f * s));
+  arrow_grad.setColorAt(0.00, QColor(224, 245, 255, 250));
+  arrow_grad.setColorAt(0.45, QColor(116, 198, 255, 245));
+  arrow_grad.setColorAt(1.00, QColor(40, 126, 255, 238));
+  p.setBrush(arrow_grad);
+  p.setPen(QPen(QColor(255, 255, 255, 215), std::max(1.5f, 0.12f * s), Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+  p.drawPath(arrow);
+
+  p.setPen(QPen(QColor(255, 255, 255, 125), std::max(1.0f, 0.06f * s), Qt::SolidLine, Qt::RoundCap));
+  p.drawLine(QPointF(0.0f, -0.55f * s), QPointF(0.0f, 0.58f * s));
+
+  p.restore();
+}
+
 void HudRendererSP::drawCurveDirectionIcon(QPainter &p, const QRect &icon_rect, int direction) const {
   p.save();
   p.setRenderHint(QPainter::Antialiasing, true);
@@ -871,21 +925,9 @@ void HudRendererSP::drawVTSCCoPilotCurve(QPainter &p, const QRect &surface_rect)
   }
   const float ego_adv = vtsc_copilot_ego_advance_m_;
 
-  // --- Speed-dependent lookahead ---
-  constexpr float kMinSpeedMps = 8.94f;    // 20 mph
-  constexpr float kMaxSpeedMps = 31.29f;   // 70 mph
-  constexpr float kMinLookaheadS = 5.0f;
-  constexpr float kMaxLookaheadS = 12.0f;
-  constexpr float kMinLookaheadM = 20.0f;
-
-  const float v_ego = vtsc_copilot_v_ego_mps_;
-  const float t_speed = std::clamp((v_ego - kMinSpeedMps) / (kMaxSpeedMps - kMinSpeedMps), 0.0f, 1.0f);
-  const float lookahead_s = kMinLookaheadS + t_speed * (kMaxLookaheadS - kMinLookaheadS);
-  const float target_lookahead_m = std::max(kMinLookaheadM, lookahead_s * v_ego);
-
-  constexpr float kLookaheadSmooth = 0.06f;
-  vtsc_copilot_smoothed_lookahead_m_ += kLookaheadSmooth * (target_lookahead_m - vtsc_copilot_smoothed_lookahead_m_);
-  const float lookahead_m = vtsc_copilot_smoothed_lookahead_m_;
+  // Fixed 10-second lookahead. Distance still grows with speed, but the strip map
+  // no longer adds a separate zoom model on top of that.
+  const float lookahead_m = std::clamp(std::max(0.0f, vtsc_copilot_v_ego_mps_) * 10.0f, 30.0f, 350.0f);
 
   // --- Build ego-shifted, lookahead-clipped point set ---
   std::vector<QPointF> pts_m;
@@ -933,37 +975,32 @@ void HudRendererSP::drawVTSCCoPilotCurve(QPainter &p, const QRect &surface_rect)
     return;
   }
 
-  // --- Auto-centering: smooth ego lateral offset to prevent drift at intersections ---
-  const float ego_y_raw = static_cast<float>(pts_m.front().y());
-  constexpr float kEgoLatSmooth = 0.12f;
-  vtsc_copilot_smoothed_ego_y_left_ += kEgoLatSmooth * (ego_y_raw - vtsc_copilot_smoothed_ego_y_left_);
-  const float center_y = vtsc_copilot_smoothed_ego_y_left_;
+  // Anchor the road under the navigation arrow instead of re-centering the whole
+  // strip map each update. This keeps the preview stable while preserving the road's
+  // actual lateral shape ahead.
+  const float road_anchor_y = static_cast<float>(pts_m.front().y());
 
-  // --- Scaling with auto-fit to prevent overflow ---
-  // Road half-width in meters (must match the value used for edge computation below).
-  constexpr float kRoadHalfWidthM = 3.0f;
+  // Fixed-projection strip map: forward scale is driven only by the 10-second horizon.
+  constexpr float kRoadHalfWidthM = 3.2f;
+  constexpr float kLaneMarkWidthM = 0.18f;
 
-  float x_max = 0.0f;
   float y_abs = 0.0f;
   for (const auto &pt : pts_m) {
-    x_max = std::max(x_max, static_cast<float>(pt.x()));
-    y_abs = std::max(y_abs, std::abs(static_cast<float>(pt.y()) - center_y));
+    y_abs = std::max(y_abs, std::abs(static_cast<float>(pt.y()) - road_anchor_y));
   }
-  x_max = std::max(10.0f, x_max);
-  // Include road edge width in the lateral range so edges don't overflow.
-  y_abs = std::max(1.0f, y_abs + kRoadHalfWidthM);
+  y_abs = std::max(1.0f, y_abs + kRoadHalfWidthM + kLaneMarkWidthM);
 
-  const float fwd_scale = static_cast<float>(curve_area.height()) / x_max;
-  // Lateral scale: proportional to forward for zoom, but clamped to prevent overflow.
-  const float lat_scale_zoom = fwd_scale * 3.0f;
-  const float lat_scale_fit = (0.45f * static_cast<float>(curve_area.width())) / y_abs;
-  const float lat_scale = std::min(lat_scale_zoom, lat_scale_fit);
+  const float fwd_scale = static_cast<float>(curve_area.height()) / std::max(10.0f, lookahead_m);
+  // Keep lateral projection constant relative to the forward horizon. Only clamp when
+  // a very wide bend would otherwise overflow the box.
+  const float lat_scale_nominal = fwd_scale * 2.35f;
+  const float lat_scale_fit = (0.47f * static_cast<float>(curve_area.width())) / y_abs;
+  const float lat_scale = std::min(lat_scale_nominal, lat_scale_fit);
 
   auto toPx = [&](float x_fwd_m, float y_left_m) -> QPointF {
-    const float t = std::clamp(x_fwd_m / x_max, 0.0f, 1.0f);
-    const float persp = std::clamp(1.0f - 0.35f * t, 0.65f, 1.0f);
-    // Center on smoothed ego lateral position — prevents drift at intersections.
-    const float x_px = static_cast<float>(curve_area.center().x()) - (y_left_m - center_y) * lat_scale * persp;
+    const float t = std::clamp(x_fwd_m / std::max(10.0f, lookahead_m), 0.0f, 1.0f);
+    const float persp = std::clamp(1.0f - 0.30f * t, 0.68f, 1.0f);
+    const float x_px = static_cast<float>(curve_area.center().x()) - (y_left_m - road_anchor_y) * lat_scale * persp;
     const float y_px = static_cast<float>(curve_area.bottom()) - x_fwd_m * fwd_scale;
     return QPointF(x_px, y_px);
   };
@@ -976,6 +1013,136 @@ void HudRendererSP::drawVTSCCoPilotCurve(QPainter &p, const QRect &surface_rect)
   }
 
   p.setClipRect(box);
+
+  auto buildShiftedPolyline = [&](const std::vector<QPointF> &src_pts_m) {
+    std::vector<QPointF> out;
+    if (src_pts_m.size() < 2) return out;
+
+    QPointF prev_raw;
+    bool have_prev = false;
+    for (const auto &pt : src_pts_m) {
+      const float xf_raw = static_cast<float>(pt.x());
+      const float yl = static_cast<float>(pt.y());
+      if (!std::isfinite(xf_raw) || !std::isfinite(yl)) {
+        have_prev = false;
+        continue;
+      }
+
+      const float xf = xf_raw - ego_adv;
+      if (xf < 0.0f) {
+        prev_raw = QPointF(xf_raw, yl);
+        have_prev = true;
+        continue;
+      }
+      if (xf > lookahead_m) {
+        if (!out.empty()) {
+          const auto &last = out.back();
+          const float x_last = static_cast<float>(last.x());
+          const float y_last = static_cast<float>(last.y());
+          const float denom = xf - x_last;
+          if (std::abs(denom) > 1e-6f) {
+            const float frac = (lookahead_m - x_last) / denom;
+            out.emplace_back(lookahead_m, y_last + frac * (yl - y_last));
+          }
+        }
+        break;
+      }
+      if (have_prev && out.empty()) {
+        const float x_prev = static_cast<float>(prev_raw.x()) - ego_adv;
+        const float y_prev = static_cast<float>(prev_raw.y());
+        const float denom = xf - x_prev;
+        if (std::abs(denom) > 1e-6f) {
+          const float frac = -x_prev / denom;
+          out.emplace_back(0.0f, y_prev + frac * (yl - y_prev));
+        }
+      }
+      have_prev = false;
+      out.emplace_back(xf, yl);
+    }
+    return out;
+  };
+
+  auto drawStubRibbon = [&](const std::vector<QPointF> &stub_src_pts_m, bool highlighted) {
+    const std::vector<QPointF> stub_pts_m = buildShiftedPolyline(stub_src_pts_m);
+    if (stub_pts_m.size() < 2) return;
+
+    std::vector<QPointF> stub_center_px, left_edge_px, right_edge_px;
+    stub_center_px.reserve(stub_pts_m.size());
+    left_edge_px.reserve(stub_pts_m.size());
+    right_edge_px.reserve(stub_pts_m.size());
+    const float stub_hw_m = kRoadHalfWidthM * (highlighted ? 0.80f : 0.66f);
+
+    for (size_t i = 0; i < stub_pts_m.size(); ++i) {
+      QPointF tangent;
+      if (i == 0) {
+        tangent = stub_pts_m[1] - stub_pts_m[0];
+      } else if (i == stub_pts_m.size() - 1) {
+        tangent = stub_pts_m[i] - stub_pts_m[i - 1];
+      } else {
+        tangent = stub_pts_m[i + 1] - stub_pts_m[i - 1];
+      }
+      float len = std::sqrt(tangent.x() * tangent.x() + tangent.y() * tangent.y());
+      if (len < 0.01f) len = 0.01f;
+
+      const float lnx = -tangent.y() / len;
+      const float lny =  tangent.x() / len;
+      const float xf = static_cast<float>(stub_pts_m[i].x());
+      const float yl = static_cast<float>(stub_pts_m[i].y());
+      stub_center_px.push_back(toPx(xf, yl));
+      left_edge_px.push_back(toPx(xf + lnx * stub_hw_m, yl + lny * stub_hw_m));
+      right_edge_px.push_back(toPx(xf - lnx * stub_hw_m, yl - lny * stub_hw_m));
+    }
+
+    QPainterPath stub_surface;
+    stub_surface.moveTo(left_edge_px.front());
+    for (size_t i = 1; i < left_edge_px.size(); ++i) stub_surface.lineTo(left_edge_px[i]);
+    for (int i = static_cast<int>(right_edge_px.size()) - 1; i >= 0; --i) stub_surface.lineTo(right_edge_px[i]);
+    stub_surface.closeSubpath();
+
+    QLinearGradient stub_grad(stub_center_px.front(), stub_center_px.back());
+    if (highlighted) {
+      stub_grad.setColorAt(0.00, QColor(214, 164, 72, 0));
+      stub_grad.setColorAt(0.14, QColor(214, 164, 72, 110));
+      stub_grad.setColorAt(0.55, QColor(194, 150, 68, 116));
+      stub_grad.setColorAt(0.86, QColor(188, 145, 62, 44));
+      stub_grad.setColorAt(1.00, QColor(180, 140, 60, 0));
+    } else {
+      stub_grad.setColorAt(0.00, QColor(76, 82, 94, 0));
+      stub_grad.setColorAt(0.14, QColor(76, 82, 94, 78));
+      stub_grad.setColorAt(0.55, QColor(72, 78, 90, 76));
+      stub_grad.setColorAt(0.86, QColor(68, 74, 86, 24));
+      stub_grad.setColorAt(1.00, QColor(66, 72, 84, 0));
+    }
+    p.setBrush(stub_grad);
+    QLinearGradient stub_edge_grad(stub_center_px.front(), stub_center_px.back());
+    if (highlighted) {
+      stub_edge_grad.setColorAt(0.00, QColor(255, 226, 184, 0));
+      stub_edge_grad.setColorAt(0.18, QColor(255, 226, 184, 148));
+      stub_edge_grad.setColorAt(0.80, QColor(255, 226, 184, 102));
+      stub_edge_grad.setColorAt(1.00, QColor(255, 226, 184, 0));
+      p.setPen(QPen(QBrush(stub_edge_grad), 1.55 * kScale, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    } else {
+      stub_edge_grad.setColorAt(0.00, QColor(210, 216, 228, 0));
+      stub_edge_grad.setColorAt(0.18, QColor(210, 216, 228, 56));
+      stub_edge_grad.setColorAt(0.80, QColor(210, 216, 228, 36));
+      stub_edge_grad.setColorAt(1.00, QColor(210, 216, 228, 0));
+      p.setPen(QPen(QBrush(stub_edge_grad), 1.15 * kScale, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    }
+    p.drawPath(stub_surface);
+
+    QPainterPath left_line, right_line;
+    left_line.moveTo(left_edge_px.front());
+    right_line.moveTo(right_edge_px.front());
+    for (size_t i = 1; i < left_edge_px.size(); ++i) left_line.lineTo(left_edge_px[i]);
+    for (size_t i = 1; i < right_edge_px.size(); ++i) right_line.lineTo(right_edge_px[i]);
+    p.setBrush(Qt::NoBrush);
+    p.drawPath(left_line);
+    p.drawPath(right_line);
+  };
+
+  for (const auto &stub : vtsc_copilot_branch_stubs_) {
+    drawStubRibbon(stub.points_m, stub.highlighted);
+  }
 
   // --- Road surface polygon: perspective-varying width, gradient fill ---
   // Render a filled road surface instead of a centerline-only stroke.
@@ -1030,13 +1197,13 @@ void HudRendererSP::drawVTSCCoPilotCurve(QPainter &p, const QRect &surface_rect)
     }
 
     // Fill with vertical gradient — opaque at ego, fading to transparent at horizon.
-    QLinearGradient road_grad(
-      QPointF(curve_area.center().x(), curve_area.bottom()),
-      QPointF(curve_area.center().x(), curve_area.top())
-    );
-    road_grad.setColorAt(0.00, QColor(50, 55, 65, 140));
-    road_grad.setColorAt(0.70, QColor(50, 55, 65, 70));
-    road_grad.setColorAt(1.00, QColor(50, 55, 65, 0));
+    QLinearGradient road_grad(px_pts.front(), px_pts.back());
+    road_grad.setColorAt(0.00, QColor(56, 60, 70, 0));
+    road_grad.setColorAt(0.08, QColor(56, 60, 70, 98));
+    road_grad.setColorAt(0.24, QColor(54, 58, 68, 172));
+    road_grad.setColorAt(0.62, QColor(50, 55, 65, 128));
+    road_grad.setColorAt(0.88, QColor(46, 51, 60, 34));
+    road_grad.setColorAt(1.00, QColor(44, 49, 58, 0));
     p.setPen(Qt::NoPen);
     p.setBrush(road_grad);
     p.drawPath(road_surface);
@@ -1052,35 +1219,47 @@ void HudRendererSP::drawVTSCCoPilotCurve(QPainter &p, const QRect &surface_rect)
       for (size_t i = 1; i < right_edge_px.size(); i++) right_line.lineTo(right_edge_px[i]);
     }
 
+    QPainterPath center_line;
+    if (!px_pts.empty()) {
+      center_line.moveTo(px_pts.front());
+      for (size_t i = 1; i < px_pts.size(); i++) center_line.lineTo(px_pts[i]);
+    }
+
     // Edge glow.
-    p.setPen(QPen(QColor(255, 255, 255, 12), 5.0 * kScale, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    QLinearGradient edge_glow_grad(px_pts.front(), px_pts.back());
+    edge_glow_grad.setColorAt(0.00, QColor(255, 255, 255, 0));
+    edge_glow_grad.setColorAt(0.12, QColor(255, 255, 255, 12));
+    edge_glow_grad.setColorAt(0.82, QColor(255, 255, 255, 10));
+    edge_glow_grad.setColorAt(1.00, QColor(255, 255, 255, 0));
+    p.setPen(QPen(QBrush(edge_glow_grad), 5.0 * kScale, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
     p.setBrush(Qt::NoBrush);
     p.drawPath(left_line);
     p.drawPath(right_line);
 
     // Edge lines proper.
-    p.setPen(QPen(QColor(255, 255, 255, 70), 1.5 * kScale, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    QLinearGradient edge_line_grad(px_pts.front(), px_pts.back());
+    edge_line_grad.setColorAt(0.00, QColor(255, 255, 255, 0));
+    edge_line_grad.setColorAt(0.16, QColor(255, 255, 255, 68));
+    edge_line_grad.setColorAt(0.82, QColor(255, 255, 255, 54));
+    edge_line_grad.setColorAt(1.00, QColor(255, 255, 255, 0));
+    p.setPen(QPen(QBrush(edge_line_grad), 1.5 * kScale, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
     p.drawPath(left_line);
     p.drawPath(right_line);
+
+    QLinearGradient lane_grad(px_pts.front(), px_pts.back());
+    lane_grad.setColorAt(0.00, QColor(255, 255, 255, 0));
+    lane_grad.setColorAt(0.18, QColor(255, 255, 255, 74));
+    lane_grad.setColorAt(0.80, QColor(255, 255, 255, 62));
+    lane_grad.setColorAt(1.00, QColor(255, 255, 255, 0));
+    QPen lane_pen(QBrush(lane_grad), std::max(1.0, 1.15 * kScale), Qt::DashLine, Qt::RoundCap, Qt::RoundJoin);
+    lane_pen.setDashPattern({6.0 * kScale, 8.0 * kScale});
+    p.setPen(lane_pen);
+    p.drawPath(center_line);
   }
 
-  // --- Ego dot: always at the bottom of the strip map ---
+  // --- Classic navigation arrow at the road origin ---
   if (!px_pts.empty()) {
-    const QPointF dot_center = px_pts.front();
-    const int kRoadMainWidth = std::max(1, static_cast<int>(vtsc_copilot_tuning_.road_main_width_px_at_scale1));
-    const qreal dot_r = static_cast<qreal>(kRoadMainWidth * kScale) * 0.5;
-
-    p.setPen(Qt::NoPen);
-    p.setBrush(QColor(255, 59, 48, 50));
-    p.drawEllipse(dot_center, dot_r + 3.0 * kScale, dot_r + 3.0 * kScale);
-
-    p.setBrush(Qt::NoBrush);
-    p.setPen(QPen(QColor(0, 0, 0, 200), 2.0 * kScale, Qt::SolidLine));
-    p.drawEllipse(dot_center, dot_r, dot_r);
-
-    p.setPen(Qt::NoPen);
-    p.setBrush(QColor(255, 59, 48, 240));
-    p.drawEllipse(dot_center, dot_r - 1.0 * kScale, dot_r - 1.0 * kScale);
+    drawVTSCCoPilotNavArrow(p, toPx(0.0f, road_anchor_y), 6.5f * kScale);
   }
 
   p.restore();

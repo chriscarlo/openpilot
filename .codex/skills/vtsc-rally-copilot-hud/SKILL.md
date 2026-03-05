@@ -10,6 +10,7 @@ description: Edit, debug, troubleshoot, iterate, and polish the Sunnypilot VTSC 
 - Reuse existing MTSC/VTSC/mapd math. Do not add a separate curve computation path in the HUD.
 - Render actual map-derived curve geometry via `LongitudinalPlanSP.visionTurnSpeedControl.curvePreviewPoints` (no generic left/right placeholder icon).
 - Do not remove or break the system readiness indicator (`HudRendererSP::drawSystemReadiness`).
+- Chauffeur currently runs pfeifer mapd `v1.10.0` in production. Upstream `pfeiferj/openpilot-mapd/main` is `v2.x` and incompatible. For current HUD work, treat `MapCurvatures` / `MapHazard` Params and existing chauffeur messages as the source of truth unless the task explicitly includes a v2 migration.
 
 ## Quick Loop (Edit -> Build -> Verify)
 
