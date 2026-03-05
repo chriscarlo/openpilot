@@ -768,31 +768,6 @@ QString HudRendererSP::formatDistance(float distance_m) const {
   }
 }
 
-static QPainterPath buildSmoothStripMapPath(const std::vector<QPointF> &pts, float tension = 0.9f) {
-  // Catmull-Rom spline converted to cubic Beziers.
-  // This is a display-only smoothing step; the curve geometry itself is produced by VTSC map enrichment.
-  QPainterPath path;
-  if (pts.empty()) return path;
-  path.moveTo(pts.front());
-  if (pts.size() < 2) return path;
-
-  const float t = std::clamp(tension, 0.0f, 3.0f);
-  const float s = t / 6.0f;
-
-  for (size_t i = 0; i + 1 < pts.size(); i++) {
-    const QPointF &p0 = (i == 0) ? pts[0] : pts[i - 1];
-    const QPointF &p1 = pts[i];
-    const QPointF &p2 = pts[i + 1];
-    const QPointF &p3 = (i + 2 < pts.size()) ? pts[i + 2] : pts.back();
-
-    const QPointF c1 = p1 + (p2 - p0) * s;
-    const QPointF c2 = p2 - (p3 - p1) * s;
-    path.cubicTo(c1, c2, p2);
-  }
-
-  return path;
-}
-
 void HudRendererSP::drawCurveDirectionIcon(QPainter &p, const QRect &icon_rect, int direction) const {
   p.save();
   p.setRenderHint(QPainter::Antialiasing, true);
@@ -965,6 +940,9 @@ void HudRendererSP::drawVTSCCoPilotCurve(QPainter &p, const QRect &surface_rect)
   const float center_y = vtsc_copilot_smoothed_ego_y_left_;
 
   // --- Scaling with auto-fit to prevent overflow ---
+  // Road half-width in meters (must match the value used for edge computation below).
+  constexpr float kRoadHalfWidthM = 3.0f;
+
   float x_max = 0.0f;
   float y_abs = 0.0f;
   for (const auto &pt : pts_m) {
@@ -972,12 +950,13 @@ void HudRendererSP::drawVTSCCoPilotCurve(QPainter &p, const QRect &surface_rect)
     y_abs = std::max(y_abs, std::abs(static_cast<float>(pt.y()) - center_y));
   }
   x_max = std::max(10.0f, x_max);
-  y_abs = std::max(1.0f, y_abs);
+  // Include road edge width in the lateral range so edges don't overflow.
+  y_abs = std::max(1.0f, y_abs + kRoadHalfWidthM);
 
   const float fwd_scale = static_cast<float>(curve_area.height()) / x_max;
   // Lateral scale: proportional to forward for zoom, but clamped to prevent overflow.
   const float lat_scale_zoom = fwd_scale * 3.0f;
-  const float lat_scale_fit = (0.42f * static_cast<float>(curve_area.width())) / y_abs;
+  const float lat_scale_fit = (0.45f * static_cast<float>(curve_area.width())) / y_abs;
   const float lat_scale = std::min(lat_scale_zoom, lat_scale_fit);
 
   auto toPx = [&](float x_fwd_m, float y_left_m) -> QPointF {
@@ -999,49 +978,56 @@ void HudRendererSP::drawVTSCCoPilotCurve(QPainter &p, const QRect &surface_rect)
   p.setClipRect(box);
 
   // --- Road surface polygon: perspective-varying width, gradient fill ---
-  // This replaces the centerline-only stroke with a filled road surface
-  // (the technique used by Garmin / Google Maps / Navit for strip maps).
+  // Render a filled road surface instead of a centerline-only stroke.
+  // Edge offsets are computed in METER space and mapped through toPx so that
+  // perspective is handled naturally — no self-intersection even on tight onramps.
   {
-    const float main_w = static_cast<float>(vtsc_copilot_tuning_.main_stroke_width_px_at_scale1 * kScale);
-    const float road_hw_ego = std::max(10.0f, main_w * 2.5f);   // half-width at ego (bottom)
-    const float road_hw_far = std::max(3.0f,  main_w * 0.35f);  // half-width at horizon (top)
+    // Road half-width in meters — must match kRoadHalfWidthM used in auto-fit above.
+    // ~3m half = 6m total ≈ 1.5 lanes — visible but won't self-intersect
+    // (even the tightest onramp has radius ~30m >> 3m).
+    const float road_hw_m = kRoadHalfWidthM;
 
-    std::vector<QPointF> left_edge, right_edge;
-    left_edge.reserve(px_pts.size());
-    right_edge.reserve(px_pts.size());
+    std::vector<QPointF> left_edge_px, right_edge_px;
+    left_edge_px.reserve(pts_m.size());
+    right_edge_px.reserve(pts_m.size());
 
-    for (size_t i = 0; i < px_pts.size(); i++) {
-      // Tangent via central differences for smoothness.
+    for (size_t i = 0; i < pts_m.size(); i++) {
+      // Tangent in meter space via central differences.
       QPointF tangent;
       if (i == 0) {
-        tangent = (px_pts.size() > 1) ? (px_pts[1] - px_pts[0]) : QPointF(0.0, -1.0);
-      } else if (i == px_pts.size() - 1) {
-        tangent = px_pts[i] - px_pts[i - 1];
+        tangent = (pts_m.size() > 1) ? (pts_m[1] - pts_m[0]) : QPointF(1.0, 0.0);
+      } else if (i == pts_m.size() - 1) {
+        tangent = pts_m[i] - pts_m[i - 1];
       } else {
-        tangent = px_pts[i + 1] - px_pts[i - 1];
+        tangent = pts_m[i + 1] - pts_m[i - 1];
       }
       float len = std::sqrt(tangent.x() * tangent.x() + tangent.y() * tangent.y());
-      if (len < 0.5f) len = 0.5f;
+      if (len < 0.01f) len = 0.01f;
 
-      // Right normal in screen coords: (-ty/len, tx/len).
-      const QPointF rn(-tangent.y() / len, tangent.x() / len);
+      // Left perpendicular in ego-local (x=fwd, y=left): (-dy, dx) / len.
+      const float lnx = -tangent.y() / len;
+      const float lny =  tangent.x() / len;
 
-      // Perspective-varying road half-width.
-      const float t = static_cast<float>(i) / static_cast<float>(std::max(size_t(1), px_pts.size() - 1));
-      const float hw = road_hw_ego + t * (road_hw_far - road_hw_ego);
+      const float xf = static_cast<float>(pts_m[i].x());
+      const float yl = static_cast<float>(pts_m[i].y());
 
-      right_edge.push_back(px_pts[i] + rn * hw);
-      left_edge.push_back(px_pts[i] - rn * hw);
+      left_edge_px.push_back(toPx(xf + lnx * road_hw_m, yl + lny * road_hw_m));
+      right_edge_px.push_back(toPx(xf - lnx * road_hw_m, yl - lny * road_hw_m));
     }
 
-    // Build smooth edge paths via Catmull-Rom, then compose into a closed surface.
-    const QPainterPath left_smooth = buildSmoothStripMapPath(left_edge, 1.5f);
-    std::vector<QPointF> right_rev(right_edge.rbegin(), right_edge.rend());
-    const QPainterPath right_smooth = buildSmoothStripMapPath(right_rev, 1.5f);
-
-    QPainterPath road_surface = left_smooth;
-    road_surface.connectPath(right_smooth);
-    road_surface.closeSubpath();
+    // Build the road surface as a raw polygon (no Catmull-Rom on edges —
+    // splines overshoot catastrophically on tight bends).
+    QPainterPath road_surface;
+    if (!left_edge_px.empty()) {
+      road_surface.moveTo(left_edge_px.front());
+      for (size_t i = 1; i < left_edge_px.size(); i++) {
+        road_surface.lineTo(left_edge_px[i]);
+      }
+      for (int i = static_cast<int>(right_edge_px.size()) - 1; i >= 0; --i) {
+        road_surface.lineTo(right_edge_px[i]);
+      }
+      road_surface.closeSubpath();
+    }
 
     // Fill with vertical gradient — opaque at ego, fading to transparent at horizon.
     QLinearGradient road_grad(
@@ -1055,9 +1041,16 @@ void HudRendererSP::drawVTSCCoPilotCurve(QPainter &p, const QRect &surface_rect)
     p.setBrush(road_grad);
     p.drawPath(road_surface);
 
-    // Edge lines: subtle glow + thin white stroke.
-    const QPainterPath left_line = buildSmoothStripMapPath(left_edge, 1.5f);
-    const QPainterPath right_line = buildSmoothStripMapPath(right_edge, 1.5f);
+    // Edge lines (raw polylines — no spline to avoid overshoot).
+    QPainterPath left_line, right_line;
+    if (!left_edge_px.empty()) {
+      left_line.moveTo(left_edge_px.front());
+      for (size_t i = 1; i < left_edge_px.size(); i++) left_line.lineTo(left_edge_px[i]);
+    }
+    if (!right_edge_px.empty()) {
+      right_line.moveTo(right_edge_px.front());
+      for (size_t i = 1; i < right_edge_px.size(); i++) right_line.lineTo(right_edge_px[i]);
+    }
 
     // Edge glow.
     p.setPen(QPen(QColor(255, 255, 255, 12), 5.0 * kScale, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
