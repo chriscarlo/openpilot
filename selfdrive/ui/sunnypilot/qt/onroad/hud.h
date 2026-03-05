@@ -124,6 +124,10 @@ protected:
   // Smoothed lookahead distance for seamless zoom animation as speed changes.
   float vtsc_copilot_smoothed_lookahead_m_ = 50.0f;
 
+  // Smoothed ego lateral offset — prevents the strip map from drifting off-screen
+  // when road geometry has lateral displacement at the ego position (intersections, GPS jitter).
+  float vtsc_copilot_smoothed_ego_y_left_ = 0.0f;
+
   struct VTSCCoPilotHudTuning {
     float curve_hold_new_dist_min_m = 30.0f;
     float geometry_epsilon_m = 0.05f;
