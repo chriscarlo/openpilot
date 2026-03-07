@@ -925,9 +925,12 @@ void HudRendererSP::drawVTSCCoPilotCurve(QPainter &p, const QRect &surface_rect)
   }
   const float ego_adv = vtsc_copilot_ego_advance_m_;
 
-  // Fixed 10-second lookahead. Distance still grows with speed, but the strip map
-  // no longer adds a separate zoom model on top of that.
-  const float lookahead_m = std::clamp(std::max(0.0f, vtsc_copilot_v_ego_mps_) * 10.0f, 30.0f, 350.0f);
+  // Fixed 10-second strip-map horizon.
+  // Keep the visual projection on a time axis so speed changes move geometry
+  // through the preview instead of zooming the whole ribbon in and out.
+  constexpr float kPreviewHorizonS = 10.0f;
+  const float projection_v_mps = std::max(3.0f, vtsc_copilot_v_ego_mps_);
+  const float lookahead_m = projection_v_mps * kPreviewHorizonS;
 
   // --- Build ego-shifted, lookahead-clipped point set ---
   std::vector<QPointF> pts_m;
@@ -980,28 +983,20 @@ void HudRendererSP::drawVTSCCoPilotCurve(QPainter &p, const QRect &surface_rect)
   // actual lateral shape ahead.
   const float road_anchor_y = static_cast<float>(pts_m.front().y());
 
-  // Fixed-projection strip map: forward scale is driven only by the 10-second horizon.
+  // Fixed-projection strip map: forward scale is time-based, and lateral span stays
+  // constant so speed changes do not rescale the ribbon.
   constexpr float kRoadHalfWidthM = 3.2f;
-  constexpr float kLaneMarkWidthM = 0.18f;
+  constexpr float kLateralSpanM = 48.0f;
 
-  float y_abs = 0.0f;
-  for (const auto &pt : pts_m) {
-    y_abs = std::max(y_abs, std::abs(static_cast<float>(pt.y()) - road_anchor_y));
-  }
-  y_abs = std::max(1.0f, y_abs + kRoadHalfWidthM + kLaneMarkWidthM);
-
-  const float fwd_scale = static_cast<float>(curve_area.height()) / std::max(10.0f, lookahead_m);
-  // Keep lateral projection constant relative to the forward horizon. Only clamp when
-  // a very wide bend would otherwise overflow the box.
-  const float lat_scale_nominal = fwd_scale * 2.35f;
-  const float lat_scale_fit = (0.47f * static_cast<float>(curve_area.width())) / y_abs;
-  const float lat_scale = std::min(lat_scale_nominal, lat_scale_fit);
+  const float fwd_scale = static_cast<float>(curve_area.height()) / kPreviewHorizonS;
+  const float lat_scale = (0.47f * static_cast<float>(curve_area.width())) / kLateralSpanM;
 
   auto toPx = [&](float x_fwd_m, float y_left_m) -> QPointF {
-    const float t = std::clamp(x_fwd_m / std::max(10.0f, lookahead_m), 0.0f, 1.0f);
+    const float preview_t_s = x_fwd_m / projection_v_mps;
+    const float t = std::clamp(preview_t_s / kPreviewHorizonS, 0.0f, 1.0f);
     const float persp = std::clamp(1.0f - 0.30f * t, 0.68f, 1.0f);
     const float x_px = static_cast<float>(curve_area.center().x()) - (y_left_m - road_anchor_y) * lat_scale * persp;
-    const float y_px = static_cast<float>(curve_area.bottom()) - x_fwd_m * fwd_scale;
+    const float y_px = static_cast<float>(curve_area.bottom()) - preview_t_s * fwd_scale;
     return QPointF(x_px, y_px);
   };
 
