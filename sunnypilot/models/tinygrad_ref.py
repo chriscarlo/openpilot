@@ -2,9 +2,24 @@ import os
 
 from openpilot.common.basedir import BASEDIR
 
+VENDORED_REF_FILE = ".vendored_ref"
+
+
+def _read_vendored_ref(repo_path: str) -> str | None:
+  vendored_ref_path = os.path.join(repo_path, VENDORED_REF_FILE)
+  try:
+    with open(vendored_ref_path) as f:
+      ref = f.read().strip()
+    return ref or None
+  except OSError:
+    return None
+
 
 def get_tinygrad_ref():
   repo_path = os.path.join(BASEDIR, "tinygrad_repo")
+  if vendored_ref := _read_vendored_ref(repo_path):
+    return vendored_ref
+
   git_path = os.path.join(repo_path, ".git")
   try:
     if os.path.isdir(git_path):

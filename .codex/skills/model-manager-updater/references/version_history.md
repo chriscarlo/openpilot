@@ -55,3 +55,14 @@
   `parse_model_outputs_split.py` must parse standalone `planplus`
 - If only capnp/UI support is added, onroad can stay unhealthy with calibration
   stuck at 0% because `modeld_tinygrad` is missing required outputs
+
+### Tinygrad runtime/model ABI mismatch (2026-03-08, working tree)
+- OMV4 still crashed after the split-runner fix because `modeld_tinygrad`
+  died during `pickle.load(...)` of `driving_vision_omv4_tinygrad.pkl`
+- Device traceback:
+  `AssertionError: size mismatch, len(mv)=2528 != self.dtype=dtypes.float self.size=632`
+- Remote `driving_models_v15.json` advertises `tinygrad_ref`
+  `3501a714785ff370cffb966a45d5f9cdf6c9ea7a`
+- This branch's `tinygrad_repo` is an older vendored tree object
+  `bf041d6c43362afea0a6578856344bb271a7861d`, not the upstream gitlink/ref
+- Result: no `modelV2`/`cameraOdometry`, `MDL` red, calibration stuck at 0%

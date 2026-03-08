@@ -35,6 +35,8 @@ Missing any one of them causes a different silent or runtime failure.
 | `sunnypilot/models/runners/tinygrad/model_types.py` | Parser mapping for new runtime model types; `offPolicy` needs its own parser entry |
 | `sunnypilot/models/runners/tinygrad/tinygrad_runner.py` | `TinygradSplitRunner` must instantiate and merge every artifact required by the bundle, including `offPolicy` |
 | `sunnypilot/modeld_v2/parse_model_outputs_split.py` | `planplus` may arrive without `plan`; parse it independently for three-artifact bundles |
+| `sunnypilot/models/tinygrad_ref.py` | If `tinygrad_repo` is vendored instead of a submodule/git checkout, read the pinned runtime ref from tracked metadata first |
+| `tinygrad_repo/.vendored_ref` | When vendoring tinygrad, record the exact upstream commit here so compatibility checks can still prove the runtime matches the model list |
 
 ## Step-by-Step Workflow
 
@@ -167,12 +169,33 @@ For three-artifact bundles, `planplus` may live in the `policy` artifact
 without `plan` in the same output dict. `sunnypilot/modeld_v2/parse_model_outputs_split.py`
 must parse `planplus` independently, not only inside `if 'plan' in outs:`.
 
+### `tinygrad_ref` mismatch can hard-crash `modeld_tinygrad`
+The v15 model list publishes a top-level `tinygrad_ref`. If your branch's
+`tinygrad_repo` content does not match that ref, newer compiled tinygrad
+pickles can crash during `pickle.load(...)` before onroad publishes any
+`modelV2`/`cameraOdometry` data. On affected branches this shows up as:
+
+- `modeld_tinygrad` never stays running
+- calibration stuck at `0%`
+- `MDL` red with downstream `LOC`/`PLN`/`PRM` red or yellow
+- swaglog traceback from `tinygrad/device.py` with a buffer `size mismatch`
+
+Check both:
+
+- remote JSON `tinygrad_ref`
+- your branch's actual `tinygrad_repo` state
+
+Do not assume `tinygrad_repo` is a real git checkout; some branches vendor it
+as a plain tree snapshot, which makes `get_tinygrad_ref()` ineffective.
+When that happens, add a tracked `tinygrad_repo/.vendored_ref` file and make
+`sunnypilot/models/tinygrad_ref.py` read it before looking for `.git`.
+
 ### Upstream sync overwrites local fixes
 Upstream sunnypilot syncs may completely replace `helpers.py`, `fetcher.py`,
 `manager.py`, and the tinygrad split runtime files. Re-verify defensive
 patterns (try/except in parser, `is not None` checks, JSON encode/decode in
-cache, `offPolicy` runner support, standalone `planplus` parsing) after
-every sync.
+cache, `offPolicy` runner support, standalone `planplus` parsing, and
+`tinygrad_ref` compatibility) after every sync.
 
 ### JSON keys vs capnp field names
 Remote JSON uses `snake_case` (`minimum_selector_version`). Capnp uses
