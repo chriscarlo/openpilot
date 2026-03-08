@@ -32,6 +32,9 @@ Missing any one of them causes a different silent or runtime failure.
 | `sunnypilot/models/manager.py` | Download loop, param read/write, index checks |
 | `selfdrive/ui/sunnypilot/qt/offroad/settings/models_panel.cc` | C++ `switch(model.getType())` — must have a case for every capnp enum value; progress bar + frame per type |
 | `selfdrive/ui/sunnypilot/qt/offroad/settings/models_panel.h` | Declares `QProgressBar*` and `QFrame*` members for each model type |
+| `sunnypilot/models/runners/tinygrad/model_types.py` | Parser mapping for new runtime model types; `offPolicy` needs its own parser entry |
+| `sunnypilot/models/runners/tinygrad/tinygrad_runner.py` | `TinygradSplitRunner` must instantiate and merge every artifact required by the bundle, including `offPolicy` |
+| `sunnypilot/modeld_v2/parse_model_outputs_split.py` | `planplus` may arrive without `plan`; parse it independently for three-artifact bundles |
 
 ## Step-by-Step Workflow
 
@@ -88,7 +91,16 @@ For each new enum value, follow the existing pattern — declare `QProgressBar*`
 `QFrame*` in the header, create them in the constructor, add visibility reset in
 `handleBundleDownloadProgress()`, and add a `case` in the `switch(model.getType())`.
 
-### 6. Build and deploy
+### 6. Audit runtime support for the new bundle composition
+
+Do not stop after capnp + parser + UI support. If a bundle contains
+`offPolicy`, also diff/check:
+
+- `sunnypilot/models/runners/tinygrad/model_types.py`
+- `sunnypilot/models/runners/tinygrad/tinygrad_runner.py`
+- `sunnypilot/modeld_v2/parse_model_outputs_split.py`
+
+### 7. Build and deploy
 
 ```bash
 # Local C++ check (fast — just the one object file)
@@ -98,7 +110,7 @@ scons -j$(nproc) selfdrive/ui/sunnypilot/qt/offroad/settings/models_panel.o
 git push && ssh commaCar "cd /data/openpilot && git pull && sudo reboot"
 ```
 
-### 7. Verify on device
+### 8. Verify on device
 
 ```bash
 ssh commaCar "cd /data/openpilot && source /usr/local/venv/bin/activate && python3 -c '
@@ -142,10 +154,25 @@ Always append with the next `@N`.
 Any `cereal/custom.capnp` change invalidates the scons cache for most C++
 targets. Expect 15-20 minute full rebuild on-device.
 
+### Runtime half-support on `offPolicy` bundles
+Adding `offPolicy` to capnp + the offroad UI is **not** enough. v15 bundles
+such as `OMV4` are three-artifact runtime bundles: `policy` can carry
+`planplus`, `vision` can carry `pose`/`meta`/`hidden_state`, and `offPolicy`
+can carry `plan`, `lane_lines`, `road_edges`, `lead`, and `lead_prob`.
+If `TinygradSplitRunner` only runs `vision` + `policy`, onroad can stay
+unhealthy with calibration stuck at 0%.
+
+### Standalone `planplus` parsing
+For three-artifact bundles, `planplus` may live in the `policy` artifact
+without `plan` in the same output dict. `sunnypilot/modeld_v2/parse_model_outputs_split.py`
+must parse `planplus` independently, not only inside `if 'plan' in outs:`.
+
 ### Upstream sync overwrites local fixes
 Upstream sunnypilot syncs may completely replace `helpers.py`, `fetcher.py`,
-and `manager.py`. Re-verify defensive patterns (try/except in parser,
-`is not None` checks, JSON encode/decode in cache) after every sync.
+`manager.py`, and the tinygrad split runtime files. Re-verify defensive
+patterns (try/except in parser, `is not None` checks, JSON encode/decode in
+cache, `offPolicy` runner support, standalone `planplus` parsing) after
+every sync.
 
 ### JSON keys vs capnp field names
 Remote JSON uses `snake_case` (`minimum_selector_version`). Capnp uses

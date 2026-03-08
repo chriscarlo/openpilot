@@ -45,3 +45,13 @@
 ### Parse resilience (2026-03-03, `1239afd2e`)
 - `parse_models()` list comprehension let one bad bundle crash the entire list
 - Changed to per-bundle try/except with cloudlog warning
+
+### Off-policy runtime contract gap (2026-03-08, working tree)
+- v15 bundles such as `OMV4` split runtime outputs across three artifacts:
+  `vision`, `policy`, and `offPolicy`
+- `plan`, `lane_lines`, `road_edges`, `lead`, and `lead_prob` can live only in
+  `offPolicy`, while `planplus` can live only in `policy`
+- `TinygradSplitRunner` must run + merge `offPolicy`, and
+  `parse_model_outputs_split.py` must parse standalone `planplus`
+- If only capnp/UI support is added, onroad can stay unhealthy with calibration
+  stuck at 0% because `modeld_tinygrad` is missing required outputs
