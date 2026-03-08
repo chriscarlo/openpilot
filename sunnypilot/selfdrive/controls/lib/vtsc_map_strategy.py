@@ -153,6 +153,10 @@ def compute_map_cap_candidate(
   anchor_vsafe_mps = None
   anchor_curvature = None
   anchor_index = None
+  first_candidate = None
+  direct_cap = float(v_cruise)
+  direct_anchor = None
+  response_constraints: list[tuple[float, float, float, float, int, int]] = []
   reference_speed = float(reference_speed_mps) if reference_speed_mps is not None else float(v_ego)
   timing_speed = max(0.1, float(v_ego))
 
@@ -171,9 +175,11 @@ def compute_map_cap_candidate(
       if float(di) >= s_start
     )
 
-  for di, ki, vi, abs_idx in candidate_points:
+  for seq, (di, ki, vi, abs_idx) in enumerate(candidate_points):
     any_future = True
     vsafe = float(vi)
+    if first_candidate is None:
+      first_candidate = (float(di), float(vsafe), float(ki), int(abs_idx))
     effective_distance = float(di)
     if strategy_mode == MAP_STRATEGY_STRATEGIC:
       # Reuse the driver's existing VTSC timing semantics for map planning too:
@@ -192,21 +198,15 @@ def compute_map_cap_candidate(
         braking_distance = max(0.0, effective_distance - float(v_ego) * float(response_model.actuation_delay_s))
         if braking_distance <= 1e-3:
           v_allow = float(vsafe)
+          if v_allow < direct_cap - 1e-6:
+            direct_cap = float(v_allow)
+            direct_anchor = (float(di), float(vsafe), float(ki), int(abs_idx))
         elif vsafe >= float(v_ego) - 1e-6:
           v_allow = float(v_cruise)
         else:
           required_decel = max(0.0, (float(v_ego) * float(v_ego) - vsafe * vsafe) / (2.0 * braking_distance))
-          v_allow = cruise_cap_for_required_average_decel(
-            v_ego=float(v_ego),
-            required_decel_mps2=required_decel,
-            response_model=response_model,
-            v_cruise_upper=float(v_cruise),
-          )
-          if v_allow <= 1e-3 and required_decel > 1e-3:
-            # If even the strongest short-horizon average decel probe cannot make the
-            # requested pace, the most conservative actionable request is "ask for the
-            # target speed now", not a zero cap that will be dropped by later arbitration.
-            v_allow = min(float(v_cruise), float(vsafe))
+          response_constraints.append((float(required_decel), float(di), float(vsafe), float(ki), int(abs_idx), int(seq)))
+          v_allow = float(v_cruise)
       except Exception:
         v_allow = float(v_ego)
     else:
@@ -221,6 +221,70 @@ def compute_map_cap_candidate(
       anchor_curvature = float(ki)
       anchor_index = int(abs_idx)
     v_cap = min(v_cap, v_allow)
+
+  if strategy_mode == MAP_STRATEGY_STRATEGIC and response_model is not None:
+    def _apply_anchor(anchor):
+      nonlocal anchor_dist_m, anchor_vsafe_mps, anchor_curvature, anchor_index
+      if anchor is None:
+        return
+      anchor_dist_m, anchor_vsafe_mps, anchor_curvature, anchor_index = anchor
+
+    v_cap = float(v_cruise)
+    if direct_anchor is not None:
+      v_cap = float(direct_cap)
+      _apply_anchor(direct_anchor)
+
+    if response_constraints:
+      constraints = sorted(response_constraints, key=lambda x: (x[0], x[5]))
+      probe_cache: dict[float, float] = {}
+
+      def _probe(req: float) -> float:
+        key = round(float(req), 9)
+        if key not in probe_cache:
+          probe_cache[key] = cruise_cap_for_required_average_decel(
+            v_ego=float(v_ego),
+            required_decel_mps2=float(req),
+            response_model=response_model,
+            v_cruise_upper=float(v_cruise),
+          )
+        return float(probe_cache[key])
+
+      def _probe_positive(req: float) -> bool:
+        return _probe(req) > 1e-3
+
+      max_possible_idx: int | None = None
+      if _probe_positive(constraints[-1][0]):
+        max_possible_idx = len(constraints) - 1
+      elif _probe_positive(constraints[0][0]):
+        lo, hi = 0, len(constraints) - 1
+        while lo < hi:
+          mid = (lo + hi + 1) // 2
+          if _probe_positive(constraints[mid][0]):
+            lo = mid
+          else:
+            hi = mid - 1
+        max_possible_idx = lo
+
+      if max_possible_idx is not None:
+        req, di, vsafe, ki, abs_idx, _ = constraints[max_possible_idx]
+        possible_cap = _probe(req)
+        if possible_cap < v_cap - 1e-6:
+          v_cap = float(possible_cap)
+          _apply_anchor((float(di), float(vsafe), float(ki), int(abs_idx)))
+
+      impossible_start = 0 if max_possible_idx is None else (max_possible_idx + 1)
+      if impossible_start < len(constraints):
+        _, imp_di, imp_vsafe, imp_ki, imp_abs_idx, _ = min(
+          constraints[impossible_start:],
+          key=lambda x: (x[2], x[5]),
+        )
+        fallback_cap = min(float(v_cruise), float(imp_vsafe))
+        if fallback_cap < v_cap - 1e-6:
+          v_cap = float(fallback_cap)
+          _apply_anchor((float(imp_di), float(imp_vsafe), float(imp_ki), int(imp_abs_idx)))
+
+    if anchor_dist_m is None and first_candidate is not None:
+      _apply_anchor(first_candidate)
 
   if not any_future:
     coverage = 0.0

@@ -5,6 +5,7 @@ import pytest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import sunnypilot.selfdrive.controls.lib.vtsc_map_strategy as map_strategy
 from sunnypilot.selfdrive.controls.lib.vision_turn_controller import (
   curvature_to_speed,
   SEVERE_OVERSHOOT_SPEED_SCALE_MIN,
@@ -1211,6 +1212,111 @@ def test_strategic_mode_overshoot_phase_offset_ignored_when_reference_speed_is_n
   )
 
   assert float(candidate_early.cap_mps) == pytest.approx(float(candidate_late.cap_mps), abs=1e-6)
+
+
+def test_strategic_response_probe_runs_once_for_controlling_constraint(monkeypatch):
+  response_model = build_cruise_response_model(min_accel_mps2=-6.0, max_accel_mps2=5.0, actuation_delay_s=0.35)
+  calls = []
+
+  def fake_probe(*, v_ego, required_decel_mps2, response_model, v_cruise_upper, **kwargs):
+    calls.append(float(required_decel_mps2))
+    if float(required_decel_mps2) >= 2.2:
+      return 0.0
+    return float(v_cruise_upper) - float(required_decel_mps2)
+
+  monkeypatch.setattr(map_strategy, 'cruise_cap_for_required_average_decel', fake_probe)
+
+  candidate = compute_map_cap_candidate(
+    mode='strategic',
+    s_list=[30.0, 60.0, 90.0],
+    k_list=[0.020, 0.030, 0.025],
+    vsafe_list=[20.0, 15.0, 14.0],
+    abs_indices=[3, 6, 9],
+    v_ego=24.0,
+    v_cruise=27.0,
+    vis_horizon_s=1.4,
+    vis_margin_m=10.0,
+    severe_vision=False,
+    partial_vision=False,
+    vision_confidence=0.95,
+    conf_lo=0.55,
+    conf_hi=0.85,
+    max_decel=3.5,
+    horizon_limit_m=250.0,
+    response_model=response_model,
+    fixed_lead_time_s=0.0,
+    curve_phase_offset_s=0.0,
+    overshoot_phase_offset_s=0.0,
+    reference_speed_mps=24.0,
+  )
+
+  assert 1 <= len(calls) <= 3
+  assert float(candidate.cap_mps) == pytest.approx(14.0, abs=1e-6)
+  assert float(candidate.anchor_dist_m) == pytest.approx(90.0, abs=1e-6)
+  assert int(candidate.anchor_index) == 9
+
+
+def test_strategic_response_bounded_probe_matches_bruteforce():
+  response_model = build_cruise_response_model(min_accel_mps2=-6.0, max_accel_mps2=5.0, actuation_delay_s=0.35)
+  s_list = [30.0, 60.0, 90.0, 120.0]
+  k_list = [0.020, 0.030, 0.025, 0.010]
+  vsafe_list = [20.0, 15.0, 14.0, 22.0]
+  abs_indices = [3, 6, 9, 12]
+  v_ego = 24.0
+  v_cruise = 27.0
+
+  def bruteforce():
+    v_cap = float(v_cruise)
+    anchor = None
+    for di, ki, vi, abs_idx in zip(s_list, k_list, vsafe_list, abs_indices, strict=False):
+      braking_distance = max(0.0, float(di) - float(v_ego) * float(response_model.actuation_delay_s))
+      if braking_distance <= 1e-3:
+        v_allow = float(vi)
+      elif float(vi) >= float(v_ego) - 1e-6:
+        v_allow = float(v_cruise)
+      else:
+        required_decel = max(0.0, (float(v_ego) * float(v_ego) - float(vi) * float(vi)) / (2.0 * braking_distance))
+        v_allow = map_strategy.cruise_cap_for_required_average_decel(
+          v_ego=float(v_ego),
+          required_decel_mps2=required_decel,
+          response_model=response_model,
+          v_cruise_upper=float(v_cruise),
+        )
+        if v_allow <= 1e-3 and required_decel > 1e-3:
+          v_allow = min(float(v_cruise), float(vi))
+      if anchor is None or v_allow < v_cap - 1e-6:
+        anchor = (float(di), float(vi), float(ki), int(abs_idx))
+      v_cap = min(v_cap, v_allow)
+    return v_cap, anchor
+
+  expected_cap, expected_anchor = bruteforce()
+  candidate = compute_map_cap_candidate(
+    mode='strategic',
+    s_list=s_list,
+    k_list=k_list,
+    vsafe_list=vsafe_list,
+    abs_indices=abs_indices,
+    v_ego=v_ego,
+    v_cruise=v_cruise,
+    vis_horizon_s=1.4,
+    vis_margin_m=10.0,
+    severe_vision=False,
+    partial_vision=False,
+    vision_confidence=0.95,
+    conf_lo=0.55,
+    conf_hi=0.85,
+    max_decel=3.5,
+    horizon_limit_m=250.0,
+    response_model=response_model,
+    fixed_lead_time_s=0.0,
+    curve_phase_offset_s=0.0,
+    overshoot_phase_offset_s=0.0,
+    reference_speed_mps=v_ego,
+  )
+
+  assert float(candidate.cap_mps) == pytest.approx(float(expected_cap), rel=1e-6)
+  assert float(candidate.anchor_dist_m) == pytest.approx(float(expected_anchor[0]), abs=1e-6)
+  assert int(candidate.anchor_index) == int(expected_anchor[3])
 
 
 def test_strategic_post_apex_release_helper_state():
