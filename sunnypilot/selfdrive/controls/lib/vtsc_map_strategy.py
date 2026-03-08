@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 from openpilot.selfdrive.controls.lib.longitudinal_response_model import (
   CruiseResponseModel,
-  reachable_speed_for_target_at_distance,
+  cruise_cap_for_required_average_decel,
 )
 
 
@@ -89,6 +89,24 @@ def advisory_start_distance(
   return s_start_full
 
 
+def _strategic_frontier(
+  *,
+  s_list: list[float],
+  k_list: list[float],
+  vsafe_list: list[float],
+  abs_indices: list[int],
+  s_start: float,
+):
+  best_vsafe = float('inf')
+  for di, ki, vi, abs_idx in zip(s_list, k_list, vsafe_list, abs_indices, strict=False):
+    if float(di) < float(s_start):
+      continue
+    vsafe = float(vi)
+    if vsafe < best_vsafe - 1e-6:
+      best_vsafe = vsafe
+      yield float(di), float(ki), vsafe, int(abs_idx)
+
+
 def compute_map_cap_candidate(
   *,
   mode: str,
@@ -108,6 +126,7 @@ def compute_map_cap_candidate(
   max_decel: float,
   horizon_limit_m: float,
   response_model: CruiseResponseModel | None = None,
+  fixed_lead_time_s: float = 0.0,
   curve_phase_offset_s: float = 0.0,
   overshoot_phase_offset_s: float = 0.0,
   reference_speed_mps: float | None = None,
@@ -137,14 +156,30 @@ def compute_map_cap_candidate(
   reference_speed = float(reference_speed_mps) if reference_speed_mps is not None else float(v_ego)
   timing_speed = max(0.1, float(v_ego))
 
-  for di, ki, vi, abs_idx in zip(s_list, k_list, vsafe_list, abs_indices, strict=False):
-    if float(di) < s_start:
-      continue
+  if strategy_mode == MAP_STRATEGY_STRATEGIC:
+    candidate_points = _strategic_frontier(
+      s_list=s_list,
+      k_list=k_list,
+      vsafe_list=vsafe_list,
+      abs_indices=abs_indices,
+      s_start=s_start,
+    )
+  else:
+    candidate_points = (
+      (float(di), float(ki), float(vi), int(abs_idx))
+      for di, ki, vi, abs_idx in zip(s_list, k_list, vsafe_list, abs_indices, strict=False)
+      if float(di) >= s_start
+    )
+
+  for di, ki, vi, abs_idx in candidate_points:
     any_future = True
     vsafe = float(vi)
     effective_distance = float(di)
     if strategy_mode == MAP_STRATEGY_STRATEGIC:
       # Reuse the driver's existing VTSC timing semantics for map planning too:
+      # fixed lead time means "be at the anchor speed before the anchor by N seconds"
+      # and should tighten the reachable cap even when the signed phase offsets are zero.
+      effective_distance -= max(0.0, float(fixed_lead_time_s)) * timing_speed
       # curve timing moves the nominal "arrive at anchor speed" point earlier/later,
       # while overshoot timing only biases anchors that are materially tighter than the
       # current local vision target.
@@ -154,12 +189,24 @@ def compute_map_cap_candidate(
       effective_distance = max(0.0, effective_distance)
     if strategy_mode == MAP_STRATEGY_STRATEGIC and response_model is not None:
       try:
-        v_allow = reachable_speed_for_target_at_distance(
-          v_ego=float(v_ego),
-          target_speed=vsafe,
-          distance_m=effective_distance,
-          response_model=response_model,
-        )
+        braking_distance = max(0.0, effective_distance - float(v_ego) * float(response_model.actuation_delay_s))
+        if braking_distance <= 1e-3:
+          v_allow = float(vsafe)
+        elif vsafe >= float(v_ego) - 1e-6:
+          v_allow = float(v_cruise)
+        else:
+          required_decel = max(0.0, (float(v_ego) * float(v_ego) - vsafe * vsafe) / (2.0 * braking_distance))
+          v_allow = cruise_cap_for_required_average_decel(
+            v_ego=float(v_ego),
+            required_decel_mps2=required_decel,
+            response_model=response_model,
+            v_cruise_upper=float(v_cruise),
+          )
+          if v_allow <= 1e-3 and required_decel > 1e-3:
+            # If even the strongest short-horizon average decel probe cannot make the
+            # requested pace, the most conservative actionable request is "ask for the
+            # target speed now", not a zero cap that will be dropped by later arbitration.
+            v_allow = min(float(v_cruise), float(vsafe))
       except Exception:
         v_allow = float(v_ego)
     else:
@@ -168,7 +215,7 @@ def compute_map_cap_candidate(
         v_allow = math.sqrt(max(0.0, vsafe * vsafe + 2.0 * a_plan * d))
       except Exception:
         v_allow = float(v_ego)
-    if anchor_dist_m is None or v_allow <= v_cap + 1e-6:
+    if anchor_dist_m is None or v_allow < v_cap - 1e-6:
       anchor_dist_m = float(di)
       anchor_vsafe_mps = float(vsafe)
       anchor_curvature = float(ki)

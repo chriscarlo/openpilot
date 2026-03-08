@@ -143,11 +143,19 @@ def install_fake_long_mpc(*, module_name: str = 'openpilot.selfdrive.controls.li
       self._v0 = float(v)
       self._a0 = float(a)
 
-    def get_cruise_response_model(self, v_ego: float, *, actuation_delay_s: float = 0.0):
+    def get_cruise_response_model(self, v_ego: float, *, actuation_delay_s: float = 0.0,
+                                  planner_accel_limits: tuple[float, float] | None = None):
+      planner_min = DEFAULT_CRUISE_MIN_ACCEL
+      planner_max = DEFAULT_CRUISE_MAX_ACCEL
+      if planner_accel_limits is not None:
+        planner_min = float(planner_accel_limits[0])
+        planner_max = float(planner_accel_limits[1])
       return build_cruise_response_model(
         min_accel_mps2=DEFAULT_CRUISE_MIN_ACCEL,
         max_accel_mps2=DEFAULT_CRUISE_MAX_ACCEL,
         actuation_delay_s=actuation_delay_s,
+        planner_output_min_accel_mps2=planner_min,
+        planner_output_max_accel_mps2=planner_max,
       )
 
     def update(self, radar_state, v_cruise: float, x, v, a, j, personality=None) -> None:

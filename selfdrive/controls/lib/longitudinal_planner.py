@@ -177,6 +177,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
       accel_clip[1] = min(accel_clip[1], clipped_accel_coast_interp)
 
     # Get new v_cruise from Speed Limit Control
+    self._planner_output_accel_limits = (float(accel_clip[0]), float(accel_clip[1]))
     v_cruise = LongitudinalPlannerSP.update_v_cruise(self, sm, self.v_desired_filter.x, self.a_desired, v_cruise)
 
     if force_slow_decel:

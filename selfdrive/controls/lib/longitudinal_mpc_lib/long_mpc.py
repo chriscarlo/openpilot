@@ -347,7 +347,8 @@ class LongitudinalMpc:
     lead_xv = self.extrapolate_lead(x_lead, v_lead, a_lead, a_lead_tau)
     return lead_xv
 
-  def get_cruise_response_model(self, v_ego: float, *, actuation_delay_s: float = 0.0) -> CruiseResponseModel:
+  def get_cruise_response_model(self, v_ego: float, *, actuation_delay_s: float = 0.0,
+                                planner_accel_limits: tuple[float, float] | None = None) -> CruiseResponseModel:
     if self.vibe_controller.is_accel_enabled():
       accel_limits = self.vibe_controller.get_accel_limits(v_ego)
       if accel_limits is not None:
@@ -356,11 +357,19 @@ class LongitudinalMpc:
         min_accel = CRUISE_MIN_ACCEL
     else:
       min_accel = CRUISE_MIN_ACCEL
+    if planner_accel_limits is not None:
+      planner_accel_min = float(planner_accel_limits[0])
+      planner_accel_max = float(planner_accel_limits[1])
+    else:
+      planner_accel_min = ACCEL_MIN
+      planner_accel_max = ACCEL_MAX
     return build_cruise_response_model(
       min_accel_mps2=min_accel,
       max_accel_mps2=CRUISE_MAX_ACCEL,
       comfort_brake_mps2=COMFORT_BRAKE,
       actuation_delay_s=actuation_delay_s,
+      planner_output_min_accel_mps2=planner_accel_min,
+      planner_output_max_accel_mps2=planner_accel_max,
     )
 
   def update(self, radarstate, v_cruise, x, v, a, j, personality=log.LongitudinalPersonality.standard):

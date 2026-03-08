@@ -64,9 +64,11 @@ class LongitudinalPlannerSP:
     # so VTSC produces physics-based advisory speeds instead of collapsing to 0.
     v_cruise_for_vtsc = float(v_cruise if apply_vtsc else (V_CRUISE_MAX * CV.KPH_TO_MS))
     try:
+      planner_accel_limits = getattr(self, '_planner_output_accel_limits', None)
       response_model = self.mpc.get_cruise_response_model(
         v_ego,
         actuation_delay_s=float(getattr(self.CP, 'longitudinalActuatorDelay', 0.0)) + DT_MDL,
+        planner_accel_limits=planner_accel_limits,
       )
     except Exception:
       response_model = None

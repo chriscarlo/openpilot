@@ -682,6 +682,7 @@ def _patch_map_tail_inputs(vtsc, monkeypatch, lat0: float, lon0: float, pts):
 def _run_strategic_map_snapshot(
   monkeypatch,
   *,
+  fixed_lead_time_s: float = 0.0,
   curve_phase_s: float = 0.0,
   overshoot_phase_s: float = 0.0,
   apex_exit_phase_s: float = 0.0,
@@ -702,6 +703,7 @@ def _run_strategic_map_snapshot(
   _enable_map_lookahead(vtsc, monkeypatch)
   _set_map_strategy(vtsc, monkeypatch, 'strategic')
   _set_longitudinal_response_model(vtsc, min_accel=-6.0, delay_s=planner_delay_s)
+  vtsc._fixed_lead_time_s = float(fixed_lead_time_s)
   vtsc._curve_phase_offset_s = float(curve_phase_s)
   vtsc._overshoot_phase_offset_s = float(overshoot_phase_s)
   vtsc._apex_exit_phase_offset_s = float(apex_exit_phase_s)
@@ -1088,6 +1090,19 @@ def test_strategic_mode_curve_phase_offset_shifts_map_floor_timing(monkeypatch):
 
   assert float(snap_early['map_strategic_cap']) < float(snap_late['map_strategic_cap']) - 0.5
   assert float(snap_early['vtsc_cmd']) < float(snap_late['vtsc_cmd']) - 0.5
+
+
+def test_strategic_mode_fixed_lead_time_tightens_map_floor(monkeypatch):
+  snap_zero = _run_strategic_map_snapshot(monkeypatch, fixed_lead_time_s=0.0, curve_phase_s=0.0, overshoot_phase_s=0.0)
+  snap_one = _run_strategic_map_snapshot(monkeypatch, fixed_lead_time_s=1.0, curve_phase_s=0.0, overshoot_phase_s=0.0)
+  snap_two = _run_strategic_map_snapshot(monkeypatch, fixed_lead_time_s=2.0, curve_phase_s=0.0, overshoot_phase_s=0.0)
+
+  assert float(snap_one['map_strategic_cap']) < float(snap_zero['map_strategic_cap']) - 0.5
+  # Once the requested lead time is large enough that the strategic solver must ask for the
+  # anchor speed immediately, additional lead time should saturate at that target rather than
+  # manufacture an artificial distinction below it.
+  assert float(snap_two['map_strategic_cap']) <= float(snap_one['map_strategic_cap']) + 1e-6
+  assert float(snap_two['map_strategic_cap']) <= float(curvature_to_speed(0.02)) + 0.25
 
 
 def test_strategic_mode_overshoot_phase_offset_shifts_tighter_map_floor_timing(monkeypatch):

@@ -3848,6 +3848,7 @@ class VisionTurnController:
       max_decel=float(getattr(self, '_max_decel', 3.5)),
       horizon_limit_m=S_MAX,
       response_model=getattr(self, '_longitudinal_response_model', None),
+      fixed_lead_time_s=float(getattr(self, '_fixed_lead_time_s', 0.0)),
       curve_phase_offset_s=float(getattr(self, '_curve_phase_offset_s', 0.0)),
       overshoot_phase_offset_s=float(getattr(self, '_overshoot_phase_offset_s', 0.0)),
       reference_speed_mps=float(getattr(self, '_dbg_target_raw', self._v_ego) or self._v_ego),
