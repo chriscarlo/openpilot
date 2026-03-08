@@ -4,8 +4,10 @@ import math
 from dataclasses import dataclass
 
 from openpilot.selfdrive.controls.lib.longitudinal_response_model import (
+  CRUISE_CAP_REQUIRED_DECEL_TOL_MPS2,
   CruiseResponseModel,
   cruise_cap_for_required_average_decel,
+  predict_average_decel_for_cruise_cap,
 )
 
 
@@ -235,49 +237,39 @@ def compute_map_cap_candidate(
       _apply_anchor(direct_anchor)
 
     if response_constraints:
-      constraints = sorted(response_constraints, key=lambda x: (x[0], x[5]))
-      probe_cache: dict[float, float] = {}
+      max_supported_required_decel = predict_average_decel_for_cruise_cap(
+        v_ego=float(v_ego),
+        cruise_cap=0.0,
+        response_model=response_model,
+      ) + float(CRUISE_CAP_REQUIRED_DECEL_TOL_MPS2)
 
-      def _probe(req: float) -> float:
-        key = round(float(req), 9)
-        if key not in probe_cache:
-          probe_cache[key] = cruise_cap_for_required_average_decel(
-            v_ego=float(v_ego),
-            required_decel_mps2=float(req),
-            response_model=response_model,
-            v_cruise_upper=float(v_cruise),
-          )
-        return float(probe_cache[key])
+      feasible_constraint = None
+      infeasible_constraint = None
+      for req, di, vsafe, ki, abs_idx, seq in response_constraints:
+        if float(req) <= max_supported_required_decel + 1e-9:
+          if (feasible_constraint is None or
+              float(req) > float(feasible_constraint[0]) + 1e-9 or
+              (abs(float(req) - float(feasible_constraint[0])) <= 1e-9 and int(seq) < int(feasible_constraint[5]))):
+            feasible_constraint = (float(req), float(di), float(vsafe), float(ki), int(abs_idx), int(seq))
+        elif (infeasible_constraint is None or
+              float(vsafe) < float(infeasible_constraint[2]) - 1e-9 or
+              (abs(float(vsafe) - float(infeasible_constraint[2])) <= 1e-9 and int(seq) < int(infeasible_constraint[5]))):
+          infeasible_constraint = (float(req), float(di), float(vsafe), float(ki), int(abs_idx), int(seq))
 
-      def _probe_positive(req: float) -> bool:
-        return _probe(req) > 1e-3
-
-      max_possible_idx: int | None = None
-      if _probe_positive(constraints[-1][0]):
-        max_possible_idx = len(constraints) - 1
-      elif _probe_positive(constraints[0][0]):
-        lo, hi = 0, len(constraints) - 1
-        while lo < hi:
-          mid = (lo + hi + 1) // 2
-          if _probe_positive(constraints[mid][0]):
-            lo = mid
-          else:
-            hi = mid - 1
-        max_possible_idx = lo
-
-      if max_possible_idx is not None:
-        req, di, vsafe, ki, abs_idx, _ = constraints[max_possible_idx]
-        possible_cap = _probe(req)
+      if feasible_constraint is not None:
+        req, di, vsafe, ki, abs_idx, _ = feasible_constraint
+        possible_cap = cruise_cap_for_required_average_decel(
+          v_ego=float(v_ego),
+          required_decel_mps2=float(req),
+          response_model=response_model,
+          v_cruise_upper=float(v_cruise),
+        )
         if possible_cap < v_cap - 1e-6:
           v_cap = float(possible_cap)
           _apply_anchor((float(di), float(vsafe), float(ki), int(abs_idx)))
 
-      impossible_start = 0 if max_possible_idx is None else (max_possible_idx + 1)
-      if impossible_start < len(constraints):
-        _, imp_di, imp_vsafe, imp_ki, imp_abs_idx, _ = min(
-          constraints[impossible_start:],
-          key=lambda x: (x[2], x[5]),
-        )
+      if infeasible_constraint is not None:
+        _, imp_di, imp_vsafe, imp_ki, imp_abs_idx, _ = infeasible_constraint
         fallback_cap = min(float(v_cruise), float(imp_vsafe))
         if fallback_cap < v_cap - 1e-6:
           v_cap = float(fallback_cap)

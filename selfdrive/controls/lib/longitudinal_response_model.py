@@ -16,6 +16,7 @@ DEFAULT_CRUISE_MIN_ACCEL = -6.0
 DEFAULT_CRUISE_MAX_ACCEL = 5.0
 DEFAULT_COMFORT_BRAKE = 2.5
 CURVE_DECEL_PROBE_DURATION_S = 2.0
+CRUISE_CAP_REQUIRED_DECEL_TOL_MPS2 = 0.02
 
 
 @dataclass(frozen=True)
@@ -229,7 +230,7 @@ def cruise_cap_for_required_average_decel(
   v_ego_stopping: float = 0.25,
   t_idxs = None,
   iterations: int = 10,
-  decel_tol_mps2: float = 0.02,
+  decel_tol_mps2: float = CRUISE_CAP_REQUIRED_DECEL_TOL_MPS2,
 ) -> float:
   v_ego_f = max(0.0, float(v_ego))
   required = max(0.0, float(required_decel_mps2))

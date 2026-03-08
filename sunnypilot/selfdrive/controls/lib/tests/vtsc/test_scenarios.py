@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import math
+import random
 
 import pytest
 from types import SimpleNamespace
@@ -1216,21 +1217,25 @@ def test_strategic_mode_overshoot_phase_offset_ignored_when_reference_speed_is_n
 
 def test_strategic_response_probe_runs_once_for_controlling_constraint(monkeypatch):
   response_model = build_cruise_response_model(min_accel_mps2=-6.0, max_accel_mps2=5.0, actuation_delay_s=0.35)
-  calls = []
+  probe_calls = []
+  threshold_calls = []
 
   def fake_probe(*, v_ego, required_decel_mps2, response_model, v_cruise_upper, **kwargs):
-    calls.append(float(required_decel_mps2))
-    if float(required_decel_mps2) >= 2.2:
-      return 0.0
-    return float(v_cruise_upper) - float(required_decel_mps2)
+    probe_calls.append(float(required_decel_mps2))
+    return 16.5
+
+  def fake_threshold(*, v_ego, cruise_cap, response_model, **kwargs):
+    threshold_calls.append(float(cruise_cap))
+    return 2.01
 
   monkeypatch.setattr(map_strategy, 'cruise_cap_for_required_average_decel', fake_probe)
+  monkeypatch.setattr(map_strategy, 'predict_average_decel_for_cruise_cap', fake_threshold)
 
   candidate = compute_map_cap_candidate(
     mode='strategic',
-    s_list=[30.0, 60.0, 90.0],
+    s_list=[10.0, 80.0, 120.0],
     k_list=[0.020, 0.030, 0.025],
-    vsafe_list=[20.0, 15.0, 14.0],
+    vsafe_list=[22.0, 17.0, 15.0],
     abs_indices=[3, 6, 9],
     v_ego=24.0,
     v_cruise=27.0,
@@ -1250,10 +1255,11 @@ def test_strategic_response_probe_runs_once_for_controlling_constraint(monkeypat
     reference_speed_mps=24.0,
   )
 
-  assert 1 <= len(calls) <= 3
-  assert float(candidate.cap_mps) == pytest.approx(14.0, abs=1e-6)
-  assert float(candidate.anchor_dist_m) == pytest.approx(90.0, abs=1e-6)
-  assert int(candidate.anchor_index) == 9
+  assert threshold_calls == [0.0]
+  assert len(probe_calls) == 1
+  assert float(candidate.cap_mps) == pytest.approx(16.5, abs=1e-6)
+  assert float(candidate.anchor_dist_m) == pytest.approx(80.0, abs=1e-6)
+  assert int(candidate.anchor_index) == 6
 
 
 def test_strategic_response_bounded_probe_matches_bruteforce():
@@ -1317,6 +1323,81 @@ def test_strategic_response_bounded_probe_matches_bruteforce():
   assert float(candidate.cap_mps) == pytest.approx(float(expected_cap), rel=1e-6)
   assert float(candidate.anchor_dist_m) == pytest.approx(float(expected_anchor[0]), abs=1e-6)
   assert int(candidate.anchor_index) == int(expected_anchor[3])
+
+
+def test_strategic_response_single_threshold_matches_bruteforce_randomized():
+  rng = random.Random(0)
+  response_model = build_cruise_response_model(min_accel_mps2=-6.0, max_accel_mps2=5.0, actuation_delay_s=0.35)
+  v_ego = 24.0
+  v_cruise = 27.0
+
+  def bruteforce(s_list, k_list, vsafe_list, abs_indices):
+    v_cap = float(v_cruise)
+    anchor = None
+    for di, ki, vi, abs_idx in zip(s_list, k_list, vsafe_list, abs_indices, strict=False):
+      braking_distance = max(0.0, float(di) - float(v_ego) * float(response_model.actuation_delay_s))
+      if braking_distance <= 1e-3:
+        v_allow = float(vi)
+      elif float(vi) >= float(v_ego) - 1e-6:
+        v_allow = float(v_cruise)
+      else:
+        required_decel = max(0.0, (float(v_ego) * float(v_ego) - float(vi) * float(vi)) / (2.0 * braking_distance))
+        v_allow = map_strategy.cruise_cap_for_required_average_decel(
+          v_ego=float(v_ego),
+          required_decel_mps2=required_decel,
+          response_model=response_model,
+          v_cruise_upper=float(v_cruise),
+        )
+        if v_allow <= 1e-3 and required_decel > 1e-3:
+          v_allow = min(float(v_cruise), float(vi))
+      if anchor is None or v_allow < v_cap - 1e-6:
+        anchor = (float(di), float(vi), float(ki), int(abs_idx))
+      v_cap = min(v_cap, v_allow)
+    return v_cap, anchor
+
+  for _ in range(16):
+    n = rng.randint(2, 8)
+    s = []
+    dist = 0.0
+    for _ in range(n):
+      dist += rng.uniform(8.0, 40.0)
+      s.append(dist)
+    vsafe = []
+    current_vsafe = rng.uniform(12.0, 24.5)
+    for _ in range(n):
+      current_vsafe = max(4.0, current_vsafe - rng.uniform(0.0, 3.5))
+      vsafe.append(current_vsafe)
+    k = [rng.uniform(0.001, 0.03) for _ in range(n)]
+    abs_indices = list(range(n))
+
+    expected_cap, expected_anchor = bruteforce(s, k, vsafe, abs_indices)
+    candidate = compute_map_cap_candidate(
+      mode='strategic',
+      s_list=s,
+      k_list=k,
+      vsafe_list=vsafe,
+      abs_indices=abs_indices,
+      v_ego=v_ego,
+      v_cruise=v_cruise,
+      vis_horizon_s=1.4,
+      vis_margin_m=10.0,
+      severe_vision=False,
+      partial_vision=False,
+      vision_confidence=0.95,
+      conf_lo=0.55,
+      conf_hi=0.85,
+      max_decel=3.5,
+      horizon_limit_m=250.0,
+      response_model=response_model,
+      fixed_lead_time_s=0.0,
+      curve_phase_offset_s=0.0,
+      overshoot_phase_offset_s=0.0,
+      reference_speed_mps=v_ego,
+    )
+
+    assert float(candidate.cap_mps) == pytest.approx(float(expected_cap), rel=1e-6)
+    assert float(candidate.anchor_dist_m) == pytest.approx(float(expected_anchor[0]), abs=1e-6)
+    assert int(candidate.anchor_index) == int(expected_anchor[3])
 
 
 def test_strategic_post_apex_release_helper_state():
