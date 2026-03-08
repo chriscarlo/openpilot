@@ -124,6 +124,7 @@ def main() -> int:
   launch_a_target_samples: deque[float] = deque(maxlen=256)
   launch_block_vtsc = False
   launch_block_lead = False
+  launch_block_throttle = False
   launch_handoff = False
   launch_any_enabled = False
   launch_lcs_path: list[int] = []
@@ -131,7 +132,7 @@ def main() -> int:
   t_start = time.monotonic()
 
   print("watching stop/handoff: Ctrl-C to stop")
-  print("t v aT aE vtsc lead[d,hw] dup mdlL block handoff notes")
+  print("t v aT aE vtsc thr[p] lead[d,hw] dup mdlL block handoff notes")
 
   try:
     while True:
@@ -163,6 +164,14 @@ def main() -> int:
         a_target = float(lp.aTarget)
       except Exception:
         a_target = 0.0
+      try:
+        allow_throttle = bool(lp.allowThrottle)
+      except Exception:
+        allow_throttle = True
+      try:
+        throttle_prob = float(m.meta.disengagePredictions.gasPressProbs[1])
+      except Exception:
+        throttle_prob = float("nan")
       try:
         vtsc_v = float(lpsp.visionTurnSpeedControl.velocity)
       except Exception:
@@ -206,12 +215,15 @@ def main() -> int:
       # VTSC likely limiting if it publishes a cap close to current speed while below usual cruise.
       vtsc_cap_near_ego = math.isfinite(vtsc_v) and (vtsc_v <= v_ego + 0.50)
       planner_not_accel = a_target <= 0.05
+      throttle_gate_active = (not allow_throttle) and (v_ego > 2.5)
 
       block_by_vtsc = control_on and (v_ego < 5.0) and planner_not_accel and vtsc_cap_near_ego
       block_by_lead = control_on and (v_ego < 5.0) and planner_not_accel and lead_close and not vtsc_cap_near_ego
+      block_by_throttle = control_on and planner_not_accel and throttle_gate_active and not vtsc_cap_near_ego and not lead_close
       # Diagnostic versions that ignore enabled-state to help root-cause odd handoff behavior.
       block_by_vtsc_diag = (v_ego < 5.0) and planner_not_accel and vtsc_cap_near_ego
       block_by_lead_diag = (v_ego < 5.0) and planner_not_accel and lead_close and not vtsc_cap_near_ego
+      block_by_throttle_diag = planner_not_accel and throttle_gate_active and not vtsc_cap_near_ego and not lead_close
 
       # Stop->launch handoff tracking
       if prev_standstill and (not standstill):
@@ -221,13 +233,15 @@ def main() -> int:
         launch_a_target_samples.clear()
         launch_block_vtsc = False
         launch_block_lead = False
+        launch_block_throttle = False
         launch_handoff = False
         launch_any_enabled = False
         launch_lcs_path = [long_state]
         print(
           f"{time.strftime('%H:%M:%S')} "
           f"LAUNCH_START v={_fmt(v_ego,2)} lead={_bool(lead_status)} "
-          f"d={_fmt(lead_d_rel,1)} hw={_fmt(headway_s,2)} dup={_bool(lead_dup)} mdlL={model_active_leads} lcs={long_state_name}"
+          f"d={_fmt(lead_d_rel,1)} hw={_fmt(headway_s,2)} dup={_bool(lead_dup)} "
+          f"mdlL={model_active_leads} thr={_bool(allow_throttle)}[{_fmt(throttle_prob,2)}] lcs={long_state_name}"
         )
 
       if standstill:
@@ -251,6 +265,8 @@ def main() -> int:
             launch_block_vtsc = True
           if block_by_lead_diag:
             launch_block_lead = True
+          if block_by_throttle_diag:
+            launch_block_throttle = True
           s = _sign_with_deadband(a_target, deadband=0.10)
           if s != 0:
             if not launch_signs or launch_signs[-1][1] != s:
@@ -276,6 +292,8 @@ def main() -> int:
             summary_notes.append("BLOCK_VTSC")
           if launch_block_lead:
             summary_notes.append("BLOCK_LEAD")
+          if launch_block_throttle:
+            summary_notes.append("BLOCK_THROTTLE")
           if launch_handoff:
             summary_notes.append("HANDOFF_GLITCH")
           # If we handoff from starting->pid and immediately command non-accel at crawl with no close lead,
@@ -305,12 +323,17 @@ def main() -> int:
         notes.append("vtsc_near_ego")
         if planner_not_accel and control_on and v_ego < 8.0:
           alert_notes.append("VTSC_NEAR_EGO_NO_ACCEL")
+      if throttle_gate_active:
+        notes.append("throttle_gate")
       if block_by_vtsc:
         notes.append("BLOCK_VTSC")
         alert_notes.append("BLOCK_VTSC")
       if block_by_lead:
         notes.append("BLOCK_LEAD")
         alert_notes.append("BLOCK_LEAD")
+      if block_by_throttle:
+        notes.append("BLOCK_THROTTLE")
+        alert_notes.append("BLOCK_THROTTLE")
       if handoff_glitch:
         notes.append("HANDOFF_GLITCH")
         alert_notes.append("HANDOFF_GLITCH")
@@ -330,6 +353,7 @@ def main() -> int:
           f"{ts} "
           f"v={_fmt(v_ego,2)} aT={_fmt(a_target,2)} aE={_fmt(a_ego,2)} "
           f"vtsc={_fmt(vtsc_v,2)} "
+          f"thr={_bool(allow_throttle)}[{_fmt(throttle_prob,2)}] "
           f"lead={_bool(lead_status)}[{_fmt(lead_d_rel,1)},{_fmt(headway_s,2)}] "
           f"dup={_bool(lead_dup)} mdlL={model_active_leads} lcs={long_state_name} "
           f"eng={_bool(control_on)} blockV={_bool(block_by_vtsc)} handoff={_bool(handoff_glitch)} "

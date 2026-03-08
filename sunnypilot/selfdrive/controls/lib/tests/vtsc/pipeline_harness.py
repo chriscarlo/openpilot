@@ -11,6 +11,12 @@ from typing import Any, Dict, Iterable, Optional
 import numpy as np
 
 from openpilot.selfdrive.modeld.constants import ModelConstants
+from openpilot.selfdrive.controls.lib.longitudinal_response_model import (
+  DEFAULT_CRUISE_MAX_ACCEL,
+  DEFAULT_CRUISE_MIN_ACCEL,
+  build_cruise_response_model,
+  clip_cruise_speed_profile,
+)
 
 
 @dataclass
@@ -137,17 +143,26 @@ def install_fake_long_mpc(*, module_name: str = 'openpilot.selfdrive.controls.li
       self._v0 = float(v)
       self._a0 = float(a)
 
+    def get_cruise_response_model(self, v_ego: float, *, actuation_delay_s: float = 0.0):
+      return build_cruise_response_model(
+        min_accel_mps2=DEFAULT_CRUISE_MIN_ACCEL,
+        max_accel_mps2=DEFAULT_CRUISE_MAX_ACCEL,
+        actuation_delay_s=actuation_delay_s,
+      )
+
     def update(self, radar_state, v_cruise: float, x, v, a, j, personality=None) -> None:
       self.last_v_cruise = float(v_cruise)
       t = np.array(ModelConstants.T_IDXS, dtype=float)
       # Mimic the real long MPC "cruise obstacle" envelope clipping (ACC mode) at a high level.
       # This does not attempt to reproduce the full solver; it only exposes the key confounder:
       # v_cruise is clipped by accel/decel envelopes, so a sharp VTSC cap step-down is softened.
-      a_cruise_min = -6.0
-      a_cruise_max = 5.0
-      v_lower = self._v0 + (t * a_cruise_min * 1.05)
-      v_upper = self._v0 + (t * a_cruise_max * 1.05)
-      v_cruise_clipped = np.clip(np.full_like(t, float(v_cruise)), v_lower, v_upper)
+      response_model = self.get_cruise_response_model(self._v0)
+      v_lower, v_upper, v_cruise_clipped = clip_cruise_speed_profile(
+        v_ego=self._v0,
+        v_cruise=v_cruise,
+        t_idxs=t,
+        response_model=response_model,
+      )
       self.last_v_lower = v_lower
       self.last_v_upper = v_upper
       self.last_v_cruise_clipped = v_cruise_clipped

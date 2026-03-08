@@ -37,6 +37,8 @@ if str(REPO_ROOT) not in sys.path:
   sys.path.insert(0, str(REPO_ROOT))
 
 from openpilot.tools.lib.logreader import LogReader
+from openpilot.common.realtime import DT_MDL
+from openpilot.selfdrive.controls.lib.longitudinal_response_model import build_cruise_response_model
 import sunnypilot.selfdrive.controls.lib.vision_turn_controller as vtc
 from sunnypilot.selfdrive.controls.lib.vision_turn_controller import VisionTurnController
 
@@ -59,6 +61,12 @@ class Episode:
   ttfdecel_s: float | None
   min_v_turn: float
   max_v_ego: float
+
+
+def _default_replay_response_model():
+  # Reuse the shared cruise-response helper so offline controller replays stay
+  # aligned with planner-side strategic reachability assumptions.
+  return build_cruise_response_model(actuation_delay_s=float(DT_MDL))
 
 
 def _discover_rlogs(inputs: List[str]) -> List[Path]:
@@ -147,7 +155,9 @@ def _mk_controller_deterministic() -> VisionTurnController:
 
     mp.get.side_effect = _get
     MockParams.return_value = mp
-    return VisionTurnController(MockCP())
+    ctrl = VisionTurnController(MockCP())
+    ctrl.set_longitudinal_response_model(_default_replay_response_model())
+    return ctrl
 
 
 def _estimate_v_cruise_from_vtscdbg(rlog_path: Path) -> float | None:

@@ -11,6 +11,14 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.modeld.constants import index_function
 from openpilot.selfdrive.controls.radard import _LEAD_ACCEL_TAU
 from openpilot.selfdrive.controls.lib.lead_role_classifier import LeadRoleClassifier
+from openpilot.selfdrive.controls.lib.longitudinal_response_model import (
+  DEFAULT_COMFORT_BRAKE,
+  DEFAULT_CRUISE_MAX_ACCEL,
+  DEFAULT_CRUISE_MIN_ACCEL,
+  CruiseResponseModel,
+  build_cruise_response_model,
+  clip_cruise_speed_profile,
+)
 
 from openpilot.sunnypilot.selfdrive.controls.lib.vibe_personality.vibe_personality import VibePersonalityController
 
@@ -57,10 +65,10 @@ T_IDXS_LST = [index_function(idx, max_val=MAX_T, max_idx=N) for idx in range(N+1
 T_IDXS = np.array(T_IDXS_LST)
 FCW_IDXS = T_IDXS < 5.0
 T_DIFFS = np.diff(T_IDXS, prepend=[0.])
-COMFORT_BRAKE = 2.5
+COMFORT_BRAKE = DEFAULT_COMFORT_BRAKE
 STOP_DISTANCE = 6.0
-CRUISE_MIN_ACCEL = -6.0
-CRUISE_MAX_ACCEL = 5.0
+CRUISE_MIN_ACCEL = DEFAULT_CRUISE_MIN_ACCEL
+CRUISE_MAX_ACCEL = DEFAULT_CRUISE_MAX_ACCEL
 
 def get_jerk_factor(personality=log.LongitudinalPersonality.standard):
   if personality==log.LongitudinalPersonality.relaxed:
@@ -258,6 +266,10 @@ class LongitudinalMpc:
     self.status = False
     self.crash_cnt = 0.0
     self.solution_status = 0
+    self.last_cruise_response_model = None
+    self.last_v_lower = None
+    self.last_v_upper = None
+    self.last_v_cruise_clipped = None
     # timers
     self.solve_time = 0.0
     self.time_qp_solution = 0.0
@@ -335,6 +347,22 @@ class LongitudinalMpc:
     lead_xv = self.extrapolate_lead(x_lead, v_lead, a_lead, a_lead_tau)
     return lead_xv
 
+  def get_cruise_response_model(self, v_ego: float, *, actuation_delay_s: float = 0.0) -> CruiseResponseModel:
+    if self.vibe_controller.is_accel_enabled():
+      accel_limits = self.vibe_controller.get_accel_limits(v_ego)
+      if accel_limits is not None:
+        min_accel = float(accel_limits[0])
+      else:
+        min_accel = CRUISE_MIN_ACCEL
+    else:
+      min_accel = CRUISE_MIN_ACCEL
+    return build_cruise_response_model(
+      min_accel_mps2=min_accel,
+      max_accel_mps2=CRUISE_MAX_ACCEL,
+      comfort_brake_mps2=COMFORT_BRAKE,
+      actuation_delay_s=actuation_delay_s,
+    )
+
   def update(self, radarstate, v_cruise, x, v, a, j, personality=log.LongitudinalPersonality.standard):
     v_ego = self.x0[1]
     now = time.monotonic()
@@ -354,17 +382,8 @@ class LongitudinalMpc:
     self.lead_role_debug = lead_role_debug
     self.status = control_lead0.status or control_lead1.status
 
-    # Get acceleration limits
-    if self.vibe_controller.is_accel_enabled():
-      accel_limits = self.vibe_controller.get_accel_limits(v_ego)
-      if accel_limits is not None:
-        min_accel = accel_limits[0]
-      else:
-        min_accel = CRUISE_MIN_ACCEL
-    else:
-      min_accel = CRUISE_MIN_ACCEL
-
-    a_cruise_min = min_accel
+    response_model = self.get_cruise_response_model(v_ego)
+    self.last_cruise_response_model = response_model
 
     lead_xv_0 = self.process_lead(control_lead0)
     lead_xv_1 = self.process_lead(control_lead1)
@@ -384,12 +403,15 @@ class LongitudinalMpc:
 
       # Fake an obstacle for cruise, this ensures smooth acceleration to set speed
       # when the leads are no factor.
-      v_lower = v_ego + (T_IDXS * a_cruise_min * 1.05)
-      # TODO does this make sense when max_a is negative?
-      v_upper = v_ego + (T_IDXS * CRUISE_MAX_ACCEL * 1.05)
-      v_cruise_clipped = np.clip(v_cruise * np.ones(N+1),
-                                 v_lower,
-                                 v_upper)
+      v_lower, v_upper, v_cruise_clipped = clip_cruise_speed_profile(
+        v_ego=v_ego,
+        v_cruise=v_cruise,
+        t_idxs=T_IDXS,
+        response_model=response_model,
+      )
+      self.last_v_lower = v_lower
+      self.last_v_upper = v_upper
+      self.last_v_cruise_clipped = v_cruise_clipped
       cruise_obstacle = np.cumsum(T_DIFFS * v_cruise_clipped) + get_safe_obstacle_distance(v_cruise_clipped, t_follow)
       x_obstacles = np.column_stack([lead_0_obstacle, lead_1_obstacle, cruise_obstacle])
       self.source = SOURCES[np.argmin(x_obstacles[0])]
@@ -398,6 +420,9 @@ class LongitudinalMpc:
       x[:], v[:], a[:], j[:] = 0.0, 0.0, 0.0, 0.0
 
     elif self.mode == 'blended':
+      self.last_v_lower = None
+      self.last_v_upper = None
+      self.last_v_cruise_clipped = None
       self.params[:,5] = 1.0
 
       x_obstacles = np.column_stack([lead_0_obstacle,

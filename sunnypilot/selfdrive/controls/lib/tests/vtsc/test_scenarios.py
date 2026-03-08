@@ -5,7 +5,18 @@ import pytest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from sunnypilot.selfdrive.controls.lib.vision_turn_controller import curvature_to_speed, VTURN_HOLD_S
+from sunnypilot.selfdrive.controls.lib.vision_turn_controller import (
+  curvature_to_speed,
+  SEVERE_OVERSHOOT_SPEED_SCALE_MIN,
+  VTURN_HOLD_S,
+)
+from sunnypilot.selfdrive.controls.lib.vtsc_map_strategy import (
+  MapCapCandidate,
+  MapStrategyState,
+  compute_map_cap_candidate,
+  evaluate_map_strategy,
+)
+from openpilot.selfdrive.controls.lib.longitudinal_response_model import build_cruise_response_model
 from pathlib import Path
 
 from .harness import Step, simulate_sequence, simulate_sequence_trace, mk_vtsc_with_params, load_steps_from_rlog
@@ -378,7 +389,20 @@ def test_severe_confidence_overshoot_is_mildly_conservative_for_blind_curves():
   v_cruise = 26.8
   dt = 0.05
   conf = 0.05
-  k = 0.0035
+  # Choose curvature just past the point where the severe-confidence overshoot scaling flips a
+  # "no cap" case into a small cap reduction. This keeps the test tied to the behavior it intends
+  # to guard even if the global curvature->speed fit changes slightly.
+  target_scaled_speed = v0 - 0.15
+  lo, hi = 1e-4, 0.02
+  for _ in range(80):
+    mid = 0.5 * (lo + hi)
+    if float(SEVERE_OVERSHOOT_SPEED_SCALE_MIN) * float(curvature_to_speed(mid)) <= target_scaled_speed:
+      hi = mid
+    else:
+      lo = mid
+  k = hi
+  assert float(curvature_to_speed(k)) > v0
+  assert float(SEVERE_OVERSHOOT_SPEED_SCALE_MIN) * float(curvature_to_speed(k)) < v0
 
   trace = simulate_sequence_trace(
     steps=[Step(curvature=k, curvature_ahead=k, confidence=conf) for _ in range(5)],
@@ -448,6 +472,27 @@ def _build_map_polyline(
   return pts
 
 
+def _build_map_profile_polyline(
+  lat0: float, lon0: float,
+  curvature_profile: list[float],
+  *,
+  profile_start_m: float = 0.0,
+  total_m: float = 1500.0,
+  step_m: float = 10.0,
+):
+  pts = []
+  n = int(total_m // step_m)
+  profile_start_idx = int(round(float(profile_start_m) / float(step_m)))
+  for i in range(n + 1):
+    profile_idx = i - profile_start_idx
+    if 0 <= profile_idx < len(curvature_profile):
+      k = float(max(0.0, curvature_profile[profile_idx]))
+    else:
+      k = 0.0
+    pts.append((lat0 + (i * step_m) / 111000.0, lon0, k))
+  return pts
+
+
 def _run_map_latency_trace(
   gps_delay_s: float = 0.0,
   map_hold_s: float = 0.0,
@@ -485,12 +530,12 @@ def _run_map_latency_trace(
 
   def _gps():
     d = max(0.0, state['d'] - float(gps_delay_s) * float(v_ego_mps))
-    return (lat0 + d / 111000.0, lon0)
+    return (lat0 + d / 111000.0, lon0, None)
 
   def _map_pts():
     return map_stale if state['t'] < float(map_hold_s) else map_base
 
-  vtsc._get_last_gps = _gps
+  vtsc._get_last_gps_pose = _gps
   vtsc._load_map_curvatures = _map_pts
 
   trace = []
@@ -598,24 +643,134 @@ def test_stale_map_recovery_avoids_brake_accel_oscillation():
   assert _count_accel_sign_flips(pre + post) <= 1
 
 
+def _enable_map_lookahead(vtsc, monkeypatch):
+  orig_get_bool = vtsc._get_bool_param
+
+  def _get_bool(key: str, default: bool = False) -> bool:
+    if key == 'MTSCLookaheadEnabled':
+      return True
+    return bool(orig_get_bool(key, default))
+
+  monkeypatch.setattr(vtsc, "_get_bool_param", _get_bool, raising=True)
+
+
+def _set_map_strategy(vtsc, monkeypatch, mode: str):
+  orig_get_string = vtsc._get_string_param
+
+  def _get_string(key: str, default: str = "") -> str:
+    if key == 'VTSCMapStrategy':
+      return mode
+    return str(orig_get_string(key, default))
+
+  vtsc._map_strategy_mode = mode
+  monkeypatch.setattr(vtsc, "_get_string_param", _get_string, raising=True)
+
+
+def _set_longitudinal_response_model(vtsc, *, min_accel: float = -6.0, max_accel: float = 5.0, delay_s: float = 0.0):
+  vtsc.set_longitudinal_response_model(build_cruise_response_model(
+    min_accel_mps2=min_accel,
+    max_accel_mps2=max_accel,
+    actuation_delay_s=delay_s,
+  ))
+
+
+def _patch_map_tail_inputs(vtsc, monkeypatch, lat0: float, lon0: float, pts):
+  monkeypatch.setattr(vtsc, "_get_last_gps_pose", lambda: (lat0, lon0, None), raising=True)
+  monkeypatch.setattr(vtsc, "_load_map_curvatures", lambda: pts, raising=True)
+
+
+def _run_strategic_map_snapshot(
+  monkeypatch,
+  *,
+  curve_phase_s: float = 0.0,
+  overshoot_phase_s: float = 0.0,
+  apex_exit_phase_s: float = 0.0,
+  v0: float = 24.0,
+  v_cruise: float = 27.0,
+  current_curve: float = 0.0,
+  curvature_ahead: float = 0.0,
+  confidence: float = 0.95,
+  map_curve_start_m: float = 50.0,
+  map_curve_end_m: float = 70.0,
+  map_curve_k: float = 0.02,
+  planner_delay_s: float = 0.35,
+):
+  lat0, lon0 = 37.0, -122.0
+  step_deg = 10.0 / 111000.0
+
+  vtsc = mk_vtsc_with_params()
+  _enable_map_lookahead(vtsc, monkeypatch)
+  _set_map_strategy(vtsc, monkeypatch, 'strategic')
+  _set_longitudinal_response_model(vtsc, min_accel=-6.0, delay_s=planner_delay_s)
+  vtsc._curve_phase_offset_s = float(curve_phase_s)
+  vtsc._overshoot_phase_offset_s = float(overshoot_phase_s)
+  vtsc._apex_exit_phase_offset_s = float(apex_exit_phase_s)
+
+  pts = []
+  for i in range(80):
+    dist_m = float(i * 10.0)
+    k = map_curve_k if (map_curve_start_m <= dist_m <= map_curve_end_m) else 0.0
+    pts.append((lat0 + i * step_deg, lon0, k))
+  _patch_map_tail_inputs(vtsc, monkeypatch, lat0, lon0, pts)
+
+  snap = simulate_sequence(
+    steps=[Step(curvature=current_curve, curvature_ahead=curvature_ahead, confidence=confidence) for _ in range(10)],
+    vtsc=vtsc,
+    v0_mps=v0,
+    v_cruise_mps=v_cruise,
+    dt=0.05,
+  )
+  assert snap
+  assert snap['strategy_mode'] == 'strategic'
+  return snap
+
+
+def _run_profile_map_snapshot(
+  monkeypatch,
+  *,
+  mode: str,
+  map_profile: list[float],
+  profile_start_m: float = 0.0,
+  v0: float = 22.0,
+  v_cruise: float = 27.0,
+  current_curve: float = 0.0015,
+  curvature_ahead: float = 0.0025,
+  confidence: float = 0.95,
+  planner_delay_s: float = 0.35,
+):
+  lat0, lon0 = 37.0, -122.0
+  vtsc = mk_vtsc_with_params()
+  _enable_map_lookahead(vtsc, monkeypatch)
+  _set_map_strategy(vtsc, monkeypatch, mode)
+  _set_longitudinal_response_model(vtsc, min_accel=-6.0, delay_s=planner_delay_s)
+
+  pts = _build_map_profile_polyline(lat0, lon0, map_profile, profile_start_m=profile_start_m)
+  _patch_map_tail_inputs(vtsc, monkeypatch, lat0, lon0, pts)
+
+  snap = simulate_sequence(
+    steps=[Step(curvature=current_curve, curvature_ahead=curvature_ahead, confidence=confidence) for _ in range(10)],
+    vtsc=vtsc,
+    v0_mps=v0,
+    v_cruise_mps=v_cruise,
+    dt=0.05,
+  )
+  assert snap
+  assert snap['strategy_mode'] == mode
+  return snap
+
+
 def test_map_lookahead_cap_applies_when_available(monkeypatch):
   # Patch controller to provide GPS + synthetic map tail; assert map tail active and cap < cruise
   v0 = 25.0
   v_cruise = 30.0
   vtsc = mk_vtsc_with_params()
-  # Enable map lookahead explicitly for this test (mk_vtsc_with_params defaults most toggles off).
-  orig_get_bool = vtsc._get_bool_param
-  def _get_bool(key: str, default: bool = False) -> bool:
-    if key == 'MTSCLookaheadEnabled':
-      return True
-    return bool(orig_get_bool(key, default))
-  monkeypatch.setattr(vtsc, "_get_bool_param", _get_bool, raising=True)
+  _enable_map_lookahead(vtsc, monkeypatch)
+  _set_map_strategy(vtsc, monkeypatch, 'advisory')
   # Enable map lookahead via get_bool and patch data providers
-  def _gps():
-    return (37.0, -122.0)
+  lat0, lon0 = 37.0, -122.0
   def _map_pts():
     # Construct ~10 points with increasing curvature ahead (~0.0 near, then 0.008 farther)
-    base_lat, base_lon = 37.0, -122.0
+    base_lat, base_lon = lat0, lon0
     pts = []
     for i in range(10):
       lat = base_lat + 0.0001 * i
@@ -623,8 +778,7 @@ def test_map_lookahead_cap_applies_when_available(monkeypatch):
       k = 0.0 if i < 3 else 0.008
       pts.append((lat, lon, k))
     return pts
-  monkeypatch.setattr(vtsc, "_get_last_gps", _gps, raising=True)
-  monkeypatch.setattr(vtsc, "_load_map_curvatures", _map_pts, raising=True)
+  _patch_map_tail_inputs(vtsc, monkeypatch, lat0, lon0, _map_pts())
   # Run straight/clear steps; map tail should cap
   snap = simulate_sequence(
     steps=_steps_constant(curvature=0.0, confidence=0.95, n=80),
@@ -637,6 +791,9 @@ def test_map_lookahead_cap_applies_when_available(monkeypatch):
   assert bool(snap['map_tail_active']) is True
   # Cap should be below cruise when curvature ahead is present
   assert float(snap['map_tail_cap']) <= v_cruise + 1e-6
+  assert snap['strategy_mode'] == 'advisory'
+  assert float(snap['map_advisory_cap']) <= v_cruise + 1e-6
+  assert float(snap['map_strategic_cap']) >= float(snap['map_advisory_cap']) - 1e-6
 
 
 def test_offramp_short_tight_curve_map_cap_applies_when_vision_lost(monkeypatch):
@@ -658,14 +815,7 @@ def test_offramp_short_tight_curve_map_cap_applies_when_vision_lost(monkeypatch)
   lon0 = -(120.0 + 47.0 / 60.0 + 20.2 / 3600.0)
 
   vtsc = mk_vtsc_with_params()
-
-  # Enable map lookahead explicitly for this test (mk_vtsc_with_params defaults most toggles off).
-  orig_get_bool = vtsc._get_bool_param
-  def _get_bool(key: str, default: bool = False) -> bool:
-    if key == 'MTSCLookaheadEnabled':
-      return True
-    return bool(orig_get_bool(key, default))
-  monkeypatch.setattr(vtsc, "_get_bool_param", _get_bool, raising=True)
+  _enable_map_lookahead(vtsc, monkeypatch)
 
   # Synthetic map curvature polyline:
   # - Straight segment
@@ -678,8 +828,7 @@ def test_offramp_short_tight_curve_map_cap_applies_when_vision_lost(monkeypatch)
     dist_m = float(i * 10.0)
     k = k_curve if (20.0 <= dist_m <= 40.0) else 0.0
     pts.append((lat0 + i * step_deg, lon0, k))
-  monkeypatch.setattr(vtsc, "_get_last_gps", lambda: (lat0, lon0), raising=True)
-  monkeypatch.setattr(vtsc, "_load_map_curvatures", lambda: pts, raising=True)
+  _patch_map_tail_inputs(vtsc, monkeypatch, lat0, lon0, pts)
 
   # Simulate a brief "vision lost" window with near-zero model curvature (can't see the ramp curve).
   trace = simulate_sequence_trace(
@@ -703,17 +852,445 @@ def test_offramp_short_tight_curve_map_cap_applies_when_vision_lost(monkeypatch)
   assert trace[0]['v_turn'] <= v_expected_10m + 0.75
 
 
+def test_partial_occlusion_blends_map_tail_start_for_short_hidden_curve(monkeypatch):
+  v0 = 18.0
+  v_cruise = 22.0
+  dt = 0.05
+  lat0, lon0 = 37.0, -122.0
+  step_deg = 10.0 / 111000.0
+  k_curve = 0.02
+
+  vtsc = mk_vtsc_with_params()
+  _enable_map_lookahead(vtsc, monkeypatch)
+  _set_map_strategy(vtsc, monkeypatch, 'advisory')
+
+  pts = []
+  for i in range(80):
+    dist_m = float(i * 10.0)
+    k = k_curve if (20.0 <= dist_m <= 30.0) else 0.0
+    pts.append((lat0 + i * step_deg, lon0, k))
+  _patch_map_tail_inputs(vtsc, monkeypatch, lat0, lon0, pts)
+
+  trace = simulate_sequence_trace(
+    steps=[Step(curvature=0.0, curvature_ahead=0.0, confidence=0.95) for _ in range(10)] +
+          [Step(curvature=0.0, curvature_ahead=0.0, confidence=0.60) for _ in range(8)],
+    vtsc=vtsc,
+    v0_mps=v0,
+    v_cruise_mps=v_cruise,
+    dt=dt,
+    integrate_ego=False,
+  )
+  assert trace
+
+  snap = vtsc.snapshot_debug_state()
+  assert snap['vision_status'] == 'PARTIAL'
+  assert bool(snap['map_tail_active']) is True
+  assert float(snap['map_tail_cap']) < v_cruise - 1e-3
+  assert float(snap['map_tail_start_m']) > 10.0
+  assert float(snap['map_tail_start_m']) < (v0 * float(snap['vis_horizon_s']) + 10.0) - 1e-3
+  assert snap['active_cap'] == 'map'
+
+
+def test_partial_occlusion_keeps_tighter_map_cap_when_visible_curve_is_looser(monkeypatch):
+  v0 = 18.0
+  v_cruise = 22.0
+  dt = 0.05
+  lat0, lon0 = 37.0, -122.0
+  step_deg = 10.0 / 111000.0
+  k_curve = 0.02
+
+  vtsc = mk_vtsc_with_params()
+  _enable_map_lookahead(vtsc, monkeypatch)
+  _set_map_strategy(vtsc, monkeypatch, 'advisory')
+
+  pts = []
+  for i in range(80):
+    dist_m = float(i * 10.0)
+    k = k_curve if (20.0 <= dist_m <= 40.0) else 0.0
+    pts.append((lat0 + i * step_deg, lon0, k))
+  _patch_map_tail_inputs(vtsc, monkeypatch, lat0, lon0, pts)
+
+  trace = simulate_sequence_trace(
+    steps=[Step(curvature=0.0, curvature_ahead=0.0, confidence=0.95) for _ in range(10)] +
+          [Step(curvature=0.0, curvature_ahead=0.008, confidence=0.60) for _ in range(8)],
+    vtsc=vtsc,
+    v0_mps=v0,
+    v_cruise_mps=v_cruise,
+    dt=dt,
+    integrate_ego=False,
+  )
+  assert trace
+
+  snap = vtsc.snapshot_debug_state()
+  assert snap['vision_status'] == 'PARTIAL'
+  assert bool(snap['map_tail_active']) is True
+  assert snap['map_tail_reason'] == 'applied'
+  assert float(snap['cap_map_vmin']) > 0.0
+  assert float(snap['cap_map_vmin']) < float(snap['cap_visible_vmin']) - 1e-3
+  assert snap['active_cap'] == 'map'
+  assert float(snap['vtsc_cmd']) < float(snap['cap_visible_vmin']) - 1e-3
+
+
+def test_strategic_mode_applies_map_floor_inside_visible_horizon(monkeypatch):
+  v0 = 18.0
+  v_cruise = 22.0
+  dt = 0.05
+  lat0, lon0 = 37.0, -122.0
+  step_deg = 10.0 / 111000.0
+  k_curve = 0.02
+
+  vtsc = mk_vtsc_with_params()
+  _enable_map_lookahead(vtsc, monkeypatch)
+  _set_map_strategy(vtsc, monkeypatch, 'strategic')
+  _set_longitudinal_response_model(vtsc, min_accel=-6.0, delay_s=0.35)
+
+  pts = []
+  for i in range(80):
+    dist_m = float(i * 10.0)
+    k = k_curve if (20.0 <= dist_m <= 30.0) else 0.0
+    pts.append((lat0 + i * step_deg, lon0, k))
+  _patch_map_tail_inputs(vtsc, monkeypatch, lat0, lon0, pts)
+
+  snap = simulate_sequence(
+    steps=[Step(curvature=0.0, curvature_ahead=0.0, confidence=0.95) for _ in range(12)],
+    vtsc=vtsc,
+    v0_mps=v0,
+    v_cruise_mps=v_cruise,
+    dt=dt,
+  )
+  assert snap
+  assert snap['strategy_mode'] == 'strategic'
+  assert bool(snap['map_tail_active']) is True
+  assert bool(snap['map_floor_active']) is True
+  assert float(snap['map_tail_start_m']) <= 1e-6
+  assert float(snap['map_strategic_cap']) < v_cruise - 1e-3
+  assert float(snap['map_advisory_cap']) >= v_cruise - 1e-3
+  assert snap['active_cap'] == 'map'
+  assert float(snap['vtsc_cmd']) < v_cruise - 1e-3
+  assert float(snap['planner_min_accel_mps2']) == pytest.approx(-6.0, abs=1e-6)
+  assert float(snap['planner_response_delay_s']) == pytest.approx(0.35, abs=1e-6)
+
+
+def test_strategic_mode_releases_map_floor_on_counterevidence_dwell(monkeypatch):
+  v0 = 18.0
+  v_cruise = 22.0
+  dt = 0.05
+  lat0, lon0 = 37.0, -122.0
+  step_deg = 10.0 / 111000.0
+  k_curve = 0.02
+
+  vtsc = mk_vtsc_with_params()
+  _enable_map_lookahead(vtsc, monkeypatch)
+  _set_map_strategy(vtsc, monkeypatch, 'strategic')
+  _set_longitudinal_response_model(vtsc, min_accel=-6.0, delay_s=0.35)
+
+  pts = []
+  for i in range(80):
+    dist_m = float(i * 10.0)
+    k = k_curve if (20.0 <= dist_m <= 40.0) else 0.0
+    pts.append((lat0 + i * step_deg, lon0, k))
+  _patch_map_tail_inputs(vtsc, monkeypatch, lat0, lon0, pts)
+
+  snap = simulate_sequence(
+    steps=[Step(curvature=0.0, curvature_ahead=0.008, confidence=0.95) for _ in range(22)],
+    vtsc=vtsc,
+    v0_mps=v0,
+    v_cruise_mps=v_cruise,
+    dt=dt,
+  )
+  assert snap
+  assert snap['strategy_mode'] == 'strategic'
+  assert bool(snap['vision_relax_allowed']) is True
+  assert snap['vision_relax_reason'] in ('counterevidence_dwell', 'post_apex_release')
+  assert bool(snap['map_floor_active']) is False
+  assert snap['strategy_state'] == 'vision_owns'
+  assert snap['active_cap'] == 'visible'
+  assert float(snap['vision_local_cap']) > float(snap['map_strategic_cap']) + 0.5
+
+
+def test_strategic_mode_uses_planner_response_model_not_vtsc_max_decel(monkeypatch):
+  v0 = 24.0
+  v_cruise = 27.0
+  dt = 0.05
+  lat0, lon0 = 37.0, -122.0
+  step_deg = 10.0 / 111000.0
+  k_curve = 0.02
+
+  def run_case(vtsc_max_decel: float):
+    vtsc = mk_vtsc_with_params()
+    _enable_map_lookahead(vtsc, monkeypatch)
+    _set_map_strategy(vtsc, monkeypatch, 'strategic')
+    _set_longitudinal_response_model(vtsc, min_accel=-6.0, delay_s=0.40)
+    vtsc._max_decel = float(vtsc_max_decel)
+
+    pts = []
+    for i in range(80):
+      dist_m = float(i * 10.0)
+      k = k_curve if (50.0 <= dist_m <= 70.0) else 0.0
+      pts.append((lat0 + i * step_deg, lon0, k))
+    _patch_map_tail_inputs(vtsc, monkeypatch, lat0, lon0, pts)
+
+    snap = simulate_sequence(
+      steps=[Step(curvature=0.0, curvature_ahead=0.0, confidence=0.95) for _ in range(8)],
+      vtsc=vtsc,
+      v0_mps=v0,
+      v_cruise_mps=v_cruise,
+      dt=dt,
+    )
+    return snap
+
+  snap_low = run_case(1.0)
+  snap_high = run_case(7.0)
+  assert float(snap_low['map_strategic_cap']) == pytest.approx(float(snap_high['map_strategic_cap']), abs=1e-6)
+  assert float(snap_low['planner_min_accel_mps2']) == pytest.approx(-6.0, abs=1e-6)
+  assert float(snap_high['planner_min_accel_mps2']) == pytest.approx(-6.0, abs=1e-6)
+
+
+def test_strategic_mode_tightens_when_planner_delay_increases(monkeypatch):
+  v0 = 24.0
+  v_cruise = 27.0
+  dt = 0.05
+  lat0, lon0 = 37.0, -122.0
+  step_deg = 10.0 / 111000.0
+  k_curve = 0.02
+
+  def run_case(delay_s: float):
+    vtsc = mk_vtsc_with_params()
+    _enable_map_lookahead(vtsc, monkeypatch)
+    _set_map_strategy(vtsc, monkeypatch, 'strategic')
+    _set_longitudinal_response_model(vtsc, min_accel=-6.0, delay_s=delay_s)
+
+    pts = []
+    for i in range(80):
+      dist_m = float(i * 10.0)
+      k = k_curve if (50.0 <= dist_m <= 70.0) else 0.0
+      pts.append((lat0 + i * step_deg, lon0, k))
+    _patch_map_tail_inputs(vtsc, monkeypatch, lat0, lon0, pts)
+
+    snap = simulate_sequence(
+      steps=[Step(curvature=0.0, curvature_ahead=0.0, confidence=0.95) for _ in range(8)],
+      vtsc=vtsc,
+      v0_mps=v0,
+      v_cruise_mps=v_cruise,
+      dt=dt,
+    )
+    return snap
+
+  snap_fast = run_case(0.10)
+  snap_slow = run_case(1.00)
+  assert float(snap_slow['map_strategic_cap']) < float(snap_fast['map_strategic_cap']) - 1e-3
+  assert float(snap_slow['planner_response_delay_s']) == pytest.approx(1.0, abs=1e-6)
+
+
+def test_strategic_mode_curve_phase_offset_shifts_map_floor_timing(monkeypatch):
+  snap_early = _run_strategic_map_snapshot(monkeypatch, curve_phase_s=-2.0, overshoot_phase_s=0.0)
+  snap_late = _run_strategic_map_snapshot(monkeypatch, curve_phase_s=2.0, overshoot_phase_s=0.0)
+
+  assert float(snap_early['map_strategic_cap']) < float(snap_late['map_strategic_cap']) - 0.5
+  assert float(snap_early['vtsc_cmd']) < float(snap_late['vtsc_cmd']) - 0.5
+
+
+def test_strategic_mode_overshoot_phase_offset_shifts_tighter_map_floor_timing(monkeypatch):
+  snap_early = _run_strategic_map_snapshot(monkeypatch, curve_phase_s=0.0, overshoot_phase_s=-2.0)
+  snap_late = _run_strategic_map_snapshot(monkeypatch, curve_phase_s=0.0, overshoot_phase_s=2.0)
+
+  assert float(snap_early['map_strategic_cap']) < float(snap_late['map_strategic_cap']) - 0.5
+  assert float(snap_early['vtsc_cmd']) < float(snap_late['vtsc_cmd']) - 0.5
+
+
+def test_strategic_mode_uses_hidden_apex_profile_for_blind_rising_curve(monkeypatch):
+  # Synthetic blind-curve profile:
+  # - shallow entry geometry
+  # - much tighter hidden apex at ~30 m
+  # - unwind after the apex
+  # Vision is still effectively blind in this frame, so the map profile is the only
+  # source that can expose the hidden entry->apex delta. Advisory mode only plans from
+  # beyond the visible-handoff window, so it largely sees the unwind. Strategic mode
+  # should still hold the tighter hidden-apex floor.
+  map_profile = [
+    0.0,    # ego point
+    0.0015, # 10 m: shallow entry
+    0.0030, # 20 m: shallow entry
+    0.0200, # 30 m: hidden apex
+    0.0080, # 40 m: unwind
+    0.0030, # 50 m: unwind
+    0.0,
+  ]
+
+  advisory_snap = _run_profile_map_snapshot(
+    monkeypatch,
+    mode='advisory',
+    map_profile=map_profile,
+    v0=22.0,
+    v_cruise=27.0,
+    current_curve=0.0,
+    curvature_ahead=0.0,
+  )
+  strategic_snap = _run_profile_map_snapshot(
+    monkeypatch,
+    mode='strategic',
+    map_profile=map_profile,
+    v0=22.0,
+    v_cruise=27.0,
+    current_curve=0.0,
+    curvature_ahead=0.0,
+  )
+
+  # The synthetic map profile should actually create a materially tighter hidden-apex floor.
+  assert float(advisory_snap['map_strategic_cap']) < float(advisory_snap['map_advisory_cap']) - 1.0
+  # Strategic mode should select that tighter floor, while advisory stays materially looser.
+  assert float(strategic_snap['vtsc_cmd']) < float(advisory_snap['vtsc_cmd']) - 1.0
+  assert bool(strategic_snap['map_floor_active']) is True
+  assert float(strategic_snap['map_floor_anchor_dist_m']) <= 35.0
+  assert float(strategic_snap['map_floor_anchor_k']) >= 0.018
+
+
+def test_strategic_mode_overshoot_phase_offset_ignored_when_reference_speed_is_not_tighter():
+  k_curve = 0.02
+  vsafe = float(curvature_to_speed(k_curve))
+  response_model = build_cruise_response_model(min_accel_mps2=-6.0, max_accel_mps2=5.0, actuation_delay_s=0.35)
+
+  candidate_early = compute_map_cap_candidate(
+    mode='strategic',
+    s_list=[60.0],
+    k_list=[k_curve],
+    vsafe_list=[vsafe],
+    abs_indices=[6],
+    v_ego=24.0,
+    v_cruise=27.0,
+    vis_horizon_s=1.4,
+    vis_margin_m=10.0,
+    severe_vision=False,
+    partial_vision=False,
+    vision_confidence=0.95,
+    conf_lo=0.55,
+    conf_hi=0.85,
+    max_decel=3.5,
+    horizon_limit_m=250.0,
+    response_model=response_model,
+    curve_phase_offset_s=0.0,
+    overshoot_phase_offset_s=-2.0,
+    reference_speed_mps=vsafe + 0.5,
+  )
+  candidate_late = compute_map_cap_candidate(
+    mode='strategic',
+    s_list=[60.0],
+    k_list=[k_curve],
+    vsafe_list=[vsafe],
+    abs_indices=[6],
+    v_ego=24.0,
+    v_cruise=27.0,
+    vis_horizon_s=1.4,
+    vis_margin_m=10.0,
+    severe_vision=False,
+    partial_vision=False,
+    vision_confidence=0.95,
+    conf_lo=0.55,
+    conf_hi=0.85,
+    max_decel=3.5,
+    horizon_limit_m=250.0,
+    response_model=response_model,
+    curve_phase_offset_s=0.0,
+    overshoot_phase_offset_s=2.0,
+    reference_speed_mps=vsafe + 0.5,
+  )
+
+  assert float(candidate_early.cap_mps) == pytest.approx(float(candidate_late.cap_mps), abs=1e-6)
+
+
+def test_strategic_post_apex_release_helper_state():
+  state = MapStrategyState()
+  candidate = MapCapCandidate(
+    mode='strategic',
+    cap_mps=15.0,
+    start_m=0.0,
+    coverage=0.8,
+    reason='cap_available',
+    anchor_dist_m=18.0,
+    anchor_vsafe_mps=9.0,
+    anchor_curvature=0.02,
+    anchor_index=9,
+  )
+
+  decision = evaluate_map_strategy(
+    mode='strategic',
+    state=state,
+    candidate=candidate,
+    raw_target_pre_map=16.0,
+    full_visibility=True,
+    vision_good=True,
+    turn_visible=True,
+    s_visible_m=35.0,
+    vis_margin_m=10.0,
+    now_s=0.10,
+    apex_exit_ready=True,
+  )
+
+  assert decision.apply_map_cap is False
+  assert decision.map_floor_active is False
+  assert decision.vision_relax_allowed is True
+  assert decision.vision_relax_reason == 'post_apex_release'
+  assert decision.strategy_state == 'vision_owns'
+
+
+def test_strategic_counterevidence_dwell_releases_helper_state():
+  state = MapStrategyState()
+  candidate = MapCapCandidate(
+    mode='strategic',
+    cap_mps=15.0,
+    start_m=0.0,
+    coverage=0.8,
+    reason='cap_available',
+    anchor_dist_m=20.0,
+    anchor_vsafe_mps=9.0,
+    anchor_curvature=0.02,
+    anchor_index=12,
+  )
+
+  d0 = evaluate_map_strategy(
+    mode='strategic',
+    state=state,
+    candidate=candidate,
+    raw_target_pre_map=16.0,
+    full_visibility=True,
+    vision_good=True,
+    turn_visible=True,
+    s_visible_m=35.0,
+    vis_margin_m=10.0,
+    now_s=0.10,
+    apex_exit_ready=False,
+  )
+  assert d0.apply_map_cap is True
+  assert d0.vision_relax_allowed is False
+
+  d1 = evaluate_map_strategy(
+    mode='strategic',
+    state=state,
+    candidate=candidate,
+    raw_target_pre_map=16.0,
+    full_visibility=True,
+    vision_good=True,
+    turn_visible=True,
+    s_visible_m=35.0,
+    vis_margin_m=10.0,
+    now_s=0.95,
+    apex_exit_ready=False,
+  )
+  assert d1.apply_map_cap is False
+  assert d1.vision_relax_allowed is True
+  assert d1.vision_relax_reason == 'counterevidence_dwell'
+  assert d1.strategy_state == 'vision_owns'
+
+
 def test_map_lookahead_absent_no_cap(monkeypatch):
   # When GPS or map points are absent, map cap stays inactive
   v0 = 25.0
   v_cruise = 30.0
   vtsc = mk_vtsc_with_params()
   # Disable map by returning no GPS or empty points
-  def _gps_none():
-    return None
   def _map_empty():
     return []
-  monkeypatch.setattr(vtsc, "_get_last_gps", _gps_none, raising=True)
+  monkeypatch.setattr(vtsc, "_get_last_gps_pose", lambda: None, raising=True)
   monkeypatch.setattr(vtsc, "_load_map_curvatures", _map_empty, raising=True)
   snap = simulate_sequence(
     steps=_steps_constant(curvature=0.0, confidence=0.95, n=80),
@@ -749,13 +1326,8 @@ def test_map_lookahead_reason_no_gps_when_enabled(monkeypatch):
   v_cruise = 30.0
   vtsc = mk_vtsc_with_params()
 
-  orig_get_bool = vtsc._get_bool_param
-  def _get_bool(key: str, default: bool = False) -> bool:
-    if key == 'MTSCLookaheadEnabled':
-      return True
-    return bool(orig_get_bool(key, default))
-  monkeypatch.setattr(vtsc, "_get_bool_param", _get_bool, raising=True)
-  monkeypatch.setattr(vtsc, "_get_last_gps", lambda: None, raising=True)
+  _enable_map_lookahead(vtsc, monkeypatch)
+  monkeypatch.setattr(vtsc, "_get_last_gps_pose", lambda: None, raising=True)
 
   snap = simulate_sequence(
     steps=_steps_constant(curvature=0.0, confidence=0.95, n=20),

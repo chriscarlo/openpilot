@@ -2,6 +2,7 @@ import time
 import importlib
 
 from openpilot.common.numpy_fast import clip
+from .vtsc_map_strategy import DEFAULT_MAP_STRATEGY, normalize_map_strategy
 
 PARAM_REFRESH_S = 0.2  # 5 Hz live-tuning refresh
 
@@ -31,6 +32,7 @@ def update_vtsc_params(ctrl, *, force: bool = False) -> None:
   # Convenience accessors from the controller
   getf = ctrl._get_float_param
   getb = ctrl._get_bool_param
+  gets = ctrl._get_string_param
   P = ctrl._params
   expert_enabled = bool(getb("VTSCExpertModeEnabled", getattr(ctrl, "_expert_mode_enabled", False)))
   ctrl._expert_mode_enabled = expert_enabled
@@ -49,6 +51,7 @@ def update_vtsc_params(ctrl, *, force: bool = False) -> None:
 
   # Enable + high-level knobs
   ctrl._is_enabled = getb("VisionTurnSpeedControl", False)
+  ctrl._map_strategy_mode = normalize_map_strategy(gets("VTSCMapStrategy", getattr(ctrl, "_map_strategy_mode", DEFAULT_MAP_STRATEGY)))
   ctrl._aggressiveness = getf("VisionTurnSpeedControlAggressiveness", getattr(ctrl, "_aggressiveness", 1.0), 0.5, 2.0)
   ctrl._fixed_lead_time_s = getf("VisionTurnSpeedControlFixedLeadTimeSeconds", getattr(ctrl, "_fixed_lead_time_s", 0.0), 0.0, 10.0)
   ctrl._curve_phase_offset_s = getf("VisionTurnSpeedControlCurvePhaseOffsetS", getattr(ctrl, "_curve_phase_offset_s", 0.0), -3.0, 3.0)

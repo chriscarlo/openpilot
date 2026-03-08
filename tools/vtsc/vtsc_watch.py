@@ -76,6 +76,8 @@ def parse_swag_line(s):
   try:
     rec = json.loads(s)
     msg = rec.get('msg')
+    if not isinstance(msg, str):
+      msg = rec.get('msg$s')
     if isinstance(msg, str) and msg.startswith('VTSCDBG '):
       j = json.loads(msg.split('VTSCDBG ', 1)[1])
       return ("vtscdbg", j) if isinstance(j, dict) else None

@@ -10,6 +10,7 @@ from cereal import messaging, custom
 from opendbc.car import structs
 from opendbc.car.interfaces import ACCEL_MIN
 from openpilot.common.constants import CV
+from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.car.cruise import V_CRUISE_MAX, V_CRUISE_UNSET
 from openpilot.sunnypilot.selfdrive.controls.lib.dec.dec import DynamicExperimentalController
 from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit_controller.speed_limit_controller import SpeedLimitController
@@ -25,6 +26,7 @@ DecState = custom.LongitudinalPlanSP.DynamicExperimentalControl.DynamicExperimen
 
 class LongitudinalPlannerSP:
   def __init__(self, CP: structs.CarParams, mpc):
+    self.CP = CP
     self.events_sp = EventsSP()
     self.transition_init()
     self.dec = DynamicExperimentalController(CP, mpc)
@@ -61,6 +63,14 @@ class LongitudinalPlannerSP:
     # When not engaged, there may be no meaningful cruise setpoint. Use a high cap
     # so VTSC produces physics-based advisory speeds instead of collapsing to 0.
     v_cruise_for_vtsc = float(v_cruise if apply_vtsc else (V_CRUISE_MAX * CV.KPH_TO_MS))
+    try:
+      response_model = self.mpc.get_cruise_response_model(
+        v_ego,
+        actuation_delay_s=float(getattr(self.CP, 'longitudinalActuatorDelay', 0.0)) + DT_MDL,
+      )
+    except Exception:
+      response_model = None
+    self.v_tsc.set_longitudinal_response_model(response_model)
     self.v_tsc.update(sm, True, v_ego, a_ego, v_cruise_for_vtsc)
     v_cruise_v_tsc = self.v_tsc.v_turn if (apply_vtsc and self.v_tsc.is_active) else V_CRUISE_UNSET
 

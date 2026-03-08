@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Tests for vtsc_watch.py render_line and evaluate_flags."""
+"""Tests for vtsc_watch.py parsing, render_line, and evaluate_flags."""
+import json
 import sys
 from pathlib import Path
 
 # Ensure the tools dir is importable.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from vtsc.vtsc_watch import evaluate_flags, render_line
+from vtsc.vtsc_watch import evaluate_flags, parse_swag_line, render_line
 
 
 def _base_snapshot(**overrides):
@@ -60,6 +61,21 @@ class TestRenderLine:
     d = _base_snapshot(cap_map_vmin=0.0)
     out = render_line(d, "snap")
     assert "map=0.0" in out
+
+
+class TestParseSwagLine:
+  def test_parses_msg_field(self):
+    line = json.dumps({"msg": 'VTSCDBG {"active_cap":"map"}'})
+    kind, payload = parse_swag_line(line)
+    assert kind == "vtscdbg"
+    assert payload["active_cap"] == "map"
+
+  def test_parses_msg_dollar_s_field(self):
+    line = json.dumps({"msg$s": 'LEADROLEDBG {"source":"lead0","duplicate_pair":true}'})
+    kind, payload = parse_swag_line(line)
+    assert kind == "leadrole"
+    assert payload["source"] == "lead0"
+    assert payload["duplicate_pair"] is True
 
 
 class TestEvaluateFlags:

@@ -10,6 +10,18 @@
 #include <algorithm>
 #include <cmath>
 
+namespace {
+
+std::string vtscStrategyParamFromIndex(int index) {
+  return index == 1 ? "strategic" : "advisory";
+}
+
+int vtscStrategyIndexFromParam(const std::string &value) {
+  return value == "advisory" ? 0 : 1;
+}
+
+}  // namespace
+
 // Local helper: create a section card with shared style
 QFrame* VTSCSettingsPanel::createSectionFrame() {
   QFrame *frame = new QFrame();
@@ -28,6 +40,13 @@ void VTSCSettingsPanel::showEvent(QShowEvent *event) {
   if (mapTog_) {
     bool on = p.getBool("MTSCLookaheadEnabled");
     if (mapTog_->on != on) mapTog_->togglePosition();
+  }
+  if (mapStrategyCarousel_) {
+    const int idx = vtscStrategyIndexFromParam(p.get("VTSCMapStrategy"));
+    if (mapStrategyCarousel_->currentIndex() != idx) {
+      mapStrategyCarousel_->setCurrentIndex(idx, false);
+    }
+    mapStrategyCarousel_->setEnabled(p.getBool("MTSCLookaheadEnabled"));
   }
   if (bypassTog_) {
     bool on = p.getBool("VisionTurnSpeedControlOcclBypassWithLead");
@@ -129,6 +148,28 @@ void VTSCSettingsPanel::setupUI() {
     mapHelp->setWordWrap(true);
     mapLayout->addWidget(mapHelp);
   }
+
+  QLabel *strategyTitle = new QLabel(tr("Map Planning Strategy"));
+  strategyTitle->setStyleSheet("font-size: 42px; font-weight: 500; color: #E4E4E4;");
+  mapLayout->addWidget(strategyTitle);
+
+  QLabel *strategyHelp = new QLabel(tr(
+    "Advisory keeps the current map tail behavior. Strategic is experimental: map owns long-horizon timing, "
+    "while vision earns the right to relax once the curve is clearly understood."
+  ));
+  strategyHelp->setStyleSheet("font-size: 32px; color: #999999; padding-left: 10px; padding-bottom: 10px;");
+  strategyHelp->setWordWrap(true);
+  mapLayout->addWidget(strategyHelp);
+
+  mapStrategyCarousel_ = new HorizontalCarousel({tr("Advisory"), tr("Strategic")}, vtscStrategyIndexFromParam(Params().get("VTSCMapStrategy")), this);
+  mapStrategyCarousel_->setEnabled(Params().getBool("MTSCLookaheadEnabled"));
+  QObject::connect(mapStrategyCarousel_, &HorizontalCarousel::currentIndexChanged, [](int index) {
+    Params().put("VTSCMapStrategy", vtscStrategyParamFromIndex(index));
+  });
+  QObject::connect(mapTog_, &ToggleSP::stateChanged, [this](bool enabled) {
+    if (mapStrategyCarousel_) mapStrategyCarousel_->setEnabled(enabled);
+  });
+  mapLayout->addWidget(mapStrategyCarousel_);
 
   // Row: Rally co-pilot HUD curve preview
   QHBoxLayout *copilotRow = new QHBoxLayout();

@@ -16,6 +16,7 @@
 #include <QShowEvent>
 
 #include "selfdrive/ui/sunnypilot/qt/widgets/controls.h"
+#include "selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/horizontal_carousel.h"
 
 class VTSCSettingsPanel : public QFrame {
   Q_OBJECT
@@ -35,6 +36,7 @@ private:
 
   // Persisted control handles for refresh
   ToggleSP *mapTog_ = nullptr;
+  HorizontalCarousel *mapStrategyCarousel_ = nullptr;
   ToggleSP *bypassTog_ = nullptr;
   ToggleSP *dbgTog_ = nullptr;
   ToggleSP *recorderTog_ = nullptr;

@@ -11,6 +11,7 @@ from openpilot.common.params import Params
 from openpilot.common.swaglog import cloudlog
 from openpilot.common.numpy_fast import clip
 from opendbc.car.common.conversions import Conversions as CV
+from openpilot.selfdrive.controls.lib.longitudinal_response_model import CruiseResponseModel
 try:
   from opendbc.car.vehicle_model import VehicleModel
 except Exception:
@@ -18,6 +19,15 @@ except Exception:
 from openpilot.selfdrive.car.cruise import V_CRUISE_MAX
 from openpilot.selfdrive.modeld.constants import ModelConstants
 from .vision_turn_params import update_vtsc_params
+from .vtsc_map_strategy import (
+  MAP_STRATEGY_ADVISORY,
+  DEFAULT_MAP_STRATEGY,
+  MAP_STRATEGY_STRATEGIC,
+  MapStrategyState,
+  compute_map_cap_candidate,
+  evaluate_map_strategy,
+  normalize_map_strategy,
+)
 try:
   from .vtsc_curve_tuning import Q_CURVE_ENABLED, Q_CURVE_POINTS
 except Exception:
@@ -933,6 +943,7 @@ class VisionTurnController:
     # Visibility barrier params (defaults; Params override in update)
     self._vis_horizon_s = 1.4
     self._vis_margin_m = 10.0
+    self._last_vision_confidence = 1.0
     self._gamma_per_meter = 0.00035
     self._lat_jerk_cap = 2.0
     # Sentinel: <= 0 disables cap in tests
@@ -1018,10 +1029,20 @@ class VisionTurnController:
     self._map_curv_cache_raw = None
     self._map_curv_cache = []
     self._map_curv_last_ts = 0.0
+    self._map_strategy_mode = DEFAULT_MAP_STRATEGY
+    self._map_strategy_state = MapStrategyState()
+    self._map_tail_candidate = None
     self._map_tail_active = False
     self._map_tail_last_cap = None
+    self._map_tail_advisory_cap = None
+    self._map_tail_strategic_cap = None
     self._map_tail_last_start = 0.0
     self._map_tail_last_coverage = 0.0
+    self._map_tail_anchor_dist_m = 0.0
+    self._map_tail_anchor_k = 0.0
+    self._map_tail_anchor_vsafe = 0.0
+    self._map_tail_anchor_index = -1
+    self._longitudinal_response_model = None
     # Debug-only map lookahead diagnostics (why map cap is inactive this frame)
     self._map_tail_reason = "init"
     self._map_tail_compute_reason = "init"
@@ -1102,6 +1123,23 @@ class VisionTurnController:
     self._dbg_cap_occl_vmin = 0.0
     self._dbg_cap_map_vmin = 0.0
     self._dbg_vtsc_cmd = 0.0
+    self._dbg_strategy_mode = DEFAULT_MAP_STRATEGY
+    self._dbg_strategy_state = "idle"
+    self._dbg_map_advisory_cap = 0.0
+    self._dbg_map_strategic_cap = 0.0
+    self._dbg_vision_local_cap = 0.0
+    self._dbg_selected_cap = 0.0
+    self._dbg_map_floor_active = False
+    self._dbg_map_floor_reason = ""
+    self._dbg_vision_relax_allowed = False
+    self._dbg_vision_relax_reason = ""
+    self._dbg_map_anchor_dist_m = 0.0
+    self._dbg_map_anchor_k = 0.0
+    self._dbg_map_takeover_dwell_s = 0.0
+    self._dbg_map_counterevidence_dwell_s = 0.0
+    self._dbg_planner_min_accel = 0.0
+    self._dbg_planner_response_decel = 0.0
+    self._dbg_planner_delay_s = 0.0
     self._dbg_kappa_vis = 0.0
     self._dbg_s_visible_m = 0.0
     self._dbg_path_conf = 0.0
@@ -1143,6 +1181,19 @@ class VisionTurnController:
       return bool(self._params.get_bool(key))
     except Exception:
       return bool(default)
+
+  def _get_string_param(self, key: str, default: str = "") -> str:
+    """Read a string param; returns default on any decode/access failure."""
+    try:
+      raw = self._params.get(key)
+      if raw is None:
+        return str(default)
+      return str(raw.decode('utf-8') if isinstance(raw, (bytes, bytearray)) else raw)
+    except Exception:
+      return str(default)
+
+  def set_longitudinal_response_model(self, response_model: CruiseResponseModel | None) -> None:
+    self._longitudinal_response_model = response_model
 
   def _should_emit_debug(self, now_s: float) -> bool:
     try:
@@ -1250,6 +1301,23 @@ class VisionTurnController:
       cap_map = float(getattr(self, '_dbg_cap_map_vmin', 0.0))
       active_cap = str(getattr(self, '_dbg_active_cap', '') or '')
       vtsc_cmd = float(getattr(self, '_dbg_vtsc_cmd', 0.0) or 0.0)
+      strategy_mode = str(getattr(self, '_dbg_strategy_mode', DEFAULT_MAP_STRATEGY) or DEFAULT_MAP_STRATEGY)
+      strategy_state = str(getattr(self, '_dbg_strategy_state', 'idle') or 'idle')
+      map_advisory_cap = float(getattr(self, '_dbg_map_advisory_cap', 0.0) or 0.0)
+      map_strategic_cap = float(getattr(self, '_dbg_map_strategic_cap', 0.0) or 0.0)
+      vision_local_cap = float(getattr(self, '_dbg_vision_local_cap', 0.0) or 0.0)
+      selected_cap = float(getattr(self, '_dbg_selected_cap', 0.0) or 0.0)
+      map_floor_active = bool(getattr(self, '_dbg_map_floor_active', False))
+      map_floor_reason = str(getattr(self, '_dbg_map_floor_reason', '') or '')
+      vision_relax_allowed = bool(getattr(self, '_dbg_vision_relax_allowed', False))
+      vision_relax_reason = str(getattr(self, '_dbg_vision_relax_reason', '') or '')
+      map_anchor_dist = float(getattr(self, '_dbg_map_anchor_dist_m', 0.0) or 0.0)
+      map_anchor_k = float(getattr(self, '_dbg_map_anchor_k', 0.0) or 0.0)
+      takeover_dwell_s = float(getattr(self, '_dbg_map_takeover_dwell_s', 0.0) or 0.0)
+      counterevidence_dwell_s = float(getattr(self, '_dbg_map_counterevidence_dwell_s', 0.0) or 0.0)
+      planner_min_accel = float(getattr(self, '_dbg_planner_min_accel', 0.0) or 0.0)
+      planner_response_decel = float(getattr(self, '_dbg_planner_response_decel', 0.0) or 0.0)
+      planner_delay_s = float(getattr(self, '_dbg_planner_delay_s', 0.0) or 0.0)
       s_vis_m = float(getattr(self, '_dbg_s_visible_m', 0.0))
       fail_open = bool(getattr(self, '_dbg_fail_open', False))
       # FOV/units helpers (may be unset on older builds; default sensibly)
@@ -1286,6 +1354,15 @@ class VisionTurnController:
         'active_cap': active_cap, 'vtsc_cmd': vtsc_cmd,
         'cap_source': str(getattr(self, '_dbg_cap_source', '')),
         'cap_visible_vmin': cap_vis, 'cap_occl_vmin': cap_occ, 'cap_map_vmin': cap_map,
+        'strategy_mode': strategy_mode, 'strategy_state': strategy_state,
+        'map_advisory_cap': map_advisory_cap, 'map_strategic_cap': map_strategic_cap,
+        'vision_local_cap': vision_local_cap, 'selected_cap': selected_cap,
+        'map_floor_active': map_floor_active, 'map_floor_reason': map_floor_reason,
+        'vision_relax_allowed': vision_relax_allowed, 'vision_relax_reason': vision_relax_reason,
+        'map_floor_anchor_dist_m': map_anchor_dist, 'map_floor_anchor_k': map_anchor_k,
+        'map_takeover_dwell_s': takeover_dwell_s, 'map_counterevidence_dwell_s': counterevidence_dwell_s,
+        'planner_min_accel_mps2': planner_min_accel, 'planner_response_decel_mps2': planner_response_decel,
+        'planner_response_delay_s': planner_delay_s,
         's_visible_m': s_vis_m, 'kappa_vis': k_vis, 'path_conf': conf,
         'occluded': bool(not getattr(self._occlusion_state, 'vision_good', True)),
         'fail_open': fail_open,
@@ -1697,6 +1774,7 @@ class VisionTurnController:
             vision_confidence = float(np.mean(model_data.laneLineProbs))
         else:
             vision_confidence = 1.0
+    self._last_vision_confidence = vision_confidence
 
     # Candidate current curvature is the filtered curvature we track
     current_curvature = self._filtered_curvature
@@ -2087,23 +2165,42 @@ class VisionTurnController:
     scale_jerk = 1.0
 
     # Optional: apply map-based lookahead cap to extend horizon.
-    # Map is "advance warning only": once vision has confident in-range turn evidence,
-    # suppress map capping so vision remains the source of truth.
+    strategy_mode = normalize_map_strategy(getattr(self, '_map_strategy_mode', DEFAULT_MAP_STRATEGY))
+    self._dbg_strategy_mode = strategy_mode
+    self._dbg_strategy_state = "idle"
+    self._dbg_map_advisory_cap = float(getattr(self, '_map_tail_advisory_cap', 0.0) or 0.0)
+    self._dbg_map_strategic_cap = float(getattr(self, '_map_tail_strategic_cap', 0.0) or 0.0)
+    self._dbg_vision_local_cap = float(raw_target)
+    self._dbg_selected_cap = float(raw_target)
+    self._dbg_map_floor_active = False
+    self._dbg_map_floor_reason = ""
+    self._dbg_vision_relax_allowed = False
+    self._dbg_vision_relax_reason = ""
+    self._dbg_map_anchor_dist_m = 0.0
+    self._dbg_map_anchor_k = 0.0
+    self._dbg_map_takeover_dwell_s = 0.0
+    self._dbg_map_counterevidence_dwell_s = 0.0
+    response_model = getattr(self, '_longitudinal_response_model', None)
+    self._dbg_planner_min_accel = float(getattr(response_model, 'min_accel_mps2', 0.0) or 0.0)
+    self._dbg_planner_response_decel = float(getattr(response_model, 'planning_decel_mps2', 0.0) or 0.0)
+    self._dbg_planner_delay_s = float(getattr(response_model, 'actuation_delay_s', 0.0) or 0.0)
     self._map_tail_reason = "toggle_off"
     try:
       if self._get_bool_param('MTSCLookaheadEnabled', False):
         self._map_tail_reason = "enabled_no_cap"
         v_cap, s_start, coverage = self._map_tail_cap(sm)
-        if v_cap is not None:
+        candidate = getattr(self, '_map_tail_candidate', None)
+        self._dbg_map_advisory_cap = float(getattr(self, '_map_tail_advisory_cap', 0.0) or 0.0)
+        self._dbg_map_strategic_cap = float(getattr(self, '_map_tail_strategic_cap', 0.0) or 0.0)
+        if candidate is not None:
+          self._map_tail_last_cap = float(getattr(candidate, 'cap_mps', 0.0) or 0.0)
+          self._map_tail_last_start = float(getattr(candidate, 'start_m', s_start) or 0.0)
+          self._map_tail_last_coverage = float(getattr(candidate, 'coverage', coverage) or 0.0)
+          self._dbg_map_anchor_dist_m = float(getattr(candidate, 'anchor_dist_m', 0.0) or 0.0)
+          self._dbg_map_anchor_k = float(getattr(candidate, 'anchor_curvature', 0.0) or 0.0)
+        if v_cap is not None and candidate is not None:
           v_cap_f = float(v_cap)
-          s_start_f = float(s_start)
-          coverage_f = float(coverage)
-          # Keep latest map diagnostics even when map cap is suppressed.
-          self._map_tail_last_cap = v_cap_f
-          self._map_tail_last_start = s_start_f
-          self._map_tail_last_coverage = coverage_f
-
-          map_cap_allowed = True
+          raw_target_pre_map = float(raw_target)
           try:
             v_ego_local = float(max(0.0, self._v_ego))
             s_visible = float(max(0.0, getattr(self, '_vis_horizon_s', 1.4)) * v_ego_local)
@@ -2116,27 +2213,54 @@ class VisionTurnController:
               (float(getattr(self, '_v_overshoot_distance', 1e9)) <= (s_visible + vis_margin))
             )
             vision_good = bool(getattr(self._occlusion_state, 'vision_good', True))
-            # Once vision has eyes-on turn evidence, map should no longer tighten VTSC.
-            map_cap_allowed = not bool(vision_good and (turn_visible_now or turn_visible_ahead))
+            vision_status = getattr(self._occlusion_state, 'vision_status', VisionStatus.FULL_VISIBILITY)
+            full_visibility = bool(int(vision_status) == int(VisionStatus.FULL_VISIBILITY))
+            decision = evaluate_map_strategy(
+              mode=strategy_mode,
+              state=self._map_strategy_state,
+              candidate=candidate,
+              raw_target_pre_map=raw_target_pre_map,
+              full_visibility=full_visibility,
+              vision_good=vision_good,
+              turn_visible=bool(turn_visible_now or turn_visible_ahead),
+              s_visible_m=s_visible,
+              vis_margin_m=vis_margin,
+              now_s=now,
+              apex_exit_ready=bool(getattr(self, '_apex_exit_ready', False)),
+            )
           except Exception:
-            map_cap_allowed = True
+            decision = None
 
-          if map_cap_allowed:
-            raw_target = min(raw_target, v_cap_f)
+          if decision is not None:
+            self._map_tail_active = bool(decision.map_floor_active)
+            self._map_tail_reason = str(decision.map_reason or "applied")
+            self._dbg_strategy_state = str(decision.strategy_state or "idle")
+            self._dbg_map_floor_active = bool(decision.map_floor_active)
+            self._dbg_map_floor_reason = str(decision.map_reason or "")
+            self._dbg_vision_relax_allowed = bool(decision.vision_relax_allowed)
+            self._dbg_vision_relax_reason = str(decision.vision_relax_reason or "")
+            self._dbg_map_takeover_dwell_s = float(decision.takeover_dwell_s)
+            self._dbg_map_counterevidence_dwell_s = float(decision.counterevidence_dwell_s)
+            if bool(decision.apply_map_cap):
+              raw_target = min(raw_target, v_cap_f)
+          else:
             self._map_tail_active = True
             self._map_tail_reason = "applied"
-          else:
-            self._map_tail_active = False
-            self._map_tail_reason = "vision_suppressed"
+            raw_target = min(raw_target, v_cap_f)
         else:
+          self._map_strategy_state.reset()
           self._map_tail_active = False
           self._map_tail_reason = str(getattr(self, '_map_tail_compute_reason', '') or 'no_cap')
       else:
         # Ensure HUD preview does not persist when map lookahead is disabled.
+        self._map_strategy_state.reset()
         self._clear_curve_preview()
     except Exception:
+      self._map_strategy_state.reset()
       self._map_tail_active = False
       self._map_tail_reason = "exception"
+    self._dbg_selected_cap = float(raw_target)
+    self._dbg_map_floor_reason = str(self._map_tail_reason or "")
     # Debug: record final target after map caps
     try:
       self._dbg_target_final = float(raw_target)
@@ -3595,6 +3719,13 @@ class VisionTurnController:
 
     Returns (v_cap_mps|None, start_distance_m, coverage_frac)
     """
+    self._map_tail_candidate = None
+    self._map_tail_advisory_cap = None
+    self._map_tail_strategic_cap = None
+    self._map_tail_anchor_dist_m = 0.0
+    self._map_tail_anchor_k = 0.0
+    self._map_tail_anchor_vsafe = 0.0
+    self._map_tail_anchor_index = -1
     self._map_tail_compute_reason = "unknown"
     gps_pose = self._get_last_gps_pose()
     if gps_pose is None:
@@ -3662,56 +3793,80 @@ class VisionTurnController:
         break
     s_list = s_list[:cut]
     k_list = k_list[:cut]
+    abs_indices = list(range(i0 + 1, len(pts)))[:cut]
 
     # Compute vsafe from curvature
     vsafe = [ curvature_to_speed(k) for k in k_list ]
 
-    # Determine start distance: visible horizon + margin
-    #
-    # NOTE:
-    # Map tail is primarily meant to cover *beyond* what vision can see.
-    # When vision confidence is extremely low (SEVERE/LOST), we may not have reliable near-horizon
-    # curvature from the model either. In that case, allow map curvature to influence the cap
-    # immediately (starting at the margin distance) so short, sharp off-ramp curves inside the
-    # usual "visible horizon" aren't ignored.
     try:
       vs = getattr(self._occlusion_state, 'vision_status', VisionStatus.FULL_VISIBILITY)
       severe_vision = bool(int(vs) >= int(VisionStatus.SEVERE_OCCLUSION))
     except Exception:
+      vs = VisionStatus.FULL_VISIBILITY
       severe_vision = False
+    partial_vision = bool(vs == VisionStatus.PARTIAL_OCCLUSION)
     vis_margin = float(getattr(self, '_vis_margin_m', 10.0))
-    if severe_vision:
-      s_start = max(0.0, vis_margin)
-    else:
-      s_start = max(0.0, self._v_ego * float(getattr(self, '_vis_horizon_s', 1.4)) + vis_margin)
-    # Planning decel: use half of comfort decel for the reachable-cap so braking
-    # begins earlier and more gently, instead of last-second emergency braking.
-    a_comf_full = float(max(0.1, getattr(self, '_max_decel', 3.5)))
-    a_plan = a_comf_full * 0.5
+    vis_horizon_s = float(getattr(self, '_vis_horizon_s', 1.4))
+    try:
+      conf_now = float(getattr(self, '_last_vision_confidence', getattr(self._occlusion_state, 'smoothed_confidence', 1.0)))
+    except Exception:
+      conf_now = float(getattr(self._occlusion_state, 'smoothed_confidence', 1.0))
 
-    # Reachable cap: start from cruise setpoint, not v_ego.  Starting from v_ego
-    # creates a one-way ratchet that pins the cap at current speed when exiting a
-    # curve, preventing acceleration even when the next curve is far ahead.
-    v_now = float(self._v_ego)
-    v_cap = float(self._v_cruise_setpoint)
-    any_future = False
-    for vi, di in zip(vsafe, s_list, strict=False):
-      if di < s_start:
-        continue
-      any_future = True
-      d = max(0.0, di - s_start)
-      try:
-        v_allow = math.sqrt(max(0.0, vi*vi + 2.0 * a_plan * d))
-      except Exception:
-        v_allow = v_now
-      v_cap = min(v_cap, v_allow)
-    if not any_future:
-      self._map_tail_compute_reason = "no_future_points_beyond_start"
-      return (None, s_start, float(min(1.0, s_list[-1] / max(1e-3, s_start))))
+    advisory_candidate = compute_map_cap_candidate(
+      mode=MAP_STRATEGY_ADVISORY,
+      s_list=s_list,
+      k_list=k_list,
+      vsafe_list=vsafe,
+      abs_indices=abs_indices,
+      v_ego=float(self._v_ego),
+      v_cruise=float(self._v_cruise_setpoint),
+      vis_horizon_s=vis_horizon_s,
+      vis_margin_m=vis_margin,
+      severe_vision=severe_vision,
+      partial_vision=partial_vision,
+      vision_confidence=conf_now,
+      conf_lo=float(CONFIDENCE_EXIT_TO_PARTIAL),
+      conf_hi=float(CONFIDENCE_EXIT_TO_FULL),
+      max_decel=float(getattr(self, '_max_decel', 3.5)),
+      horizon_limit_m=S_MAX,
+    )
+    strategic_candidate = compute_map_cap_candidate(
+      mode=MAP_STRATEGY_STRATEGIC,
+      s_list=s_list,
+      k_list=k_list,
+      vsafe_list=vsafe,
+      abs_indices=abs_indices,
+      v_ego=float(self._v_ego),
+      v_cruise=float(self._v_cruise_setpoint),
+      vis_horizon_s=vis_horizon_s,
+      vis_margin_m=vis_margin,
+      severe_vision=severe_vision,
+      partial_vision=partial_vision,
+      vision_confidence=conf_now,
+      conf_lo=float(CONFIDENCE_EXIT_TO_PARTIAL),
+      conf_hi=float(CONFIDENCE_EXIT_TO_FULL),
+      max_decel=float(getattr(self, '_max_decel', 3.5)),
+      horizon_limit_m=S_MAX,
+      response_model=getattr(self, '_longitudinal_response_model', None),
+      curve_phase_offset_s=float(getattr(self, '_curve_phase_offset_s', 0.0)),
+      overshoot_phase_offset_s=float(getattr(self, '_overshoot_phase_offset_s', 0.0)),
+      reference_speed_mps=float(getattr(self, '_dbg_target_raw', self._v_ego) or self._v_ego),
+    )
 
-    coverage = float(min(1.0, (s_list[-1] - s_start) / max(1e-3, (S_MAX - s_start)))) if s_list[-1] > s_start else 0.0
-    self._map_tail_compute_reason = "cap_available"
-    return (max(0.0, v_cap), s_start, coverage)
+    self._map_tail_advisory_cap = advisory_candidate.cap_mps
+    self._map_tail_strategic_cap = strategic_candidate.cap_mps
+
+    strategy_mode = normalize_map_strategy(getattr(self, '_map_strategy_mode', DEFAULT_MAP_STRATEGY))
+    candidate = strategic_candidate if strategy_mode == MAP_STRATEGY_STRATEGIC else advisory_candidate
+    self._map_tail_candidate = candidate
+    self._map_tail_anchor_dist_m = float(candidate.anchor_dist_m or 0.0)
+    self._map_tail_anchor_k = float(candidate.anchor_curvature or 0.0)
+    self._map_tail_anchor_vsafe = float(candidate.anchor_vsafe_mps or 0.0)
+    self._map_tail_anchor_index = int(candidate.anchor_index) if candidate.anchor_index is not None else -1
+    self._map_tail_compute_reason = str(candidate.reason or "unknown")
+    if candidate.cap_mps is None:
+      return (None, float(candidate.start_m), float(candidate.coverage))
+    return (float(candidate.cap_mps), float(candidate.start_m), float(candidate.coverage))
 
   def update(self, sm, enabled, v_ego, a_ego, v_cruise_setpoint, v_cruise_cluster_setpoint=None):
     self._op_enabled = enabled

@@ -6,11 +6,19 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from openpilot.common.realtime import DT_MDL
+from openpilot.selfdrive.controls.lib.longitudinal_response_model import build_cruise_response_model
 
 from .harness import Step, mk_vtsc_with_params, _mk_sm
 
 
 _FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures" / "rca_events"
+
+
+def _default_replay_response_model():
+  # Match the shared cruise-response helper used onroad as closely as this
+  # controller-only replay can, without standing up the full planner/MPC path.
+  return build_cruise_response_model(actuation_delay_s=float(DT_MDL))
 
 
 def _load_fixture(path: Path) -> dict:
@@ -37,6 +45,7 @@ def _simulate_controller_from_fixture(fixture: dict) -> tuple[list[float], list[
   v_cruise = _fill_forward([r.get("v_cruise") for r in steps_raw], fallback=0.0)
 
   ctrl = mk_vtsc_with_params()
+  ctrl.set_longitudinal_response_model(_default_replay_response_model())
   v_turn_out: list[float] = []
 
   for i, r in enumerate(steps_raw):
@@ -106,4 +115,3 @@ def test_rca_fixtures_have_no_one_frame_cap_pulses_pre_intervention(fixture_name
     t0_window=(-2.0, 0.0),
   )
   assert pulses == 0
-
