@@ -7,10 +7,19 @@ acceleration profiles, following distance, and personality management.
 
 import pytest
 import numpy as np
-from pytest_mock import MockerFixture
+from unittest.mock import Mock
 from cereal import log, custom
 
-from openpilot.sunnypilot.selfdrive.controls.lib.vibe_personality.vibe_personality import VibePersonalityController
+import openpilot.sunnypilot.selfdrive.controls.lib.vibe_personality.vibe_personality as vibe_module
+from openpilot.sunnypilot.selfdrive.controls.lib.vibe_personality.vibe_personality import (
+  DEFAULT_FOLLOW_DISTANCE_PROFILES,
+  DEFAULT_MAX_ACCEL_PROFILES,
+  DEFAULT_MIN_ACCEL_PROFILES,
+  FOLLOW_DISTANCE_PARAM_KEYS,
+  MAX_ACCEL_PARAM_KEYS,
+  MIN_ACCEL_PARAM_KEYS,
+  VibePersonalityController,
+)
 
 AccelPersonality = custom.LongitudinalPlanSP.AccelerationPersonality
 LongPersonality = log.LongitudinalPersonality
@@ -20,19 +29,39 @@ class TestVibePersonalityController:
   """Test suite for VibePersonalityController"""
 
   @pytest.fixture
-  def mock_params(self, mocker: MockerFixture):
+  def mock_params(self):
     """Mock Params with realistic behavior"""
-    mock = mocker.Mock()
-    mock.get.return_value = None
-    mock.get_bool.return_value = True
-    mock.put.return_value = None
-    mock.put_bool.return_value = None
+    store = {
+      "VibePersonalityEnabled": "1",
+      "VibeAccelPersonalityEnabled": "1",
+      "VibeFollowPersonalityEnabled": "1",
+    }
+    mock = Mock()
+
+    def get_value(key, *args, **kwargs):
+      return store.get(key)
+
+    def get_bool_value(key, *args, **kwargs):
+      value = store.get(key)
+      return value in ("1", 1, True)
+
+    def put_value(key, value):
+      store[key] = str(value)
+
+    def put_bool_value(key, value):
+      store[key] = "1" if value else "0"
+
+    mock.get.side_effect = get_value
+    mock.get_bool.side_effect = get_bool_value
+    mock.put.side_effect = put_value
+    mock.put_bool.side_effect = put_bool_value
+    mock._store = store
     return mock
 
   @pytest.fixture
-  def controller(self, mock_params, mocker: MockerFixture):
+  def controller(self, mock_params, monkeypatch):
     """Create controller with mocked dependencies"""
-    mocker.patch('openpilot.sunnypilot.selfdrive.controls.lib.vibe_personality.vibe_personality.Params', return_value=mock_params)
+    monkeypatch.setattr(vibe_module, "Params", lambda: mock_params)
     controller = VibePersonalityController()
     controller.params = mock_params
     return controller
@@ -85,28 +114,30 @@ class TestVibePersonalityController:
   def test_enable_disable_logic(self, controller):
     """Test feature enable/disable states"""
     # Mock enabled state
-    controller.params.get_bool.return_value = True
+    controller.params._store["VibePersonalityEnabled"] = "1"
+    controller.params._store["VibeAccelPersonalityEnabled"] = "1"
+    controller.params._store["VibeFollowPersonalityEnabled"] = "1"
     assert controller.is_enabled() is True
     assert controller.is_accel_enabled() is True
     assert controller.is_follow_enabled() is True
 
     # Mock disabled state
-    controller.params.get_bool.return_value = False
+    controller.params._store["VibePersonalityEnabled"] = "0"
+    controller.params._store["VibeAccelPersonalityEnabled"] = "0"
+    controller.params._store["VibeFollowPersonalityEnabled"] = "0"
     assert controller.is_enabled() is False
     assert controller.is_accel_enabled() is False
     assert controller.is_follow_enabled() is False
 
     # Test partial disable (only main toggle off)
-    def mock_get_bool(key):
-      return key != 'VibePersonalityEnabled'
-    controller.params.get_bool.side_effect = mock_get_bool
+    controller.params._store["VibePersonalityEnabled"] = "0"
+    controller.params._store["VibeAccelPersonalityEnabled"] = "1"
+    controller.params._store["VibeFollowPersonalityEnabled"] = "1"
     assert controller.is_accel_enabled() is False
     assert controller.is_follow_enabled() is False
 
   def test_get_accel_limits_returns_valid_range(self, controller):
     """Acceleration limits should return valid min/max values"""
-    controller.params.get_bool.return_value = True
-
     # Test at multiple speeds
     for speed in [0.0, 15.0, 30.0]:
       limits = controller.get_accel_limits(speed)
@@ -121,13 +152,11 @@ class TestVibePersonalityController:
 
   def test_get_accel_limits_returns_none_when_disabled(self, controller):
     """Should return None when acceleration control is disabled"""
-    controller.params.get_bool.return_value = False
+    controller.params._store["VibePersonalityEnabled"] = "0"
     assert controller.get_accel_limits(20.0) is None
 
   def test_get_follow_distance_multiplier_returns_positive_value(self, controller):
     """Follow distance multiplier should be positive"""
-    controller.params.get_bool.return_value = True
-
     multiplier = controller.get_follow_distance_multiplier(20.0)
     assert multiplier is not None
     assert isinstance(multiplier, float)
@@ -135,13 +164,11 @@ class TestVibePersonalityController:
 
   def test_get_follow_distance_multiplier_returns_none_when_disabled(self, controller):
     """Should return None when follow distance control is disabled"""
-    controller.params.get_bool.return_value = False
+    controller.params._store["VibePersonalityEnabled"] = "0"
     assert controller.get_follow_distance_multiplier(20.0) is None
 
   def test_personality_differences_produce_different_results(self, controller):
     """Different personalities should produce measurably different outputs"""
-    controller.params.get_bool.return_value = True
-
     # Test acceleration personality differences
     controller.set_accel_personality(AccelPersonality.eco)
     eco_limits = controller.get_accel_limits(15.0)
@@ -202,16 +229,12 @@ class TestVibePersonalityController:
 
   def test_toggle_functions_change_state(self, controller):
     """Toggle functions should change parameter states"""
-    # Mock current enabled state
-    controller.params.get_bool.return_value = True
-
     # Test main toggle
     result = controller.toggle_personality()
     assert result is False  # should return new state
     controller.params.put_bool.assert_called_with('VibePersonalityEnabled', False)
 
     # Test specific toggles
-    controller.params.get_bool.return_value = True
     controller.toggle_accel_personality()
     controller.params.put_bool.assert_called_with('VibeAccelPersonalityEnabled', False)
 
@@ -244,8 +267,6 @@ class TestVibePersonalityController:
 
   def test_individual_accel_methods(self, controller):
     """Test individual min/max accel convenience methods"""
-    controller.params.get_bool.return_value = True
-
     min_accel = controller.get_min_accel(15.0)
     max_accel = controller.get_max_accel(15.0)
 
@@ -255,15 +276,66 @@ class TestVibePersonalityController:
     assert max_accel > 0
 
     # Test disabled state
-    controller.params.get_bool.return_value = False
+    controller.params._store["VibePersonalityEnabled"] = "0"
     assert controller.get_min_accel(15.0) is None
     assert controller.get_max_accel(15.0) is None
+
+  def test_loads_aggressive_personality_from_zero_value(self, controller):
+    """Aggressive personality uses enum value 0 and must still load from Params."""
+    controller.params._store["LongitudinalPersonality"] = str(LongPersonality.aggressive)
+    controller.long_personality = LongPersonality.relaxed
+    controller.frame = 0
+
+    assert controller.get_long_personality() == LongPersonality.aggressive
+
+  def test_follow_distance_tuning_params_override_defaults(self, controller):
+    """Follow tuning params should override shipped default anchors."""
+    key = FOLLOW_DISTANCE_PARAM_KEYS[LongPersonality.aggressive][3]
+    controller.params._store[key] = "1.11"
+
+    controller._update_tuning_profiles(force=True)
+    controller.set_long_personality(LongPersonality.aggressive)
+
+    assert controller.follow_distance_profiles[LongPersonality.aggressive]["y_dist"][3] == pytest.approx(1.11)
+    assert controller.get_follow_distance_multiplier(40.0) == pytest.approx(1.11)
+
+  def test_brake_tuning_params_override_defaults(self, controller):
+    """Brake tuning params should override shipped default anchors."""
+    key = MIN_ACCEL_PARAM_KEYS[LongPersonality.standard][1]
+    controller.params._store[key] = "-1.55"
+
+    controller._update_tuning_profiles(force=True)
+
+    assert controller.min_accel_profiles[LongPersonality.standard][1] == pytest.approx(-1.55)
+    min_accel, _ = controller.get_accel_limits(10.0)
+    assert min_accel == pytest.approx(-1.55)
+
+  def test_accel_tuning_params_override_defaults(self, controller):
+    """Accel tuning params should override shipped default anchors."""
+    key = MAX_ACCEL_PARAM_KEYS[AccelPersonality.sport][2]
+    controller.params._store[key] = "4.25"
+
+    controller._update_tuning_profiles(force=True)
+
+    assert controller.max_accel_profiles[AccelPersonality.sport][2] == pytest.approx(4.25)
+    controller.set_accel_personality(AccelPersonality.sport)
+    _, max_accel = controller.get_accel_limits(9.0)
+    assert max_accel == pytest.approx(4.25)
+
+  def test_profile_keys_cover_default_profile_lengths(self):
+    """Every tunable param key map should stay aligned with its default profile."""
+    for personality, keys in FOLLOW_DISTANCE_PARAM_KEYS.items():
+      assert len(keys) == len(DEFAULT_FOLLOW_DISTANCE_PROFILES[personality]["y_dist"])
+
+    for personality, keys in MIN_ACCEL_PARAM_KEYS.items():
+      assert len(keys) == len(DEFAULT_MIN_ACCEL_PROFILES[personality])
+
+    for personality, keys in MAX_ACCEL_PARAM_KEYS.items():
+      assert len(keys) == len(DEFAULT_MAX_ACCEL_PROFILES[personality])
 
   @pytest.mark.parametrize("speed", [0.0, 5.0, 15.0, 25.0, 40.0, 55.0])
   def test_accel_limits_at_various_speeds(self, controller, speed):
     """Test acceleration limits across speed range"""
-    controller.params.get_bool.return_value = True
-
     limits = controller.get_accel_limits(speed)
     assert limits is not None
 

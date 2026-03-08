@@ -13,36 +13,82 @@ from openpilot.common.params import Params
 LongPersonality = log.LongitudinalPersonality
 AccelPersonality = custom.LongitudinalPlanSP.AccelerationPersonality
 
-# Acceleration Profiles mapped to AccelPersonality (eco/normal/sport)
-MAX_ACCEL_PROFILES = {
-  AccelPersonality.eco:       [1.10, 1.0, 0.85, 0.76, .58,  .46, .365, .317, .089],  # eco
-  AccelPersonality.normal:    [2.00, 2.00, 1.42, 1.10, .65,  .56, .43, .36, .12],   # normal
-  AccelPersonality.sport:     [4.00, 4.00, 3.80, 3.50, 2.00, 1.75, 1.325, 1.15, .50],   # sport (2.5x multiplier, capped at 4.0)
+LONG_PERSONALITIES = [LongPersonality.relaxed, LongPersonality.standard, LongPersonality.aggressive]
+ACCEL_PERSONALITIES = [AccelPersonality.eco, AccelPersonality.normal, AccelPersonality.sport]
+
+LONG_MODE_NAMES = {
+  LongPersonality.relaxed: "Relaxed",
+  LongPersonality.standard: "Standard",
+  LongPersonality.aggressive: "Aggressive",
 }
-MAX_ACCEL_BREAKPOINTS =       [0.,   6.,   9.,   11.,  16.,  20., 25., 30., 55.]
+
+ACCEL_MODE_NAMES = {
+  AccelPersonality.eco: "Eco",
+  AccelPersonality.normal: "Normal",
+  AccelPersonality.sport: "Sport",
+}
+
+# Acceleration Profiles mapped to AccelPersonality (eco/normal/sport)
+DEFAULT_MAX_ACCEL_PROFILES = {
+  AccelPersonality.eco:       (1.10, 1.00, 0.85, 0.76, 0.58, 0.46, 0.365, 0.317, 0.089),
+  AccelPersonality.normal:    (2.00, 2.00, 1.42, 1.10, 0.65, 0.56, 0.43, 0.36, 0.12),
+  AccelPersonality.sport:     (4.00, 4.00, 3.80, 3.50, 2.00, 1.75, 1.325, 1.15, 0.50),
+}
+MAX_ACCEL_PROFILES = DEFAULT_MAX_ACCEL_PROFILES
+MAX_ACCEL_BREAKPOINTS = [0.0, 6.0, 9.0, 11.0, 16.0, 20.0, 25.0, 30.0, 55.0]
 
 # Braking profiles mapped to LongPersonality (relaxed/standard/aggressive)
-MIN_ACCEL_PROFILES = {
-  LongPersonality.relaxed:    [-0.50, -0.8, -1.20, -1.20],  # gentler braking
-  LongPersonality.standard:   [-1.05, -1.15, -1.30, -1.30],  # normal braking
-  LongPersonality.aggressive: [-1.10, -1.25, -1.40, -1.40],  # more aggressive braking
+DEFAULT_MIN_ACCEL_PROFILES = {
+  LongPersonality.relaxed:    (-0.50, -0.80, -1.20, -1.20),
+  LongPersonality.standard:   (-1.05, -1.15, -1.30, -1.30),
+  LongPersonality.aggressive: (-1.10, -1.25, -1.40, -1.40),
 }
-MIN_ACCEL_BREAKPOINTS =       [0., 10., 25., 50.]
+MIN_ACCEL_PROFILES = DEFAULT_MIN_ACCEL_PROFILES
+MIN_ACCEL_BREAKPOINTS = [0.0, 10.0, 25.0, 50.0]
 
 # Following Distance Profiles mapped to LongPersonality (relaxed/standard/aggressive)
-FOLLOW_DISTANCE_PROFILES = {
+DEFAULT_FOLLOW_DISTANCE_PROFILES = {
   LongPersonality.relaxed: {
-    'x_vel':  [0.,   19.7, 22.2, 40.],
-    'y_dist': [1.25, 1.60, 1.85, 2.2]  # longer following distance
+    'x_vel':  [0.0, 19.7, 22.2, 40.0],
+    'y_dist': (1.25, 1.60, 1.85, 2.20),
   },
   LongPersonality.standard: {
-    'x_vel':  [0.,   19.7, 22.2, 40.],
-    'y_dist': [1.35, 1.35, 1.40, 1.40]  # normal following distance
+    'x_vel':  [0.0, 19.7, 22.2, 40.0],
+    'y_dist': (1.35, 1.35, 1.40, 1.40),
   },
   LongPersonality.aggressive: {
-    'x_vel':  [0.,   19.7, 22.2, 40.],
-    'y_dist': [1.20, 1.20, 1.30, 1.30]  # shorter following distance
-  }
+    'x_vel':  [0.0, 19.7, 22.2, 40.0],
+    'y_dist': (1.20, 1.20, 1.30, 1.30),
+  },
+}
+FOLLOW_DISTANCE_PROFILES = DEFAULT_FOLLOW_DISTANCE_PROFILES
+
+
+def _make_follow_param_key(personality: int, idx: int) -> str:
+  return f"VibeTune.Follow.{LONG_MODE_NAMES[personality]}.Headway{idx}"
+
+
+def _make_brake_param_key(personality: int, idx: int) -> str:
+  return f"VibeTune.Brake.{LONG_MODE_NAMES[personality]}.Decel{idx}"
+
+
+def _make_accel_param_key(personality: int, idx: int) -> str:
+  return f"VibeTune.Accel.{ACCEL_MODE_NAMES[personality]}.Max{idx}"
+
+
+FOLLOW_DISTANCE_PARAM_KEYS = {
+  personality: tuple(_make_follow_param_key(personality, idx) for idx in range(len(DEFAULT_FOLLOW_DISTANCE_PROFILES[personality]['y_dist'])))
+  for personality in LONG_PERSONALITIES
+}
+
+MIN_ACCEL_PARAM_KEYS = {
+  personality: tuple(_make_brake_param_key(personality, idx) for idx in range(len(DEFAULT_MIN_ACCEL_PROFILES[personality])))
+  for personality in LONG_PERSONALITIES
+}
+
+MAX_ACCEL_PARAM_KEYS = {
+  personality: tuple(_make_accel_param_key(personality, idx) for idx in range(len(DEFAULT_MAX_ACCEL_PROFILES[personality])))
+  for personality in ACCEL_PERSONALITIES
 }
 
 class VibePersonalityController:
@@ -63,14 +109,24 @@ class VibePersonalityController:
     # Parameter keys
     self.param_keys = {
       'accel_personality': 'AccelPersonality',        # eco=0, normal=1, sport=2
-      'long_personality': 'LongitudinalPersonality',  # relaxed=0, standard=1, aggressive=2
+      'long_personality': 'LongitudinalPersonality',  # aggressive=0, standard=1, relaxed=2
       'enabled': 'VibePersonalityEnabled',
       'accel_enabled': 'VibeAccelPersonalityEnabled',
       'follow_enabled': 'VibeFollowPersonalityEnabled'
     }
 
-    # Precompute slopes for all personalities
+    self.max_accel_profiles = {personality: tuple(values) for personality, values in DEFAULT_MAX_ACCEL_PROFILES.items()}
+    self.min_accel_profiles = {personality: tuple(values) for personality, values in DEFAULT_MIN_ACCEL_PROFILES.items()}
+    self.follow_distance_profiles = {
+      personality: {
+        'x_vel': list(profile['x_vel']),
+        'y_dist': tuple(profile['y_dist']),
+      }
+      for personality, profile in DEFAULT_FOLLOW_DISTANCE_PROFILES.items()
+    }
+
     self._precompute_slopes()
+    self._update_tuning_profiles(force=True)
 
   def _precompute_slopes(self):
     """Precompute all interpolation slopes for efficiency"""
@@ -79,18 +135,56 @@ class VibePersonalityController:
     self.follow_distance_slopes = {}
 
     # Precompute for AccelPersonality (acceleration)
-    for personality in [AccelPersonality.eco, AccelPersonality.normal, AccelPersonality.sport]:
-      if personality in MAX_ACCEL_PROFILES:
-        self.max_accel_slopes[personality] = self._compute_slopes(MAX_ACCEL_BREAKPOINTS, MAX_ACCEL_PROFILES[personality])
+    for personality in ACCEL_PERSONALITIES:
+      if personality in self.max_accel_profiles:
+        self.max_accel_slopes[personality] = self._compute_slopes(MAX_ACCEL_BREAKPOINTS, self.max_accel_profiles[personality])
 
     # Precompute for LongPersonality (braking and following)
-    for personality in [LongPersonality.relaxed, LongPersonality.standard, LongPersonality.aggressive]:
-      if personality in MIN_ACCEL_PROFILES:
-        self.min_accel_slopes[personality] = self._compute_slopes(MIN_ACCEL_BREAKPOINTS, MIN_ACCEL_PROFILES[personality])
+    for personality in LONG_PERSONALITIES:
+      if personality in self.min_accel_profiles:
+        self.min_accel_slopes[personality] = self._compute_slopes(MIN_ACCEL_BREAKPOINTS, self.min_accel_profiles[personality])
 
-      if personality in FOLLOW_DISTANCE_PROFILES:
-        profile = FOLLOW_DISTANCE_PROFILES[personality]
+      if personality in self.follow_distance_profiles:
+        profile = self.follow_distance_profiles[personality]
         self.follow_distance_slopes[personality] = self._compute_slopes(profile['x_vel'], profile['y_dist'])
+
+  def _read_profile_values(self, keys: tuple[str, ...], defaults: tuple[float, ...]) -> tuple[float, ...]:
+    values = []
+    for key, default in zip(keys, defaults, strict=True):
+      try:
+        value = self.params.get(key, return_default=True)
+      except Exception:
+        value = default
+      if value is None:
+        value = default
+      values.append(float(value))
+    return tuple(values)
+
+  def _update_tuning_profiles(self, force: bool = False):
+    updated = force
+
+    for personality in ACCEL_PERSONALITIES:
+      values = self._read_profile_values(MAX_ACCEL_PARAM_KEYS[personality], DEFAULT_MAX_ACCEL_PROFILES[personality])
+      if force or values != self.max_accel_profiles[personality]:
+        self.max_accel_profiles[personality] = values
+        updated = True
+
+    for personality in LONG_PERSONALITIES:
+      min_values = self._read_profile_values(MIN_ACCEL_PARAM_KEYS[personality], DEFAULT_MIN_ACCEL_PROFILES[personality])
+      if force or min_values != self.min_accel_profiles[personality]:
+        self.min_accel_profiles[personality] = min_values
+        updated = True
+
+      follow_values = self._read_profile_values(FOLLOW_DISTANCE_PARAM_KEYS[personality], DEFAULT_FOLLOW_DISTANCE_PROFILES[personality]['y_dist'])
+      if force or follow_values != self.follow_distance_profiles[personality]['y_dist']:
+        self.follow_distance_profiles[personality] = {
+          'x_vel': list(DEFAULT_FOLLOW_DISTANCE_PROFILES[personality]['x_vel']),
+          'y_dist': follow_values,
+        }
+        updated = True
+
+    if updated:
+      self._precompute_slopes()
 
   def _update_from_params(self):
     """Update personalities from params (rate limited)"""
@@ -99,19 +193,21 @@ class VibePersonalityController:
 
     # Update AccelPersonality
     try:
-      accel_personality_str = self.params.get(self.param_keys['accel_personality'])
-      if accel_personality_str:
-        accel_personality_int = int(accel_personality_str)
+      accel_personality_val = self.params.get(self.param_keys['accel_personality'])
+      if accel_personality_val is not None:
+        accel_personality_int = int(accel_personality_val)
         if accel_personality_int in [AccelPersonality.eco, AccelPersonality.normal, AccelPersonality.sport]:
           self.accel_personality = accel_personality_int
     except (ValueError, TypeError):
       pass
 
+    self._update_tuning_profiles()
+
     # Update LongPersonality
     try:
-      long_personality_str = self.params.get(self.param_keys['long_personality'])
-      if long_personality_str:
-        long_personality_int = int(long_personality_str)
+      long_personality_val = self.params.get(self.param_keys['long_personality'])
+      if long_personality_val is not None:
+        long_personality_int = int(long_personality_val)
         if long_personality_int in [LongPersonality.relaxed, LongPersonality.standard, LongPersonality.aggressive]:
           self.long_personality = long_personality_int
     except (ValueError, TypeError):
@@ -209,11 +305,11 @@ class VibePersonalityController:
 
     try:
       # Max acceleration from AccelPersonality
-      max_a = self._interpolate(v_ego, MAX_ACCEL_BREAKPOINTS, MAX_ACCEL_PROFILES[self.accel_personality],
+      max_a = self._interpolate(v_ego, MAX_ACCEL_BREAKPOINTS, self.max_accel_profiles[self.accel_personality],
                                 self.max_accel_slopes[self.accel_personality])
 
       # Min acceleration (braking) from LongPersonality
-      min_a = self._interpolate(v_ego, MIN_ACCEL_BREAKPOINTS, MIN_ACCEL_PROFILES[self.long_personality],
+      min_a = self._interpolate(v_ego, MIN_ACCEL_BREAKPOINTS, self.min_accel_profiles[self.long_personality],
                                 self.min_accel_slopes[self.long_personality])
 
       return float(min_a), float(max_a)
@@ -227,7 +323,7 @@ class VibePersonalityController:
       return None
 
     try:
-      profile = FOLLOW_DISTANCE_PROFILES[self.long_personality]
+      profile = self.follow_distance_profiles[self.long_personality]
       multiplier = float(self._interpolate(v_ego, profile['x_vel'], profile['y_dist'],
                                            self.follow_distance_slopes[self.long_personality]))
       return multiplier

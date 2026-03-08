@@ -66,9 +66,8 @@ LongitudinalPanel::LongitudinalPanel(QWidget *parent) : QWidget(parent) {
     "../assets/offroad/icon_shell.png", nullptr, false, false);
   list->addItem(vibeFollowPersonalityControl);
 
-  main_layout->addWidget(cruisePanelScreen);
-  main_layout->setCurrentWidget(cruisePanelScreen);
-  // Moved refresh() call to end of constructor after all controls are initialized
+  vibeTuningControl = new VibeTuningControl(this);
+  list->addItem(vibeTuningControl);
 
   slcControl = new SpeedLimitControl(this);
   list->addItem(slcControl);
@@ -99,6 +98,11 @@ LongitudinalPanel::LongitudinalPanel(QWidget *parent) : QWidget(parent) {
     cruisePanelScroller->setLastScrollPosition();
     main_layout->setCurrentWidget(rtiSettingsScreen);
   });
+
+  connect(vibeTuningControl, &VibeTuningControl::settingsClicked, [=]() {
+    cruisePanelScroller->setLastScrollPosition();
+    main_layout->setCurrentWidget(vibeTuningScreen);
+  });
   
   connect(decControl, &DecControl::settingsClicked, [=]() {
     cruisePanelScroller->setLastScrollPosition();
@@ -113,6 +117,12 @@ LongitudinalPanel::LongitudinalPanel(QWidget *parent) : QWidget(parent) {
 
   rtiSettingsScreen = new RTISettingsPanel(this);
   connect(rtiSettingsScreen, &RTISettingsPanel::backPress, [=]() {
+    cruisePanelScroller->restoreScrollPosition();
+    main_layout->setCurrentWidget(cruisePanelScreen);
+  });
+
+  vibeTuningScreen = new VibeTuningPanel(this);
+  connect(vibeTuningScreen, &VibeTuningPanel::backPress, [=]() {
     cruisePanelScroller->restoreScrollPosition();
     main_layout->setCurrentWidget(cruisePanelScreen);
   });
@@ -137,6 +147,7 @@ LongitudinalPanel::LongitudinalPanel(QWidget *parent) : QWidget(parent) {
   main_layout->addWidget(cruisePanelScreen);
   main_layout->addWidget(slcScreen);
   main_layout->addWidget(rtiSettingsScreen);
+  main_layout->addWidget(vibeTuningScreen);
   main_layout->addWidget(decScreen);
   main_layout->addWidget(vtscSettingsScreen);
   main_layout->setCurrentWidget(cruisePanelScreen);
@@ -191,9 +202,11 @@ void LongitudinalPanel::refresh(bool _offroad) {
   if (vibePersonalityEnabled) {
     vibeAccelPersonalityControl->setVisible(true);
     vibeFollowPersonalityControl->setVisible(true);
+    vibeTuningControl->setVisible(true);
   } else {
     vibeAccelPersonalityControl->setVisible(false);
     vibeFollowPersonalityControl->setVisible(false);
+    vibeTuningControl->setVisible(false);
   }
 
   // enable toggle when long is available and is not PCM cruise
@@ -204,12 +217,14 @@ void LongitudinalPanel::refresh(bool _offroad) {
   vibePersonalityControl->setEnabled(true);
   vibeAccelPersonalityControl->setEnabled(true);
   vibeFollowPersonalityControl->setEnabled(true);
+  vibeTuningControl->setSettingsEnabled(vibePersonalityEnabled);
   
   // Refresh VTSC toggle state
   visionTurnSpeedControl->refresh();
   vibePersonalityControl->refresh();
   vibeAccelPersonalityControl->refresh();
   vibeFollowPersonalityControl->refresh();
+  vibeTuningControl->refresh();
 
   offroad = _offroad;
 }

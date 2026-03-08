@@ -27,6 +27,8 @@
 #include "selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/vtsc_physics_internals_panel.h"
 #include "selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/rti_control.h"
 #include "selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/rti_settings_panel.h"
+#include "selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/vibe_tuning_control.h"
+#include "selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/vibe_tuning_panel.h"
 #include "selfdrive/ui/sunnypilot/qt/offroad/settings/settings.h"
 #include "selfdrive/ui/sunnypilot/qt/widgets/scrollview.h"
 
@@ -70,6 +72,8 @@ private:
   ParamControlSP *vibePersonalityControl;
   ParamControlSP *vibeAccelPersonalityControl;
   ParamControlSP *vibeFollowPersonalityControl;
+  VibeTuningControl *vibeTuningControl = nullptr;
+  VibeTuningPanel *vibeTuningScreen = nullptr;
   
   // RTI controls
   RTIControl *rtiControl;
