@@ -147,6 +147,22 @@ ModelsPanel::ModelsPanel(QWidget *parent) : QWidget(parent) {
   });
   delay_control->showDescription();
   list->addItem(delay_control);
+
+  list->addItem(horizontal_line());
+
+  camera_offset_control = new OptionControlSP(
+      "CameraOffset",
+      tr("Adjust Camera Offset"),
+      tr("Virtually shift camera's perspective to move model's center.\n"
+         "Positive values shift left, negative values shift right."),
+      "", {-35, 35}, 1, false, nullptr, true, false);
+
+  connect(camera_offset_control, &OptionControlSP::updateLabels, [=]() {
+    float value = QString::fromStdString(params.get("CameraOffset")).toFloat();
+    camera_offset_control->setLabel(QString::number(value, 'f', 2) + " m");
+  });
+  camera_offset_control->showDescription();
+  list->addItem(camera_offset_control);
 }
 
 QProgressBar* ModelsPanel::createProgressBar(QWidget *parent) {
@@ -450,6 +466,11 @@ void ModelsPanel::updateLabels() {
     delay_control->setLabel(QString::number(value, 'f', 2) + "s");
   }
 
+  {
+    float value = QString::fromStdString(params.get("CameraOffset")).toFloat();
+    camera_offset_control->setLabel(QString::number(value, 'f', 2) + " m");
+  }
+
   clearModelCacheBtn->setValue(QString::number(calculateCacheSize(), 'f', 2) + " MB");
 }
 
@@ -506,4 +527,5 @@ void ModelsPanel::showEvent(QShowEvent *event) {
   if (delay_control->isVisible()) {
     delay_control->showDescription();
   }
+  camera_offset_control->showDescription();
 }

@@ -70,6 +70,7 @@ private:
   ParamControlSP *dynamicModeldOutputs;
   ParamControlSP *lagd_toggle_control;
   OptionControlSP *delay_control;
+  OptionControlSP *camera_offset_control;
   QProgressBar *supercomboProgressBar;
   QFrame *supercomboFrame;
   QProgressBar *navigationProgressBar;
