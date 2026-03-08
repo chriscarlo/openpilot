@@ -67,6 +67,24 @@ print("min_selector_version range:", min(versions), "-", max(versions))
 '
 ```
 
+For tinygrad runtime issues, also check the runtime pin itself:
+
+```bash
+# Upstream sunnypilot stores tinygrad_repo as a gitlink, not a tree
+git rev-parse sp/master:tinygrad_repo
+
+# Remote compiled model list pin
+python3 - <<'PY'
+import requests
+from sunnypilot.models.fetcher import ModelFetcher
+print(requests.get(ModelFetcher.MODEL_URL, timeout=10).json()["tinygrad_ref"])
+PY
+```
+
+If this branch vendors `tinygrad_repo`, compare your local tree against a real
+checkout/archive of that tinygrad commit. Do **not** rely on
+`git diff sp/master:tinygrad_repo ...`; the superproject only stores a gitlink.
+
 ### 2. Update version constants (`helpers.py`)
 
 ```python
@@ -190,12 +208,45 @@ as a plain tree snapshot, which makes `get_tinygrad_ref()` ineffective.
 When that happens, add a tracked `tinygrad_repo/.vendored_ref` file and make
 `sunnypilot/models/tinygrad_ref.py` read it before looking for `.git`.
 
+After any tinygrad runtime sync, smoke-test the actual compiled pickles before
+declaring victory. On device, run `pickle.load(...)` on the active
+`driving_vision_*_tinygrad.pkl`, `driving_policy_*_tinygrad.pkl`, and
+`driving_off_policy_*_tinygrad.pkl` under the target runtime. If that still
+crashes in `tinygrad/device.py`, calibration will remain stuck at `0%` because
+`modeld_tinygrad` never reaches steady state.
+
+### `CapturedJit` input metadata rename can crash startup after a tinygrad sync
+After syncing to newer tinygrad runtimes, compiled model pickles may still load
+cleanly while `modeld_tinygrad` crashes during runner initialization. Newer
+tinygrad exposes `model_run.captured.expected_input_info`; older code in
+`sunnypilot/models/runners/tinygrad/tinygrad_runner.py` may still read the
+legacy `expected_st_vars_dtype_device` field. When that happens, startup fails
+with:
+
+- `AttributeError: 'CapturedJit' object has no attribute 'expected_st_vars_dtype_device'`
+- `modeld_tinygrad` exits with code `1`
+- calibration may briefly move if you manually launch `modeld`, then stop again
+
+Keep a compatibility helper/fallback in `tinygrad_runner.py` for both field
+names when vendoring newer tinygrad runtimes.
+
+### Gitlink vs vendored tree diff trap
+Upstream sunnypilot tracks `tinygrad_repo` as a gitlink/submodule, while some
+branches vendor it as a plain tree. `git diff sp/master:tinygrad_repo` is not a
+real tree diff and can fail or mislead. To audit local drift correctly:
+
+- resolve the upstream tinygrad commit from `sp/master:tinygrad_repo` or remote
+  JSON `tinygrad_ref`
+- checkout or archive that commit from the actual tinygrad repo
+- diff that real tree against local `tinygrad_repo/`
+
 ### Upstream sync overwrites local fixes
 Upstream sunnypilot syncs may completely replace `helpers.py`, `fetcher.py`,
 `manager.py`, and the tinygrad split runtime files. Re-verify defensive
 patterns (try/except in parser, `is not None` checks, JSON encode/decode in
-cache, `offPolicy` runner support, standalone `planplus` parsing, and
-`tinygrad_ref` compatibility) after every sync.
+cache, `offPolicy` runner support, standalone `planplus` parsing,
+`tinygrad_ref` compatibility, and vendored tinygrad metadata) after every
+sync.
 
 ### JSON keys vs capnp field names
 Remote JSON uses `snake_case` (`minimum_selector_version`). Capnp uses
@@ -206,7 +257,29 @@ Remote JSON uses `snake_case` (`minimum_selector_version`). Capnp uses
 
 After completing any model-manager update task, **before finishing**,
 review what happened during this session and update both copies of this
-skill with any new information learned. This is not optional.
+skill with any new information learned. This is not optional, and it does
+**not** require a user prompt.
+
+Treat this skill as a kaizen loop: every real invocation should leave it
+more accurate, more actionable, or more compact than it was before. The
+skill should continuously improve as a matter of course while being used,
+not only when the user explicitly asks for documentation maintenance.
+
+### Continuous Improvement Policy
+
+- Always compare new evidence from the current session against existing
+  guidance before finishing.
+- If the new evidence proves an existing bullet incomplete, stale, or wrong,
+  **correct or replace** it immediately instead of adding a contradictory note.
+- Prefer editing or deleting obsolete guidance over endlessly appending new
+  warnings.
+- If a new lesson affects nearby workflow steps, file inventory, or reference
+  history, update those adjacent sections in the same pass.
+- If a failure passes through multiple layers, record the **first broken
+  contract** and the most reliable validation command, not just the final
+  downstream symptom.
+- Keep both skill copies in sync automatically; do not wait for the user to
+  ask for the second copy to be updated.
 
 ### What to update
 
@@ -239,9 +312,10 @@ path references (Codex uses `.codex/skills/...` paths, Claude Code uses
 
 - Only add things that caused real failures or wasted real time.
 - Prefer concrete guidance (file path, command, config key) over vague warnings.
+- Prefer correction and replacement over accumulation.
 - Remove bullets that become obsolete (e.g., a bug was fixed in code/config).
-- Keep the skill under 250 lines — if it grows past that, factor details
-  into `references/` files and link to them.
+- Keep the skill compact. If it grows too large, factor detail into
+  `references/` files and link to them rather than letting stale bulk pile up.
 
 ## References
 

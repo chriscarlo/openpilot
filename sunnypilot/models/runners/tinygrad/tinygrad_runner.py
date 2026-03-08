@@ -4,12 +4,12 @@ import numpy as np
 from openpilot.sunnypilot.modeld_v2.runners.tinygrad_helpers import qcom_tensor_from_opencl_address
 from openpilot.sunnypilot.models.runners.constants import CLMemDict, FrameDict, NumpyDict, ModelType, ShapeDict, CUSTOM_MODEL_PATH, SliceDict
 from openpilot.sunnypilot.models.runners.model_runner import ModelRunner
+from openpilot.sunnypilot.models.runners.tinygrad.compat import get_captured_input_info
 from openpilot.sunnypilot.models.runners.tinygrad.model_types import PolicyTinygrad, VisionTinygrad, SupercomboTinygrad, OffPolicyTinygrad
 from openpilot.sunnypilot.models.runners.tinygrad.split_outputs import merge_split_model_outputs
 from openpilot.system.hardware import TICI
 from openpilot.sunnypilot.models.split_model_constants import SplitModelConstants
 from openpilot.sunnypilot.modeld_v2.constants import ModelConstants
-
 from tinygrad.tensor import Tensor
 
 
@@ -51,8 +51,9 @@ class TinygradRunner(ModelRunner, SupercomboTinygrad, PolicyTinygrad, VisionTiny
     # Map input names to their required dtype and device from the loaded model
     self.input_to_dtype = {}
     self.input_to_device = {}
+    input_info = get_captured_input_info(self.model_run.captured)
     for idx, name in enumerate(self.model_run.captured.expected_names):
-      info = self.model_run.captured.expected_st_vars_dtype_device[idx]
+      info = input_info[idx]
       self.input_to_dtype[name] = info[2]  # dtype
       self.input_to_device[name] = info[3]  # device
 

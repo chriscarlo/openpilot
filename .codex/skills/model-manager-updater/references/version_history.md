@@ -14,6 +14,7 @@
 | 2026-03-03 | `5a85c423d` | 15 | 14 | v15 | Our explicit bump + 3 manager.py fixes |
 | 2026-03-03 | `1239afd2e` | — | — | — | Added `offPolicy @4` to capnp + resilient parser |
 | 2026-03-03 | `6ff7cf6ad` | — | — | — | Added offPolicy progress bar to models_panel UI |
+| 2026-03-08 | `e1c7ebc24` | — | — | v15 | Vendored upstream tinygrad runtime at matching `tinygrad_ref` and added `.vendored_ref` metadata |
 
 ## Model Type Evolution
 
@@ -56,7 +57,7 @@
 - If only capnp/UI support is added, onroad can stay unhealthy with calibration
   stuck at 0% because `modeld_tinygrad` is missing required outputs
 
-### Tinygrad runtime/model ABI mismatch (2026-03-08, working tree)
+### Tinygrad runtime/model ABI mismatch (2026-03-08, `e1c7ebc24`)
 - OMV4 still crashed after the split-runner fix because `modeld_tinygrad`
   died during `pickle.load(...)` of `driving_vision_omv4_tinygrad.pkl`
 - Device traceback:
@@ -66,3 +67,9 @@
 - This branch's `tinygrad_repo` is an older vendored tree object
   `bf041d6c43362afea0a6578856344bb271a7861d`, not the upstream gitlink/ref
 - Result: no `modelV2`/`cameraOdometry`, `MDL` red, calibration stuck at 0%
+- Fixed by vendoring the upstream tinygrad runtime at
+  `3501a714785ff370cffb966a45d5f9cdf6c9ea7a` and storing that pin in
+  `tinygrad_repo/.vendored_ref`
+- Device proof after the fix: live `/data/openpilot/tinygrad` successfully
+  `pickle.load(...)`ed all three OMV4 artifacts (`vision`, `policy`,
+  `off_policy`)
