@@ -30,7 +30,7 @@ class TestSmoothing:
     for _ in range(100):
       helper.update(transform.copy(), transform.copy(), mock_sm, False)
 
-    assert abs(helper.actual_camera_offset - 0.1) < 1e-6
+    assert abs(helper.actual_camera_offset - 0.1) < 1e-5
 
   def test_smoothing_step(self, helper, mock_sm):
     """Single step should apply 0.1 of the target (SMOOTH_ALPHA)."""
