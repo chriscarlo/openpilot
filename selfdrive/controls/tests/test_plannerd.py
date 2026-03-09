@@ -4,7 +4,7 @@ from openpilot.common.realtime import Priority
 from openpilot.selfdrive.controls import plannerd
 
 
-def test_main_pins_plannerd_to_core6(monkeypatch):
+def test_main_pins_plannerd_to_core5(monkeypatch):
   calls = []
 
   monkeypatch.setattr(plannerd, "config_realtime_process", lambda cores, priority: calls.append((cores, priority)))
@@ -24,4 +24,4 @@ def test_main_pins_plannerd_to_core6(monkeypatch):
   with pytest.raises(RuntimeError, match="stop_after_affinity"):
     plannerd.main()
 
-  assert calls == [(6, Priority.CTRL_LOW)]
+  assert calls == [(5, Priority.CTRL_LOW)]
