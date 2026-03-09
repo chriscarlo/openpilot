@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import bisect
 import math
 from dataclasses import dataclass
 
 import numpy as np
 from opendbc.car.interfaces import ACCEL_MIN, ACCEL_MAX
 from openpilot.common.realtime import DT_MDL
-from openpilot.selfdrive.controls.lib.drive_helpers import get_accel_from_plan
 from openpilot.selfdrive.modeld.constants import ModelConstants
 from openpilot.sunnypilot.selfdrive.controls.lib.planner_lag_debug import (
   SPAN_HELPER_CRUISE_CAP,
@@ -96,6 +96,76 @@ def clip_cruise_speed_profile(
   return v_lower, v_upper, v_cruise_clipped
 
 
+# The helper probe calls this step function dozens of times per planner cycle.
+# Evaluate the sampled clipped cruise profile directly at the few times we need
+# instead of rebuilding full arrays and gradients for every step.
+def _clipped_cruise_speed_at_time(
+  *,
+  v_ego: float,
+  cruise_cap: float,
+  response_model: CruiseResponseModel,
+  t_s: float,
+) -> float:
+  t = max(0.0, float(t_s))
+  min_accel = min(0.0, float(response_model.min_accel_mps2)) * float(response_model.speed_safety_factor)
+  max_accel = max(0.0, float(response_model.max_accel_mps2)) * float(response_model.speed_safety_factor)
+  lower = float(v_ego) + (t * min_accel)
+  upper = float(v_ego) + (t * max_accel)
+  return float(min(max(float(cruise_cap), lower), upper))
+
+
+def _interp_clipped_cruise_speed(
+  *,
+  v_ego: float,
+  cruise_cap: float,
+  t_idxs,
+  action_t: float,
+  response_model: CruiseResponseModel,
+) -> float:
+  if len(t_idxs) == 0:
+    return float(v_ego)
+
+  target_t = max(0.0, float(action_t))
+  first_t = float(t_idxs[0])
+  last_t = float(t_idxs[-1])
+  if target_t <= first_t:
+    return float(v_ego)
+  if target_t >= last_t:
+    return _clipped_cruise_speed_at_time(
+      v_ego=v_ego,
+      cruise_cap=cruise_cap,
+      response_model=response_model,
+      t_s=last_t,
+    )
+
+  hi = bisect.bisect_left(t_idxs, target_t)
+  if hi < len(t_idxs) and abs(float(t_idxs[hi]) - target_t) <= 1e-12:
+    return _clipped_cruise_speed_at_time(
+      v_ego=v_ego,
+      cruise_cap=cruise_cap,
+      response_model=response_model,
+      t_s=float(t_idxs[hi]),
+    )
+
+  lo = max(0, hi - 1)
+  t0 = float(t_idxs[lo])
+  t1 = float(t_idxs[hi])
+  y0 = _clipped_cruise_speed_at_time(
+    v_ego=v_ego,
+    cruise_cap=cruise_cap,
+    response_model=response_model,
+    t_s=t0,
+  )
+  y1 = _clipped_cruise_speed_at_time(
+    v_ego=v_ego,
+    cruise_cap=cruise_cap,
+    response_model=response_model,
+    t_s=t1,
+  )
+  frac = (target_t - t0) / max(1e-12, t1 - t0)
+  return float(y0 + frac * (y1 - y0))
+
+
 def _planner_step_accel(
   *,
   v_ego: float,
@@ -105,24 +175,33 @@ def _planner_step_accel(
   v_ego_stopping: float = 0.25,
   t_idxs = None,
 ) -> float:
-  t = np.asarray(ModelConstants.T_IDXS if t_idxs is None else t_idxs, dtype=float)
-  _, _, v_cruise_clipped = clip_cruise_speed_profile(
-    v_ego=float(v_ego),
-    v_cruise=float(cruise_cap),
+  t = ModelConstants.T_IDXS if t_idxs is None else t_idxs
+  v_ego_f = float(v_ego)
+  cruise_f = float(cruise_cap)
+  action_t = max(float(dt_s), float(response_model.actuation_delay_s))
+
+  if len(t) >= 2 and float(t[1]) > 0.0:
+    next_v = _clipped_cruise_speed_at_time(
+      v_ego=v_ego_f,
+      cruise_cap=cruise_f,
+      response_model=response_model,
+      t_s=float(t[1]),
+    )
+    a_now = (next_v - v_ego_f) / float(t[1])
+  else:
+    a_now = 0.0
+
+  v_target = _interp_clipped_cruise_speed(
+    v_ego=v_ego_f,
+    cruise_cap=cruise_f,
     t_idxs=t,
+    action_t=action_t,
     response_model=response_model,
   )
-  a_profile = np.gradient(v_cruise_clipped, t)
-  a_target, _ = get_accel_from_plan(
-    v_cruise_clipped,
-    a_profile,
-    t,
-    action_t=max(float(dt_s), float(response_model.actuation_delay_s)),
-    vEgoStopping=v_ego_stopping,
-  )
+  a_target = 2.0 * (v_target - v_ego_f) / action_t - a_now
   amin = float(response_model.planner_output_min_accel_mps2)
   amax = float(response_model.planner_output_max_accel_mps2)
-  return float(np.clip(a_target, amin, amax))
+  return float(min(max(a_target, amin), amax))
 
 
 def distance_needed_to_reach_speed(
