@@ -9,6 +9,12 @@ from opendbc.car.interfaces import ACCEL_MIN, ACCEL_MAX
 from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.controls.lib.drive_helpers import get_accel_from_plan
 from openpilot.selfdrive.modeld.constants import ModelConstants
+from openpilot.sunnypilot.selfdrive.controls.lib.planner_lag_debug import (
+  SPAN_HELPER_CRUISE_CAP,
+  SPAN_HELPER_PREDICT,
+  end_span,
+  start_span,
+)
 
 
 CRUISE_ENVELOPE_SAFETY_FACTOR = 1.05
@@ -197,26 +203,30 @@ def predict_average_decel_for_cruise_cap(
   v_ego_stopping: float = 0.25,
   t_idxs = None,
 ) -> float:
-  v = max(0.0, float(v_ego))
-  cruise = max(0.0, float(cruise_cap))
-  dt = max(1e-3, float(dt_s))
-  duration = max(dt, float(probe_duration_s))
-  steps = max(1, int(math.ceil(duration / dt)))
-  a_sum = 0.0
+  total_span = start_span(SPAN_HELPER_PREDICT)
+  try:
+    v = max(0.0, float(v_ego))
+    cruise = max(0.0, float(cruise_cap))
+    dt = max(1e-3, float(dt_s))
+    duration = max(dt, float(probe_duration_s))
+    steps = max(1, int(math.ceil(duration / dt)))
+    a_sum = 0.0
 
-  for _ in range(steps):
-    a_cmd = _planner_step_accel(
-      v_ego=v,
-      cruise_cap=cruise,
-      response_model=response_model,
-      dt_s=dt,
-      v_ego_stopping=v_ego_stopping,
-      t_idxs=t_idxs,
-    )
-    a_sum += a_cmd
-    v = max(0.0, v + a_cmd * dt)
+    for _ in range(steps):
+      a_cmd = _planner_step_accel(
+        v_ego=v,
+        cruise_cap=cruise,
+        response_model=response_model,
+        dt_s=dt,
+        v_ego_stopping=v_ego_stopping,
+        t_idxs=t_idxs,
+      )
+      a_sum += a_cmd
+      v = max(0.0, v + a_cmd * dt)
 
-  return max(0.0, -(a_sum / float(steps)))
+    return max(0.0, -(a_sum / float(steps)))
+  finally:
+    end_span(total_span)
 
 
 def cruise_cap_for_required_average_decel(
@@ -232,43 +242,47 @@ def cruise_cap_for_required_average_decel(
   iterations: int = 10,
   decel_tol_mps2: float = CRUISE_CAP_REQUIRED_DECEL_TOL_MPS2,
 ) -> float:
-  v_ego_f = max(0.0, float(v_ego))
-  required = max(0.0, float(required_decel_mps2))
-  upper = max(0.0, float(v_cruise_upper))
-  if required <= decel_tol_mps2:
-    return upper
+  total_span = start_span(SPAN_HELPER_CRUISE_CAP)
+  try:
+    v_ego_f = max(0.0, float(v_ego))
+    required = max(0.0, float(required_decel_mps2))
+    upper = max(0.0, float(v_cruise_upper))
+    if required <= decel_tol_mps2:
+      return upper
 
-  cache: dict[float, float] = {}
+    cache: dict[float, float] = {}
 
-  def avg_decel(cap: float) -> float:
-    key = round(float(cap), 4)
-    if key not in cache:
-      cache[key] = predict_average_decel_for_cruise_cap(
-        v_ego=v_ego_f,
-        cruise_cap=key,
-        response_model=response_model,
-        probe_duration_s=probe_duration_s,
-        dt_s=dt_s,
-        v_ego_stopping=v_ego_stopping,
-        t_idxs=t_idxs,
-      )
-    return cache[key]
+    def avg_decel(cap: float) -> float:
+      key = round(float(cap), 4)
+      if key not in cache:
+        cache[key] = predict_average_decel_for_cruise_cap(
+          v_ego=v_ego_f,
+          cruise_cap=key,
+          response_model=response_model,
+          probe_duration_s=probe_duration_s,
+          dt_s=dt_s,
+          v_ego_stopping=v_ego_stopping,
+          t_idxs=t_idxs,
+        )
+      return cache[key]
 
-  lo = 0.0
-  hi = upper
-  if avg_decel(hi) >= required - decel_tol_mps2:
-    return hi
-  if avg_decel(lo) < required - decel_tol_mps2:
-    return lo
+    lo = 0.0
+    hi = upper
+    if avg_decel(hi) >= required - decel_tol_mps2:
+      return hi
+    if avg_decel(lo) < required - decel_tol_mps2:
+      return lo
 
-  for _ in range(int(iterations)):
-    mid = 0.5 * (lo + hi)
-    if avg_decel(mid) >= required - decel_tol_mps2:
-      lo = mid
-    else:
-      hi = mid
+    for _ in range(int(iterations)):
+      mid = 0.5 * (lo + hi)
+      if avg_decel(mid) >= required - decel_tol_mps2:
+        lo = mid
+      else:
+        hi = mid
 
-  return max(0.0, float(lo))
+    return max(0.0, float(lo))
+  finally:
+    end_span(total_span)
 
 
 def required_cruise_cap_for_target_at_distance(

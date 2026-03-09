@@ -18,6 +18,13 @@ except Exception:
   VehicleModel = None
 from openpilot.selfdrive.car.cruise import V_CRUISE_MAX
 from openpilot.selfdrive.modeld.constants import ModelConstants
+from .planner_lag_debug import (
+  SPAN_MAP_TAIL_CAP,
+  SPAN_PREVIEW_BRANCH_STUBS,
+  SPAN_PREVIEW_FROM_MAP,
+  end_span,
+  start_span,
+)
 from .vision_turn_params import update_vtsc_params
 from .vtsc_map_strategy import (
   MAP_STRATEGY_ADVISORY,
@@ -2190,7 +2197,11 @@ class VisionTurnController:
     try:
       if self._get_bool_param('MTSCLookaheadEnabled', False):
         self._map_tail_reason = "enabled_no_cap"
-        v_cap, s_start, coverage = self._map_tail_cap(sm)
+        map_tail_span = start_span(SPAN_MAP_TAIL_CAP)
+        try:
+          v_cap, s_start, coverage = self._map_tail_cap(sm)
+        finally:
+          end_span(map_tail_span)
         candidate = getattr(self, '_map_tail_candidate', None)
         self._dbg_map_advisory_cap = float(getattr(self, '_map_tail_advisory_cap', 0.0) or 0.0)
         self._dbg_map_strategic_cap = float(getattr(self, '_map_tail_strategic_cap', 0.0) or 0.0)
@@ -3785,25 +3796,33 @@ class VisionTurnController:
 
     # Update HUD preview from the same map lookahead inputs VTSC already uses.
     try:
-      self._update_curve_preview_from_map(
-        gps_lat=float(lat0),
-        gps_lon=float(lon0),
-        gps_bearing_deg=None if bearing_deg is None else float(bearing_deg),
-        pts=pts,
-        i0=i0,
-      )
+      preview_span = start_span(SPAN_PREVIEW_FROM_MAP)
+      try:
+        self._update_curve_preview_from_map(
+          gps_lat=float(lat0),
+          gps_lon=float(lon0),
+          gps_bearing_deg=None if bearing_deg is None else float(bearing_deg),
+          pts=pts,
+          i0=i0,
+        )
+      finally:
+        end_span(preview_span)
     except Exception:
       # Never let preview failures affect longitudinal behavior.
       self._clear_curve_preview()
     else:
       try:
         if sm is not None:
-          self._update_curve_preview_branch_stubs(
-            sm,
-            gps_lat=float(lat0),
-            gps_lon=float(lon0),
-            gps_bearing_deg=None if bearing_deg is None else float(bearing_deg),
-          )
+          branch_stub_span = start_span(SPAN_PREVIEW_BRANCH_STUBS)
+          try:
+            self._update_curve_preview_branch_stubs(
+              sm,
+              gps_lat=float(lat0),
+              gps_lon=float(lon0),
+              gps_bearing_deg=None if bearing_deg is None else float(bearing_deg),
+            )
+          finally:
+            end_span(branch_stub_span)
       except Exception:
         self._curve_preview_branch_stubs = []
 

@@ -8,6 +8,7 @@ configuration loading, and main processing loop.
 
 import asyncio
 import json
+import math
 import os
 import tempfile
 import pytest
@@ -206,6 +207,47 @@ class TestRTIDaemon:
 
         assert speed == 0.0
 
+    def test_get_current_heading_falls_back_to_live_pose(self, daemon):
+        """RTI should derive heading from livePose when GPS bearing is unavailable."""
+        gps_loc = MagicMock()
+        gps_loc.hasFix = True
+        gps_loc.bearingDeg = None
+
+        gps_ext = MagicMock()
+        gps_ext.hasFix = False
+
+        live_pose = MagicMock()
+        live_pose.inputsOK = True
+        live_pose.orientationNED = MagicMock(z=-math.pi / 2, valid=True)
+
+        daemon.sm.__getitem__.side_effect = lambda key: {
+            'gpsLocation': gps_loc,
+            'gpsLocationExternal': gps_ext,
+            'livePose': live_pose,
+        }.get(key)
+
+        heading = daemon._get_current_heading_deg()
+
+        assert heading == pytest.approx(270.0)
+
+    def test_get_current_speed_limit_combined_policy_matches_slc_higher_source(self, daemon):
+        """RTI should mirror SLC combined-mode source selection for raw posted limits."""
+        daemon.params.get.side_effect = lambda key: b"4" if key == "SpeedLimitControlPolicy" else None
+
+        map_data = MagicMock()
+        map_data.speedLimitValid = True
+        map_data.speedLimit = 24.6
+
+        car_state_sp = MagicMock()
+        car_state_sp.speedLimit = 29.1
+
+        daemon.sm.__getitem__.side_effect = lambda key: {
+            'liveMapDataSP': map_data,
+            'carStateSP': car_state_sp,
+        }.get(key)
+
+        assert daemon._get_current_speed_limit() == pytest.approx(29.1)
+
     def test_publish_offline_state(self, daemon):
         """Test publishing offline RTI state."""
         with patch('sunnypilot.rtid.rtid.time.time', return_value=1234.567):
@@ -383,6 +425,66 @@ class TestRTIDaemon:
         assert kwargs["timestamp"] == 1234567890000
         assert daemon._last_processed_state is mock_state
         assert daemon._last_processed_state.api_status == "offline"
+
+    @pytest.mark.asyncio
+    async def test_process_cycle_uses_live_pose_heading_when_gps_bearing_missing(self, daemon):
+        """Threat processing should receive livePose-derived heading when GPS bearing is empty."""
+        gps_loc = MagicMock()
+        gps_loc.hasFix = True
+        gps_loc.latitude = 37.4221
+        gps_loc.longitude = -122.0841
+        gps_loc.bearingDeg = None
+
+        gps_ext = MagicMock()
+        gps_ext.hasFix = False
+        gps_ext.latitude = 0.0
+        gps_ext.longitude = 0.0
+        gps_ext.horizontalAccuracy = 99.0
+
+        live_pose = MagicMock()
+        live_pose.inputsOK = True
+        live_pose.orientationNED = MagicMock(z=-math.pi / 2, valid=True)
+
+        car_state = MagicMock()
+        car_state.vEgo = 25.0
+        car_state.cruiseState.enabled = True
+        car_state.cruiseState.speedCluster = 30.0
+
+        map_data = MagicMock()
+        map_data.speedLimitValid = False
+        map_data.roadName = "US-50 W"
+
+        car_state_sp = MagicMock()
+        car_state_sp.speedLimit = 0.0
+
+        daemon.sm.updated = {'carState': True}
+        daemon.sm.__getitem__.side_effect = lambda key: {
+            'gpsLocation': gps_loc,
+            'gpsLocationExternal': gps_ext,
+            'livePose': live_pose,
+            'carState': car_state,
+            'liveMapDataSP': map_data,
+            'carStateSP': car_state_sp,
+        }.get(key)
+
+        daemon.waze_client = None
+
+        mock_state = RTIState(
+            timestamp=1234567890,
+            threat_ahead=False,
+            threat_distance_m=0.0,
+            recommended_speed=0.0,
+            source='rti',
+            api_status='unknown',
+            threats=[]
+        )
+        daemon.threat_detector.process_threats = MagicMock(return_value=mock_state)
+
+        with patch('sunnypilot.rtid.rtid.time.monotonic_ns', return_value=1234567890000):
+            await daemon._process_cycle_async()
+
+        kwargs = daemon.threat_detector.process_threats.call_args.kwargs
+        assert kwargs["current_heading_deg"] == pytest.approx(270.0)
 
     @pytest.mark.asyncio
     async def test_process_cycle_exception_handling(self, daemon):

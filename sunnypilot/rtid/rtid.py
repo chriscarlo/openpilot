@@ -12,6 +12,7 @@ Architecture: fetch → detect → publish at 1Hz
 import asyncio
 import inspect
 import json
+import math
 import os
 import time
 
@@ -34,6 +35,7 @@ class RTIDaemon:
         self.sm = messaging.SubMaster([
             'gpsLocationExternal',
             'gpsLocation',
+            'livePose',
             'carState',
             'liveMapDataSP',  # Map-based speed limit data
             'carStateSP'      # Dashboard-based speed limit data (from car's TSR camera)
@@ -170,8 +172,36 @@ class RTIDaemon:
 
         return None
 
+    @staticmethod
+    def _heading_from_live_pose(live_pose) -> float | None:
+        """Extract heading degrees from livePose.orientationNED."""
+        if not live_pose or not getattr(live_pose, 'inputsOK', False):
+            return None
+
+        orientation = getattr(live_pose, 'orientationNED', None)
+        if orientation is None:
+            return None
+
+        try:
+            if hasattr(orientation, 'valid') and not bool(orientation.valid):
+                return None
+
+            if hasattr(orientation, 'z'):
+                yaw_rad = float(orientation.z)
+            elif len(orientation) >= 3:
+                yaw_rad = float(orientation[2])
+            else:
+                return None
+        except Exception:
+            return None
+
+        if not math.isfinite(yaw_rad):
+            return None
+
+        return (math.degrees(yaw_rad) + 360.0) % 360.0
+
     def _get_current_heading_deg(self) -> float | None:
-        """Get current ego heading in degrees from GPS if available."""
+        """Get current ego heading in degrees from GPS or livePose if available."""
         # Update with small timeout to ensure we get fresh data
         self.sm.update(100)  # 100ms timeout to get fresh GPS
 
@@ -196,6 +226,12 @@ class RTIDaemon:
                     return float(bearing)
             except Exception:
                 pass
+
+        # GPS bearings are not always populated. Fall back to the calibrated pose
+        # yaw so threat direction stays correct on east/west roads as well.
+        heading_from_pose = self._heading_from_live_pose(self.sm['livePose'])
+        if heading_from_pose is not None:
+            return heading_from_pose
 
         return None
 
@@ -225,14 +261,7 @@ class RTIDaemon:
         return 0.0
 
     def _get_current_speed_limit(self) -> float:
-        """Get current posted speed limit from both map and dashboard sources.
-
-        Conservative combination: when both sources have data, use the LOWER value to
-        avoid recommending speeds above a more restrictive posted limit (e.g. school zone).
-
-        Returns:
-            Speed limit in m/s, or 0.0 if not available
-        """
+        """Get the current posted speed limit using the same source policy as SLC."""
         map_limit = 0.0
         dashboard_limit = 0.0
 
@@ -254,26 +283,64 @@ class RTIDaemon:
         except Exception as e:
             cloudlog.debug(f"RTI: Could not get speed limit from dashboard: {e}")
 
-        # CONSERVATIVE COMBINATION: Use MIN when both sources are available.
-        # RTI errs on the side of safety to avoid recommending speeds above the
-        # lower posted limit (e.g., construction or school zones).
-        if map_limit > 0 and dashboard_limit > 0:
-            combined_limit = min(map_limit, dashboard_limit)
-            source = "dashboard" if dashboard_limit <= map_limit else "map"
-            cloudlog.debug(f"RTI: Using {source} speed limit (conservative): {combined_limit:.1f} m/s")
-            return combined_limit
-        elif dashboard_limit > 0:
-            # Only dashboard has data
-            cloudlog.debug(f"RTI: Using dashboard-only speed limit: {dashboard_limit:.1f} m/s")
-            return dashboard_limit
-        elif map_limit > 0:
-            # Only map has data
-            cloudlog.debug(f"RTI: Using map-only speed limit: {map_limit:.1f} m/s")
-            return map_limit
+        try:
+            raw_policy = self.params.get("SpeedLimitControlPolicy")
+            policy = int(raw_policy) if raw_policy is not None else 2
+        except (ValueError, TypeError):
+            policy = 2
+
+        selected_limit = 0.0
+        selected_source = "none"
+
+        # Match SpeedLimitController._read_policy_param UI mapping:
+        # 0 car only, 1 map only, 2 car first, 3 map first, 4 combined
+        if policy == 0:
+            if dashboard_limit > 0:
+                selected_limit = dashboard_limit
+                selected_source = "dashboard"
+        elif policy == 1:
+            if map_limit > 0:
+                selected_limit = map_limit
+                selected_source = "map"
+        elif policy == 3:
+            if map_limit > 0:
+                selected_limit = map_limit
+                selected_source = "map"
+            elif dashboard_limit > 0:
+                selected_limit = dashboard_limit
+                selected_source = "dashboard"
+        elif policy == 4:
+            if dashboard_limit == 0.0 and map_limit == 0.0:
+                selected_limit = 0.0
+            elif dashboard_limit > 0.0 and map_limit == 0.0:
+                selected_limit = dashboard_limit
+                selected_source = "dashboard"
+            elif map_limit > 0.0 and dashboard_limit == 0.0:
+                selected_limit = map_limit
+                selected_source = "map"
+            elif abs(dashboard_limit - map_limit) < 0.01:
+                selected_limit = map_limit
+                selected_source = "map"
+            elif dashboard_limit > map_limit:
+                selected_limit = dashboard_limit
+                selected_source = "dashboard"
+            else:
+                selected_limit = map_limit
+                selected_source = "map"
         else:
-            # No speed limit data available from either source
-            cloudlog.debug("RTI: No speed limit data available from map or dashboard")
-            return 0.0
+            if dashboard_limit > 0:
+                selected_limit = dashboard_limit
+                selected_source = "dashboard"
+            elif map_limit > 0:
+                selected_limit = map_limit
+                selected_source = "map"
+
+        if selected_limit > 0.0:
+            cloudlog.debug(f"RTI: Using {selected_source} posted speed limit per SLC policy: {selected_limit:.1f} m/s")
+            return selected_limit
+
+        cloudlog.debug("RTI: No speed limit data available from map or dashboard")
+        return 0.0
 
     async def _process_cycle_async(self):
         """Non-blocking version of process cycle that stores state for continuous publishing."""

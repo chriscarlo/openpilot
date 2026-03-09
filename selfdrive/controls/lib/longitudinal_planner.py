@@ -15,6 +15,13 @@ from openpilot.selfdrive.controls.lib.drive_helpers import CONTROL_N, get_accel_
 from openpilot.selfdrive.car.cruise import V_CRUISE_MAX, V_CRUISE_UNSET
 from openpilot.common.swaglog import cloudlog
 
+from openpilot.sunnypilot.selfdrive.controls.lib.planner_lag_debug import (
+  SPAN_MPC_UPDATE,
+  SPAN_PLANNER_UPDATE_TOTAL,
+  end_span,
+  record_fields,
+  start_span,
+)
 from openpilot.sunnypilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPlannerSP
 
 LON_MPC_STEP = 0.2  # first step is 0.2s
@@ -98,6 +105,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     return x, v, a, j, throttle_prob
 
   def update(self, sm):
+    total_span = start_span(SPAN_PLANNER_UPDATE_TOTAL)
     self.mode = 'blended' if sm['selfdriveState'].experimentalMode else 'acc'
     if not self.mlsim:
       self.mpc.mode = self.mode
@@ -185,7 +193,15 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
 
     self.mpc.set_weights(prev_accel_constraint, personality=sm['selfdriveState'].personality)
     self.mpc.set_cur_state(self.v_desired_filter.x, self.a_desired)
-    self.mpc.update(sm['radarState'], v_cruise, x, v, a, j, personality=sm['selfdriveState'].personality)
+    mpc_update_span = start_span(SPAN_MPC_UPDATE)
+    try:
+      self.mpc.update(sm['radarState'], v_cruise, x, v, a, j, personality=sm['selfdriveState'].personality)
+    finally:
+      end_span(mpc_update_span)
+    record_fields(
+      mpc_solve_time_ms=float(getattr(self.mpc, 'solve_time', 0.0) or 0.0) * 1000.0,
+      planner_mode=str(self.mode),
+    )
 
     self.v_desired_trajectory = np.interp(CONTROL_N_T_IDX, T_IDXS_MPC, self.mpc.v_solution)
     self.a_desired_trajectory = np.interp(CONTROL_N_T_IDX, T_IDXS_MPC, self.mpc.a_solution)
@@ -218,6 +234,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
       accel_clip[idx] = np.clip(accel_clip[idx], self.prev_accel_clip[idx] - 0.05, self.prev_accel_clip[idx] + 0.05)
     self.output_a_target = np.clip(output_a_target, accel_clip[0], accel_clip[1])
     self.prev_accel_clip = accel_clip
+    end_span(total_span)
 
   def publish(self, sm, pm):
     plan_send = messaging.new_message('longitudinalPlan')
