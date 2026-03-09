@@ -39,8 +39,8 @@ class CameraOffsetHelper:
     # compensating for the camera intrinsics' principal point (cy).
     cy = intrinsics[1, 2]
     shear = np.array([
-      [1.0, 0.0, 0.0],
-      [offset / height, 1.0, cy * offset / height],
+      [1.0, offset / height, -offset / height * cy],
+      [0.0, 1.0, 0.0],
       [0.0, 0.0, 1.0],
     ], dtype=np.float32)
     return shear @ transform

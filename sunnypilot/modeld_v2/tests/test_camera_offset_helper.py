@@ -75,7 +75,7 @@ class TestShearMatrix:
     assert not np.array_equal(extra, transform)
 
   def test_shear_matrix_values(self):
-    """Verify shear matrix has expected structure."""
+    """Verify shear matrix has correct horizontal shear structure (row 0)."""
     from openpilot.common.transformations.camera import DEVICE_CAMERAS
     dc = DEVICE_CAMERAS[('tici', 'ar0231')]
     intrinsics = dc.fcam.intrinsics
@@ -85,12 +85,15 @@ class TestShearMatrix:
 
     result = CameraOffsetHelper.apply_camera_offset(np.eye(3, dtype=np.float32), intrinsics, height, offset)
 
-    # Check the shear element
+    # Horizontal shear: offset lives in row 0, col 1
     expected_shear = offset / height
-    assert abs(result[1, 0] - expected_shear) < 1e-6
-    # Check the translation element
-    expected_translation = cy * offset / height
-    assert abs(result[1, 2] - expected_translation) < 1e-4
+    assert abs(result[0, 1] - expected_shear) < 1e-6
+    # Translation with negative sign to keep principal point centered
+    expected_translation = -offset / height * cy
+    assert abs(result[0, 2] - expected_translation) < 1e-4
+    # Row 1 must be untouched (no vertical shear)
+    assert abs(result[1, 0]) < 1e-6
+    assert abs(result[1, 2]) < 1e-6
 
   def test_apply_to_identity(self):
     """Applying shear to identity should produce the shear matrix itself."""
@@ -103,8 +106,27 @@ class TestShearMatrix:
     result = CameraOffsetHelper.apply_camera_offset(np.eye(3, dtype=np.float32), intrinsics, height, offset)
 
     cy = intrinsics[1, 2]
+    # Diagonal is identity
     assert abs(result[0, 0] - 1.0) < 1e-6
     assert abs(result[1, 1] - 1.0) < 1e-6
     assert abs(result[2, 2] - 1.0) < 1e-6
-    assert abs(result[1, 0] - offset / height) < 1e-6
-    assert abs(result[1, 2] - cy * offset / height) < 1e-4
+    # Horizontal shear in row 0
+    assert abs(result[0, 1] - offset / height) < 1e-6
+    assert abs(result[0, 2] - (-offset / height * cy)) < 1e-4
+    # Row 1 untouched
+    assert abs(result[1, 0]) < 1e-6
+    assert abs(result[1, 2]) < 1e-6
+
+  def test_negative_offset_reverses_shear(self):
+    """Negative offset should produce opposite shear direction."""
+    from openpilot.common.transformations.camera import DEVICE_CAMERAS
+    dc = DEVICE_CAMERAS[('tici', 'ar0231')]
+    intrinsics = dc.fcam.intrinsics
+    height = 1.22
+
+    pos = CameraOffsetHelper.apply_camera_offset(np.eye(3, dtype=np.float32), intrinsics, height, 0.1)
+    neg = CameraOffsetHelper.apply_camera_offset(np.eye(3, dtype=np.float32), intrinsics, height, -0.1)
+
+    # Shear elements should be equal magnitude, opposite sign
+    assert abs(pos[0, 1] + neg[0, 1]) < 1e-6
+    assert abs(pos[0, 2] + neg[0, 2]) < 1e-4
