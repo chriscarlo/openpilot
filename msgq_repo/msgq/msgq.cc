@@ -147,6 +147,8 @@ void msgq_init_publisher(msgq_queue_t * q) {
   //std::cout << "Starting publisher" << std::endl;
   uint64_t uid = msgq_get_uid();
 
+  // A restarted publisher must not resume from stale shared-memory offsets.
+  *q->write_pointer = 0;
   *q->write_uid = uid;
   *q->num_readers = 0;
 

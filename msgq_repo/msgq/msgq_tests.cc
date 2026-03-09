@@ -98,6 +98,19 @@ TEST_CASE("msgq_msg_send first message")
   msgq_msg_close(&msg);
 }
 
+TEST_CASE("msgq_init_publisher resets stale write pointer")
+{
+  remove("/dev/shm/test_queue");
+  msgq_queue_t q;
+  msgq_new_queue(&q, "test_queue", 1024);
+
+  *q.write_pointer = ((uint64_t)3 << 32) | 512;
+  msgq_init_publisher(&q);
+
+  REQUIRE((*q.write_pointer & 0xFFFFFFFF) == 0);
+  REQUIRE((*q.write_pointer >> 32) == 0);
+}
+
 TEST_CASE("msgq_msg_send test wraparound")
 {
   remove("/dev/shm/test_queue");
