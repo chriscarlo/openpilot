@@ -5,12 +5,14 @@ This file is part of sunnypilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 """
 import math
+import time
 
 from cereal import messaging, custom
 from opendbc.car import structs
 from opendbc.car.interfaces import ACCEL_MIN
 from openpilot.common.constants import CV
 from openpilot.common.realtime import DT_MDL
+from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.car.cruise import V_CRUISE_MAX, V_CRUISE_UNSET
 from openpilot.sunnypilot.selfdrive.controls.lib.dec.dec import DynamicExperimentalController
 from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit_controller.speed_limit_controller import SpeedLimitController
@@ -73,7 +75,35 @@ class LongitudinalPlannerSP:
     except Exception:
       response_model = None
     self.v_tsc.set_longitudinal_response_model(response_model)
+    vt_update_t0 = time.monotonic()
     self.v_tsc.update(sm, True, v_ego, a_ego, v_cruise_for_vtsc)
+    vt_update_dt = time.monotonic() - vt_update_t0
+    if vt_update_dt >= 0.03 or (bool(getattr(self.v_tsc, '_apex_exit_ready', False)) and vt_update_dt >= 0.015):
+      try:
+        map_data = sm['liveMapDataSP']
+        nearby_segments = len(getattr(map_data, 'nearbyRoadSegments', []))
+        road_geometry_valid = bool(getattr(map_data, 'roadGeometryValid', False))
+      except Exception:
+        nearby_segments = 0
+        road_geometry_valid = False
+      try:
+        cloudlog.warning(
+          "VTSC slow update",
+          dt_ms=round(vt_update_dt * 1000.0, 2),
+          v_ego=float(v_ego),
+          state=str(self.v_tsc.state),
+          apex_exit_ready=bool(getattr(self.v_tsc, '_apex_exit_ready', False)),
+          strategy_mode=str(getattr(self.v_tsc, '_dbg_strategy_mode', 'unknown') or 'unknown'),
+          strategy_state=str(getattr(self.v_tsc, '_dbg_strategy_state', 'idle') or 'idle'),
+          map_tail_reason=str(getattr(self.v_tsc, '_map_tail_reason', '') or ''),
+          curve_preview_valid=bool(self.v_tsc.curve_preview_valid),
+          curve_preview_points=len(self.v_tsc.curve_preview_points),
+          curve_preview_branch_stubs=len(self.v_tsc.curve_preview_branch_stubs),
+          nearby_segments=int(nearby_segments),
+          road_geometry_valid=road_geometry_valid,
+        )
+      except Exception:
+        pass
     v_cruise_v_tsc = self.v_tsc.v_turn if (apply_vtsc and self.v_tsc.is_active) else V_CRUISE_UNSET
 
     # Update RTI controller
@@ -151,6 +181,9 @@ class LongitudinalPlannerSP:
     visionTurnSpeedControl.currentLateralAccel = float(self.v_tsc.current_lat_acc)
     visionTurnSpeedControl.maxPredictedLateralAccel = float(self.v_tsc.max_pred_lat_acc)
     # Rally co-pilot curve preview (map-enriched). HUD-only telemetry.
+    preview_encode_t0 = time.monotonic()
+    preview_pts_count = 0
+    preview_stub_count = 0
     try:
       visionTurnSpeedControl.curvePreviewValid = bool(self.v_tsc.curve_preview_valid)
       visionTurnSpeedControl.curveDistanceM = float(self.v_tsc.curve_preview_distance_m)
@@ -159,12 +192,14 @@ class LongitudinalPlannerSP:
       visionTurnSpeedControl.curveDirection = int(self.v_tsc.curve_preview_direction)
       visionTurnSpeedControl.curveSeverity = int(self.v_tsc.curve_preview_severity)
       pts = self.v_tsc.curve_preview_points
+      preview_pts_count = len(pts)
       if pts:
         out_pts = visionTurnSpeedControl.init('curvePreviewPoints', len(pts))
         for i, (x_fwd, y_left) in enumerate(pts):
           out_pts[i].xFwdM = float(x_fwd)
           out_pts[i].yLeftM = float(y_left)
       branch_stubs = self.v_tsc.curve_preview_branch_stubs
+      preview_stub_count = len(branch_stubs)
       if branch_stubs:
         out_stubs = visionTurnSpeedControl.init('curvePreviewBranchStubs', len(branch_stubs))
         for i, stub in enumerate(branch_stubs):
@@ -178,6 +213,20 @@ class LongitudinalPlannerSP:
     except Exception:
       # Backward compatibility if capnp/python bindings are older.
       pass
+    preview_encode_dt = time.monotonic() - preview_encode_t0
+    if preview_encode_dt >= 0.01 or (bool(getattr(self.v_tsc, '_apex_exit_ready', False)) and preview_encode_dt >= 0.005):
+      try:
+        cloudlog.warning(
+          "VTSC preview encode slow",
+          dt_ms=round(preview_encode_dt * 1000.0, 2),
+          state=str(self.v_tsc.state),
+          apex_exit_ready=bool(getattr(self.v_tsc, '_apex_exit_ready', False)),
+          curve_preview_valid=bool(self.v_tsc.curve_preview_valid),
+          curve_preview_points=int(preview_pts_count),
+          curve_preview_branch_stubs=int(preview_stub_count),
+        )
+      except Exception:
+        pass
 
     # Speed Limit Control
     slc = longitudinalPlanSP.slc

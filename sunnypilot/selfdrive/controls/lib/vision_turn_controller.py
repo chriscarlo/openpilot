@@ -994,6 +994,7 @@ class VisionTurnController:
     self._last_apex_passed_time = 0.0  # For hysteresis
     self._distance_past_apex = 0.0  # Meters past most recent apex
     self._apex_exit_ready = False
+    self._prev_apex_exit_ready = False
     self._apex_trigger_idx = 0
     self._curve_sample_idx = 0
     # Detection
@@ -1588,6 +1589,7 @@ class VisionTurnController:
     self._apex_indices = []
     self._distance_past_apex = 0.0
     self._apex_exit_ready = False
+    self._prev_apex_exit_ready = False
     self._apex_trigger_idx = 0
     self._curve_sample_idx = 0
     self._curvature_trajectory = []
@@ -3061,6 +3063,7 @@ class VisionTurnController:
 
   def _plan_advanced_speed_trajectory(self) -> float:
     """SIMPLIFIED: Always calculate physics-based speed, let longitudinal planner handle activation."""
+    prev_apex_exit_ready = bool(getattr(self, '_prev_apex_exit_ready', False))
     self._apex_exit_ready = False
     self._apex_trigger_idx = int(getattr(self, '_apex_near_index', 3))
 
@@ -3135,6 +3138,27 @@ class VisionTurnController:
       if is_past_apex and self._distance_past_apex < float(self._apex_boost_distance):
         apply_boost = True
       self._apex_exit_ready = bool(is_past_apex)
+
+    if self._apex_exit_ready and not prev_apex_exit_ready:
+      try:
+        cloudlog.info(
+          "VTSC apex release",
+          v_ego=float(self._v_ego),
+          state=str(self.state),
+          strategy_mode=str(getattr(self, '_dbg_strategy_mode', DEFAULT_MAP_STRATEGY) or DEFAULT_MAP_STRATEGY),
+          strategy_state=str(getattr(self, '_dbg_strategy_state', 'idle') or 'idle'),
+          trigger_idx=int(getattr(self, '_apex_trigger_idx', 0)),
+          nearest_apex_idx=int(self._apex_indices[0]) if self._apex_indices else -1,
+          distance_past_apex_m=float(getattr(self, '_distance_past_apex', 0.0) or 0.0),
+          is_easing=bool(getattr(self, '_is_easing', False)),
+          map_tail_reason=str(getattr(self, '_map_tail_reason', '') or ''),
+          curve_preview_valid=bool(getattr(self, '_curve_preview_valid', False)),
+          curve_preview_points=len(getattr(self, '_curve_preview_points', []) or []),
+          curve_preview_branch_stubs=len(getattr(self, '_curve_preview_branch_stubs', []) or []),
+        )
+      except Exception:
+        pass
+    self._prev_apex_exit_ready = bool(self._apex_exit_ready)
 
     if apply_boost and lateral_accel > float(self._apex_boost_min_lat_accel):  # Only boost if actually in a curve
       # Apply physics-based boost for acceleration out of apex
