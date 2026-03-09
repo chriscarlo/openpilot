@@ -174,3 +174,19 @@
 - **Diverges from user proposal:** no
 - **Files touched:** `.agents/verification/VERIFICATION.md`, `.agents/refinement/REFINEMENTS.md`
 - **Notes:** Added deterministic A/B proof harness and command evidence to validate root cause and non-regression claims for `paramsd` roll-confidence gating without introducing runtime code changes.
+
+### VTSC Rally Co-Pilot Strip-Map Refinement
+- **Date:** 2026-03-05
+- **Classification:** C
+- **Category:** UI + Telemetry
+- **Status:** applied
+- **Approval:** user-requested in-thread (explicit strip-map rendering, realism, smoothness, and nav-arrow changes)
+- **User-visible change:** yes (fixed 10-second horizon, smoother road geometry, nav arrow replacing red dot, more stable 3D road preview)
+- **Behavior/semantics change:** yes (HUD preview now uses ego-pose-aligned, resampled map geometry instead of sparse segment-to-segment decimation and speed-dependent zoom)
+- **Concurrency/threading change:** no
+- **Bounded?** na
+- **Structured?** na
+- **Potential downstream load increase:** negligible (slightly denser preview preprocessing inside existing VTSC update loop)
+- **Diverges from user proposal:** no
+- **Files touched:** `sunnypilot/selfdrive/controls/lib/vision_turn_controller.py`, `selfdrive/ui/sunnypilot/qt/onroad/hud.cc`, `selfdrive/ui/sunnypilot/qt/onroad/hud.h`, `sunnypilot/selfdrive/controls/lib/tests/vtsc/test_map_curve_preview.py`, `.agents/refinement/REFINEMENTS.md`
+- **Notes:** Switched the HUD preview to a fixed 10-second strip-map, aligned map geometry to the live ego pose/bearing, added densify + smoothing + resampling so coarse OSM segments render as continuous bends, and replaced the red ego marker with a classic navigation arrow.
