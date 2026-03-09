@@ -157,6 +157,8 @@ procs = [
   PythonProcess("radard", "selfdrive.controls.radard", only_onroad),
   NativeProcess("vtsc_intervention_recorder", ".", ["/usr/local/venv/bin/python3", "-m", "tools.vtsc.vtsc_intervention_recorder"],
                 vtsc_intervention_recorder_enabled, enabled=not PC),
+  NativeProcess("vtsc_comm_issue_recorder", ".", ["/usr/local/venv/bin/python3", "-m", "tools.vtsc.comm_issue_recorder"],
+                vtsc_intervention_recorder_enabled, enabled=not PC),
   PythonProcess("hardwared", "system.hardware.hardwared", always_run),
   PythonProcess("tombstoned", "system.tombstoned", always_run, enabled=not PC),
   PythonProcess("updated", "system.updated.updated", only_offroad, enabled=not PC),

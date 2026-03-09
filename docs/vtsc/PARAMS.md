@@ -18,7 +18,7 @@ Primary read path:
 Telemetry/debug toggles are polled by the controller:
 - `VTSCVerboseDebug` (enables `VTSCDBG` logs)
 - `VTSCWriteSnapshotFile` (enables `/data/media/0/VTSCDebug/vtsc_snapshots.jsonl`)
-- `VTSCInterventionRecorderEnabled` (manager-controlled onroad event recorder to `/data/media/0/VTSCTuner/events`)
+- `VTSCInterventionRecorderEnabled` (manager-controlled onroad event recorders to `/data/media/0/VTSCTuner/events` and `/data/media/0/VTSCTuner/comm_issues`)
 
 ## Key Param Groups (High Level)
 
