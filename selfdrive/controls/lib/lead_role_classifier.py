@@ -78,7 +78,7 @@ class LeadRoleClassifier:
       "dedupe_drel_eps_m": 2.0,
       "dedupe_yrel_eps_m": 0.6,
       "dedupe_vrel_eps_mps": 1.5,
-      "debug_log_enabled": True,
+      "debug_log_enabled": False,
     }
     # slot state keyed by lead slot index (0/1)
     self._slot_state: dict[int, dict[str, Any]] = {

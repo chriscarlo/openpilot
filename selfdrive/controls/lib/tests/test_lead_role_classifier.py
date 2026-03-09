@@ -24,6 +24,14 @@ def _make_lead(*, status=True, d_rel=80.0, y_rel=0.0, v_rel=-2.0, model_prob=0.9
 
 
 class TestLeadRoleClassifier:
+  def test_debug_logging_disabled_by_default(self):
+    c = LeadRoleClassifier()
+    lead0 = _make_lead(y_rel=0.25)
+    lead1 = _make_lead(status=False)
+    _ctrl0, _ctrl1, dbg = c.classify(v_ego=30.0, lead0=lead0, lead1=lead1, now=1.0)
+
+    assert dbg["debug_log_enabled"] is False
+
   def test_adjacent_lead_is_awareness_not_control(self):
     c = LeadRoleClassifier()
     lead0 = _make_lead(y_rel=-11.0)
