@@ -18,6 +18,12 @@ struct Way {
   oneWay @11 :Bool;
   maxSpeedForward @12 :Float64;
   maxSpeedBackward @13 :Float64;
+  windingForwardLevel @14 :UInt8;
+  windingBackwardLevel @15 :UInt8;
+  windingForwardScore @16 :UInt8;
+  windingBackwardScore @17 :UInt8;
+  windingForwardConfidence @18 :UInt8;
+  windingBackwardConfidence @19 :UInt8;
 }
 
 struct Coordinates {

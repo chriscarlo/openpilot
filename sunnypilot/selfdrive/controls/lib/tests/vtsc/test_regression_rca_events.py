@@ -35,7 +35,7 @@ def _fill_forward(values: list[float | None], *, fallback: float) -> list[float]
   return out
 
 
-def _simulate_controller_from_fixture(fixture: dict) -> tuple[list[float], list[float], list[float]]:
+def _simulate_controller_from_fixture(fixture: dict) -> tuple[list[float], list[float], list[float], list[float]]:
   steps_raw = list(fixture.get("steps") or [])
   assert steps_raw, "fixture has no steps"
 
@@ -64,12 +64,12 @@ def _simulate_controller_from_fixture(fixture: dict) -> tuple[list[float], list[
       ctrl.update(sm, True, v_ego[i], a_ego[i], v_cruise[i])
     v_turn_out.append(float(ctrl.v_turn))
 
-  return t_rel, v_cruise, v_turn_out
+  return t_rel, v_ego, v_cruise, v_turn_out
 
 
-def _one_frame_limiting_pulses(*, t_rel: list[float], v_cruise: list[float], v_turn: list[float],
+def _one_frame_limiting_pulses(*, t_rel: list[float], v_ego: list[float], v_cruise: list[float], v_turn: list[float],
                               t0_window: tuple[float, float]) -> int:
-  assert len(t_rel) == len(v_cruise) == len(v_turn)
+  assert len(t_rel) == len(v_ego) == len(v_cruise) == len(v_turn)
   t_min, t_max = t0_window
   idx = [i for i, t in enumerate(t_rel) if float(t_min) <= float(t) <= float(t_max)]
   if len(idx) < 3:
@@ -80,11 +80,13 @@ def _one_frame_limiting_pulses(*, t_rel: list[float], v_cruise: list[float], v_t
     i0 = idx[j - 1]
     i1 = idx[j]
     i2 = idx[j + 1]
-    # A "limiting" frame is one where VTSC requests a meaningful reduction vs cruise.
-    lim1 = v_turn[i1] <= (v_cruise[i1] - 1.0)
+    # A braking-relevant "limiting" frame must both reduce cruise materially and pull the
+    # commanded cap down to roughly current ego speed or lower. Pulses far above v_ego cannot
+    # start braking, so they are not the late-braking failure this regression targets.
+    lim1 = (v_turn[i1] <= (v_cruise[i1] - 1.0)) and (v_turn[i1] <= (v_ego[i1] + 0.1))
     # A 1-frame pulse is a single limiting frame with non-limiting neighbors.
-    lim0 = v_turn[i0] <= (v_cruise[i0] - 1.0)
-    lim2 = v_turn[i2] <= (v_cruise[i2] - 1.0)
+    lim0 = (v_turn[i0] <= (v_cruise[i0] - 1.0)) and (v_turn[i0] <= (v_ego[i0] + 0.1))
+    lim2 = (v_turn[i2] <= (v_cruise[i2] - 1.0)) and (v_turn[i2] <= (v_ego[i2] + 0.1))
     if lim1 and (not lim0) and (not lim2):
       pulses += 1
   return pulses
@@ -106,10 +108,11 @@ def test_rca_fixtures_have_no_one_frame_cap_pulses_pre_intervention(fixture_name
   # single-frame *limiting* caps in the pre-intervention window.
   fix_path = _FIXTURES_DIR / fixture_name
   fixture = _load_fixture(fix_path)
-  t_rel, v_cruise, v_turn = _simulate_controller_from_fixture(fixture)
+  t_rel, v_ego, v_cruise, v_turn = _simulate_controller_from_fixture(fixture)
 
   pulses = _one_frame_limiting_pulses(
     t_rel=t_rel,
+    v_ego=v_ego,
     v_cruise=v_cruise,
     v_turn=v_turn,
     t0_window=(-2.0, 0.0),

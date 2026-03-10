@@ -21,6 +21,16 @@ MAP_STRATEGY_ADVISORY = "advisory"
 MAP_STRATEGY_STRATEGIC = "strategic"
 DEFAULT_MAP_STRATEGY = MAP_STRATEGY_STRATEGIC
 STRATEGIC_OVERSHOOT_DELTA_MPS = 1.0
+STRATEGIC_CHAIN_LOCAL_MIN_EPS_MPS = 0.05
+STRATEGIC_CHAIN_REARM_RISE_MPS = 0.75
+WINDING_ROAD_LOOKAHEAD_M = 325.0
+WINDING_ROAD_BASELINE_QUANTILE = 0.85
+WINDING_ROAD_MIN_DROP_MPS = 2.0
+WINDING_ROAD_DROP_RATIO = 0.12
+WINDING_ROAD_SHORT_GAP_MAX_M = 120.0
+WINDING_ROAD_CURVE_FRACTION_START = 0.20
+WINDING_ROAD_CURVE_FRACTION_FULL = 0.50
+WINDING_ROAD_ACTIVE_SCORE = 0.55
 
 
 def normalize_map_strategy(raw: str | bytes | None) -> str:
@@ -74,6 +84,22 @@ class MapStrategyDecision:
   vision_relax_reason: str
   takeover_dwell_s: float
   counterevidence_dwell_s: float
+
+
+@dataclass
+class WindingRoadContext:
+  active: bool = False
+  score: float = 0.0
+  horizon_m: float = 0.0
+  reference_vsafe_mps: float = 0.0
+  min_anchor_vsafe_mps: float | None = None
+  anchor_count: int = 0
+  short_gap_count: int = 0
+  curve_distance_m: float = 0.0
+
+
+def _clip01(value: float) -> float:
+  return min(1.0, max(0.0, float(value)))
 
 
 def _max_entry_speed_for_target(
@@ -134,6 +160,162 @@ def _strategic_chain_envelope_cap(
     response_model=response_model,
   )
   return min(float(v_cruise), float(current_cap)), anchors[0]
+
+
+def _strategic_chain_anchor_points(
+  *,
+  source_points: list[tuple[float, float, float, float, int]],
+) -> list[tuple[float, float, float, float, int]]:
+  if not source_points:
+    return []
+
+  ordered = sorted(source_points, key=lambda row: (float(row[0]), float(row[1]), int(row[4])))
+  eps = float(STRATEGIC_CHAIN_LOCAL_MIN_EPS_MPS)
+  minima_runs: list[list[int]] = []
+  cur_run: list[int] = []
+
+  def _flush_run() -> None:
+    nonlocal cur_run
+    if cur_run:
+      minima_runs.append(list(cur_run))
+      cur_run = []
+
+  for idx, row in enumerate(ordered):
+    v = float(row[2])
+    prev_v = float(ordered[idx - 1][2]) if idx > 0 else float('inf')
+    next_v = float(ordered[idx + 1][2]) if idx + 1 < len(ordered) else float('inf')
+    local_min = bool(
+      (v <= prev_v + eps) and (v <= next_v + eps) and
+      ((idx == 0) or (idx + 1 == len(ordered)) or (v < prev_v - eps) or (v < next_v - eps))
+    )
+    if local_min:
+      cur_run.append(int(idx))
+    else:
+      _flush_run()
+  _flush_run()
+
+  if not minima_runs:
+    return []
+
+  candidate_indices: list[int] = []
+  for run in minima_runs:
+    best_idx = min(
+      run,
+      key=lambda idx: (
+        float(ordered[idx][2]),
+        float(ordered[idx][0]),
+        float(ordered[idx][1]),
+        int(ordered[idx][4]),
+      ),
+    )
+    candidate_indices.append(int(best_idx))
+
+  accepted_indices: list[int] = []
+  rise_delta = float(STRATEGIC_CHAIN_REARM_RISE_MPS)
+  for cand_idx in candidate_indices:
+    if not accepted_indices:
+      accepted_indices.append(int(cand_idx))
+      continue
+
+    last_idx = int(accepted_indices[-1])
+    last_v = float(ordered[last_idx][2])
+    cand_v = float(ordered[cand_idx][2])
+    peak_v = max(float(row[2]) for row in ordered[last_idx:cand_idx + 1])
+    if (cand_v < last_v - eps) or (peak_v >= last_v + rise_delta):
+      accepted_indices.append(int(cand_idx))
+
+  return [ordered[idx] for idx in accepted_indices]
+
+
+def classify_winding_road_context(
+  *,
+  s_list: list[float],
+  vsafe_list: list[float],
+  abs_indices: list[int],
+  lookahead_m: float = WINDING_ROAD_LOOKAHEAD_M,
+) -> WindingRoadContext:
+  # This intentionally classifies "curve density / chained bends ahead" from the same unsigned
+  # map speed profile the cap logic already trusts. Signed left/right alternation can be layered
+  # on later from the preview polyline without changing this behavior-neutral summary.
+  points: list[tuple[float, float, int]] = []
+  max_lookahead = max(0.0, float(lookahead_m))
+  for di, vi, abs_idx in zip(s_list, vsafe_list, abs_indices, strict=False):
+    dist_m = float(di)
+    if dist_m < 0.0:
+      continue
+    if dist_m > max_lookahead:
+      break
+    points.append((dist_m, float(vi), int(abs_idx)))
+
+  if not points:
+    return WindingRoadContext()
+
+  horizon_m = float(points[-1][0])
+  baseline_samples = sorted(float(vsafe) for _dist, vsafe, _abs_idx in points)
+  q_idx = int(round((len(baseline_samples) - 1) * float(WINDING_ROAD_BASELINE_QUANTILE)))
+  q_idx = min(max(q_idx, 0), len(baseline_samples) - 1)
+  reference_vsafe = float(baseline_samples[q_idx])
+  anchor_drop = max(float(WINDING_ROAD_MIN_DROP_MPS), float(reference_vsafe) * float(WINDING_ROAD_DROP_RATIO))
+  curve_threshold = float(reference_vsafe) - float(anchor_drop)
+
+  curve_distance_m = 0.0
+  first_dist, first_vsafe, _ = points[0]
+  if float(first_vsafe) <= curve_threshold + 1e-6:
+    curve_distance_m += max(0.0, float(first_dist))
+  prev_dist = float(first_dist)
+  prev_vsafe = float(first_vsafe)
+  for dist_m, vsafe, _ in points[1:]:
+    dist_m = float(dist_m)
+    vsafe = float(vsafe)
+    if min(float(prev_vsafe), float(vsafe)) <= curve_threshold + 1e-6:
+      curve_distance_m += max(0.0, float(dist_m) - float(prev_dist))
+    prev_dist = float(dist_m)
+    prev_vsafe = float(vsafe)
+
+  anchor_points = _strategic_chain_anchor_points(
+    source_points=[(float(dist_m), float(dist_m), float(vsafe), 0.0, int(abs_idx)) for dist_m, vsafe, abs_idx in points],
+  )
+  meaningful_anchors = [row for row in anchor_points if float(row[2]) <= curve_threshold + 1e-6]
+  anchor_count = len(meaningful_anchors)
+  short_gap_count = 0
+  for prev_row, next_row in zip(meaningful_anchors, meaningful_anchors[1:], strict=False):
+    gap_m = float(next_row[1]) - float(prev_row[1])
+    if gap_m <= float(WINDING_ROAD_SHORT_GAP_MAX_M) + 1e-6:
+      short_gap_count += 1
+
+  min_anchor_vsafe = min((float(row[2]) for row in meaningful_anchors), default=None)
+  curve_fraction = (float(curve_distance_m) / max(1e-3, float(horizon_m))) if horizon_m > 1e-6 else 0.0
+  anchor_score = _clip01((float(anchor_count) - 1.0) / 1.5)
+  gap_score = _clip01(float(short_gap_count) / max(1.0, float(anchor_count - 1)))
+  density_score = _clip01(
+    (float(curve_fraction) - float(WINDING_ROAD_CURVE_FRACTION_START)) /
+    max(1e-3, float(WINDING_ROAD_CURVE_FRACTION_FULL) - float(WINDING_ROAD_CURVE_FRACTION_START))
+  )
+  depth_score = 0.0
+  if min_anchor_vsafe is not None:
+    depth_score = _clip01((float(reference_vsafe) - float(min_anchor_vsafe) - float(anchor_drop)) / 4.0)
+
+  score = (
+    0.35 * float(anchor_score) +
+    0.30 * float(gap_score) +
+    0.20 * float(density_score) +
+    0.15 * float(depth_score)
+  )
+  active = bool(
+    anchor_count >= 2 and
+    short_gap_count >= 1 and
+    score >= float(WINDING_ROAD_ACTIVE_SCORE)
+  )
+  return WindingRoadContext(
+    active=active,
+    score=float(score),
+    horizon_m=float(horizon_m),
+    reference_vsafe_mps=float(reference_vsafe),
+    min_anchor_vsafe_mps=None if min_anchor_vsafe is None else float(min_anchor_vsafe),
+    anchor_count=int(anchor_count),
+    short_gap_count=int(short_gap_count),
+    curve_distance_m=float(curve_distance_m),
+  )
 
 
 def advisory_start_distance(
@@ -227,9 +409,17 @@ def compute_map_cap_candidate(
     direct_cap = float(v_cruise)
     direct_anchor = None
     response_constraints: list[tuple[float, float, float, float, int, int]] = []
-    strategic_frontier_points: list[tuple[float, float, float, float, int]] = []
+    strategic_chain_source_points: list[tuple[float, float, float, float, int]] = []
     reference_speed = float(reference_speed_mps) if reference_speed_mps is not None else float(v_ego)
     timing_speed = max(0.1, float(v_ego))
+
+    all_strategic_points = []
+    if strategy_mode == MAP_STRATEGY_STRATEGIC:
+      all_strategic_points = [
+        (float(di), float(ki), float(vi), int(abs_idx))
+        for di, ki, vi, abs_idx in zip(s_list, k_list, vsafe_list, abs_indices, strict=False)
+        if float(di) >= s_start
+      ]
 
     if strategy_mode == MAP_STRATEGY_STRATEGIC:
       candidate_points = _strategic_frontier(
@@ -264,8 +454,6 @@ def compute_map_cap_candidate(
         if vsafe + STRATEGIC_OVERSHOOT_DELTA_MPS < float(reference_speed):
           effective_distance += float(overshoot_phase_offset_s) * timing_speed
         effective_distance = max(0.0, effective_distance)
-        if response_model is not None:
-          strategic_frontier_points.append((float(effective_distance), float(di), float(vsafe), float(ki), int(abs_idx)))
       if strategy_mode == MAP_STRATEGY_STRATEGIC and response_model is not None:
         try:
           braking_distance = max(0.0, effective_distance - float(v_ego) * float(response_model.actuation_delay_s))
@@ -349,9 +537,22 @@ def compute_map_cap_candidate(
       if anchor_dist_m is None and first_candidate is not None:
         _apply_anchor(first_candidate)
 
-      if strategic_frontier_points:
+      if all_strategic_points:
+        for di, ki, vi, abs_idx in all_strategic_points:
+          effective_distance = float(di)
+          effective_distance -= max(0.0, float(fixed_lead_time_s)) * timing_speed
+          effective_distance += float(curve_phase_offset_s) * timing_speed
+          if float(vi) + STRATEGIC_OVERSHOOT_DELTA_MPS < float(reference_speed):
+            effective_distance += float(overshoot_phase_offset_s) * timing_speed
+          effective_distance = max(0.0, effective_distance)
+          strategic_chain_source_points.append((float(effective_distance), float(di), float(vi), float(ki), int(abs_idx)))
+
+      strategic_chain_points = _strategic_chain_anchor_points(
+        source_points=strategic_chain_source_points,
+      )
+      if strategic_chain_points:
         envelope_cap, envelope_anchor = _strategic_chain_envelope_cap(
-          frontier_points=strategic_frontier_points,
+          frontier_points=strategic_chain_points,
           response_model=response_model,
           v_cruise=float(v_cruise),
         )

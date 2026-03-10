@@ -170,6 +170,12 @@ func loop(state *State) {
 	err = PutParam(MAP_TARGET_VELOCITIES, data)
 	logwe(errors.Wrap(err, "could not write curvatures"))
 
+	routeWinding := ComputeRouteWindingSummary(state.CurrentWay, state.NextWays)
+	data, err = json.Marshal(routeWinding)
+	logde(errors.Wrap(err, "could not marshal winding road summary"))
+	err = PutParam(MAP_WINDING_SUMMARY, data)
+	logwe(errors.Wrap(err, "could not write winding road summary"))
+
 	// ----------------- Current Data --------------------
 	err = PutParam(ROAD_NAME, []byte(RoadName(state.CurrentWay.Way)))
 	logwe(errors.Wrap(err, "could not write road name"))

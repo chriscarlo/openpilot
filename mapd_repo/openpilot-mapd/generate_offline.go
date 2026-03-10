@@ -20,20 +20,26 @@ type TmpNode struct {
 	Longitude float64
 }
 type TmpWay struct {
-	Name             string
-	Ref              string
-	Hazard           string
-	MaxSpeed         float64
-	MaxSpeedForward  float64
-	MaxSpeedBackward float64
-	MaxSpeedAdvisory float64
-	Lanes            uint8
-	MinLat           float64
-	MinLon           float64
-	MaxLat           float64
-	MaxLon           float64
-	OneWay           bool
-	Nodes            []TmpNode
+	Name                      string
+	Ref                       string
+	Hazard                    string
+	MaxSpeed                  float64
+	MaxSpeedForward           float64
+	MaxSpeedBackward          float64
+	MaxSpeedAdvisory          float64
+	Lanes                     uint8
+	MinLat                    float64
+	MinLon                    float64
+	MaxLat                    float64
+	MaxLon                    float64
+	OneWay                    bool
+	Nodes                     []TmpNode
+	WindingForwardLevel       uint8
+	WindingBackwardLevel      uint8
+	WindingForwardScore       uint8
+	WindingBackwardScore      uint8
+	WindingForwardConfidence  uint8
+	WindingBackwardConfidence uint8
 }
 
 type Area struct {
@@ -182,6 +188,13 @@ func GenerateOffline(minGenLat int, minGenLon int, maxGenLat int, maxGenLon int,
 			tmpWay.MinLon = minLon
 			tmpWay.MaxLat = maxLat
 			tmpWay.MaxLon = maxLon
+			forwardWinding, backwardWinding := ComputeWayWindingMetadata(tmpWay.Nodes)
+			tmpWay.WindingForwardLevel = forwardWinding.Level
+			tmpWay.WindingBackwardLevel = backwardWinding.Level
+			tmpWay.WindingForwardScore = forwardWinding.Score
+			tmpWay.WindingBackwardScore = backwardWinding.Score
+			tmpWay.WindingForwardConfidence = forwardWinding.Confidence
+			tmpWay.WindingBackwardConfidence = backwardWinding.Confidence
 			if minLat < allMinLat {
 				allMinLat = minLat
 			}
@@ -248,6 +261,12 @@ func GenerateOffline(minGenLat int, minGenLon int, maxGenLat int, maxGenLon int,
 			w.SetAdvisorySpeed(way.MaxSpeedAdvisory)
 			w.SetLanes(way.Lanes)
 			w.SetOneWay(way.OneWay)
+			w.SetWindingForwardLevel(way.WindingForwardLevel)
+			w.SetWindingBackwardLevel(way.WindingBackwardLevel)
+			w.SetWindingForwardScore(way.WindingForwardScore)
+			w.SetWindingBackwardScore(way.WindingBackwardScore)
+			w.SetWindingForwardConfidence(way.WindingForwardConfidence)
+			w.SetWindingBackwardConfidence(way.WindingBackwardConfidence)
 			nodes, err := w.NewNodes(int32(len(way.Nodes)))
 			check(errors.Wrap(err, "could not create way nodes"))
 			for j, node := range way.Nodes {

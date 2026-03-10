@@ -26,9 +26,11 @@ class Step:
   lead_d_rel_m: Optional[float] = None  # if provided, simulates a lead at this distance
   steering_angle_deg: float = 0.0  # steering wheel angle (deg), used by steering-curvature fallback
   dt: Optional[float] = None           # optional per-step dt override (seconds)
+  live_map_data: Optional[Dict[str, Any]] = None  # optional liveMapDataSP fields for mapd telemetry tests
 
 
-def _mk_sm(curvature: float, curvature_ahead: Optional[float], v_pred: float, confidence: float, lead_d_rel_m: Optional[float], steering_angle_deg: float):
+def _mk_sm(curvature: float, curvature_ahead: Optional[float], v_pred: float, confidence: float,
+           lead_d_rel_m: Optional[float], steering_angle_deg: float, live_map_data: Optional[Dict[str, Any]] = None):
   """Create a minimal SM stub with modelV2 and optional radarState.leadOne."""
   # modelV2.orientationRate.z is yaw rate (rad/s), not curvature.
   # Curvature κ (1/m) = yaw_rate / speed, so yaw_rate = κ * v.
@@ -53,6 +55,10 @@ def _mk_sm(curvature: float, curvature_ahead: Optional[float], v_pred: float, co
     radar_state = None
     valid = {'modelV2': True}
 
+  live_map_msg = SimpleNamespace(**(live_map_data or {})) if live_map_data is not None else None
+  if live_map_msg is not None:
+    valid['liveMapDataSP'] = True
+
   class SM:
     def __init__(self, model, radar_state, valid):
       self.valid = valid
@@ -62,6 +68,8 @@ def _mk_sm(curvature: float, curvature_ahead: Optional[float], v_pred: float, co
       }
       if radar_state is not None:
         self._data['radarState'] = radar_state
+      if live_map_msg is not None:
+        self._data['liveMapDataSP'] = live_map_msg
     def __getitem__(self, key):
       return self._data.get(key)
 
@@ -135,7 +143,7 @@ def simulate_sequence(
 
   for st in steps:
     step_dt = float(getattr(st, 'dt', dt) or dt)
-    sm = _mk_sm(st.curvature, st.curvature_ahead, v_ego, st.confidence, st.lead_d_rel_m, st.steering_angle_deg)
+    sm = _mk_sm(st.curvature, st.curvature_ahead, v_ego, st.confidence, st.lead_d_rel_m, st.steering_angle_deg, st.live_map_data)
     # Patch time used inside controller to advance deterministically
     with patch('sunnypilot.selfdrive.controls.lib.vision_turn_controller.time.time', lambda: t), \
          patch('sunnypilot.selfdrive.controls.lib.vision_turn_controller.time.monotonic', lambda: t):
@@ -243,7 +251,7 @@ def simulate_sequence_trace(
   trace: List[Dict[str, Any]] = []
 
   for st in steps:
-    sm = _mk_sm(st.curvature, st.curvature_ahead, v_ego, st.confidence, st.lead_d_rel_m, st.steering_angle_deg)
+    sm = _mk_sm(st.curvature, st.curvature_ahead, v_ego, st.confidence, st.lead_d_rel_m, st.steering_angle_deg, st.live_map_data)
     with patch('sunnypilot.selfdrive.controls.lib.vision_turn_controller.time.time', lambda: t), \
          patch('sunnypilot.selfdrive.controls.lib.vision_turn_controller.time.monotonic', lambda: t):
       ctrl.update(sm, True, v_ego, a_ego, v_cruise_mps)

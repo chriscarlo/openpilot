@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/pkg/errors"
 	"github.com/rs/zerolog/log"
@@ -96,6 +97,34 @@ type DownloadLocationDetail struct {
 }
 
 var progress DownloadProgress
+
+const DEFAULT_TILE_BASE_URL = "https://map-data.pfeifer.dev"
+
+func readOptionalParam(path string) string {
+	data, err := GetParam(path)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+func configuredTileBaseURL() string {
+	baseURL := readOptionalParam(ParamPath("MapdTileBaseUrl", true))
+	if baseURL == "" {
+		baseURL = readOptionalParam(ParamPath("MapdTileBaseUrl", false))
+	}
+	if baseURL == "" {
+		baseURL = strings.TrimSpace(os.Getenv("MAPD_TILE_BASE_URL"))
+	}
+	if baseURL == "" {
+		baseURL = DEFAULT_TILE_BASE_URL
+	}
+	return strings.TrimRight(baseURL, "/")
+}
+
+func tileArchiveURL(filename string) string {
+	return fmt.Sprintf("%s/%s", configuredTileBaseURL(), strings.TrimLeft(filename, "/"))
+}
 
 func AddLocationDetailsToProgress(locationNames []string, locationType string) {
 	for _, locationName := range locationNames {
@@ -199,7 +228,7 @@ func DownloadBounds(bounds Bounds, locationName string) (err error) {
 	for i := minLat; i < maxLat; i += GROUP_AREA_BOX_DEGREES {
 		for j := minLon; j < maxLon; j += GROUP_AREA_BOX_DEGREES {
 			filename := fmt.Sprintf("offline/%d/%d.tar.gz", i, j)
-			url := fmt.Sprintf("https://map-data.pfeifer.dev/%s", filename)
+			url := tileArchiveURL(filename)
 			outputName := filepath.Join(GetBaseOpPath(), "tmp", filename)
 			err := os.MkdirAll(filepath.Dir(outputName), 0o775)
 			logde(errors.Wrap(err, "failed to make output directory"))

@@ -19,7 +19,7 @@ from openpilot.selfdrive.selfdrived.alertmanager import set_offroad_alert
 from openpilot.sunnypilot.mapd.live_map_data.osm_map_data import OsmMapData
 from openpilot.system.hardware.hw import Paths
 from openpilot.sunnypilot.mapd import MAPD_PATH
-from openpilot.sunnypilot.mapd.mapd_installer import VERSION, update_installed_version
+from openpilot.sunnypilot.mapd.mapd_installer import get_target_version, update_installed_version
 
 # PFEIFER - MAPD {{
 params = Params()
@@ -120,7 +120,7 @@ def update_osm_db() -> None:
 
 
 def main_thread():
-  update_installed_version(VERSION, params)
+  update_installed_version(get_target_version(params), params)
   config_realtime_process([0, 1, 2, 3], 5)
 
   rk = Ratekeeper(1, print_delay_threshold=None)

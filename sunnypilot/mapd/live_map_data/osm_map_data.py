@@ -124,6 +124,25 @@ class OsmMapData(BaseMapData):
   def get_current_speed_limit(self) -> float:
     return float(self.mem_params.get("MapSpeedLimit") or 0.0)
 
+  def _read_mem_json(self, key: str) -> dict:
+    raw = self.mem_params.get(key)
+    if not raw:
+      return {}
+    if isinstance(raw, dict):
+      return raw
+    if isinstance(raw, bytes):
+      try:
+        raw = raw.decode('utf-8')
+      except Exception:
+        return {}
+    if isinstance(raw, str):
+      try:
+        parsed = json.loads(raw)
+      except Exception:
+        return {}
+      return parsed if isinstance(parsed, dict) else {}
+    return {}
+
   def get_current_road_name(self) -> str:
     try:
       if self.current_road_segment and getattr(self.current_road_segment, 'name', ""):
@@ -134,8 +153,7 @@ class OsmMapData(BaseMapData):
     return str(self.mem_params.get("RoadName") or "")
 
   def get_next_speed_limit_and_distance(self) -> tuple[float, float]:
-    next_speed_limit_section_str = self.mem_params.get("NextMapSpeedLimit")
-    next_speed_limit_section = next_speed_limit_section_str if next_speed_limit_section_str else {}
+    next_speed_limit_section = self._read_mem_json("NextMapSpeedLimit")
     next_speed_limit = next_speed_limit_section.get('speedlimit', 0.0)
     next_speed_limit_latitude = next_speed_limit_section.get('latitude')
     next_speed_limit_longitude = next_speed_limit_section.get('longitude')
@@ -146,6 +164,9 @@ class OsmMapData(BaseMapData):
       next_speed_limit_distance = (self.last_position or Coordinate(0, 0)).distance_to(next_speed_limit_coordinates)
 
     return next_speed_limit, next_speed_limit_distance
+
+  def get_winding_road_summary(self) -> dict | None:
+    return self._read_mem_json("MapWindingSummary")
 
   # Road geometry access methods for RTI integration
   def get_road_geometry_valid(self) -> bool:

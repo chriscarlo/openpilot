@@ -31,6 +31,8 @@ from .vtsc_map_strategy import (
   DEFAULT_MAP_STRATEGY,
   MAP_STRATEGY_STRATEGIC,
   MapStrategyState,
+  WindingRoadContext,
+  classify_winding_road_context,
   compute_map_cap_candidate,
   evaluate_map_strategy,
   normalize_map_strategy,
@@ -88,6 +90,11 @@ SEVERE_OVERSHOOT_SPEED_SCALE_MIN = 0.90  # multiplicative on safe speeds (lower 
 
 # Hidden-turn early deceleration feature flag (disabled fully per request)
 HIDDEN_TURN_ENABLED = False
+
+# The FOV/degraded-confidence occlusion state machine has repeatedly produced
+# worse on-road behavior than simply trusting the visible path plus map preview.
+# Keep the code inert so it cannot throttle acceleration or handoff timing.
+VTSC_OCCLUSION_ENABLED = False
 
 # Highway override threshold: start any bypass/relax behavior at 55 mph
 HIGHWAY_MIN_MPH = 55.0
@@ -1068,6 +1075,8 @@ class VisionTurnController:
     self._curve_preview_last_ts = 0.0
     self._curve_preview_last_cache_raw = None
     self._curve_preview_last_latlon: tuple[float, float] | None = None
+    self._clear_winding_road_context()
+    self._clear_mapd_winding_context()
 
     # Lead-aware occlusion bypass
     self._occl_bypass_with_lead = True
@@ -1268,6 +1277,7 @@ class VisionTurnController:
       lead = bool(getattr(self, '_lead_present', False))
       hw = float(getattr(self, '_lead_headway_s', 99.0))
       conf = float(getattr(self._occlusion_state, 'smoothed_confidence', 0.0))
+      raw_conf = float(getattr(self, '_last_vision_confidence', conf))
       k_model = float(getattr(self, '_dbg_k_model', 0.0))
       k_steer = float(getattr(self, '_dbg_k_steer', 0.0))
       steer_fallback_active = bool(getattr(self, '_dbg_steer_fallback_active', False))
@@ -1371,7 +1381,23 @@ class VisionTurnController:
         'map_takeover_dwell_s': takeover_dwell_s, 'map_counterevidence_dwell_s': counterevidence_dwell_s,
         'planner_min_accel_mps2': planner_min_accel, 'planner_response_decel_mps2': planner_response_decel,
         'planner_response_delay_s': planner_delay_s,
-        's_visible_m': s_vis_m, 'kappa_vis': k_vis, 'path_conf': conf,
+        's_visible_m': s_vis_m, 'kappa_vis': k_vis, 'path_conf': raw_conf, 'raw_path_conf': raw_conf,
+        'winding_road_active': bool(getattr(self, '_winding_road_active', False)),
+        'winding_road_score': float(getattr(self, '_winding_road_score', 0.0) or 0.0),
+        'winding_road_horizon_m': float(getattr(self, '_winding_road_horizon_m', 0.0) or 0.0),
+        'winding_reference_vsafe_mps': float(getattr(self, '_winding_reference_vsafe_mps', 0.0) or 0.0),
+        'winding_min_anchor_vsafe_mps': float(getattr(self, '_winding_min_anchor_vsafe_mps', 0.0) or 0.0),
+        'winding_anchor_count': int(getattr(self, '_winding_anchor_count', 0) or 0),
+        'winding_short_gap_count': int(getattr(self, '_winding_short_gap_count', 0) or 0),
+        'winding_curve_distance_m': float(getattr(self, '_winding_curve_distance_m', 0.0) or 0.0),
+        'mapd_winding_valid': bool(getattr(self, '_mapd_winding_valid', False)),
+        'mapd_winding_level': int(getattr(self, '_mapd_winding_level', 0) or 0),
+        'mapd_winding_score': int(getattr(self, '_mapd_winding_score', 0) or 0),
+        'mapd_winding_confidence': int(getattr(self, '_mapd_winding_confidence', 0) or 0),
+        'mapd_winding_current_level': int(getattr(self, '_mapd_winding_current_level', 0) or 0),
+        'mapd_winding_current_score': int(getattr(self, '_mapd_winding_current_score', 0) or 0),
+        'mapd_winding_current_confidence': int(getattr(self, '_mapd_winding_current_confidence', 0) or 0),
+        'mapd_winding_way_count': int(getattr(self, '_mapd_winding_way_count', 0) or 0),
         'occluded': bool(not getattr(self._occlusion_state, 'vision_good', True)),
         'fail_open': fail_open,
         'psi_vis': psi_vis, 'psi_thresh': psi_thresh, 'ttfov_s': ttfov, 'psi_fov_rad': psi_fov, 'psi_margin_rad': psi_margin,
@@ -1635,12 +1661,18 @@ class VisionTurnController:
       v_ego = 0.0
 
     # Gate hold behavior:
-    # - At freeway speeds with good vision, hold helps when the horizon "pulses" a curve.
-    # - Under degraded vision (occlusion), hold helps at any speed when a real cap appears briefly.
+    # - At freeway speeds with good confidence, hold helps when the horizon "pulses" a curve.
+    # - Under degraded confidence, hold can still stabilize a brief but meaningful cap without
+    #   relying on the deprecated occlusion state machine.
     try:
-      vision_good = bool(getattr(self._occlusion_state, 'vision_good', True))
+      raw_conf = float(getattr(self, '_last_vision_confidence', getattr(self._occlusion_state, 'smoothed_confidence', 1.0)))
     except Exception:
-      vision_good = True
+      raw_conf = 1.0
+    try:
+      good_conf = float(getattr(self._occlusion_state, 'good_threshold', 0.70))
+    except Exception:
+      good_conf = 0.70
+    confidence_good = raw_conf >= good_conf
     try:
       failopen = bool(getattr(self, '_freeway_failopen_active', False))
     except Exception:
@@ -1650,12 +1682,13 @@ class VisionTurnController:
       turn_evidence = float(getattr(self, '_max_pred_lat_acc', 0.0)) >= float(_ENTERING_PRED_LAT_ACC_TH)
     except Exception:
       turn_evidence = False
+    try:
+      curve_evidence = abs(float(getattr(self, '_filtered_curvature', 0.0))) >= 0.004
+    except Exception:
+      curve_evidence = False
 
-    freeway_clean = (v_ego >= float(VTURN_HOLD_MIN_V_MPS)) and vision_good and (not fov_occluded)
-    # Under degraded vision, allow triggering a hold at any speed when there is clear turn evidence.
-    # Do not trigger this while the FOV-occlusion latch is active: that subsystem already enforces
-    # monotonic caps and can legitimately hold a cap after a curve until geometry clears.
-    occluded_trigger_ok = (not vision_good) and (not failopen) and (not fov_occluded) and turn_evidence
+    freeway_clean = (v_ego >= float(VTURN_HOLD_MIN_V_MPS)) and confidence_good and (not fov_occluded)
+    low_conf_trigger_ok = (raw_conf < good_conf) and (not failopen) and (turn_evidence or curve_evidence)
 
     try:
       v_cruise = float(self._v_cruise_setpoint)
@@ -1664,7 +1697,7 @@ class VisionTurnController:
 
     # Update/extend hold window only when VTSC is asking for a meaningful reduction.
     overspeed = (v_ego - float(v_cap)) >= 0.5
-    if (freeway_clean or occluded_trigger_ok) and ((v_cruise - float(v_cap)) >= float(VTURN_HOLD_DELTA_MPS)) and (overspeed or freeway_clean):
+    if (freeway_clean or low_conf_trigger_ok) and ((v_cruise - float(v_cap)) >= float(VTURN_HOLD_DELTA_MPS)) and (overspeed or freeway_clean):
       hold_until = float(getattr(self, '_v_turn_hold_until', 0.0) or 0.0)
       hold_min = float(getattr(self, '_v_turn_hold_min', float(v_cap)) or float(v_cap))
       if now >= hold_until:
@@ -1672,7 +1705,7 @@ class VisionTurnController:
       else:
         hold_min = min(hold_min, float(v_cap))
       self._v_turn_hold_min = hold_min
-      hold_s = float(VTURN_HOLD_S_OCCLUDED) if occluded_trigger_ok else float(VTURN_HOLD_S)
+      hold_s = float(VTURN_HOLD_S_OCCLUDED) if low_conf_trigger_ok else float(VTURN_HOLD_S)
       self._v_turn_hold_until = now + hold_s
 
     # Apply hold if active
@@ -1787,6 +1820,37 @@ class VisionTurnController:
 
     # Candidate current curvature is the filtered curvature we track
     current_curvature = self._filtered_curvature
+
+    if not VTSC_OCCLUSION_ENABLED:
+      occ = self._occlusion_state
+      good_conf = float(getattr(occ, 'good_threshold', 0.70))
+      occ.smoothed_confidence = max(float(vision_confidence), good_conf)
+      occ.prev_smoothed_conf = float(occ.smoothed_confidence)
+      occ.vision_good = True
+      occ.vision_status = VisionStatus.FULL_VISIBILITY
+      occ.last_valid_curvature = current_curvature
+      occ.extrapolated_curvature = current_curvature
+      occ.est_curvature = current_curvature
+      occ.entry_curvature = current_curvature
+      occ.distance_since_m = 0.0
+      occ.occlusion_start_time = 0.0
+      occ.occluded_since_time = 0.0
+      occ.reacquired_at = 0.0
+      occ.dropout_active = False
+      self._fast_reacq_until = 0.0
+      self._fov_occluded = False
+      self._fov_on_cnt = 0
+      self._fov_off_cnt = 0
+      self._fov_reason = ''
+      self._fov_boost_left = 0
+      self._fov_overshoot_left = 0
+      self._fov_kappa_ewma = current_curvature
+      self._occlusion_prev = False
+      self._occlusion_onset_timer_s = 0.0
+      self._v_cap_active_at_onset_mps = 0.0
+      self._onset_no_raise_active = False
+      self._occl_lead_bypass_active = False
+      return current_curvature
 
     # Remember vision_good before update to detect reacquisition
     prev_good = self._occlusion_state.vision_good
@@ -2268,10 +2332,12 @@ class VisionTurnController:
         # Ensure HUD preview does not persist when map lookahead is disabled.
         self._map_strategy_state.reset()
         self._clear_curve_preview()
+        self._clear_winding_road_context()
     except Exception:
       self._map_strategy_state.reset()
       self._map_tail_active = False
       self._map_tail_reason = "exception"
+      self._clear_winding_road_context()
     self._dbg_selected_cap = float(raw_target)
     self._dbg_map_floor_reason = str(self._map_tail_reason or "")
     # Debug: record final target after map caps
@@ -3327,6 +3393,64 @@ class VisionTurnController:
     self._curve_preview_points = []
     self._curve_preview_branch_stubs = []
 
+  def _clear_winding_road_context(self) -> None:
+    self._winding_road_active = False
+    self._winding_road_score = 0.0
+    self._winding_road_horizon_m = 0.0
+    self._winding_reference_vsafe_mps = 0.0
+    self._winding_min_anchor_vsafe_mps = 0.0
+    self._winding_anchor_count = 0
+    self._winding_short_gap_count = 0
+    self._winding_curve_distance_m = 0.0
+
+  def _set_winding_road_context(self, context: WindingRoadContext) -> None:
+    self._winding_road_active = bool(context.active)
+    self._winding_road_score = float(context.score)
+    self._winding_road_horizon_m = float(context.horizon_m)
+    self._winding_reference_vsafe_mps = float(context.reference_vsafe_mps)
+    self._winding_min_anchor_vsafe_mps = float(context.min_anchor_vsafe_mps or 0.0)
+    self._winding_anchor_count = int(context.anchor_count)
+    self._winding_short_gap_count = int(context.short_gap_count)
+    self._winding_curve_distance_m = float(context.curve_distance_m)
+
+  def _clear_mapd_winding_context(self) -> None:
+    self._mapd_winding_valid = False
+    self._mapd_winding_level = 0
+    self._mapd_winding_score = 0
+    self._mapd_winding_confidence = 0
+    self._mapd_winding_current_level = 0
+    self._mapd_winding_current_score = 0
+    self._mapd_winding_current_confidence = 0
+    self._mapd_winding_way_count = 0
+
+  def _update_mapd_winding_context(self, sm) -> None:
+    self._clear_mapd_winding_context()
+    map_data = _sm_get_optional(sm, 'liveMapDataSP')
+    if map_data is None:
+      return
+
+    try:
+      valid = bool(getattr(map_data, 'windingRoadValid', False))
+    except Exception:
+      valid = False
+    if not valid:
+      return
+
+    def _u8(name: str) -> int:
+      try:
+        return max(0, min(255, int(getattr(map_data, name, 0) or 0)))
+      except Exception:
+        return 0
+
+    self._mapd_winding_valid = True
+    self._mapd_winding_level = _u8('windingRoadLevel')
+    self._mapd_winding_score = _u8('windingRoadScore')
+    self._mapd_winding_confidence = _u8('windingRoadConfidence')
+    self._mapd_winding_current_level = _u8('windingRoadCurrentLevel')
+    self._mapd_winding_current_score = _u8('windingRoadCurrentScore')
+    self._mapd_winding_current_confidence = _u8('windingRoadCurrentConfidence')
+    self._mapd_winding_way_count = _u8('windingRoadWayCount')
+
   def _update_curve_preview_from_map(self, *, gps_lat: float, gps_lon: float, pts: list[tuple[float, float, float]], i0: int,
                                      gps_bearing_deg: float | None = None) -> None:
     """Update HUD curve preview from mapd curvature samples.
@@ -3762,6 +3886,7 @@ class VisionTurnController:
     self._map_tail_anchor_vsafe = 0.0
     self._map_tail_anchor_index = -1
     self._map_tail_compute_reason = "unknown"
+    self._clear_winding_road_context()
     gps_pose = self._get_last_gps_pose()
     if gps_pose is None:
       self._map_tail_compute_reason = "no_gps"
@@ -3840,6 +3965,11 @@ class VisionTurnController:
 
     # Compute vsafe from curvature
     vsafe = [ curvature_to_speed(k) for k in k_list ]
+    self._set_winding_road_context(classify_winding_road_context(
+      s_list=s_list,
+      vsafe_list=vsafe,
+      abs_indices=abs_indices,
+    ))
 
     try:
       vs = getattr(self._occlusion_state, 'vision_status', VisionStatus.FULL_VISIBILITY)
@@ -3950,6 +4080,7 @@ class VisionTurnController:
       self._current_accel = a_ego
 
     self._update_params()
+    self._update_mapd_winding_context(sm)
     self._update_calculations(sm)
     self._state_transition()
     self._update_solution(sm)

@@ -324,16 +324,10 @@ def test_vtsc_release_recovers_actuator_accel(monkeypatch):
   assert saw_accel_after_release, "Expected positive actuator accel after VTSC released back to cruise"
 
 
-def test_vtsc_does_not_stick_occluded_after_curve_end_to_end(monkeypatch):
-  # End-to-end regression (human-like recovery):
-  #
-  # - Enter a curve that latches VTSC's FOV-occlusion logic.
-  # - Exit to a straight where lane-line confidence stays mediocre.
-  #
-  # Once the path is safely within FoV again (geometry says no imminent FoV exit),
-  # VTSC must clear the FOV-occlusion latch and allow acceleration back toward cruise.
-  #
-  # This should hold regardless of lead presence; a lead vehicle must not "poison" recovery.
+def test_vtsc_curve_exit_stays_on_normal_path_end_to_end(monkeypatch):
+  # End-to-end regression after removing occlusion:
+  # low-confidence curve exit should never latch FOV occlusion or any lead-bypass path,
+  # but the planner should still accelerate once the cap releases.
   mod = _import_longitudinal_planner_module(monkeypatch)
 
   p = Params()
@@ -350,10 +344,10 @@ def test_vtsc_does_not_stick_occluded_after_curve_end_to_end(monkeypatch):
   v_cruise = 30.0
   conf = 0.55
   headway_s = 2.0
-  n_curve = 10       # 0.5s: enough to latch FOV occlusion
-  n_straight = 60    # 3.0s: enough time to observe clearing + recovery
+  n_curve = 10
+  n_straight = 60
   k_curve = 0.012
-  k_ahead = 0.004    # keep predicted lat acc above UI-disable threshold; avoid internal reset
+  k_ahead = 0.004
 
   def run(*, with_lead: bool) -> dict[str, object]:
     planner = mod.LongitudinalPlanner(_MockCP(), init_v=25.0, init_a=0.0)
@@ -378,7 +372,6 @@ def test_vtsc_does_not_stick_occluded_after_curve_end_to_end(monkeypatch):
 
       lead_d = None
       if with_lead:
-        # Keep headway approximately constant as we integrate v_ego.
         lead_d = headway_s * max(0.1, float(v_ego))
 
       sm = _mk_sm(
@@ -420,21 +413,20 @@ def test_vtsc_does_not_stick_occluded_after_curve_end_to_end(monkeypatch):
     }
 
   out_no_lead = run(with_lead=False)
-  assert out_no_lead['fov_latched'] is True
+  assert out_no_lead['fov_latched'] is False
   assert out_no_lead['bypass_seen'] is False
   assert out_no_lead['fov_cleared_idx'] is not None
-  assert (int(out_no_lead['fov_cleared_idx']) - n_curve) * dt <= 1.0
+  assert int(out_no_lead['fov_cleared_idx']) == n_curve
   assert out_no_lead['saw_positive_accel_after_clear'] is True
 
   out_lead = run(with_lead=True)
-  assert out_lead['fov_latched'] is True
-  assert out_lead['bypass_seen'] is True
+  assert out_lead['fov_latched'] is False
+  assert out_lead['bypass_seen'] is False
   assert out_lead['fov_cleared_idx'] is not None
-  assert (int(out_lead['fov_cleared_idx']) - n_curve) * dt <= 1.0
+  assert int(out_lead['fov_cleared_idx']) == n_curve
   assert out_lead['saw_positive_accel_after_clear'] is True
 
-  # Lead presence should not materially delay clearing.
-  assert abs(int(out_lead['fov_cleared_idx']) - int(out_no_lead['fov_cleared_idx'])) * dt <= 0.25
+  assert abs(int(out_lead['fov_cleared_idx']) - int(out_no_lead['fov_cleared_idx'])) == 0
 
 
 def test_throttle_prob_gate_can_prevent_accel_after_vtsc_release(monkeypatch):

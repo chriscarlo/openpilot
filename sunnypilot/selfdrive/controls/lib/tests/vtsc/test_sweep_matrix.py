@@ -61,17 +61,16 @@ def test_v_turn_releases_after_curve_sweep(v0: float, v_cruise: float, k_curve: 
   assert min(s['v_turn'] for s in trace[recover_idx:]) >= v_cruise - 1e-3
 
 
-@pytest.mark.parametrize("headway_s,expect_bypass", [
-  (2.0, True),
-  (2.9, True),
-  (3.0, True),
-  (3.1, False),
-  (4.0, False),
+@pytest.mark.parametrize("headway_s", [
+  2.0,
+  2.9,
+  3.0,
+  3.1,
+  4.0,
 ])
-def test_lead_bypass_headway_threshold_sweep(headway_s: float, expect_bypass: bool):
-  # Sweep invariant:
-  # Lead presence/headway should not cause VTSC to "stick" in FOV-occlusion on a straight.
-  # The bypass flag should still follow the configured headway threshold.
+def test_lead_headway_does_not_activate_dead_occlusion_paths(headway_s: float):
+  # With occlusion removed, close-vs-far lead headway should not activate any FOV latch or
+  # lead-bypass path. The cap should still release back to cruise promptly after the curve.
   dt = 0.05
   v0 = 25.0
   v_cruise = 30.0
@@ -99,10 +98,8 @@ def test_lead_bypass_headway_threshold_sweep(headway_s: float, expect_bypass: bo
   trace = simulate_sequence_trace(steps=steps, vtsc=vtsc, v0_mps=v0, v_cruise_mps=v_cruise, dt=dt, integrate_ego=False)
   assert len(trace) == (n_curve + n_straight)
 
-  assert any(s['fov_occluded'] for s in trace), "Scenario did not latch FOV-occlusion"
-
-  bypass_seen = any(s['occl_lead_bypass_active'] for s in trace)
-  assert bypass_seen is expect_bypass
+  assert all(not s['fov_occluded'] for s in trace)
+  assert all(not s['occl_lead_bypass_active'] for s in trace)
 
   # After the curve ends, the key observation is whether VTSC releases the cap back to cruise.
   recover_idx = None

@@ -48,6 +48,18 @@ latitude, longitude, and bearing are all in degrees.
 Maps can be downloaded in one of two ways, by arbitrary bounding box or by
 pre-defined locations.
 
+#### Override Tile Host
+By default mapd downloads offline archives from `https://map-data.pfeifer.dev`.
+For a forked deployment you can override the base URL by setting the persistent
+or memory `MapdTileBaseUrl` param. The value should be the host prefix that
+serves files in the existing layout:
+`offline/<lat>/<lon>.tar.gz`.
+
+For example:
+```text
+https://maps.example.com
+```
+
 #### Download by Bounding Box
 To download an arbitrary bounding box write the bounding box to
 /dev/shm/params/d/OSMDownloadBounds (OSMDownloadBounds memory param) using the

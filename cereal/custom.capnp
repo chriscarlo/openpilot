@@ -357,6 +357,17 @@ struct LiveMapDataSP @0xf416ec09499d9d19 {
   roadGeometryValid @6 :Bool;
   currentRoadSegment @7 :RoadSegment;
   nearbyRoadSegments @8 :List(RoadSegment);  # Road segments within ~500m
+
+  # Directional, route-aware winding-road summary derived from offline map tiles.
+  # Level is the coarse 0..5 severity ladder; score/confidence are compact 0..255 values.
+  windingRoadValid @9 :Bool;
+  windingRoadLevel @10 :UInt8;
+  windingRoadScore @11 :UInt8;
+  windingRoadConfidence @12 :UInt8;
+  windingRoadCurrentLevel @13 :UInt8;
+  windingRoadCurrentScore @14 :UInt8;
+  windingRoadCurrentConfidence @15 :UInt8;
+  windingRoadWayCount @16 :UInt8;
   
   struct RoadSegment {
     wayId @0 :UInt64;  # OSM way ID for identification

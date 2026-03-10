@@ -22,8 +22,31 @@ from openpilot.system.version import is_prebuilt
 from openpilot.sunnypilot.mapd import MAPD_PATH, MAPD_BIN_DIR
 import openpilot.system.sentry as sentry
 
-VERSION = 'v1.10.0'
-URL = f"https://github.com/pfeiferj/openpilot-mapd/releases/download/{VERSION}/mapd"
+DEFAULT_VERSION = 'v1.10.0'
+DEFAULT_BINARY_URL_TEMPLATE = "https://github.com/pfeiferj/openpilot-mapd/releases/download/{version}/mapd"
+VERSION = DEFAULT_VERSION
+
+
+def _clean_override(raw_value: str | bytes | None) -> str:
+  if raw_value is None:
+    return ""
+  if isinstance(raw_value, bytes):
+    raw_value = raw_value.decode('utf-8', errors='ignore')
+  return str(raw_value).strip()
+
+
+def get_target_version(params: Params | None = None) -> str:
+  params = params or Params()
+  return _clean_override(os.getenv("SP_MAPD_RELEASE_VERSION")) or \
+    _clean_override(params.get("MapdReleaseVersion")) or DEFAULT_VERSION
+
+
+def get_target_binary_url(version: str, params: Params | None = None) -> str:
+  params = params or Params()
+  override = _clean_override(os.getenv("SP_MAPD_BINARY_URL")) or _clean_override(params.get("MapdBinaryUrl"))
+  if override:
+    return override.format(version=version)
+  return DEFAULT_BINARY_URL_TEMPLATE.format(version=version)
 
 
 def update_installed_version(version: str, params: Params = None) -> None:
@@ -40,15 +63,16 @@ class MapdInstallManager:
 
   def download(self) -> None:
     self.ensure_directories_exist()
-    self._download_file()
-    update_installed_version(VERSION, self._params)
+    target_version = get_target_version(self._params)
+    self._download_file(get_target_binary_url(target_version, self._params))
+    update_installed_version(target_version, self._params)
 
   def check_and_download(self) -> None:
     if self.download_needed():
       self.download()
 
   def download_needed(self) -> bool:
-    return not os.path.exists(MAPD_PATH) or self.get_installed_version() != VERSION
+    return not os.path.exists(MAPD_PATH) or self.get_installed_version() != get_target_version(self._params)
 
   @staticmethod
   def ensure_directories_exist() -> None:
@@ -66,12 +90,12 @@ class MapdInstallManager:
     current_permissions = stat.S_IMODE(os.lstat(file_path).st_mode)
     os.chmod(file_path, current_permissions | stat.S_IEXEC)
 
-  def _download_file(self, num_retries=5) -> None:
+  def _download_file(self, url: str, num_retries=5) -> None:
     temp_file = Path(MAPD_PATH + ".tmp")
     download_timeout = 60
     for cnt in range(num_retries):
       try:
-        response = requests.get(URL, stream=True, timeout=download_timeout)
+        response = requests.get(url, stream=True, timeout=download_timeout)
         response.raise_for_status()
         self._safe_write_and_set_executable(temp_file, response.content)
         # No exceptions encountered. Safe to replace original file.
@@ -90,7 +114,7 @@ class MapdInstallManager:
     logging.error("Failed to download file after all retries")
 
   def get_installed_version(self) -> str:
-    return str(self._params.get("MapdVersion"))
+    return _clean_override(self._params.get("MapdVersion"))
 
   def wait_for_internet_connection(self, return_on_failure: bool = False) -> bool:
     max_retries = 10
@@ -124,7 +148,9 @@ class MapdInstallManager:
         return
 
       if self.wait_for_internet_connection(return_on_failure=True):
-        self._spinner.update(f"Downloading pfeiferj's mapd [{self.get_installed_version()}] => [{VERSION}].")
+        target_version = get_target_version(self._params)
+        binary_url = get_target_binary_url(target_version, self._params)
+        self._spinner.update(f"Downloading mapd [{self.get_installed_version()}] => [{target_version}] from [{binary_url}].")
         time.sleep(0.1)
         self.check_and_download()
       self._spinner.close()
@@ -146,9 +172,10 @@ if __name__ == "__main__":
   install_manager = MapdInstallManager(spinner)
   install_manager.ensure_directories_exist()
   if is_prebuilt():
-    debug_msg = f"[DEBUG] This is prebuilt, no mapd install required. VERSION: [{VERSION}], Param [{install_manager.get_installed_version()}]"
+    target_version = get_target_version()
+    debug_msg = f"[DEBUG] This is prebuilt, no mapd install required. VERSION: [{target_version}], Param [{install_manager.get_installed_version()}]"
     spinner.update(debug_msg)
-    update_installed_version(VERSION)
+    update_installed_version(target_version)
   else:
     spinner.update(f"Checking if mapd is installed and valid. Prebuilt [{is_prebuilt()}]")
     install_manager.non_prebuilt_install()

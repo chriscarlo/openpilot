@@ -47,6 +47,10 @@ class BaseMapData(ABC):
   def get_current_road_name(self) -> str:
     pass
 
+  def get_winding_road_summary(self) -> dict | None:
+    """Get aggregated winding-road metadata from mapd, if available."""
+    return None
+
   # Road geometry abstract methods (optional - provide defaults for backward compatibility)
   def get_road_geometry_valid(self) -> bool:
     """Check if road geometry data is available and valid."""
@@ -118,6 +122,7 @@ class BaseMapData(ABC):
     live_map_data.speedLimitAhead = next_speed_limit
     live_map_data.speedLimitAheadDistance = next_speed_limit_distance
     live_map_data.roadName = self.get_current_road_name()
+    self._populate_winding_summary(live_map_data)
 
     # New road geometry fields
     try:
@@ -139,6 +144,37 @@ class BaseMapData(ABC):
       live_map_data.roadGeometryValid = False
 
     self.pm.send('liveMapDataSP', mapd_sp_send)
+
+  def _populate_winding_summary(self, live_map_data) -> None:
+    def _as_u8(value) -> int:
+      try:
+        return max(0, min(255, int(value)))
+      except Exception:
+        return 0
+
+    try:
+      summary = self.get_winding_road_summary() or {}
+    except Exception:
+      summary = {}
+
+    try:
+      live_map_data.windingRoadValid = bool(summary.get('valid', False))
+      live_map_data.windingRoadLevel = _as_u8(summary.get('level', 0))
+      live_map_data.windingRoadScore = _as_u8(summary.get('score', 0))
+      live_map_data.windingRoadConfidence = _as_u8(summary.get('confidence', 0))
+      live_map_data.windingRoadCurrentLevel = _as_u8(summary.get('currentLevel', 0))
+      live_map_data.windingRoadCurrentScore = _as_u8(summary.get('currentScore', 0))
+      live_map_data.windingRoadCurrentConfidence = _as_u8(summary.get('currentConfidence', 0))
+      live_map_data.windingRoadWayCount = _as_u8(summary.get('wayCount', 0))
+    except Exception:
+      live_map_data.windingRoadValid = False
+      live_map_data.windingRoadLevel = 0
+      live_map_data.windingRoadScore = 0
+      live_map_data.windingRoadConfidence = 0
+      live_map_data.windingRoadCurrentLevel = 0
+      live_map_data.windingRoadCurrentScore = 0
+      live_map_data.windingRoadCurrentConfidence = 0
+      live_map_data.windingRoadWayCount = 0
 
   def _populate_road_segment(self, segment_msg, road_segment):
     """Populate capnp road segment message from RoadSegment object."""

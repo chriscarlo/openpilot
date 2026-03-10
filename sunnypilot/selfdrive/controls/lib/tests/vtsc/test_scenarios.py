@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import json
 import math
 import random
 
@@ -22,6 +23,13 @@ from openpilot.selfdrive.controls.lib.longitudinal_response_model import build_c
 from pathlib import Path
 
 from .harness import Step, simulate_sequence, simulate_sequence_trace, mk_vtsc_with_params, load_steps_from_rlog
+
+
+WINDING_PROFILE_FIXTURE = Path(__file__).with_name("fixtures") / "winding_road_profiles" / "eldorado_representatives.json"
+
+
+def _load_winding_profile_fixture():
+  return json.loads(WINDING_PROFILE_FIXTURE.read_text())["profiles"]
 
 
 def _steps_constant(curvature: float, confidence: float, n: int, lead_d: float | None = None, curvature_ahead: float | None = None):
@@ -88,76 +96,57 @@ def test_freeway_cap_hold_prevents_single_frame_flicker():
   assert float(trace[-1]['v_turn']) >= v_cruise - 1e-3
 
 
-def test_mountain_cap_hold_prevents_single_frame_flicker_under_occlusion():
-  # Regression (mountain): at 30-50 mph we observed "cap flapping" where VTSC briefly recommends a
-  # much lower speed for <0.5s, then returns to cruise. The longitudinal planner often cannot
-  # react within that window, so braking begins late and the driver intervenes.
-  #
-  # Hold material cap reductions briefly under degraded vision so the planner sees a stable target.
+def test_low_confidence_hold_stabilizes_single_frame_pulse_without_occlusion_state():
+  # Low-confidence cap-hold is still useful for anti-flap stabilization, but it now keys directly
+  # off raw confidence rather than entering an occluded controller state.
   v0 = 15.0
   v_cruise = 24.0
   dt = 0.05
-  conf = 0.52  # below CONF_BAD_TH to emulate severe/occluded frames in real events
+  conf = 0.52
 
-  # Warm-in low confidence so the controller enters occlusion mode (smoothed confidence hysteresis).
   steps = [Step(curvature=0.0, curvature_ahead=0.0, confidence=conf) for _ in range(10)]
-  # One-frame "curve ahead" pulse (horizon only), then straight.
   steps += [Step(curvature=0.0, curvature_ahead=0.012, confidence=conf)]
   steps += [Step(curvature=0.0, curvature_ahead=0.0, confidence=conf) for _ in range(int(VTURN_HOLD_S / dt) + 12)]
 
   trace = simulate_sequence_trace(steps=steps, v0_mps=v0, v_cruise_mps=v_cruise, dt=dt, integrate_ego=False)
   assert trace and len(trace) >= 3
 
-  # First frame should produce a meaningful cap reduction.
   first = 10
   assert float(trace[first]['v_turn']) <= v_cruise - 1.0
-  # Second frame must remain held low even though horizon is straight.
   assert float(trace[first + 1]['v_turn']) <= v_cruise - 1.0
-  # After the hold expires, cap should recover to cruise promptly.
   assert float(trace[-1]['v_turn']) >= v_cruise - 1e-3
 
 
-def test_lead_bypass_active_allows_raise_with_margin():
-  # Occluded vision with a lead at ~2.4 s headway should enable lead-bypass
+def test_low_confidence_with_lead_stays_at_visible_cap_without_bypass():
+  # Low confidence plus a close lead should not activate any occlusion-specific bypass path.
+  # The controller should simply follow the visible-cap result.
   v0 = 20.0
   v_cruise = 22.0
-  # Choose a small curvature where base speed allows gentle raise
   k = 0.001
-  # 2.4 s headway => d_rel ~ v * t
   headway_s = 2.4
   d_rel = v0 * headway_s
-  # Build controller with defaults
   vtsc = mk_vtsc_with_params()
-  # Run: first ensure occlusion, then present lead
-  # Warm-in occlusion by low confidence, then keep occluded with the lead present
-  steps = list(_steps_constant(curvature=k, confidence=0.4, n=40, lead_d=None)) 
+  steps = list(_steps_constant(curvature=k, confidence=0.4, n=40, lead_d=None))
   steps += list(_steps_constant(curvature=k, confidence=0.4, n=40, lead_d=d_rel))
   snap = simulate_sequence(steps=steps, vtsc=vtsc, v0_mps=v0, v_cruise_mps=v_cruise, dt=0.05)
   assert snap, "Snapshot missing"
-  # Lead-bypass active under occlusion
-  assert not snap['conf'] >= 0.7  # still occluded scenario
-  assert bool(snap['occl_lead_bypass_active']) is True
-  # With lead bypass active, no undue slow-down under benign curvature
-  assert float(snap['final']) >= v0 - 0.5
+  assert snap['vision_status'] == 'FULL'
+  assert float(snap['raw_path_conf']) == pytest.approx(0.4, abs=1e-6)
+  assert bool(snap['occl_lead_bypass_active']) is False
+  assert float(snap['final']) >= v_cruise - 1e-3
 
 
-def test_fov_occlusion_clears_on_straight_even_with_mediocre_confidence():
-  # Regression-style invariant (human-like recovery):
-  # - Enter a curve (FOV exit condition trips, confidence drops)
-  # - Exit to a straight but confidence stays mediocre (paint wear / glare / lead artifacts)
-  #
-  # Once geometry says the path is safely within FoV again, VTSC should clear the FOV-occlusion latch
-  # and allow acceleration back toward cruise. This should be true with *or without* a lead vehicle.
+def test_curve_exit_never_latches_fov_occlusion_even_with_mediocre_confidence():
+  # Low-confidence curve exit should recover through the normal visible-cap path.
+  # No FOV occlusion latch or lead-specific bypass should appear in the trace.
   v0 = 25.0
   v_cruise = 30.0
   dt = 0.05
 
-  # Tight-ish curve to ensure FOV occlusion gate activates at highway speeds.
   k_curve = 0.012
-  # Keep predicted lat acc above the UI-disable threshold so the VTSC state machine doesn't call _reset().
   k_ahead = 0.004
   conf = 0.55
-  lead_d = 30.0  # close lead; headway stays <= 3s over this sequence
+  lead_d = 30.0
   n_curve = 10
   n_straight = 60
 
@@ -173,27 +162,25 @@ def test_fov_occlusion_clears_on_straight_even_with_mediocre_confidence():
         return i
     return None
 
-  def saw_positive_accel_soon(trace, start_idx: int) -> bool:
-    # Allow a little time for jerk-limited recovery back to positive accel.
-    # Include the boundary sample at exactly 1.5s (30 frames at 20 Hz).
-    return any(s['a_target'] > 0.05 for s in trace[start_idx:start_idx + int(1.5 / dt) + 1])
+  def v_turn_recovers_soon(trace, start_idx: int) -> bool:
+    return any(s['v_turn'] >= v_cruise - 1e-3 for s in trace[start_idx:start_idx + int(1.5 / dt) + 1])
 
   trace_no_lead = run(None)
-  assert any(s['fov_occluded'] for s in trace_no_lead[:n_curve]), "Expected FOV occlusion latch during curve phase"
+  assert all(not s['fov_occluded'] for s in trace_no_lead)
   clear_idx = first_clear_idx(trace_no_lead)
   assert clear_idx is not None
-  assert (clear_idx - n_curve) * dt <= 1.0
-  assert saw_positive_accel_soon(trace_no_lead, clear_idx) is True
+  assert clear_idx == n_curve
+  assert v_turn_recovers_soon(trace_no_lead, clear_idx) is True
 
   trace_lead = run(lead_d)
-  assert any(s['fov_occluded'] for s in trace_lead[:n_curve]), "Expected FOV occlusion latch during curve phase"
+  assert all(not s['fov_occluded'] for s in trace_lead)
+  assert all(not s['occl_lead_bypass_active'] for s in trace_lead)
   clear_idx_lead = first_clear_idx(trace_lead)
   assert clear_idx_lead is not None
-  assert (clear_idx_lead - n_curve) * dt <= 1.0
-  assert saw_positive_accel_soon(trace_lead, clear_idx_lead) is True
+  assert clear_idx_lead == n_curve
+  assert v_turn_recovers_soon(trace_lead, clear_idx_lead) is True
 
-  # Lead presence should not materially delay clearing.
-  assert abs(clear_idx_lead - clear_idx) * dt <= 0.25
+  assert abs(clear_idx_lead - clear_idx) == 0
 
 
 def test_lead_bypass_only_applies_at_close_headway():
@@ -217,8 +204,9 @@ def test_lead_bypass_only_applies_at_close_headway():
   assert bool(snap['occl_lead_bypass_active']) is False
 
 
-def test_partial_occlusion_no_lead_blocks_raise_when_no_margin():
-  # Occluded, no lead, relatively tight curvature -> margin negative; block positive accel
+def test_low_confidence_visible_curve_tracks_visible_cap_without_occlusion_state():
+  # Low confidence on a visible curve should still produce the visible-cap result, but must not
+  # create an occluded state or comfort-limited no-raise behavior.
   v0 = 20.0
   v_cruise = 22.0
   snap = simulate_sequence(
@@ -228,14 +216,13 @@ def test_partial_occlusion_no_lead_blocks_raise_when_no_margin():
     dt=0.05,
   )
   assert snap
-  assert snap['vision_status'] != 'FULL'
+  assert snap['vision_status'] == 'FULL'
+  assert float(snap['raw_path_conf']) == pytest.approx(0.4, abs=1e-6)
+  assert bool(snap['occluded']) is False
   assert bool(snap['occl_lead_bypass_active']) is False
-  # Negative margin expected for tight curvature
   assert bool(snap['occl_positive_margin']) is False
-  # No positive accel while occluded without margin
-  assert float(snap['a_last']) <= 1e-6
-  # Decel command bounded by comfort cap while occluded
-  assert float(snap['decel_cmd']) >= float(snap['comfort_decel']) - 1e-6
+  assert float(snap['vtsc_cmd']) < v_cruise - 1.0
+  assert float(snap['decel_cmd']) == pytest.approx(0.0, abs=1e-6)
 
 
 def test_severe_occlusion_reacquisition_adds_nudge():
@@ -258,11 +245,8 @@ def test_severe_occlusion_reacquisition_adds_nudge():
 
 
 def test_severe_confidence_on_straight_does_not_block_raise():
-  # Guard against over-reaching occlusion logic:
-  #
-  # Very low lane-line confidence can occur on straight roads for reasons that are not
-  # "can't see around a bend" (e.g., worn paint, glare). VTSC should not block acceleration
-  # purely due to confidence when curvature is ~0.
+  # Very low lane-line confidence should remain observable in telemetry, but must not create a
+  # separate VTSC visibility state or block acceleration on a straight road.
   v0 = 20.0
   v_cruise = 25.0
   snap = simulate_sequence(
@@ -272,16 +256,15 @@ def test_severe_confidence_on_straight_does_not_block_raise():
     dt=0.05,
   )
   assert snap
-  assert snap['vision_status'] in ('SEVERE', 'LOST')
-  assert bool(snap['occluded']) is True
+  assert snap['vision_status'] == 'FULL'
+  assert bool(snap['occluded']) is False
+  assert float(snap['raw_path_conf']) == pytest.approx(0.1, abs=1e-6)
   assert float(snap['a_last']) >= 0.05
 
 
 def test_severe_confidence_low_speed_lead_does_not_freeze():
-  # Regression (real-world stop-and-go):
-  #
-  # When crawling behind a lead, lane-line confidence can drop to SEVERE/LOST (lead covers lines),
-  # but VTSC must not "stick" in a no-raise clamp that prevents resuming motion when the lead moves.
+  # Crawling behind a lead with terrible lane confidence should still resume through the normal
+  # controller path. No lead-bypass or occluded state should be needed.
   v0 = 1.0
   v_cruise = 15.0
   conf = 0.10
@@ -295,10 +278,10 @@ def test_severe_confidence_low_speed_lead_does_not_freeze():
     dt=0.05,
   )
   assert snap
-  assert snap['vision_status'] in ('SEVERE', 'LOST')
+  assert snap['vision_status'] == 'FULL'
+  assert float(snap['raw_path_conf']) == pytest.approx(conf, abs=1e-6)
   assert bool(snap['lead']) is True
-  assert bool(snap['occl_lead_bypass_active']) is True
-  # Cap must be above current speed (otherwise planner will not accelerate)
+  assert bool(snap['occl_lead_bypass_active']) is False
   assert float(snap['vtsc_cmd']) > float(snap['v']) + 0.5
   assert float(snap['a_last']) >= 0.05
 
@@ -417,19 +400,20 @@ def test_severe_confidence_overshoot_is_mildly_conservative_for_blind_curves():
   assert float(trace[0]['v_turn']) <= v0 - 0.10
 
 
-def test_hidden_turn_early_decel_with_caps():
-  # During early occlusion phase, with tightening curvature behind FoV, ensure decel engages and respects caps
+def test_tightening_visible_curvature_can_use_full_decel_budget_without_occlusion_clamp():
+  # With occlusion removed, tightening visible curvature is allowed to use the controller's full
+  # decel budget instead of being pinned to the old comfort-decel occlusion clamp.
   v0 = 22.0
   v_cruise = 24.0
-  # Build increasing curvature steps to mimic tail growth
   ks = [0.002 + i * (0.006 - 0.002) / 20 for i in range(20)]
   steps = [Step(curvature=k, confidence=0.4) for k in ks]
   steps += [Step(curvature=0.006, confidence=0.4) for _ in range(20)]
   snap = simulate_sequence(steps=steps, v0_mps=v0, v_cruise_mps=v_cruise, dt=0.05)
   assert snap
-  # Decel engaged (negative) and jerk bounded; comfort cap enforced while occluded
   assert float(snap['decel_cmd']) <= 0.0
-  assert float(snap['decel_cmd']) >= float(snap['comfort_decel']) - 1e-6
+  assert float(snap['decel_cmd']) < float(snap['comfort_decel']) - 1e-6
+  assert snap['vision_status'] == 'FULL'
+  assert float(snap['raw_path_conf']) == pytest.approx(0.4, abs=1e-6)
   assert -7.0 <= float(snap['jerk_cmd']) <= 3.0
 
 
@@ -856,7 +840,7 @@ def test_offramp_short_tight_curve_map_cap_applies_when_vision_lost(monkeypatch)
   assert trace[0]['v_turn'] <= v_expected_10m + 0.75
 
 
-def test_partial_occlusion_blends_map_tail_start_for_short_hidden_curve(monkeypatch):
+def test_low_confidence_does_not_let_advisory_map_beat_visible_cap_for_hidden_curve(monkeypatch):
   v0 = 18.0
   v_cruise = 22.0
   dt = 0.05
@@ -887,15 +871,16 @@ def test_partial_occlusion_blends_map_tail_start_for_short_hidden_curve(monkeypa
   assert trace
 
   snap = vtsc.snapshot_debug_state()
-  assert snap['vision_status'] == 'PARTIAL'
+  assert snap['vision_status'] == 'FULL'
+  assert float(snap['raw_path_conf']) == pytest.approx(0.60, abs=1e-6)
   assert bool(snap['map_tail_active']) is True
-  assert float(snap['map_tail_cap']) < v_cruise - 1e-3
-  assert float(snap['map_tail_start_m']) > 10.0
-  assert float(snap['map_tail_start_m']) < (v0 * float(snap['vis_horizon_s']) + 10.0) - 1e-3
-  assert snap['active_cap'] == 'map'
+  assert snap['map_tail_reason'] == 'applied'
+  assert float(snap['map_tail_start_m']) >= (v0 * float(snap['vis_horizon_s']) + 10.0) - 1e-3
+  assert snap['active_cap'] == 'visible'
+  assert float(snap['map_tail_cap']) >= v_cruise - 1e-3
 
 
-def test_partial_occlusion_keeps_tighter_map_cap_when_visible_curve_is_looser(monkeypatch):
+def test_low_confidence_still_allows_tighter_advisory_map_cap_when_visible_curve_is_looser(monkeypatch):
   v0 = 18.0
   v_cruise = 22.0
   dt = 0.05
@@ -926,7 +911,8 @@ def test_partial_occlusion_keeps_tighter_map_cap_when_visible_curve_is_looser(mo
   assert trace
 
   snap = vtsc.snapshot_debug_state()
-  assert snap['vision_status'] == 'PARTIAL'
+  assert snap['vision_status'] == 'FULL'
+  assert float(snap['raw_path_conf']) == pytest.approx(0.60, abs=1e-6)
   assert bool(snap['map_tail_active']) is True
   assert snap['map_tail_reason'] == 'applied'
   assert float(snap['cap_map_vmin']) > 0.0
@@ -1300,6 +1286,221 @@ def test_strategic_chain_envelope_limits_accel_for_same_speed_next_curve():
   assert int(candidate.anchor_index) == 6
 
 
+def test_strategic_compute_feeds_chain_envelope_with_reaccelerate_retighten_anchors(monkeypatch):
+  response_model = build_cruise_response_model(min_accel_mps2=-6.0, max_accel_mps2=5.0, actuation_delay_s=0.35)
+  captured = {}
+
+  def fake_envelope(*, frontier_points, response_model, v_cruise):
+    captured['frontier_points'] = list(frontier_points)
+    return float(v_cruise), None
+
+  monkeypatch.setattr(map_strategy, '_strategic_chain_envelope_cap', fake_envelope)
+
+  compute_map_cap_candidate(
+    mode='strategic',
+    s_list=[5.0, 15.0, 30.0, 45.0, 60.0, 80.0],
+    k_list=[0.020, 0.012, 0.001, 0.009, 0.001, 0.030],
+    vsafe_list=[10.0, 12.0, 17.0, 13.0, 16.0, 8.0],
+    abs_indices=[1, 2, 3, 4, 5, 6],
+    v_ego=10.0,
+    v_cruise=25.0,
+    vis_horizon_s=1.4,
+    vis_margin_m=10.0,
+    severe_vision=False,
+    partial_vision=False,
+    vision_confidence=0.95,
+    conf_lo=0.55,
+    conf_hi=0.85,
+    max_decel=3.5,
+    horizon_limit_m=250.0,
+    response_model=response_model,
+    fixed_lead_time_s=0.0,
+    curve_phase_offset_s=0.0,
+    overshoot_phase_offset_s=0.0,
+    reference_speed_mps=10.0,
+  )
+
+  points = captured['frontier_points']
+  assert [float(row[1]) for row in points] == pytest.approx([5.0, 45.0, 80.0], abs=1e-6)
+  assert [float(row[2]) for row in points] == pytest.approx([10.0, 13.0, 8.0], abs=1e-6)
+  assert [int(row[4]) for row in points] == [1, 4, 6]
+
+
+def test_winding_road_context_detects_dense_curve_cluster():
+  vsafe_list = [23.0, 20.0, 13.0, 16.0, 21.0, 18.0, 12.0, 16.0, 20.0, 17.0, 11.0, 15.0, 21.0, 23.0]
+  s_list = [10.0 * (idx + 1) for idx in range(len(vsafe_list))]
+  abs_indices = list(range(len(vsafe_list)))
+
+  ctx = map_strategy.classify_winding_road_context(
+    s_list=s_list,
+    vsafe_list=vsafe_list,
+    abs_indices=abs_indices,
+  )
+
+  assert bool(ctx.active) is True
+  assert float(ctx.score) >= 0.55
+  assert int(ctx.anchor_count) == 3
+  assert int(ctx.short_gap_count) == 2
+  assert float(ctx.curve_distance_m) >= 70.0
+
+
+def test_winding_road_context_rejects_single_offramp():
+  vsafe_list = [27.0, 27.0, 26.0, 22.0, 14.0, 10.0, 14.0, 22.0, 26.0, 27.0, 27.0]
+  s_list = [10.0 * (idx + 1) for idx in range(len(vsafe_list))]
+  abs_indices = list(range(len(vsafe_list)))
+
+  ctx = map_strategy.classify_winding_road_context(
+    s_list=s_list,
+    vsafe_list=vsafe_list,
+    abs_indices=abs_indices,
+  )
+
+  assert bool(ctx.active) is False
+  assert int(ctx.anchor_count) == 1
+  assert int(ctx.short_gap_count) == 0
+
+
+def test_winding_road_context_rejects_sparse_freeway_bends():
+  vsafe_list = [27.0, 26.0, 19.0, 23.0, 27.0, 27.0, 27.0, 27.0, 27.0, 26.0, 18.0, 23.0, 27.0, 27.0]
+  s_list = [25.0 * (idx + 1) for idx in range(len(vsafe_list))]
+  abs_indices = list(range(len(vsafe_list)))
+
+  ctx = map_strategy.classify_winding_road_context(
+    s_list=s_list,
+    vsafe_list=vsafe_list,
+    abs_indices=abs_indices,
+  )
+
+  assert bool(ctx.active) is False
+  assert int(ctx.anchor_count) == 2
+  assert int(ctx.short_gap_count) == 0
+
+
+def test_winding_road_context_rejects_shallow_rolling_road():
+  vsafe_list = [27.0, 26.2, 24.7, 25.6, 26.8, 25.2, 24.4, 25.5, 26.6, 25.4, 24.8, 26.3, 27.0]
+  s_list = [10.0 * (idx + 1) for idx in range(len(vsafe_list))]
+  abs_indices = list(range(len(vsafe_list)))
+
+  ctx = map_strategy.classify_winding_road_context(
+    s_list=s_list,
+    vsafe_list=vsafe_list,
+    abs_indices=abs_indices,
+  )
+
+  assert bool(ctx.active) is False
+  assert int(ctx.anchor_count) == 0
+  assert float(ctx.score) < 0.55
+
+
+def test_winding_road_context_stays_active_under_small_vsafe_noise():
+  baseline_vsafe = [23.0, 20.0, 13.0, 16.0, 21.0, 18.0, 12.0, 16.0, 20.0, 17.0, 11.0, 15.0, 21.0, 23.0]
+  noisy_vsafe = [v + dv for v, dv in zip(
+    baseline_vsafe,
+    [0.10, -0.15, 0.18, -0.12, 0.05, -0.10, 0.22, -0.08, 0.12, -0.18, 0.16, -0.05, 0.09, -0.04],
+    strict=False,
+  )]
+  s_list = [10.0 * (idx + 1) for idx in range(len(baseline_vsafe))]
+  abs_indices = list(range(len(baseline_vsafe)))
+
+  ctx = map_strategy.classify_winding_road_context(
+    s_list=s_list,
+    vsafe_list=noisy_vsafe,
+    abs_indices=abs_indices,
+  )
+
+  assert bool(ctx.active) is True
+  assert int(ctx.anchor_count) == 3
+  assert int(ctx.short_gap_count) == 2
+
+
+def test_winding_road_context_real_profiles_hold_activation_boundary():
+  profiles = _load_winding_profile_fixture()
+
+  for row in profiles:
+    ctx = map_strategy.classify_winding_road_context(
+      s_list=row["profile_s_m"],
+      vsafe_list=row["profile_vsafe_mps"],
+      abs_indices=list(range(len(row["profile_s_m"]))),
+    )
+    expected_active = row["level"] >= 3
+    assert bool(ctx.active) is expected_active, row["label"]
+
+
+def test_winding_road_context_real_profiles_score_increases_with_level():
+  profiles = _load_winding_profile_fixture()
+  scores = []
+  for row in profiles:
+    ctx = map_strategy.classify_winding_road_context(
+      s_list=row["profile_s_m"],
+      vsafe_list=row["profile_vsafe_mps"],
+      abs_indices=list(range(len(row["profile_s_m"]))),
+    )
+    scores.append(float(ctx.score))
+
+  assert scores == sorted(scores)
+  assert scores[2] < float(map_strategy.WINDING_ROAD_ACTIVE_SCORE)
+  assert scores[3] > float(map_strategy.WINDING_ROAD_ACTIVE_SCORE)
+  assert scores[-1] >= 0.95
+
+
+def test_snapshot_exposes_winding_road_context(monkeypatch):
+  map_profile = [
+    0.0005, 0.0040, 0.0140, 0.0080, 0.0020,
+    0.0100, 0.0200, 0.0090, 0.0020,
+    0.0130, 0.0240, 0.0100, 0.0020, 0.0005,
+  ]
+  snap = _run_profile_map_snapshot(
+    monkeypatch,
+    mode='strategic',
+    map_profile=map_profile,
+    v0=18.0,
+    v_cruise=24.0,
+    current_curve=0.002,
+    curvature_ahead=0.003,
+  )
+
+  assert bool(snap['winding_road_active']) is True
+  assert float(snap['winding_road_score']) >= 0.55
+  assert int(snap['winding_anchor_count']) >= 2
+  assert int(snap['winding_short_gap_count']) >= 1
+  assert float(snap['winding_curve_distance_m']) > 0.0
+
+
+def test_snapshot_exposes_mapd_winding_summary():
+  snap = simulate_sequence(
+    steps=[
+      Step(
+        curvature=0.0010,
+        curvature_ahead=0.0012,
+        confidence=0.95,
+        live_map_data={
+          'windingRoadValid': True,
+          'windingRoadLevel': 4,
+          'windingRoadScore': 208,
+          'windingRoadConfidence': 196,
+          'windingRoadCurrentLevel': 2,
+          'windingRoadCurrentScore': 124,
+          'windingRoadCurrentConfidence': 180,
+          'windingRoadWayCount': 3,
+        },
+      )
+      for _ in range(6)
+    ],
+    v0_mps=18.0,
+    v_cruise_mps=24.0,
+    dt=0.05,
+  )
+
+  assert bool(snap['mapd_winding_valid']) is True
+  assert int(snap['mapd_winding_level']) == 4
+  assert int(snap['mapd_winding_score']) == 208
+  assert int(snap['mapd_winding_confidence']) == 196
+  assert int(snap['mapd_winding_current_level']) == 2
+  assert int(snap['mapd_winding_current_score']) == 124
+  assert int(snap['mapd_winding_current_confidence']) == 180
+  assert int(snap['mapd_winding_way_count']) == 3
+
+
 def test_strategic_response_bounded_probe_matches_bruteforce():
   response_model = build_cruise_response_model(min_accel_mps2=-6.0, max_accel_mps2=5.0, actuation_delay_s=0.35)
   s_list = [30.0, 60.0, 90.0, 120.0]
@@ -1633,8 +1834,9 @@ def test_map_lookahead_reason_no_gps_when_enabled(monkeypatch):
   assert snap.get('map_tail_compute_reason') == 'no_gps'
 
 
-def test_occlusion_dwell_hysteresis_stability():
-  # Confidence bouncing around thresholds should respect dwell timers and not oscillate rapidly
+def test_low_confidence_no_longer_changes_visibility_state():
+  # Confidence swings should no longer transition VTSC into PARTIAL/SEVERE/LOST. The raw
+  # confidence remains observable, but the controller stays in FULL visibility throughout.
   v0 = 20.0
   v_cruise = 25.0
   vtsc = mk_vtsc_with_params()
@@ -1651,22 +1853,20 @@ def test_occlusion_dwell_hysteresis_stability():
   # Start with good vision to stabilize
   snap = run(0.0, 0.95, 40)  # 2.0 s
   assert snap['vision_status'] == 'FULL'
+  assert float(snap['raw_path_conf']) == pytest.approx(0.95, abs=1e-6)
 
-  # Brief dips below bad threshold may mark PARTIAL, but should not escalate to SEVERE/LOST
   snap = run(0.0, 0.64, 2)   # 0.10 s < 0.20 s dwell
-  assert snap['vision_status'] in ('FULL', 'PARTIAL')
+  assert snap['vision_status'] == 'FULL'
+  assert float(snap['raw_path_conf']) == pytest.approx(0.64, abs=1e-6)
 
-  # Sustain poor vision long enough to enter occlusion
   snap = run(0.002, 0.40, 10)  # 0.50 s > 0.20 s dwell
-  assert snap['vision_status'] != 'FULL'
+  assert snap['vision_status'] == 'FULL'
+  assert float(snap['raw_path_conf']) == pytest.approx(0.40, abs=1e-6)
 
-  # A brief borderline phase shouldn't be relied on for exit; avoid oscillation checks on status string here
   snap = run(0.002, 0.72, 2)
-  # Exit dwell is short by design; don't enforce FULL/non-FULL here.
-  # We only care that we don't oscillate rapidly into severe states during borderline segments.
-  assert snap['vision_status'] in ('FULL', 'PARTIAL')
+  assert snap['vision_status'] == 'FULL'
+  assert float(snap['raw_path_conf']) == pytest.approx(0.72, abs=1e-6)
 
-  # Now sustain strong vision long enough to exit occlusion
   snap = run(0.0, 0.95, 3)     # 0.15 s >= 0.10 s exit dwell
   assert snap['vision_status'] == 'FULL'
 

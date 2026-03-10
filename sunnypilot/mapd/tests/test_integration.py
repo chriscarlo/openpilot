@@ -21,7 +21,7 @@ def _make_mock_params():
     def _get(key, *args, **kwargs):
         if key == "LastGPSPosition":
             return "{}"
-        if key in ("MapSpeedLimit", "NextMapSpeedLimit", "RoadName"):
+        if key in ("MapSpeedLimit", "NextMapSpeedLimit", "RoadName", "MapWindingSummary"):
             return None
         return None
 
@@ -97,6 +97,7 @@ class TestMapdIntegration(unittest.TestCase):
         next_speed, distance = map_data.get_next_speed_limit_and_distance()
         self.assertEqual(next_speed, 0.0)
         self.assertEqual(distance, 0.0)
+        self.assertEqual(map_data.get_winding_road_summary(), {})
 
     def test_road_geometry_methods(self):
         """Test new road geometry methods work without errors."""
@@ -172,9 +173,75 @@ class TestMapdIntegration(unittest.TestCase):
 
             # Verify road geometry fields were set to safe defaults
             self.assertFalse(mock_live_map_data.roadGeometryValid)
+            self.assertFalse(mock_live_map_data.windingRoadValid)
 
         except Exception as e:
             self.fail(f"publish failed with no road data: {e}")
+
+    def test_json_params_are_parsed_for_speed_limit_and_winding_summary(self):
+        map_data = OsmMapData()
+        map_data.last_position = Coordinate(38.73152, -120.78821)
+        map_data.mem_params = MagicMock()
+
+        next_speed_payload = {
+            "speedlimit": 17.5,
+            "latitude": 38.73200,
+            "longitude": -120.78900,
+        }
+        winding_payload = {
+            "valid": True,
+            "level": 4,
+            "score": 210,
+            "confidence": 190,
+            "currentLevel": 2,
+            "currentScore": 120,
+            "currentConfidence": 180,
+            "wayCount": 3,
+        }
+
+        def _get(key, *args, **kwargs):
+            if key == "NextMapSpeedLimit":
+                return json.dumps(next_speed_payload).encode("utf-8")
+            if key == "MapWindingSummary":
+                return json.dumps(winding_payload).encode("utf-8")
+            return None
+
+        map_data.mem_params.get.side_effect = _get
+
+        next_speed, distance = map_data.get_next_speed_limit_and_distance()
+        self.assertAlmostEqual(next_speed, 17.5)
+        self.assertGreater(distance, 0.0)
+        self.assertEqual(map_data.get_winding_road_summary(), winding_payload)
+
+    def test_publish_includes_winding_summary_fields(self):
+        map_data = OsmMapData()
+        map_data.get_winding_road_summary = MagicMock(return_value={
+            "valid": True,
+            "level": 4,
+            "score": 205,
+            "confidence": 200,
+            "currentLevel": 2,
+            "currentScore": 118,
+            "currentConfidence": 176,
+            "wayCount": 3,
+        })
+
+        mock_msg = MagicMock()
+        mock_live_map_data = MagicMock()
+        mock_msg.liveMapDataSP = mock_live_map_data
+        self.mock_messaging.new_message.return_value = mock_msg
+        self.mock_sm.all_checks.return_value = True
+
+        map_data.publish()
+
+        self.assertTrue(mock_live_map_data.windingRoadValid)
+        self.assertEqual(mock_live_map_data.windingRoadLevel, 4)
+        self.assertEqual(mock_live_map_data.windingRoadScore, 205)
+        self.assertEqual(mock_live_map_data.windingRoadConfidence, 200)
+        self.assertEqual(mock_live_map_data.windingRoadCurrentLevel, 2)
+        self.assertEqual(mock_live_map_data.windingRoadCurrentScore, 118)
+        self.assertEqual(mock_live_map_data.windingRoadCurrentConfidence, 176)
+        self.assertEqual(mock_live_map_data.windingRoadWayCount, 3)
 
     def test_tick_method(self):
         """Test that tick method completes without errors."""

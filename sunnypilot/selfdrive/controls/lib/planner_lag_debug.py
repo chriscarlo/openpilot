@@ -486,7 +486,8 @@ class PlannerLagRecorder:
     route = self._safe_read_current_route()
     seg_guess = self._guess_current_segment(route) if route else None
 
-    event_tag = dt.datetime.utcfromtimestamp(time.time()).strftime("%Y%m%dT%H%M%SZ")
+    now_utc = dt.datetime.now(dt.UTC)
+    event_tag = now_utc.strftime("%Y%m%dT%H%M%SZ")
     event_id = f"{event_tag}_planner_lag"
     if route:
       event_id += f"_{route}"
@@ -496,7 +497,7 @@ class PlannerLagRecorder:
 
     meta = {
       "event_id": event_id,
-      "created_utc": dt.datetime.utcnow().isoformat(timespec="seconds") + "Z",
+      "created_utc": now_utc.isoformat(timespec="seconds").replace("+00:00", "Z"),
       "enable_param": ENABLE_PARAM,
       "route": route,
       "seg_guess": seg_guess,
