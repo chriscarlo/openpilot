@@ -144,11 +144,18 @@ def render_line(d, src):
   reason = d.get('occlusion_reason')
   tail = fmt_float(d.get('tail_frac'))
   s_tail = fmt_float(d.get('s_tail'))
+  wind_src = str(d.get('winding_context_source') or 'none')
+  wind_lvl = d.get('winding_context_level')
+  wind_score = d.get('winding_context_score')
+  if wind_src != 'none':
+    wind = f"{wind_src}:L{int(wind_lvl or 0)}@{fmt_float(wind_score, 2)}"
+  else:
+    wind = "-"
   flags = evaluate_flags(d)
   flags_s = (",".join(flags)) if flags else "-"
   return (
     f"[{src}] v={v} base={base} raw={raw} final={final} | cap={cap} vis={cap_vis} occ={cap_occ} map={cap_map} | "
-    f"v_vis={v_vis} v_occ={v_occ} conf={conf} psi={psi}/{psi_th} reason={reason} tail={tail}@{s_tail} | flags={flags_s}"
+    f"v_vis={v_vis} v_occ={v_occ} conf={conf} psi={psi}/{psi_th} reason={reason} tail={tail}@{s_tail} wind={wind} | flags={flags_s}"
   )
 
 

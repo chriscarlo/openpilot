@@ -1501,6 +1501,83 @@ def test_snapshot_exposes_mapd_winding_summary():
   assert int(snap['mapd_winding_way_count']) == 3
 
 
+def test_winding_context_uses_mapd_when_local_detector_is_inactive():
+  snap = simulate_sequence(
+    steps=[
+      Step(
+        curvature=0.0008,
+        curvature_ahead=0.0010,
+        confidence=0.95,
+        live_map_data={
+          'windingRoadValid': True,
+          'windingRoadLevel': 4,
+          'windingRoadScore': 204,
+          'windingRoadConfidence': 190,
+          'windingRoadCurrentLevel': 2,
+          'windingRoadCurrentScore': 110,
+          'windingRoadCurrentConfidence': 170,
+          'windingRoadWayCount': 3,
+        },
+      )
+      for _ in range(6)
+    ],
+    v0_mps=18.0,
+    v_cruise_mps=24.0,
+    dt=0.05,
+  )
+
+  assert bool(snap['winding_road_active']) is False
+  assert bool(snap['winding_context_active']) is True
+  assert snap['winding_context_source'] == 'mapd'
+  assert int(snap['winding_context_level']) == 4
+  assert float(snap['winding_context_score']) >= 0.75
+
+
+def test_winding_context_blends_local_and_mapd_detectors(monkeypatch):
+  map_profile = [
+    0.0005, 0.0040, 0.0140, 0.0080, 0.0020,
+    0.0100, 0.0200, 0.0090, 0.0020,
+    0.0130, 0.0240, 0.0100, 0.0020, 0.0005,
+  ]
+  vtsc = mk_vtsc_with_params()
+  _enable_map_lookahead(vtsc, monkeypatch)
+  _set_map_strategy(vtsc, monkeypatch, 'strategic')
+  _set_longitudinal_response_model(vtsc, min_accel=-6.0, delay_s=0.35)
+  pts = _build_map_profile_polyline(37.0, -122.0, map_profile, profile_start_m=0.0)
+  _patch_map_tail_inputs(vtsc, monkeypatch, 37.0, -122.0, pts)
+
+  snap = simulate_sequence(
+    steps=[
+      Step(
+        curvature=0.0020,
+        curvature_ahead=0.0030,
+        confidence=0.95,
+        live_map_data={
+          'windingRoadValid': True,
+          'windingRoadLevel': 5,
+          'windingRoadScore': 230,
+          'windingRoadConfidence': 210,
+          'windingRoadCurrentLevel': 3,
+          'windingRoadCurrentScore': 150,
+          'windingRoadCurrentConfidence': 190,
+          'windingRoadWayCount': 4,
+        },
+      )
+      for _ in range(8)
+    ],
+    vtsc=vtsc,
+    v0_mps=18.0,
+    v_cruise_mps=24.0,
+    dt=0.05,
+  )
+
+  assert bool(snap['winding_road_active']) is True
+  assert bool(snap['winding_context_active']) is True
+  assert snap['winding_context_source'] == 'blended'
+  assert int(snap['winding_context_level']) == 5
+  assert float(snap['winding_context_score']) >= float(snap['winding_road_score']) - 1e-6
+
+
 def test_strategic_response_bounded_probe_matches_bruteforce():
   response_model = build_cruise_response_model(min_accel_mps2=-6.0, max_accel_mps2=5.0, actuation_delay_s=0.35)
   s_list = [30.0, 60.0, 90.0, 120.0]

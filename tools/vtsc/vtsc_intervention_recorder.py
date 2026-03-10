@@ -238,6 +238,7 @@ def _summarize_vtsc_snapshots(path: Path) -> dict[str, Any]:
   vision_counts: dict[str, int] = {}
   active_cap_counts: dict[str, int] = {}
   cap_source_counts: dict[str, int] = {}
+  winding_context_source_counts: dict[str, int] = {}
   conf_vals: list[float] = []
   vtsc_cmd_vals: list[float] = []
   cap_visible_vals: list[float] = []
@@ -250,6 +251,10 @@ def _summarize_vtsc_snapshots(path: Path) -> dict[str, Any]:
   fail_open_cnt = 0
   map_tail_cnt = 0
   steer_fallback_cnt = 0
+  winding_context_active_cnt = 0
+  mapd_winding_valid_cnt = 0
+  winding_context_level_vals: list[int] = []
+  mapd_winding_level_vals: list[int] = []
 
   def _f(v):
     try:
@@ -280,6 +285,9 @@ def _summarize_vtsc_snapshots(path: Path) -> dict[str, Any]:
         cap_source = str(d.get("cap_source", "") or "")
         if cap_source:
           cap_source_counts[cap_source] = cap_source_counts.get(cap_source, 0) + 1
+        winding_context_source = str(d.get("winding_context_source", "") or "")
+        if winding_context_source:
+          winding_context_source_counts[winding_context_source] = winding_context_source_counts.get(winding_context_source, 0) + 1
         conf = _f(d.get("conf"))
         if conf is not None:
           conf_vals.append(conf)
@@ -312,6 +320,22 @@ def _summarize_vtsc_snapshots(path: Path) -> dict[str, Any]:
             map_cov_vals.append(cov)
         if bool(d.get("steer_fallback_active")):
           steer_fallback_cnt += 1
+        if bool(d.get("winding_context_active")):
+          winding_context_active_cnt += 1
+        if bool(d.get("mapd_winding_valid")):
+          mapd_winding_valid_cnt += 1
+        try:
+          winding_context_level = int(d.get("winding_context_level", 0) or 0)
+          if winding_context_level > 0:
+            winding_context_level_vals.append(winding_context_level)
+        except Exception:
+          pass
+        try:
+          mapd_winding_level = int(d.get("mapd_winding_level", 0) or 0)
+          if mapd_winding_level > 0:
+            mapd_winding_level_vals.append(mapd_winding_level)
+        except Exception:
+          pass
   except Exception:
     return {}
 
@@ -340,6 +364,7 @@ def _summarize_vtsc_snapshots(path: Path) -> dict[str, Any]:
     "vision_status_counts": vision_counts,
     "active_cap_counts": active_cap_counts,
     "cap_source_counts": cap_source_counts,
+    "winding_context_source_counts": winding_context_source_counts,
     "conf_min": conf_min,
     "conf_max": conf_max,
     "vtsc_cmd_min": vcmd_min,
@@ -363,6 +388,12 @@ def _summarize_vtsc_snapshots(path: Path) -> dict[str, Any]:
     "steer_fallback_active_any": bool(steer_fallback_cnt),
     "k_steer_min": k_steer_min,
     "k_steer_max": k_steer_max,
+    "winding_context_active_ratio": float(winding_context_active_cnt) / float(rows),
+    "winding_context_active_any": bool(winding_context_active_cnt),
+    "winding_context_level_max": max(winding_context_level_vals) if winding_context_level_vals else None,
+    "mapd_winding_valid_ratio": float(mapd_winding_valid_cnt) / float(rows),
+    "mapd_winding_valid_any": bool(mapd_winding_valid_cnt),
+    "mapd_winding_level_max": max(mapd_winding_level_vals) if mapd_winding_level_vals else None,
   }
 
 
@@ -544,6 +575,19 @@ def main() -> int:
     vtsc_vel = None
     pred_lat_acc = None
     cur_lat_acc = None
+    mapd_winding_valid = None
+    mapd_winding_level = None
+    mapd_winding_score = None
+    mapd_winding_confidence = None
+    mapd_winding_current_level = None
+    mapd_winding_current_score = None
+    mapd_winding_current_confidence = None
+    mapd_winding_way_count = None
+    winding_context_active = None
+    winding_context_level = None
+    winding_context_score = None
+    winding_context_confidence = None
+    winding_context_source = None
     slc_active = False
     slc_offseted = None
     if lp is not None:
@@ -553,6 +597,19 @@ def main() -> int:
         vtsc_vel = float(getattr(vtsc, "velocity", 0.0))
         pred_lat_acc = float(getattr(vtsc, "maxPredictedLateralAccel", 0.0))
         cur_lat_acc = float(getattr(vtsc, "currentLateralAccel", 0.0))
+        mapd_winding_valid = bool(getattr(vtsc, "mapWindingValid", False)) if hasattr(vtsc, "mapWindingValid") else None
+        mapd_winding_level = int(getattr(vtsc, "mapWindingLevel", 0)) if hasattr(vtsc, "mapWindingLevel") else None
+        mapd_winding_score = int(getattr(vtsc, "mapWindingScore", 0)) if hasattr(vtsc, "mapWindingScore") else None
+        mapd_winding_confidence = int(getattr(vtsc, "mapWindingConfidence", 0)) if hasattr(vtsc, "mapWindingConfidence") else None
+        mapd_winding_current_level = int(getattr(vtsc, "mapWindingCurrentLevel", 0)) if hasattr(vtsc, "mapWindingCurrentLevel") else None
+        mapd_winding_current_score = int(getattr(vtsc, "mapWindingCurrentScore", 0)) if hasattr(vtsc, "mapWindingCurrentScore") else None
+        mapd_winding_current_confidence = int(getattr(vtsc, "mapWindingCurrentConfidence", 0)) if hasattr(vtsc, "mapWindingCurrentConfidence") else None
+        mapd_winding_way_count = int(getattr(vtsc, "mapWindingWayCount", 0)) if hasattr(vtsc, "mapWindingWayCount") else None
+        winding_context_active = bool(getattr(vtsc, "windingContextActive", False)) if hasattr(vtsc, "windingContextActive") else None
+        winding_context_level = int(getattr(vtsc, "windingContextLevel", 0)) if hasattr(vtsc, "windingContextLevel") else None
+        winding_context_score = float(getattr(vtsc, "windingContextScore", 0.0)) if hasattr(vtsc, "windingContextScore") else None
+        winding_context_confidence = float(getattr(vtsc, "windingContextConfidence", 0.0)) if hasattr(vtsc, "windingContextConfidence") else None
+        winding_context_source = str(getattr(vtsc, "windingContextSource", "none")) if hasattr(vtsc, "windingContextSource") else None
       except Exception:
         pass
       try:
@@ -607,6 +664,19 @@ def main() -> int:
       "slcActive": slc_active,
       "slcOffsetedMps": slc_offseted,
       "rtiRecoMps": rti_reco,
+      "mapdWindingValid": mapd_winding_valid,
+      "mapdWindingLevel": mapd_winding_level,
+      "mapdWindingScore": mapd_winding_score,
+      "mapdWindingConfidence": mapd_winding_confidence,
+      "mapdWindingCurrentLevel": mapd_winding_current_level,
+      "mapdWindingCurrentScore": mapd_winding_current_score,
+      "mapdWindingCurrentConfidence": mapd_winding_current_confidence,
+      "mapdWindingWayCount": mapd_winding_way_count,
+      "windingContextActive": winding_context_active,
+      "windingContextLevel": winding_context_level,
+      "windingContextScore": winding_context_score,
+      "windingContextConfidence": winding_context_confidence,
+      "windingContextSource": winding_context_source,
       "sources": sources,
       "minSource": min_src,
       "minSpeedMps": float(min_v),

@@ -244,6 +244,27 @@ class LongitudinalPlannerSP:
         visionTurnSpeedControl.curveMaxCurvature = float(self.v_tsc.curve_preview_kappa_max)
         visionTurnSpeedControl.curveDirection = int(self.v_tsc.curve_preview_direction)
         visionTurnSpeedControl.curveSeverity = int(self.v_tsc.curve_preview_severity)
+        visionTurnSpeedControl.mapWindingValid = bool(getattr(self.v_tsc, '_mapd_winding_valid', False))
+        visionTurnSpeedControl.mapWindingLevel = int(getattr(self.v_tsc, '_mapd_winding_level', 0) or 0)
+        visionTurnSpeedControl.mapWindingScore = int(getattr(self.v_tsc, '_mapd_winding_score', 0) or 0)
+        visionTurnSpeedControl.mapWindingConfidence = int(getattr(self.v_tsc, '_mapd_winding_confidence', 0) or 0)
+        visionTurnSpeedControl.mapWindingCurrentLevel = int(getattr(self.v_tsc, '_mapd_winding_current_level', 0) or 0)
+        visionTurnSpeedControl.mapWindingCurrentScore = int(getattr(self.v_tsc, '_mapd_winding_current_score', 0) or 0)
+        visionTurnSpeedControl.mapWindingCurrentConfidence = int(getattr(self.v_tsc, '_mapd_winding_current_confidence', 0) or 0)
+        visionTurnSpeedControl.mapWindingWayCount = int(getattr(self.v_tsc, '_mapd_winding_way_count', 0) or 0)
+        visionTurnSpeedControl.windingContextActive = bool(getattr(self.v_tsc, '_winding_context_active', False))
+        visionTurnSpeedControl.windingContextLevel = int(getattr(self.v_tsc, '_winding_context_level', 0) or 0)
+        visionTurnSpeedControl.windingContextScore = float(getattr(self.v_tsc, '_winding_context_score', 0.0) or 0.0)
+        visionTurnSpeedControl.windingContextConfidence = float(getattr(self.v_tsc, '_winding_context_confidence', 0.0) or 0.0)
+        winding_context_source = str(getattr(self.v_tsc, '_winding_context_source', 'none') or 'none')
+        source_enum = custom.LongitudinalPlanSP.VisionTurnSpeedControl.WindingContextSource.none
+        if winding_context_source == 'local':
+          source_enum = custom.LongitudinalPlanSP.VisionTurnSpeedControl.WindingContextSource.local
+        elif winding_context_source == 'mapd':
+          source_enum = custom.LongitudinalPlanSP.VisionTurnSpeedControl.WindingContextSource.mapd
+        elif winding_context_source == 'blended':
+          source_enum = custom.LongitudinalPlanSP.VisionTurnSpeedControl.WindingContextSource.blended
+        visionTurnSpeedControl.windingContextSource = source_enum
         pts = self.v_tsc.curve_preview_points
         preview_pts_count = len(pts)
         if pts:

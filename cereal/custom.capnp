@@ -162,6 +162,19 @@ struct LongitudinalPlanSP @0xf35cc4560bbf6ec2 {
     curvePreviewPoints @9 :List(StripMapPoint);  # <=32 points, ego-local (x forward, y left)
     curveMaxCurvature @10 :Float32;  # peak abs curvature within the previewed curve region (1/m)
     curvePreviewBranchStubs @11 :List(StripMapBranchStub);  # <=2 branch stubs near the previewed path
+    mapWindingValid @12 :Bool;
+    mapWindingLevel @13 :UInt8;
+    mapWindingScore @14 :UInt8;
+    mapWindingConfidence @15 :UInt8;
+    mapWindingCurrentLevel @16 :UInt8;
+    mapWindingCurrentScore @17 :UInt8;
+    mapWindingCurrentConfidence @18 :UInt8;
+    mapWindingWayCount @19 :UInt8;
+    windingContextActive @20 :Bool;
+    windingContextLevel @21 :UInt8;
+    windingContextScore @22 :Float32;
+    windingContextConfidence @23 :Float32;
+    windingContextSource @24 :WindingContextSource;
 
     struct StripMapPoint {
       xFwdM @0 :Float32;
@@ -184,6 +197,13 @@ struct LongitudinalPlanSP @0xf35cc4560bbf6ec2 {
       gentle @1;
       medium @2;
       tight @3;
+    }
+
+    enum WindingContextSource {
+      none @0;
+      local @1;
+      mapd @2;
+      blended @3;
     }
 
     enum VisionTurnSpeedControlState {

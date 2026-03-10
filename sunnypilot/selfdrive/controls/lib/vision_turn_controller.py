@@ -1077,6 +1077,7 @@ class VisionTurnController:
     self._curve_preview_last_latlon: tuple[float, float] | None = None
     self._clear_winding_road_context()
     self._clear_mapd_winding_context()
+    self._clear_winding_context()
 
     # Lead-aware occlusion bypass
     self._occl_bypass_with_lead = True
@@ -1398,6 +1399,11 @@ class VisionTurnController:
         'mapd_winding_current_score': int(getattr(self, '_mapd_winding_current_score', 0) or 0),
         'mapd_winding_current_confidence': int(getattr(self, '_mapd_winding_current_confidence', 0) or 0),
         'mapd_winding_way_count': int(getattr(self, '_mapd_winding_way_count', 0) or 0),
+        'winding_context_active': bool(getattr(self, '_winding_context_active', False)),
+        'winding_context_score': float(getattr(self, '_winding_context_score', 0.0) or 0.0),
+        'winding_context_level': int(getattr(self, '_winding_context_level', 0) or 0),
+        'winding_context_confidence': float(getattr(self, '_winding_context_confidence', 0.0) or 0.0),
+        'winding_context_source': str(getattr(self, '_winding_context_source', 'none') or 'none'),
         'occluded': bool(not getattr(self._occlusion_state, 'vision_good', True)),
         'fail_open': fail_open,
         'psi_vis': psi_vis, 'psi_thresh': psi_thresh, 'ttfov_s': ttfov, 'psi_fov_rad': psi_fov, 'psi_margin_rad': psi_margin,
@@ -3451,6 +3457,48 @@ class VisionTurnController:
     self._mapd_winding_current_confidence = _u8('windingRoadCurrentConfidence')
     self._mapd_winding_way_count = _u8('windingRoadWayCount')
 
+  def _clear_winding_context(self) -> None:
+    self._winding_context_active = False
+    self._winding_context_score = 0.0
+    self._winding_context_level = 0
+    self._winding_context_confidence = 0.0
+    self._winding_context_source = 'none'
+
+  def _update_winding_context(self) -> None:
+    self._clear_winding_context()
+
+    local_active = bool(getattr(self, '_winding_road_active', False))
+    local_score = float(getattr(self, '_winding_road_score', 0.0) or 0.0)
+
+    mapd_valid = bool(getattr(self, '_mapd_winding_valid', False))
+    mapd_level = int(getattr(self, '_mapd_winding_level', 0) or 0)
+    mapd_score = max(0.0, min(1.0, float(getattr(self, '_mapd_winding_score', 0) or 0) / 255.0))
+    mapd_conf = max(0.0, min(1.0, float(getattr(self, '_mapd_winding_confidence', 0) or 0) / 255.0))
+    mapd_active = bool(mapd_valid and mapd_level >= 3 and mapd_conf >= 0.35 and mapd_score >= 0.45)
+
+    if local_active and mapd_active:
+      self._winding_context_active = True
+      self._winding_context_score = max(local_score, mapd_score)
+      self._winding_context_level = max(3, mapd_level)
+      self._winding_context_confidence = max(mapd_conf, min(1.0, 0.5 + 0.5 * local_score))
+      self._winding_context_source = 'blended'
+      return
+
+    if mapd_active:
+      self._winding_context_active = True
+      self._winding_context_score = mapd_score
+      self._winding_context_level = mapd_level
+      self._winding_context_confidence = mapd_conf
+      self._winding_context_source = 'mapd'
+      return
+
+    if local_active:
+      self._winding_context_active = True
+      self._winding_context_score = local_score
+      self._winding_context_level = 0
+      self._winding_context_confidence = min(1.0, 0.5 + 0.5 * local_score)
+      self._winding_context_source = 'local'
+
   def _update_curve_preview_from_map(self, *, gps_lat: float, gps_lon: float, pts: list[tuple[float, float, float]], i0: int,
                                      gps_bearing_deg: float | None = None) -> None:
     """Update HUD curve preview from mapd curvature samples.
@@ -4084,6 +4132,7 @@ class VisionTurnController:
     self._update_calculations(sm)
     self._state_transition()
     self._update_solution(sm)
+    self._update_winding_context()
     # Emit compact debug snapshot if enabled and rate allows
     try:
       now_s = float(getattr(time, 'monotonic', time.time)())

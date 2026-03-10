@@ -194,6 +194,58 @@ def test_longitudinal_plan_sp_publishes_vtsc_velocity(planner_sp):
   assert vtsc_pub == pytest.approx(float(planner_sp.v_tsc.v_turn), abs=1e-6)
 
 
+def test_longitudinal_plan_sp_publishes_winding_context(planner_sp):
+  class _FakePM:
+    def __init__(self):
+      self.sent = {}
+    def send(self, name, msg) -> None:
+      self.sent[name] = msg
+
+  planner_sp.v_tsc._mapd_winding_valid = True
+  planner_sp.v_tsc._mapd_winding_level = 4
+  planner_sp.v_tsc._mapd_winding_score = 208
+  planner_sp.v_tsc._mapd_winding_confidence = 196
+  planner_sp.v_tsc._mapd_winding_current_level = 2
+  planner_sp.v_tsc._mapd_winding_current_score = 124
+  planner_sp.v_tsc._mapd_winding_current_confidence = 180
+  planner_sp.v_tsc._mapd_winding_way_count = 3
+  planner_sp.v_tsc._winding_context_active = True
+  planner_sp.v_tsc._winding_context_level = 4
+  planner_sp.v_tsc._winding_context_score = 0.82
+  planner_sp.v_tsc._winding_context_confidence = 0.91
+  planner_sp.v_tsc._winding_context_source = 'blended'
+
+  from .pipeline_harness import FakeSubMaster, make_model_v2, make_radar_state, make_car_state, make_car_control
+  sm_last = FakeSubMaster(
+    data={
+      'modelV2': make_model_v2(curvature=0.0, v_pred=20.0, confidence=0.95),
+      'radarState': make_radar_state(lead_d_rel_m=None),
+      'carState': make_car_state(gas_pressed=False),
+      'carControl': make_car_control(long_active=True),
+      'controlsState': SimpleNamespace(),
+      'controlsStateSP': SimpleNamespace(),
+    },
+    valid={'modelV2': True, 'radarState': True},
+  )
+
+  pm = _FakePM()
+  planner_sp.publish_longitudinal_plan_sp(sm_last, pm)
+  vtsc = pm.sent['longitudinalPlanSP'].longitudinalPlanSP.visionTurnSpeedControl
+  assert bool(vtsc.mapWindingValid) is True
+  assert int(vtsc.mapWindingLevel) == 4
+  assert int(vtsc.mapWindingScore) == 208
+  assert int(vtsc.mapWindingConfidence) == 196
+  assert int(vtsc.mapWindingCurrentLevel) == 2
+  assert int(vtsc.mapWindingCurrentScore) == 124
+  assert int(vtsc.mapWindingCurrentConfidence) == 180
+  assert int(vtsc.mapWindingWayCount) == 3
+  assert bool(vtsc.windingContextActive) is True
+  assert int(vtsc.windingContextLevel) == 4
+  assert float(vtsc.windingContextScore) == pytest.approx(0.82, abs=1e-6)
+  assert float(vtsc.windingContextConfidence) == pytest.approx(0.91, abs=1e-6)
+  assert str(vtsc.windingContextSource) == 'blended'
+
+
 def test_vtsc_does_not_apply_when_long_inactive(planner_sp):
   v0 = 30.0
   v_cruise = 33.0

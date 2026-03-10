@@ -286,6 +286,19 @@ def _build_trace_rows_for_segment(
       "vtscVelMps": vtsc_v,
       "vtscMaxPredLatAcc": lp_sp.get("vtscMaxPredLatAcc"),
       "vtscCurLatAcc": lp_sp.get("vtscCurLatAcc"),
+      "mapdWindingValid": lp_sp.get("mapdWindingValid", map_sp.get("mapWindingValid")),
+      "mapdWindingLevel": lp_sp.get("mapdWindingLevel", map_sp.get("mapWindingLevel")),
+      "mapdWindingScore": lp_sp.get("mapdWindingScore", map_sp.get("mapWindingScore")),
+      "mapdWindingConfidence": lp_sp.get("mapdWindingConfidence", map_sp.get("mapWindingConfidence")),
+      "mapdWindingCurrentLevel": lp_sp.get("mapdWindingCurrentLevel", map_sp.get("mapWindingCurrentLevel")),
+      "mapdWindingCurrentScore": lp_sp.get("mapdWindingCurrentScore", map_sp.get("mapWindingCurrentScore")),
+      "mapdWindingCurrentConfidence": lp_sp.get("mapdWindingCurrentConfidence", map_sp.get("mapWindingCurrentConfidence")),
+      "mapdWindingWayCount": lp_sp.get("mapdWindingWayCount", map_sp.get("mapWindingWayCount")),
+      "windingContextActive": lp_sp.get("windingContextActive"),
+      "windingContextLevel": lp_sp.get("windingContextLevel"),
+      "windingContextScore": lp_sp.get("windingContextScore"),
+      "windingContextConfidence": lp_sp.get("windingContextConfidence"),
+      "windingContextSource": lp_sp.get("windingContextSource"),
       "llProbMean": model.get("llProbMean"),
       "modelConf": model.get("modelConf"),
       "modelFrameDropPerc": model.get("modelFrameDropPerc"),
@@ -317,6 +330,14 @@ def _build_trace_rows_for_segment(
       "mapRoadName": map_sp.get("mapRoadName"),
       "mapRoadGeometryValid": map_sp.get("mapRoadGeometryValid"),
       "mapCurrentWayId": map_sp.get("mapCurrentWayId"),
+      "mapWindingValid": map_sp.get("mapWindingValid"),
+      "mapWindingLevel": map_sp.get("mapWindingLevel"),
+      "mapWindingScore": map_sp.get("mapWindingScore"),
+      "mapWindingConfidence": map_sp.get("mapWindingConfidence"),
+      "mapWindingCurrentLevel": map_sp.get("mapWindingCurrentLevel"),
+      "mapWindingCurrentScore": map_sp.get("mapWindingCurrentScore"),
+      "mapWindingCurrentConfidence": map_sp.get("mapWindingCurrentConfidence"),
+      "mapWindingWayCount": map_sp.get("mapWindingWayCount"),
       "mapDataAge": (float(target_t - map_sp.get("_t")) if map_sp.get("_t") is not None else None),
     }
 
@@ -340,6 +361,22 @@ def _build_trace_rows_for_segment(
     row["dbgFinal"] = vdbg.get("dbgFinal")
     row["occluded"] = vdbg.get("occluded")
     row["failOpen"] = vdbg.get("failOpen")
+    if row["mapdWindingLevel"] is None:
+      row["mapdWindingLevel"] = vdbg.get("mapdWindingLevel")
+    if row["mapdWindingScore"] is None:
+      row["mapdWindingScore"] = vdbg.get("mapdWindingScore")
+    if row["mapdWindingConfidence"] is None:
+      row["mapdWindingConfidence"] = vdbg.get("mapdWindingConfidence")
+    if row["windingContextActive"] is None:
+      row["windingContextActive"] = vdbg.get("windingContextActive")
+    if row["windingContextLevel"] is None:
+      row["windingContextLevel"] = vdbg.get("windingContextLevel")
+    if row["windingContextScore"] is None:
+      row["windingContextScore"] = vdbg.get("windingContextScore")
+    if row["windingContextConfidence"] is None:
+      row["windingContextConfidence"] = vdbg.get("windingContextConfidence")
+    if row["windingContextSource"] is None:
+      row["windingContextSource"] = vdbg.get("windingContextSource")
 
     # Names + derived deltas.
     row["vtscStateName"] = _vtsc_state_name(_safe_int(row.get("vtscState")))
@@ -407,6 +444,19 @@ def _build_trace_rows_for_segment(
           "vtscVelMps": _safe_float(getattr(vtsc, "velocity", None)),
           "vtscMaxPredLatAcc": _safe_float(getattr(vtsc, "maxPredictedLateralAccel", None)),
           "vtscCurLatAcc": _safe_float(getattr(vtsc, "currentLateralAccel", None)),
+          "mapdWindingValid": bool(getattr(vtsc, "mapWindingValid", False)) if hasattr(vtsc, "mapWindingValid") else None,
+          "mapdWindingLevel": _safe_int(getattr(vtsc, "mapWindingLevel", None)),
+          "mapdWindingScore": _safe_int(getattr(vtsc, "mapWindingScore", None)),
+          "mapdWindingConfidence": _safe_int(getattr(vtsc, "mapWindingConfidence", None)),
+          "mapdWindingCurrentLevel": _safe_int(getattr(vtsc, "mapWindingCurrentLevel", None)),
+          "mapdWindingCurrentScore": _safe_int(getattr(vtsc, "mapWindingCurrentScore", None)),
+          "mapdWindingCurrentConfidence": _safe_int(getattr(vtsc, "mapWindingCurrentConfidence", None)),
+          "mapdWindingWayCount": _safe_int(getattr(vtsc, "mapWindingWayCount", None)),
+          "windingContextActive": bool(getattr(vtsc, "windingContextActive", False)) if hasattr(vtsc, "windingContextActive") else None,
+          "windingContextLevel": _safe_int(getattr(vtsc, "windingContextLevel", None)),
+          "windingContextScore": _safe_float(getattr(vtsc, "windingContextScore", None)),
+          "windingContextConfidence": _safe_float(getattr(vtsc, "windingContextConfidence", None)),
+          "windingContextSource": _safe_str(getattr(vtsc, "windingContextSource", None)),
         }
     elif which == "modelV2":
       m = evt.modelV2
@@ -468,6 +518,14 @@ def _build_trace_rows_for_segment(
         "mapRoadName": _safe_str(getattr(m, "roadName", None)),
         "mapRoadGeometryValid": bool(getattr(m, "roadGeometryValid", False)) if hasattr(m, "roadGeometryValid") else None,
         "mapCurrentWayId": current_way_id,
+        "mapWindingValid": bool(getattr(m, "windingRoadValid", False)) if hasattr(m, "windingRoadValid") else None,
+        "mapWindingLevel": _safe_int(getattr(m, "windingRoadLevel", None)),
+        "mapWindingScore": _safe_int(getattr(m, "windingRoadScore", None)),
+        "mapWindingConfidence": _safe_int(getattr(m, "windingRoadConfidence", None)),
+        "mapWindingCurrentLevel": _safe_int(getattr(m, "windingRoadCurrentLevel", None)),
+        "mapWindingCurrentScore": _safe_int(getattr(m, "windingRoadCurrentScore", None)),
+        "mapWindingCurrentConfidence": _safe_int(getattr(m, "windingRoadCurrentConfidence", None)),
+        "mapWindingWayCount": _safe_int(getattr(m, "windingRoadWayCount", None)),
         "_t": t,
       }
     elif which == "logMessage":
@@ -497,6 +555,14 @@ def _build_trace_rows_for_segment(
               "dbgFinal": _safe_float(snap.get("final")),
               "occluded": bool(snap.get("occluded", False)),
               "failOpen": bool(snap.get("fail_open", False)),
+              "mapdWindingLevel": _safe_int(snap.get("mapd_winding_level")),
+              "mapdWindingScore": _safe_int(snap.get("mapd_winding_score")),
+              "mapdWindingConfidence": _safe_int(snap.get("mapd_winding_confidence")),
+              "windingContextActive": bool(snap.get("winding_context_active", False)),
+              "windingContextLevel": _safe_int(snap.get("winding_context_level")),
+              "windingContextScore": _safe_float(snap.get("winding_context_score")),
+              "windingContextConfidence": _safe_float(snap.get("winding_context_confidence")),
+              "windingContextSource": _safe_str(snap.get("winding_context_source")),
             }
       except Exception:
         pass
@@ -761,6 +827,11 @@ def _compute_summary_row(ev: EventBundle, df: pd.DataFrame) -> Dict[str, Any]:
   row["capMap@-0.5"] = _value_at_dt(df, -0.5, "capMapVmin")
   row["mapCoverage@-0.5"] = _value_at_dt(df, -0.5, "mapTailCoverage")
   row["visionStatus@-0.5"] = _str_at_dt(df, -0.5, "visionStatus")
+  row["mapdWindLevel@-0.5"] = _value_at_dt(df, -0.5, "mapdWindingLevel")
+  row["mapdWindConf@-0.5"] = _value_at_dt(df, -0.5, "mapdWindingConfidence")
+  row["windCtxSource@-0.5"] = _str_at_dt(df, -0.5, "windingContextSource")
+  row["windCtxLevel@-0.5"] = _value_at_dt(df, -0.5, "windingContextLevel")
+  row["windCtxScore@-0.5"] = _value_at_dt(df, -0.5, "windingContextScore")
   return row
 
 

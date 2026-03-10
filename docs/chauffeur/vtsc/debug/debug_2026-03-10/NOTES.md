@@ -303,6 +303,11 @@ That runtime bridge is now implemented locally as telemetry:
   - `wayCount`
 - `OsmMapData` now republishes that summary into `liveMapDataSP`
 - `VisionTurnController` now snapshots those fields as `mapd_winding_*` telemetry alongside the existing local winding detector output
+- `VisionTurnController` now also produces a fused telemetry-only `winding_context_*` signal:
+  - `source=local` when only the local map-curvature cluster detector is active
+  - `source=mapd` when only the baked route summary is active
+  - `source=blended` when both agree on a winding context
+- this gives VTSC one authoritative winding-context signal for future behavior work without yet changing turn-speed behavior
 
 What is still intentionally not done:
 
@@ -388,3 +393,85 @@ Latest results from this state:
 - mapd targeted Go tests: `ok`
 - Python mapd tests: `18 passed`
 - VTSC suite: `97 passed`
+
+After adding the fused `winding_context_*` telemetry:
+
+- Python mapd integration tests: `12 passed`
+- VTSC suite: `99 passed`
+
+## VTSC tuner tooling carry-through
+
+The `vtsc-tuner` path now understands the new winding telemetry too:
+
+- `tools/vtsc/vtsc_watch.py` renders the fused winding context inline during live watching as:
+  `wind=<source>:L<level>@<score>`
+- `tools/vtsc/vtsc_intervention_recorder.py` now summarizes:
+  - `winding_context_source_counts`
+  - `winding_context_active_ratio`
+  - `winding_context_level_max`
+  - `mapd_winding_valid_ratio`
+  - `mapd_winding_level_max`
+- `tools/vtsc/vtsc_rca_workbook.py` now carries the baked/fused winding fields through trace rows and workbook summary columns, including:
+  - map-side fields from `liveMapDataSP`
+  - VTSC snapshot-side fields from `VTSCDBG`
+  - summary columns at `-0.5 s` for `mapdWindLevel`, `mapdWindConf`, `windCtxSource`, `windCtxLevel`, and `windCtxScore`
+
+Verification for the tooling layer:
+
+- watcher tests:
+  `PYTHONPATH=$PWD .venv/bin/pytest tools/vtsc/tests/test_vtsc_watch.py`
+- script compile smoke:
+  `PYTHONPATH=$PWD .venv/bin/python -m py_compile tools/vtsc/vtsc_watch.py tools/vtsc/vtsc_intervention_recorder.py tools/vtsc/vtsc_rca_workbook.py`
+
+Latest results:
+
+- watcher tests: `16 passed`
+- compile smoke: `ok`
+
+## Standard log carry-through
+
+The next useful hardening step was to stop depending on `VTSCDBG` snapshots for winding-road RCA.
+
+`LongitudinalPlanSP.VisionTurnSpeedControl` now publishes the winding telemetry directly:
+
+- baked map summary:
+  - `mapWindingValid`
+  - `mapWindingLevel`
+  - `mapWindingScore`
+  - `mapWindingConfidence`
+  - `mapWindingCurrentLevel`
+  - `mapWindingCurrentScore`
+  - `mapWindingCurrentConfidence`
+  - `mapWindingWayCount`
+- fused VTSC context:
+  - `windingContextActive`
+  - `windingContextLevel`
+  - `windingContextScore`
+  - `windingContextConfidence`
+  - `windingContextSource`
+
+Why this matters:
+
+- future qlog/rlog analysis will still have winding context even when verbose VTSC snapshot logging is off
+- intervention traces can now capture the fused winding state from the standard planner message path
+- RCA workbook generation now prefers `longitudinalPlanSP` winding fields first and only falls back to `VTSCDBG` when needed
+
+Follow-on tooling changes:
+
+- `tools/vtsc/vtsc_intervention_recorder.py` now writes the planner-side winding fields into `trace_20s.jsonl`
+- `tools/vtsc/vtsc_rca_workbook.py` now reads planner-side winding fields from `longitudinalPlanSP.visionTurnSpeedControl`
+
+Verification for this pass:
+
+- planner integration tests:
+  `PYTHONPATH=$PWD .venv/bin/pytest sunnypilot/selfdrive/controls/lib/tests/vtsc/test_pipeline_integration.py`
+- full VTSC regression suite:
+  `PYTHONPATH=$PWD .venv/bin/pytest sunnypilot/selfdrive/controls/lib/tests/vtsc`
+- tooling compile smoke:
+  `PYTHONPATH=$PWD .venv/bin/python -m py_compile tools/vtsc/vtsc_intervention_recorder.py tools/vtsc/vtsc_rca_workbook.py`
+
+Latest results:
+
+- planner integration: `6 passed`
+- VTSC suite: `100 passed`
+- tooling compile smoke: `ok`

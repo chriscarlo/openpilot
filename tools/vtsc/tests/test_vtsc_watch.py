@@ -25,6 +25,9 @@ def _base_snapshot(**overrides):
     "psi_vis": 0.3,
     "psi_thresh": 0.2,
     "conf": 0.85,
+    "winding_context_source": "none",
+    "winding_context_level": 0,
+    "winding_context_score": 0.0,
     "occlusion_reason": "",
     "tail_frac": 0.6,
     "s_tail": 80.0,
@@ -51,6 +54,15 @@ class TestRenderLine:
     assert "occ=" in out
     assert "map=" in out
     assert "cap=visible" in out
+
+  def test_output_contains_winding_context_when_active(self):
+    d = _base_snapshot(
+      winding_context_source="blended",
+      winding_context_level=5,
+      winding_context_score=0.91,
+    )
+    out = render_line(d, "snap")
+    assert "wind=blended:L5@0.91" in out
 
   def test_output_format_source_tag(self):
     d = _base_snapshot()
