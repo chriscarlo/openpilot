@@ -31,6 +31,11 @@ WINDING_ROAD_SHORT_GAP_MAX_M = 120.0
 WINDING_ROAD_CURVE_FRACTION_START = 0.20
 WINDING_ROAD_CURVE_FRACTION_FULL = 0.50
 WINDING_ROAD_ACTIVE_SCORE = 0.55
+WINDING_BEHAVIOR_MAX_LEVEL = 5
+WINDING_BEHAVIOR_MIN_SIGNAL = 0.20
+WINDING_BEHAVIOR_SOFT_SIGNAL = 0.35
+WINDING_BEHAVIOR_LOCAL_LEVEL4_SCORE = 0.78
+WINDING_BEHAVIOR_LOCAL_LEVEL5_SCORE = 0.90
 
 
 def normalize_map_strategy(raw: str | bytes | None) -> str:
@@ -98,8 +103,171 @@ class WindingRoadContext:
   curve_distance_m: float = 0.0
 
 
+@dataclass(frozen=True)
+class WindingBehaviorProfile:
+  level: int = 0
+  name: str = "normal"
+  fixed_lead_time_adjust_s: float = 0.0
+  curve_phase_offset_adjust_s: float = 0.0
+  overshoot_phase_offset_adjust_s: float = 0.0
+  takeover_dwell_s: float = 0.35
+  counterevidence_dwell_s: float = 0.75
+  rearm_margin_m: float = 15.0
+  rearm_delta_mps: float = 0.50
+  allow_immediate_post_apex_release: bool = True
+  v_turn_release_up_slew_mps2: float = float('inf')
+
+
+WINDING_BEHAVIOR_PROFILES: dict[int, WindingBehaviorProfile] = {
+  0: WindingBehaviorProfile(
+    level=0,
+    name="normal",
+    allow_immediate_post_apex_release=True,
+    v_turn_release_up_slew_mps2=4.0,
+  ),
+  1: WindingBehaviorProfile(
+    level=1,
+    name="gentle_curvy",
+    curve_phase_offset_adjust_s=0.05,
+    overshoot_phase_offset_adjust_s=0.04,
+    takeover_dwell_s=0.40,
+    counterevidence_dwell_s=0.85,
+    rearm_margin_m=13.0,
+    rearm_delta_mps=0.45,
+    allow_immediate_post_apex_release=True,
+    v_turn_release_up_slew_mps2=3.0,
+  ),
+  2: WindingBehaviorProfile(
+    level=2,
+    name="sustained_curvy",
+    curve_phase_offset_adjust_s=0.12,
+    overshoot_phase_offset_adjust_s=0.08,
+    takeover_dwell_s=0.55,
+    counterevidence_dwell_s=1.00,
+    rearm_margin_m=10.0,
+    rearm_delta_mps=0.38,
+    allow_immediate_post_apex_release=False,
+    v_turn_release_up_slew_mps2=2.2,
+  ),
+  3: WindingBehaviorProfile(
+    level=3,
+    name="tight_winding",
+    curve_phase_offset_adjust_s=0.18,
+    overshoot_phase_offset_adjust_s=0.12,
+    takeover_dwell_s=0.70,
+    counterevidence_dwell_s=1.20,
+    rearm_margin_m=8.0,
+    rearm_delta_mps=0.32,
+    allow_immediate_post_apex_release=False,
+    v_turn_release_up_slew_mps2=1.5,
+  ),
+  4: WindingBehaviorProfile(
+    level=4,
+    name="switchback_zone",
+    curve_phase_offset_adjust_s=0.24,
+    overshoot_phase_offset_adjust_s=0.16,
+    takeover_dwell_s=0.85,
+    counterevidence_dwell_s=1.35,
+    rearm_margin_m=6.0,
+    rearm_delta_mps=0.26,
+    allow_immediate_post_apex_release=False,
+    v_turn_release_up_slew_mps2=1.0,
+  ),
+  5: WindingBehaviorProfile(
+    level=5,
+    name="hairpin_extreme",
+    curve_phase_offset_adjust_s=0.30,
+    overshoot_phase_offset_adjust_s=0.20,
+    takeover_dwell_s=1.00,
+    counterevidence_dwell_s=1.50,
+    rearm_margin_m=4.0,
+    rearm_delta_mps=0.20,
+    allow_immediate_post_apex_release=False,
+    v_turn_release_up_slew_mps2=0.75,
+  ),
+}
+DEFAULT_WINDING_BEHAVIOR_PROFILE = WINDING_BEHAVIOR_PROFILES[0]
+
+
 def _clip01(value: float) -> float:
   return min(1.0, max(0.0, float(value)))
+
+
+def _clamp_winding_level(level: int | float) -> int:
+  try:
+    raw = int(level)
+  except Exception:
+    raw = 0
+  return min(max(raw, 0), int(WINDING_BEHAVIOR_MAX_LEVEL))
+
+
+def _local_winding_behavior_level(*, active: bool, score: float) -> int:
+  if not bool(active):
+    return 0
+  score_f = _clip01(score)
+  if score_f >= float(WINDING_BEHAVIOR_LOCAL_LEVEL5_SCORE):
+    return 5
+  if score_f >= float(WINDING_BEHAVIOR_LOCAL_LEVEL4_SCORE):
+    return 4
+  return 3
+
+
+def _mapd_winding_behavior_level(*, level: int, score: float, confidence: float) -> int:
+  eff_level = _clamp_winding_level(level)
+  if eff_level <= 0:
+    return 0
+
+  signal = min(1.0, max(0.0, 0.65 * _clip01(score) + 0.35 * _clip01(confidence)))
+  if signal < float(WINDING_BEHAVIOR_MIN_SIGNAL):
+    return 0
+  if signal < float(WINDING_BEHAVIOR_SOFT_SIGNAL):
+    return max(1, eff_level - 1)
+  return eff_level
+
+
+def resolve_winding_behavior_profile(
+  *,
+  active: bool,
+  level: int,
+  score: float,
+  confidence: float,
+  source: str,
+  local_active: bool = False,
+  local_score: float = 0.0,
+  mapd_level: int = 0,
+  mapd_score: float = 0.0,
+  mapd_confidence: float = 0.0,
+) -> WindingBehaviorProfile:
+  local_level = _local_winding_behavior_level(
+    active=bool(local_active),
+    score=float(local_score),
+  )
+  mapd_level_eff = _mapd_winding_behavior_level(
+    level=int(mapd_level),
+    score=float(mapd_score),
+    confidence=float(mapd_confidence),
+  )
+
+  fused_level = _clamp_winding_level(level)
+  fused_score = _clip01(score)
+  fused_confidence = _clip01(confidence)
+  source_value = str(source or "none").strip().lower()
+
+  if source_value == "blended":
+    selected_level = max(fused_level, mapd_level_eff, local_level)
+  elif source_value == "mapd":
+    selected_level = max(mapd_level_eff, min(fused_level, mapd_level_eff))
+  elif source_value == "local":
+    selected_level = max(local_level, fused_level)
+  else:
+    selected_level = max(mapd_level_eff, local_level, fused_level if bool(active) else 0)
+
+  if selected_level <= 0:
+    signal = max(fused_score, fused_confidence, _clip01(mapd_score), _clip01(local_score))
+    if bool(active) and signal >= float(WINDING_BEHAVIOR_SOFT_SIGNAL):
+      selected_level = max(1, fused_level)
+
+  return WINDING_BEHAVIOR_PROFILES.get(_clamp_winding_level(selected_level), DEFAULT_WINDING_BEHAVIOR_PROFILE)
 
 
 def _max_entry_speed_for_target(
@@ -380,8 +548,13 @@ def compute_map_cap_candidate(
   curve_phase_offset_s: float = 0.0,
   overshoot_phase_offset_s: float = 0.0,
   reference_speed_mps: float | None = None,
+  winding_profile: WindingBehaviorProfile | None = None,
 ) -> MapCapCandidate:
   strategy_mode = normalize_map_strategy(mode)
+  profile = winding_profile or DEFAULT_WINDING_BEHAVIOR_PROFILE
+  fixed_lead_time = max(0.0, float(fixed_lead_time_s) + float(profile.fixed_lead_time_adjust_s))
+  curve_phase_offset = float(curve_phase_offset_s) + float(profile.curve_phase_offset_adjust_s)
+  overshoot_phase_offset = float(overshoot_phase_offset_s) + float(profile.overshoot_phase_offset_adjust_s)
   total_span = start_span(SPAN_MAP_CAP_STRATEGIC if strategy_mode == MAP_STRATEGY_STRATEGIC else SPAN_MAP_CAP_ADVISORY)
   try:
     if strategy_mode == MAP_STRATEGY_STRATEGIC:
@@ -446,13 +619,13 @@ def compute_map_cap_candidate(
         # Reuse the driver's existing VTSC timing semantics for map planning too:
         # fixed lead time means "be at the anchor speed before the anchor by N seconds"
         # and should tighten the reachable cap even when the signed phase offsets are zero.
-        effective_distance -= max(0.0, float(fixed_lead_time_s)) * timing_speed
+        effective_distance -= float(fixed_lead_time) * timing_speed
         # curve timing moves the nominal "arrive at anchor speed" point earlier/later,
         # while overshoot timing only biases anchors that are materially tighter than the
         # current local vision target.
-        effective_distance += float(curve_phase_offset_s) * timing_speed
+        effective_distance += float(curve_phase_offset) * timing_speed
         if vsafe + STRATEGIC_OVERSHOOT_DELTA_MPS < float(reference_speed):
-          effective_distance += float(overshoot_phase_offset_s) * timing_speed
+          effective_distance += float(overshoot_phase_offset) * timing_speed
         effective_distance = max(0.0, effective_distance)
       if strategy_mode == MAP_STRATEGY_STRATEGIC and response_model is not None:
         try:
@@ -540,10 +713,10 @@ def compute_map_cap_candidate(
       if all_strategic_points:
         for di, ki, vi, abs_idx in all_strategic_points:
           effective_distance = float(di)
-          effective_distance -= max(0.0, float(fixed_lead_time_s)) * timing_speed
-          effective_distance += float(curve_phase_offset_s) * timing_speed
+          effective_distance -= float(fixed_lead_time) * timing_speed
+          effective_distance += float(curve_phase_offset) * timing_speed
           if float(vi) + STRATEGIC_OVERSHOOT_DELTA_MPS < float(reference_speed):
-            effective_distance += float(overshoot_phase_offset_s) * timing_speed
+            effective_distance += float(overshoot_phase_offset) * timing_speed
           effective_distance = max(0.0, effective_distance)
           strategic_chain_source_points.append((float(effective_distance), float(di), float(vi), float(ki), int(abs_idx)))
 
@@ -609,8 +782,16 @@ def evaluate_map_strategy(
   counterevidence_dwell_s: float = 0.75,
   rearm_margin_m: float = 15.0,
   rearm_delta_mps: float = 0.50,
+  winding_profile: WindingBehaviorProfile | None = None,
 ) -> MapStrategyDecision:
   strategy_mode = normalize_map_strategy(mode)
+  profile = winding_profile or DEFAULT_WINDING_BEHAVIOR_PROFILE
+  takeover_dwell_s = max(float(takeover_dwell_s), float(profile.takeover_dwell_s))
+  counterevidence_dwell_s = max(float(counterevidence_dwell_s), float(profile.counterevidence_dwell_s))
+  if int(profile.level) > 0:
+    rearm_margin_m = min(float(rearm_margin_m), float(profile.rearm_margin_m))
+    rearm_delta_mps = min(float(rearm_delta_mps), float(profile.rearm_delta_mps))
+  allow_immediate_post_apex_release = bool(profile.allow_immediate_post_apex_release)
   if candidate is None or candidate.cap_mps is None:
     state.reset()
     return MapStrategyDecision(
@@ -672,7 +853,7 @@ def evaluate_map_strategy(
   counterevidence_elapsed = max(0.0, float(now_s) - float(state.counterevidence_since)) if state.counterevidence_since > 0.0 else 0.0
 
   vision_relax_reason = ""
-  if apex_exit_ready and full_visibility and turn_visible:
+  if allow_immediate_post_apex_release and apex_exit_ready and full_visibility and turn_visible:
     state.release_latched = True
     state.release_reason = "post_apex_release"
   elif takeover_elapsed >= float(takeover_dwell_s):

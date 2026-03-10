@@ -46,3 +46,20 @@ description: Edit, debug, troubleshoot, iterate, and polish the Sunnypilot VTSC 
 ## References
 
 - Read `references/pipeline.md` when debugging “is the map preview data wrong, or is the HUD rendering wrong?” and when changing any capnp fields.
+
+## Skill Maintenance
+
+After any real VTSC HUD debug or polish session:
+- compare new evidence against existing guidance before finishing
+- correct stale bullets instead of appending contradictory notes
+- keep exact file paths, thresholds, and verification commands current
+- prefer one clear proven failure mode and one reliable validation command over speculative lists
+- add new gotchas only for real, repeatable footguns
+- keep only durable workflow guidance in `SKILL.md`; move detailed examples or reference material to `references/` or `scripts/`
+- update `agents/openai.yaml` only if the skill’s scope or trigger wording changed materially
+
+Treat this skill as a recursive kaizen loop:
+- every real invocation should leave it more accurate, more actionable, more compact, or all three
+- recursively self-improve by reconciling new facts with old guidance in the same pass so the next invocation starts smarter
+- if new evidence proves an older bullet wrong, incomplete, or redundant, replace, tighten, or delete it instead of stacking another warning
+- prefer editing and pruning over adding line after line; a shorter, sharper skill beats a longer noisier one

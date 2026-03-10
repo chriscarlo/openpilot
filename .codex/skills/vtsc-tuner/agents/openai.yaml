@@ -1,0 +1,4 @@
+interface:
+  display_name: "VTSC Tuner"
+  short_description: "Capture and replay VTSC curve-speed misses"
+  default_prompt: "Use $vtsc-tuner to capture or replay a VTSC intervention and identify whether the miss came from vision, map handoff, or planner timing."

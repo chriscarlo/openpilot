@@ -267,22 +267,17 @@ def test_vtsc_recovers_back_to_cruise_after_curve(planner_sp):
 
   # Phase 1: curve present, should cap below cruise.
   steps = [Step(curvature=0.01, confidence=0.95, v_ego=v0, a_ego=0.0, v_cruise=v_cruise, long_active=True)] * 40
-  # Phase 2: curve gone, confidence good; cap should return to cruise promptly.
+  # Phase 2: curve gone, confidence good; cap should wind back up smoothly.
   steps += [Step(curvature=0.0, confidence=0.95, v_ego=v0, a_ego=0.0, v_cruise=v_cruise, long_active=True)] * 60
 
   hist = run_vtsc_min_of_sources(planner_sp, steps=steps, dt=dt, start_t=0.0, integrate_ego=True)
   assert len(hist) == len(steps)
 
-  # Find the first time after the curve ends where v_cruise_final == v_cruise (within tol).
-  recover_idx = None
-  for i in range(40, len(hist)):
-    if hist[i]['v_cruise_final'] >= v_cruise - 1e-3:
-      recover_idx = i
-      break
-
-  assert recover_idx is not None, "VTSC did not release cruise cap after curve ended"
-  # Recovery should happen within a reasonable time window (target: <= 2s in this synthetic case).
-  assert (recover_idx - 40) * dt <= 2.0
+  post = hist[40:]
+  assert post
+  peak_step = max(max(0.0, float(nxt['v_cruise_final']) - float(cur['v_cruise_final'])) for cur, nxt in zip(post, post[1:], strict=False))
+  assert peak_step <= 0.25
+  assert float(post[-1]['v_cruise_final']) >= float(post[0]['v_cruise_final']) + 3.0
 
 
 def test_vtsc_recovers_after_occlusion_reacquisition(planner_sp):

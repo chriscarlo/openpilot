@@ -28,7 +28,7 @@ def _steps_curve_then_straight(*,
 def test_v_turn_releases_after_curve_sweep(v0: float, v_cruise: float, k_curve: float):
   # Sweep invariant: with good vision, VTSC must:
   # - impose a cap during the curve (v_turn < cruise), and
-  # - release back to cruise quickly after curvature returns to ~0.
+  # - then wind the cap back up smoothly after the curve instead of jumping straight to cruise.
   dt = 0.05
   n_curve = 40     # 2.0 s
   n_straight = 60  # 3.0 s (enough for recovery timing checks)
@@ -44,21 +44,17 @@ def test_v_turn_releases_after_curve_sweep(v0: float, v_cruise: float, k_curve: 
     curvature_ahead=None,
   )
   # This sweep is about VTSC's *cap output* (v_turn), not its internal accel plan.
-  trace = simulate_sequence_trace(steps=steps, vtsc=vtsc, v0_mps=v0, v_cruise_mps=v_cruise, dt=dt, integrate_ego=False)
+  trace = simulate_sequence_trace(steps=steps, vtsc=vtsc, v0_mps=v0, v_cruise_mps=v_cruise, dt=dt, integrate_ego=True)
   assert len(trace) == (n_curve + n_straight)
 
   min_curve_v_turn = min(s['v_turn'] for s in trace[:n_curve])
   assert min_curve_v_turn <= v_cruise - 0.20, "Scenario did not exercise a meaningful VTSC cap during the curve"
 
-  recover_idx = None
-  for i in range(n_curve, len(trace)):
-    if trace[i]['v_turn'] >= v_cruise - 1e-3:
-      recover_idx = i
-      break
-  assert recover_idx is not None, "v_turn did not return to cruise after the curve ended"
-  assert (recover_idx - n_curve) * dt <= 2.0
-  # Once the cap releases, it should remain released under good vision.
-  assert min(s['v_turn'] for s in trace[recover_idx:]) >= v_cruise - 1e-3
+  post = trace[n_curve:]
+  assert post, "Missing post-curve recovery window"
+  peak_step = max(max(0.0, nxt['v_turn'] - cur['v_turn']) for cur, nxt in zip(post, post[1:], strict=False))
+  assert peak_step <= 0.25
+  assert float(post[-1]['v_turn']) >= float(post[0]['v_turn']) + 3.0
 
 
 @pytest.mark.parametrize("headway_s", [
@@ -70,7 +66,7 @@ def test_v_turn_releases_after_curve_sweep(v0: float, v_cruise: float, k_curve: 
 ])
 def test_lead_headway_does_not_activate_dead_occlusion_paths(headway_s: float):
   # With occlusion removed, close-vs-far lead headway should not activate any FOV latch or
-  # lead-bypass path. The cap should still release back to cruise promptly after the curve.
+  # lead-bypass path. The cap should still unwind smoothly after the curve.
   dt = 0.05
   v0 = 25.0
   v_cruise = 30.0
@@ -101,12 +97,8 @@ def test_lead_headway_does_not_activate_dead_occlusion_paths(headway_s: float):
   assert all(not s['fov_occluded'] for s in trace)
   assert all(not s['occl_lead_bypass_active'] for s in trace)
 
-  # After the curve ends, the key observation is whether VTSC releases the cap back to cruise.
-  recover_idx = None
-  for i in range(n_curve, len(trace)):
-    if trace[i]['v_turn'] >= v_cruise - 1e-3:
-      recover_idx = i
-      break
-
-  assert recover_idx is not None, "Expected VTSC cap to release back to cruise on the straight"
-  assert (recover_idx - n_curve) * dt <= 1.0
+  post = trace[n_curve:]
+  assert post, "Missing post-curve recovery window"
+  peak_step = max(max(0.0, nxt['v_turn'] - cur['v_turn']) for cur, nxt in zip(post, post[1:], strict=False))
+  assert peak_step <= 0.25
+  assert float(post[-1]['v_turn']) >= float(post[0]['v_turn']) + 3.0

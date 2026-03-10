@@ -29,13 +29,16 @@ from .vision_turn_params import update_vtsc_params
 from .vtsc_map_strategy import (
   MAP_STRATEGY_ADVISORY,
   DEFAULT_MAP_STRATEGY,
+  DEFAULT_WINDING_BEHAVIOR_PROFILE,
   MAP_STRATEGY_STRATEGIC,
   MapStrategyState,
+  WindingBehaviorProfile,
   WindingRoadContext,
   classify_winding_road_context,
   compute_map_cap_candidate,
   evaluate_map_strategy,
   normalize_map_strategy,
+  resolve_winding_behavior_profile,
 )
 try:
   from .vtsc_curve_tuning import Q_CURVE_ENABLED, Q_CURVE_POINTS
@@ -64,6 +67,10 @@ VTURN_HOLD_S = 1.2            # tuned from rlogs: typical planner response ≈ 0
 # Under degraded vision we still want a hold, but make it shorter to avoid "sticky" slowdowns after
 # a curve ends (especially when the UI state machine keeps predicted curvature slightly non-zero).
 VTURN_HOLD_S_OCCLUDED = 0.85
+# Shape the final VTSC cap release after a real curve-limited phase so longitudinal MPC does not
+# snap from a low curve cap straight back to set speed in one frame.
+VTURN_RELEASE_SHAPE_ENTRY_DELTA_MPS = 0.75
+VTURN_RELEASE_SHAPE_HANDOFF_MARGIN_MPS = 0.35
 # Minimum predicted lateral acceleration (m/s^2) to treat as real turn evidence for hold gating.
 _ENTERING_PRED_LAT_ACC_TH = 1.3
 
@@ -974,6 +981,7 @@ class VisionTurnController:
     # ===== Freeway cap hold (avoid flicker) =====
     self._v_turn_hold_until = 0.0
     self._v_turn_hold_min = float(INF_SPEED)
+    self._v_turn_release_shape_active = False
 
     # Advanced controller state
     self._current_accel = 0.0
@@ -1078,6 +1086,7 @@ class VisionTurnController:
     self._clear_winding_road_context()
     self._clear_mapd_winding_context()
     self._clear_winding_context()
+    self._clear_winding_behavior_profile()
 
     # Lead-aware occlusion bypass
     self._occl_bypass_with_lead = True
@@ -1158,6 +1167,12 @@ class VisionTurnController:
     self._dbg_planner_min_accel = 0.0
     self._dbg_planner_response_decel = 0.0
     self._dbg_planner_delay_s = 0.0
+    self._dbg_winding_profile_level = 0
+    self._dbg_winding_profile_name = DEFAULT_WINDING_BEHAVIOR_PROFILE.name
+    self._dbg_winding_profile_source = "none"
+    self._dbg_winding_release_up_slew_mps2 = 0.0
+    self._dbg_winding_release_limited = False
+    self._dbg_winding_release_shape_active = False
     self._dbg_kappa_vis = 0.0
     self._dbg_s_visible_m = 0.0
     self._dbg_path_conf = 0.0
@@ -1337,6 +1352,12 @@ class VisionTurnController:
       planner_min_accel = float(getattr(self, '_dbg_planner_min_accel', 0.0) or 0.0)
       planner_response_decel = float(getattr(self, '_dbg_planner_response_decel', 0.0) or 0.0)
       planner_delay_s = float(getattr(self, '_dbg_planner_delay_s', 0.0) or 0.0)
+      winding_profile_level = int(getattr(self, '_dbg_winding_profile_level', 0) or 0)
+      winding_profile_name = str(getattr(self, '_dbg_winding_profile_name', DEFAULT_WINDING_BEHAVIOR_PROFILE.name) or DEFAULT_WINDING_BEHAVIOR_PROFILE.name)
+      winding_profile_source = str(getattr(self, '_dbg_winding_profile_source', 'none') or 'none')
+      winding_release_up_slew = float(getattr(self, '_dbg_winding_release_up_slew_mps2', 0.0) or 0.0)
+      winding_release_limited = bool(getattr(self, '_dbg_winding_release_limited', False))
+      winding_release_shape_active = bool(getattr(self, '_dbg_winding_release_shape_active', False))
       s_vis_m = float(getattr(self, '_dbg_s_visible_m', 0.0))
       fail_open = bool(getattr(self, '_dbg_fail_open', False))
       # FOV/units helpers (may be unset on older builds; default sensibly)
@@ -1382,6 +1403,12 @@ class VisionTurnController:
         'map_takeover_dwell_s': takeover_dwell_s, 'map_counterevidence_dwell_s': counterevidence_dwell_s,
         'planner_min_accel_mps2': planner_min_accel, 'planner_response_decel_mps2': planner_response_decel,
         'planner_response_delay_s': planner_delay_s,
+        'winding_profile_level': winding_profile_level,
+        'winding_profile_name': winding_profile_name,
+        'winding_profile_source': winding_profile_source,
+        'winding_release_up_slew_mps2': winding_release_up_slew,
+        'winding_release_limited': winding_release_limited,
+        'winding_release_shape_active': winding_release_shape_active,
         's_visible_m': s_vis_m, 'kappa_vis': k_vis, 'path_conf': raw_conf, 'raw_path_conf': raw_conf,
         'winding_road_active': bool(getattr(self, '_winding_road_active', False)),
         'winding_road_score': float(getattr(self, '_winding_road_score', 0.0) or 0.0),
@@ -1644,6 +1671,8 @@ class VisionTurnController:
 
     # Reset anticipatory deceleration state
     self._is_decelerating_for_curve = False
+    self._v_turn_release_shape_active = False
+    self._clear_winding_behavior_profile()
 
   def _apply_freeway_v_turn_hold(self, v_cap: float) -> float:
     """Hold material VTSC cap reductions briefly to bridge model flicker.
@@ -1725,6 +1754,80 @@ class VisionTurnController:
     # Hold expired: allow immediate release
     self._v_turn_hold_min = float(INF_SPEED)
     return float(v_cap)
+
+  def _apply_winding_v_turn_release_slew(self, v_cap: float, dt: float) -> float:
+    self._dbg_winding_release_limited = False
+    self._dbg_winding_release_up_slew_mps2 = 0.0
+    self._dbg_winding_release_shape_active = bool(getattr(self, '_v_turn_release_shape_active', False))
+
+    try:
+      desired_cap = max(0.0, float(v_cap))
+    except Exception:
+      return float(getattr(self, '_v_cruise_setpoint', 0.0) or 0.0)
+
+    profile = getattr(self, '_winding_behavior_profile', DEFAULT_WINDING_BEHAVIOR_PROFILE)
+    if getattr(profile, 'level', None) is None:
+      return desired_cap
+
+    try:
+      prev_cap = max(0.0, float(getattr(self, '_v_turn_output', desired_cap) or desired_cap))
+    except Exception:
+      prev_cap = desired_cap
+
+    try:
+      v_cruise = max(0.0, float(getattr(self, '_v_cruise_setpoint', desired_cap) or desired_cap))
+    except Exception:
+      v_cruise = desired_cap
+    cap_limited_delta = float(VTURN_RELEASE_SHAPE_ENTRY_DELTA_MPS)
+    handoff_margin = float(VTURN_RELEASE_SHAPE_HANDOFF_MARGIN_MPS)
+    try:
+      curve_evidence = bool(
+        bool(getattr(self, '_map_tail_active', False)) or
+        bool(getattr(self, '_overshoot_cap_active', False)) or
+        bool(getattr(self, '_lat_acc_overshoot_ahead', False)) or
+        (abs(float(getattr(self, '_filtered_curvature', 0.0) or 0.0)) >= 0.0015) or
+        (float(getattr(self, '_max_pred_lat_acc', 0.0) or 0.0) >= float(_ENTERING_PRED_LAT_ACC_TH))
+      )
+    except Exception:
+      curve_evidence = False
+
+    if curve_evidence and min(desired_cap, prev_cap) <= v_cruise - cap_limited_delta:
+      self._v_turn_release_shape_active = True
+    elif bool(getattr(self, '_v_turn_release_shape_active', False)) and (desired_cap <= prev_cap + handoff_margin) and (not curve_evidence):
+      self._v_turn_release_shape_active = False
+
+    self._dbg_winding_release_shape_active = bool(getattr(self, '_v_turn_release_shape_active', False))
+    if desired_cap <= prev_cap + 1e-6:
+      return desired_cap
+    if not bool(getattr(self, '_v_turn_release_shape_active', False)):
+      return desired_cap
+
+    slew_limit = float(profile.v_turn_release_up_slew_mps2)
+    response_model = getattr(self, '_longitudinal_response_model', None)
+    if response_model is not None:
+      try:
+        slew_limit = min(
+          slew_limit,
+          max(0.0, float(getattr(response_model, 'max_accel_mps2', 0.0) or 0.0)),
+          max(0.0, float(getattr(response_model, 'planner_output_max_accel_mps2', 0.0) or 0.0)),
+        )
+      except Exception:
+        pass
+    try:
+      slew_limit = min(slew_limit, max(0.0, float(getattr(self, '_max_accel', slew_limit) or slew_limit)))
+    except Exception:
+      pass
+
+    if (not math.isfinite(slew_limit)) or slew_limit <= 0.0:
+      return desired_cap
+
+    self._dbg_winding_release_up_slew_mps2 = float(slew_limit)
+    limited_cap = min(desired_cap, prev_cap + float(slew_limit) * max(0.0, float(dt)))
+    self._dbg_winding_release_limited = bool(limited_cap < desired_cap - 1e-6)
+    if (limited_cap >= desired_cap - handoff_margin) and (not curve_evidence):
+      self._v_turn_release_shape_active = False
+      self._dbg_winding_release_shape_active = False
+    return float(limited_cap)
 
   def _update_params(self):
     # Delegate to shared reader to avoid duplicating logic here
@@ -2263,6 +2366,7 @@ class VisionTurnController:
     self._dbg_planner_min_accel = float(getattr(response_model, 'min_accel_mps2', 0.0) or 0.0)
     self._dbg_planner_response_decel = float(getattr(response_model, 'planning_decel_mps2', 0.0) or 0.0)
     self._dbg_planner_delay_s = float(getattr(response_model, 'actuation_delay_s', 0.0) or 0.0)
+    self._clear_winding_behavior_profile()
     self._map_tail_reason = "toggle_off"
     try:
       if self._get_bool_param('MTSCLookaheadEnabled', False):
@@ -2310,6 +2414,7 @@ class VisionTurnController:
               vis_margin_m=vis_margin,
               now_s=now,
               apex_exit_ready=bool(getattr(self, '_apex_exit_ready', False)),
+              winding_profile=getattr(self, '_winding_behavior_profile', DEFAULT_WINDING_BEHAVIOR_PROFILE),
             )
           except Exception:
             decision = None
@@ -2977,7 +3082,9 @@ class VisionTurnController:
     # Publish cap to the planner: clamp to cruise setpoint and keep non-negative.
     try:
       v_publish = float(max(0.0, min(float(v_target_cap), float(self._v_cruise_setpoint))))
-      self._v_turn_output = float(self._apply_freeway_v_turn_hold(v_publish))
+      v_publish = float(self._apply_freeway_v_turn_hold(v_publish))
+      v_publish = float(self._apply_winding_v_turn_release_slew(v_publish, dt))
+      self._v_turn_output = float(v_publish)
     except Exception:
       self._v_turn_output = float(getattr(self, '_v_cruise_setpoint', 0.0) or 0.0)
 
@@ -3464,6 +3571,46 @@ class VisionTurnController:
     self._winding_context_confidence = 0.0
     self._winding_context_source = 'none'
 
+  def _clear_winding_behavior_profile(self) -> None:
+    self._winding_behavior_profile = DEFAULT_WINDING_BEHAVIOR_PROFILE
+    self._winding_behavior_source = 'none'
+    self._dbg_winding_profile_level = int(DEFAULT_WINDING_BEHAVIOR_PROFILE.level)
+    self._dbg_winding_profile_name = str(DEFAULT_WINDING_BEHAVIOR_PROFILE.name)
+    self._dbg_winding_profile_source = 'none'
+    self._dbg_winding_release_up_slew_mps2 = 0.0
+    self._dbg_winding_release_limited = False
+    self._dbg_winding_release_shape_active = False
+
+  def _set_winding_behavior_profile(self, profile: WindingBehaviorProfile, *, source: str) -> None:
+    resolved = profile if getattr(profile, 'level', None) is not None else DEFAULT_WINDING_BEHAVIOR_PROFILE
+    self._winding_behavior_profile = resolved
+    self._winding_behavior_source = str(source or 'none')
+    self._dbg_winding_profile_level = int(resolved.level)
+    self._dbg_winding_profile_name = str(resolved.name)
+    self._dbg_winding_profile_source = self._winding_behavior_source
+    self._dbg_winding_release_up_slew_mps2 = 0.0
+    self._dbg_winding_release_limited = False
+    self._dbg_winding_release_shape_active = bool(getattr(self, '_v_turn_release_shape_active', False))
+
+  def _refresh_winding_behavior_profile(self) -> WindingBehaviorProfile:
+    profile = resolve_winding_behavior_profile(
+      active=bool(getattr(self, '_winding_context_active', False)),
+      level=int(getattr(self, '_winding_context_level', 0) or 0),
+      score=float(getattr(self, '_winding_context_score', 0.0) or 0.0),
+      confidence=float(getattr(self, '_winding_context_confidence', 0.0) or 0.0),
+      source=str(getattr(self, '_winding_context_source', 'none') or 'none'),
+      local_active=bool(getattr(self, '_winding_road_active', False)),
+      local_score=float(getattr(self, '_winding_road_score', 0.0) or 0.0),
+      mapd_level=int(getattr(self, '_mapd_winding_level', 0) or 0),
+      mapd_score=max(0.0, min(1.0, float(getattr(self, '_mapd_winding_score', 0) or 0) / 255.0)),
+      mapd_confidence=max(0.0, min(1.0, float(getattr(self, '_mapd_winding_confidence', 0) or 0) / 255.0)),
+    )
+    self._set_winding_behavior_profile(
+      profile,
+      source=str(getattr(self, '_winding_context_source', 'none') or 'none'),
+    )
+    return profile
+
   def _update_winding_context(self) -> None:
     self._clear_winding_context()
 
@@ -3934,6 +4081,7 @@ class VisionTurnController:
     self._map_tail_anchor_vsafe = 0.0
     self._map_tail_anchor_index = -1
     self._map_tail_compute_reason = "unknown"
+    self._clear_winding_behavior_profile()
     self._clear_winding_road_context()
     gps_pose = self._get_last_gps_pose()
     if gps_pose is None:
@@ -4018,6 +4166,8 @@ class VisionTurnController:
       vsafe_list=vsafe,
       abs_indices=abs_indices,
     ))
+    self._update_winding_context()
+    winding_profile = self._refresh_winding_behavior_profile()
 
     try:
       vs = getattr(self._occlusion_state, 'vision_status', VisionStatus.FULL_VISIBILITY)
@@ -4073,6 +4223,7 @@ class VisionTurnController:
       curve_phase_offset_s=float(getattr(self, '_curve_phase_offset_s', 0.0)),
       overshoot_phase_offset_s=float(getattr(self, '_overshoot_phase_offset_s', 0.0)),
       reference_speed_mps=float(getattr(self, '_dbg_target_raw', self._v_ego) or self._v_ego),
+      winding_profile=winding_profile,
     )
 
     self._map_tail_advisory_cap = advisory_candidate.cap_mps

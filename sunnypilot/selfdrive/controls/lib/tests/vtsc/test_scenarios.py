@@ -19,7 +19,11 @@ from sunnypilot.selfdrive.controls.lib.vtsc_map_strategy import (
   compute_map_cap_candidate,
   evaluate_map_strategy,
 )
-from openpilot.selfdrive.controls.lib.longitudinal_response_model import build_cruise_response_model
+from openpilot.selfdrive.controls.lib.longitudinal_response_model import (
+  CRUISE_CAP_REQUIRED_DECEL_TOL_MPS2,
+  build_cruise_response_model,
+  predict_average_decel_for_cruise_cap,
+)
 from pathlib import Path
 
 from .harness import Step, simulate_sequence, simulate_sequence_trace, mk_vtsc_with_params, load_steps_from_rlog
@@ -162,15 +166,25 @@ def test_curve_exit_never_latches_fov_occlusion_even_with_mediocre_confidence():
         return i
     return None
 
-  def v_turn_recovers_soon(trace, start_idx: int) -> bool:
-    return any(s['v_turn'] >= v_cruise - 1e-3 for s in trace[start_idx:start_idx + int(1.5 / dt) + 1])
+  def v_turn_recovers_smoothly(trace, start_idx: int) -> bool:
+    window = trace[start_idx:start_idx + int(3.0 / dt) + 1]
+    if not window:
+      return False
+    if float(window[0]['v_turn']) >= v_cruise - 1.0:
+      return False
+    net_rise = float(window[-1]['v_turn']) - float(window[0]['v_turn'])
+    peak_step = max(
+      max(0.0, float(nxt['v_turn']) - float(cur['v_turn']))
+      for cur, nxt in zip(window, window[1:], strict=False)
+    )
+    return bool(peak_step <= 0.25 and net_rise >= 3.0)
 
   trace_no_lead = run(None)
   assert all(not s['fov_occluded'] for s in trace_no_lead)
   clear_idx = first_clear_idx(trace_no_lead)
   assert clear_idx is not None
   assert clear_idx == n_curve
-  assert v_turn_recovers_soon(trace_no_lead, clear_idx) is True
+  assert v_turn_recovers_smoothly(trace_no_lead, clear_idx) is True
 
   trace_lead = run(lead_d)
   assert all(not s['fov_occluded'] for s in trace_lead)
@@ -178,7 +192,7 @@ def test_curve_exit_never_latches_fov_occlusion_even_with_mediocre_confidence():
   clear_idx_lead = first_clear_idx(trace_lead)
   assert clear_idx_lead is not None
   assert clear_idx_lead == n_curve
-  assert v_turn_recovers_soon(trace_lead, clear_idx_lead) is True
+  assert v_turn_recovers_smoothly(trace_lead, clear_idx_lead) is True
 
   assert abs(clear_idx_lead - clear_idx) == 0
 
@@ -1576,6 +1590,165 @@ def test_winding_context_blends_local_and_mapd_detectors(monkeypatch):
   assert snap['winding_context_source'] == 'blended'
   assert int(snap['winding_context_level']) == 5
   assert float(snap['winding_context_score']) >= float(snap['winding_road_score']) - 1e-6
+
+
+def test_winding_behavior_profile_preserves_mapd_severity_levels():
+  gentle = map_strategy.resolve_winding_behavior_profile(
+    active=False,
+    level=0,
+    score=0.0,
+    confidence=0.0,
+    source='none',
+    local_active=False,
+    local_score=0.0,
+    mapd_level=2,
+    mapd_score=0.62,
+    mapd_confidence=0.74,
+  )
+  tight = map_strategy.resolve_winding_behavior_profile(
+    active=False,
+    level=0,
+    score=0.0,
+    confidence=0.0,
+    source='none',
+    local_active=False,
+    local_score=0.0,
+    mapd_level=4,
+    mapd_score=0.78,
+    mapd_confidence=0.82,
+  )
+
+  assert int(gentle.level) == 2
+  assert int(tight.level) == 4
+  assert float(tight.v_turn_release_up_slew_mps2) < float(gentle.v_turn_release_up_slew_mps2)
+  assert float(tight.counterevidence_dwell_s) > float(gentle.counterevidence_dwell_s)
+
+
+def test_winding_profile_keeps_map_ownership_longer_between_chained_curves():
+  candidate = MapCapCandidate(
+    mode='strategic',
+    cap_mps=15.0,
+    start_m=0.0,
+    coverage=0.8,
+    reason='cap_available',
+    anchor_dist_m=40.0,
+    anchor_vsafe_mps=10.0,
+    anchor_curvature=0.02,
+    anchor_index=12,
+  )
+
+  baseline = evaluate_map_strategy(
+    mode='strategic',
+    state=MapStrategyState(),
+    candidate=candidate,
+    raw_target_pre_map=16.0,
+    full_visibility=True,
+    vision_good=True,
+    turn_visible=True,
+    s_visible_m=30.0,
+    vis_margin_m=10.0,
+    now_s=0.10,
+    apex_exit_ready=True,
+    winding_profile=map_strategy.WINDING_BEHAVIOR_PROFILES[0],
+  )
+  winding = evaluate_map_strategy(
+    mode='strategic',
+    state=MapStrategyState(),
+    candidate=candidate,
+    raw_target_pre_map=16.0,
+    full_visibility=True,
+    vision_good=True,
+    turn_visible=True,
+    s_visible_m=30.0,
+    vis_margin_m=10.0,
+    now_s=0.10,
+    apex_exit_ready=True,
+    winding_profile=map_strategy.WINDING_BEHAVIOR_PROFILES[4],
+  )
+
+  assert baseline.apply_map_cap is False
+  assert baseline.vision_relax_allowed is True
+  assert baseline.vision_relax_reason == 'post_apex_release'
+  assert winding.apply_map_cap is True
+  assert winding.map_floor_active is True
+  assert winding.vision_relax_allowed is False
+  assert winding.strategy_state == 'vision_clear_waiting'
+
+
+def test_winding_profile_later_brake_cap_stays_planner_reachable():
+  response_model = build_cruise_response_model(min_accel_mps2=-6.0, max_accel_mps2=5.0, actuation_delay_s=0.35)
+  profile = map_strategy.WINDING_BEHAVIOR_PROFILES[5]
+  v_ego = 24.0
+  v_cruise = 27.0
+  anchor_dist = 90.0
+  anchor_vsafe = 12.0
+
+  candidate = compute_map_cap_candidate(
+    mode='strategic',
+    s_list=[anchor_dist],
+    k_list=[0.022],
+    vsafe_list=[anchor_vsafe],
+    abs_indices=[9],
+    v_ego=v_ego,
+    v_cruise=v_cruise,
+    vis_horizon_s=1.4,
+    vis_margin_m=10.0,
+    severe_vision=False,
+    partial_vision=False,
+    vision_confidence=0.95,
+    conf_lo=0.55,
+    conf_hi=0.85,
+    max_decel=3.5,
+    horizon_limit_m=250.0,
+    response_model=response_model,
+    fixed_lead_time_s=0.0,
+    curve_phase_offset_s=0.0,
+    overshoot_phase_offset_s=0.0,
+    reference_speed_mps=v_ego,
+    winding_profile=profile,
+  )
+
+  effective_distance = float(anchor_dist)
+  effective_distance += float(profile.curve_phase_offset_adjust_s) * float(v_ego)
+  effective_distance += float(profile.overshoot_phase_offset_adjust_s) * float(v_ego)
+  braking_distance = max(0.0, effective_distance - float(v_ego) * float(response_model.actuation_delay_s))
+  required_decel = max(0.0, (float(v_ego) * float(v_ego) - float(anchor_vsafe) * float(anchor_vsafe)) / (2.0 * braking_distance))
+  supported_decel = predict_average_decel_for_cruise_cap(
+    v_ego=v_ego,
+    cruise_cap=float(candidate.cap_mps),
+    response_model=response_model,
+  )
+
+  assert supported_decel + float(CRUISE_CAP_REQUIRED_DECEL_TOL_MPS2) >= required_decel
+  assert float(candidate.anchor_dist_m) == pytest.approx(float(anchor_dist), abs=1e-6)
+
+
+def test_winding_profile_release_slew_limits_upward_v_turn_step():
+  vtsc = mk_vtsc_with_params()
+  _set_longitudinal_response_model(vtsc, min_accel=-6.0, max_accel=5.0, delay_s=0.35)
+  vtsc._max_accel = 3.0
+  vtsc._v_cruise_setpoint = 25.0
+  vtsc._v_turn_output = 10.0
+  vtsc._map_tail_active = True
+
+  vtsc._set_winding_behavior_profile(map_strategy.WINDING_BEHAVIOR_PROFILES[0], source='none')
+  baseline_first = vtsc._apply_winding_v_turn_release_slew(20.0, 0.05)
+  vtsc._v_turn_output = baseline_first
+  vtsc._map_tail_active = False
+  baseline_follow = vtsc._apply_winding_v_turn_release_slew(20.0, 0.05)
+
+  vtsc._set_winding_behavior_profile(map_strategy.WINDING_BEHAVIOR_PROFILES[4], source='mapd')
+  vtsc._v_turn_output = 10.0
+  vtsc._v_turn_release_shape_active = False
+  vtsc._map_tail_active = True
+  limited = vtsc._apply_winding_v_turn_release_slew(20.0, 0.05)
+
+  assert baseline_first == pytest.approx(10.15, abs=1e-6)
+  assert baseline_follow == pytest.approx(10.30, abs=1e-6)
+  assert limited == pytest.approx(10.05, abs=1e-6)
+  assert limited < baseline_first
+  assert bool(vtsc._dbg_winding_release_limited) is True
+  assert bool(vtsc._dbg_winding_release_shape_active) is True
 
 
 def test_strategic_response_bounded_probe_matches_bruteforce():

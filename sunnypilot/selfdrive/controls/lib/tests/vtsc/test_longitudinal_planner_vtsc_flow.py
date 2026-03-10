@@ -345,9 +345,9 @@ def test_vtsc_curve_exit_stays_on_normal_path_end_to_end(monkeypatch):
   conf = 0.55
   headway_s = 2.0
   n_curve = 10
-  n_straight = 60
+  n_straight = 320
   k_curve = 0.012
-  k_ahead = 0.004
+  k_ahead = 0.0
 
   def run(*, with_lead: bool) -> dict[str, object]:
     planner = mod.LongitudinalPlanner(_MockCP(), init_v=25.0, init_a=0.0)
@@ -432,7 +432,7 @@ def test_vtsc_curve_exit_stays_on_normal_path_end_to_end(monkeypatch):
 def test_throttle_prob_gate_can_prevent_accel_after_vtsc_release(monkeypatch):
   # Pipeline deviation test (important for debugging "won't return to speed"):
   #
-  # Even if VTSC releases its cap (v_turn returns to cruise), the main longitudinal planner can still
+  # Even if VTSC winds its cap back up enough to permit acceleration, the main longitudinal planner can still
   # refuse to accelerate if `allow_throttle` is false. This happens when model
   # `meta.disengagePredictions.gasPressProbs[1]` is low (throttle_prob <= 0.4) at speed.
   #
@@ -452,7 +452,7 @@ def test_throttle_prob_gate_can_prevent_accel_after_vtsc_release(monkeypatch):
   # so the `allow_throttle` clip is observable in this synthetic environment.
   v_cruise = 40.0
   n_curve = 10
-  n_straight = 40
+  n_straight = 320
 
   def run(throttle_prob: float) -> dict[str, object]:
     planner = mod.LongitudinalPlanner(_MockCP(), init_v=25.0, init_a=0.0)
@@ -482,8 +482,8 @@ def test_throttle_prob_gate_can_prevent_accel_after_vtsc_release(monkeypatch):
 
       allow_throttle_seen = allow_throttle_seen and bool(getattr(planner, 'allow_throttle', True))
 
-      # Once curvature is zero, VTSC should release its cap to cruise promptly.
-      if i >= n_curve and float(getattr(planner.v_tsc, 'v_turn', 0.0)) >= v_cruise - 1e-3:
+      # Once curvature is zero, VTSC should eventually wind its cap high enough that throttle is relevant.
+      if i >= n_curve and float(getattr(planner.v_tsc, 'v_turn', 0.0)) >= v_ego + 0.5:
         saw_release = True
         accel_after_release.append(float(getattr(planner, 'output_a_target', 0.0)))
       t += dt
@@ -494,22 +494,24 @@ def test_throttle_prob_gate_can_prevent_accel_after_vtsc_release(monkeypatch):
       'allow_throttle_seen': allow_throttle_seen,
     }
 
-  # Baseline: with throttle allowed, after VTSC releases we should see some positive accel command.
+  # Baseline: with throttle allowed, once VTSC has wound its cap high enough we should see positive accel.
   ok = run(throttle_prob=1.0)
   assert ok['saw_release'] is True
   accel_ok = [float(a) for a in (ok['accel_after_release'] or [])]
-  assert max(accel_ok) > 0.50
+  assert accel_ok, "Expected to record accel samples after VTSC release shaping"
+  assert accel_ok[-1] > 0.05
 
   # Confounder: with throttle forbidden, even after VTSC releases, planner accel must stay at/below coast.
   blocked = run(throttle_prob=0.0)
   assert blocked['saw_release'] is True
   assert blocked['allow_throttle_seen'] is False
   accel_blocked = [float(a) for a in (blocked['accel_after_release'] or [])]
+  assert accel_blocked, "Expected to record accel samples after VTSC release"
+  # End of run should be meaningfully lower than the throttle-allowed case and should settle at/below coast.
+  assert accel_blocked[-1] <= accel_ok[-1] - 0.20
+  assert accel_blocked[-1] <= -0.05
   # NOTE: In this synthetic harness, accel envelope smoothing dominates and the clamp effect is
   # gradual; verify that low throttle_prob flips the gate and drives a monotonic ramp-down.
-  assert accel_blocked, "Expected to record accel samples after VTSC release"
-  # End of run should be meaningfully lower than onset, and recent samples should not ramp upward.
-  assert accel_blocked[-1] <= accel_blocked[0] - 0.10
   tail_diffs = [b - a for a, b in zip(accel_blocked[-10:], accel_blocked[-9:])]
   assert all(d <= 1e-6 for d in tail_diffs)
 
