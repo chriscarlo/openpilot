@@ -1262,6 +1262,44 @@ def test_strategic_response_probe_runs_once_for_controlling_constraint(monkeypat
   assert int(candidate.anchor_index) == 6
 
 
+def test_strategic_chain_envelope_limits_accel_for_same_speed_next_curve():
+  response_model = build_cruise_response_model(min_accel_mps2=-6.0, max_accel_mps2=5.0, actuation_delay_s=0.35)
+  target_speed = 10.0
+  target_dist = 60.0
+
+  candidate = compute_map_cap_candidate(
+    mode='strategic',
+    s_list=[target_dist],
+    k_list=[0.02],
+    vsafe_list=[target_speed],
+    abs_indices=[6],
+    v_ego=10.0,
+    v_cruise=25.0,
+    vis_horizon_s=1.4,
+    vis_margin_m=10.0,
+    severe_vision=False,
+    partial_vision=False,
+    vision_confidence=0.95,
+    conf_lo=0.55,
+    conf_hi=0.85,
+    max_decel=3.5,
+    horizon_limit_m=250.0,
+    response_model=response_model,
+    fixed_lead_time_s=0.0,
+    curve_phase_offset_s=0.0,
+    overshoot_phase_offset_s=0.0,
+    reference_speed_mps=10.0,
+  )
+
+  a_plan = float(response_model.planning_decel_mps2)
+  delay = float(response_model.actuation_delay_s)
+  expected_cap = -a_plan * delay + math.sqrt((a_plan * delay) ** 2 + target_speed ** 2 + 2.0 * a_plan * target_dist)
+
+  assert float(candidate.cap_mps) == pytest.approx(float(expected_cap), abs=1e-6)
+  assert float(candidate.anchor_dist_m) == pytest.approx(target_dist, abs=1e-6)
+  assert int(candidate.anchor_index) == 6
+
+
 def test_strategic_response_bounded_probe_matches_bruteforce():
   response_model = build_cruise_response_model(min_accel_mps2=-6.0, max_accel_mps2=5.0, actuation_delay_s=0.35)
   s_list = [30.0, 60.0, 90.0, 120.0]
@@ -1363,7 +1401,9 @@ def test_strategic_response_single_threshold_matches_bruteforce_randomized():
       dist += rng.uniform(8.0, 40.0)
       s.append(dist)
     vsafe = []
-    current_vsafe = rng.uniform(12.0, 24.5)
+    # Keep this parity test in the "future target already below current speed" regime.
+    # Chained-curve accel limiting above current speed is covered separately.
+    current_vsafe = rng.uniform(12.0, 23.5)
     for _ in range(n):
       current_vsafe = max(4.0, current_vsafe - rng.uniform(0.0, 3.5))
       vsafe.append(current_vsafe)
@@ -1482,6 +1522,55 @@ def test_strategic_counterevidence_dwell_releases_helper_state():
   assert d1.vision_relax_allowed is True
   assert d1.vision_relax_reason == 'counterevidence_dwell'
   assert d1.strategy_state == 'vision_owns'
+
+
+def test_strategic_counterevidence_dwell_waits_for_anchor_visibility():
+  state = MapStrategyState()
+  candidate = MapCapCandidate(
+    mode='strategic',
+    cap_mps=15.0,
+    start_m=0.0,
+    coverage=0.8,
+    reason='cap_available',
+    anchor_dist_m=38.0,
+    anchor_vsafe_mps=9.0,
+    anchor_curvature=0.02,
+    anchor_index=12,
+  )
+
+  d0 = evaluate_map_strategy(
+    mode='strategic',
+    state=state,
+    candidate=candidate,
+    raw_target_pre_map=16.0,
+    full_visibility=True,
+    vision_good=True,
+    turn_visible=True,
+    s_visible_m=28.0,
+    vis_margin_m=10.0,
+    now_s=0.10,
+    apex_exit_ready=False,
+  )
+  assert d0.apply_map_cap is True
+  assert d0.vision_relax_allowed is False
+
+  d1 = evaluate_map_strategy(
+    mode='strategic',
+    state=state,
+    candidate=candidate,
+    raw_target_pre_map=16.0,
+    full_visibility=True,
+    vision_good=True,
+    turn_visible=True,
+    s_visible_m=28.0,
+    vis_margin_m=10.0,
+    now_s=0.95,
+    apex_exit_ready=False,
+  )
+  assert d1.apply_map_cap is True
+  assert d1.map_floor_active is True
+  assert d1.vision_relax_allowed is False
+  assert d1.strategy_state == 'vision_clear_waiting'
 
 
 def test_map_lookahead_absent_no_cap(monkeypatch):

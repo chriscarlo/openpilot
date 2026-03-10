@@ -76,6 +76,66 @@ class MapStrategyDecision:
   counterevidence_dwell_s: float
 
 
+def _max_entry_speed_for_target(
+  *,
+  target_speed: float,
+  distance_m: float,
+  response_model: CruiseResponseModel,
+) -> float:
+  target = max(0.0, float(target_speed))
+  distance = max(0.0, float(distance_m))
+  if distance <= 1e-3:
+    return target
+
+  decel = max(1e-3, float(response_model.planning_decel_mps2))
+  delay = max(0.0, float(response_model.actuation_delay_s))
+  delay_term = decel * delay
+  radicand = (delay_term * delay_term) + (target * target) + (2.0 * decel * distance)
+  return max(0.0, -delay_term + math.sqrt(max(0.0, radicand)))
+
+
+def _strategic_chain_envelope_cap(
+  *,
+  frontier_points: list[tuple[float, float, float, float, int]],
+  response_model: CruiseResponseModel,
+  v_cruise: float,
+) -> tuple[float, tuple[float, float, float, int] | None]:
+  if not frontier_points:
+    return float(v_cruise), None
+
+  ordered = sorted(frontier_points, key=lambda row: (float(row[0]), float(row[1]), int(row[4])))
+  caps: list[float] = [float(v_cruise)] * len(ordered)
+  anchors: list[tuple[float, float, float, int] | None] = [None] * len(ordered)
+
+  for idx in range(len(ordered) - 1, -1, -1):
+    eff_dist, abs_dist, vsafe, curvature, abs_idx = ordered[idx]
+    point_anchor = (float(abs_dist), float(vsafe), float(curvature), int(abs_idx))
+    if idx == len(ordered) - 1:
+      caps[idx] = min(float(v_cruise), float(vsafe))
+      anchors[idx] = point_anchor
+      continue
+
+    next_eff_dist = float(ordered[idx + 1][0])
+    carry_cap = _max_entry_speed_for_target(
+      target_speed=float(caps[idx + 1]),
+      distance_m=max(0.0, next_eff_dist - float(eff_dist)),
+      response_model=response_model,
+    )
+    if float(vsafe) <= carry_cap + 1e-6:
+      caps[idx] = min(float(v_cruise), float(vsafe))
+      anchors[idx] = point_anchor
+    else:
+      caps[idx] = min(float(v_cruise), float(carry_cap))
+      anchors[idx] = anchors[idx + 1]
+
+  current_cap = _max_entry_speed_for_target(
+    target_speed=float(caps[0]),
+    distance_m=max(0.0, float(ordered[0][0])),
+    response_model=response_model,
+  )
+  return min(float(v_cruise), float(current_cap)), anchors[0]
+
+
 def advisory_start_distance(
   *,
   v_ego: float,
@@ -167,6 +227,7 @@ def compute_map_cap_candidate(
     direct_cap = float(v_cruise)
     direct_anchor = None
     response_constraints: list[tuple[float, float, float, float, int, int]] = []
+    strategic_frontier_points: list[tuple[float, float, float, float, int]] = []
     reference_speed = float(reference_speed_mps) if reference_speed_mps is not None else float(v_ego)
     timing_speed = max(0.1, float(v_ego))
 
@@ -203,6 +264,8 @@ def compute_map_cap_candidate(
         if vsafe + STRATEGIC_OVERSHOOT_DELTA_MPS < float(reference_speed):
           effective_distance += float(overshoot_phase_offset_s) * timing_speed
         effective_distance = max(0.0, effective_distance)
+        if response_model is not None:
+          strategic_frontier_points.append((float(effective_distance), float(di), float(vsafe), float(ki), int(abs_idx)))
       if strategy_mode == MAP_STRATEGY_STRATEGIC and response_model is not None:
         try:
           braking_distance = max(0.0, effective_distance - float(v_ego) * float(response_model.actuation_delay_s))
@@ -285,6 +348,16 @@ def compute_map_cap_candidate(
 
       if anchor_dist_m is None and first_candidate is not None:
         _apply_anchor(first_candidate)
+
+      if strategic_frontier_points:
+        envelope_cap, envelope_anchor = _strategic_chain_envelope_cap(
+          frontier_points=strategic_frontier_points,
+          response_model=response_model,
+          v_cruise=float(v_cruise),
+        )
+        if envelope_cap < v_cap - 1e-6:
+          v_cap = float(envelope_cap)
+          _apply_anchor(envelope_anchor)
 
     if not any_future:
       coverage = 0.0
@@ -372,7 +445,7 @@ def evaluate_map_strategy(
     state.counterevidence_since = 0.0
 
   anchor_dist_m = float(candidate.anchor_dist_m if candidate.anchor_dist_m is not None else 1e9)
-  takeover_zone_m = max(0.0, float(s_visible_m) + float(vis_margin_m))
+  takeover_zone_m = max(0.0, float(s_visible_m))
   in_takeover_zone = bool(full_visibility and vision_good and turn_visible and anchor_dist_m <= takeover_zone_m)
 
   if in_takeover_zone:
