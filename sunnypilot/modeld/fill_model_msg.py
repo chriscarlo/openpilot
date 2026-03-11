@@ -4,6 +4,7 @@ import numpy as np
 from cereal import log
 from openpilot.sunnypilot.modeld.constants import ModelConstants, Plan
 from openpilot.sunnypilot.selfdrive.controls.lib.drive_helpers import CONTROL_N, get_lag_adjusted_curvature, MIN_SPEED
+from openpilot.selfdrive.modeld.lane_line_meta import fill_lane_line_meta
 
 SEND_RAW_PRED = os.getenv('SEND_RAW_PRED')
 
@@ -146,11 +147,7 @@ def fill_model_msg(base_msg: capnp._DynamicStructBuilder, extended_msg: capnp._D
   modelV2.laneLineStds = net_output_data['lane_lines_stds'][0,:,0,0].tolist()
   modelV2.laneLineProbs = net_output_data['lane_lines_prob'][0,1::2].tolist()
 
-  lane_line_meta = driving_model_data.laneLineMeta
-  lane_line_meta.leftY = modelV2.laneLines[1].y[0]
-  lane_line_meta.leftProb = modelV2.laneLineProbs[1]
-  lane_line_meta.rightY = modelV2.laneLines[2].y[0]
-  lane_line_meta.rightProb = modelV2.laneLineProbs[2]
+  fill_lane_line_meta(driving_model_data.laneLineMeta, modelV2.laneLines, modelV2.laneLineProbs)
 
   # road edges
   modelV2.init('roadEdges', 2)

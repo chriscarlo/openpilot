@@ -295,3 +295,37 @@ After fast-forwarding `chauffeur-dev4` to `67df2ecd88a020855fe7065560723849f551e
 - patched tree: `/home/chris/repos/chauffeur-dev4` (`67df2ecd8`)
 
 Result: passed (`AB_PARAMS_ROOTCAUSE_CHECK_DEV4_HEAD: PASS`).
+
+### Lane-center + camera offset auto-tune (2026-03-10)
+Commands run:
+```bash
+python3 -m pytest --noconftest -o addopts='' sunnypilot/modeld_v2/tests/test_camera_offset_helper.py -q
+python3 -m py_compile \
+  selfdrive/modeld/camera_offset_helper.py \
+  selfdrive/modeld/lane_line_meta.py \
+  selfdrive/modeld/fill_model_msg.py \
+  selfdrive/modeld/modeld.py \
+  sunnypilot/modeld/fill_model_msg.py \
+  sunnypilot/modeld/modeld.py \
+  sunnypilot/modeld_v2/camera_offset_helper.py \
+  sunnypilot/modeld_v2/fill_model_msg.py \
+  sunnypilot/modeld_v2/modeld.py
+PATH="$(pwd)/.cache/bin:$PATH" scons -j"$(nproc)" \
+  common/params_pyx.so \
+  common/transformations/transformations.so \
+  msgq_repo/msgq/ipc_pyx.so \
+  msgq_repo/msgq/visionipc/visionipc_pyx.so \
+  selfdrive/modeld/models/commonmodel_pyx.so \
+  sunnypilot/modeld_v2/models/commonmodel_pyx.so
+capnpc --src-prefix=cereal cereal/log.capnp cereal/car.capnp cereal/legacy.capnp cereal/custom.capnp -o c++:cereal/gen/cpp/
+python3 -m pytest --noconftest -o addopts='' selfdrive/modeld/tests/test_modeld.py sunnypilot/modeld_v2/tests/test_modeld.py -q
+```
+Results:
+- `sunnypilot/modeld_v2/tests/test_camera_offset_helper.py`: passed (`12 passed`), including deterministic lane-center estimation and synthetic straight-highway auto-tune anti-oscillation coverage.
+- `py_compile`: success for all touched Python modules.
+- Targeted native build: success for the touched modeld/msgq/common native modules.
+- `selfdrive/modeld/tests/test_modeld.py` and `sunnypilot/modeld_v2/tests/test_modeld.py`: collection blocked by missing host dependency `capnp` in the system Python environment.
+
+Environment notes:
+- This host does not provide a `cythonize` executable on `PATH`; targeted SCons runs were executed with an untracked shim at `.cache/bin/cythonize` forwarding to `python3 -m Cython.Build.Cythonize`.
+- Repo-root pytest defaults were bypassed with `--noconftest -o addopts=''` to avoid unrelated workspace dependency issues while running targeted checks.
