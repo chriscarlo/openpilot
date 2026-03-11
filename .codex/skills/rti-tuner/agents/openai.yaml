@@ -1,0 +1,4 @@
+interface:
+  display_name: "RTI Tuner"
+  short_description: "Tune and debug RTI daemon, planner, and UI"
+  default_prompt: "Use $rti-tuner when working on Realtime Traffic Intelligence across rtid, threat matching, planner slowdown behavior, or the RTI HUD/settings UI. Start by identifying which layer is wrong, run the smallest relevant test or build, and keep code-verified facts ahead of stale planning docs."
