@@ -1621,6 +1621,7 @@ def test_winding_behavior_profile_preserves_mapd_severity_levels():
   assert int(gentle.level) == 2
   assert int(tight.level) == 4
   assert float(tight.v_turn_release_up_slew_mps2) < float(gentle.v_turn_release_up_slew_mps2)
+  assert float(tight.apex_release_lat_acc_ratio) < float(gentle.apex_release_lat_acc_ratio)
   assert float(tight.counterevidence_dwell_s) > float(gentle.counterevidence_dwell_s)
 
 
@@ -1745,10 +1746,63 @@ def test_winding_profile_release_slew_limits_upward_v_turn_step():
 
   assert baseline_first == pytest.approx(10.15, abs=1e-6)
   assert baseline_follow == pytest.approx(10.30, abs=1e-6)
-  assert limited == pytest.approx(10.05, abs=1e-6)
+  assert limited == pytest.approx(10.11, abs=1e-6)
   assert limited < baseline_first
   assert bool(vtsc._dbg_winding_release_limited) is True
   assert bool(vtsc._dbg_winding_release_shape_active) is True
+
+
+def test_winding_profile_near_apex_release_helper_scales_with_severity():
+  def run_once(profile):
+    vtsc = mk_vtsc_with_params()
+    vtsc._set_winding_behavior_profile(profile, source='mapd')
+    vtsc._filtered_curvature = 0.01
+    vtsc._current_lat_acc = 2.15
+    vtsc._max_pred_lat_acc = 2.50
+    vtsc._lat_acc_overshoot_ahead = True
+    ready = vtsc._is_near_apex_release_ready()
+    return ready, vtsc.snapshot_debug_state()
+
+  baseline_ready, baseline = run_once(map_strategy.WINDING_BEHAVIOR_PROFILES[0])
+  winding_ready, winding = run_once(map_strategy.WINDING_BEHAVIOR_PROFILES[4])
+
+  assert baseline_ready is False
+  assert bool(baseline['near_apex_release_ready']) is False
+
+  assert winding_ready is True
+  assert bool(winding['near_apex_release_ready']) is True
+  assert float(winding['apex_release_lat_acc_ratio']) < float(baseline['apex_release_lat_acc_ratio'])
+
+
+def test_near_apex_release_helper_disables_overshoot_cap_before_geometric_apex():
+  vtsc = mk_vtsc_with_params()
+  _set_longitudinal_response_model(vtsc, min_accel=-6.0, max_accel=5.0, delay_s=0.35)
+  vtsc._v_ego = 20.0
+  vtsc._a_ego = 0.0
+  vtsc._v_cruise_setpoint = 33.0
+  vtsc._filtered_curvature = 0.01
+  vtsc._current_lat_acc = 2.15
+  vtsc._max_pred_lat_acc = 2.50
+  vtsc._apex_indices = []
+  vtsc._apex_exit_ready = False
+  vtsc._is_easing = False
+  vtsc._lat_acc_overshoot_ahead = True
+  vtsc._overshoot_cap_active = True
+  vtsc._v_overshoot = 12.0
+  vtsc._v_overshoot_distance = 20.0
+  vtsc._overshoot_trigger_in_s = -0.5
+  vtsc._occlusion_state.vision_good = True
+  vtsc._occlusion_state.smoothed_confidence = 0.95
+
+  with patch.object(vtsc, '_is_near_apex_release_ready', return_value=True), \
+       patch('sunnypilot.selfdrive.controls.lib.vision_turn_controller.time.time', lambda: 100.0), \
+       patch('sunnypilot.selfdrive.controls.lib.vision_turn_controller.time.monotonic', lambda: 100.0):
+    vtsc._update_solution()
+  snap = vtsc.snapshot_debug_state()
+
+  assert bool(snap['apex_exit_ready']) is False
+  assert bool(snap['overshoot_cap_active']) is False
+  assert float(snap['vtsc_cmd']) > 12.0
 
 
 def test_strategic_response_bounded_probe_matches_bruteforce():

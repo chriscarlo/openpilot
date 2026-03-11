@@ -110,6 +110,8 @@ class WindingBehaviorProfile:
   fixed_lead_time_adjust_s: float = 0.0
   curve_phase_offset_adjust_s: float = 0.0
   overshoot_phase_offset_adjust_s: float = 0.0
+  apex_release_lat_acc_ratio: float = 0.92
+  apex_release_hold_s: float = 0.60
   takeover_dwell_s: float = 0.35
   counterevidence_dwell_s: float = 0.75
   rearm_margin_m: float = 15.0
@@ -122,6 +124,8 @@ WINDING_BEHAVIOR_PROFILES: dict[int, WindingBehaviorProfile] = {
   0: WindingBehaviorProfile(
     level=0,
     name="normal",
+    apex_release_lat_acc_ratio=0.92,
+    apex_release_hold_s=0.60,
     allow_immediate_post_apex_release=True,
     v_turn_release_up_slew_mps2=4.0,
   ),
@@ -130,60 +134,70 @@ WINDING_BEHAVIOR_PROFILES: dict[int, WindingBehaviorProfile] = {
     name="gentle_curvy",
     curve_phase_offset_adjust_s=0.05,
     overshoot_phase_offset_adjust_s=0.04,
+    apex_release_lat_acc_ratio=0.88,
+    apex_release_hold_s=0.80,
     takeover_dwell_s=0.40,
     counterevidence_dwell_s=0.85,
     rearm_margin_m=13.0,
     rearm_delta_mps=0.45,
     allow_immediate_post_apex_release=True,
-    v_turn_release_up_slew_mps2=3.0,
+    v_turn_release_up_slew_mps2=3.6,
   ),
   2: WindingBehaviorProfile(
     level=2,
     name="sustained_curvy",
     curve_phase_offset_adjust_s=0.12,
     overshoot_phase_offset_adjust_s=0.08,
+    apex_release_lat_acc_ratio=0.84,
+    apex_release_hold_s=1.05,
     takeover_dwell_s=0.55,
     counterevidence_dwell_s=1.00,
     rearm_margin_m=10.0,
     rearm_delta_mps=0.38,
     allow_immediate_post_apex_release=False,
-    v_turn_release_up_slew_mps2=2.2,
+    v_turn_release_up_slew_mps2=3.1,
   ),
   3: WindingBehaviorProfile(
     level=3,
     name="tight_winding",
     curve_phase_offset_adjust_s=0.18,
     overshoot_phase_offset_adjust_s=0.12,
+    apex_release_lat_acc_ratio=0.80,
+    apex_release_hold_s=1.30,
     takeover_dwell_s=0.70,
     counterevidence_dwell_s=1.20,
     rearm_margin_m=8.0,
     rearm_delta_mps=0.32,
     allow_immediate_post_apex_release=False,
-    v_turn_release_up_slew_mps2=1.5,
+    v_turn_release_up_slew_mps2=2.7,
   ),
   4: WindingBehaviorProfile(
     level=4,
     name="switchback_zone",
     curve_phase_offset_adjust_s=0.24,
     overshoot_phase_offset_adjust_s=0.16,
+    apex_release_lat_acc_ratio=0.76,
+    apex_release_hold_s=1.60,
     takeover_dwell_s=0.85,
     counterevidence_dwell_s=1.35,
     rearm_margin_m=6.0,
     rearm_delta_mps=0.26,
     allow_immediate_post_apex_release=False,
-    v_turn_release_up_slew_mps2=1.0,
+    v_turn_release_up_slew_mps2=2.2,
   ),
   5: WindingBehaviorProfile(
     level=5,
     name="hairpin_extreme",
     curve_phase_offset_adjust_s=0.30,
     overshoot_phase_offset_adjust_s=0.20,
+    apex_release_lat_acc_ratio=0.72,
+    apex_release_hold_s=1.90,
     takeover_dwell_s=1.00,
     counterevidence_dwell_s=1.50,
     rearm_margin_m=4.0,
     rearm_delta_mps=0.20,
     allow_immediate_post_apex_release=False,
-    v_turn_release_up_slew_mps2=0.75,
+    v_turn_release_up_slew_mps2=1.7,
   ),
 }
 DEFAULT_WINDING_BEHAVIOR_PROFILE = WINDING_BEHAVIOR_PROFILES[0]

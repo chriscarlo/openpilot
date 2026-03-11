@@ -1010,6 +1010,7 @@ class VisionTurnController:
     # <= 0 means we should already be applying overshoot braking.
     self._overshoot_trigger_in_s = float('inf')
     self._overshoot_cap_active = False
+    self._near_apex_release_until = 0.0
 
     # Apex detection and tracking
     self._apex_indices = []  # Indices of detected apexes in trajectory
@@ -1358,6 +1359,8 @@ class VisionTurnController:
       winding_release_up_slew = float(getattr(self, '_dbg_winding_release_up_slew_mps2', 0.0) or 0.0)
       winding_release_limited = bool(getattr(self, '_dbg_winding_release_limited', False))
       winding_release_shape_active = bool(getattr(self, '_dbg_winding_release_shape_active', False))
+      near_apex_release_ready = bool(getattr(self, '_dbg_near_apex_release_ready', False))
+      apex_release_lat_acc_ratio = float(getattr(self, '_dbg_apex_release_lat_acc_ratio', 0.0) or 0.0)
       s_vis_m = float(getattr(self, '_dbg_s_visible_m', 0.0))
       fail_open = bool(getattr(self, '_dbg_fail_open', False))
       # FOV/units helpers (may be unset on older builds; default sensibly)
@@ -1409,6 +1412,8 @@ class VisionTurnController:
         'winding_release_up_slew_mps2': winding_release_up_slew,
         'winding_release_limited': winding_release_limited,
         'winding_release_shape_active': winding_release_shape_active,
+        'near_apex_release_ready': near_apex_release_ready,
+        'apex_release_lat_acc_ratio': apex_release_lat_acc_ratio,
         's_visible_m': s_vis_m, 'kappa_vis': k_vis, 'path_conf': raw_conf, 'raw_path_conf': raw_conf,
         'winding_road_active': bool(getattr(self, '_winding_road_active', False)),
         'winding_road_score': float(getattr(self, '_winding_road_score', 0.0) or 0.0),
@@ -1642,6 +1647,7 @@ class VisionTurnController:
     self._lat_acc_overshoot_ahead = False
     self._overshoot_trigger_in_s = float('inf')
     self._overshoot_cap_active = False
+    self._near_apex_release_until = 0.0
 
     # Reset adaptive deceleration system
     self._current_decel = 0.0
@@ -1828,6 +1834,38 @@ class VisionTurnController:
       self._v_turn_release_shape_active = False
       self._dbg_winding_release_shape_active = False
     return float(limited_cap)
+
+  def _is_near_apex_release_ready(self) -> bool:
+    profile = getattr(self, '_winding_behavior_profile', DEFAULT_WINDING_BEHAVIOR_PROFILE)
+    try:
+      ratio = float(getattr(profile, 'apex_release_lat_acc_ratio', 0.92))
+    except Exception:
+      ratio = 0.92
+    ratio = min(1.0, max(0.50, ratio))
+    self._dbg_apex_release_lat_acc_ratio = float(ratio)
+
+    try:
+      peak_lat_acc = max(
+        abs(float(getattr(self, '_current_lat_acc', 0.0) or 0.0)),
+        abs(float(getattr(self, '_max_pred_lat_acc', 0.0) or 0.0)),
+      )
+      current_lat_acc = abs(float(getattr(self, '_current_lat_acc', 0.0) or 0.0))
+      has_curve_evidence = bool(
+        bool(getattr(self, '_lat_acc_overshoot_ahead', False)) or
+        bool(getattr(self, '_overshoot_cap_active', False)) or
+        (abs(float(getattr(self, '_filtered_curvature', 0.0) or 0.0)) >= 0.0015)
+      )
+    except Exception:
+      self._dbg_near_apex_release_ready = False
+      return False
+
+    ready = bool(
+      has_curve_evidence and
+      peak_lat_acc >= float(_ENTERING_PRED_LAT_ACC_TH) and
+      current_lat_acc >= (ratio * peak_lat_acc)
+    )
+    self._dbg_near_apex_release_ready = bool(ready)
+    return bool(ready)
 
   def _update_params(self):
     # Delegate to shared reader to avoid duplicating logic here
@@ -2467,15 +2505,47 @@ class VisionTurnController:
     # - Engage once computed "time-to-start-braking" is reached.
     # - Release this extra cap once apex-exit logic says we're past apex in an easing phase, so the
     #   planner can start accelerating out while still obeying the visible-curve cap.
+    prev_overshoot_cap_active = bool(getattr(self, '_overshoot_cap_active', False))
     self._overshoot_cap_active = False
+    self._dbg_near_apex_release_ready = False
+    try:
+      profile = getattr(self, '_winding_behavior_profile', DEFAULT_WINDING_BEHAVIOR_PROFILE)
+      self._dbg_apex_release_lat_acc_ratio = float(getattr(profile, 'apex_release_lat_acc_ratio', DEFAULT_WINDING_BEHAVIOR_PROFILE.apex_release_lat_acc_ratio))
+    except Exception:
+      self._dbg_apex_release_lat_acc_ratio = float(DEFAULT_WINDING_BEHAVIOR_PROFILE.apex_release_lat_acc_ratio)
     try:
       if bool(getattr(self, '_lat_acc_overshoot_ahead', False)):
+        now_release_s = float(time.time())
+        prev_published_cap = max(0.0, float(getattr(self, '_v_turn_output', 0.0) or 0.0))
         trigger_in_s = float(getattr(self, '_overshoot_trigger_in_s', float('inf')))
         should_start = bool(trigger_in_s <= 0.0)
-        apex_release = bool(getattr(self, '_apex_exit_ready', False) and getattr(self, '_is_easing', False))
-        if should_start and not apex_release:
+        try:
+          profile = getattr(self, '_winding_behavior_profile', DEFAULT_WINDING_BEHAVIOR_PROFILE)
+          near_apex_hold_s = max(0.0, float(getattr(profile, 'apex_release_hold_s', 0.0) or 0.0))
+        except Exception:
+          near_apex_hold_s = 0.0
+        near_apex_release = bool(prev_overshoot_cap_active and self._is_near_apex_release_ready())
+        if near_apex_release and near_apex_hold_s > 0.0:
+          self._near_apex_release_until = max(
+            float(getattr(self, '_near_apex_release_until', 0.0) or 0.0),
+            float(now_release_s) + float(near_apex_hold_s),
+          )
+        latched_near_apex_release = bool(float(getattr(self, '_near_apex_release_until', 0.0) or 0.0) > float(now_release_s))
+        apex_release = bool(
+          (getattr(self, '_apex_exit_ready', False) and getattr(self, '_is_easing', False)) or
+          latched_near_apex_release
+        )
+        soft_handoff_block = bool(
+          bool(getattr(self, '_apex_exit_ready', False)) and
+          (not prev_overshoot_cap_active) and
+          prev_published_cap > 1.0 and
+          prev_published_cap <= (float(getattr(self, '_v_ego', 0.0) or 0.0) + 2.0)
+        )
+        if should_start and not apex_release and not soft_handoff_block:
           v_target_cap = min(v_target_cap, float(getattr(self, '_v_overshoot', v_target_cap)))
           self._overshoot_cap_active = True
+      else:
+        self._near_apex_release_until = 0.0
     except Exception:
       self._overshoot_cap_active = False
 
@@ -3580,6 +3650,8 @@ class VisionTurnController:
     self._dbg_winding_release_up_slew_mps2 = 0.0
     self._dbg_winding_release_limited = False
     self._dbg_winding_release_shape_active = False
+    self._dbg_near_apex_release_ready = False
+    self._dbg_apex_release_lat_acc_ratio = float(DEFAULT_WINDING_BEHAVIOR_PROFILE.apex_release_lat_acc_ratio)
 
   def _set_winding_behavior_profile(self, profile: WindingBehaviorProfile, *, source: str) -> None:
     resolved = profile if getattr(profile, 'level', None) is not None else DEFAULT_WINDING_BEHAVIOR_PROFILE
@@ -3591,6 +3663,8 @@ class VisionTurnController:
     self._dbg_winding_release_up_slew_mps2 = 0.0
     self._dbg_winding_release_limited = False
     self._dbg_winding_release_shape_active = bool(getattr(self, '_v_turn_release_shape_active', False))
+    self._dbg_near_apex_release_ready = False
+    self._dbg_apex_release_lat_acc_ratio = float(getattr(resolved, 'apex_release_lat_acc_ratio', DEFAULT_WINDING_BEHAVIOR_PROFILE.apex_release_lat_acc_ratio))
 
   def _refresh_winding_behavior_profile(self) -> WindingBehaviorProfile:
     profile = resolve_winding_behavior_profile(

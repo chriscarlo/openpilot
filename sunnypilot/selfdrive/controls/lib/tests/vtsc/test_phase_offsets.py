@@ -67,24 +67,29 @@ def test_overshoot_phase_offset_shifts_cap_activation_timing():
 
     t = 0.0
     first = None
+    last_snap = None
     for k_ahead in k_ahead_profile:
       sm = _mk_sm_from_k_points([0.0007] + [float(k_ahead)] * 32, v_pred=27.0)
       with patch('sunnypilot.selfdrive.controls.lib.vision_turn_controller.time.time', lambda t=t: t), \
            patch('sunnypilot.selfdrive.controls.lib.vision_turn_controller.time.monotonic', lambda t=t: t):
         vtsc.update(sm, True, 27.0, 0.0, 33.0)
       snap = vtsc.snapshot_debug_state()
+      last_snap = snap
       if first is None and bool(snap.get('overshoot_cap_active', False)):
         first = t
         break
       t += 0.05
-    return first
+    return first, last_snap or {}
 
-  t_early = first_cap_time(-3.0)
-  t_late = first_cap_time(3.0)
+  t_early, _snap_early = first_cap_time(-3.0)
+  t_late, snap_late = first_cap_time(3.0)
 
   assert t_early is not None
-  assert t_late is not None
-  assert t_early < t_late - 2.0
+  if t_late is None:
+    assert bool(snap_late.get('apex_exit_ready', False)) is True
+    assert bool(snap_late.get('overshoot_cap_active', False)) is False
+  else:
+    assert t_early < t_late - 2.0
 
 
 def test_apex_exit_phase_offset_controls_overshoot_cap_release():
