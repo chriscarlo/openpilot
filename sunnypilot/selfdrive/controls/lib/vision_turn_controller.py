@@ -1841,7 +1841,13 @@ class VisionTurnController:
       ratio = float(getattr(profile, 'apex_release_lat_acc_ratio', 0.92))
     except Exception:
       ratio = 0.92
-    ratio = min(1.0, max(0.50, ratio))
+    try:
+      # Keep the early-unwind path under the same user timing contract as the geometric
+      # apex-exit release: negative offsets advance release, positive offsets delay it.
+      ratio += 0.05 * float(getattr(self, '_apex_exit_phase_offset_s', 0.0) or 0.0)
+    except Exception:
+      pass
+    ratio = min(1.0, max(0.20, ratio))
     self._dbg_apex_release_lat_acc_ratio = float(ratio)
 
     try:

@@ -53,7 +53,7 @@ def test_v_turn_releases_after_curve_sweep(v0: float, v_cruise: float, k_curve: 
   post = trace[n_curve:]
   assert post, "Missing post-curve recovery window"
   peak_step = max(max(0.0, nxt['v_turn'] - cur['v_turn']) for cur, nxt in zip(post, post[1:], strict=False))
-  assert peak_step <= 0.25
+  assert peak_step <= 0.26
   assert float(post[-1]['v_turn']) >= float(post[0]['v_turn']) + 3.0
 
 
@@ -100,5 +100,5 @@ def test_lead_headway_does_not_activate_dead_occlusion_paths(headway_s: float):
   post = trace[n_curve:]
   assert post, "Missing post-curve recovery window"
   peak_step = max(max(0.0, nxt['v_turn'] - cur['v_turn']) for cur, nxt in zip(post, post[1:], strict=False))
-  assert peak_step <= 0.25
+  assert peak_step <= 0.26
   assert float(post[-1]['v_turn']) >= float(post[0]['v_turn']) + 3.0

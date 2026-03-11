@@ -5,6 +5,8 @@ import numpy as np
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import sunnypilot.selfdrive.controls.lib.vtsc_map_strategy as map_strategy
+
 from .harness import mk_vtsc_with_params
 
 
@@ -127,3 +129,25 @@ def test_apex_exit_phase_offset_controls_overshoot_cap_release():
   assert bool(snap_early['overshoot_cap_active']) is False
   assert bool(snap_late['overshoot_cap_active']) is True
   assert float(snap_early['vtsc_cmd']) > float(snap_late['vtsc_cmd'])
+
+
+def test_apex_exit_phase_offset_biases_near_apex_release_threshold():
+  def run_once(apex_offset_s: float):
+    vtsc = mk_vtsc_with_params()
+    vtsc._set_winding_behavior_profile(map_strategy.WINDING_BEHAVIOR_PROFILES[4], source='mapd')
+    vtsc._apex_exit_phase_offset_s = float(apex_offset_s)
+    vtsc._filtered_curvature = 0.01
+    vtsc._current_lat_acc = 1.20
+    vtsc._max_pred_lat_acc = 2.50
+    vtsc._lat_acc_overshoot_ahead = True
+    ready = vtsc._is_near_apex_release_ready()
+    return ready, vtsc.snapshot_debug_state()
+
+  ready_early, snap_early = run_once(-2.0)
+  ready_late, snap_late = run_once(2.0)
+
+  assert ready_early is True
+  assert ready_late is False
+  assert bool(snap_early['near_apex_release_ready']) is True
+  assert bool(snap_late['near_apex_release_ready']) is False
+  assert float(snap_early['apex_release_lat_acc_ratio']) < float(snap_late['apex_release_lat_acc_ratio'])
