@@ -5,6 +5,7 @@ from cereal import log
 from openpilot.sunnypilot.modeld_v2.constants import ModelConstants, Plan
 from openpilot.sunnypilot.models.helpers import plan_x_idxs_helper
 from openpilot.selfdrive.controls.lib.drive_helpers import get_curvature_from_plan
+from openpilot.selfdrive.modeld.lane_line_meta import fill_lane_line_meta
 
 SEND_RAW_PRED = os.getenv('SEND_RAW_PRED')
 
@@ -59,12 +60,6 @@ def fill_xyz_poly(builder, degree, x, y, z):
   builder.xCoefficients = coeffs[:, 0].tolist()
   builder.yCoefficients = coeffs[:, 1].tolist()
   builder.zCoefficients = coeffs[:, 2].tolist()
-
-def fill_lane_line_meta(builder, lane_lines, lane_line_probs):
-  builder.leftY = lane_lines[1].y[0]
-  builder.leftProb = lane_line_probs[1]
-  builder.rightY = lane_lines[2].y[0]
-  builder.rightProb = lane_line_probs[2]
 
 def fill_model_msg(base_msg: capnp._DynamicStructBuilder, extended_msg: capnp._DynamicStructBuilder,
                    net_output_data: dict[str, np.ndarray], action: log.ModelDataV2.Action,

@@ -190,3 +190,19 @@
 - **Diverges from user proposal:** no
 - **Files touched:** `sunnypilot/selfdrive/controls/lib/vision_turn_controller.py`, `selfdrive/ui/sunnypilot/qt/onroad/hud.cc`, `selfdrive/ui/sunnypilot/qt/onroad/hud.h`, `sunnypilot/selfdrive/controls/lib/tests/vtsc/test_map_curve_preview.py`, `.agents/refinement/REFINEMENTS.md`
 - **Notes:** Switched the HUD preview to a fixed 10-second strip-map, aligned map geometry to the live ego pose/bearing, added densify + smoothing + resampling so coarse OSM segments render as continuous bends, and replaced the red ego marker with a classic navigation arrow.
+
+### Lane-Center Estimation + Shared Camera Offset Auto-Tuning
+- **Date:** 2026-03-10
+- **Classification:** C
+- **Category:** Code
+- **Status:** applied
+- **Approval:** na (explicitly requested by user)
+- **User-visible change:** yes (camera offset now works across all three model runners, with optional automatic centering enabled by default)
+- **Behavior/semantics change:** yes
+- **Concurrency/threading change:** no
+- **Bounded?** na
+- **Structured?** na
+- **Potential downstream load increase:** negligible
+- **Diverges from user proposal:** no
+- **Files touched:** `cereal/log.capnp`, `common/params_keys.h`, `selfdrive/modeld/camera_offset_helper.py`, `selfdrive/modeld/lane_line_meta.py`, `selfdrive/modeld/fill_model_msg.py`, `selfdrive/modeld/modeld.py`, `sunnypilot/modeld/fill_model_msg.py`, `sunnypilot/modeld/modeld.py`, `sunnypilot/modeld_v2/camera_offset_helper.py`, `sunnypilot/modeld_v2/fill_model_msg.py`, `sunnypilot/modeld_v2/modeld.py`, `sunnypilot/modeld_v2/tests/test_camera_offset_helper.py`
+- **Notes:** Added a deterministic lane-center estimate from both lane markers, shared camera-offset application across stock/SNPE/tinygrad modeld paths, and a low-rate filtered auto-tuner gated by confidence, speed, blinkers, and low curvature to avoid hunting.

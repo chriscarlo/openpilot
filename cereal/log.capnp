@@ -1035,6 +1035,10 @@ struct DrivingModelData {
     rightY @1 :Float32;
     leftProb @2 :Float32;
     rightProb @3 :Float32;
+    centerY @4 :Float32;
+    laneWidth @5 :Float32;
+    centerProb @6 :Float32;
+    centerValid @7 :Bool;
   }
 
   struct MetaData {

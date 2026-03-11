@@ -16,6 +16,7 @@ from openpilot.common.transformations.model import get_warp_matrix
 from openpilot.system import sentry
 from openpilot.selfdrive.controls.lib.desire_helper import DesireHelper
 from openpilot.selfdrive.controls.lib.drive_helpers import get_accel_from_plan, smooth_value
+from openpilot.selfdrive.modeld.camera_offset_helper import CameraOffsetHelper
 
 from openpilot.sunnypilot.modeld_v2.fill_model_msg import fill_model_msg, fill_pose_msg, PublishState, get_curvature_from_output
 from openpilot.sunnypilot.modeld_v2.constants import Plan
@@ -24,7 +25,6 @@ from openpilot.sunnypilot.modeld_v2.meta_helper import load_meta_constants
 
 from openpilot.sunnypilot.livedelay.helpers import get_lat_delay
 from openpilot.sunnypilot.modeld.modeld_base import ModelStateBase
-from openpilot.sunnypilot.modeld_v2.camera_offset_helper import CameraOffsetHelper
 from openpilot.sunnypilot.models.helpers import get_active_bundle
 from openpilot.sunnypilot.models.runners.helpers import get_model_runner
 
@@ -257,11 +257,16 @@ def main(demo=False):
 
   model_transform_main = np.zeros((3, 3), dtype=np.float32)
   model_transform_extra = np.zeros((3, 3), dtype=np.float32)
+  base_model_transform_main = np.zeros((3, 3), dtype=np.float32)
+  base_model_transform_extra = np.zeros((3, 3), dtype=np.float32)
+  main_intrinsics = None
+  extra_intrinsics = None
+  camera_height = 1.22
   live_calib_seen = False
   buf_main, buf_extra = None, None
   meta_main = FrameMeta()
   meta_extra = FrameMeta()
-  camera_offset_helper = CameraOffsetHelper()
+  camera_offset_helper = CameraOffsetHelper(model.constants.MODEL_FREQ)
 
 
   if demo:
@@ -316,17 +321,22 @@ def main(demo=False):
     v_ego = max(sm["carState"].vEgo, 0.)
     if sm.frame % 60 == 0:
       model.lat_delay = get_lat_delay(params, sm["liveDelay"].lateralDelay)
+    if sm.frame % 10 == 0:
       camera_offset_helper.set_offset(params.get("CameraOffset", return_default=True))
+      camera_offset_helper.set_auto_enabled(params.get_bool("CameraOffsetAuto"))
     lat_delay = model.lat_delay + model.LAT_SMOOTH_SECONDS
     if sm.updated["liveCalibration"] and sm.seen['roadCameraState'] and sm.seen['deviceState']:
       device_from_calib_euler = np.array(sm["liveCalibration"].rpyCalib, dtype=np.float32)
       dc = DEVICE_CAMERAS[(str(sm['deviceState'].deviceType), str(sm['roadCameraState'].sensor))]
-      model_transform_main = get_warp_matrix(device_from_calib_euler, dc.ecam.intrinsics if main_wide_camera else dc.fcam.intrinsics,
-                                             False).astype(np.float32)
-      model_transform_extra = get_warp_matrix(device_from_calib_euler, dc.ecam.intrinsics, True).astype(np.float32)
-      model_transform_main, model_transform_extra = camera_offset_helper.update(
-          model_transform_main, model_transform_extra, sm, main_wide_camera)
+      main_intrinsics = dc.ecam.intrinsics if main_wide_camera else dc.fcam.intrinsics
+      extra_intrinsics = dc.ecam.intrinsics
+      camera_height = sm['liveCalibration'].height[0] if sm['liveCalibration'].height else 1.22
+      base_model_transform_main = get_warp_matrix(device_from_calib_euler, main_intrinsics, False).astype(np.float32)
+      base_model_transform_extra = get_warp_matrix(device_from_calib_euler, extra_intrinsics, True).astype(np.float32)
       live_calib_seen = True
+    if live_calib_seen and main_intrinsics is not None and extra_intrinsics is not None:
+      model_transform_main, model_transform_extra = camera_offset_helper.update(
+        base_model_transform_main, base_model_transform_extra, main_intrinsics, extra_intrinsics, camera_height)
 
     traffic_convention = np.zeros(2)
     traffic_convention[int(is_rhd)] = 1
@@ -383,6 +393,16 @@ def main(demo=False):
       modelv2_send.modelV2.meta.laneChangeDirection = DH.lane_change_direction
       drivingdata_send.drivingModelData.meta.laneChangeState = DH.lane_change_state
       drivingdata_send.drivingModelData.meta.laneChangeDirection = DH.lane_change_direction
+      camera_offset_helper.observe(
+        center_y=drivingdata_send.drivingModelData.laneLineMeta.centerY,
+        center_prob=drivingdata_send.drivingModelData.laneLineMeta.centerProb,
+        lane_width=drivingdata_send.drivingModelData.laneLineMeta.laneWidth,
+        center_valid=drivingdata_send.drivingModelData.laneLineMeta.centerValid,
+        v_ego=v_ego,
+        lat_active=sm['carControl'].latActive,
+        blinkers_active=sm['carState'].leftBlinker or sm['carState'].rightBlinker,
+        desired_curvature=drivingdata_send.drivingModelData.action.desiredCurvature,
+      )
 
       fill_pose_msg(posenet_send, model_output, meta_main.frame_id, vipc_dropped_frames, meta_main.timestamp_eof, live_calib_seen)
       pm.send('modelV2', modelv2_send)
