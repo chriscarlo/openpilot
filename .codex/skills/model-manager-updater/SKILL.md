@@ -30,7 +30,7 @@ Missing any one of them causes a different silent or runtime failure.
 | `sunnypilot/models/helpers.py` | `CURRENT_SELECTOR_VERSION`, `REQUIRED_MIN_SELECTOR_VERSION`, `is_bundle_version_compatible()` |
 | `sunnypilot/models/fetcher.py` | `MODEL_URL`, `ModelParser._parse_model()`, `ModelParser.parse_models()` |
 | `sunnypilot/models/manager.py` | Download loop, param read/write, index checks |
-| `selfdrive/ui/sunnypilot/qt/offroad/settings/models_panel.cc` | C++ `switch(model.getType())` — must have a case for every capnp enum value; progress bar + frame per type |
+| `selfdrive/ui/sunnypilot/qt/offroad/settings/models_panel.cc` | C++ `switch(model.getType())` — must have a case for every capnp enum value; progress bar + frame per type; if the selector is browseable onroad, it also needs a cache fallback because `models_manager` is offroad-only |
 | `selfdrive/ui/sunnypilot/qt/offroad/settings/models_panel.h` | Declares `QProgressBar*` and `QFrame*` members for each model type |
 | `sunnypilot/models/runners/tinygrad/model_types.py` | Parser mapping for new runtime model types; `offPolicy` needs its own parser entry |
 | `sunnypilot/models/runners/tinygrad/tinygrad_runner.py` | `TinygradSplitRunner` must instantiate and merge every artifact required by the bundle, including `offPolicy` |
@@ -110,6 +110,11 @@ Check the JSON `type` values against `cereal/custom.capnp` → `ModelManagerSP.M
 For each new enum value, follow the existing pattern — declare `QProgressBar*` and
 `QFrame*` in the header, create them in the constructor, add visibility reset in
 `handleBundleDownloadProgress()`, and add a `case` in the `switch(model.getType())`.
+
+If the selector can be opened onroad, do not rely on `modelManagerSP` alone.
+`system/manager/process_config.py` keeps `models_manager` on `only_offroad`, so
+`models_panel.cc` must fall back to cached params (`ModelManager_ModelsCache`
+and `ModelManager_ActiveBundle`) or the UI will appear empty while driving.
 
 ### 6. Audit runtime support for the new bundle composition
 
@@ -239,6 +244,29 @@ real tree diff and can fail or mislead. To audit local drift correctly:
   JSON `tinygrad_ref`
 - checkout or archive that commit from the actual tinygrad repo
 - diff that real tree against local `tinygrad_repo/`
+
+### Onroad selector can look empty even when the model list is healthy
+`models_manager` is registered as `PythonProcess("models_manager", ..., only_offroad)`.
+If `models_panel.cc` is changed to allow browsing onroad, there will be no live
+`modelManagerSP` publisher while `deviceState.started == True`.
+
+Symptoms:
+
+- the selector shows only the default `phoenix` entry
+- the current-model label falls back to `phoenix`
+- `ModelFetcher(Params()).get_available_bundles()` still returns the full list
+- `ModelManager_ModelsCache` and `ModelManager_ActiveBundle` params are populated
+
+The first broken contract is UI data sourcing, not fetch/parsing. Fix by either:
+
+- re-gating the selector to offroad, or
+- making `models_panel.cc` read cached params when the live message is absent
+
+Fast proof on device:
+
+- `deviceState.started == True`
+- `managerState.processes["models_manager"].running == False`
+- `managerState.processes["models_manager"].shouldBeRunning == False`
 
 ### Upstream sync overwrites local fixes
 Upstream sunnypilot syncs may completely replace `helpers.py`, `fetcher.py`,

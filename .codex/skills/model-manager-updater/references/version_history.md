@@ -15,6 +15,7 @@
 | 2026-03-03 | `1239afd2e` | — | — | — | Added `offPolicy @4` to capnp + resilient parser |
 | 2026-03-03 | `6ff7cf6ad` | — | — | — | Added offPolicy progress bar to models_panel UI |
 | 2026-03-08 | `e1c7ebc24` | — | — | v15 | Vendored upstream tinygrad runtime at matching `tinygrad_ref` and added `.vendored_ref` metadata |
+| 2026-03-12 | `43dc7715e` | — | — | v15 | Fixed onroad selector fallback: read cached model-list and active-bundle params when `models_manager` is offroad-only |
 
 ## Model Type Evolution
 

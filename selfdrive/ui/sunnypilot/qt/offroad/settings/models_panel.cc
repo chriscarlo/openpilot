@@ -6,7 +6,9 @@
  */
 
 #include <algorithm>
+#include <QJsonArray>
 #include <QJsonDocument>
+#include <QJsonObject>
 #include <QStyle>
 #include <QtConcurrent/QtConcurrent>
 #include <QDir>
@@ -47,6 +49,85 @@ static const QString progressStyleError = progressStyleActive +
     "QProgressBar::chunk {"
     "  background-color: transparent;"
     "}";
+
+namespace {
+
+struct ModelSelectionEntry {
+  QString folder;
+  QString displayName;
+  int index = -1;
+  int generation = -1;
+};
+
+QJsonObject readJsonParam(Params &params, const char *key) {
+  const std::string raw_value = params.get(key);
+  if (raw_value.empty()) {
+    return {};
+  }
+
+  QJsonParseError error;
+  const QJsonDocument document = QJsonDocument::fromJson(QByteArray::fromStdString(raw_value), &error);
+  if (error.error != QJsonParseError::NoError || !document.isObject()) {
+    return {};
+  }
+
+  return document.object();
+}
+
+QJsonObject readActiveBundleParam(Params &params) {
+  return readJsonParam(params, "ModelManager_ActiveBundle");
+}
+
+QList<ModelSelectionEntry> readCachedModelEntries(Params &params) {
+  QList<ModelSelectionEntry> entries;
+  const QJsonArray bundles = readJsonParam(params, "ModelManager_ModelsCache").value("bundles").toArray();
+
+  for (const auto &bundle_value : bundles) {
+    const QJsonObject bundle = bundle_value.toObject();
+    const QJsonObject overrides = bundle.value("overrides").toObject();
+    const QString display_name = bundle.value("display_name").toString();
+    const int index = bundle.value("index").toInt(-1);
+
+    if (display_name.isEmpty() || index < 0) {
+      continue;
+    }
+
+    entries.append({
+      overrides.value("folder").toString(),
+      display_name,
+      index,
+      bundle.value("generation").toInt(-1),
+    });
+  }
+
+  return entries;
+}
+
+QString getActiveBundleDisplayName(const cereal::ModelManagerSP::Reader &model_manager, Params &params) {
+  if (model_manager.hasActiveBundle()) {
+    return QString::fromStdString(model_manager.getActiveBundle().getDisplayName());
+  }
+
+  return readActiveBundleParam(params).value("displayName").toString();
+}
+
+QString getActiveBundleInternalName(const cereal::ModelManagerSP::Reader &model_manager, Params &params) {
+  if (model_manager.hasActiveBundle()) {
+    return QString::fromStdString(model_manager.getActiveBundle().getInternalName());
+  }
+
+  return readActiveBundleParam(params).value("internalName").toString();
+}
+
+int getActiveBundleGeneration(const cereal::ModelManagerSP::Reader &model_manager, Params &params) {
+  if (model_manager.hasActiveBundle()) {
+    return static_cast<int>(model_manager.getActiveBundle().getGeneration());
+  }
+
+  return readActiveBundleParam(params).value("generation").toInt(-1);
+}
+
+}  // namespace
 
 ModelsPanel::ModelsPanel(QWidget *parent) : QWidget(parent) {
   QVBoxLayout *main_layout = new QVBoxLayout(this);
@@ -272,8 +353,8 @@ void ModelsPanel::handleBundleDownloadProgress() {
  * @return Display name of the selected bundle or default model name
  */
 QString ModelsPanel::GetActiveModelName() {
-  if (model_manager.hasActiveBundle()) {
-    return QString::fromStdString(model_manager.getActiveBundle().getDisplayName());
+  if (const QString active_bundle_name = getActiveBundleDisplayName(model_manager, params); !active_bundle_name.isEmpty()) {
+    return active_bundle_name;
   }
 
   return DEFAULT_MODEL;
@@ -284,9 +365,10 @@ QString ModelsPanel::GetActiveModelName() {
  * @return Display short name of the selected bundle or default model name
  */
 QString ModelsPanel::GetActiveModelInternalName() {
-  if (model_manager.hasActiveBundle()) {
-    return QString::fromStdString(model_manager.getActiveBundle().getInternalName());
+  if (const QString active_bundle_name = getActiveBundleInternalName(model_manager, params); !active_bundle_name.isEmpty()) {
+    return active_bundle_name;
   }
+
   return DEFAULT_MODEL;
 }
 
@@ -303,34 +385,36 @@ void ModelsPanel::handleCurrentModelLblBtnClicked() {
   currentModelLblBtn->setEnabled(false);
   currentModelLblBtn->setValue(tr("Fetching models..."));
 
-  struct ModelEntry {
-    QString folder;
-    QString displayName;
-    int index;
-  };
-  QList<ModelEntry> sortedModels;
+  QList<ModelSelectionEntry> sortedModels;
   QSet<QString> modelFolders;
-  const auto bundles = model_manager.getAvailableBundles();
+  const auto live_bundles = model_manager.getAvailableBundles();
 
-  for (const auto &bundle : bundles) {
-    auto overrides = bundle.getOverrides();
-    QString gen;
-    for (const auto &override : overrides) {
-      if (override.getKey() == "folder") {
-        gen = QString::fromStdString(override.getValue().cStr());
+  if (live_bundles.size() > 0) {
+    for (const auto &bundle : live_bundles) {
+      QString folder;
+      for (const auto &override : bundle.getOverrides()) {
+        if (override.getKey() == "folder") {
+          folder = QString::fromStdString(override.getValue().cStr());
+        }
       }
-    }
 
-    modelFolders.insert(gen);
-    sortedModels.append(ModelEntry{
-      gen,
-      QString::fromStdString(bundle.getDisplayName()),
-      static_cast<int>(bundle.getIndex())
-    });
+      sortedModels.append({
+        folder,
+        QString::fromStdString(bundle.getDisplayName()),
+        static_cast<int>(bundle.getIndex()),
+        static_cast<int>(bundle.getGeneration()),
+      });
+    }
+  } else {
+    sortedModels = readCachedModelEntries(params);
+  }
+
+  for (const auto &model : sortedModels) {
+    modelFolders.insert(model.folder);
   }
 
   std::sort(sortedModels.begin(), sortedModels.end(),
-    [](const ModelEntry &a, const ModelEntry &b) {
+    [](const ModelSelectionEntry &a, const ModelSelectionEntry &b) {
       return a.index > b.index;
     });
 
@@ -388,11 +472,12 @@ void ModelsPanel::handleCurrentModelLblBtnClicked() {
     currentModelLblBtn->setValue(tr("Default"));
     showResetParamsDialog();
   } else {
-    // Find selected bundle and initiate download
-    for (const auto &bundle: bundles) {
-      if (QString::fromStdString(bundle.getDisplayName()) == selectedBundleName) {
-        params.put("ModelManager_DownloadIndex", std::to_string(bundle.getIndex()));
-        if (bundle.getGeneration() != model_manager.getActiveBundle().getGeneration()) {
+    const int active_generation = getActiveBundleGeneration(model_manager, params);
+
+    for (const auto &bundle : sortedModels) {
+      if (bundle.displayName == selectedBundleName) {
+        params.put("ModelManager_DownloadIndex", std::to_string(bundle.index));
+        if (active_generation < 0 || bundle.generation != active_generation) {
           showResetParamsDialog();
         }
         break;
