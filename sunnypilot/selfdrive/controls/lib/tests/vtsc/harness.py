@@ -7,6 +7,7 @@ from typing import Iterable, List, Optional, Tuple, Dict, Any
 
 import numpy as np
 from unittest.mock import MagicMock, patch
+from cereal import log
 
 # Local import of the controller under test
 from openpilot.tools.lib.logreader import LogReader
@@ -27,10 +28,17 @@ class Step:
   steering_angle_deg: float = 0.0  # steering wheel angle (deg), used by steering-curvature fallback
   dt: Optional[float] = None           # optional per-step dt override (seconds)
   live_map_data: Optional[Dict[str, Any]] = None  # optional liveMapDataSP fields for mapd telemetry tests
+  lane_change_state: int = int(log.LaneChangeState.off)
+  lane_change_direction: int = int(log.LaneChangeDirection.none)
+  left_blinker: bool = False
+  right_blinker: bool = False
 
 
 def _mk_sm(curvature: float, curvature_ahead: Optional[float], v_pred: float, confidence: float,
-           lead_d_rel_m: Optional[float], steering_angle_deg: float, live_map_data: Optional[Dict[str, Any]] = None):
+           lead_d_rel_m: Optional[float], steering_angle_deg: float, live_map_data: Optional[Dict[str, Any]] = None,
+           lane_change_state: int = int(log.LaneChangeState.off),
+           lane_change_direction: int = int(log.LaneChangeDirection.none),
+           left_blinker: bool = False, right_blinker: bool = False):
   """Create a minimal SM stub with modelV2 and optional radarState.leadOne."""
   # modelV2.orientationRate.z is yaw rate (rad/s), not curvature.
   # Curvature κ (1/m) = yaw_rate / speed, so yaw_rate = κ * v.
@@ -44,6 +52,10 @@ def _mk_sm(curvature: float, curvature_ahead: Optional[float], v_pred: float, co
     orientationRate=SimpleNamespace(z=yaw_rate_points),
     velocity=SimpleNamespace(x=[v_pred] * 33),
     laneLineProbs=[confidence] * 4,
+    meta=SimpleNamespace(
+      laneChangeState=lane_change_state,
+      laneChangeDirection=lane_change_direction,
+    ),
   )
 
   # Optional simple radarState lead stub
@@ -64,7 +76,12 @@ def _mk_sm(curvature: float, curvature_ahead: Optional[float], v_pred: float, co
       self.valid = valid
       self._data = {
         'modelV2': model,
-        'carState': SimpleNamespace(gasPressed=False, steeringAngleDeg=float(steering_angle_deg)),
+        'carState': SimpleNamespace(
+          gasPressed=False,
+          steeringAngleDeg=float(steering_angle_deg),
+          leftBlinker=bool(left_blinker),
+          rightBlinker=bool(right_blinker),
+        ),
       }
       if radar_state is not None:
         self._data['radarState'] = radar_state
@@ -143,7 +160,9 @@ def simulate_sequence(
 
   for st in steps:
     step_dt = float(getattr(st, 'dt', dt) or dt)
-    sm = _mk_sm(st.curvature, st.curvature_ahead, v_ego, st.confidence, st.lead_d_rel_m, st.steering_angle_deg, st.live_map_data)
+    sm = _mk_sm(st.curvature, st.curvature_ahead, v_ego, st.confidence, st.lead_d_rel_m,
+                st.steering_angle_deg, st.live_map_data, st.lane_change_state,
+                st.lane_change_direction, st.left_blinker, st.right_blinker)
     # Patch time used inside controller to advance deterministically
     with patch('sunnypilot.selfdrive.controls.lib.vision_turn_controller.time.time', lambda: t), \
          patch('sunnypilot.selfdrive.controls.lib.vision_turn_controller.time.monotonic', lambda: t):
@@ -251,7 +270,9 @@ def simulate_sequence_trace(
   trace: List[Dict[str, Any]] = []
 
   for st in steps:
-    sm = _mk_sm(st.curvature, st.curvature_ahead, v_ego, st.confidence, st.lead_d_rel_m, st.steering_angle_deg, st.live_map_data)
+    sm = _mk_sm(st.curvature, st.curvature_ahead, v_ego, st.confidence, st.lead_d_rel_m,
+                st.steering_angle_deg, st.live_map_data, st.lane_change_state,
+                st.lane_change_direction, st.left_blinker, st.right_blinker)
     with patch('sunnypilot.selfdrive.controls.lib.vision_turn_controller.time.time', lambda: t), \
          patch('sunnypilot.selfdrive.controls.lib.vision_turn_controller.time.monotonic', lambda: t):
       ctrl.update(sm, True, v_ego, a_ego, v_cruise_mps)

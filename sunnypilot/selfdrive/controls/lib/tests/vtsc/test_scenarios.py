@@ -7,6 +7,7 @@ import pytest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from cereal import log
 import sunnypilot.selfdrive.controls.lib.vtsc_map_strategy as map_strategy
 from sunnypilot.selfdrive.controls.lib.vision_turn_controller import (
   curvature_to_speed,
@@ -373,6 +374,63 @@ def test_steering_fallback_ignored_below_min_speed():
   )
   assert trace
   assert trace[0]['v_turn'] >= v_cruise - 0.2
+
+
+def test_confirmed_lane_change_suppresses_model_only_curve_cap():
+  # Offline RCA reproducer from 2026-03-13 route 000000af--0e810c91d5--31:
+  # laneChangeStarting with tiny actual curvature and small steering, but the model horizon still
+  # arced enough to drag VTSC far below cruise. During a confirmed lane change, suppress that
+  # model-only cap when steering does not corroborate a real road curve.
+  v0 = 22.5
+  v_cruise = 24.7
+  trace = simulate_sequence_trace(
+    steps=[Step(
+      curvature=0.0,
+      curvature_ahead=0.02,
+      confidence=0.95,
+      steering_angle_deg=0.0,
+      lane_change_state=int(log.LaneChangeState.laneChangeStarting),
+      lane_change_direction=int(log.LaneChangeDirection.left),
+      left_blinker=True,
+    ) for _ in range(10)],
+    v0_mps=v0,
+    v_cruise_mps=v_cruise,
+    dt=0.05,
+    integrate_ego=False,
+  )
+  assert trace
+  assert min(float(row['v_turn']) for row in trace) >= v_cruise - 0.2
+
+
+def test_real_curve_still_slows_during_confirmed_lane_change():
+  # Safety guard: if the car is genuinely turning while lane-change state is active, VTSC should
+  # still respect the real curve via steering corroboration.
+  v0 = 22.5
+  v_cruise = 24.7
+  k_curve = 0.02
+  vtsc = mk_vtsc_with_params()
+  assert getattr(vtsc, '_vm', None) is not None, "VehicleModel required for lane-change curve guard"
+  sa_rad = float(vtsc._vm.get_steer_from_curvature(k_curve, v0, 0.0))
+  sa_deg = float(math.degrees(sa_rad))
+
+  trace = simulate_sequence_trace(
+    steps=[Step(
+      curvature=0.0,
+      curvature_ahead=0.02,
+      confidence=0.95,
+      steering_angle_deg=sa_deg,
+      lane_change_state=int(log.LaneChangeState.laneChangeStarting),
+      lane_change_direction=int(log.LaneChangeDirection.left),
+      left_blinker=True,
+    ) for _ in range(10)],
+    vtsc=vtsc,
+    v0_mps=v0,
+    v_cruise_mps=v_cruise,
+    dt=0.05,
+    integrate_ego=False,
+  )
+  assert trace
+  assert min(float(row['v_turn']) for row in trace) < v_cruise - 1.0
 
 
 def test_severe_confidence_overshoot_is_mildly_conservative_for_blind_curves():
@@ -1746,7 +1804,7 @@ def test_winding_profile_release_slew_limits_upward_v_turn_step():
 
   assert baseline_first == pytest.approx(10.15, abs=1e-6)
   assert baseline_follow == pytest.approx(10.30, abs=1e-6)
-  assert limited == pytest.approx(10.14, abs=1e-6)
+  assert limited == pytest.approx(10.1475, abs=1e-6)
   assert limited < baseline_first
   assert bool(vtsc._dbg_winding_release_limited) is True
   assert bool(vtsc._dbg_winding_release_shape_active) is True
@@ -1772,6 +1830,27 @@ def test_winding_profile_near_apex_release_helper_scales_with_severity():
   assert winding_ready is True
   assert bool(winding['near_apex_release_ready']) is True
   assert float(winding['apex_release_lat_acc_ratio']) < float(baseline['apex_release_lat_acc_ratio'])
+
+
+def test_winding_profile_near_apex_release_can_prespool_before_geometric_apex():
+  def run_once(profile):
+    vtsc = mk_vtsc_with_params()
+    vtsc._set_winding_behavior_profile(profile, source='mapd')
+    vtsc._filtered_curvature = 0.01
+    vtsc._current_lat_acc = 1.00
+    vtsc._max_pred_lat_acc = 2.50
+    vtsc._lat_acc_overshoot_ahead = True
+    ready = vtsc._is_near_apex_release_ready()
+    return ready, vtsc.snapshot_debug_state()
+
+  baseline_ready, baseline = run_once(map_strategy.WINDING_BEHAVIOR_PROFILES[0])
+  winding_ready, winding = run_once(map_strategy.WINDING_BEHAVIOR_PROFILES[4])
+
+  assert baseline_ready is False
+  assert bool(baseline['near_apex_release_ready']) is False
+  assert winding_ready is True
+  assert bool(winding['near_apex_release_ready']) is True
+  assert float(winding['apex_release_lat_acc_ratio']) == pytest.approx(0.40, abs=1e-6)
 
 
 def test_near_apex_release_helper_disables_overshoot_cap_before_geometric_apex():

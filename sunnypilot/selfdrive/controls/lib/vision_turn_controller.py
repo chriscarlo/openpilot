@@ -6,7 +6,7 @@ import os
 from dataclasses import dataclass
 from enum import IntEnum
 
-from cereal import custom
+from cereal import custom, log
 from openpilot.common.params import Params
 from openpilot.common.swaglog import cloudlog
 from openpilot.common.numpy_fast import clip
@@ -47,6 +47,7 @@ except Exception:
   Q_CURVE_POINTS = []
 
 VisionTurnControllerState = custom.LongitudinalPlanSP.VisionTurnSpeedControl.VisionTurnSpeedControlState
+LaneChangeState = log.LaneChangeState
 
 N_POINTS = int(min(33, len(ModelConstants.T_IDXS)))  # Use available trajectory points
 
@@ -88,6 +89,11 @@ INF_SPEED = 1e9
 STEER_CURVATURE_FALLBACK_MODEL_KAPPA_MAX = 0.003  # 1/m: model says "straight-ish"
 STEER_CURVATURE_FALLBACK_MIN_KAPPA = 0.003        # 1/m: car is actually turning
 STEER_CURVATURE_FALLBACK_MIN_V_MPS = 13.0         # only consider at ~29 mph+
+# During a confirmed lane change, the model horizon can arc across lanes strongly enough to look
+# like road curvature. If steering-derived curvature is still below this threshold, suppress the
+# model-only curve signal and let map/steering evidence decide whether VTSC should slow.
+LANE_CHANGE_CURVATURE_SUPPRESS_STEER_KAPPA_MAX = 0.003
+LANE_CHANGE_CURVATURE_SUPPRESS_MIN_V_MPS = 1.0
 
 # ===== Severe-confidence overshoot conservatism =====
 # If lane-line confidence is extremely low, the model often "discovers" tight off-ramp curvature late.
@@ -2155,14 +2161,11 @@ class VisionTurnController:
         # expose for debug snapshot
         self._dbg_k_model = max_pred_curvature
 
-        # Store curvature trajectory and detect apexes (use absolute values for apex detection)
-        self._curvature_trajectory = curvature_array_abs.tolist()
-        raw_apex_indices = find_apexes_enhanced(curvature_array_abs, self._apex_threshold, self._apex_prominence)
-        if lead_idx > 0 and raw_apex_indices:
-          self._apex_indices = sorted({max(0, int(i) - lead_idx) for i in raw_apex_indices})
-        else:
-          self._apex_indices = raw_apex_indices
-        _debug(f'TVC: Found {len(self._apex_indices)} apexes at indices: {self._apex_indices}')
+        lane_change_active = False
+        try:
+          lane_change_active = bool(getattr(getattr(model_data, 'meta', None), 'laneChangeState', LaneChangeState.off) != LaneChangeState.off)
+        except Exception:
+          lane_change_active = False
 
         # Calculate lateral acceleration using model-predicted curvature
         # This is more accurate than steering angle at highway speeds
@@ -2182,19 +2185,40 @@ class VisionTurnController:
           vision_confidence = float(np.mean(llp)) if llp else 1.0
         except Exception:
           vision_confidence = 1.0
+        kappa_steer = 0.0
+        kappa_steer_abs = 0.0
         try:
-          if (float(max_pred_curvature) <= STEER_CURVATURE_FALLBACK_MODEL_KAPPA_MAX and
-              self._vm is not None and float(self._v_ego) >= STEER_CURVATURE_FALLBACK_MIN_V_MPS):
+          if self._vm is not None and float(self._v_ego) >= LANE_CHANGE_CURVATURE_SUPPRESS_MIN_V_MPS:
             sa_rad = math.radians(float(getattr(self, '_steering_angle_deg', 0.0)))
             kappa_steer = float(self._vm.calc_curvature(sa_rad, float(self._v_ego), 0.0))
             kappa_steer_abs = abs(kappa_steer)
             self._dbg_k_steer = float(kappa_steer_abs)
-            if kappa_steer_abs >= STEER_CURVATURE_FALLBACK_MIN_KAPPA:
+            if (float(max_pred_curvature) <= STEER_CURVATURE_FALLBACK_MODEL_KAPPA_MAX and
+                float(self._v_ego) >= STEER_CURVATURE_FALLBACK_MIN_V_MPS and
+                kappa_steer_abs >= STEER_CURVATURE_FALLBACK_MIN_KAPPA):
               current_curvature = max(float(current_curvature), float(kappa_steer_abs))
               current_curvature_signed = float(kappa_steer)
               self._dbg_steer_fallback_active = True
         except Exception:
           pass
+
+        if lane_change_active and kappa_steer_abs < LANE_CHANGE_CURVATURE_SUPPRESS_STEER_KAPPA_MAX:
+          curvature_array_signed = np.zeros_like(curvature_array_signed)
+          curvature_array_abs = np.zeros_like(curvature_array_abs)
+          max_pred_curvature = 0.0
+          current_curvature = 0.0
+          current_curvature_signed = 0.0
+          self._dbg_k_model = 0.0
+          self._dbg_steer_fallback_active = False
+
+        # Store curvature trajectory and detect apexes (use absolute values for apex detection)
+        self._curvature_trajectory = curvature_array_abs.tolist()
+        raw_apex_indices = find_apexes_enhanced(curvature_array_abs, self._apex_threshold, self._apex_prominence)
+        if lead_idx > 0 and raw_apex_indices:
+          self._apex_indices = sorted({max(0, int(i) - lead_idx) for i in raw_apex_indices})
+        else:
+          self._apex_indices = raw_apex_indices
+        _debug(f'TVC: Found {len(self._apex_indices)} apexes at indices: {self._apex_indices}')
 
         # Update filtered curvature using EMA of the NEAR-TERM curvature, not the horizon max.
         # Using the max across the horizon makes the "visible" path act like an occlusion cap

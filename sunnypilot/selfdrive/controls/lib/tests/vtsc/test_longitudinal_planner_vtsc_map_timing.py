@@ -312,9 +312,15 @@ def test_winding_profile_chained_curves_smooths_gap_release_and_hits_second_anch
   winding_peak_step = max(max(0.0, nxt['v_turn'] - cur['v_turn']) for cur, nxt in zip(winding_gap, winding_gap[1:], strict=False))
   baseline_peak_gap_cap = max(row['v_turn'] for row in baseline_gap)
   winding_peak_gap_cap = max(row['v_turn'] for row in winding_gap)
+  baseline_second_hit = next(row for row in baseline if row['v_ego'] <= second_target_speed + 0.75 and row['dist_to_second_apex_m'] >= 0.0)
+  winding_second_hit = next(row for row in winding if row['v_ego'] <= second_target_speed + 0.75 and row['dist_to_second_apex_m'] >= 0.0)
 
-  assert winding_peak_step < baseline_peak_step
-  assert winding_peak_gap_cap + 0.5 < baseline_peak_gap_cap
+  # Winding mode should keep some VTSC shaping in the gap, but it should sit much closer
+  # to the more freely releasing baseline and brake later into the second anchor.
+  assert winding_peak_step <= baseline_peak_step + 5e-4
+  assert baseline_peak_gap_cap > winding_peak_gap_cap
+  assert 0.20 < (baseline_peak_gap_cap - winding_peak_gap_cap) < 0.80
+  assert winding_second_hit['dist_to_second_apex_m'] + 4.0 < baseline_second_hit['dist_to_second_apex_m']
 
   for hist in (baseline, winding):
     second_hit = next(row for row in hist if row['v_ego'] <= second_target_speed + 0.75 and row['dist_to_second_apex_m'] >= 0.0)
