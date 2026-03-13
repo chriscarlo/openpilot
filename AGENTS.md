@@ -49,6 +49,7 @@ Trigger phrases:
   - `commaAdb` — USB via adb port-forward (127.0.0.1:2222, key `~/.ssh/id_comma_device`)
 - All use user `comma`. `sudo` requires no password (NOPASSWD).
 - Repo on device: `/data/openpilot` (tracks `chauffeur-dev4`).
+- Tici only: the device build venv is `/usr/local/venv`; use `source /usr/local/venv/bin/activate` and `/usr/local/venv/bin/scons` rather than assuming `scons` is on `PATH`.
 - Deploy workflow: `git push` from dev machine, then `ssh <profile> "cd /data/openpilot && git pull && sudo reboot"`.
 
 ## Needs human confirmation (temporary; keep very short)
