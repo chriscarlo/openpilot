@@ -74,14 +74,12 @@ def force_params_stub():
     import sys as _sys
 
     modname = 'openpilot.common.params_pyx'
-    if modname in _sys.modules:
-        return
 
-    try:
-        __import__(modname)
-        return
-    except Exception:
-        pass
+    # These tests exercise controller semantics, not the host's persistent params store.
+    # Always replace params_pyx with an isolated stub so worker-local param files do not
+    # leak into expectations for activation distance, resume distance, or filter values.
+    _sys.modules.pop('openpilot.common.params', None)
+    _sys.modules.pop(modname, None)
 
     module = _types.ModuleType(modname)
 

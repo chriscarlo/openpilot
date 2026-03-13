@@ -185,6 +185,13 @@ class RoadMatcher:
         # Distance thresholds for fallback when street names unavailable
         self.road_proximity_threshold_m = 50  # Assume same road if within 50m
         self.highway_proximity_threshold_m = 200  # Highways are wider
+        self.current_segment_match_threshold_m = 35.0
+        self.contiguous_segment_match_threshold_m = 20.0
+        self.contiguous_endpoint_threshold_m = 40.0
+        self.contiguous_direction_threshold_deg = 25.0
+        self.contiguous_speed_delta_ms = 8.0
+        self.competing_segment_advantage_m = 8.0
+        self.route_direction_conflict_threshold_deg = 80.0
         # If names are unavailable, use heading + bearing to reject likely side-street threats.
         self.heading_gate_min_speed_ms = 8.0
         self.side_street_bearing_threshold_deg = 60.0
@@ -204,7 +211,9 @@ class RoadMatcher:
                     ego_speed_ms: float,
                     ego_street: str | None = None,
                     threat_street: str | None = None,
-                    ego_heading_deg: float | None = None) -> tuple[bool, float]:
+                    ego_heading_deg: float | None = None,
+                    current_road_segment = None,
+                    nearby_road_segments = None) -> tuple[bool, float]:
         """
         Determine if threat is on the same road as ego vehicle with confidence.
 
@@ -222,16 +231,40 @@ class RoadMatcher:
             Tuple of (is_same_road: bool, confidence: float)
             confidence ranges from 0.0 to 1.0
         """
+        norm_ego_street = self.street_matcher.normalize_street_name(ego_street)
+        norm_threat_street = self.street_matcher.normalize_street_name(threat_street)
+
         # First try street name matching if both names available
-        if ego_street and threat_street:
+        if norm_ego_street and norm_threat_street:
             # Use strict direction matching for highways or expressways on either name
             strict_direction = (
                 self.street_matcher.is_highway_or_expressway(ego_street)
                 or self.street_matcher.is_highway_or_expressway(threat_street)
             )
+            ego_route = self.street_matcher._extract_route_designator(norm_ego_street)
+            threat_route = self.street_matcher._extract_route_designator(norm_threat_street)
             match_result = self.street_matcher.match_street_names(
                 ego_street, threat_street, strict_direction
             )
+
+            if (
+                strict_direction
+                and match_result.is_match
+                and ego_route
+                and threat_route
+                and self.street_matcher._route_designators_equivalent(ego_route, threat_route)
+                and self._route_alias_direction_conflicts(
+                    ego_route,
+                    threat_route,
+                    current_road_segment=current_road_segment,
+                    ego_heading_deg=ego_heading_deg,
+                )
+            ):
+                cloudlog.debug(
+                    "RTI route direction conflict: "
+                    + f"ego='{ego_street}', threat='{threat_street}'"
+                )
+                return False, 0.05
 
             if match_result.is_match and match_result.confidence >= 0.7:
                 # High confidence match
@@ -250,6 +283,19 @@ class RoadMatcher:
                 elif match_result.is_match:
                     # Street matches but distance doesn't confirm
                     return match_result.is_match, match_result.confidence * 0.8
+
+            geometry_match, geometry_confidence = self._geometry_override_same_road(
+                threat_lat,
+                threat_lon,
+                current_road_segment,
+                nearby_road_segments,
+            )
+            if geometry_match:
+                cloudlog.debug(
+                    "RTI geometry override accepted street mismatch: "
+                    + f"{match_result.reason}, confidence={geometry_confidence:.2f}"
+                )
+                return True, geometry_confidence
 
             # If both street names are present and don't match, do not trust pure proximity fallback.
             cloudlog.debug(f"RTI street mismatch: {match_result.reason}")
@@ -294,6 +340,174 @@ class RoadMatcher:
             )
 
         return is_same, confidence
+
+    @staticmethod
+    def _segment_centerline_distance_m(lat: float, lon: float, segment) -> float:
+        """Return minimum distance from a point to any centerline coordinate in a segment."""
+        centerline = getattr(segment, 'centerline', None) or []
+        min_distance = float('inf')
+        for coord in centerline:
+            coord_lat = getattr(coord, 'latitude', None)
+            coord_lon = getattr(coord, 'longitude', None)
+            if coord_lat is None or coord_lon is None:
+                continue
+            distance = GeoUtils.haversine_distance(lat, lon, coord_lat, coord_lon)
+            if distance < min_distance:
+                min_distance = distance
+        return min_distance
+
+    @staticmethod
+    def _segment_endpoints(segment) -> list:
+        centerline = getattr(segment, 'centerline', None) or []
+        if not centerline:
+            return []
+        if len(centerline) == 1:
+            return [centerline[0]]
+        return [centerline[0], centerline[-1]]
+
+    @staticmethod
+    def _direction_delta_deg(direction_a: float, direction_b: float) -> float:
+        diff = abs(float(direction_a) - float(direction_b)) % 360.0
+        return min(diff, 360.0 - diff)
+
+    @staticmethod
+    def _direction_token_to_bearing(direction_token: str | None) -> float | None:
+        if direction_token is None:
+            return None
+
+        mapping = {
+            'n': 0.0,
+            'nb': 0.0,
+            'ne': 45.0,
+            'e': 90.0,
+            'eb': 90.0,
+            'se': 135.0,
+            's': 180.0,
+            'sb': 180.0,
+            'sw': 225.0,
+            'w': 270.0,
+            'wb': 270.0,
+            'nw': 315.0,
+        }
+        return mapping.get(direction_token)
+
+    def _route_alias_direction_conflicts(self, ego_route, threat_route,
+                                         current_road_segment, ego_heading_deg: float | None) -> bool:
+        """
+        Reject route-alias matches when only one side carries a direction token and the
+        current road geometry or heading clearly points the opposite way.
+        """
+        if ego_route is None or threat_route is None:
+            return False
+
+        ego_direction = ego_route[2]
+        threat_direction = threat_route[2]
+        if ego_direction and threat_direction:
+            return False
+
+        expected_direction = self._direction_token_to_bearing(ego_direction or threat_direction)
+        if expected_direction is None:
+            return False
+
+        observed_direction = None
+        if current_road_segment is not None:
+            try:
+                observed_direction = float(getattr(current_road_segment, 'roadDirection'))
+            except Exception:
+                observed_direction = None
+
+        if observed_direction is None and ego_heading_deg is not None:
+            observed_direction = float(ego_heading_deg)
+
+        if observed_direction is None:
+            return False
+
+        return self._direction_delta_deg(observed_direction, expected_direction) > self.route_direction_conflict_threshold_deg
+
+    def _segments_are_contiguous(self, current_segment, candidate_segment) -> bool:
+        """Heuristic for same-corridor adjacent ways when names disagree."""
+        if current_segment is None or candidate_segment is None:
+            return False
+
+        if int(getattr(current_segment, 'wayId', 0) or 0) == int(getattr(candidate_segment, 'wayId', 0) or 0):
+            return True
+
+        if getattr(current_segment, 'levelSeparation', 0) != getattr(candidate_segment, 'levelSeparation', 0):
+            return False
+
+        if getattr(current_segment, 'roadClass', None) != getattr(candidate_segment, 'roadClass', None):
+            return False
+
+        direction_delta = self._direction_delta_deg(
+            getattr(current_segment, 'roadDirection', 0.0),
+            getattr(candidate_segment, 'roadDirection', 0.0),
+        )
+        if direction_delta > self.contiguous_direction_threshold_deg:
+            return False
+
+        speed_delta = abs(
+            float(getattr(current_segment, 'maxSpeed', 0.0) or 0.0) -
+            float(getattr(candidate_segment, 'maxSpeed', 0.0) or 0.0)
+        )
+        if speed_delta > self.contiguous_speed_delta_ms:
+            return False
+
+        current_endpoints = self._segment_endpoints(current_segment)
+        candidate_endpoints = self._segment_endpoints(candidate_segment)
+        if not current_endpoints or not candidate_endpoints:
+            return False
+
+        min_endpoint_distance = min(
+            GeoUtils.haversine_distance(a.latitude, a.longitude, b.latitude, b.longitude)
+            for a in current_endpoints
+            for b in candidate_endpoints
+        )
+        return min_endpoint_distance <= self.contiguous_endpoint_threshold_m
+
+    def _geometry_override_same_road(self, threat_lat: float, threat_lon: float,
+                                     current_road_segment, nearby_road_segments) -> tuple[bool, float]:
+        """
+        Resolve naming mismatches using mapd geometry.
+
+        Only override a street mismatch when the threat lies tightly on the current
+        segment or a clearly contiguous same-corridor segment from nearbyRoadSegments.
+        """
+        if current_road_segment is None:
+            return False, 0.0
+
+        current_distance = self._segment_centerline_distance_m(threat_lat, threat_lon, current_road_segment)
+
+        best_segment = None
+        best_distance = float('inf')
+        seen_way_ids = {int(getattr(current_road_segment, 'wayId', 0) or 0)}
+
+        for segment in nearby_road_segments or []:
+            way_id = int(getattr(segment, 'wayId', 0) or 0)
+            if way_id in seen_way_ids:
+                continue
+            seen_way_ids.add(way_id)
+
+            distance = self._segment_centerline_distance_m(threat_lat, threat_lon, segment)
+            if distance < best_distance:
+                best_distance = distance
+                best_segment = segment
+
+        if current_distance <= self.current_segment_match_threshold_m:
+            competing_segment_is_better = (
+                best_segment is not None
+                and best_distance + self.competing_segment_advantage_m < current_distance
+                and not self._segments_are_contiguous(current_road_segment, best_segment)
+            )
+            if not competing_segment_is_better:
+                return True, 0.82
+
+        if best_segment is None or best_distance > self.contiguous_segment_match_threshold_m:
+            return False, 0.0
+
+        if self._segments_are_contiguous(current_road_segment, best_segment):
+            return True, 0.72
+
+        return False, 0.0
 
     def get_direction_relative_to_ego(self, ego_lat: float, ego_lon: float,
                                      threat_lat: float, threat_lon: float,
@@ -515,7 +729,9 @@ class ThreatDetector:
                        v_cruise: float = None,
                        current_heading_deg: float | None = None,
                        posted_speed_limit: float = 0.0,
-                       current_road_name: str | None = None) -> RTIState:
+                       current_road_name: str | None = None,
+                       current_road_segment = None,
+                       nearby_road_segments = None) -> RTIState:
         """
         Main threat processing pipeline.
 
@@ -549,7 +765,8 @@ class ThreatDetector:
                 for threat in filtered_threats:
                     processed_threat = self._process_single_threat(
                         threat, current_location, current_speed, current_heading_deg,
-                        posted_speed_limit, current_road_name
+                        posted_speed_limit, current_road_name,
+                        current_road_segment, nearby_road_segments
                     )
                     if processed_threat:
                         processed_threats.append(processed_threat)
@@ -728,7 +945,9 @@ class ThreatDetector:
                              current_speed: float,
                              current_heading_deg: float | None = None,
                              posted_speed_limit: float = 0.0,
-                             current_road_name: str | None = None) -> ProcessedThreat | None:
+                             current_road_name: str | None = None,
+                             current_road_segment = None,
+                             nearby_road_segments = None) -> ProcessedThreat | None:
         """Process a single threat for relevance and direction.
 
         Args:
@@ -758,7 +977,9 @@ class ThreatDetector:
             on_same_road, road_match_confidence = self.road_matcher.is_same_road(
                 ego_lat, ego_lon, threat.latitude, threat.longitude, current_speed,
                 ego_street=current_road_name, threat_street=threat.street,
-                ego_heading_deg=current_heading_deg
+                ego_heading_deg=current_heading_deg,
+                current_road_segment=current_road_segment,
+                nearby_road_segments=nearby_road_segments,
             )
 
             # Determine direction relative to ego

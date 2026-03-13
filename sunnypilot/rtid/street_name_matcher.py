@@ -21,6 +21,8 @@ class StreetMatchResult:
 class StreetNameMatcher:
     """Intelligent street name matching with normalization."""
 
+    PLACEHOLDER_NAMES = {"none", "null", "unknown", "n/a", "na"}
+
     # Common street type abbreviations
     STREET_TYPE_MAPPING = {
         'street': 'st',
@@ -85,6 +87,8 @@ class StreetNameMatcher:
         'westbound': 'wb',
     }
 
+    DIRECTION_TOKENS = set(DIRECTION_MAPPING.values())
+
     # Number word mappings
     NUMBER_WORDS = {
         'first': '1st',
@@ -114,6 +118,14 @@ class StreetNameMatcher:
         (r'\brt[\s-]*(\d+)\b', r'rt-\1'),
     ]
 
+    HIGHWAY_ROUTE_ALIASES = {
+        'i': {'i'},
+        'us': {'us', 'rt'},
+        'sr': {'sr', 'ca', 'rt'},
+        'ca': {'ca', 'sr', 'rt'},
+        'rt': {'rt', 'us', 'sr', 'ca'},
+    }
+
     @staticmethod
     def normalize_street_name(street_name: str | None) -> str:
         """
@@ -137,6 +149,9 @@ class StreetNameMatcher:
         # Normalize multiple spaces
         normalized = re.sub(r'\s+', ' ', normalized)
 
+        if normalized in StreetNameMatcher.PLACEHOLDER_NAMES:
+            return ""
+
         # Apply highway patterns first (to preserve structure)
         for pattern, replacement in StreetNameMatcher.HIGHWAY_PATTERNS:
             normalized = re.sub(pattern, replacement, normalized, flags=re.IGNORECASE)
@@ -159,6 +174,39 @@ class StreetNameMatcher:
                 processed_words.append(word)
 
         return ' '.join(processed_words)
+
+    @staticmethod
+    def _extract_route_designator(normalized_name: str) -> tuple[str, str, str | None] | None:
+        """Extract canonical highway prefix/number/direction from a normalized name."""
+        if not normalized_name:
+            return None
+
+        match = re.search(r'\b(i|us|sr|ca|rt)-(\d+)\b', normalized_name)
+        if not match:
+            return None
+
+        prefix, number = match.groups()
+        direction = None
+        for token in normalized_name.split():
+            if token in StreetNameMatcher.DIRECTION_TOKENS:
+                direction = token
+                break
+
+        return prefix, number, direction
+
+    @staticmethod
+    def _route_designators_equivalent(route_a: tuple[str, str, str | None],
+                                      route_b: tuple[str, str, str | None]) -> bool:
+        """Treat generic/state route aliases as the same highway when the route number matches."""
+        prefix_a, number_a, _ = route_a
+        prefix_b, number_b, _ = route_b
+
+        if number_a != number_b:
+            return False
+
+        aliases_a = StreetNameMatcher.HIGHWAY_ROUTE_ALIASES.get(prefix_a, {prefix_a})
+        aliases_b = StreetNameMatcher.HIGHWAY_ROUTE_ALIASES.get(prefix_b, {prefix_b})
+        return prefix_b in aliases_a and prefix_a in aliases_b
 
     @staticmethod
     def extract_core_street_name(normalized_name: str) -> str:
@@ -216,6 +264,13 @@ class StreetNameMatcher:
         norm_ego = StreetNameMatcher.normalize_street_name(ego_street)
         norm_threat = StreetNameMatcher.normalize_street_name(threat_street)
 
+        if not norm_ego or not norm_threat:
+            return StreetMatchResult(
+                is_match=False,
+                confidence=0.0,
+                reason="Missing street name data",
+            )
+
         # Exact match after normalization
         if norm_ego == norm_threat:
             return StreetMatchResult(
@@ -251,6 +306,15 @@ class StreetNameMatcher:
                     confidence=0.0,
                     reason=f"Different directions: '{ego_street}' != '{threat_street}'",
                 )
+
+        ego_route = StreetNameMatcher._extract_route_designator(norm_ego)
+        threat_route = StreetNameMatcher._extract_route_designator(norm_threat)
+        if ego_route and threat_route and StreetNameMatcher._route_designators_equivalent(ego_route, threat_route):
+            return StreetMatchResult(
+                is_match=True,
+                confidence=0.9,
+                reason=f"Route alias match: '{ego_street}' ~ '{threat_street}'",
+            )
 
         # Extract core street names (without type/direction)
         core_ego = StreetNameMatcher.extract_core_street_name(norm_ego)

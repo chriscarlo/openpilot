@@ -7,12 +7,30 @@ to speed recommendations, ensuring safety-critical behavior across components.
 """
 
 import asyncio
+import time
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from sunnypilot.rtid.rtid import RTIDaemon
 from sunnypilot.rtid.waze_api_client import WazeAPIClient, WazeAlert
 from sunnypilot.rtid.threat_detector import ThreatDetector
+
+
+def successful_fetch_side_effect(client: WazeAPIClient, alerts):
+    async def _side_effect(*_args):
+        client.consecutive_failures = 0
+        client.last_success_time = time.time()
+        return alerts
+
+    return _side_effect
+
+
+def failing_fetch_side_effect(client: WazeAPIClient, exc: Exception):
+    async def _side_effect(*_args):
+        client.consecutive_failures = 11
+        raise exc
+
+    return _side_effect
 
 
 @pytest.mark.integration
@@ -42,13 +60,15 @@ class TestRTISystemIntegration:
 
             # Mock API client to return test data
             with patch.object(real_client, 'get_traffic_alerts', new_callable=AsyncMock) as mock_api:
-                mock_api.return_value = sample_waze_alerts
+                mock_api.side_effect = successful_fetch_side_effect(real_client, sample_waze_alerts)
 
                 # Execute processing cycle
                 await daemon._process_cycle()
 
                 # Verify API was called with correct location
-                mock_api.assert_called_once_with(37.4221, -122.0841)
+                mock_api.assert_called_once()
+                assert mock_api.call_args.args[0:2] == (37.4221, -122.0841)
+                assert mock_api.call_args.args[2] > 0.0
 
                 # Verify message was published
                 daemon.pm.send.assert_called_once()
@@ -92,7 +112,7 @@ class TestRTISystemIntegration:
             daemon._check_enabled = MagicMock(return_value=True)
 
             with patch.object(real_client, 'get_traffic_alerts', new_callable=AsyncMock) as mock_api:
-                mock_api.return_value = [highway_police]
+                mock_api.side_effect = successful_fetch_side_effect(real_client, [highway_police])
 
                 await daemon._process_cycle()
 
@@ -137,7 +157,7 @@ class TestRTISystemIntegration:
             daemon._check_enabled = MagicMock(return_value=True)
 
             with patch.object(real_client, 'get_traffic_alerts', new_callable=AsyncMock) as mock_api:
-                mock_api.return_value = [city_trap]
+                mock_api.side_effect = successful_fetch_side_effect(real_client, [city_trap])
 
                 await daemon._process_cycle()
 
@@ -187,7 +207,9 @@ class TestRTISystemIntegration:
             daemon._check_enabled = MagicMock(return_value=True)
 
             with patch.object(real_client, 'get_traffic_alerts', new_callable=AsyncMock) as mock_api:
-                mock_api.return_value = [far_threat, close_threat, medium_threat]  # Unsorted
+                mock_api.side_effect = successful_fetch_side_effect(
+                    real_client, [far_threat, close_threat, medium_threat]
+                )  # Unsorted
 
                 await daemon._process_cycle()
 
@@ -220,7 +242,7 @@ class TestRTISystemIntegration:
 
             # Mock API failure
             with patch.object(real_client, 'get_traffic_alerts', new_callable=AsyncMock) as mock_api:
-                mock_api.side_effect = Exception("Network timeout")
+                mock_api.side_effect = failing_fetch_side_effect(real_client, Exception("Network timeout"))
 
                 await daemon._process_cycle()
 
@@ -294,7 +316,7 @@ class TestRTISystemIntegration:
             daemon._check_enabled = MagicMock(return_value=True)
 
             with patch.object(real_client, 'get_traffic_alerts', new_callable=AsyncMock) as mock_api:
-                mock_api.return_value = many_threats
+                mock_api.side_effect = successful_fetch_side_effect(real_client, many_threats)
 
                 performance_timer.start()
                 await daemon._process_cycle()
@@ -343,7 +365,7 @@ class TestRTISystemSafetyIntegration:
             daemon._check_enabled = MagicMock(return_value=True)
 
             with patch.object(real_client, 'get_traffic_alerts', new_callable=AsyncMock) as mock_api:
-                mock_api.return_value = [unsafe_threat]
+                mock_api.side_effect = successful_fetch_side_effect(real_client, [unsafe_threat])
 
                 await daemon._process_cycle()
 
@@ -405,7 +427,7 @@ class TestRTISystemSafetyIntegration:
             daemon._check_enabled = MagicMock(return_value=True)
 
             with patch.object(real_client, 'get_traffic_alerts', new_callable=AsyncMock) as mock_api:
-                mock_api.return_value = [test_threat]
+                mock_api.side_effect = successful_fetch_side_effect(real_client, [test_threat])
 
                 await daemon._process_cycle()
 
@@ -421,6 +443,7 @@ class TestRTISystemSafetyIntegration:
 
         mock_waze_client = AsyncMock()
         mock_waze_client.close = AsyncMock()
+        mock_waze_client.get_health_status = MagicMock(return_value='disconnected')
         with patch('sunnypilot.rtid.rtid.WazeAPIClient', return_value=mock_waze_client), \
              patch('sunnypilot.rtid.rtid.ThreatDetector'):
             daemon = RTIDaemon()

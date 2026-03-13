@@ -72,6 +72,8 @@ class TestStreetNameNormalization(unittest.TestCase):
         self.assertEqual(StreetNameMatcher.normalize_street_name(None), "")
         self.assertEqual(StreetNameMatcher.normalize_street_name(""), "")
         self.assertEqual(StreetNameMatcher.normalize_street_name("   "), "")
+        self.assertEqual(StreetNameMatcher.normalize_street_name("None"), "")
+        self.assertEqual(StreetNameMatcher.normalize_street_name("unknown"), "")
 
 
 class TestCoreStreetNameExtraction(unittest.TestCase):
@@ -163,6 +165,11 @@ class TestStreetNameMatching(unittest.TestCase):
         self.assertFalse(result.is_match)
         self.assertEqual(result.confidence, 0.0)
 
+        result = StreetNameMatcher.match_street_names("None", "US-50 W")
+        self.assertFalse(result.is_match)
+        self.assertEqual(result.confidence, 0.0)
+        self.assertIn("Missing", result.reason)
+
 
 class TestHighwayDirectionalMatching(unittest.TestCase):
     """Test highway and directional matching logic."""
@@ -195,6 +202,16 @@ class TestHighwayDirectionalMatching(unittest.TestCase):
         result = StreetNameMatcher.match_street_names("US-101 N", "US-101 North", strict_direction=True)
         self.assertTrue(result.is_match)
         self.assertEqual(result.confidence, 1.0)
+
+    def test_highway_alias_matching(self):
+        """Test generic route aliases against concrete highway prefixes."""
+        result = StreetNameMatcher.match_street_names("Route 50", "US-50 W", strict_direction=True)
+        self.assertTrue(result.is_match)
+        self.assertGreaterEqual(result.confidence, 0.9)
+
+        result = StreetNameMatcher.match_street_names("CA-87", "State Route 87", strict_direction=True)
+        self.assertTrue(result.is_match)
+        self.assertGreaterEqual(result.confidence, 0.9)
         
     def test_non_strict_directional_matching(self):
         """Test non-strict directional matching."""

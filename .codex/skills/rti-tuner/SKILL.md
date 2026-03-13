@@ -38,6 +38,7 @@ description: >
 - `rtid` fetches traffic data on a 30 second interval and treats cached data older than 300 seconds as stale.
 - `ThreatDetector` sorts processed threats by distance and only publishes the closest five for HUD consumption.
 - Planner-side RTI in `posted` mode prefers the posted speed limit already selected by SLC (`self.slc.speed_limit`) before falling back to threat-carried limits.
+- RTID explicitly handles the case where neither map nor dashboard speed-limit input has produced a usable posted speed yet; missing posted speed at a snapshot is not by itself a fault.
 - `ThreatDetector` and `SpeedRecommendationEngine` still cache many params in `__init__`, and `RTIController` also caches most speed and distance params on init. `RTIEnabled` is checked live, and RTI threat filtering gets an extra live read in the controller. Do not assume a param is live-tuneable without checking its actual read site.
 - Current RTI offroad range controls display miles and store meters; custom speed reduction displays mph and stores km/h. Do not assume older metric or imperial plans or broad historical tests match the current panel behavior.
 
@@ -45,8 +46,12 @@ description: >
 
 - No alerts or `apiStatus=offline`:
   start at `sunnypilot/rtid/rtid.py`, `api_key_manager.py`, and `waze_api_client.py`; verify the API key source and the 30 second fetch gate before changing any threat logic.
+- No alerts or no posted speed limit yet, but `apiStatus` is healthy:
+  do not assume a bug from one snapshot. Threat presence and posted speed can both legitimately be absent until the provider side, dashboard TSR, or OSM path has actually produced data; during live monitoring, wait through at least one RTID fetch cycle before escalating.
 - Threat appears on HUD but the car does not slow:
   inspect `recommendedSpeed`, `speedLimitMs`, `isCausingRecommendation`, `onSameRoad`, and `direction`; visual-only alerts with no usable speed limit are expected in some cases.
+- Threat is visible and carries a usable posted speed, but `onSameRoad=false` and `isCausingRecommendation=false`:
+  inspect `logMessage` for `RTI street mismatch` plus the current map road name before blaming planner windows. Generic map names like `Route 50` vs Waze `US-50 W`, or placeholder road names like `'None'`, can block same-road matching upstream so RTI never enters slowdown control.
 - Slowdown happens for the wrong alert or the wrong road:
   debug `ThreatDetector` and `RoadMatcher` first; do not paper over a same-road or direction bug in the HUD.
 - Duplicate police or hazard pins clutter the HUD:
@@ -120,6 +125,8 @@ python3 docs/chauffeur/rti/tests/check_rti_content.py
 
 - If the HUD is empty, inspect `rtiStateSP` before editing Qt.
 - If posted-mode slowdown feels wrong, inspect the SLC handoff into `RTIController.update(... posted_speed_limit=self.slc.speed_limit)` before retuning threat logic.
+- If posted speed or threat presence is missing at the instant you inspect logs or a live session, first treat that as "not acquired yet" rather than "broken"; if you are watching in real time, give dashboard/OSM acquisition and the next 30 second RTID fetch a chance to populate.
+- If `threat.speedLimitMs > 0` but `threatAhead` never goes true and `recommendedSpeed` stays `0`, verify whether `onSameRoad` is being rejected by street-name matching before retuning slowdown or resume distances.
 - If a threat is rendered but `recommendedSpeed == 0`, confirm whether RTI intentionally classified it as visual-only.
 - If side-street alerts still slow the car, debug street matching and heading gating before changing the duplicate-collapse radii or HUD sorting.
 - Do not assume `RTIDataSource` or `RTIAggressiveness` are active runtime levers in the current branch without code search; they are easy to over-credit from legacy tests and UI surface area.

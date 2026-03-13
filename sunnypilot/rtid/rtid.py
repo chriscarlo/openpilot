@@ -253,11 +253,13 @@ class RTIDaemon:
             cruise_state = self.sm['carState'].cruiseState
             # speedCluster is the driver's set speed shown on the instrument cluster
             # This is the original driver-set maximum, unmodified by controllers
-            if cruise_state.enabled and cruise_state.speedCluster > 0:
-                try:
-                    return float(cruise_state.speedCluster)
-                except Exception:
-                    return 0.0
+            try:
+                speed_cluster = float(cruise_state.speedCluster)
+            except Exception:
+                return 0.0
+
+            if cruise_state.enabled and speed_cluster > 0.0:
+                return speed_cluster
         return 0.0
 
     def _get_current_speed_limit(self) -> float:
@@ -277,8 +279,9 @@ class RTIDaemon:
         # Get dashboard-based speed limit (from car's traffic sign recognition)
         try:
             car_state_sp = self.sm['carStateSP']
-            if car_state_sp.speedLimit > 0:
-                dashboard_limit = float(car_state_sp.speedLimit)
+            dashboard_speed_limit = float(car_state_sp.speedLimit)
+            if dashboard_speed_limit > 0.0:
+                dashboard_limit = dashboard_speed_limit
                 cloudlog.debug(f"RTI: Dashboard speed limit: {dashboard_limit:.1f} m/s ({dashboard_limit * 2.237:.0f} mph)")
         except Exception as e:
             cloudlog.debug(f"RTI: Could not get speed limit from dashboard: {e}")
@@ -437,17 +440,24 @@ class RTIDaemon:
                                     cloudlog.warning(f"RTI POLICE RAW: {json.dumps(pa['alert']['raw_data'])}")
 
                             # Append to capture file
-                            try:
-                                existing_data = []
-                                if os.path.exists(police_capture_file):
-                                    with open(police_capture_file) as f:
-                                        existing_data = json.load(f)
-                                existing_data.extend(police_alerts)
-                                with open(police_capture_file, 'w') as f:
-                                    json.dump(existing_data, f, indent=2)
-                                cloudlog.warning(f"RTI: Saved {len(police_alerts)} police alerts to {police_capture_file}")
-                            except Exception as e:
-                                cloudlog.error(f"RTI: Failed to save police data: {e}")
+                            capture_dir = os.path.dirname(police_capture_file)
+                            if capture_dir and os.path.isdir(capture_dir):
+                                try:
+                                    existing_data = []
+                                    if os.path.exists(police_capture_file):
+                                        with open(police_capture_file) as f:
+                                            existing_data = json.load(f)
+                                    existing_data.extend(police_alerts)
+                                    with open(police_capture_file, 'w') as f:
+                                        json.dump(existing_data, f, indent=2)
+                                    cloudlog.warning(f"RTI: Saved {len(police_alerts)} police alerts to {police_capture_file}")
+                                except Exception as e:
+                                    cloudlog.error(f"RTI: Failed to save police data: {e}")
+                            else:
+                                cloudlog.debug(
+                                    "RTI: Skipping police capture file write; "
+                                    + f"missing directory '{capture_dir}'"
+                                )
 
                         # Only treat this fetch as "fresh" if the HTTP request actually succeeded.
                         # `get_traffic_alerts()` returns [] both for "no alerts" and for request errors,
@@ -483,11 +493,17 @@ class RTIDaemon:
 
             # Get current road name from map data
             current_road_name = None
+            current_road_segment = None
+            nearby_road_segments = None
             try:
                 map_data = self.sm['liveMapDataSP']
                 if map_data and hasattr(map_data, 'roadName') and map_data.roadName:
                     current_road_name = map_data.roadName
                     cloudlog.debug(f"RTI: Current road name from mapd: '{current_road_name}'")
+                if map_data and hasattr(map_data, 'currentRoadSegment'):
+                    current_road_segment = map_data.currentRoadSegment
+                if map_data and hasattr(map_data, 'nearbyRoadSegments'):
+                    nearby_road_segments = list(map_data.nearbyRoadSegments)
             except Exception as e:
                 cloudlog.debug(f"RTI: Could not get road name from map data: {e}")
 
@@ -501,6 +517,8 @@ class RTIDaemon:
                 current_heading_deg=self._get_current_heading_deg(),
                 posted_speed_limit=current_speed_limit,  # Pass actual posted speed limit
                 current_road_name=current_road_name,  # Pass current road name for street matching
+                current_road_segment=current_road_segment,
+                nearby_road_segments=nearby_road_segments,
             )
 
             # Update API status
@@ -513,6 +531,19 @@ class RTIDaemon:
         except Exception as e:
             cloudlog.error(f"RTI cycle error: {e}")
             self._last_processed_state = None
+
+    async def _process_cycle(self):
+        """Compatibility helper for single-shot tests and debug invocations."""
+        await self._process_cycle_async()
+
+        try:
+            last_state = getattr(self, '_last_processed_state', None)
+            if last_state is not None:
+                self._publish_rti_state(last_state)
+            else:
+                self._publish_offline_state()
+        except Exception as e:
+            cloudlog.error(f"RTI failed to publish compatibility cycle state: {e}")
 
     def _normalize_180(self, angle):
         """Normalize angle to [-180, 180] range."""

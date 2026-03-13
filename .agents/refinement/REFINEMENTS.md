@@ -206,3 +206,19 @@
 - **Diverges from user proposal:** no
 - **Files touched:** `cereal/log.capnp`, `common/params_keys.h`, `selfdrive/modeld/camera_offset_helper.py`, `selfdrive/modeld/lane_line_meta.py`, `selfdrive/modeld/fill_model_msg.py`, `selfdrive/modeld/modeld.py`, `sunnypilot/modeld/fill_model_msg.py`, `sunnypilot/modeld/modeld.py`, `sunnypilot/modeld_v2/camera_offset_helper.py`, `sunnypilot/modeld_v2/fill_model_msg.py`, `sunnypilot/modeld_v2/modeld.py`, `sunnypilot/modeld_v2/tests/test_camera_offset_helper.py`
 - **Notes:** Added a deterministic lane-center estimate from both lane markers, shared camera-offset application across stock/SNPE/tinygrad modeld paths, and a low-rate filtered auto-tuner gated by confidence, speed, blinkers, and low curvature to avoid hunting.
+
+### RTI Offline Hardening: Geometry Override + Directional Route Guard
+- **Date:** 2026-03-13
+- **Classification:** A
+- **Category:** Reliability
+- **Status:** applied
+- **Approval:** na (internal equivalent refinement during requested RTI bugfix work)
+- **User-visible change:** no direct workflow/UI change
+- **Behavior/semantics change:** yes (same-road adjudication is safer and more robust for route aliases)
+- **Concurrency/threading change:** no
+- **Bounded?** na
+- **Structured?** na
+- **Potential downstream load increase:** no
+- **Diverges from user proposal:** no
+- **Files touched:** `sunnypilot/rtid/threat_detector.py`, `sunnypilot/rtid/rtid.py`, `sunnypilot/rtid/tests/test_threat_detector.py`, `sunnypilot/rtid/tests/test_integration_flow.py`, `sunnypilot/rtid/tests/conftest.py`
+- **Notes:** Added a conservative geometry-based override for map/Waze naming mismatches, blocked opposite-carriageway false matches when generic route names omit direction tokens, restored one-shot daemon compatibility for RTI integration tests, and skipped dev-only police-capture writes when the device path is absent.

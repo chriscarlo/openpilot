@@ -72,24 +72,26 @@ class RTIController:
     def _load_user_params(self) -> None:
         """Load user-configured RTI parameters."""
         # Get forward slowdown range (when to activate RTI for threats ahead)
+        # Match ThreatDetector + offroad UI default of 0.75 miles when unset.
         forward_range = self.params.get("RTIForwardSlowdownRange")
         if forward_range:
             try:
                 self._threat_activation_distance = float(forward_range)
             except (ValueError, TypeError):
-                self._threat_activation_distance = 1609  # Default 1.0 miles
+                self._threat_activation_distance = 1207  # Default 0.75 miles
         else:
-            self._threat_activation_distance = 1609  # Default 1.0 miles
+            self._threat_activation_distance = 1207  # Default 0.75 miles
 
         # Get resume speed distance (when to stop slowing after passing threat)
+        # Match ThreatDetector + offroad UI default of 0.75 miles when unset.
         resume_distance = self.params.get("RTIResumeSpeedDistance")
         if resume_distance:
             try:
                 self._resume_speed_distance = float(resume_distance)
             except (ValueError, TypeError):
-                self._resume_speed_distance = 1609  # Default 1.0 miles
+                self._resume_speed_distance = 1207  # Default 0.75 miles
         else:
-            self._resume_speed_distance = 1609  # Default 1.0 miles
+            self._resume_speed_distance = 1207  # Default 0.75 miles
 
         # Get speed reduction settings
         speed_mode = self.params.get("RTISpeedReductionMode")

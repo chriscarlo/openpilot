@@ -147,6 +147,7 @@ def mock_params():
     with patch('sunnypilot.rtid.rtid.Params') as mock_params_class:
         mock_params_instance = MagicMock()
         mock_params_instance.get_bool.return_value = True  # RTI enabled by default
+        mock_params_instance.get.return_value = None
         mock_params_class.return_value = mock_params_instance
         yield mock_params_instance
 

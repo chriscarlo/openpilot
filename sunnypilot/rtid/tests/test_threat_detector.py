@@ -8,6 +8,7 @@ road matching, and safety-critical speed recommendations.
 
 import pytest
 from unittest.mock import patch
+from types import SimpleNamespace
 
 from sunnypilot.rtid.threat_detector import (
     ThreatDetector, GeoUtils, ThreatClusterer, RoadMatcher,
@@ -106,6 +107,18 @@ class TestThreatClusterer:
 class TestRoadMatcher:
     """Test road matching and direction determination."""
 
+    @staticmethod
+    def _segment(way_id, direction_deg, coords, road_class=2, max_speed=29.0, level=0):
+        centerline = [SimpleNamespace(latitude=lat, longitude=lon) for lat, lon in coords]
+        return SimpleNamespace(
+            wayId=way_id,
+            roadDirection=direction_deg,
+            centerline=centerline,
+            roadClass=road_class,
+            maxSpeed=max_speed,
+            levelSeparation=level,
+        )
+
     @pytest.fixture
     def road_matcher(self):
         return RoadMatcher()
@@ -189,6 +202,95 @@ class TestRoadMatcher:
         )
         assert not is_same
         assert conf <= 0.2
+
+    def test_placeholder_street_name_falls_back_to_distance(self, road_matcher):
+        ego_lat, ego_lon = 39.5309, -119.8138
+        threat_lat, threat_lon = 39.5310, -119.8139  # ~14m
+
+        is_same, conf = road_matcher.is_same_road(
+            ego_lat, ego_lon, threat_lat, threat_lon, 15.0,
+            ego_street="None", threat_street="US-50 W",
+        )
+        assert is_same
+        assert conf >= 0.3
+
+    def test_route_alias_matches_highway_name(self, road_matcher):
+        ego_lat, ego_lon = 39.5309, -119.8138
+        threat_lat, threat_lon = 39.5337, -119.8138  # ~311m
+
+        is_same, conf = road_matcher.is_same_road(
+            ego_lat, ego_lon, threat_lat, threat_lon, 30.0,
+            ego_street="Route 50", threat_street="US-50 W",
+        )
+        assert is_same
+        assert conf >= 0.7
+
+    def test_route_alias_rejects_opposite_direction_with_segment_heading(self, road_matcher):
+        ego_lat, ego_lon = 39.5309, -119.8138
+        threat_lat, threat_lon = 39.5310, -119.8138
+
+        current_segment = self._segment(
+            1001, 270.0,
+            [(39.5308, -119.8138), (39.5312, -119.8138)],
+            road_class=2,
+            max_speed=29.0,
+        )
+
+        is_same, conf = road_matcher.is_same_road(
+            ego_lat, ego_lon, threat_lat, threat_lon, 30.0,
+            ego_street="Route 50", threat_street="US-50 E",
+            ego_heading_deg=270.0,
+            current_road_segment=current_segment,
+            nearby_road_segments=[current_segment],
+        )
+        assert not is_same
+        assert conf <= 0.05
+
+    def test_geometry_override_accepts_same_corridor_street_mismatch(self, road_matcher):
+        ego_lat, ego_lon = 39.5309, -119.8138
+        threat_lat, threat_lon = 39.5310, -119.8138
+
+        current_segment = self._segment(
+            1001, 270.0,
+            [(39.5308, -119.8138), (39.5312, -119.8138)],
+            road_class=2,
+            max_speed=29.0,
+        )
+
+        is_same, conf = road_matcher.is_same_road(
+            ego_lat, ego_lon, threat_lat, threat_lon, 30.0,
+            ego_street="Lincoln Highway", threat_street="US-50 W",
+            current_road_segment=current_segment,
+            nearby_road_segments=[current_segment],
+        )
+        assert is_same
+        assert conf >= 0.8
+
+    def test_geometry_override_rejects_parallel_side_road(self, road_matcher):
+        ego_lat, ego_lon = 39.5309, -119.8138
+        threat_lat, threat_lon = 39.5310, -119.8135
+
+        current_segment = self._segment(
+            1001, 270.0,
+            [(39.5308, -119.8138), (39.5312, -119.8138)],
+            road_class=2,
+            max_speed=29.0,
+        )
+        frontage_segment = self._segment(
+            2002, 270.0,
+            [(39.5308, -119.8135), (39.5312, -119.8135)],
+            road_class=5,
+            max_speed=13.0,
+        )
+
+        is_same, conf = road_matcher.is_same_road(
+            ego_lat, ego_lon, threat_lat, threat_lon, 30.0,
+            ego_street="Lincoln Highway", threat_street="Frontage Rd",
+            current_road_segment=current_segment,
+            nearby_road_segments=[frontage_segment],
+        )
+        assert not is_same
+        assert conf <= 0.05
 
     def test_heading_gated_distance_fallback_rejects_side_street(self, road_matcher):
         # Without street names, heading gate should reject close lateral threats at driving speed.
