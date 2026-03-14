@@ -9,18 +9,19 @@ class CameraOffsetHelper:
   SMOOTH_ALPHA = 0.1
   MAX_TOTAL_OFFSET = 0.35
 
-  AUTO_TUNE_UPDATE_FRAMES = 20
+  AUTO_TUNE_UPDATE_FRAMES = 25
   AUTO_TUNE_INVALID_RESET_FRAMES = 60
   AUTO_TUNE_FILTER_RC = 3.0
   AUTO_TUNE_MIN_SPEED = 20.0
-  AUTO_TUNE_MAX_CURVATURE = 8e-4
+  AUTO_TUNE_SLIGHT_CURVATURE = 5e-4
+  AUTO_TUNE_CURVATURE_HYSTERESIS = 1e-4
   AUTO_TUNE_MIN_PROB = 0.6
   AUTO_TUNE_MIN_LANE_WIDTH = 2.8
   AUTO_TUNE_MAX_LANE_WIDTH = 4.8
-  AUTO_TUNE_DEADBAND = 0.02
+  AUTO_TUNE_DEADBAND = 0.016
   AUTO_TUNE_FULL_ERROR = 0.14
   AUTO_TUNE_STEP_GAIN = 0.2
-  AUTO_TUNE_MAX_STEP = 0.008
+  AUTO_TUNE_MAX_STEP = 0.0065
   AUTO_TUNE_MAX_OFFSET = 0.18
 
   def __init__(self, model_freq: float = 20.0):
@@ -30,6 +31,7 @@ class CameraOffsetHelper:
     self.actual_camera_offset = 0.0
     self._valid_frames = 0
     self._invalid_frames = 0
+    self._curve_hold_active = False
     self._center_filter = FirstOrderFilter(0.0, self.AUTO_TUNE_FILTER_RC, 1.0 / model_freq, initialized=False)
 
   def set_offset(self, offset: float):
@@ -45,6 +47,7 @@ class CameraOffsetHelper:
     self.auto_camera_offset = 0.0
     self._valid_frames = 0
     self._invalid_frames = 0
+    self._curve_hold_active = False
     self._center_filter.initialized = False
 
   @property
@@ -52,10 +55,32 @@ class CameraOffsetHelper:
     auto_offset = self.auto_camera_offset if self.auto_enabled else 0.0
     return float(np.clip(self.camera_offset + auto_offset, -self.MAX_TOTAL_OFFSET, self.MAX_TOTAL_OFFSET))
 
+  def _update_curve_hold_state(self, desired_curvature: float) -> bool:
+    if not math.isfinite(desired_curvature):
+      self._curve_hold_active = False
+      return False
+
+    abs_curvature = abs(desired_curvature)
+    hold_enter_curvature = self.AUTO_TUNE_SLIGHT_CURVATURE + self.AUTO_TUNE_CURVATURE_HYSTERESIS
+    hold_exit_curvature = max(0.0, self.AUTO_TUNE_SLIGHT_CURVATURE - self.AUTO_TUNE_CURVATURE_HYSTERESIS)
+
+    if self._curve_hold_active:
+      self._curve_hold_active = abs_curvature >= hold_exit_curvature
+    else:
+      self._curve_hold_active = abs_curvature >= hold_enter_curvature
+
+    return self._curve_hold_active
+
   def observe(self, center_y: float, center_prob: float, lane_width: float,
               center_valid: bool, v_ego: float, lat_active: bool,
               blinkers_active: bool, desired_curvature: float) -> None:
     if not self.auto_enabled:
+      return
+
+    if self._update_curve_hold_state(desired_curvature):
+      # Hold the current learned offset through anything more than a slight bend.
+      self._valid_frames = 0
+      self._invalid_frames = 0
       return
 
     valid = (
@@ -64,7 +89,6 @@ class CameraOffsetHelper:
       not blinkers_active and
       v_ego >= self.AUTO_TUNE_MIN_SPEED and
       math.isfinite(desired_curvature) and
-      abs(desired_curvature) <= self.AUTO_TUNE_MAX_CURVATURE and
       math.isfinite(center_y) and
       math.isfinite(center_prob) and
       math.isfinite(lane_width) and
