@@ -328,10 +328,10 @@ def update_vtsc_params(ctrl, *, force: bool = False) -> None:
 
   # Physics sigmoid knobs
   phys_base = getf("VisionTurnSpeedControlPhysicsBaseline", getattr(vtc_mod, "PHYSICS_D", 3.144734))
-  setattr(vtc_mod, "PHYSICS_D", clip(phys_base, 2.0, 4.0))
+  setattr(vtc_mod, "PHYSICS_D", clip(phys_base, 2.0, 6.5))
 
   phys_amp = getf("VisionTurnSpeedControlPhysicsAmplitude", getattr(vtc_mod, "PHYSICS_A", -1.1751))
-  setattr(vtc_mod, "PHYSICS_A", -abs(clip(abs(phys_amp), 0.2, 2.5)))
+  setattr(vtc_mod, "PHYSICS_A", -abs(clip(abs(phys_amp), 0.2, 5.0)))
 
   phys_steep = getf("VisionTurnSpeedControlPhysicsSteepness", getattr(vtc_mod, "PHYSICS_B", -2000.0))
   setattr(vtc_mod, "PHYSICS_B", -abs(clip(abs(phys_steep), 100.0, 1e5)))
@@ -343,7 +343,7 @@ def update_vtsc_params(ctrl, *, force: bool = False) -> None:
   setattr(vtc_mod, "PHYSICS_MIN_LAT_ACCEL", clip(phys_min_lat, 1.0, 3.0))
 
   phys_max_lat = getf("VisionTurnSpeedControlPhysicsMaxLatAccel", getattr(vtc_mod, "PHYSICS_MAX_LAT_ACCEL", 3.12))
-  setattr(vtc_mod, "PHYSICS_MAX_LAT_ACCEL", clip(phys_max_lat, 2.0, 4.0))
+  setattr(vtc_mod, "PHYSICS_MAX_LAT_ACCEL", clip(phys_max_lat, 2.0, 5.5))
 
   # Ensure cross-key constraint: min <= max
   try:

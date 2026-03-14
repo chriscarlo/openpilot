@@ -86,6 +86,56 @@ def _build_sparse_map_curvatures_left_curve(*, lat0: float, lon0: float) -> list
   return pts
 
 
+def _build_map_curvatures_left_then_right(*, lat0: float, lon0: float) -> list[dict]:
+  pts = []
+
+  def append_point(x_east: float, y_north: float, curvature: float) -> None:
+    la, lo = _latlon_from_local_en(lat0, lon0, x_east, y_north)
+    pts.append({"latitude": la, "longitude": lo, "curvature": float(curvature)})
+
+  for i in range(0, 10):
+    append_point(float(i * 6.0), 0.0, 0.0)
+
+  r_left = 48.0
+  k_left = 1.0 / r_left
+  x0 = 54.0
+  y0 = 0.0
+  for i in range(0, 26):
+    ang = (math.pi / 2.0) * (i / 25.0)
+    x = x0 + r_left * math.sin(ang)
+    y = y0 + r_left * (1.0 - math.cos(ang))
+    append_point(x, y, k_left)
+
+  x1 = x0 + r_left
+  y1 = y0 + r_left
+  for i in range(1, 8):
+    append_point(x1, y1 + float(i * 7.0), 0.0)
+
+  r_right = 56.0
+  k_right = 1.0 / r_right
+  xc = x1 + r_right
+  yc = y1 + 49.0
+  for i in range(0, 26):
+    ang = math.pi * (i / 25.0)
+    x = xc - r_right * math.cos(ang)
+    y = yc + r_right * math.sin(ang)
+    append_point(x, y, k_right)
+
+  return pts
+
+
+def _insert_midpoint_sample(points: list[dict], idx: int) -> list[dict]:
+  out = list(points)
+  p0 = out[idx]
+  p1 = out[idx + 1]
+  out.insert(idx + 1, {
+    "latitude": 0.5 * (float(p0["latitude"]) + float(p1["latitude"])),
+    "longitude": 0.5 * (float(p0["longitude"]) + float(p1["longitude"])),
+    "curvature": 0.5 * (float(p0["curvature"]) + float(p1["curvature"])),
+  })
+  return out
+
+
 def _make_sm(*, curvature: float = 0.0, confidence: float = 0.9, v_ego: float = 25.0) -> FakeSubMaster:
   model = make_model_v2(curvature=float(curvature), v_pred=float(max(0.1, v_ego)), confidence=float(confidence))
   return FakeSubMaster(
@@ -353,3 +403,103 @@ def test_vtsc_map_curve_preview_highlights_blinker_side_stub():
   assert len(stubs) == 1
   assert bool(stubs[0]["highlighted"])
   assert float(stubs[0]["points"][-1][1]) < -8.0
+
+
+def test_vtsc_map_curve_preview_builds_multiple_tile_previews():
+  p = Params()
+  p.put_bool("VisionTurnSpeedControl", True)
+  p.put_bool("MTSCLookaheadEnabled", True)
+
+  lat0, lon0 = 37.0, -122.0
+  p.put("MapCurvatures", json.dumps(_build_map_curvatures_left_then_right(lat0=lat0, lon0=lon0)))
+  p.put("LastGPSPosition", json.dumps({"latitude": lat0, "longitude": lon0, "bearing": 90.0}))
+
+  vtc = VisionTurnController(_MockCP())
+  sm = _make_sm(v_ego=20.0)
+
+  with patch("openpilot.sunnypilot.selfdrive.controls.lib.vision_turn_controller.time.time", lambda: 0.0), \
+       patch("openpilot.sunnypilot.selfdrive.controls.lib.vision_turn_controller.time.monotonic", lambda: 0.0):
+    vtc.update(sm, True, 20.0, 0.0, 40.0)
+
+  tiles = vtc.curve_preview_tiles
+  assert len(tiles) >= 2
+  assert [int(tile["direction"]) for tile in tiles[:2]] == [1, 2]
+  assert all(len(tile["points"]) >= 12 for tile in tiles[:2])
+
+  first_tile_pts = tiles[0]["points"]
+  second_tile_pts = tiles[1]["points"]
+  assert first_tile_pts[0] == pytest.approx((0.0, 0.0), abs=1e-6)
+  assert second_tile_pts[0] == pytest.approx((0.0, 0.0), abs=1e-6)
+  assert float(second_tile_pts[1][0]) > 0.5
+  assert abs(float(second_tile_pts[1][1])) < 1.5
+  assert max(float(pt[1]) for pt in first_tile_pts) > 6.0
+  assert min(float(pt[1]) for pt in second_tile_pts) < -6.0
+
+
+def test_vtsc_map_curve_preview_keeps_tile_geometry_static_while_distance_updates():
+  p = Params()
+  p.put_bool("VisionTurnSpeedControl", True)
+  p.put_bool("MTSCLookaheadEnabled", True)
+
+  lat0, lon0 = 37.0, -122.0
+  p.put("MapCurvatures", json.dumps(_build_map_curvatures_left_then_right(lat0=lat0, lon0=lon0)))
+  p.put("LastGPSPosition", json.dumps({"latitude": lat0, "longitude": lon0, "bearing": 90.0}))
+
+  vtc = VisionTurnController(_MockCP())
+  sm = _make_sm(v_ego=20.0)
+
+  with patch("openpilot.sunnypilot.selfdrive.controls.lib.vision_turn_controller.time.time", lambda: 0.0), \
+       patch("openpilot.sunnypilot.selfdrive.controls.lib.vision_turn_controller.time.monotonic", lambda: 0.0):
+    vtc.update(sm, True, 20.0, 0.0, 40.0)
+
+  first_tiles = vtc.curve_preview_tiles
+  assert len(first_tiles) >= 1
+  first_tile = first_tiles[0]
+
+  lat1, lon1 = _latlon_from_local_en(lat0, lon0, 12.0, 0.0)
+  p.put("LastGPSPosition", json.dumps({"latitude": lat1, "longitude": lon1, "bearing": 90.0}))
+
+  with patch("openpilot.sunnypilot.selfdrive.controls.lib.vision_turn_controller.time.time", lambda: 1.0), \
+       patch("openpilot.sunnypilot.selfdrive.controls.lib.vision_turn_controller.time.monotonic", lambda: 1.0):
+    vtc.update(sm, True, 20.0, 0.0, 40.0)
+
+  second_tiles = vtc.curve_preview_tiles
+  assert len(second_tiles) >= 1
+  second_tile = second_tiles[0]
+  assert int(second_tile["id"]) == int(first_tile["id"])
+  assert second_tile["points"] == first_tile["points"]
+  assert float(second_tile["distance_m"]) < float(first_tile["distance_m"])
+
+
+def test_vtsc_map_curve_preview_tile_ids_survive_harmless_map_resampling():
+  p = Params()
+  p.put_bool("VisionTurnSpeedControl", True)
+  p.put_bool("MTSCLookaheadEnabled", True)
+
+  lat0, lon0 = 37.0, -122.0
+  base_pts = _build_map_curvatures_left_then_right(lat0=lat0, lon0=lon0)
+  resampled_pts = _insert_midpoint_sample(base_pts, 3)
+  p.put("MapCurvatures", json.dumps(base_pts))
+  p.put("LastGPSPosition", json.dumps({"latitude": lat0, "longitude": lon0, "bearing": 90.0}))
+
+  vtc = VisionTurnController(_MockCP())
+  sm = _make_sm(v_ego=20.0)
+
+  with patch("openpilot.sunnypilot.selfdrive.controls.lib.vision_turn_controller.time.time", lambda: 0.0), \
+       patch("openpilot.sunnypilot.selfdrive.controls.lib.vision_turn_controller.time.monotonic", lambda: 0.0):
+    vtc.update(sm, True, 20.0, 0.0, 40.0)
+
+  first_tiles = vtc.curve_preview_tiles
+  assert len(first_tiles) >= 2
+  first_ids = [int(tile["id"]) for tile in first_tiles[:2]]
+  first_points = [tile["points"] for tile in first_tiles[:2]]
+
+  p.put("MapCurvatures", json.dumps(resampled_pts))
+  with patch("openpilot.sunnypilot.selfdrive.controls.lib.vision_turn_controller.time.time", lambda: 1.0), \
+       patch("openpilot.sunnypilot.selfdrive.controls.lib.vision_turn_controller.time.monotonic", lambda: 1.0):
+    vtc.update(sm, True, 20.0, 0.0, 40.0)
+
+  second_tiles = vtc.curve_preview_tiles
+  assert len(second_tiles) >= 2
+  assert [int(tile["id"]) for tile in second_tiles[:2]] == first_ids
+  assert [tile["points"] for tile in second_tiles[:2]] == first_points

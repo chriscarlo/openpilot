@@ -45,6 +45,7 @@ def main() -> None:
     lp = sm["longitudinalPlanSP"].longitudinalPlanSP
     vtsc = lp.visionTurnSpeedControl
     pts = list(vtsc.curvePreviewPoints)
+    tiles = list(vtsc.curvePreviewTiles)
 
     # Core fields
     valid = bool(vtsc.curvePreviewValid)
@@ -56,10 +57,11 @@ def main() -> None:
     severity = int(vtsc.curveSeverity)
 
     print(
-      "curvePreviewValid=%d pts=%d dir=%d sev=%d kappa_max=%s dist_m=%s t_s=%s v_mps=%s"
+      "curvePreviewValid=%d pts=%d tiles=%d dir=%d sev=%d kappa_max=%s dist_m=%s t_s=%s v_mps=%s"
       % (
         1 if valid else 0,
         len(pts),
+        len(tiles),
         direction,
         severity,
         _fmt_float(kappa, 5),
@@ -88,6 +90,38 @@ def main() -> None:
           _fmt_float(y1, 1),
         )
       )
+
+    if tiles:
+      tile = tiles[0]
+      tile_pts = list(tile.points)
+      print(
+        "  tile0 id=%d dir=%d sev=%d dist_m=%s t_s=%s v_mps=%s tile_pts=%d"
+        % (
+          int(tile.tileId),
+          int(tile.direction),
+          int(tile.severity),
+          _fmt_float(float(tile.distanceM), 1),
+          _fmt_float(float(tile.timeToS), 1),
+          _fmt_float(float(tile.advisorySpeedMps), 2),
+          len(tile_pts),
+        )
+      )
+      if tile_pts:
+        tile_xs = [float(p.xFwdM) for p in tile_pts]
+        tile_ys = [float(p.yLeftM) for p in tile_pts]
+        print(
+          "  tile0 x_fwd_m=[%s..%s] y_left_m=[%s..%s] first=(%s,%s) last=(%s,%s)"
+          % (
+            _fmt_float(min(tile_xs), 1),
+            _fmt_float(max(tile_xs), 1),
+            _fmt_float(min(tile_ys), 1),
+            _fmt_float(max(tile_ys), 1),
+            _fmt_float(tile_xs[0], 1),
+            _fmt_float(tile_ys[0], 1),
+            _fmt_float(tile_xs[-1], 1),
+            _fmt_float(tile_ys[-1], 1),
+          )
+        )
 
     if args.once:
       return

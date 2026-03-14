@@ -8,6 +8,7 @@
 #pragma once
 
 #include <chrono>
+#include <cstdint>
 #include <QPainter>
 #include <unordered_map>
 #include <string>
@@ -115,6 +116,22 @@ protected:
   int vtsc_copilot_curve_direction_ = 0;  // TurnDirection (unknown=0, left=1, right=2)
   int vtsc_copilot_curve_severity_ = 0;   // CurveSeverity (unknown=0, gentle=1, medium=2, tight=3)
   std::vector<QPointF> vtsc_copilot_curve_points_m_;
+  struct VTSCCoPilotTileState {
+    uint32_t id = 0;
+    float distance_m = 0.0f;
+    float time_to_s = 0.0f;
+    float advisory_speed_mps = 0.0f;
+    float max_curvature = 0.0f;
+    int direction = 0;
+    int severity = 0;
+    std::vector<QPointF> points_m;
+  };
+  std::vector<VTSCCoPilotTileState> vtsc_copilot_tiles_;
+  std::vector<VTSCCoPilotTileState> vtsc_copilot_prev_tiles_;
+  VTSCCoPilotTileState vtsc_copilot_exiting_tile_;
+  bool vtsc_copilot_exiting_tile_active_ = false;
+  float vtsc_copilot_stack_anim_progress_ = 1.0f;
+  float vtsc_copilot_exit_anim_progress_ = 1.0f;
   struct VTSCCoPilotBranchStubState {
     bool highlighted = false;
     std::vector<QPointF> points_m;
@@ -126,6 +143,8 @@ protected:
   float vtsc_copilot_ego_advance_m_ = 0.0f;
   std::chrono::steady_clock::time_point vtsc_copilot_last_draw_time_{};
   bool vtsc_copilot_last_draw_time_valid_ = false;
+  std::chrono::steady_clock::time_point vtsc_copilot_last_nonempty_tiles_time_{};
+  bool vtsc_copilot_last_nonempty_tiles_time_valid_ = false;
 
   struct VTSCCoPilotHudTuning {
     float curve_hold_new_dist_min_m = 30.0f;

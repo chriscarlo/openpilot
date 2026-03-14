@@ -270,3 +270,35 @@
 - **Diverges from user proposal:** no
 - **Files touched:** `sunnypilot/selfdrive/controls/lib/vision_turn_controller.py`, `sunnypilot/selfdrive/controls/lib/vision_turn_params.py`, `sunnypilot/selfdrive/controls/lib/tests/vtsc/harness.py`, `sunnypilot/selfdrive/controls/lib/tests/vtsc/test_scenarios.py`, `.agents/refinement/REFINEMENTS.md`
 - **Notes:** Kept the new low-speed learning high-end range on the controller instance instead of a mutable module-global, which preserved the requested live behavior while fixing an init-order overwrite bug and eliminating cross-instance leakage in tests.
+
+### VTSC Rally Tile Stability + Missing-Data Guard
+- **Date:** 2026-03-14
+- **Classification:** A
+- **Category:** Reliability
+- **Status:** applied
+- **Approval:** na (equivalent refinement during user-requested verification/refinement pass)
+- **User-visible change:** no intended UX redesign; prevents spurious tile churn/drop animations
+- **Behavior/semantics change:** yes (tile identity now survives harmless map resampling; HUD ignores very short empty tile-list gaps)
+- **Concurrency/threading change:** no
+- **Bounded?** na
+- **Structured?** na
+- **Potential downstream load increase:** no
+- **Diverges from user proposal:** no
+- **Files touched:** `sunnypilot/selfdrive/controls/lib/vision_turn_controller.py`, `selfdrive/ui/sunnypilot/qt/onroad/hud.cc`, `selfdrive/ui/sunnypilot/qt/onroad/hud.h`, `sunnypilot/selfdrive/controls/lib/tests/vtsc/test_map_curve_preview.py`, `.agents/refinement/REFINEMENTS.md`
+- **Notes:** Replaced sample-index-derived tile identity reuse with previous-tile matching by curve characteristics/distance so `curvePreviewTiles[*].tileId` stays stable when upstream sampling changes, and added a short HUD grace window so a transient empty publish does not look like the active turn was completed.
+
+### VTSC Tile HUD Tuning Surface Cleanup
+- **Date:** 2026-03-14
+- **Classification:** C
+- **Category:** Config/UI
+- **Status:** deferred
+- **Approval:** pending
+- **User-visible change:** yes (expert VTSC HUD tuning knobs/semantics would change)
+- **Behavior/semantics change:** yes
+- **Concurrency/threading change:** no
+- **Bounded?** na
+- **Structured?** na
+- **Potential downstream load increase:** no
+- **Diverges from user proposal:** yes (beyond requested visual redesign)
+- **Files touched:** none
+- **Notes:** The tile renderer no longer uses many legacy strip-map expert params in `VTSCCoPilotHudTuning`; a follow-up could prune or rename those knobs, but that changes the tuning/config surface and was intentionally left out of this pass.

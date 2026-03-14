@@ -122,6 +122,7 @@ class LongitudinalPlannerSP:
         active_cap=str(getattr(self.v_tsc, '_dbg_active_cap', '') or ''),
         curve_preview_valid=bool(self.v_tsc.curve_preview_valid),
         curve_preview_points=len(self.v_tsc.curve_preview_points),
+        curve_preview_tiles=len(self.v_tsc.curve_preview_tiles),
         curve_preview_branch_stubs=len(self.v_tsc.curve_preview_branch_stubs),
         curve_distance_m=float(self.v_tsc.curve_preview_distance_m),
         curve_time_to_s=float(self.v_tsc.curve_preview_time_to_s),
@@ -146,6 +147,7 @@ class LongitudinalPlannerSP:
             map_tail_reason=str(getattr(self.v_tsc, '_map_tail_reason', '') or ''),
             curve_preview_valid=bool(self.v_tsc.curve_preview_valid),
             curve_preview_points=len(self.v_tsc.curve_preview_points),
+            curve_preview_tiles=len(self.v_tsc.curve_preview_tiles),
             curve_preview_branch_stubs=len(self.v_tsc.curve_preview_branch_stubs),
             nearby_segments=int(nearby_segments),
             road_geometry_valid=road_geometry_valid,
@@ -236,6 +238,7 @@ class LongitudinalPlannerSP:
       preview_encode_t0 = time.monotonic()
       preview_encode_span = start_span(SPAN_PREVIEW_ENCODE)
       preview_pts_count = 0
+      preview_tile_count = 0
       preview_stub_count = 0
       try:
         visionTurnSpeedControl.curvePreviewValid = bool(self.v_tsc.curve_preview_valid)
@@ -272,6 +275,24 @@ class LongitudinalPlannerSP:
           for i, (x_fwd, y_left) in enumerate(pts):
             out_pts[i].xFwdM = float(x_fwd)
             out_pts[i].yLeftM = float(y_left)
+        tiles = self.v_tsc.curve_preview_tiles
+        preview_tile_count = len(tiles)
+        if tiles:
+          out_tiles = visionTurnSpeedControl.init('curvePreviewTiles', len(tiles))
+          for i, tile in enumerate(tiles):
+            out_tiles[i].tileId = int(tile.get('id', 0) or 0)
+            out_tiles[i].distanceM = float(tile.get('distance_m', 0.0) or 0.0)
+            out_tiles[i].timeToS = float(tile.get('time_to_s', 0.0) or 0.0)
+            out_tiles[i].direction = int(tile.get('direction', 0) or 0)
+            out_tiles[i].severity = int(tile.get('severity', 0) or 0)
+            out_tiles[i].maxCurvature = float(tile.get('max_curvature', 0.0) or 0.0)
+            out_tiles[i].advisorySpeedMps = float(tile.get('advisory_speed_mps', 0.0) or 0.0)
+            tile_pts = tile.get('points', [])
+            if tile_pts:
+              out_tile_pts = out_tiles[i].init('points', len(tile_pts))
+              for j, (x_fwd, y_left) in enumerate(tile_pts):
+                out_tile_pts[j].xFwdM = float(x_fwd)
+                out_tile_pts[j].yLeftM = float(y_left)
         branch_stubs = self.v_tsc.curve_preview_branch_stubs
         preview_stub_count = len(branch_stubs)
         if branch_stubs:
@@ -299,6 +320,7 @@ class LongitudinalPlannerSP:
             apex_exit_ready=bool(getattr(self.v_tsc, '_apex_exit_ready', False)),
             curve_preview_valid=bool(self.v_tsc.curve_preview_valid),
             curve_preview_points=int(preview_pts_count),
+            curve_preview_tiles=int(preview_tile_count),
             curve_preview_branch_stubs=int(preview_stub_count),
           )
         except Exception:

@@ -279,78 +279,109 @@ void HudRendererSP::updateState(const UIState &s) {
   if (!vtsc_copilot_hud_enabled_ || !s.sm) {
     vtsc_copilot_alpha_ = 0.0f;
     vtsc_copilot_curve_points_m_.clear();
+    vtsc_copilot_tiles_.clear();
+    vtsc_copilot_prev_tiles_.clear();
+    vtsc_copilot_exiting_tile_active_ = false;
+    vtsc_copilot_last_nonempty_tiles_time_valid_ = false;
     vtsc_copilot_branch_stubs_.clear();
     return;
   }
 
-  // Cache v_ego for ego-advance interpolation and speed-dependent lookahead.
+  // Cache v_ego for speed display and time-based metadata.
   try {
     if (s.sm->valid("carState")) {
       vtsc_copilot_v_ego_mps_ = (*s.sm)["carState"].getCarState().getVEgo();
     }
   } catch (const std::exception&) {}
 
-  // Grab road preview geometry — always accept updates, no kappa gating.
+  // Grab per-turn tiles from VTSC. The HUD should only render this published list.
+  std::vector<VTSCCoPilotTileState> new_tiles;
   try {
     if (s.sm->valid("longitudinalPlanSP")) {
       const auto lp_sp = (*s.sm)["longitudinalPlanSP"].getLongitudinalPlanSP();
       const auto vtsc = lp_sp.getVisionTurnSpeedControl();
 
       if (vtsc.getCurvePreviewValid()) {
-        std::vector<QPointF> new_pts;
-        std::vector<VTSCCoPilotBranchStubState> new_stubs;
-        auto pts = vtsc.getCurvePreviewPoints();
-        new_pts.reserve(static_cast<size_t>(pts.size()));
-        for (const auto &pt : pts) {
-          new_pts.emplace_back(pt.getXFwdM(), pt.getYLeftM());
-        }
-        auto stubs = vtsc.getCurvePreviewBranchStubs();
-        new_stubs.reserve(static_cast<size_t>(stubs.size()));
-        for (const auto &stub : stubs) {
-          VTSCCoPilotBranchStubState state;
-          state.highlighted = stub.getHighlighted();
-          auto stub_pts = stub.getPoints();
-          state.points_m.reserve(static_cast<size_t>(stub_pts.size()));
-          for (const auto &pt : stub_pts) {
+        auto tiles = vtsc.getCurvePreviewTiles();
+        new_tiles.reserve(static_cast<size_t>(tiles.size()));
+        for (const auto &tile : tiles) {
+          VTSCCoPilotTileState state;
+          state.id = tile.getTileId();
+          state.distance_m = tile.getDistanceM();
+          state.time_to_s = tile.getTimeToS();
+          state.advisory_speed_mps = tile.getAdvisorySpeedMps();
+          state.max_curvature = tile.getMaxCurvature();
+          state.direction = static_cast<int>(tile.getDirection());
+          state.severity = static_cast<int>(tile.getSeverity());
+
+          auto pts = tile.getPoints();
+          state.points_m.reserve(static_cast<size_t>(pts.size()));
+          for (const auto &pt : pts) {
             state.points_m.emplace_back(pt.getXFwdM(), pt.getYLeftM());
           }
           if (state.points_m.size() >= 2) {
-            new_stubs.push_back(std::move(state));
+            new_tiles.push_back(std::move(state));
           }
         }
-        if (new_pts.size() >= 3) {
-          // Detect whether geometry actually changed.  The producer throttles to
-          // ~5 Hz but the planner re-publishes the same points at 20 Hz.  Resetting
-          // ego-advance on every identical re-publish kills smooth interpolation.
-          bool geom_changed = (new_pts.size() != vtsc_copilot_curve_points_m_.size());
-          if (!geom_changed) {
-            constexpr float geom_eps_m = 0.05f;
-            const size_t mid = new_pts.size() / 2;
-            const size_t last_idx = new_pts.size() - 1;
-            for (size_t idx : {size_t(0), mid, last_idx}) {
-              if (std::abs(new_pts[idx].x() - vtsc_copilot_curve_points_m_[idx].x()) > geom_eps_m ||
-                  std::abs(new_pts[idx].y() - vtsc_copilot_curve_points_m_[idx].y()) > geom_eps_m) {
-                geom_changed = true;
-                break;
-              }
-            }
-          }
-          vtsc_copilot_curve_points_m_ = std::move(new_pts);
-          vtsc_copilot_branch_stubs_ = std::move(new_stubs);
-          if (geom_changed) {
-            vtsc_copilot_ego_advance_m_ = 0.0f;
-            vtsc_copilot_last_draw_time_valid_ = false;
-          }
-        }
-      } else {
-        vtsc_copilot_curve_points_m_.clear();
-        vtsc_copilot_branch_stubs_.clear();
       }
     }
   } catch (const std::exception&) {}
 
-  // Always visible when we have road geometry. No fade — instant on/off.
-  vtsc_copilot_alpha_ = (vtsc_copilot_curve_points_m_.size() >= 3) ? 1.0f : 0.0f;
+  const auto tiles_now = std::chrono::steady_clock::now();
+  if (!new_tiles.empty()) {
+    vtsc_copilot_last_nonempty_tiles_time_ = tiles_now;
+    vtsc_copilot_last_nonempty_tiles_time_valid_ = true;
+  } else if (!vtsc_copilot_tiles_.empty() && vtsc_copilot_last_nonempty_tiles_time_valid_) {
+    constexpr float kMissingTileHoldS = 0.35f;
+    const float empty_dt = std::chrono::duration<float>(tiles_now - vtsc_copilot_last_nonempty_tiles_time_).count();
+    if (empty_dt < kMissingTileHoldS) {
+      new_tiles = vtsc_copilot_tiles_;
+    }
+  }
+
+  auto same_tile_order = [](const auto &lhs, const auto &rhs) {
+    if (lhs.size() != rhs.size()) return false;
+    for (size_t i = 0; i < lhs.size(); ++i) {
+      if (lhs[i].id != rhs[i].id) return false;
+    }
+    return true;
+  };
+  auto contains_tile_id = [](const auto &tiles, uint32_t id) {
+    return std::any_of(tiles.begin(), tiles.end(), [id](const auto &tile) { return tile.id == id; });
+  };
+
+  if (!same_tile_order(new_tiles, vtsc_copilot_tiles_)) {
+    const uint32_t previous_bottom_id = vtsc_copilot_tiles_.empty() ? 0 : vtsc_copilot_tiles_.front().id;
+    if (previous_bottom_id != 0 && !contains_tile_id(new_tiles, previous_bottom_id)) {
+      vtsc_copilot_exiting_tile_ = vtsc_copilot_tiles_.front();
+      vtsc_copilot_exiting_tile_active_ = !vtsc_copilot_exiting_tile_.points_m.empty();
+      vtsc_copilot_exit_anim_progress_ = 0.0f;
+    }
+    vtsc_copilot_prev_tiles_ = vtsc_copilot_tiles_;
+    vtsc_copilot_tiles_ = std::move(new_tiles);
+    vtsc_copilot_stack_anim_progress_ = vtsc_copilot_prev_tiles_.empty() ? 1.0f : 0.0f;
+  } else {
+    vtsc_copilot_tiles_ = std::move(new_tiles);
+  }
+
+  if (!vtsc_copilot_tiles_.empty()) {
+    const auto &tile = vtsc_copilot_tiles_.front();
+    vtsc_copilot_curve_distance_m_ = tile.distance_m;
+    vtsc_copilot_curve_time_to_s_ = tile.time_to_s;
+    vtsc_copilot_curve_kappa_max_ = tile.max_curvature;
+    vtsc_copilot_curve_direction_ = tile.direction;
+    vtsc_copilot_curve_severity_ = tile.severity;
+    vtsc_target_speed_mps_ = tile.advisory_speed_mps;
+  } else {
+    vtsc_copilot_curve_distance_m_ = 0.0f;
+    vtsc_copilot_curve_time_to_s_ = 0.0f;
+    vtsc_copilot_curve_kappa_max_ = 0.0f;
+    vtsc_copilot_curve_direction_ = 0;
+    vtsc_copilot_curve_severity_ = 0;
+    vtsc_target_speed_mps_ = 0.0f;
+  }
+
+  vtsc_copilot_alpha_ = (!vtsc_copilot_tiles_.empty() || vtsc_copilot_exiting_tile_active_) ? 1.0f : 0.0f;
 }
 
 void HudRendererSP::draw(QPainter &p, const QRect &surface_rect) {
@@ -875,7 +906,7 @@ void HudRendererSP::drawCurveDirectionIcon(QPainter &p, const QRect &icon_rect, 
 }
 
 void HudRendererSP::drawVTSCCoPilotCurve(QPainter &p, const QRect &surface_rect) {
-  if (vtsc_copilot_curve_points_m_.size() < 2 || vtsc_copilot_alpha_ < 0.01f) {
+  if ((vtsc_copilot_tiles_.empty() && !vtsc_copilot_exiting_tile_active_) || vtsc_copilot_alpha_ < 0.01f) {
     return;
   }
 
@@ -885,376 +916,258 @@ void HudRendererSP::drawVTSCCoPilotCurve(QPainter &p, const QRect &surface_rect)
   p.save();
   p.setRenderHint(QPainter::Antialiasing, true);
 
-  const float kScale = std::max(0.5f, vtsc_copilot_tuning_.scale);
+  const float kScale = std::clamp(vtsc_copilot_tuning_.scale * 0.42f, 0.70f, 1.45f);
+  const auto now_tp = std::chrono::steady_clock::now();
+  float dt = 0.0f;
+  if (vtsc_copilot_last_draw_time_valid_) {
+    dt = std::min(std::chrono::duration<float>(now_tp - vtsc_copilot_last_draw_time_).count(), 0.10f);
+  }
+  vtsc_copilot_last_draw_time_ = now_tp;
+  vtsc_copilot_last_draw_time_valid_ = true;
 
-  // Widget bounding box — right third, bottom-aligned.
-  const int box_w = static_cast<int>(right_third.width() * 0.995f);
-  const int box_h = std::min(static_cast<int>(inner.height() * 0.875f), 950);
-  const int bottom_safe = static_cast<int>(vtsc_copilot_tuning_.bottom_safe_px_at_scale1 * kScale);
-  const int box_left = right_third.center().x() - box_w / 2;
-  const int box_top = std::max(inner.top(), inner.bottom() - bottom_safe - box_h + 1);
-  const QRect box(box_left, box_top, box_w, box_h);
-
-  // Full box for road rendering (no text labels).
-  const int pad = static_cast<int>(vtsc_copilot_tuning_.pad_px_at_scale1 * kScale);
-  const QRect curve_area(box.left() + pad, box.top() + pad, box.width() - 2 * pad, box.height() - 2 * pad);
-  if (curve_area.height() < 40 || curve_area.width() < 40) {
-    p.restore();
-    return;
+  if (vtsc_copilot_stack_anim_progress_ < 1.0f) {
+    vtsc_copilot_stack_anim_progress_ = std::min(1.0f, vtsc_copilot_stack_anim_progress_ + dt / 0.18f);
+  }
+  if (vtsc_copilot_exiting_tile_active_) {
+    vtsc_copilot_exit_anim_progress_ = std::min(1.0f, vtsc_copilot_exit_anim_progress_ + dt / 0.26f);
+    if (vtsc_copilot_exit_anim_progress_ >= 1.0f) {
+      vtsc_copilot_exiting_tile_active_ = false;
+    }
   }
 
-  // 360-degree feathered halo backdrop.
-  const float radius = 0.50f * std::min(static_cast<float>(box.width()), static_cast<float>(box.height()));
-  QRadialGradient vignette(box.center(), radius);
-  vignette.setColorAt(0.00, QColor::fromRgbF(0, 0, 0, 0.40));
-  vignette.setColorAt(0.55, QColor::fromRgbF(0, 0, 0, 0.14));
-  vignette.setColorAt(1.00, QColor::fromRgbF(0, 0, 0, 0.00));
+  auto ease_out = [](float t) {
+    t = std::clamp(t, 0.0f, 1.0f);
+    const float inv = 1.0f - t;
+    return 1.0f - inv * inv * inv;
+  };
+  auto ease_in = [](float t) {
+    t = std::clamp(t, 0.0f, 1.0f);
+    return t * t * t;
+  };
+  auto severity_text = [](int severity) -> QString {
+    switch (severity) {
+      case 3: return QStringLiteral("TIGHT");
+      case 2: return QStringLiteral("MEDIUM");
+      case 1: return QStringLiteral("GENTLE");
+      default: return QStringLiteral("CURVE");
+    }
+  };
+  auto direction_text = [](int direction) -> QString {
+    switch (direction) {
+      case 1: return QStringLiteral("LEFT");
+      case 2: return QStringLiteral("RIGHT");
+      default: return QStringLiteral("AHEAD");
+    }
+  };
+  auto slot_for_tile = [&](uint32_t id) -> int {
+    for (size_t i = 0; i < vtsc_copilot_prev_tiles_.size(); ++i) {
+      if (vtsc_copilot_prev_tiles_[i].id == id) {
+        return static_cast<int>(i);
+      }
+    }
+    return -1;
+  };
+  auto speed_text = [&](float speed_mps) -> QString {
+    const float display = std::max(0.0f, speed_mps) * (is_metric ? MS_TO_KPH : MS_TO_MPH);
+    return QString::number(static_cast<int>(std::round(display)));
+  };
+  const QString speed_unit = is_metric ? QStringLiteral("km/h") : QStringLiteral("mph");
+
+  const int bottom_safe = roundToInt(vtsc_copilot_tuning_.bottom_safe_px_at_scale1 * kScale) + roundToInt(12.0f * kScale);
+  const float active_h = 228.0f * kScale;
+  const float queued_h = 154.0f * kScale;
+  const float stack_step = 96.0f * kScale;
+  const float stack_w = std::min(static_cast<float>(right_third.width()) * 0.88f, 392.0f * kScale);
+  const float stack_left = static_cast<float>(right_third.center().x()) - stack_w * 0.5f;
+  const float active_bottom = static_cast<float>(inner.bottom()) - static_cast<float>(bottom_safe);
+  const int visible_count = std::min<int>(4, static_cast<int>(vtsc_copilot_tiles_.size()));
+  const float stack_top = active_bottom - active_h - std::max(0, visible_count - 1) * stack_step - 26.0f * kScale;
+  const QRectF ambient_rect(stack_left - 24.0f * kScale, stack_top, stack_w + 48.0f * kScale,
+                            active_h + std::max(0, visible_count - 1) * stack_step + 56.0f * kScale);
+
+  QRadialGradient ambient_glow(ambient_rect.center(), std::max(ambient_rect.width(), ambient_rect.height()) * 0.58f);
+  ambient_glow.setColorAt(0.00, QColor(245, 188, 92, 32));
+  ambient_glow.setColorAt(0.34, QColor(16, 20, 26, 34));
+  ambient_glow.setColorAt(1.00, QColor(0, 0, 0, 0));
   p.setPen(Qt::NoPen);
-  p.setBrush(vignette);
-  p.drawRect(box);
+  p.setBrush(ambient_glow);
+  p.drawEllipse(ambient_rect);
 
-  // --- Ego-advance: smooth scrolling between producer updates ---
-  {
-    const auto now_tp = std::chrono::steady_clock::now();
-    if (vtsc_copilot_last_draw_time_valid_) {
-      const float dt = std::chrono::duration<float>(now_tp - vtsc_copilot_last_draw_time_).count();
-      vtsc_copilot_ego_advance_m_ += vtsc_copilot_v_ego_mps_ * std::min(dt, 0.1f);
-    }
-    vtsc_copilot_last_draw_time_ = now_tp;
-    vtsc_copilot_last_draw_time_valid_ = true;
-  }
-  const float ego_adv = vtsc_copilot_ego_advance_m_;
-
-  // Fixed 10-second strip-map horizon.
-  // Keep the visual projection on a time axis so speed changes move geometry
-  // through the preview instead of zooming the whole ribbon in and out.
-  constexpr float kPreviewHorizonS = 10.0f;
-  const float projection_v_mps = std::max(3.0f, vtsc_copilot_v_ego_mps_);
-  const float lookahead_m = projection_v_mps * kPreviewHorizonS;
-
-  // --- Build ego-shifted, lookahead-clipped point set ---
-  std::vector<QPointF> pts_m;
-  pts_m.reserve(vtsc_copilot_curve_points_m_.size());
-  QPointF prev_raw;
-  bool have_prev = false;
-  for (const auto &pt : vtsc_copilot_curve_points_m_) {
-    const float xf_raw = static_cast<float>(pt.x());
-    const float yl = static_cast<float>(pt.y());
-    if (!std::isfinite(xf_raw) || !std::isfinite(yl)) { have_prev = false; continue; }
-    const float xf = xf_raw - ego_adv;
-    if (xf < 0.0f) {
-      prev_raw = QPointF(xf_raw, yl);
-      have_prev = true;
-      continue;
-    }
-    if (xf > lookahead_m) {
-      if (!pts_m.empty()) {
-        const auto &last = pts_m.back();
-        const float x_last = static_cast<float>(last.x());
-        const float y_last = static_cast<float>(last.y());
-        const float denom = xf - x_last;
-        if (std::abs(denom) > 1e-6f) {
-          const float frac = (lookahead_m - x_last) / denom;
-          pts_m.emplace_back(lookahead_m, y_last + frac * (yl - y_last));
-        }
-      }
-      break;
-    }
-    if (have_prev && pts_m.empty()) {
-      const float x_prev = static_cast<float>(prev_raw.x()) - ego_adv;
-      const float y_prev = static_cast<float>(prev_raw.y());
-      const float denom = xf - x_prev;
-      if (std::abs(denom) > 1e-6f) {
-        const float frac = -x_prev / denom;
-        pts_m.emplace_back(0.0f, y_prev + frac * (yl - y_prev));
-      }
-    }
-    have_prev = false;
-    pts_m.emplace_back(xf, yl);
-  }
-
-  if (pts_m.size() < 2) {
-    p.restore();
-    return;
-  }
-
-  // Anchor the road under the navigation arrow instead of re-centering the whole
-  // strip map each update. This keeps the preview stable while preserving the road's
-  // actual lateral shape ahead.
-  const float road_anchor_y = static_cast<float>(pts_m.front().y());
-
-  // Fixed-projection strip map: forward scale is time-based, and lateral span stays
-  // constant so speed changes do not rescale the ribbon.
-  constexpr float kRoadHalfWidthM = 3.2f;
-  constexpr float kLateralSpanM = 48.0f;
-
-  const float fwd_scale = static_cast<float>(curve_area.height()) / kPreviewHorizonS;
-  const float lat_scale = (0.47f * static_cast<float>(curve_area.width())) / kLateralSpanM;
-
-  auto toPx = [&](float x_fwd_m, float y_left_m) -> QPointF {
-    const float preview_t_s = x_fwd_m / projection_v_mps;
-    const float t = std::clamp(preview_t_s / kPreviewHorizonS, 0.0f, 1.0f);
-    const float persp = std::clamp(1.0f - 0.30f * t, 0.68f, 1.0f);
-    const float x_px = static_cast<float>(curve_area.center().x()) - (y_left_m - road_anchor_y) * lat_scale * persp;
-    const float y_px = static_cast<float>(curve_area.bottom()) - preview_t_s * fwd_scale;
-    return QPointF(x_px, y_px);
-  };
-
-  // Convert centerline to pixel coordinates.
-  std::vector<QPointF> px_pts;
-  px_pts.reserve(pts_m.size());
-  for (const auto &pt : pts_m) {
-    px_pts.emplace_back(toPx(static_cast<float>(pt.x()), static_cast<float>(pt.y())));
-  }
-
-  p.setClipRect(box);
-
-  auto buildShiftedPolyline = [&](const std::vector<QPointF> &src_pts_m) {
-    std::vector<QPointF> out;
-    if (src_pts_m.size() < 2) return out;
-
-    QPointF prev_raw;
-    bool have_prev = false;
-    for (const auto &pt : src_pts_m) {
-      const float xf_raw = static_cast<float>(pt.x());
-      const float yl = static_cast<float>(pt.y());
-      if (!std::isfinite(xf_raw) || !std::isfinite(yl)) {
-        have_prev = false;
-        continue;
-      }
-
-      const float xf = xf_raw - ego_adv;
-      if (xf < 0.0f) {
-        prev_raw = QPointF(xf_raw, yl);
-        have_prev = true;
-        continue;
-      }
-      if (xf > lookahead_m) {
-        if (!out.empty()) {
-          const auto &last = out.back();
-          const float x_last = static_cast<float>(last.x());
-          const float y_last = static_cast<float>(last.y());
-          const float denom = xf - x_last;
-          if (std::abs(denom) > 1e-6f) {
-            const float frac = (lookahead_m - x_last) / denom;
-            out.emplace_back(lookahead_m, y_last + frac * (yl - y_last));
-          }
-        }
-        break;
-      }
-      if (have_prev && out.empty()) {
-        const float x_prev = static_cast<float>(prev_raw.x()) - ego_adv;
-        const float y_prev = static_cast<float>(prev_raw.y());
-        const float denom = xf - x_prev;
-        if (std::abs(denom) > 1e-6f) {
-          const float frac = -x_prev / denom;
-          out.emplace_back(0.0f, y_prev + frac * (yl - y_prev));
-        }
-      }
-      have_prev = false;
-      out.emplace_back(xf, yl);
-    }
-    return out;
-  };
-
-  auto drawStubRibbon = [&](const std::vector<QPointF> &stub_src_pts_m, bool highlighted) {
-    const std::vector<QPointF> stub_pts_m = buildShiftedPolyline(stub_src_pts_m);
-    if (stub_pts_m.size() < 2) return;
-
-    std::vector<QPointF> stub_center_px, left_edge_px, right_edge_px;
-    stub_center_px.reserve(stub_pts_m.size());
-    left_edge_px.reserve(stub_pts_m.size());
-    right_edge_px.reserve(stub_pts_m.size());
-    const float stub_hw_m = kRoadHalfWidthM * (highlighted ? 0.80f : 0.66f);
-
-    for (size_t i = 0; i < stub_pts_m.size(); ++i) {
-      QPointF tangent;
-      if (i == 0) {
-        tangent = stub_pts_m[1] - stub_pts_m[0];
-      } else if (i == stub_pts_m.size() - 1) {
-        tangent = stub_pts_m[i] - stub_pts_m[i - 1];
-      } else {
-        tangent = stub_pts_m[i + 1] - stub_pts_m[i - 1];
-      }
-      float len = std::sqrt(tangent.x() * tangent.x() + tangent.y() * tangent.y());
-      if (len < 0.01f) len = 0.01f;
-
-      const float lnx = -tangent.y() / len;
-      const float lny =  tangent.x() / len;
-      const float xf = static_cast<float>(stub_pts_m[i].x());
-      const float yl = static_cast<float>(stub_pts_m[i].y());
-      stub_center_px.push_back(toPx(xf, yl));
-      left_edge_px.push_back(toPx(xf + lnx * stub_hw_m, yl + lny * stub_hw_m));
-      right_edge_px.push_back(toPx(xf - lnx * stub_hw_m, yl - lny * stub_hw_m));
+  auto draw_tile = [&](const VTSCCoPilotTileState &tile, const QRectF &rect, float opacity, bool active) {
+    if (rect.width() < 40.0f || rect.height() < 40.0f || tile.points_m.size() < 2 || opacity <= 0.01f) {
+      return;
     }
 
-    QPainterPath stub_surface;
-    stub_surface.moveTo(left_edge_px.front());
-    for (size_t i = 1; i < left_edge_px.size(); ++i) stub_surface.lineTo(left_edge_px[i]);
-    for (int i = static_cast<int>(right_edge_px.size()) - 1; i >= 0; --i) stub_surface.lineTo(right_edge_px[i]);
-    stub_surface.closeSubpath();
+    p.save();
+    p.setOpacity(opacity * vtsc_copilot_alpha_);
 
-    QLinearGradient stub_grad(stub_center_px.front(), stub_center_px.back());
-    if (highlighted) {
-      stub_grad.setColorAt(0.00, QColor(214, 164, 72, 0));
-      stub_grad.setColorAt(0.14, QColor(214, 164, 72, 110));
-      stub_grad.setColorAt(0.55, QColor(194, 150, 68, 116));
-      stub_grad.setColorAt(0.86, QColor(188, 145, 62, 44));
-      stub_grad.setColorAt(1.00, QColor(180, 140, 60, 0));
-    } else {
-      stub_grad.setColorAt(0.00, QColor(76, 82, 94, 0));
-      stub_grad.setColorAt(0.14, QColor(76, 82, 94, 78));
-      stub_grad.setColorAt(0.55, QColor(72, 78, 90, 76));
-      stub_grad.setColorAt(0.86, QColor(68, 74, 86, 24));
-      stub_grad.setColorAt(1.00, QColor(66, 72, 84, 0));
-    }
-    p.setBrush(stub_grad);
-    QLinearGradient stub_edge_grad(stub_center_px.front(), stub_center_px.back());
-    if (highlighted) {
-      stub_edge_grad.setColorAt(0.00, QColor(255, 226, 184, 0));
-      stub_edge_grad.setColorAt(0.18, QColor(255, 226, 184, 148));
-      stub_edge_grad.setColorAt(0.80, QColor(255, 226, 184, 102));
-      stub_edge_grad.setColorAt(1.00, QColor(255, 226, 184, 0));
-      p.setPen(QPen(QBrush(stub_edge_grad), 1.55 * kScale, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-    } else {
-      stub_edge_grad.setColorAt(0.00, QColor(210, 216, 228, 0));
-      stub_edge_grad.setColorAt(0.18, QColor(210, 216, 228, 56));
-      stub_edge_grad.setColorAt(0.80, QColor(210, 216, 228, 36));
-      stub_edge_grad.setColorAt(1.00, QColor(210, 216, 228, 0));
-      p.setPen(QPen(QBrush(stub_edge_grad), 1.15 * kScale, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-    }
-    p.drawPath(stub_surface);
+    const float radius = 22.0f * kScale;
+    const float shadow_offset = (active ? 12.0f : 9.0f) * kScale;
+    const float road_width = (active ? 15.5f : 12.0f) * kScale;
+    const QColor accent = active ? QColor(245, 188, 92, 255) : QColor(178, 188, 202, 255);
+    const QColor surface_top = active ? QColor(22, 28, 34, 238) : QColor(18, 23, 29, 224);
+    const QColor surface_bottom = active ? QColor(10, 13, 18, 232) : QColor(8, 11, 16, 216);
 
-    QPainterPath left_line, right_line;
-    left_line.moveTo(left_edge_px.front());
-    right_line.moveTo(right_edge_px.front());
-    for (size_t i = 1; i < left_edge_px.size(); ++i) left_line.lineTo(left_edge_px[i]);
-    for (size_t i = 1; i < right_edge_px.size(); ++i) right_line.lineTo(right_edge_px[i]);
-    p.setBrush(Qt::NoBrush);
-    p.drawPath(left_line);
-    p.drawPath(right_line);
-  };
+    QPainterPath tile_path;
+    tile_path.addRoundedRect(rect, radius, radius);
 
-  for (const auto &stub : vtsc_copilot_branch_stubs_) {
-    drawStubRibbon(stub.points_m, stub.highlighted);
-  }
-
-  // --- Road surface polygon: perspective-varying width, gradient fill ---
-  // Render a filled road surface instead of a centerline-only stroke.
-  // Edge offsets are computed in METER space and mapped through toPx so that
-  // perspective is handled naturally — no self-intersection even on tight onramps.
-  {
-    // Road half-width in meters — must match kRoadHalfWidthM used in auto-fit above.
-    // ~3m half = 6m total ≈ 1.5 lanes — visible but won't self-intersect
-    // (even the tightest onramp has radius ~30m >> 3m).
-    const float road_hw_m = kRoadHalfWidthM;
-
-    std::vector<QPointF> left_edge_px, right_edge_px;
-    left_edge_px.reserve(pts_m.size());
-    right_edge_px.reserve(pts_m.size());
-
-    for (size_t i = 0; i < pts_m.size(); i++) {
-      // Tangent in meter space via central differences.
-      QPointF tangent;
-      if (i == 0) {
-        tangent = (pts_m.size() > 1) ? (pts_m[1] - pts_m[0]) : QPointF(1.0, 0.0);
-      } else if (i == pts_m.size() - 1) {
-        tangent = pts_m[i] - pts_m[i - 1];
-      } else {
-        tangent = pts_m[i + 1] - pts_m[i - 1];
-      }
-      float len = std::sqrt(tangent.x() * tangent.x() + tangent.y() * tangent.y());
-      if (len < 0.01f) len = 0.01f;
-
-      // Left perpendicular in ego-local (x=fwd, y=left): (-dy, dx) / len.
-      const float lnx = -tangent.y() / len;
-      const float lny =  tangent.x() / len;
-
-      const float xf = static_cast<float>(pts_m[i].x());
-      const float yl = static_cast<float>(pts_m[i].y());
-
-      left_edge_px.push_back(toPx(xf + lnx * road_hw_m, yl + lny * road_hw_m));
-      right_edge_px.push_back(toPx(xf - lnx * road_hw_m, yl - lny * road_hw_m));
-    }
-
-    // Build the road surface as a raw polygon (no Catmull-Rom on edges —
-    // splines overshoot catastrophically on tight bends).
-    QPainterPath road_surface;
-    if (!left_edge_px.empty()) {
-      road_surface.moveTo(left_edge_px.front());
-      for (size_t i = 1; i < left_edge_px.size(); i++) {
-        road_surface.lineTo(left_edge_px[i]);
-      }
-      for (int i = static_cast<int>(right_edge_px.size()) - 1; i >= 0; --i) {
-        road_surface.lineTo(right_edge_px[i]);
-      }
-      road_surface.closeSubpath();
-    }
-
-    // Fill with vertical gradient — opaque at ego, fading to transparent at horizon.
-    QLinearGradient road_grad(px_pts.front(), px_pts.back());
-    road_grad.setColorAt(0.00, QColor(56, 60, 70, 0));
-    road_grad.setColorAt(0.08, QColor(56, 60, 70, 98));
-    road_grad.setColorAt(0.24, QColor(54, 58, 68, 172));
-    road_grad.setColorAt(0.62, QColor(50, 55, 65, 128));
-    road_grad.setColorAt(0.88, QColor(46, 51, 60, 34));
-    road_grad.setColorAt(1.00, QColor(44, 49, 58, 0));
     p.setPen(Qt::NoPen);
-    p.setBrush(road_grad);
-    p.drawPath(road_surface);
+    p.setBrush(QColor(0, 0, 0, active ? 92 : 72));
+    p.drawPath(tile_path.translated(0.0f, shadow_offset));
 
-    // Edge lines (raw polylines — no spline to avoid overshoot).
-    QPainterPath left_line, right_line;
-    if (!left_edge_px.empty()) {
-      left_line.moveTo(left_edge_px.front());
-      for (size_t i = 1; i < left_edge_px.size(); i++) left_line.lineTo(left_edge_px[i]);
-    }
-    if (!right_edge_px.empty()) {
-      right_line.moveTo(right_edge_px.front());
-      for (size_t i = 1; i < right_edge_px.size(); i++) right_line.lineTo(right_edge_px[i]);
-    }
+    QLinearGradient tile_grad(rect.topLeft(), rect.bottomLeft());
+    tile_grad.setColorAt(0.00, surface_top);
+    tile_grad.setColorAt(0.70, surface_bottom);
+    tile_grad.setColorAt(1.00, QColor(5, 8, 12, active ? 238 : 220));
+    p.setBrush(tile_grad);
+    p.drawPath(tile_path);
 
-    QPainterPath center_line;
-    if (!px_pts.empty()) {
-      center_line.moveTo(px_pts.front());
-      for (size_t i = 1; i < px_pts.size(); i++) center_line.lineTo(px_pts[i]);
-    }
-
-    // Edge glow.
-    QLinearGradient edge_glow_grad(px_pts.front(), px_pts.back());
-    edge_glow_grad.setColorAt(0.00, QColor(255, 255, 255, 0));
-    edge_glow_grad.setColorAt(0.12, QColor(255, 255, 255, 12));
-    edge_glow_grad.setColorAt(0.82, QColor(255, 255, 255, 10));
-    edge_glow_grad.setColorAt(1.00, QColor(255, 255, 255, 0));
-    p.setPen(QPen(QBrush(edge_glow_grad), 5.0 * kScale, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    QPen border_pen(QColor(255, 255, 255, active ? 34 : 22), 1.4f * kScale);
     p.setBrush(Qt::NoBrush);
-    p.drawPath(left_line);
-    p.drawPath(right_line);
+    p.setPen(border_pen);
+    p.drawPath(tile_path);
 
-    // Edge lines proper.
-    QLinearGradient edge_line_grad(px_pts.front(), px_pts.back());
-    edge_line_grad.setColorAt(0.00, QColor(255, 255, 255, 0));
-    edge_line_grad.setColorAt(0.16, QColor(255, 255, 255, 68));
-    edge_line_grad.setColorAt(0.82, QColor(255, 255, 255, 54));
-    edge_line_grad.setColorAt(1.00, QColor(255, 255, 255, 0));
-    p.setPen(QPen(QBrush(edge_line_grad), 1.5 * kScale, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-    p.drawPath(left_line);
-    p.drawPath(right_line);
+    QLinearGradient accent_grad(rect.left(), rect.top(), rect.right(), rect.top());
+    accent_grad.setColorAt(0.00, QColor(accent.red(), accent.green(), accent.blue(), active ? 0 : 0));
+    accent_grad.setColorAt(0.22, QColor(accent.red(), accent.green(), accent.blue(), active ? 196 : 68));
+    accent_grad.setColorAt(0.80, QColor(accent.red(), accent.green(), accent.blue(), active ? 128 : 28));
+    accent_grad.setColorAt(1.00, QColor(accent.red(), accent.green(), accent.blue(), 0));
+    QRectF accent_bar(rect.left() + 18.0f * kScale, rect.top() + 12.0f * kScale,
+                      rect.width() - 36.0f * kScale, 3.0f * kScale);
+    p.fillRect(accent_bar, accent_grad);
 
-    QLinearGradient lane_grad(px_pts.front(), px_pts.back());
-    lane_grad.setColorAt(0.00, QColor(255, 255, 255, 0));
-    lane_grad.setColorAt(0.18, QColor(255, 255, 255, 74));
-    lane_grad.setColorAt(0.80, QColor(255, 255, 255, 62));
-    lane_grad.setColorAt(1.00, QColor(255, 255, 255, 0));
-    QPen lane_pen(QBrush(lane_grad), std::max(1.0, 1.15 * kScale), Qt::DashLine, Qt::RoundCap, Qt::RoundJoin);
-    lane_pen.setDashPattern({6.0 * kScale, 8.0 * kScale});
-    p.setPen(lane_pen);
-    p.drawPath(center_line);
+    QRectF glyph_rect = active
+      ? rect.adjusted(22.0f * kScale, 26.0f * kScale, -22.0f * kScale, -70.0f * kScale)
+      : rect.adjusted(20.0f * kScale, 24.0f * kScale, -20.0f * kScale, -34.0f * kScale);
+    glyph_rect.setHeight(std::max(static_cast<float>(glyph_rect.height()), 28.0f * kScale));
+
+    float fwd_max = 18.0f;
+    float lat_max = 0.0f;
+    for (const auto &pt : tile.points_m) {
+      fwd_max = std::max(fwd_max, static_cast<float>(pt.x()));
+      lat_max = std::max(lat_max, std::abs(static_cast<float>(pt.y())));
+    }
+    const float lat_extent = std::max(4.5f, lat_max * 0.82f);
+    const float horiz_span = glyph_rect.width() * (active ? 0.38f : 0.34f);
+    const float usable_h = std::max(static_cast<float>(glyph_rect.height()) - 8.0f * kScale, 16.0f * kScale);
+
+    auto to_px = [&](const QPointF &pt) -> QPointF {
+      const float t = std::clamp(static_cast<float>(pt.x()) / fwd_max, 0.0f, 1.0f);
+      const float eased_t = std::pow(t, 0.92f);
+      const float x_px = static_cast<float>(glyph_rect.center().x()) - (static_cast<float>(pt.y()) / lat_extent) * horiz_span;
+      const float y_px = static_cast<float>(glyph_rect.bottom()) - eased_t * usable_h;
+      return QPointF(x_px, y_px);
+    };
+
+    std::vector<QPointF> glyph_pts;
+    glyph_pts.reserve(tile.points_m.size());
+    for (const auto &pt : tile.points_m) {
+      glyph_pts.push_back(to_px(pt));
+    }
+
+    QPainterPath road_path;
+    road_path.moveTo(glyph_pts.front());
+    for (size_t i = 1; i < glyph_pts.size(); ++i) {
+      road_path.lineTo(glyph_pts[i]);
+    }
+
+    QLinearGradient road_grad(glyph_pts.front(), glyph_pts.back());
+    road_grad.setColorAt(0.00, QColor(255, 255, 255, 0));
+    road_grad.setColorAt(0.14, QColor(255, 255, 255, active ? 238 : 212));
+    road_grad.setColorAt(0.82, QColor(255, 255, 255, active ? 232 : 200));
+    road_grad.setColorAt(1.00, QColor(255, 255, 255, 0));
+
+    QLinearGradient glow_grad(glyph_pts.front(), glyph_pts.back());
+    glow_grad.setColorAt(0.00, QColor(255, 255, 255, 0));
+    glow_grad.setColorAt(0.16, QColor(255, 255, 255, active ? 74 : 52));
+    glow_grad.setColorAt(0.84, QColor(255, 255, 255, active ? 56 : 40));
+    glow_grad.setColorAt(1.00, QColor(255, 255, 255, 0));
+
+    p.setPen(QPen(QColor(0, 0, 0, active ? 110 : 88), road_width + 9.0f * kScale, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    p.drawPath(road_path.translated(0.0f, 4.5f * kScale));
+    p.setPen(QPen(QBrush(glow_grad), road_width + 7.0f * kScale, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    p.drawPath(road_path);
+    p.setPen(QPen(QBrush(road_grad), road_width, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    p.drawPath(road_path);
+    p.setPen(QPen(QColor(255, 255, 255, active ? 224 : 192), std::max(1.2f, 2.1f * kScale), Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    p.setOpacity(opacity * vtsc_copilot_alpha_ * (active ? 0.36f : 0.26f));
+    p.drawPath(road_path);
+    p.setOpacity(opacity * vtsc_copilot_alpha_);
+
+    const QString title = QString("%1 %2").arg(severity_text(tile.severity), direction_text(tile.direction));
+    const QString distance = formatDistance(std::max(0.0f, tile.distance_m));
+    const QString eta = tile.time_to_s > 0.05f ? QString("%1s").arg(tile.time_to_s, 0, 'f', tile.time_to_s >= 10.0f ? 0 : 1)
+                                               : QStringLiteral("NOW");
+
+    p.setPen(QColor(accent.red(), accent.green(), accent.blue(), active ? 255 : 220));
+    p.setFont(InterFont(roundToInt((active ? 20.0f : 17.0f) * kScale), QFont::DemiBold));
+    p.drawText(QRectF(rect.left() + 22.0f * kScale, rect.top() + 18.0f * kScale,
+                      rect.width() - 44.0f * kScale, 28.0f * kScale),
+               Qt::AlignLeft | Qt::AlignVCenter, title);
+
+    p.setPen(QColor(228, 234, 242, active ? 228 : 192));
+    p.setFont(InterFont(roundToInt((active ? 18.0f : 16.0f) * kScale), QFont::DemiBold));
+    p.drawText(QRectF(rect.left() + 22.0f * kScale, rect.top() + 18.0f * kScale,
+                      rect.width() - 44.0f * kScale, 28.0f * kScale),
+               Qt::AlignRight | Qt::AlignVCenter, eta);
+
+    if (active) {
+      p.setPen(QColor(232, 237, 244, 220));
+      p.setFont(InterFont(roundToInt(18.0f * kScale), QFont::DemiBold));
+      p.drawText(QRectF(rect.left() + 22.0f * kScale, rect.bottom() - 42.0f * kScale,
+                        rect.width() * 0.48f, 22.0f * kScale),
+                 Qt::AlignLeft | Qt::AlignVCenter, distance);
+
+      p.setPen(QColor(255, 255, 255, 246));
+      p.setFont(InterFont(roundToInt(34.0f * kScale), QFont::Bold));
+      p.drawText(QRectF(rect.right() - 132.0f * kScale, rect.bottom() - 58.0f * kScale,
+                        88.0f * kScale, 34.0f * kScale),
+                 Qt::AlignRight | Qt::AlignVCenter, speed_text(tile.advisory_speed_mps));
+      p.setPen(QColor(214, 221, 230, 200));
+      p.setFont(InterFont(roundToInt(16.0f * kScale), QFont::DemiBold));
+      p.drawText(QRectF(rect.right() - 126.0f * kScale, rect.bottom() - 31.0f * kScale,
+                        112.0f * kScale, 18.0f * kScale),
+                 Qt::AlignRight | Qt::AlignVCenter, speed_unit);
+    } else {
+      p.setPen(QColor(224, 229, 236, 176));
+      p.setFont(InterFont(roundToInt(15.0f * kScale), QFont::DemiBold));
+      p.drawText(QRectF(rect.left() + 22.0f * kScale, rect.bottom() - 30.0f * kScale,
+                        rect.width() - 44.0f * kScale, 18.0f * kScale),
+                 Qt::AlignLeft | Qt::AlignVCenter, distance);
+    }
+
+    p.restore();
+  };
+
+  const float shift_eased = ease_out(vtsc_copilot_stack_anim_progress_);
+  for (size_t i = 0; i < vtsc_copilot_tiles_.size() && i < 4; ++i) {
+    const auto &tile = vtsc_copilot_tiles_[i];
+    const int previous_slot = slot_for_tile(tile.id);
+    const float start_slot = previous_slot >= 0 ? static_cast<float>(previous_slot) : static_cast<float>(i) + 0.40f;
+    const float display_slot = start_slot + (static_cast<float>(i) - start_slot) * shift_eased;
+    const float depth = std::clamp(display_slot, 0.0f, 3.0f);
+    const float width_scale = 1.0f - 0.06f * depth;
+    const float height_scale = 1.0f - 0.08f * depth;
+    const float tile_h = (i == 0 ? active_h : queued_h) * height_scale;
+    const float tile_w = stack_w * width_scale;
+    const float tile_bottom = active_bottom - display_slot * stack_step;
+    const QRectF tile_rect(stack_left + 0.5f * (stack_w - tile_w), tile_bottom - tile_h, tile_w, tile_h);
+    const float opacity = (i == 0 ? 1.0f : std::max(0.34f, 0.88f - 0.16f * depth));
+    draw_tile(tile, tile_rect, opacity, i == 0);
   }
 
-  // --- Classic navigation arrow at the road origin ---
-  if (!px_pts.empty()) {
-    drawVTSCCoPilotNavArrow(p, toPx(0.0f, road_anchor_y), 6.5f * kScale);
+  if (vtsc_copilot_exiting_tile_active_ && vtsc_copilot_exiting_tile_.points_m.size() >= 2) {
+    const float exit_t = ease_in(vtsc_copilot_exit_anim_progress_);
+    const float drop_distance = 140.0f * kScale;
+    const float tile_bottom = active_bottom + exit_t * drop_distance;
+    const QRectF exit_rect(stack_left, tile_bottom - active_h, stack_w, active_h);
+
+    p.save();
+    p.translate(exit_rect.center());
+    p.rotate(-3.5f * exit_t);
+    p.translate(-exit_rect.center());
+    draw_tile(vtsc_copilot_exiting_tile_, exit_rect, 1.0f - exit_t, true);
+    p.restore();
   }
 
   p.restore();

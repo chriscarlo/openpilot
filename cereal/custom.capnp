@@ -175,6 +175,7 @@ struct LongitudinalPlanSP @0xf35cc4560bbf6ec2 {
     windingContextScore @22 :Float32;
     windingContextConfidence @23 :Float32;
     windingContextSource @24 :WindingContextSource;
+    curvePreviewTiles @25 :List(CurvePreviewTile);  # ordered nearest-first; tile-local (entry-up) geometry
 
     struct StripMapPoint {
       xFwdM @0 :Float32;
@@ -184,6 +185,17 @@ struct LongitudinalPlanSP @0xf35cc4560bbf6ec2 {
     struct StripMapBranchStub {
       highlighted @0 :Bool;  # emphasized when a matching blinker indicates intended turn side
       points @1 :List(StripMapPoint);  # ego-local (x forward, y left)
+    }
+
+    struct CurvePreviewTile {
+      tileId @0 :UInt32;               # stable across updates while the same curve region remains active
+      distanceM @1 :Float32;           # distance from ego to curve start (m)
+      timeToS @2 :Float32;             # estimated time from ego to curve start (s)
+      direction @3 :TurnDirection;
+      severity @4 :CurveSeverity;
+      maxCurvature @5 :Float32;        # peak abs curvature within this tile's curve region (1/m)
+      advisorySpeedMps @6 :Float32;    # min safe speed across the curve region (m/s)
+      points @7 :List(StripMapPoint);  # tile-local path points; origin at tile entry, x forward, y left
     }
 
     enum TurnDirection {

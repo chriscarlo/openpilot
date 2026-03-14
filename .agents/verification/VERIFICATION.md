@@ -611,3 +611,29 @@ Results:
 
 Environment notes:
 - The audit/refinement pass localized the new high-end range knob to the controller instance, which removed cross-instance leakage in tests while preserving the requested runtime behavior.
+
+### VTSC rally tile HUD verification + refinement pass (2026-03-14)
+Commands run:
+```bash
+cd /projects/chauffeur/data/openpilot
+PYTHONPATH=$PWD .venv/bin/pytest \
+  sunnypilot/selfdrive/controls/lib/tests/vtsc/test_map_curve_preview.py \
+  sunnypilot/selfdrive/controls/lib/tests/vtsc/test_pipeline_integration.py -q
+
+PYTHONPATH=$PWD .venv/bin/pytest sunnypilot/selfdrive/controls/lib/tests/vtsc -q
+
+scons -j"$(nproc)" selfdrive/ui/sunnypilot/qt/onroad/hud.o
+
+scons -j"$(nproc)"
+PATH=$PWD/.venv/bin:$PATH scons -j"$(nproc)"
+```
+Results:
+- Targeted preview/publisher tests: passed (`17 passed`)
+- Broader VTSC suite: passed (`123 passed`)
+- HUD object build: passed
+- Plain-shell repo-wide `scons`: failed because `cythonize` was not on `PATH`
+- `.venv`-backed repo-wide `scons`: progressed further, then failed on missing panda firmware toolchain (`arm-none-eabi-gcc`)
+
+Interpretation:
+- The touched VTSC/HUD paths are verified by the passing VTSC controller/planner suite and the targeted HUD build.
+- Repo-wide default `scons` is not fully runnable in this host environment without the embedded panda toolchain.

@@ -3,9 +3,11 @@
 ## High-Level Flow
 
 1. `mapd` computes upcoming curvature geometry from OSM and stores it in the `MapCurvatures` Param (JSON).
-2. VTSC reads that map curvature input and builds a *preview polyline* in ego-frame.
+2. VTSC reads that map curvature input and builds both:
+   - a legacy preview polyline in ego-frame (`curvePreviewPoints`) for compatibility/debugging
+   - a per-turn tile list (`curvePreviewTiles`) with geometry normalized into each tile's entry-up frame for the HUD
 3. The longitudinal planner publishes the preview fields on the `longitudinalPlanSP` service.
-4. The Sunnypilot onroad HUD renders the preview polyline (and only renders it; no new curve computation in HUD).
+4. The Sunnypilot onroad HUD renders the published tile list (and only renders it; no new curve computation in HUD).
 
 Keep the HUD “dumb”: if you need different geometry, fix VTSC/mapd, then publish different `curvePreviewPoints`.
 
@@ -27,13 +29,22 @@ Keep the HUD “dumb”: if you need different geometry, fix VTSC/mapd, then pub
 Read-only from the HUD’s perspective:
 
 - `curvePreviewValid` (bool)
-- `curveDistanceM` (float32): distance to curve-start marker (meters, forward)
-- `curveTimeToS` (float32): estimated time until curve-start marker
-- `curveMaxCurvature` (float32): used for “more than slight” gating (HUD-side)
-- `curveDirection` (enum): optional metadata
-- `curveSeverity` (enum): optional metadata
-- `curvePreviewPoints` (list of points): ego-frame polyline points
-  - Each point: `xFwdM` and `yLeftM`
+- `curvePreviewTiles` (list): ordered nearest-first
+  - `tileId`
+  - `distanceM`
+  - `timeToS`
+  - `direction`
+  - `severity`
+  - `maxCurvature`
+  - `advisorySpeedMps`
+  - `points` (tile-local path points; `xFwdM`, `yLeftM`)
+- Legacy/debug fields still available:
+  - `curveDistanceM`
+  - `curveTimeToS`
+  - `curveMaxCurvature`
+  - `curveDirection`
+  - `curveSeverity`
+  - `curvePreviewPoints`
 
 ## Quick Debug Commands
 
@@ -45,9 +56,9 @@ Read-only from the HUD’s perspective:
 ## Common Failure Modes
 
 - `curvePreviewValid=0`: VTSC isn’t producing preview geometry (often `MapCurvatures` missing/stale).
-- `pts<3`: preview is “valid” but empty/undersampled; fix the producer, not the HUD.
+- `tiles=0`: legacy road polyline may still exist, but the HUD intentionally hides when there are no upcoming turn tiles.
+- `tile_pts<2`: tile exists but is undersampled/invalid; fix the producer, not the HUD.
 - HUD gating hides it: check `KAPPA_SHOW_MIN`/`KAPPA_HOLD_MIN` in `hud.cc`.
 - Geometry is fine but “looks wrong”: verify coordinate convention:
   - `xFwdM` should be forward meters (>=0)
   - `yLeftM` should be positive-left, negative-right
-

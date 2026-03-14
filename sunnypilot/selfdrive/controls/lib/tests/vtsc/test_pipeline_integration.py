@@ -194,6 +194,66 @@ def test_longitudinal_plan_sp_publishes_vtsc_velocity(planner_sp):
   assert vtsc_pub == pytest.approx(float(planner_sp.v_tsc.v_turn), abs=1e-6)
 
 
+def test_longitudinal_plan_sp_publishes_curve_preview_tiles(planner_sp):
+  class _FakePM:
+    def __init__(self):
+      self.sent = {}
+    def send(self, name, msg) -> None:
+      self.sent[name] = msg
+
+  planner_sp.v_tsc._curve_preview_valid = True
+  planner_sp.v_tsc._curve_preview_tiles = [
+    {
+      'id': 0x00020007,
+      'distance_m': 42.0,
+      'time_to_s': 2.1,
+      'direction': 1,
+      'severity': 3,
+      'max_curvature': 0.021,
+      'advisory_speed_mps': 13.4,
+      'points': [(0.0, 0.0), (8.0, 0.4), (16.0, 2.1), (24.0, 6.5)],
+    },
+    {
+      'id': 0x0009000F,
+      'distance_m': 126.0,
+      'time_to_s': 6.3,
+      'direction': 2,
+      'severity': 2,
+      'max_curvature': 0.011,
+      'advisory_speed_mps': 19.8,
+      'points': [(0.0, 0.0), (10.0, -0.2), (20.0, -1.8), (30.0, -4.4)],
+    },
+  ]
+
+  from .pipeline_harness import FakeSubMaster, make_model_v2, make_radar_state, make_car_state, make_car_control
+  sm_last = FakeSubMaster(
+    data={
+      'modelV2': make_model_v2(curvature=0.0, v_pred=20.0, confidence=0.95),
+      'radarState': make_radar_state(lead_d_rel_m=None),
+      'carState': make_car_state(gas_pressed=False),
+      'carControl': make_car_control(long_active=True),
+      'controlsState': SimpleNamespace(),
+      'controlsStateSP': SimpleNamespace(),
+    },
+    valid={'modelV2': True, 'radarState': True},
+  )
+
+  pm = _FakePM()
+  planner_sp.publish_longitudinal_plan_sp(sm_last, pm)
+  vtsc = pm.sent['longitudinalPlanSP'].longitudinalPlanSP.visionTurnSpeedControl
+
+  assert len(vtsc.curvePreviewTiles) == 2
+  assert int(vtsc.curvePreviewTiles[0].tileId) == 0x00020007
+  assert float(vtsc.curvePreviewTiles[0].distanceM) == pytest.approx(42.0, abs=1e-6)
+  assert float(vtsc.curvePreviewTiles[0].timeToS) == pytest.approx(2.1, abs=1e-6)
+  assert str(vtsc.curvePreviewTiles[0].direction) == 'left'
+  assert str(vtsc.curvePreviewTiles[1].direction) == 'right'
+  assert str(vtsc.curvePreviewTiles[0].severity) == 'tight'
+  assert len(vtsc.curvePreviewTiles[0].points) == 4
+  assert float(vtsc.curvePreviewTiles[0].points[0].xFwdM) == pytest.approx(0.0, abs=1e-6)
+  assert float(vtsc.curvePreviewTiles[1].points[-1].yLeftM) == pytest.approx(-4.4, abs=1e-6)
+
+
 def test_longitudinal_plan_sp_publishes_winding_context(planner_sp):
   class _FakePM:
     def __init__(self):
