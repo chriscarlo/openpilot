@@ -222,3 +222,19 @@
 - **Diverges from user proposal:** no
 - **Files touched:** `sunnypilot/rtid/threat_detector.py`, `sunnypilot/rtid/rtid.py`, `sunnypilot/rtid/tests/test_threat_detector.py`, `sunnypilot/rtid/tests/test_integration_flow.py`, `sunnypilot/rtid/tests/conftest.py`
 - **Notes:** Added a conservative geometry-based override for map/Waze naming mismatches, blocked opposite-carriageway false matches when generic route names omit direction tokens, restored one-shot daemon compatibility for RTI integration tests, and skipped dev-only police-capture writes when the device path is absent.
+
+### VTSC Planner Timing Harness: Neutral Effective Curve-Phase Semantics
+- **Date:** 2026-03-13
+- **Classification:** A
+- **Category:** Test Reliability
+- **Status:** applied
+- **Approval:** na (internal equivalent refinement during requested VTSC calibration/timing work)
+- **User-visible change:** no
+- **Behavior/semantics change:** no runtime change; test harness only
+- **Concurrency/threading change:** no
+- **Bounded?** na
+- **Structured?** na
+- **Potential downstream load increase:** no
+- **Diverges from user proposal:** no
+- **Files touched:** `sunnypilot/selfdrive/controls/lib/tests/vtsc/test_longitudinal_planner_vtsc_map_timing.py`, `.agents/refinement/REFINEMENTS.md`
+- **Notes:** Added a raw-to-effective helper so planner-backed VTSC timing tests pin neutral effective curve timing explicitly instead of relying on the stale raw `0.0` pre-baseline assumption.

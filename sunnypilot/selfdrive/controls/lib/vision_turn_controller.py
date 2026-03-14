@@ -36,6 +36,7 @@ from .vtsc_map_strategy import (
   WindingRoadContext,
   classify_winding_road_context,
   compute_map_cap_candidate,
+  effective_curve_phase_offset_s,
   evaluate_map_strategy,
   normalize_map_strategy,
   resolve_winding_behavior_profile,
@@ -694,6 +695,26 @@ PHYSICS_MAX_LAT_ACCEL = 3.90  # raised to permit 70 mph at k=0.004 (was 3.12 →
 LOW_SPEED_BIAS_MPH = 5.0         # +speed boost at tight curves (tapers to 0 by END_MPH)
 LOW_SPEED_BIAS_END_MPH = 55.0    # taper covers up to ~55 mph base speed (was 50.0)
 
+# Low-speed envelope calibration. This stays centered on the existing sigmoid and only applies
+# a small bounded modifier in the low-speed target-speed band where steering authority tends to
+# be the real limit.
+LOW_SPEED_CALIB_TARGET_START_MPH = 10.0
+LOW_SPEED_CALIB_TARGET_FULL_MIN_MPH = 15.0
+LOW_SPEED_CALIB_TARGET_FULL_MAX_MPH = 35.0
+LOW_SPEED_CALIB_TARGET_END_MPH = 40.0
+LOW_SPEED_CALIB_MIN_CURVATURE = 0.0015
+LOW_SPEED_CALIB_MIN_CAP_DELTA_MPS = 0.5
+LOW_SPEED_CALIB_MAX_RELAX = 0.04
+LOW_SPEED_CALIB_MAX_TIGHTEN = 0.08
+LOW_SPEED_CALIB_RELAX_RATE_PER_S = 0.006
+LOW_SPEED_CALIB_TIGHTEN_RATE_PER_S = 0.014
+LOW_SPEED_CALIB_DECAY_RATE_PER_S = 0.005
+LOW_SPEED_CALIB_HEADROOM_TAU_S = 0.75
+LOW_SPEED_CALIB_RELAX_OUTPUT_MAX = 0.45
+LOW_SPEED_CALIB_TIGHTEN_OUTPUT_MIN = 0.82
+LOW_SPEED_CALIB_TRACKING_RELAX_RATIO_MAX = 0.10
+LOW_SPEED_CALIB_TRACKING_TIGHTEN_RATIO_MIN = 0.22
+
 # ===== Hidden-turn early deceleration trigger (occlusion-only, sub-65 mph) =====
 # Allows jerk-limited early braking when a short-horizon physics deficit is provably large
 # despite a transiently positive visible-margin condition.
@@ -760,13 +781,18 @@ def _q_curve_multiplier(abs_curvature_meters: float) -> float:
             return clip(q, 0.5, 1.5)
     return clip(pts[-1][1], 0.5, 1.5)
 
-def curvature_to_speed(abs_curvature_meters: float) -> float:
+def curvature_to_speed(abs_curvature_meters: float, *, low_speed_lat_accel_scale: float = 1.0) -> float:
     """FIXED: Calculates target speed (m/s) directly from curvature with NO SCALING HACK"""
     if abs_curvature_meters < 1e-7:  # Handle straight roads
         return MAX_SPEED_DEFAULT
 
     # Get safe lateral acceleration using tuned sigmoid
     safe_lat_accel = _physics_based_lateral_acceleration(abs_curvature_meters)
+    try:
+        lat_accel_scale = clip(float(low_speed_lat_accel_scale), 0.75, 1.25)
+    except Exception:
+        lat_accel_scale = 1.0
+    safe_lat_accel *= lat_accel_scale
 
     # Calculate speed using physics formula v = sqrt(a / k) with CONSISTENT curvature
     try:
@@ -1102,6 +1128,22 @@ class VisionTurnController:
     self._lead_headway_s = 99.0
     self._occl_lead_bypass_active = False
 
+    # Low-speed envelope calibration state. Positive values relax the low-speed sigmoid slightly,
+    # negative values tighten it. The state evolves slowly from repeated steering headroom evidence.
+    self._low_speed_calibration_state = 0.0
+    self._low_speed_calibration_headroom_ema = 0.0
+    self._low_speed_calibration_last_update_s = 0.0
+    self._dbg_low_speed_calibration_active = False
+    self._dbg_low_speed_calibration_reason = "init"
+    self._dbg_low_speed_calibration_headroom = 0.0
+    self._dbg_low_speed_calibration_headroom_ema = 0.0
+    self._dbg_low_speed_calibration_scale = 1.0
+    self._dbg_low_speed_calibration_curve_mph = 0.0
+    self._dbg_low_speed_calibration_output = 0.0
+    self._dbg_low_speed_calibration_gap = 0.0
+    self._dbg_low_speed_calibration_gap_ratio = 0.0
+    self._dbg_low_speed_calibration_saturated = False
+
     # Telemetry/debug controls
     self._dbg_enabled = False
     self._dbg_emit_interval_s = 0.5  # ~2 Hz
@@ -1304,14 +1346,16 @@ class VisionTurnController:
       k_model = float(getattr(self, '_dbg_k_model', 0.0))
       k_steer = float(getattr(self, '_dbg_k_steer', 0.0))
       steer_fallback_active = bool(getattr(self, '_dbg_steer_fallback_active', False))
+      curve_phase_offset_raw = float(getattr(self, '_curve_phase_offset_s', 0.0))
+      curve_phase_offset_effective = float(effective_curve_phase_offset_s(curve_phase_offset_raw))
       k_est = float(getattr(self._occlusion_state, 'est_curvature', 0.0))
       k_vis = float(getattr(self._occlusion_state, 'last_valid_curvature', 0.0))
       is_easing = bool(getattr(self, '_is_easing', False))
       abs_cr = float(getattr(self, '_abs_curvature_rate', 0.0))
       # Speeds
-      v_phys_base = float(min(v_cruise, curvature_to_speed(max(1e-8, float(getattr(self, '_filtered_curvature', 0.0))))))
-      v_occ = float(curvature_to_speed(max(1e-8, k_est)))
-      v_vis = float(curvature_to_speed(max(1e-8, k_vis)))
+      v_phys_base = float(min(v_cruise, self._curve_speed(max(1e-8, float(getattr(self, '_filtered_curvature', 0.0))))))
+      v_occ = float(self._curve_speed(max(1e-8, k_est)))
+      v_vis = float(self._curve_speed(max(1e-8, k_vis)))
       raw = float(getattr(self, '_dbg_target_raw', 0.0))
       final = float(getattr(self, '_dbg_target_final', raw))
       # Occlusion gating
@@ -1384,6 +1428,16 @@ class VisionTurnController:
       overshoot_left = int(getattr(self, '_fov_overshoot_left', 0))
       cap_hold_active = bool(getattr(self, '_dbg_vturn_hold_active', False))
       cap_hold_min = float(getattr(self, '_dbg_vturn_hold_min', 0.0) or 0.0)
+      low_speed_calibration_active = bool(getattr(self, '_dbg_low_speed_calibration_active', False))
+      low_speed_calibration_reason = str(getattr(self, '_dbg_low_speed_calibration_reason', '') or '')
+      low_speed_calibration_headroom = float(getattr(self, '_dbg_low_speed_calibration_headroom', 0.0) or 0.0)
+      low_speed_calibration_headroom_ema = float(getattr(self, '_dbg_low_speed_calibration_headroom_ema', 0.0) or 0.0)
+      low_speed_calibration_scale = float(getattr(self, '_dbg_low_speed_calibration_scale', 1.0) or 1.0)
+      low_speed_calibration_curve_mph = float(getattr(self, '_dbg_low_speed_calibration_curve_mph', 0.0) or 0.0)
+      low_speed_calibration_output = float(getattr(self, '_dbg_low_speed_calibration_output', 0.0) or 0.0)
+      low_speed_calibration_gap = float(getattr(self, '_dbg_low_speed_calibration_gap', 0.0) or 0.0)
+      low_speed_calibration_gap_ratio = float(getattr(self, '_dbg_low_speed_calibration_gap_ratio', 0.0) or 0.0)
+      low_speed_calibration_saturated = bool(getattr(self, '_dbg_low_speed_calibration_saturated', False))
       return {
         'v': v_ego, 'cruise': v_cruise, 'lead': lead, 'hw': hw,
         'conf': conf, 'vision_status': self._vision_status_str(),
@@ -1447,6 +1501,17 @@ class VisionTurnController:
         'psi_vis': psi_vis, 'psi_thresh': psi_thresh, 'ttfov_s': ttfov, 'psi_fov_rad': psi_fov, 'psi_margin_rad': psi_margin,
         'occlusion_reason': occl_reason, 'occl_on_cnt': occl_on, 'occl_off_cnt': occl_off, 'onset_boost_left': boost_left, 'overshoot_left': overshoot_left,
         'cap_hold_active': cap_hold_active, 'cap_hold_min': cap_hold_min,
+        'low_speed_calibration_active': low_speed_calibration_active,
+        'low_speed_calibration_reason': low_speed_calibration_reason,
+        'low_speed_calibration_headroom': low_speed_calibration_headroom,
+        'low_speed_calibration_headroom_ema': low_speed_calibration_headroom_ema,
+        'low_speed_calibration_state': float(getattr(self, '_low_speed_calibration_state', 0.0) or 0.0),
+        'low_speed_calibration_scale': low_speed_calibration_scale,
+        'low_speed_calibration_curve_mph': low_speed_calibration_curve_mph,
+        'low_speed_calibration_output': low_speed_calibration_output,
+        'low_speed_calibration_gap': low_speed_calibration_gap,
+        'low_speed_calibration_gap_ratio': low_speed_calibration_gap_ratio,
+        'low_speed_calibration_saturated': low_speed_calibration_saturated,
         # κ-bias diagnostics
         'onset_bias_active': bool(getattr(self, '_dbg_onset_bias_active', False)),
         'onset_gate_reason': getattr(self, '_dbg_onset_gate_reason', None),
@@ -1458,6 +1523,8 @@ class VisionTurnController:
         'double_cap_guard': bool(getattr(self, '_dbg_double_cap_guard', False)),
         'pre_cap_target': float(getattr(self, '_pre_cap_target_speed', 0.0)),
         # Phase-offset diagnostics
+        'curve_phase_offset_s': curve_phase_offset_raw,
+        'curve_phase_offset_effective_s': curve_phase_offset_effective,
         'curve_sample_idx': int(getattr(self, '_curve_sample_idx', 0)),
         'overshoot_trigger_in_s': float(getattr(self, '_overshoot_trigger_in_s', 0.0)),
         'overshoot_cap_active': bool(getattr(self, '_overshoot_cap_active', False)),
@@ -1685,6 +1752,211 @@ class VisionTurnController:
     self._is_decelerating_for_curve = False
     self._v_turn_release_shape_active = False
     self._clear_winding_behavior_profile()
+
+  @staticmethod
+  def _low_speed_calibration_taper(target_speed_mph: float) -> float:
+    speed_mph = float(target_speed_mph)
+    if speed_mph <= float(LOW_SPEED_CALIB_TARGET_START_MPH):
+      return 0.0
+    if speed_mph < float(LOW_SPEED_CALIB_TARGET_FULL_MIN_MPH):
+      return float((speed_mph - float(LOW_SPEED_CALIB_TARGET_START_MPH)) /
+                   max(1e-3, float(LOW_SPEED_CALIB_TARGET_FULL_MIN_MPH - LOW_SPEED_CALIB_TARGET_START_MPH)))
+    if speed_mph <= float(LOW_SPEED_CALIB_TARGET_FULL_MAX_MPH):
+      return 1.0
+    if speed_mph < float(LOW_SPEED_CALIB_TARGET_END_MPH):
+      return float((float(LOW_SPEED_CALIB_TARGET_END_MPH) - speed_mph) /
+                   max(1e-3, float(LOW_SPEED_CALIB_TARGET_END_MPH - LOW_SPEED_CALIB_TARGET_FULL_MAX_MPH)))
+    return 0.0
+
+  def _low_speed_calibration_scale(self, abs_curvature_meters: float) -> float:
+    try:
+      kappa = float(max(1e-8, abs_curvature_meters))
+    except Exception:
+      return 1.0
+    try:
+      base_speed_mph = float(curvature_to_speed(kappa)) * CV.MS_TO_MPH
+    except Exception:
+      return 1.0
+    taper = float(self._low_speed_calibration_taper(base_speed_mph))
+    if taper <= 0.0:
+      return 1.0
+    state = float(getattr(self, '_low_speed_calibration_state', 0.0) or 0.0)
+    return float(clip(1.0 + taper * state, 1.0 - float(LOW_SPEED_CALIB_MAX_TIGHTEN), 1.0 + float(LOW_SPEED_CALIB_MAX_RELAX)))
+
+  def _curve_speed(self, abs_curvature_meters: float) -> float:
+    return float(curvature_to_speed(
+      abs_curvature_meters,
+      low_speed_lat_accel_scale=self._low_speed_calibration_scale(abs_curvature_meters),
+    ))
+
+  def _read_lateral_feedback(self, sm) -> dict | None:
+    controls_state = _sm_get_optional(sm, 'controlsState')
+    if controls_state is None:
+      return None
+
+    try:
+      desired_curvature = abs(float(getattr(controls_state, 'desiredCurvature', 0.0) or 0.0))
+    except Exception:
+      desired_curvature = 0.0
+    try:
+      actual_curvature = abs(float(getattr(controls_state, 'curvature', 0.0) or 0.0))
+    except Exception:
+      actual_curvature = 0.0
+
+    state = None
+    try:
+      lateral_state = getattr(controls_state, 'lateralControlState', None)
+      which = lateral_state.which() if lateral_state is not None and hasattr(lateral_state, 'which') else None
+      state = getattr(lateral_state, which) if which else None
+    except Exception:
+      state = None
+
+    try:
+      output = abs(float(getattr(state, 'output', 0.0) or 0.0))
+    except Exception:
+      output = 0.0
+    try:
+      saturated = bool(getattr(state, 'saturated', False))
+    except Exception:
+      saturated = False
+    try:
+      active = bool(getattr(state, 'active', True))
+    except Exception:
+      active = True
+
+    return {
+      'active': bool(active),
+      'desired_curvature': float(desired_curvature),
+      'actual_curvature': float(actual_curvature),
+      'tracking_gap': float(abs(desired_curvature - actual_curvature)),
+      'output': float(output),
+      'saturated': bool(saturated),
+    }
+
+  def _update_low_speed_calibration(self, sm, *, reference_curvature: float) -> None:
+    try:
+      now_s = float(getattr(time, 'monotonic', time.time)())
+    except Exception:
+      now_s = time.time()
+
+    last_s = float(getattr(self, '_low_speed_calibration_last_update_s', 0.0) or 0.0)
+    dt = 0.05 if last_s <= 0.0 else float(clip(now_s - last_s, 0.01, 0.25))
+    self._low_speed_calibration_last_update_s = now_s
+
+    feedback = self._read_lateral_feedback(sm)
+    self._dbg_low_speed_calibration_active = False
+    self._dbg_low_speed_calibration_reason = "decay_no_feedback"
+    self._dbg_low_speed_calibration_headroom = 0.0
+    self._dbg_low_speed_calibration_output = 0.0
+    self._dbg_low_speed_calibration_gap = 0.0
+    self._dbg_low_speed_calibration_gap_ratio = 0.0
+    self._dbg_low_speed_calibration_saturated = False
+
+    scale_curvature = float(reference_curvature)
+    if feedback is None:
+      raw_score = 0.0
+      curve_basis_speed_mph = 0.0
+      taper = 0.0
+      relevant = False
+    else:
+      feedback_curvature = max(
+        float(reference_curvature),
+        float(feedback['desired_curvature']),
+        float(feedback['actual_curvature']),
+      )
+      scale_curvature = float(feedback_curvature)
+      try:
+        curve_basis_speed_mph = float(curvature_to_speed(max(1e-8, feedback_curvature))) * CV.MS_TO_MPH
+      except Exception:
+        curve_basis_speed_mph = 0.0
+      taper = float(self._low_speed_calibration_taper(curve_basis_speed_mph))
+      target_cap = float(min(self._v_cruise_setpoint, curvature_to_speed(max(1e-8, feedback_curvature))))
+      relevant = bool(
+        bool(self._is_enabled) and
+        bool(self._op_enabled) and
+        bool(feedback['active']) and
+        (feedback_curvature >= float(LOW_SPEED_CALIB_MIN_CURVATURE)) and
+        (taper > 0.0) and
+        ((float(self._v_cruise_setpoint) - target_cap) >= float(LOW_SPEED_CALIB_MIN_CAP_DELTA_MPS))
+      )
+
+      gap_ratio = float(feedback['tracking_gap']) / max(float(feedback['desired_curvature']), float(LOW_SPEED_CALIB_MIN_CURVATURE))
+      relax_score = 0.0
+      tighten_score = 0.0
+
+      if relevant:
+        if bool(feedback['saturated']):
+          tighten_score = 1.0
+          self._dbg_low_speed_calibration_reason = "tighten_saturated"
+        else:
+          relax_effort = clip(
+            (float(LOW_SPEED_CALIB_RELAX_OUTPUT_MAX) - float(feedback['output'])) /
+            max(1e-3, float(LOW_SPEED_CALIB_RELAX_OUTPUT_MAX)),
+            0.0, 1.0,
+          )
+          relax_tracking = clip(
+            (float(LOW_SPEED_CALIB_TRACKING_RELAX_RATIO_MAX) - gap_ratio) /
+            max(1e-3, float(LOW_SPEED_CALIB_TRACKING_RELAX_RATIO_MAX)),
+            0.0, 1.0,
+          )
+          relax_score = float(relax_effort * relax_tracking)
+
+          tighten_effort = clip(
+            (float(feedback['output']) - float(LOW_SPEED_CALIB_TIGHTEN_OUTPUT_MIN)) /
+            max(1e-3, 1.0 - float(LOW_SPEED_CALIB_TIGHTEN_OUTPUT_MIN)),
+            0.0, 1.0,
+          )
+          tighten_tracking = clip(
+            (gap_ratio - float(LOW_SPEED_CALIB_TRACKING_TIGHTEN_RATIO_MIN)) /
+            max(1e-3, 1.0 - float(LOW_SPEED_CALIB_TRACKING_TIGHTEN_RATIO_MIN)),
+            0.0, 1.0,
+          )
+          tighten_score = float(max(tighten_effort, tighten_tracking))
+
+          if tighten_tracking >= max(tighten_effort, relax_score) and tighten_tracking > 0.0:
+            self._dbg_low_speed_calibration_reason = "tighten_tracking"
+          elif tighten_effort > max(relax_score, 0.0):
+            self._dbg_low_speed_calibration_reason = "tighten_effort"
+          elif relax_score > 0.0:
+            self._dbg_low_speed_calibration_reason = "relax_clean"
+          else:
+            self._dbg_low_speed_calibration_reason = "decay_ambiguous"
+      else:
+        self._dbg_low_speed_calibration_reason = "decay_not_relevant"
+
+      raw_score = float(clip(relax_score - tighten_score, -1.0, 1.0))
+      self._dbg_low_speed_calibration_output = float(feedback['output'])
+      self._dbg_low_speed_calibration_gap = float(feedback['tracking_gap'])
+      self._dbg_low_speed_calibration_gap_ratio = float(gap_ratio)
+      self._dbg_low_speed_calibration_saturated = bool(feedback['saturated'])
+
+    ema_alpha = float(dt / max(float(LOW_SPEED_CALIB_HEADROOM_TAU_S), dt))
+    ema_prev = float(getattr(self, '_low_speed_calibration_headroom_ema', 0.0) or 0.0)
+    ema = float(clip(ema_prev + ema_alpha * (float(raw_score) - ema_prev), -1.0, 1.0))
+    self._low_speed_calibration_headroom_ema = ema
+
+    state = float(getattr(self, '_low_speed_calibration_state', 0.0) or 0.0)
+    if feedback is None or not relevant:
+      decay = float(LOW_SPEED_CALIB_DECAY_RATE_PER_S) * dt
+      if state > 0.0:
+        state = max(0.0, state - decay)
+      else:
+        state = min(0.0, state + decay)
+    elif ema > 0.0:
+      state = min(float(LOW_SPEED_CALIB_MAX_RELAX), state + float(LOW_SPEED_CALIB_RELAX_RATE_PER_S) * dt * ema)
+    elif ema < 0.0:
+      state = max(-float(LOW_SPEED_CALIB_MAX_TIGHTEN), state + float(LOW_SPEED_CALIB_TIGHTEN_RATE_PER_S) * dt * ema)
+
+    self._low_speed_calibration_state = float(clip(state, -float(LOW_SPEED_CALIB_MAX_TIGHTEN), float(LOW_SPEED_CALIB_MAX_RELAX)))
+    try:
+      applied_scale = float(self._low_speed_calibration_scale(max(1e-8, float(scale_curvature))))
+    except Exception:
+      applied_scale = 1.0
+    self._dbg_low_speed_calibration_active = bool(abs(applied_scale - 1.0) > 1e-3)
+    self._dbg_low_speed_calibration_headroom = float(raw_score)
+    self._dbg_low_speed_calibration_headroom_ema = float(ema)
+    self._dbg_low_speed_calibration_scale = float(applied_scale)
+    self._dbg_low_speed_calibration_curve_mph = float(curve_basis_speed_mph)
 
   def _apply_freeway_v_turn_hold(self, v_cap: float) -> float:
     """Hold material VTSC cap reductions briefly to bridge model flicker.
@@ -2140,7 +2412,7 @@ class VisionTurnController:
         # User offset convention: lower values start earlier, higher values start later.
         times_nominal = np.array(ModelConstants.T_IDXS[:n_points], dtype=float)
         base_phase_advance_s = float(VTSC_TRAJECTORY_PHASE_ADVANCE_S)
-        curve_phase_offset_s = float(getattr(self, '_curve_phase_offset_s', 0.0))
+        curve_phase_offset_s = float(effective_curve_phase_offset_s(float(getattr(self, '_curve_phase_offset_s', 0.0))))
         phase_advance_s = float(clip(base_phase_advance_s - curve_phase_offset_s, 0.0, float(times_nominal[-1])))
         lead_idx = int(np.searchsorted(times_nominal, phase_advance_s, side='left'))
         lead_idx = int(min(max(lead_idx, 0), n_points - 1))
@@ -2230,11 +2502,13 @@ class VisionTurnController:
         self._current_lat_acc = current_curvature_signed * self._v_ego**2
         self._max_pred_lat_acc = self._v_ego**2 * max_pred_curvature
 
-        # Calculate safe speed using advanced physics-based method
-        self._max_v_for_current_curvature = curvature_to_speed(current_curvature) if current_curvature > 0 else V_CRUISE_MAX * CV.KPH_TO_MS
+        self._update_low_speed_calibration(sm, reference_curvature=float(current_curvature))
+
+        # Calculate safe speed using the calibrated low-speed envelope.
+        self._max_v_for_current_curvature = self._curve_speed(current_curvature) if current_curvature > 0 else V_CRUISE_MAX * CV.KPH_TO_MS
 
         # Check for overshoot using curvature_to_speed method (use absolute values)
-        safe_speeds = np.array([curvature_to_speed(curv) for curv in curvature_array_abs])
+        safe_speeds = np.array([self._curve_speed(curv) for curv in curvature_array_abs])
         # Under very low lane-line confidence, be mildly conservative when deciding whether we need
         # to start slowing for a curve ahead. This helps blind off-ramps where the model curvature
         # estimate can rise sharply only very late in the approach.
@@ -2344,7 +2618,8 @@ class VisionTurnController:
                                self._curvature_ema_ratio * max_pred_curvature)
     self._current_lat_acc = current_curvature_signed * self._v_ego**2
     self._max_pred_lat_acc = self._v_ego**2 * max_pred_curvature
-    self._max_v_for_current_curvature = curvature_to_speed(current_curvature) if current_curvature > 0 else V_CRUISE_MAX * CV.KPH_TO_MS
+    self._update_low_speed_calibration(sm, reference_curvature=float(current_curvature))
+    self._max_v_for_current_curvature = self._curve_speed(current_curvature) if current_curvature > 0 else V_CRUISE_MAX * CV.KPH_TO_MS
     self._lat_acc_overshoot_ahead = (self._max_v_for_current_curvature < self._v_ego)
     self._v_overshoot = min(self._max_v_for_current_curvature, self._v_cruise_setpoint)
     # Conservative default distance handling
@@ -2733,7 +3008,7 @@ class VisionTurnController:
       now_t = time.time()
       if bool(getattr(self._occlusion_state, 'vision_good', True)) and (now_t <= float(getattr(self, '_fast_reacq_until', 0.0))):
         try:
-          base_cap = float(min(self._v_cruise_setpoint, curvature_to_speed(max(1e-8, float(getattr(self, '_filtered_curvature', 0.0))))))
+          base_cap = float(min(self._v_cruise_setpoint, self._curve_speed(max(1e-8, float(getattr(self, '_filtered_curvature', 0.0))))))
         except Exception:
           base_cap = float(self._v_cruise_setpoint)
         # Require a small margin to ensure this is a raise scenario
@@ -2799,7 +3074,7 @@ class VisionTurnController:
       except Exception:
         self._dbg_onset_bias_active = False
         self._dbg_onset_gate_reason = {'error': True}
-      v_occ_cap = float(curvature_to_speed(k_cons))
+      v_occ_cap = float(self._curve_speed(k_cons))
       accel_cmd = min(accel_cmd, (v_occ_cap - self._v_ego) / dt)
       # Also constrain the published cap to reflect this occlusion cap.
       try:
@@ -2813,7 +3088,7 @@ class VisionTurnController:
         self._occlusion_onset_timer_s = 0.0
         # Estimate visible cap at onset for reference (min of cruise and filtered-curvature speed)
         try:
-          cap_vis_onset = float(min(self._v_cruise_setpoint, curvature_to_speed(max(1e-8, float(getattr(self, '_filtered_curvature', 0.0))))))
+          cap_vis_onset = float(min(self._v_cruise_setpoint, self._curve_speed(max(1e-8, float(getattr(self, '_filtered_curvature', 0.0))))))
         except Exception:
           cap_vis_onset = float(self._v_cruise_setpoint)
         # Active cap approx at onset
@@ -2851,7 +3126,7 @@ class VisionTurnController:
         # Gradual bias toward pure physics mode between ~50 and 65 mph (no hard bypass)
         # Compute barrier context to determine margin (near vs. far)
         try:
-          v_vis = curvature_to_speed(max(1e-8, float(self._occlusion_state.last_valid_curvature)))
+          v_vis = self._curve_speed(max(1e-8, float(self._occlusion_state.last_valid_curvature)))
           # When occluded, do NOT let the filtered/model curvature drive the near cap;
           # rely on last-visible curvature (v_vis) for the near bound.
           v_near = min(v_vis, self._v_cruise_setpoint)
@@ -2861,7 +3136,7 @@ class VisionTurnController:
           except Exception:
             k_est = 0.0
           k_filt = float(max(1e-8, float(getattr(self, '_filtered_curvature', 0.0))))
-          v_occ_raw = min(curvature_to_speed(max(1e-8, k_est)), curvature_to_speed(k_filt))
+          v_occ_raw = min(self._curve_speed(max(1e-8, k_est)), self._curve_speed(k_filt))
           s_vis = max(0.0, float(getattr(self, '_vis_horizon_s', 1.4)) * max(0.0, self._v_ego))
           a_cap = abs(float(self._comfort_decel_limit))
           v_now = max(self._prev_target_speed, self._v_ego)
@@ -3001,7 +3276,7 @@ class VisionTurnController:
         # "pure physics" mode (v_occ_raw + last-visible curvature), and rely on downstream
         # occlusion "no-raise" gating to prevent inappropriate acceleration.
         try:
-          v_vis = curvature_to_speed(max(1e-8, float(self._occlusion_state.last_valid_curvature)))
+          v_vis = self._curve_speed(max(1e-8, float(self._occlusion_state.last_valid_curvature)))
         except Exception:
           v_vis = float(self._v_cruise_setpoint)
         v_near = min(float(v_vis), float(self._v_cruise_setpoint))
@@ -3014,7 +3289,7 @@ class VisionTurnController:
         except Exception:
           k_est = 0.0
         k_filt = float(max(1e-8, float(getattr(self, '_filtered_curvature', 0.0))))
-        v_occ_raw = min(curvature_to_speed(max(1e-8, k_est)), curvature_to_speed(k_filt))
+        v_occ_raw = min(self._curve_speed(max(1e-8, k_est)), self._curve_speed(k_filt))
         v_now = max(float(getattr(self, '_prev_target_speed', self._v_ego)), float(self._v_ego))
         v_far_gate = min(float(v_occ_raw), float(self._v_cruise_setpoint))
 
@@ -3166,7 +3441,7 @@ class VisionTurnController:
     if getattr(self._occlusion_state, 'vision_good', True) and (now_ts2 <= fast_reacq_until):
       # Only enforce positive accel floor when physics base supports a raise
       try:
-        base_cap2 = float(min(self._v_cruise_setpoint, curvature_to_speed(max(1e-8, float(getattr(self, '_filtered_curvature', 0.0))))))
+        base_cap2 = float(min(self._v_cruise_setpoint, self._curve_speed(max(1e-8, float(getattr(self, '_filtered_curvature', 0.0))))))
       except Exception:
         base_cap2 = float(self._v_cruise_setpoint)
       if (base_cap2 > (self._v_ego + 0.05)) and (float(getattr(self, '_prev_target_speed', self._v_ego)) < 0.98 * base_cap2):
@@ -3194,10 +3469,10 @@ class VisionTurnController:
     try:
       if occl_effects_active:
         k_vis_only = float(max(1e-8, float(getattr(self._occlusion_state, 'last_valid_curvature', 0.0))))
-        cap_visible_vmin = float(min(self._v_cruise_setpoint, curvature_to_speed(k_vis_only)))
+        cap_visible_vmin = float(min(self._v_cruise_setpoint, self._curve_speed(k_vis_only)))
       else:
         k_filt_only = float(max(1e-8, float(getattr(self, '_filtered_curvature', 0.0))))
-        cap_visible_vmin = float(min(self._v_cruise_setpoint, curvature_to_speed(k_filt_only)))
+        cap_visible_vmin = float(min(self._v_cruise_setpoint, self._curve_speed(k_filt_only)))
     except Exception:
       cap_visible_vmin = float(self._v_cruise_setpoint)
     try:
@@ -3214,9 +3489,9 @@ class VisionTurnController:
           alpha = 0.5
         self._fov_kappa_ewma = (1.0 - alpha) * float(getattr(self, '_fov_kappa_ewma', k_filt)) + alpha * k_filt
         k_cons = max(1e-8, min(self._fov_kappa_ewma, k_est))
-        cap_occl_vmin = float(curvature_to_speed(k_cons))
+        cap_occl_vmin = float(self._curve_speed(k_cons))
       else:
-        cap_occl_vmin = float(curvature_to_speed(max(1e-8, k_est)))
+        cap_occl_vmin = float(self._curve_speed(max(1e-8, k_est)))
     except Exception:
       cap_occl_vmin = 0.0
     try:
@@ -3310,7 +3585,7 @@ class VisionTurnController:
             k_lkg = float(abs(getattr(self._occlusion_state, 'last_valid_curvature', 0.0)))
           except Exception:
             k_lkg = 0.0
-          v_lkg = float(curvature_to_speed(max(1e-8, k_lkg)))
+          v_lkg = float(self._curve_speed(max(1e-8, k_lkg)))
           floor_mult = float(getattr(self, '_vision_floor_mult', 0.98))
           v_floor = floor_mult * v_lkg
           cap_occl_vmin = max(cap_occl_vmin, min(cap_visible_vmin, v_floor))
@@ -3362,7 +3637,7 @@ class VisionTurnController:
     # On curves: will return physics speed, longitudinal planner uses it
 
     # Calculate safe speed using curvature_to_speed (physics-based)
-    physics_safe_speed = curvature_to_speed(self._filtered_curvature)
+    physics_safe_speed = self._curve_speed(self._filtered_curvature)
     base_target = min(self._v_cruise_setpoint, physics_safe_speed)
     # Expose a "pre-cap" baseline so central arbitration can detect double-capping
     try:
@@ -3457,7 +3732,7 @@ class VisionTurnController:
 
       # Clamp to reasonable physics limits, NOT cruise setpoint
       # Allow speed to naturally reach what physics permits
-      max_physics_speed = curvature_to_speed(self._filtered_curvature * float(self._boost_safety_curvature_scale))
+      max_physics_speed = self._curve_speed(self._filtered_curvature * float(self._boost_safety_curvature_scale))
       target_speed = clip(target_speed, _MIN_V, max_physics_speed)
 
       # Clear deceleration state when past apex
@@ -3953,7 +4228,7 @@ class VisionTurnController:
     try:
       vs_min = float('inf')
       for idx in range(int(start_idx), int(end_idx) + 1):
-        vs_min = min(vs_min, float(curvature_to_speed(float(w_k[idx]))))
+        vs_min = min(vs_min, float(self._curve_speed(float(w_k[idx]))))
       if not math.isfinite(vs_min):
         severity = 0
       elif vs_min < 12.0:
@@ -4264,7 +4539,7 @@ class VisionTurnController:
     abs_indices = list(range(i0 + 1, len(pts)))[:cut]
 
     # Compute vsafe from curvature
-    vsafe = [ curvature_to_speed(k) for k in k_list ]
+    vsafe = [ self._curve_speed(k) for k in k_list ]
     self._set_winding_road_context(classify_winding_road_context(
       s_list=s_list,
       vsafe_list=vsafe,

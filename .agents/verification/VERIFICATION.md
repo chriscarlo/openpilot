@@ -218,6 +218,78 @@ def run_case(**kwargs):
     'steer_ratio_valid': bool(lp.steerRatioValid),
   }
 
+### VTSC low-speed calibration replay/report wiring (2026-03-13)
+Commands run:
+```bash
+python3 -m py_compile \
+  tools/vtsc/vtsc_rlog_episode_report.py \
+  tools/vtsc/vtsc_rca_workbook.py \
+  tools/vtsc/tests/test_vtsc_rlog_episode_report.py
+
+.venv/bin/pytest --noconftest -o addopts='' \
+  tools/vtsc/tests/test_vtsc_rlog_episode_report.py \
+  tools/vtsc/tests/test_vtsc_watch.py -q
+
+.venv/bin/python tools/vtsc/vtsc_rlog_episode_report.py \
+  .cache/vtsc_pull/20260314T004142Z \
+  --summary \
+  --before-scale-min 1.0 \
+  --after-scale-min 1.0 \
+  --before-disable-low-speed-calibration \
+  --out .cache/vtsc_pull/20260314T004142Z/low_speed_calibration_summary.tsv \
+  --samples-out .cache/vtsc_pull/20260314T004142Z/low_speed_calibration_samples.tsv
+
+git diff --check
+```
+
+Results:
+- Targeted tools tests: **passed** (`19 passed`)
+- `py_compile`: **passed**
+- Replay artifacts written:
+  - `.cache/vtsc_pull/20260314T004142Z/low_speed_calibration_summary.tsv`
+  - `.cache/vtsc_pull/20260314T004142Z/low_speed_calibration_samples.tsv`
+- `git diff --check`: **clean**
+
+Capture caveat discovered during replay:
+- All pulled `rlog.zst` / `qlog.zst` segments under `.cache/vtsc_pull/20260314T004142Z` report `carState.vEgo == 0.0` throughout.
+- The generated replay summary therefore shows no VTSC cap episodes and no calibration activity, which is a property of this capture shape rather than proof that the new calibration layer never engages on-road.
+- Separate `turn_desire_capture_20260313T234226Z.jsonl` in the same pull shows real curvature/speed dynamics, so future analysis should either use a capture with valid `carState` speed in rlogs/qlogs or add a dedicated turn-desire replay path.
+
+### VTSC turn_desire_capture calibration replay (2026-03-13)
+Commands run:
+```bash
+python3 -m py_compile \
+  tools/vtsc/vtsc_turn_desire_capture_report.py \
+  tools/vtsc/tests/test_vtsc_turn_desire_capture_report.py
+
+.venv/bin/pytest --noconftest -o addopts='' \
+  tools/vtsc/tests/test_vtsc_turn_desire_capture_report.py \
+  tools/vtsc/tests/test_vtsc_rlog_episode_report.py \
+  tools/vtsc/tests/test_vtsc_watch.py -q
+
+.venv/bin/python tools/vtsc/vtsc_turn_desire_capture_report.py \
+  .cache/vtsc_pull/20260314T004142Z/turn_desire_capture_20260313T234226Z.jsonl \
+  --summary-out .cache/vtsc_pull/20260314T004142Z/turn_desire_calibration_summary.tsv \
+  --episodes-out .cache/vtsc_pull/20260314T004142Z/turn_desire_calibration_episodes.tsv \
+  --samples-out .cache/vtsc_pull/20260314T004142Z/turn_desire_calibration_samples.tsv
+
+git diff --check
+```
+
+Results:
+- Targeted tools tests: **passed** (`22 passed`)
+- `py_compile`: **passed**
+- Artifacts written:
+  - `.cache/vtsc_pull/20260314T004142Z/turn_desire_calibration_summary.tsv`
+  - `.cache/vtsc_pull/20260314T004142Z/turn_desire_calibration_episodes.tsv`
+  - `.cache/vtsc_pull/20260314T004142Z/turn_desire_calibration_samples.tsv`
+- `git diff --check`: **clean**
+
+Capture findings:
+- Under the explicit replay assumption `assumed_cruise_mps = max(speed_mps + 5.0, 20.0)`, the calibration helper produced `61` tighten episodes and `0` relax episodes on this capture.
+- The strongest windows reached about `-1.22 mph` equivalent curve-speed adjustment with scale saturating at the configured floor `0.92`.
+- `54/61` episodes had `turn_context_share == 0`, so most tightening evidence in this capture was not concentrated in obvious blinker-marked intersection turns.
+
 rs = {
   'meta': {
     'roll_std_max': float(ROLL_STD_MAX),
@@ -329,3 +401,33 @@ Results:
 Environment notes:
 - This host does not provide a `cythonize` executable on `PATH`; targeted SCons runs were executed with an untracked shim at `.cache/bin/cythonize` forwarding to `python3 -m Cython.Build.Cythonize`.
 - Repo-root pytest defaults were bypassed with `--noconftest -o addopts=''` to avoid unrelated workspace dependency issues while running targeted checks.
+
+### VTSC gas-event RCA labeling (2026-03-13)
+Commands run:
+```bash
+python3 -m py_compile \
+  tools/vtsc/vtsc_gas_event_window.py \
+  tools/vtsc/vtsc_gas_event_report.py \
+  tools/vtsc/tests/test_vtsc_gas_event_window.py \
+  tools/vtsc/tests/test_vtsc_gas_event_report.py \
+  tools/vtsc/vtsc_rca_workbook.py
+.venv/bin/pytest --noconftest -o addopts='' \
+  tools/vtsc/tests/test_vtsc_gas_event_window.py \
+  tools/vtsc/tests/test_vtsc_gas_event_report.py \
+  tools/vtsc/tests/test_vtsc_rlog_episode_report.py -q
+.venv/bin/python tools/vtsc/vtsc_gas_event_report.py \
+  .cache/vtsc_live/20260310_route_a4_rca \
+  --out .cache/vtsc_live/20260310_route_a4_rca/gas_event_report.tsv
+git diff --check
+```
+Results:
+- `py_compile`: success for the new gas-event labeler/report modules and the updated RCA workbook.
+- Targeted pytest: passed (`8 passed`), including direct label classification, CLI TSV generation, replay-samples fallback, and existing VTSC replay-report coverage.
+- `tools/vtsc/vtsc_gas_event_report.py` produced `.cache/vtsc_live/20260310_route_a4_rca/gas_event_report.tsv` with:
+  - `gas_seg5_1478p400` -> `pressing_through_cap / tighten_bias`
+  - `gas_seg7_1632p150` -> `pressing_through_cap / tighten_bias`
+  - `gas_seg10_1769p465` -> `not_constraining / not_constraining`
+- `git diff --check`: clean.
+
+Environment notes:
+- `tools/vtsc/vtsc_rca_workbook.py` still depends on `pandas` for full workbook generation in this host environment; the new `tools/vtsc/vtsc_gas_event_report.py` path avoids that dependency for terminal-first gas-event triage.

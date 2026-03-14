@@ -42,6 +42,11 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
+try:
+  from vtsc.vtsc_gas_event_window import summarize_gas_event_window
+except ImportError:
+  from vtsc_gas_event_window import summarize_gas_event_window
+
 
 def _detect_repo_root() -> Path:
   """Walk up from this script to find the repo root (contains .git/)."""
@@ -377,6 +382,17 @@ def _build_trace_rows_for_segment(
       row["windingContextConfidence"] = vdbg.get("windingContextConfidence")
     if row["windingContextSource"] is None:
       row["windingContextSource"] = vdbg.get("windingContextSource")
+    row["lowSpeedCalActive"] = vdbg.get("lowSpeedCalActive")
+    row["lowSpeedCalReason"] = vdbg.get("lowSpeedCalReason")
+    row["lowSpeedCalHeadroom"] = vdbg.get("lowSpeedCalHeadroom")
+    row["lowSpeedCalHeadroomEma"] = vdbg.get("lowSpeedCalHeadroomEma")
+    row["lowSpeedCalState"] = vdbg.get("lowSpeedCalState")
+    row["lowSpeedCalScale"] = vdbg.get("lowSpeedCalScale")
+    row["lowSpeedCalCurveMph"] = vdbg.get("lowSpeedCalCurveMph")
+    row["lowSpeedCalOutput"] = vdbg.get("lowSpeedCalOutput")
+    row["lowSpeedCalGap"] = vdbg.get("lowSpeedCalGap")
+    row["lowSpeedCalGapRatio"] = vdbg.get("lowSpeedCalGapRatio")
+    row["lowSpeedCalSaturated"] = vdbg.get("lowSpeedCalSaturated")
 
     # Names + derived deltas.
     row["vtscStateName"] = _vtsc_state_name(_safe_int(row.get("vtscState")))
@@ -563,6 +579,17 @@ def _build_trace_rows_for_segment(
               "windingContextScore": _safe_float(snap.get("winding_context_score")),
               "windingContextConfidence": _safe_float(snap.get("winding_context_confidence")),
               "windingContextSource": _safe_str(snap.get("winding_context_source")),
+              "lowSpeedCalActive": bool(snap.get("low_speed_calibration_active", False)),
+              "lowSpeedCalReason": _safe_str(snap.get("low_speed_calibration_reason")),
+              "lowSpeedCalHeadroom": _safe_float(snap.get("low_speed_calibration_headroom")),
+              "lowSpeedCalHeadroomEma": _safe_float(snap.get("low_speed_calibration_headroom_ema")),
+              "lowSpeedCalState": _safe_float(snap.get("low_speed_calibration_state")),
+              "lowSpeedCalScale": _safe_float(snap.get("low_speed_calibration_scale")),
+              "lowSpeedCalCurveMph": _safe_float(snap.get("low_speed_calibration_curve_mph")),
+              "lowSpeedCalOutput": _safe_float(snap.get("low_speed_calibration_output")),
+              "lowSpeedCalGap": _safe_float(snap.get("low_speed_calibration_gap")),
+              "lowSpeedCalGapRatio": _safe_float(snap.get("low_speed_calibration_gap_ratio")),
+              "lowSpeedCalSaturated": bool(snap.get("low_speed_calibration_saturated", False)),
             }
       except Exception:
         pass
@@ -718,6 +745,27 @@ def _compute_summary_row(ev: EventBundle, df: pd.DataFrame) -> Dict[str, Any]:
     "mapRoadNameChanges[-2..0]": None,
     "mapSpeedValidChanges[-2..0]": None,
     "mapRoadGeomValidAny[-2..0]": None,
+    "lowSpeedCalActive@-0.5": None,
+    "lowSpeedCalReason@-0.5": None,
+    "lowSpeedCalScale@-0.5": None,
+    "lowSpeedCalState@-0.5": None,
+    "lowSpeedCalGapRatio@-0.5": None,
+    "lowSpeedCalActiveAny[-2..0]": None,
+    "lowSpeedCalScaleMin[-2..0]": None,
+    "lowSpeedCalScaleMax[-2..0]": None,
+    "lowSpeedCalGapRatioMax[-2..0]": None,
+    "lowSpeedCalSaturatedAny[-2..0]": None,
+    "gasWinHalfS": None,
+    "gasWinSamples": None,
+    "gasWinConstraint": "",
+    "gasWinCalLabel": "",
+    "gasWinCalActiveShare": None,
+    "gasWinGapMedian": None,
+    "gasWinGapMax": None,
+    "gasWinScaleMin": None,
+    "gasWinScaleMax": None,
+    "gasWinReasonMode": "",
+    "gasWinCapMode": "",
   }
 
   vtsc_m2 = row["vtscVel@-2"]
@@ -832,6 +880,53 @@ def _compute_summary_row(ev: EventBundle, df: pd.DataFrame) -> Dict[str, Any]:
   row["windCtxSource@-0.5"] = _str_at_dt(df, -0.5, "windingContextSource")
   row["windCtxLevel@-0.5"] = _value_at_dt(df, -0.5, "windingContextLevel")
   row["windCtxScore@-0.5"] = _value_at_dt(df, -0.5, "windingContextScore")
+  row["lowSpeedCalActive@-0.5"] = _str_at_dt(df, -0.5, "lowSpeedCalActive")
+  row["lowSpeedCalReason@-0.5"] = _str_at_dt(df, -0.5, "lowSpeedCalReason")
+  row["lowSpeedCalScale@-0.5"] = _value_at_dt(df, -0.5, "lowSpeedCalScale")
+  row["lowSpeedCalState@-0.5"] = _value_at_dt(df, -0.5, "lowSpeedCalState")
+  row["lowSpeedCalGapRatio@-0.5"] = _value_at_dt(df, -0.5, "lowSpeedCalGapRatio")
+
+  if not pre.empty and "lowSpeedCalActive" in pre.columns:
+    try:
+      vals = [bool(x) for x in pre["lowSpeedCalActive"].tolist()]
+      row["lowSpeedCalActiveAny[-2..0]"] = bool(any(vals))
+    except Exception:
+      pass
+
+  if not pre.empty and "lowSpeedCalScale" in pre.columns:
+    try:
+      scale_vals = pre["lowSpeedCalScale"].astype(float)
+      row["lowSpeedCalScaleMin[-2..0]"] = float(scale_vals.min())
+      row["lowSpeedCalScaleMax[-2..0]"] = float(scale_vals.max())
+    except Exception:
+      pass
+
+  if not pre.empty and "lowSpeedCalGapRatio" in pre.columns:
+    try:
+      row["lowSpeedCalGapRatioMax[-2..0]"] = float(pre["lowSpeedCalGapRatio"].astype(float).max())
+    except Exception:
+      pass
+
+  if not pre.empty and "lowSpeedCalSaturated" in pre.columns:
+    try:
+      vals = [bool(x) for x in pre["lowSpeedCalSaturated"].tolist()]
+      row["lowSpeedCalSaturatedAny[-2..0]"] = bool(any(vals))
+    except Exception:
+      pass
+
+  if ev.action == "gas":
+    gas_summary = summarize_gas_event_window(df.to_dict("records"))
+    row["gasWinHalfS"] = gas_summary["window_half_s"]
+    row["gasWinSamples"] = gas_summary["samples"]
+    row["gasWinConstraint"] = gas_summary["constraint_label"]
+    row["gasWinCalLabel"] = gas_summary["calibration_label"]
+    row["gasWinCalActiveShare"] = gas_summary["active_share"]
+    row["gasWinGapMedian"] = gas_summary["gap_median"]
+    row["gasWinGapMax"] = gas_summary["gap_max"]
+    row["gasWinScaleMin"] = gas_summary["scale_min"]
+    row["gasWinScaleMax"] = gas_summary["scale_max"]
+    row["gasWinReasonMode"] = gas_summary["reason_mode"]
+    row["gasWinCapMode"] = gas_summary["cap_mode"]
   return row
 
 

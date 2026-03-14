@@ -23,11 +23,13 @@ Notes:
 """
 
 import argparse
+import csv
 import dataclasses
 import math
 import sys
+from collections import Counter
 from pathlib import Path
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from typing import Any, Dict, List, Tuple
 from unittest.mock import MagicMock, patch
 
@@ -50,6 +52,19 @@ class Sample:
   a_ego: float
   v_turn: float
   a_target: float
+  vtsc_cmd: float = 0.0
+  active_cap: str = ""
+  low_speed_calibration_active: bool = False
+  low_speed_calibration_reason: str = ""
+  low_speed_calibration_state: float = 0.0
+  low_speed_calibration_scale: float = 1.0
+  low_speed_calibration_headroom: float = 0.0
+  low_speed_calibration_headroom_ema: float = 0.0
+  low_speed_calibration_gap: float = 0.0
+  low_speed_calibration_gap_ratio: float = 0.0
+  low_speed_calibration_output: float = 0.0
+  low_speed_calibration_curve_mph: float = 0.0
+  low_speed_calibration_saturated: bool = False
 
 
 @dataclasses.dataclass(frozen=True)
@@ -61,6 +76,153 @@ class Episode:
   ttfdecel_s: float | None
   min_v_turn: float
   max_v_ego: float
+
+
+def _as_finite_float(value: Any, default: float | None = None) -> float | None:
+  try:
+    out = float(value)
+  except Exception:
+    return default
+  return out if math.isfinite(out) else default
+
+
+def _sample_dt_tail(samples: List[Sample]) -> float:
+  if len(samples) < 2:
+    return 0.05
+  dts = [max(0.0, float(b.t - a.t)) for a, b in zip(samples, samples[1:], strict=False)]
+  if not dts:
+    return 0.05
+  dt_med = sorted(dts)[len(dts) // 2]
+  return max(0.01, min(0.15, float(dt_med) if math.isfinite(dt_med) else 0.05))
+
+
+def _active_duration(samples: List[Sample], pred) -> float:
+  if not samples:
+    return 0.0
+  dt_tail = _sample_dt_tail(samples)
+  total = 0.0
+  for i, sample in enumerate(samples):
+    if not pred(sample):
+      continue
+    if i + 1 < len(samples):
+      dt_i = max(0.0, float(samples[i + 1].t - sample.t))
+    else:
+      dt_i = dt_tail
+    total += max(0.0, float(dt_i))
+  return float(total)
+
+
+def _summarize_low_speed_calibration(samples: List[Sample]) -> Dict[str, Any]:
+  if not samples:
+    return {
+      "active_s": 0.0,
+      "first_active_s": None,
+      "scale_min": None,
+      "scale_max": None,
+      "state_min": None,
+      "state_max": None,
+      "headroom_min": None,
+      "headroom_max": None,
+      "gap_ratio_max": None,
+      "output_abs_max": None,
+      "saturated_s": 0.0,
+      "reason_mode": "",
+    }
+
+  scale_vals = [float(s.low_speed_calibration_scale) for s in samples if math.isfinite(float(s.low_speed_calibration_scale))]
+  state_vals = [float(s.low_speed_calibration_state) for s in samples if math.isfinite(float(s.low_speed_calibration_state))]
+  headroom_vals = [float(s.low_speed_calibration_headroom) for s in samples if math.isfinite(float(s.low_speed_calibration_headroom))]
+  gap_ratio_vals = [float(s.low_speed_calibration_gap_ratio) for s in samples if math.isfinite(float(s.low_speed_calibration_gap_ratio))]
+  output_abs_vals = [abs(float(s.low_speed_calibration_output)) for s in samples if math.isfinite(float(s.low_speed_calibration_output))]
+  reason_counts = Counter(
+    str(s.low_speed_calibration_reason)
+    for s in samples
+    if str(s.low_speed_calibration_reason or "") and (
+      bool(s.low_speed_calibration_active) or abs(float(s.low_speed_calibration_scale) - 1.0) > 1e-3
+    )
+  )
+
+  first_active_s = next((float(s.t) for s in samples if bool(s.low_speed_calibration_active)), None)
+  return {
+    "active_s": _active_duration(samples, lambda s: bool(s.low_speed_calibration_active)),
+    "first_active_s": first_active_s,
+    "scale_min": min(scale_vals) if scale_vals else None,
+    "scale_max": max(scale_vals) if scale_vals else None,
+    "state_min": min(state_vals) if state_vals else None,
+    "state_max": max(state_vals) if state_vals else None,
+    "headroom_min": min(headroom_vals) if headroom_vals else None,
+    "headroom_max": max(headroom_vals) if headroom_vals else None,
+    "gap_ratio_max": max(gap_ratio_vals) if gap_ratio_vals else None,
+    "output_abs_max": max(output_abs_vals) if output_abs_vals else None,
+    "saturated_s": _active_duration(samples, lambda s: bool(s.low_speed_calibration_saturated)),
+    "reason_mode": reason_counts.most_common(1)[0][0] if reason_counts else "",
+  }
+
+
+def _build_sample_rows(
+  *,
+  route: str,
+  seg: str,
+  rlog: Path,
+  before_samples: List[Sample],
+  after_samples: List[Sample],
+) -> List[Dict[str, Any]]:
+  rows: List[Dict[str, Any]] = []
+  n = max(len(before_samples), len(after_samples))
+  for i in range(n):
+    before = before_samples[i] if i < len(before_samples) else None
+    after = after_samples[i] if i < len(after_samples) else None
+    t_ref = before.t if before is not None else (after.t if after is not None else 0.0)
+    v_ego_ref = before.v_ego if before is not None else (after.v_ego if after is not None else 0.0)
+    rows.append({
+      "route": route,
+      "segment": seg,
+      "file": str(rlog),
+      "sample_idx": i,
+      "t": float(t_ref),
+      "v_ego": float(v_ego_ref),
+      "before_v_turn": None if before is None else float(before.v_turn),
+      "after_v_turn": None if after is None else float(after.v_turn),
+      "before_vtsc_cmd": None if before is None else float(before.vtsc_cmd),
+      "after_vtsc_cmd": None if after is None else float(after.vtsc_cmd),
+      "delta_vtsc_cmd": None if before is None or after is None else float(after.vtsc_cmd - before.vtsc_cmd),
+      "before_active_cap": "" if before is None else str(before.active_cap),
+      "after_active_cap": "" if after is None else str(after.active_cap),
+      "before_low_speed_calibration_active": False if before is None else bool(before.low_speed_calibration_active),
+      "after_low_speed_calibration_active": False if after is None else bool(after.low_speed_calibration_active),
+      "before_low_speed_calibration_reason": "" if before is None else str(before.low_speed_calibration_reason),
+      "after_low_speed_calibration_reason": "" if after is None else str(after.low_speed_calibration_reason),
+      "before_low_speed_calibration_scale": None if before is None else float(before.low_speed_calibration_scale),
+      "after_low_speed_calibration_scale": None if after is None else float(after.low_speed_calibration_scale),
+      "before_low_speed_calibration_state": None if before is None else float(before.low_speed_calibration_state),
+      "after_low_speed_calibration_state": None if after is None else float(after.low_speed_calibration_state),
+      "before_low_speed_calibration_headroom": None if before is None else float(before.low_speed_calibration_headroom),
+      "after_low_speed_calibration_headroom": None if after is None else float(after.low_speed_calibration_headroom),
+      "before_low_speed_calibration_headroom_ema": None if before is None else float(before.low_speed_calibration_headroom_ema),
+      "after_low_speed_calibration_headroom_ema": None if after is None else float(after.low_speed_calibration_headroom_ema),
+      "before_low_speed_calibration_gap": None if before is None else float(before.low_speed_calibration_gap),
+      "after_low_speed_calibration_gap": None if after is None else float(after.low_speed_calibration_gap),
+      "before_low_speed_calibration_gap_ratio": None if before is None else float(before.low_speed_calibration_gap_ratio),
+      "after_low_speed_calibration_gap_ratio": None if after is None else float(after.low_speed_calibration_gap_ratio),
+      "before_low_speed_calibration_output": None if before is None else float(before.low_speed_calibration_output),
+      "after_low_speed_calibration_output": None if after is None else float(after.low_speed_calibration_output),
+      "before_low_speed_calibration_curve_mph": None if before is None else float(before.low_speed_calibration_curve_mph),
+      "after_low_speed_calibration_curve_mph": None if after is None else float(after.low_speed_calibration_curve_mph),
+      "before_low_speed_calibration_saturated": False if before is None else bool(before.low_speed_calibration_saturated),
+      "after_low_speed_calibration_saturated": False if after is None else bool(after.low_speed_calibration_saturated),
+    })
+  return rows
+
+
+def _write_tsv(path: str, rows: List[Dict[str, Any]]) -> None:
+  out_path = Path(path).expanduser()
+  out_path.parent.mkdir(parents=True, exist_ok=True)
+  fieldnames = list(rows[0].keys()) if rows else []
+  with out_path.open("w", encoding="utf-8", newline="") as f:
+    writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter="\t", extrasaction="ignore")
+    if fieldnames:
+      writer.writeheader()
+      writer.writerows(rows)
 
 
 def _default_replay_response_model():
@@ -109,7 +271,13 @@ def _extract_route_and_segment(path: Path) -> Tuple[str, str]:
   route = ""
   for parent in [path.parent] + list(path.parents):
     if "--" in parent.name:
-      route = parent.name
+      parts = parent.name.split("--")
+      if len(parts) >= 3 and parts[-1].isdigit():
+        route = "--".join(parts[:-1])
+        if not seg:
+          seg = parts[-1]
+      else:
+        route = parent.name
       break
   if not route:
     route = path.parent.name
@@ -118,7 +286,26 @@ def _extract_route_and_segment(path: Path) -> Tuple[str, str]:
   return route, seg
 
 
-def _mk_controller_deterministic() -> VisionTurnController:
+def _install_low_speed_calibration_replay_bypass(ctrl: VisionTurnController) -> None:
+  def _disabled(self, sm, *, reference_curvature: float) -> None:
+    self._low_speed_calibration_state = 0.0
+    self._low_speed_calibration_headroom_ema = 0.0
+    self._low_speed_calibration_last_update_s = 0.0
+    self._dbg_low_speed_calibration_active = False
+    self._dbg_low_speed_calibration_reason = "disabled_for_replay"
+    self._dbg_low_speed_calibration_headroom = 0.0
+    self._dbg_low_speed_calibration_headroom_ema = 0.0
+    self._dbg_low_speed_calibration_scale = 1.0
+    self._dbg_low_speed_calibration_curve_mph = 0.0
+    self._dbg_low_speed_calibration_output = 0.0
+    self._dbg_low_speed_calibration_gap = 0.0
+    self._dbg_low_speed_calibration_gap_ratio = 0.0
+    self._dbg_low_speed_calibration_saturated = False
+
+  ctrl._update_low_speed_calibration = MethodType(_disabled, ctrl)
+
+
+def _mk_controller_deterministic(*, disable_low_speed_calibration: bool = False) -> VisionTurnController:
   # Minimal car params (enough to build VehicleModel in dev tests).
   class MockCP:
     mass = 1600.0
@@ -156,6 +343,8 @@ def _mk_controller_deterministic() -> VisionTurnController:
     mp.get.side_effect = _get
     MockParams.return_value = mp
     ctrl = VisionTurnController(MockCP())
+    if disable_low_speed_calibration:
+      _install_low_speed_calibration_replay_bypass(ctrl)
     ctrl.set_longitudinal_response_model(_default_replay_response_model())
     return ctrl
 
@@ -191,12 +380,13 @@ def _replay_samples(
   *,
   severe_scale_min: float,
   v_cruise_mps: float | None,
+  disable_low_speed_calibration: bool,
 ) -> List[Sample]:
   # Temporarily override the constant for this run.
   prev = float(getattr(vtc, "SEVERE_OVERSHOOT_SPEED_SCALE_MIN", 1.0))
   setattr(vtc, "SEVERE_OVERSHOOT_SPEED_SCALE_MIN", float(severe_scale_min))
   try:
-    ctrl = _mk_controller_deterministic()
+    ctrl = _mk_controller_deterministic(disable_low_speed_calibration=disable_low_speed_calibration)
 
     class SM:
       def __init__(self):
@@ -214,7 +404,9 @@ def _replay_samples(
     gas_pressed = False
     steer_deg = 0.0
     last_radar_state = None
+    last_controls_state = None
     have_radar = False
+    have_controls = False
 
     t0_ns: int | None = None
     v_cruise_eff = float(v_cruise_mps) if v_cruise_mps is not None else None
@@ -252,6 +444,11 @@ def _replay_samples(
         have_radar = True
         continue
 
+      if which == "controlsState":
+        last_controls_state = m.controlsState
+        have_controls = True
+        continue
+
       if which != "modelV2":
         continue
 
@@ -267,6 +464,12 @@ def _replay_samples(
       else:
         sm._data.pop("radarState", None)
         sm.valid.pop("radarState", None)
+      if have_controls and last_controls_state is not None:
+        sm._data["controlsState"] = last_controls_state
+        sm.valid["controlsState"] = True
+      else:
+        sm._data.pop("controlsState", None)
+        sm.valid.pop("controlsState", None)
 
       # Make controller time deterministic based on rlog monotime.
       with patch("sunnypilot.selfdrive.controls.lib.vision_turn_controller.time.time", lambda: t), \
@@ -281,8 +484,28 @@ def _replay_samples(
         a_target = float(ctrl.a_target)
       except Exception:
         a_target = 0.0
-
-      out.append(Sample(t=float(t), v_ego=float(v_ego), a_ego=float(a_ego), v_turn=float(v_turn), a_target=float(a_target)))
+      snap = ctrl.snapshot_debug_state() or {}
+      vtsc_cmd = _as_finite_float(snap.get("vtsc_cmd"), default=v_turn)
+      out.append(Sample(
+        t=float(t),
+        v_ego=float(v_ego),
+        a_ego=float(a_ego),
+        v_turn=float(v_turn),
+        a_target=float(a_target),
+        vtsc_cmd=float(vtsc_cmd if vtsc_cmd is not None else v_turn),
+        active_cap=str(snap.get("active_cap") or ""),
+        low_speed_calibration_active=bool(snap.get("low_speed_calibration_active", False)),
+        low_speed_calibration_reason=str(snap.get("low_speed_calibration_reason") or ""),
+        low_speed_calibration_state=float(_as_finite_float(snap.get("low_speed_calibration_state"), 0.0) or 0.0),
+        low_speed_calibration_scale=float(_as_finite_float(snap.get("low_speed_calibration_scale"), 1.0) or 1.0),
+        low_speed_calibration_headroom=float(_as_finite_float(snap.get("low_speed_calibration_headroom"), 0.0) or 0.0),
+        low_speed_calibration_headroom_ema=float(_as_finite_float(snap.get("low_speed_calibration_headroom_ema"), 0.0) or 0.0),
+        low_speed_calibration_gap=float(_as_finite_float(snap.get("low_speed_calibration_gap"), 0.0) or 0.0),
+        low_speed_calibration_gap_ratio=float(_as_finite_float(snap.get("low_speed_calibration_gap_ratio"), 0.0) or 0.0),
+        low_speed_calibration_output=float(_as_finite_float(snap.get("low_speed_calibration_output"), 0.0) or 0.0),
+        low_speed_calibration_curve_mph=float(_as_finite_float(snap.get("low_speed_calibration_curve_mph"), 0.0) or 0.0),
+        low_speed_calibration_saturated=bool(snap.get("low_speed_calibration_saturated", False)),
+      ))
 
     return out
   finally:
@@ -381,8 +604,14 @@ def main() -> int:
   ap.add_argument("--vdiff-mps", type=float, default=0.25, help="Episode active if v_turn <= v_ego - vdiff")
   ap.add_argument("--decel-a-threshold", type=float, default=0.10, help="First decel when a_target <= -threshold (m/s^2)")
   ap.add_argument("--gap-s", type=float, default=0.20, help="Gap tolerance between active samples (s)")
+  ap.add_argument("--before-disable-low-speed-calibration", action="store_true",
+                  help="Replay baseline with the low-speed calibration layer bypassed")
+  ap.add_argument("--after-disable-low-speed-calibration", action="store_true",
+                  help="Replay tuned run with the low-speed calibration layer bypassed")
   ap.add_argument("--summary", action="store_true", help="Print per-file summary instead of per-episode rows")
   ap.add_argument("--out", type=str, default=None, help="Write TSV to this file (also prints to stdout)")
+  ap.add_argument("--samples-out", type=str, default=None,
+                  help="Optional TSV path for aligned per-sample replay output including low-speed calibration fields")
   args = ap.parse_args()
 
   rlogs = _discover_rlogs(list(args.inputs))
@@ -390,6 +619,7 @@ def main() -> int:
     raise SystemExit("No rlog files found under provided inputs.")
 
   lines: List[str] = []
+  sample_rows: List[Dict[str, Any]] = []
   if args.summary:
     header = [
       "route", "segment", "file",
@@ -398,6 +628,18 @@ def main() -> int:
       "median_ep_s_before", "median_ep_s_after",
       "median_ttfdecel_s_before", "median_ttfdecel_s_after",
       "first_ep_start_s_before", "first_ep_start_s_after",
+      "calib_active_s_before", "calib_active_s_after",
+      "calib_first_active_s_before", "calib_first_active_s_after",
+      "calib_scale_min_before", "calib_scale_min_after",
+      "calib_scale_max_before", "calib_scale_max_after",
+      "calib_state_min_before", "calib_state_min_after",
+      "calib_state_max_before", "calib_state_max_after",
+      "calib_headroom_min_before", "calib_headroom_min_after",
+      "calib_headroom_max_before", "calib_headroom_max_after",
+      "calib_gap_ratio_max_before", "calib_gap_ratio_max_after",
+      "calib_output_abs_max_before", "calib_output_abs_max_after",
+      "calib_saturated_s_before", "calib_saturated_s_after",
+      "calib_reason_mode_before", "calib_reason_mode_after",
     ]
   else:
     header = [
@@ -415,12 +657,22 @@ def main() -> int:
       rlog,
       severe_scale_min=float(args.before_scale_min),
       v_cruise_mps=args.v_cruise_mps,
+      disable_low_speed_calibration=bool(args.before_disable_low_speed_calibration),
     )
     after_samples = _replay_samples(
       rlog,
       severe_scale_min=float(args.after_scale_min),
       v_cruise_mps=args.v_cruise_mps,
+      disable_low_speed_calibration=bool(args.after_disable_low_speed_calibration),
     )
+    if args.samples_out:
+      sample_rows.extend(_build_sample_rows(
+        route=route,
+        seg=seg,
+        rlog=rlog,
+        before_samples=before_samples,
+        after_samples=after_samples,
+      ))
     before_eps = _detect_episodes(
       before_samples,
       vdiff_mps=float(args.vdiff_mps),
@@ -449,6 +701,8 @@ def main() -> int:
       a_ttf = [e.ttfdecel_s for e in after_eps if e.ttfdecel_s is not None]
       b_first = before_eps[0].start_t if before_eps else None
       a_first = after_eps[0].start_t if after_eps else None
+      b_cal = _summarize_low_speed_calibration(before_samples)
+      a_cal = _summarize_low_speed_calibration(after_samples)
 
       row = [
         route, seg, str(rlog),
@@ -457,6 +711,18 @@ def main() -> int:
         _fmt(_median(b_durs)), _fmt(_median(a_durs)),
         _fmt(_median(b_ttf)), _fmt(_median(a_ttf)),
         _fmt(b_first), _fmt(a_first),
+        _fmt(b_cal["active_s"]), _fmt(a_cal["active_s"]),
+        _fmt(b_cal["first_active_s"]), _fmt(a_cal["first_active_s"]),
+        _fmt(b_cal["scale_min"]), _fmt(a_cal["scale_min"]),
+        _fmt(b_cal["scale_max"]), _fmt(a_cal["scale_max"]),
+        _fmt(b_cal["state_min"]), _fmt(a_cal["state_min"]),
+        _fmt(b_cal["state_max"]), _fmt(a_cal["state_max"]),
+        _fmt(b_cal["headroom_min"]), _fmt(a_cal["headroom_min"]),
+        _fmt(b_cal["headroom_max"]), _fmt(a_cal["headroom_max"]),
+        _fmt(b_cal["gap_ratio_max"]), _fmt(a_cal["gap_ratio_max"]),
+        _fmt(b_cal["output_abs_max"]), _fmt(a_cal["output_abs_max"]),
+        _fmt(b_cal["saturated_s"]), _fmt(a_cal["saturated_s"]),
+        str(b_cal["reason_mode"]), str(a_cal["reason_mode"]),
       ]
       lines.append("\t".join(row))
       continue
@@ -492,6 +758,8 @@ def main() -> int:
   print(tsv, end="")
   if args.out:
     Path(args.out).expanduser().write_text(tsv, encoding="utf-8")
+  if args.samples_out:
+    _write_tsv(args.samples_out, sample_rows)
   return 0
 
 

@@ -36,6 +36,10 @@ class _MockCP:
   wheelbase = 2.75
 
 
+def _curve_phase_raw_for_effective(effective_s: float) -> float:
+  return float(effective_s) - float(map_strategy.CURVE_PHASE_OFFSET_ZERO_BASELINE_S)
+
+
 def _make_radar_state():
   lead = SimpleNamespace(status=False, dRel=1e9, vLead=0.0, aLeadK=0.0, aLeadTau=1.5)
   return SimpleNamespace(leadOne=lead, leadTwo=lead)
@@ -122,7 +126,7 @@ def _run_hidden_apex_profile(monkeypatch, *, fixed_lead_time_s: float):
   planner.v_tsc._is_enabled = True
   planner.v_tsc._map_strategy_mode = 'strategic'
   planner.v_tsc._fixed_lead_time_s = float(fixed_lead_time_s)
-  planner.v_tsc._curve_phase_offset_s = 0.0
+  planner.v_tsc._curve_phase_offset_s = float(_curve_phase_raw_for_effective(0.0))
   planner.v_tsc._overshoot_phase_offset_s = 0.0
   planner.v_tsc._apex_exit_phase_offset_s = 0.0
   planner.v_tsc._get_bool_param = lambda key, default=False: True if key == 'MTSCLookaheadEnabled' else bool(orig_get_bool(key, default))
@@ -201,7 +205,7 @@ def _run_chained_winding_profile(monkeypatch, *, winding_profile_level: int):
   planner.v_tsc._is_enabled = True
   planner.v_tsc._map_strategy_mode = 'strategic'
   planner.v_tsc._fixed_lead_time_s = 0.0
-  planner.v_tsc._curve_phase_offset_s = 0.0
+  planner.v_tsc._curve_phase_offset_s = float(_curve_phase_raw_for_effective(0.0))
   planner.v_tsc._overshoot_phase_offset_s = 0.0
   planner.v_tsc._apex_exit_phase_offset_s = 0.0
   planner.v_tsc._get_bool_param = lambda key, default=False: True if key == 'MTSCLookaheadEnabled' else bool(orig_get_bool(key, default))

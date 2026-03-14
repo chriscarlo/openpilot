@@ -40,6 +40,29 @@ Outputs:
 Column meanings: see `references/rca_columns.md`.
 Live tuneable parameter semantics: see `references/live_tunable_param_glossary.md`.
 
+If you only need gas-event triage, or the host cannot run the workbook path because
+`pandas` is unavailable, use:
+```bash
+.venv/bin/python tools/vtsc/vtsc_gas_event_report.py \
+  /path/to/base_dir \
+  --out /path/to/base_dir/gas_event_report.tsv
+```
+
+This reads gas events from `events_offline/` and prefers
+`trace_rlog_20s_plus.jsonl` when present. If traces are absent but
+`gas_calibration_samples.tsv` exists under the same base dir, it falls back to
+that replay output plus `realdata/<route>--<seg>/rlog.zst` to recover event-centered
+windows without the workbook dependency.
+
+Interpret the output labels as:
+- `pressing_through_cap`: VTSC was still below ego at the gas press; this is a real
+  "possibly too conservative" candidate worth deeper replay.
+- `not_constraining`: VTSC was already above ego at the gas press; do not treat this
+  as relax evidence.
+- `tighten_bias`: low-speed calibration nudged the cap lower in the event window.
+- `relax_candidate`: low-speed calibration nudged the cap upward while VTSC still
+  constrained ego in the event window.
+
 ## Workflow Decision Tree
 
 ### A0) You are already in the car and need live capture immediately
@@ -321,8 +344,12 @@ tightens the cap relative to `advisory`.
 - If strategic map appears to work in `snapshot_debug_state()` but planner-backed
   `v_ego` still misses the anchor, trust the planner-backed result.
 - Treat brake interventions as likely timing, visibility, or handoff problems
-  first. Treat gas interventions as "possibly too conservative," but verify with
-  map coverage and anchor selection before retuning physics.
+  first. Treat gas interventions as "possibly too conservative," but run
+  `tools/vtsc/vtsc_gas_event_report.py` first and only escalate events labeled
+  `pressing_through_cap` before retuning physics.
+- A gas event labeled `not_constraining` is not relax evidence. In those cases,
+  the driver pressed while VTSC was already above ego, so the event says more about
+  driver intent than about an overly low VTSC cap.
 
 More detailed heuristics: see `references/tuning_heuristics.md`.
 

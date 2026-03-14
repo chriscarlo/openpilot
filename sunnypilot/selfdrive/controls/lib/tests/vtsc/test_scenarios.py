@@ -198,6 +198,91 @@ def test_curve_exit_never_latches_fov_occlusion_even_with_mediocre_confidence():
   assert abs(clear_idx_lead - clear_idx) == 0
 
 
+def test_low_speed_calibration_relaxes_clean_low_headroom_curve():
+  v0 = 11.5
+  v_cruise = 16.0
+  steps_neutral = [
+    Step(curvature=0.02, curvature_ahead=0.02, confidence=0.95)
+    for _ in range(220)
+  ]
+  steps_relax = [
+    Step(
+      curvature=0.02,
+      curvature_ahead=0.02,
+      confidence=0.95,
+      desired_curvature=0.020,
+      actual_curvature=0.0194,
+      lateral_output=0.24,
+      lateral_saturated=False,
+    )
+    for _ in range(220)
+  ]
+
+  snap_neutral = simulate_sequence(steps=steps_neutral, v0_mps=v0, v_cruise_mps=v_cruise, dt=0.05)
+  snap_relax = simulate_sequence(steps=steps_relax, v0_mps=v0, v_cruise_mps=v_cruise, dt=0.05)
+
+  assert float(snap_relax['low_speed_calibration_state']) > 0.01
+  assert float(snap_relax['low_speed_calibration_scale']) > 1.0
+  assert str(snap_relax['low_speed_calibration_reason']) == 'relax_clean'
+  assert float(snap_relax['v_base']) > float(snap_neutral['v_base']) + 0.05
+
+
+def test_low_speed_calibration_tightens_on_sustained_high_effort_and_tracking_gap():
+  v0 = 11.5
+  v_cruise = 16.0
+  steps_neutral = [
+    Step(curvature=0.02, curvature_ahead=0.02, confidence=0.95)
+    for _ in range(180)
+  ]
+  steps_tighten = [
+    Step(
+      curvature=0.02,
+      curvature_ahead=0.02,
+      confidence=0.95,
+      desired_curvature=0.024,
+      actual_curvature=0.016,
+      lateral_output=0.96,
+      lateral_saturated=True,
+    )
+    for _ in range(180)
+  ]
+
+  snap_neutral = simulate_sequence(steps=steps_neutral, v0_mps=v0, v_cruise_mps=v_cruise, dt=0.05)
+  snap_tighten = simulate_sequence(steps=steps_tighten, v0_mps=v0, v_cruise_mps=v_cruise, dt=0.05)
+
+  assert float(snap_tighten['low_speed_calibration_state']) < -0.02
+  assert float(snap_tighten['low_speed_calibration_scale']) < 1.0
+  assert str(snap_tighten['low_speed_calibration_reason']) == 'tighten_saturated'
+  assert float(snap_tighten['v_base']) < float(snap_neutral['v_base']) - 0.10
+
+
+def test_low_speed_calibration_decays_back_toward_neutral_when_curve_feedback_disappears():
+  v0 = 11.5
+  v_cruise = 16.0
+  ctrl = mk_vtsc_with_params()
+  relax_steps = [
+    Step(
+      curvature=0.02,
+      curvature_ahead=0.02,
+      confidence=0.95,
+      desired_curvature=0.020,
+      actual_curvature=0.0194,
+      lateral_output=0.24,
+      lateral_saturated=False,
+    )
+    for _ in range(220)
+  ]
+  decay_steps = [Step(curvature=0.0, confidence=0.95) for _ in range(220)]
+
+  snap_relax = simulate_sequence(steps=relax_steps, vtsc=ctrl, v0_mps=v0, v_cruise_mps=v_cruise, dt=0.05)
+  snap_decay = simulate_sequence(steps=decay_steps, vtsc=ctrl, v0_mps=v0, v_cruise_mps=v_cruise, dt=0.05)
+
+  assert float(snap_relax['low_speed_calibration_state']) > 0.01
+  assert float(snap_decay['low_speed_calibration_state']) < float(snap_relax['low_speed_calibration_state'])
+  assert float(snap_decay['low_speed_calibration_scale']) == pytest.approx(1.0, abs=1e-6)
+  assert str(snap_decay['low_speed_calibration_reason']) in ('decay_no_feedback', 'decay_not_relevant', 'decay_ambiguous')
+
+
 def test_lead_bypass_only_applies_at_close_headway():
   # Sanity check: a distant lead should behave like "no lead" for occlusion logic.
   v0 = 25.0
@@ -724,6 +809,10 @@ def _set_map_strategy(vtsc, monkeypatch, mode: str):
   monkeypatch.setattr(vtsc, "_get_string_param", _get_string, raising=True)
 
 
+def _curve_phase_raw_for_effective(effective_s: float) -> float:
+  return float(effective_s) - float(map_strategy.CURVE_PHASE_OFFSET_ZERO_BASELINE_S)
+
+
 def _set_longitudinal_response_model(vtsc, *, min_accel: float = -6.0, max_accel: float = 5.0, delay_s: float = 0.0):
   vtsc.set_longitudinal_response_model(build_cruise_response_model(
     min_accel_mps2=min_accel,
@@ -762,7 +851,7 @@ def _run_strategic_map_snapshot(
   _set_map_strategy(vtsc, monkeypatch, 'strategic')
   _set_longitudinal_response_model(vtsc, min_accel=-6.0, delay_s=planner_delay_s)
   vtsc._fixed_lead_time_s = float(fixed_lead_time_s)
-  vtsc._curve_phase_offset_s = float(curve_phase_s)
+  vtsc._curve_phase_offset_s = float(_curve_phase_raw_for_effective(curve_phase_s))
   vtsc._overshoot_phase_offset_s = float(overshoot_phase_s)
   vtsc._apex_exit_phase_offset_s = float(apex_exit_phase_s)
 
@@ -853,7 +942,7 @@ def test_map_lookahead_cap_applies_when_available(monkeypatch):
   assert float(snap['map_tail_cap']) <= v_cruise + 1e-6
   assert snap['strategy_mode'] == 'advisory'
   assert float(snap['map_advisory_cap']) <= v_cruise + 1e-6
-  assert float(snap['map_strategic_cap']) >= float(snap['map_advisory_cap']) - 1e-6
+  assert float(snap['map_strategic_cap']) <= float(snap['map_advisory_cap']) + 1e-6
 
 
 def test_offramp_short_tight_curve_map_cap_applies_when_vision_lost(monkeypatch):
@@ -1121,6 +1210,7 @@ def test_strategic_mode_tightens_when_planner_delay_increases(monkeypatch):
     _enable_map_lookahead(vtsc, monkeypatch)
     _set_map_strategy(vtsc, monkeypatch, 'strategic')
     _set_longitudinal_response_model(vtsc, min_accel=-6.0, delay_s=delay_s)
+    vtsc._curve_phase_offset_s = float(_curve_phase_raw_for_effective(0.0))
 
     pts = []
     for i in range(80):
@@ -1243,7 +1333,7 @@ def test_strategic_mode_overshoot_phase_offset_ignored_when_reference_speed_is_n
     max_decel=3.5,
     horizon_limit_m=250.0,
     response_model=response_model,
-    curve_phase_offset_s=0.0,
+    curve_phase_offset_s=_curve_phase_raw_for_effective(0.0),
     overshoot_phase_offset_s=-2.0,
     reference_speed_mps=vsafe + 0.5,
   )
@@ -1265,7 +1355,7 @@ def test_strategic_mode_overshoot_phase_offset_ignored_when_reference_speed_is_n
     max_decel=3.5,
     horizon_limit_m=250.0,
     response_model=response_model,
-    curve_phase_offset_s=0.0,
+    curve_phase_offset_s=_curve_phase_raw_for_effective(0.0),
     overshoot_phase_offset_s=2.0,
     reference_speed_mps=vsafe + 0.5,
   )
@@ -1308,7 +1398,7 @@ def test_strategic_response_probe_runs_once_for_controlling_constraint(monkeypat
     horizon_limit_m=250.0,
     response_model=response_model,
     fixed_lead_time_s=0.0,
-    curve_phase_offset_s=0.0,
+    curve_phase_offset_s=_curve_phase_raw_for_effective(0.0),
     overshoot_phase_offset_s=0.0,
     reference_speed_mps=24.0,
   )
@@ -1344,7 +1434,7 @@ def test_strategic_chain_envelope_limits_accel_for_same_speed_next_curve():
     horizon_limit_m=250.0,
     response_model=response_model,
     fixed_lead_time_s=0.0,
-    curve_phase_offset_s=0.0,
+    curve_phase_offset_s=_curve_phase_raw_for_effective(0.0),
     overshoot_phase_offset_s=0.0,
     reference_speed_mps=10.0,
   )
@@ -1387,7 +1477,7 @@ def test_strategic_compute_feeds_chain_envelope_with_reaccelerate_retighten_anch
     horizon_limit_m=250.0,
     response_model=response_model,
     fixed_lead_time_s=0.0,
-    curve_phase_offset_s=0.0,
+    curve_phase_offset_s=_curve_phase_raw_for_effective(0.0),
     overshoot_phase_offset_s=0.0,
     reference_speed_mps=10.0,
   )
@@ -1761,7 +1851,7 @@ def test_winding_profile_later_brake_cap_stays_planner_reachable():
     horizon_limit_m=250.0,
     response_model=response_model,
     fixed_lead_time_s=0.0,
-    curve_phase_offset_s=0.0,
+    curve_phase_offset_s=_curve_phase_raw_for_effective(0.0),
     overshoot_phase_offset_s=0.0,
     reference_speed_mps=v_ego,
     winding_profile=profile,
@@ -1937,7 +2027,7 @@ def test_strategic_response_bounded_probe_matches_bruteforce():
     horizon_limit_m=250.0,
     response_model=response_model,
     fixed_lead_time_s=0.0,
-    curve_phase_offset_s=0.0,
+    curve_phase_offset_s=_curve_phase_raw_for_effective(0.0),
     overshoot_phase_offset_s=0.0,
     reference_speed_mps=v_ego,
   )
@@ -2014,7 +2104,7 @@ def test_strategic_response_single_threshold_matches_bruteforce_randomized():
       horizon_limit_m=250.0,
       response_model=response_model,
       fixed_lead_time_s=0.0,
-      curve_phase_offset_s=0.0,
+      curve_phase_offset_s=_curve_phase_raw_for_effective(0.0),
       overshoot_phase_offset_s=0.0,
       reference_speed_mps=v_ego,
     )

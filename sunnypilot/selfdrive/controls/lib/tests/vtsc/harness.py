@@ -32,13 +32,21 @@ class Step:
   lane_change_direction: int = int(log.LaneChangeDirection.none)
   left_blinker: bool = False
   right_blinker: bool = False
+  desired_curvature: Optional[float] = None
+  actual_curvature: Optional[float] = None
+  lateral_output: Optional[float] = None
+  lateral_saturated: Optional[bool] = None
+  lateral_active: Optional[bool] = None
 
 
 def _mk_sm(curvature: float, curvature_ahead: Optional[float], v_pred: float, confidence: float,
            lead_d_rel_m: Optional[float], steering_angle_deg: float, live_map_data: Optional[Dict[str, Any]] = None,
            lane_change_state: int = int(log.LaneChangeState.off),
            lane_change_direction: int = int(log.LaneChangeDirection.none),
-           left_blinker: bool = False, right_blinker: bool = False):
+           left_blinker: bool = False, right_blinker: bool = False,
+           desired_curvature: Optional[float] = None, actual_curvature: Optional[float] = None,
+           lateral_output: Optional[float] = None, lateral_saturated: Optional[bool] = None,
+           lateral_active: Optional[bool] = None):
   """Create a minimal SM stub with modelV2 and optional radarState.leadOne."""
   # modelV2.orientationRate.z is yaw rate (rad/s), not curvature.
   # Curvature κ (1/m) = yaw_rate / speed, so yaw_rate = κ * v.
@@ -71,6 +79,23 @@ def _mk_sm(curvature: float, curvature_ahead: Optional[float], v_pred: float, co
   if live_map_msg is not None:
     valid['liveMapDataSP'] = True
 
+  controls_state = None
+  if any(v is not None for v in (desired_curvature, actual_curvature, lateral_output, lateral_saturated, lateral_active)):
+    desired_curvature_f = float(curvature if desired_curvature is None else desired_curvature)
+    actual_curvature_f = float(desired_curvature_f if actual_curvature is None else actual_curvature)
+    lat_state = SimpleNamespace(
+      active=True if lateral_active is None else bool(lateral_active),
+      output=0.0 if lateral_output is None else float(lateral_output),
+      saturated=False if lateral_saturated is None else bool(lateral_saturated),
+    )
+    lateral_control_state = SimpleNamespace(which=lambda: 'torqueState', torqueState=lat_state)
+    controls_state = SimpleNamespace(
+      desiredCurvature=float(desired_curvature_f),
+      curvature=float(actual_curvature_f),
+      lateralControlState=lateral_control_state,
+    )
+    valid['controlsState'] = True
+
   class SM:
     def __init__(self, model, radar_state, valid):
       self.valid = valid
@@ -87,6 +112,8 @@ def _mk_sm(curvature: float, curvature_ahead: Optional[float], v_pred: float, co
         self._data['radarState'] = radar_state
       if live_map_msg is not None:
         self._data['liveMapDataSP'] = live_map_msg
+      if controls_state is not None:
+        self._data['controlsState'] = controls_state
     def __getitem__(self, key):
       return self._data.get(key)
 
@@ -162,7 +189,9 @@ def simulate_sequence(
     step_dt = float(getattr(st, 'dt', dt) or dt)
     sm = _mk_sm(st.curvature, st.curvature_ahead, v_ego, st.confidence, st.lead_d_rel_m,
                 st.steering_angle_deg, st.live_map_data, st.lane_change_state,
-                st.lane_change_direction, st.left_blinker, st.right_blinker)
+                st.lane_change_direction, st.left_blinker, st.right_blinker,
+                st.desired_curvature, st.actual_curvature, st.lateral_output,
+                st.lateral_saturated, st.lateral_active)
     # Patch time used inside controller to advance deterministically
     with patch('sunnypilot.selfdrive.controls.lib.vision_turn_controller.time.time', lambda: t), \
          patch('sunnypilot.selfdrive.controls.lib.vision_turn_controller.time.monotonic', lambda: t):
@@ -272,7 +301,9 @@ def simulate_sequence_trace(
   for st in steps:
     sm = _mk_sm(st.curvature, st.curvature_ahead, v_ego, st.confidence, st.lead_d_rel_m,
                 st.steering_angle_deg, st.live_map_data, st.lane_change_state,
-                st.lane_change_direction, st.left_blinker, st.right_blinker)
+                st.lane_change_direction, st.left_blinker, st.right_blinker,
+                st.desired_curvature, st.actual_curvature, st.lateral_output,
+                st.lateral_saturated, st.lateral_active)
     with patch('sunnypilot.selfdrive.controls.lib.vision_turn_controller.time.time', lambda: t), \
          patch('sunnypilot.selfdrive.controls.lib.vision_turn_controller.time.monotonic', lambda: t):
       ctrl.update(sm, True, v_ego, a_ego, v_cruise_mps)
