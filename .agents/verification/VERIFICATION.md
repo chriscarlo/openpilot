@@ -561,6 +561,29 @@ Results:
 - VTSC tool-side regression suite: passed (`27 passed`).
 - `git diff --check`: clean.
 
+### VTSC outstanding map helper + watcher gear gate (2026-03-13)
+Commands run:
+```bash
+python3 -m py_compile \
+  tools/vtsc/live_gear_gate.py \
+  tools/vtsc/vtsc_watch.py \
+  tools/vtsc/vtsc_stop_handoff_watch.py \
+  tools/vtsc/tests/test_live_gear_gate.py
+.venv/bin/pytest --noconftest -o addopts='' \
+  tools/vtsc/tests/test_live_gear_gate.py \
+  tools/vtsc/tests/test_vtsc_watch.py -q
+.venv/bin/pytest sunnypilot/selfdrive/controls/lib/tests/vtsc -q
+git diff --check
+```
+Results:
+- `py_compile`: success for the new `live_gear_gate` helper and both watcher scripts.
+- Watcher-side regression tests: passed (`18 passed`), covering the gear-gate helper and the existing `vtsc_watch` parsing/render logic.
+- Full VTSC controller/planner suite: passed (`117 passed`) with the outstanding `vtsc_map_strategy.py` helper present.
+- `git diff --check`: clean.
+
+Notes:
+- `HEAD` on `origin/chauffeur-dev4` was missing `effective_curve_phase_offset_s(...)` in `vtsc_map_strategy.py` even though the pushed controller already imports it, so the outstanding map-strategy change was treated as required branch-consistency work rather than optional cleanup.
+
 ### VTSC low-speed learning audit + controller-local range cleanup (2026-03-13)
 Commands run:
 ```bash

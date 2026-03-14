@@ -20,6 +20,7 @@ from openpilot.selfdrive.controls.lib.longitudinal_response_model import (
 MAP_STRATEGY_ADVISORY = "advisory"
 MAP_STRATEGY_STRATEGIC = "strategic"
 DEFAULT_MAP_STRATEGY = MAP_STRATEGY_STRATEGIC
+CURVE_PHASE_OFFSET_ZERO_BASELINE_S = -3.0
 STRATEGIC_OVERSHOOT_DELTA_MPS = 1.0
 STRATEGIC_CHAIN_LOCAL_MIN_EPS_MPS = 0.05
 STRATEGIC_CHAIN_REARM_RISE_MPS = 0.75
@@ -48,6 +49,12 @@ def normalize_map_strategy(raw: str | bytes | None) -> str:
   if value in (MAP_STRATEGY_ADVISORY, MAP_STRATEGY_STRATEGIC):
     return value
   return DEFAULT_MAP_STRATEGY
+
+
+def effective_curve_phase_offset_s(curve_phase_offset_s: float, *, extra_adjust_s: float = 0.0) -> float:
+  # Keep the user-facing knob centered at 0 while preserving the earlier
+  # timing that used to require dialing CurvePhaseOffsetS down to -3.0.
+  return float(curve_phase_offset_s) + CURVE_PHASE_OFFSET_ZERO_BASELINE_S + float(extra_adjust_s)
 
 
 @dataclass
@@ -567,7 +574,10 @@ def compute_map_cap_candidate(
   strategy_mode = normalize_map_strategy(mode)
   profile = winding_profile or DEFAULT_WINDING_BEHAVIOR_PROFILE
   fixed_lead_time = max(0.0, float(fixed_lead_time_s) + float(profile.fixed_lead_time_adjust_s))
-  curve_phase_offset = float(curve_phase_offset_s) + float(profile.curve_phase_offset_adjust_s)
+  curve_phase_offset = effective_curve_phase_offset_s(
+    curve_phase_offset_s,
+    extra_adjust_s=float(profile.curve_phase_offset_adjust_s),
+  )
   overshoot_phase_offset = float(overshoot_phase_offset_s) + float(profile.overshoot_phase_offset_adjust_s)
   total_span = start_span(SPAN_MAP_CAP_STRATEGIC if strategy_mode == MAP_STRATEGY_STRATEGIC else SPAN_MAP_CAP_ADVISORY)
   try:

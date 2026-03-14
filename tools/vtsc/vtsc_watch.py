@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os, sys, time, json, glob, argparse, threading, queue
+from pathlib import Path
 
 """
 Real-time VTSC watcher: tails VTSC snapshots and swaglogs, summarizes caps and gating.
@@ -22,7 +23,21 @@ Usage:
 SNAPSHOT_PATH = "/data/media/0/VTSCDebug/vtsc_snapshots.jsonl"
 SWAGLOG_GLOB = "/data/log/swaglog.*"
 
-def tail_f(path, out_q):
+try:
+  from .live_gear_gate import LiveForwardGearGate
+except ImportError:
+  try:
+    from live_gear_gate import LiveForwardGearGate  # type: ignore
+  except ImportError:
+    sys.path.append("/data/openpilot")
+    try:
+      sys.path.append(str(Path(__file__).resolve().parents[2]))
+    except Exception:
+      pass
+    from tools.vtsc.live_gear_gate import LiveForwardGearGate  # type: ignore
+
+
+def tail_f(path, out_q, gate):
   try:
     with open(path, 'r', encoding='utf-8', errors='ignore') as f:
       f.seek(0, os.SEEK_END)
@@ -31,11 +46,13 @@ def tail_f(path, out_q):
         if not line:
           time.sleep(0.1)
           continue
+        if not gate.is_active():
+          continue
         out_q.put(('snap', line))
   except Exception as e:
     out_q.put(('err', f"tail_f error for {path}: {e}"))
 
-def tail_swaglogs(out_q):
+def tail_swaglogs(out_q, gate):
   # naive multi-file tail: reopen newest periodically
   last_sizes = {}
   while True:
@@ -50,6 +67,9 @@ def tail_swaglogs(out_q):
         # on first see, jump near end to avoid backlog
         if p not in last_sizes:
           pos = max(0, sz - 65536)
+        if not gate.is_active():
+          last_sizes[p] = sz
+          continue
         if pos < sz:
           try:
             with open(p, 'r', encoding='utf-8', errors='ignore') as f:
@@ -176,25 +196,36 @@ def main():
   ap = argparse.ArgumentParser()
   ap.add_argument('--snapshots', action='store_true', help='Tail VTSC snapshots file')
   ap.add_argument('--swaglog', action='store_true', help='Tail swaglogs for VTSCDBG lines')
+  ap.add_argument('--all-gears', action='store_true', help='Do not auto-pause while offroad or not in a forward gear')
   args = ap.parse_args()
   if not args.snapshots and not args.swaglog:
     args.snapshots = args.swaglog = True
 
+  gate = LiveForwardGearGate(enabled=not args.all_gears)
   q = queue.Queue()
   threads = []
   if args.snapshots and os.path.exists(SNAPSHOT_PATH):
-    t = threading.Thread(target=tail_f, args=(SNAPSHOT_PATH, q), daemon=True)
+    t = threading.Thread(target=tail_f, args=(SNAPSHOT_PATH, q, gate), daemon=True)
     t.start(); threads.append(t)
     print(f"[watch] tailing snapshots at {SNAPSHOT_PATH}")
   elif args.snapshots:
     print(f"[watch] snapshot file not found: {SNAPSHOT_PATH}")
   if args.swaglog:
-    t2 = threading.Thread(target=tail_swaglogs, args=(q,), daemon=True)
+    t2 = threading.Thread(target=tail_swaglogs, args=(q, gate), daemon=True)
     t2.start(); threads.append(t2)
     print(f"[watch] tailing swaglogs at {SWAGLOG_GLOB}")
+  if not gate.available:
+    print("[watch] forward-gear gate unavailable; failing open", file=sys.stderr)
 
+  last_gate = None
   try:
     while True:
+      gate_state = gate.snapshot()
+      if gate_state != last_gate:
+        active, started, gear = gate_state
+        status = "active" if active else "paused"
+        print(f"[watch] monitoring {status} started={int(started)} gear={gear}")
+        last_gate = gate_state
       try:
         src, line = q.get(timeout=1.0)
       except queue.Empty:

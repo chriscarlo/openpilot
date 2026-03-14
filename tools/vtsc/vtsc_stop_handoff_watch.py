@@ -30,6 +30,19 @@ except ModuleNotFoundError:
     pass
   from cereal import messaging
 
+try:
+  from .live_gear_gate import monitoring_enabled, normalize_gear_shifter
+except ImportError:
+  try:
+    from live_gear_gate import monitoring_enabled, normalize_gear_shifter  # type: ignore
+  except ImportError:
+    sys.path.append("/data/openpilot")
+    try:
+      sys.path.append(str(Path(__file__).resolve().parents[2]))
+    except Exception:
+      pass
+    from tools.vtsc.live_gear_gate import monitoring_enabled, normalize_gear_shifter  # type: ignore
+
 
 def _sign_with_deadband(x: float, deadband: float = 0.10) -> int:
   if x > deadband:
@@ -102,6 +115,15 @@ def _lcs_code(v) -> int:
   }.get(name, -1)
 
 
+def _reset_launch_tracking(
+  launch_signs: deque[tuple[float, int]],
+  launch_a_target_samples: deque[float],
+) -> tuple[bool, bool, bool, bool, bool, list[int]]:
+  launch_signs.clear()
+  launch_a_target_samples.clear()
+  return False, False, False, False, False, []
+
+
 def main() -> int:
   ap = argparse.ArgumentParser(description="Watch VTSC stop/launch handoff behavior live.")
   ap.add_argument("--hz", type=float, default=10.0, help="Render/update rate in Hz (default: 10)")
@@ -109,11 +131,12 @@ def main() -> int:
   ap.add_argument("--launch-window-s", type=float, default=8.0, help="Seconds after standstill release to watch handoff")
   ap.add_argument("--only-alerts", action="store_true", help="Only print suspicious lines/alerts")
   ap.add_argument("--max-speed", type=float, default=12.0, help="When not alert-only, print rows only below this speed (m/s)")
+  ap.add_argument("--all-gears", action="store_true", help="Do not auto-pause while offroad or not in a forward gear")
   args = ap.parse_args()
 
   period = 1.0 / max(1.0, args.hz)
   sm = messaging.SubMaster(
-    ["carState", "radarState", "longitudinalPlan", "longitudinalPlanSP", "modelV2", "selfdriveState", "controlsState"],
+    ["carState", "radarState", "longitudinalPlan", "longitudinalPlanSP", "modelV2", "selfdriveState", "controlsState", "deviceState"],
     poll="longitudinalPlanSP",
   )
 
@@ -129,6 +152,7 @@ def main() -> int:
   launch_any_enabled = False
   launch_lcs_path: list[int] = []
   last_print_t = 0.0
+  last_monitor_state = None
   t_start = time.monotonic()
 
   print("watching stop/handoff: Ctrl-C to stop")
@@ -156,6 +180,17 @@ def main() -> int:
         v_ego = float(cs.vEgo)
       except Exception:
         v_ego = 0.0
+      try:
+        started = bool(getattr(sm["deviceState"], "started", False))
+      except Exception:
+        started = False
+      gear = normalize_gear_shifter(getattr(cs, "gearShifter", "unknown"))
+      monitor_active = True if args.all_gears else monitoring_enabled(started=started, gear=gear)
+      monitor_state = (monitor_active, started, gear)
+      if monitor_state != last_monitor_state:
+        status = "active" if monitor_active else "paused"
+        print(f"{time.strftime('%H:%M:%S')} MONITOR {status} started={_bool(started)} gear={gear}")
+        last_monitor_state = monitor_state
       try:
         a_ego = float(cs.aEgo)
       except Exception:
@@ -193,6 +228,19 @@ def main() -> int:
       sd_state_name = _enum_name(getattr(sd, "state", "?"))
       sd_state_norm = sd_state_name.strip().lower()
       control_on = enabled or active or (sd_state_norm in ("enabled", "softdisabling", "overriding"))
+
+      if not monitor_active:
+        prev_standstill = standstill
+        (
+          launch_active,
+          launch_block_vtsc,
+          launch_block_lead,
+          launch_block_throttle,
+          launch_handoff,
+          launch_lcs_path,
+        ) = _reset_launch_tracking(launch_signs, launch_a_target_samples)
+        launch_any_enabled = False
+        continue
 
       lead1 = rs.leadOne
       lead2 = rs.leadTwo
