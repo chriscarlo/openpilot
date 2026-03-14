@@ -320,6 +320,12 @@ def update_vtsc_params(ctrl, *, force: bool = False) -> None:
     10.0, 80.0,
   ))
 
+  ctrl._low_speed_calibration_high_end_mph = getf(
+    "VisionTurnSpeedControlLowSpeedLearnedHighEndMph",
+    getattr(ctrl, "_low_speed_calibration_high_end_mph", getattr(vtc_mod, "LOW_SPEED_CALIB_TARGET_END_MPH", 40.0)),
+    20.0, 60.0,
+  )
+
   # Physics sigmoid knobs
   phys_base = getf("VisionTurnSpeedControlPhysicsBaseline", getattr(vtc_mod, "PHYSICS_D", 3.144734))
   setattr(vtc_mod, "PHYSICS_D", clip(phys_base, 2.0, 4.0))
@@ -456,6 +462,9 @@ def update_vtsc_params(ctrl, *, force: bool = False) -> None:
     getattr(ctrl, "_dropout_grace_s", 0.40),
     0.0, 2.0,
   )
+
+  if hasattr(ctrl, "_sync_low_speed_calibration_param"):
+    ctrl._sync_low_speed_calibration_param()
 
   # Double-cap guard and fov_exit relax tunables
   try:

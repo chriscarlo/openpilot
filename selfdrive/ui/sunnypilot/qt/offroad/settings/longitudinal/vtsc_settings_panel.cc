@@ -20,6 +20,15 @@ int vtscStrategyIndexFromParam(const std::string &value) {
   return value == "advisory" ? 0 : 1;
 }
 
+constexpr const char *kLowSpeedLearnHighEndParam = "VisionTurnSpeedControlLowSpeedLearnedHighEndMph";
+constexpr float kLowSpeedLearnHighEndDefaultMph = 40.0f;
+constexpr float kLowSpeedLearnHighEndMinMph = 20.0f;
+constexpr float kLowSpeedLearnHighEndMaxMph = 60.0f;
+
+float clampLowSpeedLearnHighEndMph(float value) {
+  return std::max(kLowSpeedLearnHighEndMinMph, std::min(kLowSpeedLearnHighEndMaxMph, value));
+}
+
 }  // namespace
 
 // Local helper: create a section card with shared style
@@ -75,6 +84,16 @@ void VTSCSettingsPanel::showEvent(QShowEvent *event) {
   refreshPhaseLabel(curvePhaseValLabel_, curvePhaseStatusLabel_, "VisionTurnSpeedControlCurvePhaseOffsetS");
   refreshPhaseLabel(overshootPhaseValLabel_, overshootPhaseStatusLabel_, "VisionTurnSpeedControlOvershootPhaseOffsetS");
   refreshPhaseLabel(apexExitValLabel_, apexExitStatusLabel_, "VisionTurnSpeedControlApexExitPhaseOffsetS");
+  if (learnRangeValLabel_ && learnRangeStatusLabel_) {
+    float v = kLowSpeedLearnHighEndDefaultMph;
+    QString s = QString::fromStdString(p.get(kLowSpeedLearnHighEndParam));
+    if (!s.isEmpty()) v = s.toFloat();
+    v = clampLowSpeedLearnHighEndMph(v);
+    learnRangeValLabel_->setText(QString::number(v, 'f', 0) + " mph");
+    bool isDefault = std::abs(v - kLowSpeedLearnHighEndDefaultMph) < 0.001f;
+    learnRangeStatusLabel_->setText(isDefault ? tr("(Default)") : tr("(Modified)"));
+    learnRangeStatusLabel_->setStyleSheet(isDefault ? "font-size: 32px; color: #999999;" : "font-size: 32px; color: #FFC107;");
+  }
   if (headValLabel_ && headStatusLabel_) {
     auto clamp = [](float x){ return std::max(0.5f, std::min(5.0f, x)); };
     float v = 3.0f;
@@ -324,6 +343,99 @@ void VTSCSettingsPanel::setupUI() {
     apexExitValLabel_, apexExitStatusLabel_);
 
   mainLayout->addWidget(timingFrame);
+
+  // Section: Low-Speed Learning
+  QFrame *learningFrame = createSectionFrame();
+  QVBoxLayout *learningLayout = new QVBoxLayout(learningFrame);
+
+  QLabel *learningTitle = new QLabel(tr("Low-Speed Learning"));
+  learningTitle->setStyleSheet("font-size: 42px; font-weight: 500; color: #E4E4E4; padding-bottom: 15px;");
+  learningLayout->addWidget(learningTitle);
+
+  QLabel *rangeTitle = new QLabel(tr("Learning High-End Speed (mph)"));
+  rangeTitle->setStyleSheet("font-size: 42px; font-weight: 500; color: #E4E4E4;");
+  learningLayout->addWidget(rangeTitle);
+
+  QHBoxLayout *learnRow = new QHBoxLayout();
+
+  QPushButton *learnMinus = new QPushButton("-");
+  learnMinus->setFixedSize(100, 100);
+  learnMinus->setStyleSheet(circleButtonStyle);
+  learnMinus->setFocusPolicy(Qt::NoFocus);
+  learnRow->addWidget(learnMinus);
+
+  QVBoxLayout *learnValueLayout = new QVBoxLayout();
+  learnRangeValLabel_ = new QLabel("40 mph");
+  learnRangeValLabel_->setAlignment(Qt::AlignCenter);
+  learnRangeValLabel_->setFixedWidth(300);
+  learnRangeValLabel_->setStyleSheet("font-size: 70px; font-weight: 500; color: #FFFFFF;");
+  learnValueLayout->addWidget(learnRangeValLabel_);
+  learnRangeStatusLabel_ = new QLabel(tr("(Default)"));
+  learnRangeStatusLabel_->setAlignment(Qt::AlignCenter);
+  learnRangeStatusLabel_->setStyleSheet("font-size: 32px; color: #999999;");
+  learnValueLayout->addWidget(learnRangeStatusLabel_);
+  learnRow->addLayout(learnValueLayout);
+
+  QPushButton *learnPlus = new QPushButton("+");
+  learnPlus->setFixedSize(100, 100);
+  learnPlus->setStyleSheet(circleButtonStyle);
+  learnPlus->setFocusPolicy(Qt::NoFocus);
+  learnRow->addWidget(learnPlus);
+
+  learnRow->addStretch();
+
+  QPushButton *learnReset = new QPushButton(tr("Reset"));
+  learnReset->setFixedSize(150, 80);
+  learnReset->setStyleSheet(resetButtonStyle);
+  learnReset->setFocusPolicy(Qt::NoFocus);
+  learnRow->addWidget(learnReset);
+
+  auto updateLearnRangeLabels = [this, learnMinus, learnPlus, learnReset](float v) {
+    learnRangeValLabel_->setText(QString::number(v, 'f', 0) + " mph");
+    bool isDefault = std::abs(v - kLowSpeedLearnHighEndDefaultMph) < 0.001f;
+    learnRangeStatusLabel_->setText(isDefault ? QObject::tr("(Default)") : QObject::tr("(Modified)"));
+    learnRangeStatusLabel_->setStyleSheet(isDefault ? "font-size: 32px; color: #999999;" : "font-size: 32px; color: #FFC107;");
+    learnMinus->setEnabled(v > kLowSpeedLearnHighEndMinMph);
+    learnPlus->setEnabled(v < kLowSpeedLearnHighEndMaxMph);
+    learnReset->setEnabled(!isDefault);
+  };
+  auto readLearnRangeValue = []() -> float {
+    Params p;
+    float v = kLowSpeedLearnHighEndDefaultMph;
+    QString s = QString::fromStdString(p.get(kLowSpeedLearnHighEndParam));
+    if (!s.isEmpty()) v = s.toFloat();
+    return clampLowSpeedLearnHighEndMph(v);
+  };
+
+  updateLearnRangeLabels(readLearnRangeValue());
+  QObject::connect(learnMinus, &QPushButton::clicked, [updateLearnRangeLabels, readLearnRangeValue]() {
+    float v = clampLowSpeedLearnHighEndMph(readLearnRangeValue() - 1.0f);
+    Params().put(kLowSpeedLearnHighEndParam, QString::number(v, 'f', 0).toStdString());
+    updateLearnRangeLabels(v);
+  });
+  QObject::connect(learnPlus, &QPushButton::clicked, [updateLearnRangeLabels, readLearnRangeValue]() {
+    float v = clampLowSpeedLearnHighEndMph(readLearnRangeValue() + 1.0f);
+    Params().put(kLowSpeedLearnHighEndParam, QString::number(v, 'f', 0).toStdString());
+    updateLearnRangeLabels(v);
+  });
+  QObject::connect(learnReset, &QPushButton::clicked, [updateLearnRangeLabels]() {
+    float v = kLowSpeedLearnHighEndDefaultMph;
+    Params().put(kLowSpeedLearnHighEndParam, QString::number(v, 'f', 0).toStdString());
+    updateLearnRangeLabels(v);
+  });
+
+  learningLayout->addLayout(learnRow);
+
+  QLabel *rangeHelp = new QLabel(tr(
+    "Sets where the persisted low-speed learning fades out on the high side. "
+    "Learning still ramps in from 10 mph to 15 mph, stays fully active until 5 mph below this value, "
+    "then tapers to zero by this speed."
+  ));
+  rangeHelp->setStyleSheet("font-size: 32px; color: #999999; padding-left: 10px; padding-bottom: 10px;");
+  rangeHelp->setWordWrap(true);
+  learningLayout->addWidget(rangeHelp);
+
+  mainLayout->addWidget(learningFrame);
 
   // Section: Lead Vehicle Bypass
   QFrame *leadFrame = createSectionFrame();

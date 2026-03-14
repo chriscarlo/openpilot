@@ -126,6 +126,7 @@ def mk_vtsc_with_params(
   hysteresis: float = 0.2,
   safety_bias: float = 0.1,
   bool_overrides: Optional[Dict[str, bool]] = None,
+  value_overrides: Optional[Dict[str, Any]] = None,
 ) -> VisionTurnController:
   """Instantiate VisionTurnController with Params patched to specified values."""
   class MockCP:  # minimal car params (enough to build VehicleModel in dev tests)
@@ -150,6 +151,13 @@ def mk_vtsc_with_params(
       return False
     mp.get_bool.side_effect = _get_bool
     def _get(key: str):
+      if value_overrides and key in value_overrides:
+        raw = value_overrides[key]
+        if raw is None:
+          return None
+        if isinstance(raw, (bytes, bytearray)):
+          return raw
+        return str(raw).encode()
       if key.endswith('Aggressiveness'):
         return str(aggressiveness).encode()
       if key.endswith('FilterAlpha'):

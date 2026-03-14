@@ -5,7 +5,7 @@ import random
 
 import pytest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from cereal import log
 import sunnypilot.selfdrive.controls.lib.vtsc_map_strategy as map_strategy
@@ -227,7 +227,7 @@ def test_low_speed_calibration_relaxes_clean_low_headroom_curve():
   assert float(snap_relax['v_base']) > float(snap_neutral['v_base']) + 0.05
 
 
-def test_low_speed_calibration_tightens_on_sustained_high_effort_and_tracking_gap():
+def test_low_speed_calibration_tightens_on_sustained_saturation():
   v0 = 11.5
   v_cruise = 16.0
   steps_neutral = [
@@ -254,6 +254,76 @@ def test_low_speed_calibration_tightens_on_sustained_high_effort_and_tracking_ga
   assert float(snap_tighten['low_speed_calibration_scale']) < 1.0
   assert str(snap_tighten['low_speed_calibration_reason']) == 'tighten_saturated'
   assert float(snap_tighten['v_base']) < float(snap_neutral['v_base']) - 0.10
+
+
+def test_low_speed_calibration_does_not_tighten_on_high_effort_without_saturation():
+  v0 = 11.5
+  v_cruise = 16.0
+  steps = [
+    Step(
+      curvature=0.02,
+      curvature_ahead=0.02,
+      confidence=0.95,
+      desired_curvature=0.024,
+      actual_curvature=0.014,
+      lateral_output=0.97,
+      lateral_saturated=False,
+    )
+    for _ in range(220)
+  ]
+
+  snap = simulate_sequence(steps=steps, v0_mps=v0, v_cruise_mps=v_cruise, dt=0.05)
+
+  assert float(snap['low_speed_calibration_state']) > -0.005
+  assert float(snap['low_speed_calibration_scale']) >= 0.999
+  assert str(snap['low_speed_calibration_reason']) == 'decay_ambiguous'
+
+
+def test_low_speed_calibration_loads_and_persists_learned_state():
+  ctrl = mk_vtsc_with_params(value_overrides={"VisionTurnSpeedControlLowSpeedLearnedState": "0.025"})
+  assert float(getattr(ctrl, '_low_speed_calibration_state', 0.0)) == pytest.approx(0.025, abs=1e-9)
+
+  relax_steps = [
+    Step(
+      curvature=0.02,
+      curvature_ahead=0.02,
+      confidence=0.95,
+      desired_curvature=0.020,
+      actual_curvature=0.0195,
+      lateral_output=0.20,
+      lateral_saturated=False,
+    )
+    for _ in range(220)
+  ]
+  simulate_sequence(steps=relax_steps, vtsc=ctrl, v0_mps=11.5, v_cruise_mps=16.0, dt=0.05)
+
+  persist_calls = [
+    call for call in getattr(ctrl._params, 'put_nonblocking', MagicMock()).call_args_list
+    if call.args and call.args[0] == 'VisionTurnSpeedControlLowSpeedLearnedState'
+  ]
+  assert persist_calls
+  persisted_value = float(persist_calls[-1].args[1])
+  assert persisted_value > 0.025
+
+
+def test_low_speed_calibration_high_end_param_limits_sigmoid_range():
+  k_curve = next(
+    k for k in (0.012, 0.011, 0.010, 0.009, 0.008)
+    if float(curvature_to_speed(k)) * 2.2369362920544 > 26.0
+  )
+  ctrl_default = mk_vtsc_with_params(value_overrides={
+    "VisionTurnSpeedControlLowSpeedLearnedState": "0.040",
+  })
+  scale_default = float(ctrl_default._low_speed_calibration_scale(k_curve))
+
+  ctrl_limited = mk_vtsc_with_params(value_overrides={
+    "VisionTurnSpeedControlLowSpeedLearnedState": "0.040",
+    "VisionTurnSpeedControlLowSpeedLearnedHighEndMph": "25.0",
+  })
+  scale_limited = float(ctrl_limited._low_speed_calibration_scale(k_curve))
+
+  assert scale_default > 1.03
+  assert scale_limited == pytest.approx(1.0, abs=1e-6)
 
 
 def test_low_speed_calibration_decays_back_toward_neutral_when_curve_feedback_disappears():

@@ -68,13 +68,14 @@ def test_analyze_turn_desire_capture_relaxes_clean_trace():
   assert "relax_clean" in {str(row["low_speed_calibration_reason"]) for row in trace if bool(row["low_speed_calibration_active"])}
 
 
-def test_analyze_turn_desire_capture_tightens_high_effort_trace():
+def test_analyze_turn_desire_capture_tightens_only_when_saturated():
   samples = [
     _capture_sample(
       i * 0.1,
       output=0.95,
       controls_desired_curvature=0.02,
       controls_curvature=0.014,
+      lat_saturated=True,
       actualLateralAccel=0.30,
       top_desire="turnRight",
     )
@@ -89,12 +90,19 @@ def test_analyze_turn_desire_capture_tightens_high_effort_trace():
 
   assert min(float(row["low_speed_calibration_scale"]) for row in trace) < 1.0
   assert min(float(row["delta_curve_speed_mps"]) for row in trace) < 0.0
-  assert "tighten_effort" in {str(row["low_speed_calibration_reason"]) for row in trace if bool(row["low_speed_calibration_active"])}
+  assert "tighten_saturated" in {str(row["low_speed_calibration_reason"]) for row in trace if bool(row["low_speed_calibration_active"])}
 
 
 def test_detect_episodes_and_summary_capture_mode_counts():
   tighten = [
-    _capture_sample(i * 0.1, output=0.95, controls_desired_curvature=0.02, controls_curvature=0.014, top_desire="turnRight")
+    _capture_sample(
+      i * 0.1,
+      output=0.95,
+      controls_desired_curvature=0.02,
+      controls_curvature=0.014,
+      lat_saturated=True,
+      top_desire="turnRight",
+    )
     for i in range(80)
   ]
   gap = [_capture_sample(8.0 + i * 0.1, speed_mps=0.0, speed_mph=0.0, lat_active=False, output=0.0) for i in range(200)]

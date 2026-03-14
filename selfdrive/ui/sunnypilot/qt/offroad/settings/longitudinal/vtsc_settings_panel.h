@@ -46,6 +46,8 @@ private:
   QLabel *overshootPhaseStatusLabel_ = nullptr;
   QLabel *apexExitValLabel_ = nullptr;
   QLabel *apexExitStatusLabel_ = nullptr;
+  QLabel *learnRangeValLabel_ = nullptr;
+  QLabel *learnRangeStatusLabel_ = nullptr;
   QLabel *headValLabel_ = nullptr;
   QLabel *headStatusLabel_ = nullptr;
 };

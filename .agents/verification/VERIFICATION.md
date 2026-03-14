@@ -431,3 +431,160 @@ Results:
 
 Environment notes:
 - `tools/vtsc/vtsc_rca_workbook.py` still depends on `pandas` for full workbook generation in this host environment; the new `tools/vtsc/vtsc_gas_event_report.py` path avoids that dependency for terminal-first gas-event triage.
+
+### VTSC saturation-only low-speed calibration + persisted learned state (2026-03-13)
+Commands run:
+```bash
+python3 -m py_compile \
+  sunnypilot/selfdrive/controls/lib/vision_turn_controller.py \
+  sunnypilot/selfdrive/controls/lib/vision_turn_params.py \
+  sunnypilot/selfdrive/controls/lib/tests/vtsc/harness.py \
+  sunnypilot/selfdrive/controls/lib/tests/vtsc/test_scenarios.py \
+  tools/vtsc/vtsc_live_params.py \
+  tools/vtsc/tests/test_vtsc_turn_desire_capture_report.py
+.venv/bin/pytest sunnypilot/selfdrive/controls/lib/tests/vtsc/test_scenarios.py -k 'low_speed_calibration' -q
+.venv/bin/pytest --noconftest -o addopts='' tools/vtsc/tests/test_vtsc_turn_desire_capture_report.py -q
+PATH="$(pwd)/.cache/bin:$PATH" scons -j"$(nproc)" common/params_pyx.so
+.venv/bin/python - <<'PY'
+import sys
+sys.path.insert(0, '.')
+from openpilot.common.params import Params
+p = Params()
+print('check_key', p.check_key('VisionTurnSpeedControlLowSpeedLearnedState'))
+print('type', p.get_type('VisionTurnSpeedControlLowSpeedLearnedState'))
+PY
+.venv/bin/pytest sunnypilot/selfdrive/controls/lib/tests/vtsc -q
+.venv/bin/pytest --noconftest -o addopts='' \
+  tools/vtsc/tests/test_vtsc_rlog_episode_report.py \
+  tools/vtsc/tests/test_vtsc_turn_desire_capture_report.py \
+  tools/vtsc/tests/test_vtsc_gas_event_window.py \
+  tools/vtsc/tests/test_vtsc_gas_event_report.py \
+  tools/vtsc/tests/test_vtsc_watch.py -q
+git diff --check
+```
+Results:
+- `py_compile`: success for the controller, live-param loader, harness, scenario tests, and turn-desire report tests.
+- `test_scenarios.py -k low_speed_calibration`: passed (`5 passed`), including:
+  - relax on clean steering headroom
+  - tighten only on saturation
+  - no tighten on unsaturated high-effort / high-gap traces
+  - persisted learned-state load + debounced write
+- `tools/vtsc/tests/test_vtsc_turn_desire_capture_report.py`: passed (`3 passed`) with the new saturation-only tighten semantics.
+- Targeted Params build: `common/params_pyx.so` rebuilt successfully with the local `cythonize` shim on `PATH`.
+- Direct Params verification succeeded for `VisionTurnSpeedControlLowSpeedLearnedState` (`check_key` truthy, `type == 3` / float).
+- Full VTSC controller/planner suite: passed (`116 passed`).
+- VTSC tool-side regression suite: passed (`27 passed`).
+- `git diff --check`: clean.
+
+Environment notes:
+- This host still requires `PATH="$(pwd)/.cache/bin:$PATH"` for targeted SCons builds because `cythonize` is not otherwise on `PATH`.
+
+### VTSC low-speed sigmoid persistence + offroad high-end range knob (2026-03-13)
+Commands run:
+```bash
+python3 -m py_compile \
+  sunnypilot/selfdrive/controls/lib/vision_turn_controller.py \
+  sunnypilot/selfdrive/controls/lib/vision_turn_params.py \
+  sunnypilot/selfdrive/controls/lib/tests/vtsc/test_scenarios.py \
+  tools/vtsc/vtsc_live_params.py
+.venv/bin/pytest sunnypilot/selfdrive/controls/lib/tests/vtsc/test_scenarios.py -k 'low_speed_calibration' -q
+.venv/bin/pytest --noconftest -o addopts='' tools/vtsc/tests/test_vtsc_turn_desire_capture_report.py -q
+PATH="$(pwd)/.cache/bin:$PATH" scons -j"$(nproc)" common/params_pyx.so
+.venv/bin/python - <<'PY'
+import sys
+sys.path.insert(0, '.')
+from openpilot.common.params import Params
+p = Params()
+print('check_key', p.check_key('VisionTurnSpeedControlLowSpeedLearnedHighEndMph'))
+print('type', p.get_type('VisionTurnSpeedControlLowSpeedLearnedHighEndMph'))
+PY
+scons -j"$(nproc)" \
+  selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/vtsc_settings_panel.o \
+  selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/moc_vtsc_settings_panel.o
+.venv/bin/pytest sunnypilot/selfdrive/controls/lib/tests/vtsc -q
+.venv/bin/pytest --noconftest -o addopts='' \
+  tools/vtsc/tests/test_vtsc_rlog_episode_report.py \
+  tools/vtsc/tests/test_vtsc_turn_desire_capture_report.py \
+  tools/vtsc/tests/test_vtsc_gas_event_window.py \
+  tools/vtsc/tests/test_vtsc_gas_event_report.py \
+  tools/vtsc/tests/test_vtsc_watch.py -q
+git diff --check
+```
+Results:
+- `py_compile`: success for the controller, live-param loader, and updated low-speed calibration tests.
+- `test_scenarios.py -k low_speed_calibration`: passed (`6 passed`), including:
+  - relax and tighten behavior with the new in-sigmoid low-speed modifier
+  - saturation-only tighten gating
+  - persisted learned-state load + debounced write
+  - high-end range parameter limiting the learning taper as intended
+- `tools/vtsc/tests/test_vtsc_turn_desire_capture_report.py`: passed (`3 passed`) after aligning the offline analyzer with the live controller’s in-sigmoid tuning path.
+- Targeted Params build: `common/params_pyx.so` rebuilt successfully with the local `cythonize` shim.
+- Direct Params verification succeeded for `VisionTurnSpeedControlLowSpeedLearnedHighEndMph` (`check_key` truthy, `type == 3` / float).
+- Targeted Qt build succeeded for:
+  - `selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/vtsc_settings_panel.o`
+  - `selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/moc_vtsc_settings_panel.o`
+- Full VTSC controller/planner suite: passed (`117 passed`).
+- VTSC tool-side regression suite: passed (`27 passed`).
+- `git diff --check`: clean.
+
+Environment notes:
+- The new offroad setting uses the existing VTSC submenu controls and did not introduce `moc_*.cc` or `*.o` working-tree churn after the targeted build.
+
+### VTSC low-speed learning final revalidation (2026-03-13)
+Commands run:
+```bash
+.venv/bin/pytest sunnypilot/selfdrive/controls/lib/tests/vtsc/test_scenarios.py -k 'low_speed_calibration' -q
+scons -j"$(nproc)" \
+  selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/vtsc_settings_panel.o \
+  selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/moc_vtsc_settings_panel.o
+python3 -m py_compile \
+  sunnypilot/selfdrive/controls/lib/vision_turn_controller.py \
+  sunnypilot/selfdrive/controls/lib/vision_turn_params.py \
+  sunnypilot/selfdrive/controls/lib/tests/vtsc/harness.py \
+  sunnypilot/selfdrive/controls/lib/tests/vtsc/test_scenarios.py \
+  tools/vtsc/vtsc_live_params.py \
+  tools/vtsc/tests/test_vtsc_turn_desire_capture_report.py
+.venv/bin/pytest sunnypilot/selfdrive/controls/lib/tests/vtsc -q
+.venv/bin/pytest --noconftest -o addopts='' \
+  tools/vtsc/tests/test_vtsc_rlog_episode_report.py \
+  tools/vtsc/tests/test_vtsc_turn_desire_capture_report.py \
+  tools/vtsc/tests/test_vtsc_gas_event_window.py \
+  tools/vtsc/tests/test_vtsc_gas_event_report.py \
+  tools/vtsc/tests/test_vtsc_watch.py -q
+git diff --check
+```
+Results:
+- Focused low-speed calibration tests: passed (`6 passed`) after the final internal cleanup pass.
+- Targeted Qt build: passed for the touched VTSC settings panel objects.
+- `py_compile`: success for the touched Python files.
+- Full VTSC controller/planner suite: passed (`117 passed`).
+- VTSC tool-side regression suite: passed (`27 passed`).
+- `git diff --check`: clean.
+
+### VTSC low-speed learning audit + controller-local range cleanup (2026-03-13)
+Commands run:
+```bash
+python3 -m py_compile \
+  sunnypilot/selfdrive/controls/lib/vision_turn_controller.py \
+  sunnypilot/selfdrive/controls/lib/vision_turn_params.py \
+  sunnypilot/selfdrive/controls/lib/tests/vtsc/harness.py \
+  sunnypilot/selfdrive/controls/lib/tests/vtsc/test_scenarios.py
+.venv/bin/pytest sunnypilot/selfdrive/controls/lib/tests/vtsc/test_scenarios.py -k 'low_speed_calibration' -q
+.venv/bin/pytest sunnypilot/selfdrive/controls/lib/tests/vtsc -q
+.venv/bin/pytest --noconftest -o addopts='' \
+  tools/vtsc/tests/test_vtsc_rlog_episode_report.py \
+  tools/vtsc/tests/test_vtsc_turn_desire_capture_report.py \
+  tools/vtsc/tests/test_vtsc_gas_event_window.py \
+  tools/vtsc/tests/test_vtsc_gas_event_report.py \
+  tools/vtsc/tests/test_vtsc_watch.py -q
+git diff --check
+```
+Results:
+- `py_compile`: success for the controller, param refresh path, test harness, and low-speed calibration scenarios.
+- `test_scenarios.py -k low_speed_calibration`: passed (`6 passed`) after fixing the init-order overwrite on `VisionTurnSpeedControlLowSpeedLearnedHighEndMph`.
+- Full VTSC controller/planner suite: passed (`117 passed`).
+- VTSC tool-side regression suite: passed (`27 passed`).
+- `git diff --check`: clean.
+
+Environment notes:
+- The audit/refinement pass localized the new high-end range knob to the controller instance, which removed cross-instance leakage in tests while preserving the requested runtime behavior.

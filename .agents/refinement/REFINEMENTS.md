@@ -238,3 +238,35 @@
 - **Diverges from user proposal:** no
 - **Files touched:** `sunnypilot/selfdrive/controls/lib/tests/vtsc/test_longitudinal_planner_vtsc_map_timing.py`, `.agents/refinement/REFINEMENTS.md`
 - **Notes:** Added a raw-to-effective helper so planner-backed VTSC timing tests pin neutral effective curve timing explicitly instead of relying on the stale raw `0.0` pre-baseline assumption.
+
+### VTSC Low-Speed Learning: In-Sigmoid Persistence + Controller-Local Range Knob
+- **Date:** 2026-03-13
+- **Classification:** A
+- **Category:** Architecture + UI Hygiene
+- **Status:** applied
+- **Approval:** user-requested in-thread (persisted learned tune + offroad range knob)
+- **User-visible change:** yes (new VTSC offroad knob for low-speed learning high-end range)
+- **Behavior/semantics change:** yes (persisted low-speed learning now tunes the low-speed sigmoid/clamp path directly, with saturation-only tighten behavior retained)
+- **Concurrency/threading change:** no
+- **Bounded?** na
+- **Structured?** na
+- **Potential downstream load increase:** no
+- **Diverges from user proposal:** no
+- **Files touched:** `common/params_keys.h`, `sunnypilot/selfdrive/controls/lib/vision_turn_controller.py`, `sunnypilot/selfdrive/controls/lib/vision_turn_params.py`, `selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/vtsc_settings_panel.cc`, `selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/vtsc_settings_panel.h`, `tools/vtsc/vtsc_live_params.py`, `sunnypilot/selfdrive/controls/lib/tests/vtsc/harness.py`, `sunnypilot/selfdrive/controls/lib/tests/vtsc/test_scenarios.py`, `tools/vtsc/tests/test_vtsc_turn_desire_capture_report.py`, `.agents/verification/VERIFICATION.md`, `.agents/refinement/REFINEMENTS.md`
+- **Notes:** Kept the learned high-end range controller-local instead of mutating a shared module-global cap, aligned the offline analyzer with the live in-sigmoid tuning path, and centralized the new UI knob constants so the param key/default/min/max are not duplicated across refresh and click handlers.
+
+### VTSC Low-Speed Learning: Controller-Local High-End Range
+- **Date:** 2026-03-13
+- **Classification:** A
+- **Category:** Reliability
+- **Status:** applied
+- **Approval:** na (internal equivalent refinement during requested VTSC low-speed learning and offroad-knob work)
+- **User-visible change:** no additional user-visible change beyond the requested feature
+- **Behavior/semantics change:** no intended runtime change; fixes loading/persistence of the requested high-end knob and removes shared test/controller state
+- **Concurrency/threading change:** no
+- **Bounded?** na
+- **Structured?** na
+- **Potential downstream load increase:** no
+- **Diverges from user proposal:** no
+- **Files touched:** `sunnypilot/selfdrive/controls/lib/vision_turn_controller.py`, `sunnypilot/selfdrive/controls/lib/vision_turn_params.py`, `sunnypilot/selfdrive/controls/lib/tests/vtsc/harness.py`, `sunnypilot/selfdrive/controls/lib/tests/vtsc/test_scenarios.py`, `.agents/refinement/REFINEMENTS.md`
+- **Notes:** Kept the new low-speed learning high-end range on the controller instance instead of a mutable module-global, which preserved the requested live behavior while fixing an init-order overwrite bug and eliminating cross-instance leakage in tests.

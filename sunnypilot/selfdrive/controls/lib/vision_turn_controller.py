@@ -695,13 +695,13 @@ PHYSICS_MAX_LAT_ACCEL = 3.90  # raised to permit 70 mph at k=0.004 (was 3.12 →
 LOW_SPEED_BIAS_MPH = 5.0         # +speed boost at tight curves (tapers to 0 by END_MPH)
 LOW_SPEED_BIAS_END_MPH = 55.0    # taper covers up to ~55 mph base speed (was 50.0)
 
-# Low-speed envelope calibration. This stays centered on the existing sigmoid and only applies
-# a small bounded modifier in the low-speed target-speed band where steering authority tends to
-# be the real limit.
+# Low-speed envelope calibration. This keeps the learned adjustment bounded to the low-speed
+# portion of the physics sigmoid, where steering authority is the real limit, without distorting
+# the higher-speed envelope.
 LOW_SPEED_CALIB_TARGET_START_MPH = 10.0
 LOW_SPEED_CALIB_TARGET_FULL_MIN_MPH = 15.0
-LOW_SPEED_CALIB_TARGET_FULL_MAX_MPH = 35.0
 LOW_SPEED_CALIB_TARGET_END_MPH = 40.0
+LOW_SPEED_CALIB_TARGET_HIGH_END_FADE_MPH = 5.0
 LOW_SPEED_CALIB_MIN_CURVATURE = 0.0015
 LOW_SPEED_CALIB_MIN_CAP_DELTA_MPS = 0.5
 LOW_SPEED_CALIB_MAX_RELAX = 0.04
@@ -714,6 +714,11 @@ LOW_SPEED_CALIB_RELAX_OUTPUT_MAX = 0.45
 LOW_SPEED_CALIB_TIGHTEN_OUTPUT_MIN = 0.82
 LOW_SPEED_CALIB_TRACKING_RELAX_RATIO_MAX = 0.10
 LOW_SPEED_CALIB_TRACKING_TIGHTEN_RATIO_MIN = 0.22
+LOW_SPEED_CALIB_ENABLE_TIGHTEN_EFFORT = False
+LOW_SPEED_CALIB_ENABLE_TRACKING_TRIGGER = False
+LOW_SPEED_CALIB_PERSIST_WRITE_S = 5.0
+LOW_SPEED_CALIB_PERSIST_DELTA = 0.005
+LOW_SPEED_CALIB_PARAM_SYNC_EPS = 1e-4
 
 # ===== Hidden-turn early deceleration trigger (occlusion-only, sub-65 mph) =====
 # Allows jerk-limited early braking when a short-horizon physics deficit is provably large
@@ -728,7 +733,7 @@ HIDDEN_TURN_PHASE_S = 2.0      # only within first ~2 s of occlusion
 HIDDEN_TURN_HEADING_WIN_S = 1.2
 HIDDEN_TURN_VIS_HEADING_MAX_RAD = math.radians(6.0)  # ~6°, "straight enough"
 
-def _physics_based_lateral_acceleration(curvature: float) -> float:
+def _physics_based_lateral_acceleration(curvature: float, *, low_speed_sigmoid_scale: float = 1.0) -> float:
     """
     Continuous sigmoid-based lateral acceleration function (scipy optimized)
     
@@ -743,7 +748,14 @@ def _physics_based_lateral_acceleration(curvature: float) -> float:
     curvature = max(1e-8, min(curvature, 1.0))
     # Use globally-tunable sigmoid parameters
     result = PHYSICS_A / (1.0 + math.exp(PHYSICS_B * (curvature - PHYSICS_C))) + PHYSICS_D
-    return max(PHYSICS_MIN_LAT_ACCEL, min(result, PHYSICS_MAX_LAT_ACCEL))
+    try:
+        sigmoid_scale = clip(float(low_speed_sigmoid_scale), 0.75, 1.25)
+    except Exception:
+        sigmoid_scale = 1.0
+    tuned_min = max(0.1, float(PHYSICS_MIN_LAT_ACCEL) * sigmoid_scale)
+    tuned_max = max(tuned_min, float(PHYSICS_MAX_LAT_ACCEL) * sigmoid_scale)
+    result *= sigmoid_scale
+    return max(tuned_min, min(result, tuned_max))
 
 def _q_curve_multiplier(abs_curvature_meters: float) -> float:
     if not Q_CURVE_ENABLED or len(Q_CURVE_POINTS) < 2:
@@ -781,18 +793,16 @@ def _q_curve_multiplier(abs_curvature_meters: float) -> float:
             return clip(q, 0.5, 1.5)
     return clip(pts[-1][1], 0.5, 1.5)
 
-def curvature_to_speed(abs_curvature_meters: float, *, low_speed_lat_accel_scale: float = 1.0) -> float:
-    """FIXED: Calculates target speed (m/s) directly from curvature with NO SCALING HACK"""
+def curvature_to_speed(abs_curvature_meters: float, *, low_speed_sigmoid_scale: float = 1.0) -> float:
+    """Calculates target speed (m/s) directly from curvature with optional low-speed sigmoid tuning."""
     if abs_curvature_meters < 1e-7:  # Handle straight roads
         return MAX_SPEED_DEFAULT
 
     # Get safe lateral acceleration using tuned sigmoid
-    safe_lat_accel = _physics_based_lateral_acceleration(abs_curvature_meters)
-    try:
-        lat_accel_scale = clip(float(low_speed_lat_accel_scale), 0.75, 1.25)
-    except Exception:
-        lat_accel_scale = 1.0
-    safe_lat_accel *= lat_accel_scale
+    safe_lat_accel = _physics_based_lateral_acceleration(
+      abs_curvature_meters,
+      low_speed_sigmoid_scale=low_speed_sigmoid_scale,
+    )
 
     # Calculate speed using physics formula v = sqrt(a / k) with CONSISTENT curvature
     try:
@@ -1143,6 +1153,16 @@ class VisionTurnController:
     self._dbg_low_speed_calibration_gap = 0.0
     self._dbg_low_speed_calibration_gap_ratio = 0.0
     self._dbg_low_speed_calibration_saturated = False
+    self._low_speed_calibration_param_state = 0.0
+    self._low_speed_calibration_persisted_state = 0.0
+    self._low_speed_calibration_last_persist_s = 0.0
+    self._low_speed_calibration_high_end_mph = float(
+      getattr(self, "_low_speed_calibration_high_end_mph", LOW_SPEED_CALIB_TARGET_END_MPH)
+    )
+    try:
+      self._sync_low_speed_calibration_param(force=True)
+    except Exception:
+      pass
 
     # Telemetry/debug controls
     self._dbg_enabled = False
@@ -1273,6 +1293,44 @@ class VisionTurnController:
       return str(raw.decode('utf-8') if isinstance(raw, (bytes, bytearray)) else raw)
     except Exception:
       return str(default)
+
+  @staticmethod
+  def _clip_low_speed_calibration_state(value: float) -> float:
+    try:
+      state = float(value)
+    except Exception:
+      state = 0.0
+    return float(clip(state, -float(LOW_SPEED_CALIB_MAX_TIGHTEN), float(LOW_SPEED_CALIB_MAX_RELAX)))
+
+  def _sync_low_speed_calibration_param(self, *, force: bool = False) -> None:
+    raw_state = self._get_float_param(
+      "VisionTurnSpeedControlLowSpeedLearnedState",
+      getattr(self, "_low_speed_calibration_param_state", 0.0),
+      -float(LOW_SPEED_CALIB_MAX_TIGHTEN),
+      float(LOW_SPEED_CALIB_MAX_RELAX),
+    )
+    loaded_state = self._clip_low_speed_calibration_state(raw_state)
+    tracked_state = self._clip_low_speed_calibration_state(getattr(self, "_low_speed_calibration_param_state", 0.0))
+    if force or abs(float(loaded_state) - float(tracked_state)) > float(LOW_SPEED_CALIB_PARAM_SYNC_EPS):
+      self._low_speed_calibration_state = float(loaded_state)
+      self._low_speed_calibration_param_state = float(loaded_state)
+      self._low_speed_calibration_persisted_state = float(loaded_state)
+      self._low_speed_calibration_headroom_ema = 0.0
+
+  def _maybe_persist_low_speed_calibration_state(self, now_s: float) -> None:
+    state = self._clip_low_speed_calibration_state(getattr(self, "_low_speed_calibration_state", 0.0))
+    persisted = self._clip_low_speed_calibration_state(getattr(self, "_low_speed_calibration_persisted_state", 0.0))
+    last_write_s = float(getattr(self, "_low_speed_calibration_last_persist_s", 0.0) or 0.0)
+    if abs(float(state) - float(persisted)) < float(LOW_SPEED_CALIB_PERSIST_DELTA):
+      return
+    if float(now_s) < (last_write_s + float(LOW_SPEED_CALIB_PERSIST_WRITE_S)):
+      return
+    try:
+      self._params.put_nonblocking("VisionTurnSpeedControlLowSpeedLearnedState", f"{float(state):.6f}")
+      self._low_speed_calibration_persisted_state = float(state)
+      self._low_speed_calibration_last_persist_s = float(now_s)
+    except Exception:
+      pass
 
   def set_longitudinal_response_model(self, response_model: CruiseResponseModel | None) -> None:
     self._longitudinal_response_model = response_model
@@ -1753,19 +1811,31 @@ class VisionTurnController:
     self._v_turn_release_shape_active = False
     self._clear_winding_behavior_profile()
 
-  @staticmethod
-  def _low_speed_calibration_taper(target_speed_mph: float) -> float:
+  def _low_speed_calibration_full_max_mph(self) -> float:
+    high_end_mph = float(max(
+      float(LOW_SPEED_CALIB_TARGET_FULL_MIN_MPH),
+      float(getattr(self, "_low_speed_calibration_high_end_mph", LOW_SPEED_CALIB_TARGET_END_MPH)),
+    ))
+    fade_width_mph = float(max(1.0, float(LOW_SPEED_CALIB_TARGET_HIGH_END_FADE_MPH)))
+    return float(max(float(LOW_SPEED_CALIB_TARGET_FULL_MIN_MPH), high_end_mph - fade_width_mph))
+
+  def _low_speed_calibration_taper(self, target_speed_mph: float) -> float:
     speed_mph = float(target_speed_mph)
     if speed_mph <= float(LOW_SPEED_CALIB_TARGET_START_MPH):
       return 0.0
     if speed_mph < float(LOW_SPEED_CALIB_TARGET_FULL_MIN_MPH):
       return float((speed_mph - float(LOW_SPEED_CALIB_TARGET_START_MPH)) /
                    max(1e-3, float(LOW_SPEED_CALIB_TARGET_FULL_MIN_MPH - LOW_SPEED_CALIB_TARGET_START_MPH)))
-    if speed_mph <= float(LOW_SPEED_CALIB_TARGET_FULL_MAX_MPH):
+    high_full_max_mph = float(self._low_speed_calibration_full_max_mph())
+    high_end_mph = float(max(
+      high_full_max_mph,
+      float(getattr(self, "_low_speed_calibration_high_end_mph", LOW_SPEED_CALIB_TARGET_END_MPH)),
+    ))
+    if speed_mph <= high_full_max_mph:
       return 1.0
-    if speed_mph < float(LOW_SPEED_CALIB_TARGET_END_MPH):
-      return float((float(LOW_SPEED_CALIB_TARGET_END_MPH) - speed_mph) /
-                   max(1e-3, float(LOW_SPEED_CALIB_TARGET_END_MPH - LOW_SPEED_CALIB_TARGET_FULL_MAX_MPH)))
+    if speed_mph < high_end_mph:
+      return float((high_end_mph - speed_mph) /
+                   max(1e-3, high_end_mph - high_full_max_mph))
     return 0.0
 
   def _low_speed_calibration_scale(self, abs_curvature_meters: float) -> float:
@@ -1786,7 +1856,7 @@ class VisionTurnController:
   def _curve_speed(self, abs_curvature_meters: float) -> float:
     return float(curvature_to_speed(
       abs_curvature_meters,
-      low_speed_lat_accel_scale=self._low_speed_calibration_scale(abs_curvature_meters),
+      low_speed_sigmoid_scale=self._low_speed_calibration_scale(abs_curvature_meters),
     ))
 
   def _read_lateral_feedback(self, sm) -> dict | None:
@@ -1894,23 +1964,32 @@ class VisionTurnController:
             max(1e-3, float(LOW_SPEED_CALIB_RELAX_OUTPUT_MAX)),
             0.0, 1.0,
           )
-          relax_tracking = clip(
-            (float(LOW_SPEED_CALIB_TRACKING_RELAX_RATIO_MAX) - gap_ratio) /
-            max(1e-3, float(LOW_SPEED_CALIB_TRACKING_RELAX_RATIO_MAX)),
-            0.0, 1.0,
-          )
+          if bool(LOW_SPEED_CALIB_ENABLE_TRACKING_TRIGGER):
+            relax_tracking = clip(
+              (float(LOW_SPEED_CALIB_TRACKING_RELAX_RATIO_MAX) - gap_ratio) /
+              max(1e-3, float(LOW_SPEED_CALIB_TRACKING_RELAX_RATIO_MAX)),
+              0.0, 1.0,
+            )
+          else:
+            relax_tracking = 1.0
           relax_score = float(relax_effort * relax_tracking)
 
-          tighten_effort = clip(
-            (float(feedback['output']) - float(LOW_SPEED_CALIB_TIGHTEN_OUTPUT_MIN)) /
-            max(1e-3, 1.0 - float(LOW_SPEED_CALIB_TIGHTEN_OUTPUT_MIN)),
-            0.0, 1.0,
-          )
-          tighten_tracking = clip(
-            (gap_ratio - float(LOW_SPEED_CALIB_TRACKING_TIGHTEN_RATIO_MIN)) /
-            max(1e-3, 1.0 - float(LOW_SPEED_CALIB_TRACKING_TIGHTEN_RATIO_MIN)),
-            0.0, 1.0,
-          )
+          if bool(LOW_SPEED_CALIB_ENABLE_TIGHTEN_EFFORT):
+            tighten_effort = clip(
+              (float(feedback['output']) - float(LOW_SPEED_CALIB_TIGHTEN_OUTPUT_MIN)) /
+              max(1e-3, 1.0 - float(LOW_SPEED_CALIB_TIGHTEN_OUTPUT_MIN)),
+              0.0, 1.0,
+            )
+          else:
+            tighten_effort = 0.0
+          if bool(LOW_SPEED_CALIB_ENABLE_TRACKING_TRIGGER):
+            tighten_tracking = clip(
+              (gap_ratio - float(LOW_SPEED_CALIB_TRACKING_TIGHTEN_RATIO_MIN)) /
+              max(1e-3, 1.0 - float(LOW_SPEED_CALIB_TRACKING_TIGHTEN_RATIO_MIN)),
+              0.0, 1.0,
+            )
+          else:
+            tighten_tracking = 0.0
           tighten_score = float(max(tighten_effort, tighten_tracking))
 
           if tighten_tracking >= max(tighten_effort, relax_score) and tighten_tracking > 0.0:
@@ -1948,6 +2027,7 @@ class VisionTurnController:
       state = max(-float(LOW_SPEED_CALIB_MAX_TIGHTEN), state + float(LOW_SPEED_CALIB_TIGHTEN_RATE_PER_S) * dt * ema)
 
     self._low_speed_calibration_state = float(clip(state, -float(LOW_SPEED_CALIB_MAX_TIGHTEN), float(LOW_SPEED_CALIB_MAX_RELAX)))
+    self._low_speed_calibration_param_state = float(self._low_speed_calibration_state)
     try:
       applied_scale = float(self._low_speed_calibration_scale(max(1e-8, float(scale_curvature))))
     except Exception:
@@ -1957,6 +2037,7 @@ class VisionTurnController:
     self._dbg_low_speed_calibration_headroom_ema = float(ema)
     self._dbg_low_speed_calibration_scale = float(applied_scale)
     self._dbg_low_speed_calibration_curve_mph = float(curve_basis_speed_mph)
+    self._maybe_persist_low_speed_calibration_state(now_s)
 
   def _apply_freeway_v_turn_hold(self, v_cap: float) -> float:
     """Hold material VTSC cap reductions briefly to bridge model flicker.

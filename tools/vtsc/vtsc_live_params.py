@@ -96,6 +96,8 @@ BOUNDS: dict[str, Bound] = {
   "VTSCHUD.DistanceLabelSepPxAtScale1": Bound(0.0, 120.0),
   "VTSCHUD.SpeedFontPxAtScale1": Bound(8.0, 80.0),
   "VTSCHUD.BottomFontPxAtScale1": Bound(8.0, 80.0),
+  "VisionTurnSpeedControlLowSpeedLearnedState": Bound(-0.08, 0.04),
+  "VisionTurnSpeedControlLowSpeedLearnedHighEndMph": Bound(20.0, 60.0),
 }
 
 
