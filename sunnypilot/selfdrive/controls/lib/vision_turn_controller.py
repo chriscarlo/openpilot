@@ -73,6 +73,7 @@ VTURN_HOLD_S_OCCLUDED = 0.85
 # snap from a low curve cap straight back to set speed in one frame.
 VTURN_RELEASE_SHAPE_ENTRY_DELTA_MPS = 0.75
 VTURN_RELEASE_SHAPE_HANDOFF_MARGIN_MPS = 0.35
+VTURN_LOCAL_CURVATURE_CORROBORATION_KAPPA = 0.001
 # Minimum predicted lateral acceleration (m/s^2) to treat as real turn evidence for hold gating.
 _ENTERING_PRED_LAT_ACC_TH = 1.3
 
@@ -370,6 +371,115 @@ def _resample_polyline(points: list[tuple[float, float]], count: int) -> list[tu
     t = 0.0 if span < 1e-6 else (target - cumulative[seg_idx]) / span
     out.append(_interp_xy(points[seg_idx], points[seg_idx + 1], t))
   return out
+
+
+def _slice_polyline_by_s(points: list[tuple[float, float]], s_vals: list[float], s_min: float, s_max: float) -> list[tuple[float, float]]:
+  if len(points) < 2 or len(points) != len(s_vals):
+    return list(points)
+  if not (math.isfinite(s_min) and math.isfinite(s_max) and s_max > s_min):
+    return list(points)
+
+  clipped: list[tuple[float, float]] = []
+  prev = (float(points[0][0]), float(points[0][1]))
+  prev_s = float(s_vals[0])
+  if s_min <= prev_s <= s_max:
+    _append_point_if_distinct(clipped, prev)
+
+  for curr_raw, curr_s_raw in zip(points[1:], s_vals[1:], strict=False):
+    curr = (float(curr_raw[0]), float(curr_raw[1]))
+    curr_s = float(curr_s_raw)
+    ds = curr_s - prev_s
+    if not (ds > 1e-6 and math.isfinite(ds)):
+      prev = curr
+      prev_s = curr_s
+      continue
+
+    for bound in (s_min, s_max):
+      if prev_s < bound <= curr_s:
+        t = max(0.0, min(1.0, (bound - prev_s) / ds))
+        _append_point_if_distinct(clipped, _interp_xy(prev, curr, t))
+
+    if s_min <= curr_s <= s_max:
+      _append_point_if_distinct(clipped, curr)
+
+    if prev_s <= s_max < curr_s:
+      break
+
+    prev = curr
+    prev_s = curr_s
+
+  return clipped
+
+
+def _curve_direction_from_points(points: list[tuple[float, float]]) -> int:
+  cross_sum = 0.0
+  for p0, p1, p2 in zip(points, points[1:], points[2:], strict=False):
+    v1x = float(p1[0]) - float(p0[0])
+    v1y = float(p1[1]) - float(p0[1])
+    v2x = float(p2[0]) - float(p1[0])
+    v2y = float(p2[1]) - float(p1[1])
+    cross_sum += (v1x * v2y - v1y * v2x)
+
+  if cross_sum > 1e-3:
+    return 1
+  if cross_sum < -1e-3:
+    return 2
+  return 0
+
+
+def _normalize_polyline_to_entry_frame(points: list[tuple[float, float]], *, densify_step_m: float = 3.0,
+                                       smooth_passes: int = 4, resample_count: int = 24) -> list[tuple[float, float]]:
+  base: list[tuple[float, float]] = []
+  for x_raw, y_raw in points:
+    x = float(x_raw)
+    y = float(y_raw)
+    if math.isfinite(x) and math.isfinite(y):
+      base.append((x, y))
+  if len(base) < 2:
+    return []
+
+  origin = base[0]
+  tangent = None
+  for cand in base[1:]:
+    dx = float(cand[0]) - float(origin[0])
+    dy = float(cand[1]) - float(origin[1])
+    norm = math.hypot(dx, dy)
+    if norm > 0.5 and math.isfinite(norm):
+      tangent = (float(dx / norm), float(dy / norm))
+      break
+  if tangent is None:
+    return []
+
+  tx, ty = tangent
+  lx, ly = -ty, tx
+  local: list[tuple[float, float]] = []
+  for pt in base:
+    dx = float(pt[0]) - float(origin[0])
+    dy = float(pt[1]) - float(origin[1])
+    local.append((
+      float(dx * tx + dy * ty),
+      float(dx * lx + dy * ly),
+    ))
+
+  local = _densify_polyline(local, max(0.5, float(densify_step_m)))
+  local = _chaikin_smooth_polyline(local, passes=max(0, int(smooth_passes)))
+  local = _resample_polyline(local, max(8, int(resample_count)))
+  if len(local) < 2:
+    return []
+
+  normalized: list[tuple[float, float]] = [(0.0, 0.0)]
+  prev_x = 0.0
+  for idx, (x_raw, y_raw) in enumerate(local[1:], start=1):
+    x = max(prev_x, float(x_raw))
+    y = float(y_raw)
+    pt = (x, y)
+    if math.hypot(pt[0] - normalized[-1][0], pt[1] - normalized[-1][1]) > 1e-3:
+      normalized.append(pt)
+      prev_x = x
+    else:
+      prev_x = max(prev_x, x)
+
+  return normalized if len(normalized) >= 2 else []
 
 # ===== ADAPTIVE DECELERATION SYSTEM =====
 # Physics-based deceleration management for vision update lag scenarios
@@ -684,12 +794,14 @@ MAX_SPEED_DEFAULT = 70.0  # m/s, fallback for straight roads (overridden by para
 SPEED_INCREASE_FACTOR = 1.0  # Global multiplier on target speeds (overridden by param)
 
 # Physics sigmoid tunables (overridden by params)
-PHYSICS_A = -2.300000    # Amplitude (deepened to keep tight-turn lat_accel ≈ D+A ≈ 1.97 m/s²)
-PHYSICS_B = -2000.000000 # Steepness
-PHYSICS_C = 0.004778     # Transition center (1/m)
-PHYSICS_D = 4.270000     # Baseline (m/s²; raised to target ~70 mph at k≈0.004 sweeper curvature)
+# Keep the sub-50 mph portion close to the existing curve while lifting the high-speed sweeper
+# shoulder around k≈0.0046 1/m into the upper-60s/low-70s mph band.
+PHYSICS_A = -3.260000
+PHYSICS_B = -6270.000000
+PHYSICS_C = 0.005010
+PHYSICS_D = 5.607000
 PHYSICS_MIN_LAT_ACCEL = 1.8
-PHYSICS_MAX_LAT_ACCEL = 3.90  # raised to permit 70 mph at k=0.004 (was 3.12 → 61 mph)
+PHYSICS_MAX_LAT_ACCEL = 4.478
 
 # Low-speed bias (applied as +Δ mph under a taper)
 LOW_SPEED_BIAS_MPH = 5.0         # +speed boost at tight curves (tapers to 0 by END_MPH)
@@ -716,6 +828,11 @@ LOW_SPEED_CALIB_TRACKING_RELAX_RATIO_MAX = 0.10
 LOW_SPEED_CALIB_TRACKING_TIGHTEN_RATIO_MIN = 0.22
 LOW_SPEED_CALIB_ENABLE_TIGHTEN_EFFORT = False
 LOW_SPEED_CALIB_ENABLE_TRACKING_TRIGGER = False
+# Driver gas overrides above the current VTSC request are strong relax evidence, but only while
+# the curve is still relevant and lateral control is not saturated.
+LOW_SPEED_CALIB_OVERRIDE_DIVERGENCE_DEADBAND_MPS = 0.20
+LOW_SPEED_CALIB_OVERRIDE_DIVERGENCE_FULL_SCALE_MPS = 1.75
+LOW_SPEED_CALIB_OVERRIDE_EMA_TAU_S = 0.60
 LOW_SPEED_CALIB_PERSIST_WRITE_S = 5.0
 LOW_SPEED_CALIB_PERSIST_DELTA = 0.005
 LOW_SPEED_CALIB_PARAM_SYNC_EPS = 1e-4
@@ -1122,6 +1239,7 @@ class VisionTurnController:
     self._curve_preview_direction = 0  # VisionTurnSpeedControl.TurnDirection (unknown=0)
     self._curve_preview_severity = 0   # VisionTurnSpeedControl.CurveSeverity (unknown=0)
     self._curve_preview_points: list[tuple[float, float]] = []
+    self._curve_preview_tiles: list[dict] = []
     self._curve_preview_branch_stubs: list[dict] = []
     self._curve_preview_last_ts = 0.0
     self._curve_preview_last_cache_raw = None
@@ -1142,11 +1260,14 @@ class VisionTurnController:
     # negative values tighten it. The state evolves slowly from repeated steering headroom evidence.
     self._low_speed_calibration_state = 0.0
     self._low_speed_calibration_headroom_ema = 0.0
+    self._low_speed_calibration_override_ema = 0.0
     self._low_speed_calibration_last_update_s = 0.0
     self._dbg_low_speed_calibration_active = False
     self._dbg_low_speed_calibration_reason = "init"
     self._dbg_low_speed_calibration_headroom = 0.0
     self._dbg_low_speed_calibration_headroom_ema = 0.0
+    self._dbg_low_speed_calibration_override_ema = 0.0
+    self._dbg_low_speed_calibration_divergence_mps = 0.0
     self._dbg_low_speed_calibration_scale = 1.0
     self._dbg_low_speed_calibration_curve_mph = 0.0
     self._dbg_low_speed_calibration_output = 0.0
@@ -1176,6 +1297,8 @@ class VisionTurnController:
     self._dbg_steer_fallback_active = False
     self._dbg_target_raw = 0.0
     self._dbg_target_final = 0.0
+    self._dbg_controls_desired_curvature = 0.0
+    self._dbg_controls_actual_curvature = 0.0
     self._dbg_occl_positive_margin = False
     self._dbg_early_no_raise = False
     self._dbg_tail_frac = 0.0
@@ -1316,6 +1439,7 @@ class VisionTurnController:
       self._low_speed_calibration_param_state = float(loaded_state)
       self._low_speed_calibration_persisted_state = float(loaded_state)
       self._low_speed_calibration_headroom_ema = 0.0
+      self._low_speed_calibration_override_ema = 0.0
 
   def _maybe_persist_low_speed_calibration_state(self, now_s: float) -> None:
     state = self._clip_low_speed_calibration_state(getattr(self, "_low_speed_calibration_state", 0.0))
@@ -1490,6 +1614,8 @@ class VisionTurnController:
       low_speed_calibration_reason = str(getattr(self, '_dbg_low_speed_calibration_reason', '') or '')
       low_speed_calibration_headroom = float(getattr(self, '_dbg_low_speed_calibration_headroom', 0.0) or 0.0)
       low_speed_calibration_headroom_ema = float(getattr(self, '_dbg_low_speed_calibration_headroom_ema', 0.0) or 0.0)
+      low_speed_calibration_override_ema = float(getattr(self, '_dbg_low_speed_calibration_override_ema', 0.0) or 0.0)
+      low_speed_calibration_divergence_mps = float(getattr(self, '_dbg_low_speed_calibration_divergence_mps', 0.0) or 0.0)
       low_speed_calibration_scale = float(getattr(self, '_dbg_low_speed_calibration_scale', 1.0) or 1.0)
       low_speed_calibration_curve_mph = float(getattr(self, '_dbg_low_speed_calibration_curve_mph', 0.0) or 0.0)
       low_speed_calibration_output = float(getattr(self, '_dbg_low_speed_calibration_output', 0.0) or 0.0)
@@ -1563,6 +1689,8 @@ class VisionTurnController:
         'low_speed_calibration_reason': low_speed_calibration_reason,
         'low_speed_calibration_headroom': low_speed_calibration_headroom,
         'low_speed_calibration_headroom_ema': low_speed_calibration_headroom_ema,
+        'low_speed_calibration_override_ema': low_speed_calibration_override_ema,
+        'low_speed_calibration_divergence_mps': low_speed_calibration_divergence_mps,
         'low_speed_calibration_state': float(getattr(self, '_low_speed_calibration_state', 0.0) or 0.0),
         'low_speed_calibration_scale': low_speed_calibration_scale,
         'low_speed_calibration_curve_mph': low_speed_calibration_curve_mph,
@@ -1737,6 +1865,51 @@ class VisionTurnController:
   def curve_preview_points(self) -> list[tuple[float, float]]:
     pts = getattr(self, '_curve_preview_points', None)
     return list(pts) if isinstance(pts, list) else []
+
+  @property
+  def curve_preview_tiles(self) -> list[dict]:
+    tiles = getattr(self, '_curve_preview_tiles', None)
+    if not isinstance(tiles, list):
+      return []
+
+    out: list[dict] = []
+    for tile in tiles:
+      if not isinstance(tile, dict):
+        continue
+      pts_raw = tile.get('points', [])
+      pts: list[tuple[float, float]] = []
+      if isinstance(pts_raw, list):
+        for pt in pts_raw:
+          try:
+            x_fwd = float(pt[0])
+            y_left = float(pt[1])
+          except Exception:
+            continue
+          if math.isfinite(x_fwd) and math.isfinite(y_left):
+            pts.append((x_fwd, y_left))
+      if len(pts) < 2:
+        continue
+      try:
+        tile_id = int(tile.get('id', 0) or 0)
+        distance_m = float(tile.get('distance_m', 0.0) or 0.0)
+        time_to_s = float(tile.get('time_to_s', 0.0) or 0.0)
+        direction = int(tile.get('direction', 0) or 0)
+        severity = int(tile.get('severity', 0) or 0)
+        max_curvature = float(tile.get('max_curvature', 0.0) or 0.0)
+        advisory_speed_mps = float(tile.get('advisory_speed_mps', 0.0) or 0.0)
+      except Exception:
+        continue
+      out.append({
+        'id': tile_id,
+        'distance_m': distance_m,
+        'time_to_s': time_to_s,
+        'direction': direction,
+        'severity': severity,
+        'max_curvature': max_curvature,
+        'advisory_speed_mps': advisory_speed_mps,
+        'points': pts,
+      })
+    return out
 
   @property
   def curve_preview_branch_stubs(self) -> list[dict]:
@@ -1921,8 +2094,12 @@ class VisionTurnController:
     self._dbg_low_speed_calibration_gap = 0.0
     self._dbg_low_speed_calibration_gap_ratio = 0.0
     self._dbg_low_speed_calibration_saturated = False
+    self._dbg_low_speed_calibration_override_ema = float(getattr(self, '_low_speed_calibration_override_ema', 0.0) or 0.0)
+    self._dbg_low_speed_calibration_divergence_mps = 0.0
 
     scale_curvature = float(reference_curvature)
+    override_ema = float(getattr(self, '_low_speed_calibration_override_ema', 0.0) or 0.0)
+    override_target = 0.0
     if feedback is None:
       raw_score = 0.0
       curve_basis_speed_mph = 0.0
@@ -1940,23 +2117,26 @@ class VisionTurnController:
       except Exception:
         curve_basis_speed_mph = 0.0
       taper = float(self._low_speed_calibration_taper(curve_basis_speed_mph))
-      target_cap = float(min(self._v_cruise_setpoint, curvature_to_speed(max(1e-8, feedback_curvature))))
+      baseline_target_cap = float(min(self._v_cruise_setpoint, curvature_to_speed(max(1e-8, feedback_curvature))))
+      requested_cap = float(min(self._v_cruise_setpoint, self._curve_speed(max(1e-8, feedback_curvature))))
       relevant = bool(
         bool(self._is_enabled) and
         bool(self._op_enabled) and
         bool(feedback['active']) and
         (feedback_curvature >= float(LOW_SPEED_CALIB_MIN_CURVATURE)) and
         (taper > 0.0) and
-        ((float(self._v_cruise_setpoint) - target_cap) >= float(LOW_SPEED_CALIB_MIN_CAP_DELTA_MPS))
+        ((float(self._v_cruise_setpoint) - baseline_target_cap) >= float(LOW_SPEED_CALIB_MIN_CAP_DELTA_MPS))
       )
 
       gap_ratio = float(feedback['tracking_gap']) / max(float(feedback['desired_curvature']), float(LOW_SPEED_CALIB_MIN_CURVATURE))
+      base_relax_score = 0.0
       relax_score = 0.0
       tighten_score = 0.0
 
       if relevant:
         if bool(feedback['saturated']):
           tighten_score = 1.0
+          override_ema = 0.0
           self._dbg_low_speed_calibration_reason = "tighten_saturated"
         else:
           relax_effort = clip(
@@ -1972,7 +2152,18 @@ class VisionTurnController:
             )
           else:
             relax_tracking = 1.0
-          relax_score = float(relax_effort * relax_tracking)
+          base_relax_score = float(relax_effort * relax_tracking)
+
+          if bool(getattr(self, '_gas_pressed', False)):
+            divergence_mps = max(0.0, float(self._v_ego) - float(requested_cap))
+            self._dbg_low_speed_calibration_divergence_mps = float(divergence_mps)
+            divergence_ratio = clip(
+              (float(divergence_mps) - float(LOW_SPEED_CALIB_OVERRIDE_DIVERGENCE_DEADBAND_MPS)) /
+              max(1e-3, float(LOW_SPEED_CALIB_OVERRIDE_DIVERGENCE_FULL_SCALE_MPS)),
+              0.0, 1.0,
+            )
+            # Weight larger driver-taken divergences increasingly heavier than mild bumps.
+            override_target = float(divergence_ratio * (0.5 + 0.5 * divergence_ratio))
 
           if bool(LOW_SPEED_CALIB_ENABLE_TIGHTEN_EFFORT):
             tighten_effort = clip(
@@ -1992,16 +2183,24 @@ class VisionTurnController:
             tighten_tracking = 0.0
           tighten_score = float(max(tighten_effort, tighten_tracking))
 
+          override_alpha = float(dt / max(float(LOW_SPEED_CALIB_OVERRIDE_EMA_TAU_S), dt))
+          override_ema = float(clip(override_ema + override_alpha * (float(override_target) - override_ema), 0.0, 1.0))
+          relax_score = float(max(base_relax_score, override_ema))
+
           if tighten_tracking >= max(tighten_effort, relax_score) and tighten_tracking > 0.0:
             self._dbg_low_speed_calibration_reason = "tighten_tracking"
           elif tighten_effort > max(relax_score, 0.0):
             self._dbg_low_speed_calibration_reason = "tighten_effort"
-          elif relax_score > 0.0:
+          elif override_ema > max(base_relax_score, 0.0):
+            self._dbg_low_speed_calibration_reason = "relax_override"
+          elif base_relax_score > 0.0:
             self._dbg_low_speed_calibration_reason = "relax_clean"
           else:
             self._dbg_low_speed_calibration_reason = "decay_ambiguous"
       else:
         self._dbg_low_speed_calibration_reason = "decay_not_relevant"
+        override_alpha = float(dt / max(float(LOW_SPEED_CALIB_OVERRIDE_EMA_TAU_S), dt))
+        override_ema = float(max(0.0, override_ema + override_alpha * (0.0 - override_ema)))
 
       raw_score = float(clip(relax_score - tighten_score, -1.0, 1.0))
       self._dbg_low_speed_calibration_output = float(feedback['output'])
@@ -2009,6 +2208,11 @@ class VisionTurnController:
       self._dbg_low_speed_calibration_gap_ratio = float(gap_ratio)
       self._dbg_low_speed_calibration_saturated = bool(feedback['saturated'])
 
+    if feedback is None:
+      override_alpha = float(dt / max(float(LOW_SPEED_CALIB_OVERRIDE_EMA_TAU_S), dt))
+      override_ema = float(max(0.0, override_ema + override_alpha * (0.0 - override_ema)))
+
+    self._low_speed_calibration_override_ema = float(override_ema)
     ema_alpha = float(dt / max(float(LOW_SPEED_CALIB_HEADROOM_TAU_S), dt))
     ema_prev = float(getattr(self, '_low_speed_calibration_headroom_ema', 0.0) or 0.0)
     ema = float(clip(ema_prev + ema_alpha * (float(raw_score) - ema_prev), -1.0, 1.0))
@@ -2035,6 +2239,7 @@ class VisionTurnController:
     self._dbg_low_speed_calibration_active = bool(abs(applied_scale - 1.0) > 1e-3)
     self._dbg_low_speed_calibration_headroom = float(raw_score)
     self._dbg_low_speed_calibration_headroom_ema = float(ema)
+    self._dbg_low_speed_calibration_override_ema = float(override_ema)
     self._dbg_low_speed_calibration_scale = float(applied_scale)
     self._dbg_low_speed_calibration_curve_mph = float(curve_basis_speed_mph)
     self._maybe_persist_low_speed_calibration_state(now_s)
@@ -2087,8 +2292,12 @@ class VisionTurnController:
     except Exception:
       curve_evidence = False
 
-    freeway_clean = (v_ego >= float(VTURN_HOLD_MIN_V_MPS)) and confidence_good and (not fov_occluded)
+    freeway_speed = v_ego >= float(VTURN_HOLD_MIN_V_MPS)
+    local_curve_corroborated = bool(self._has_local_curve_corroboration())
+    freeway_clean = freeway_speed and confidence_good and (not fov_occluded)
+    freeway_hold_supported = bool(local_curve_corroborated)
     low_conf_trigger_ok = (raw_conf < good_conf) and (not failopen) and (turn_evidence or curve_evidence)
+    low_conf_hold_supported = bool(low_conf_trigger_ok and ((not freeway_speed) or local_curve_corroborated))
 
     try:
       v_cruise = float(self._v_cruise_setpoint)
@@ -2097,7 +2306,8 @@ class VisionTurnController:
 
     # Update/extend hold window only when VTSC is asking for a meaningful reduction.
     overspeed = (v_ego - float(v_cap)) >= 0.5
-    if (freeway_clean or low_conf_trigger_ok) and ((v_cruise - float(v_cap)) >= float(VTURN_HOLD_DELTA_MPS)) and (overspeed or freeway_clean):
+    hold_trigger_ok = low_conf_hold_supported or (freeway_clean and freeway_hold_supported)
+    if hold_trigger_ok and ((v_cruise - float(v_cap)) >= float(VTURN_HOLD_DELTA_MPS)) and (overspeed or freeway_clean):
       hold_until = float(getattr(self, '_v_turn_hold_until', 0.0) or 0.0)
       hold_min = float(getattr(self, '_v_turn_hold_min', float(v_cap)) or float(v_cap))
       if now >= hold_until:
@@ -2105,7 +2315,7 @@ class VisionTurnController:
       else:
         hold_min = min(hold_min, float(v_cap))
       self._v_turn_hold_min = hold_min
-      hold_s = float(VTURN_HOLD_S_OCCLUDED) if low_conf_trigger_ok else float(VTURN_HOLD_S)
+      hold_s = float(VTURN_HOLD_S_OCCLUDED) if low_conf_hold_supported else float(VTURN_HOLD_S)
       self._v_turn_hold_until = now + hold_s
 
     # Apply hold if active
@@ -2119,6 +2329,48 @@ class VisionTurnController:
     # Hold expired: allow immediate release
     self._v_turn_hold_min = float(INF_SPEED)
     return float(v_cap)
+
+  def _has_local_curve_corroboration(self) -> bool:
+    try:
+      control_curve_evidence = max(
+        abs(float(getattr(self, '_dbg_controls_actual_curvature', 0.0) or 0.0)),
+        abs(float(getattr(self, '_dbg_controls_desired_curvature', 0.0) or 0.0)),
+      ) >= float(VTURN_LOCAL_CURVATURE_CORROBORATION_KAPPA)
+    except Exception:
+      control_curve_evidence = False
+    try:
+      steer_curve_evidence = abs(float(getattr(self, '_dbg_k_steer', 0.0) or 0.0)) >= float(STEER_CURVATURE_FALLBACK_MIN_KAPPA)
+    except Exception:
+      steer_curve_evidence = False
+    try:
+      map_evidence = bool(getattr(self, '_map_tail_active', False))
+    except Exception:
+      map_evidence = False
+    # Preview-only overshoot state is derived from the same model horizon that can flicker for a
+    # single frame on straight freeway segments. Don't treat it as corroboration when deciding
+    # whether to latch a published cap or keep the post-hold release shaping alive.
+    return bool(control_curve_evidence or steer_curve_evidence or map_evidence)
+
+  def _has_release_shape_curve_evidence(self) -> bool:
+    if bool(self._has_local_curve_corroboration()):
+      return True
+
+    try:
+      freeway_speed = float(getattr(self, '_v_ego', 0.0) or 0.0) >= float(VTURN_HOLD_MIN_V_MPS)
+    except Exception:
+      freeway_speed = False
+    if freeway_speed:
+      return False
+
+    try:
+      return bool(
+        bool(getattr(self, '_overshoot_cap_active', False)) or
+        bool(getattr(self, '_lat_acc_overshoot_ahead', False)) or
+        (abs(float(getattr(self, '_filtered_curvature', 0.0) or 0.0)) >= 0.0015) or
+        (float(getattr(self, '_max_pred_lat_acc', 0.0) or 0.0) >= float(_ENTERING_PRED_LAT_ACC_TH))
+      )
+    except Exception:
+      return False
 
   def _apply_winding_v_turn_release_slew(self, v_cap: float, dt: float) -> float:
     self._dbg_winding_release_limited = False
@@ -2145,16 +2397,7 @@ class VisionTurnController:
       v_cruise = desired_cap
     cap_limited_delta = float(VTURN_RELEASE_SHAPE_ENTRY_DELTA_MPS)
     handoff_margin = float(VTURN_RELEASE_SHAPE_HANDOFF_MARGIN_MPS)
-    try:
-      curve_evidence = bool(
-        bool(getattr(self, '_map_tail_active', False)) or
-        bool(getattr(self, '_overshoot_cap_active', False)) or
-        bool(getattr(self, '_lat_acc_overshoot_ahead', False)) or
-        (abs(float(getattr(self, '_filtered_curvature', 0.0) or 0.0)) >= 0.0015) or
-        (float(getattr(self, '_max_pred_lat_acc', 0.0) or 0.0) >= float(_ENTERING_PRED_LAT_ACC_TH))
-      )
-    except Exception:
-      curve_evidence = False
+    curve_evidence = bool(self._has_release_shape_curve_evidence())
 
     if curve_evidence and min(desired_cap, prev_cap) <= v_cruise - cap_limited_delta:
       self._v_turn_release_shape_active = True
@@ -2447,6 +2690,15 @@ class VisionTurnController:
       self._lead_present = False
       self._lead_headway_s = 99.0
     current_time = time.time()
+    controls_state = _sm_get_optional(sm, 'controlsState')
+    try:
+      self._dbg_controls_desired_curvature = abs(float(getattr(controls_state, 'desiredCurvature', 0.0) or 0.0))
+    except Exception:
+      self._dbg_controls_desired_curvature = 0.0
+    try:
+      self._dbg_controls_actual_curvature = abs(float(getattr(controls_state, 'curvature', 0.0) or 0.0))
+    except Exception:
+      self._dbg_controls_actual_curvature = 0.0
 
     # Initialize defaults for edge cases (use the last filtered curvature if present).
     # NOTE: vision occlusion state is updated *after* we update `_filtered_curvature` for this frame.
@@ -3960,6 +4212,7 @@ class VisionTurnController:
     self._curve_preview_direction = 0
     self._curve_preview_severity = 0
     self._curve_preview_points = []
+    self._curve_preview_tiles = []
     self._curve_preview_branch_stubs = []
 
   def _clear_winding_road_context(self) -> None:
@@ -4124,11 +4377,31 @@ class VisionTurnController:
     except Exception:
       moved_far = True
 
+    prev_tiles_by_id: dict[int, dict] = {}
+    prev_tiles = getattr(self, '_curve_preview_tiles', None)
+    if isinstance(prev_tiles, list):
+      for tile in prev_tiles:
+        if not isinstance(tile, dict):
+          continue
+        try:
+          tile_id = int(tile.get('id', 0) or 0)
+        except Exception:
+          continue
+        if tile_id != 0:
+          prev_tiles_by_id[tile_id] = dict(tile)
+
     # Recompute at most 5 Hz unless map changed or ego moved materially.
     if (now - float(getattr(self, '_curve_preview_last_ts', 0.0) or 0.0)) < 0.2 and (cache_raw == last_raw) and (not moved_far):
       # Still refresh time-to-curve using latest speed.
       try:
         self._curve_preview_time_to_s = float(self._curve_preview_distance_m) / max(0.1, float(self._v_ego))
+        refreshed_tiles: list[dict] = []
+        for tile in self.curve_preview_tiles:
+          refreshed_tiles.append({
+            **tile,
+            'time_to_s': float(tile['distance_m']) / max(0.1, float(self._v_ego)),
+          })
+        self._curve_preview_tiles = refreshed_tiles
       except Exception:
         pass
       return
@@ -4139,6 +4412,9 @@ class VisionTurnController:
     PREVIEW_TIME_HORIZON_S = 10.0
     PREVIEW_MIN_M = 30.0
     PREVIEW_MAX_M = 350.0
+    TILE_TIME_HORIZON_S = 20.0
+    TILE_MIN_M = 60.0
+    TILE_MAX_M = 450.0
     PREVIEW_SOURCE_MARGIN_M = 25.0
     PREVIEW_TRAILING_M = 8.0
     PREVIEW_RESAMPLE_STEP_M = 4.0
@@ -4146,6 +4422,14 @@ class VisionTurnController:
     MAX_POINTS = 48
     KAPPA_MIN = 1.0e-3  # 1/m, ~1000 m radius (detect gentler curves)
     RUN = 2             # consecutive samples to start/end a curve
+    TILE_MAX_COUNT = 6
+    TILE_MERGE_GAP_M = 18.0
+    TILE_LEAD_IN_MIN_M = 10.0
+    TILE_LEAD_IN_MAX_M = 24.0
+    TILE_LEAD_OUT_MIN_M = 10.0
+    TILE_LEAD_OUT_MAX_M = 20.0
+    TILE_SMOOTHING_PASSES = 4
+    TILE_RESAMPLE_COUNT = 24
 
     try:
       i0 = int(max(0, min(len(pts) - 1, i0)))
@@ -4153,7 +4437,8 @@ class VisionTurnController:
       i0 = 0
     base_idx = max(0, i0 - 1)
     preview_s_max_m = max(PREVIEW_MIN_M, min(float(self._v_ego) * PREVIEW_TIME_HORIZON_S, PREVIEW_MAX_M))
-    source_s_max_m = preview_s_max_m + PREVIEW_SOURCE_MARGIN_M
+    tile_s_max_m = max(TILE_MIN_M, min(float(self._v_ego) * TILE_TIME_HORIZON_S, TILE_MAX_M))
+    source_s_max_m = max(preview_s_max_m, tile_s_max_m) + PREVIEW_SOURCE_MARGIN_M
 
     w_lat: list[float] = [float(pts[base_idx][0])]
     w_lon: list[float] = [float(pts[base_idx][1])]
@@ -4239,18 +4524,53 @@ class VisionTurnController:
     if pts_out:
       pts_out[0] = (0.0, float(pts_out[0][1]))
 
-    # Find the next curve region by curvature threshold persistence.
-    start_idx = None
-    consec = 0
-    for idx, k in enumerate(w_k):
-      if float(k) >= KAPPA_MIN:
-        consec += 1
-      else:
-        consec = 0
-      if consec >= RUN:
-        start_idx = idx - (RUN - 1)
+    curve_regions: list[tuple[int, int, int]] = []
+    search_idx = 0
+    while search_idx < len(w_k):
+      start_idx = None
+      consec = 0
+      for idx in range(search_idx, len(w_k)):
+        if float(s_pts[idx]) - float(s_zero_m) > tile_s_max_m:
+          search_idx = len(w_k)
+          break
+        if float(w_k[idx]) >= KAPPA_MIN:
+          consec += 1
+        else:
+          consec = 0
+        if consec >= RUN:
+          start_idx = idx - (RUN - 1)
+          break
+      if start_idx is None:
         break
-    if start_idx is None:
+
+      end_idx = len(w_k) - 1
+      consec_below = 0
+      for idx in range(int(start_idx), len(w_k)):
+        if float(s_pts[idx]) - float(s_zero_m) > tile_s_max_m:
+          end_idx = max(int(start_idx), idx - 1)
+          break
+        if float(w_k[idx]) < KAPPA_MIN:
+          consec_below += 1
+        else:
+          consec_below = 0
+        if consec_below >= RUN:
+          end_idx = max(int(start_idx), idx - RUN)
+          break
+
+      direction = _curve_direction_from_points(fwd_left[int(start_idx):int(end_idx) + 1])
+      if curve_regions:
+        prev_start, prev_end, prev_direction = curve_regions[-1]
+        gap_m = float(s_pts[int(start_idx)]) - float(s_pts[int(prev_end)])
+        if prev_direction != 0 and prev_direction == direction and gap_m <= TILE_MERGE_GAP_M:
+          curve_regions[-1] = (prev_start, max(prev_end, int(end_idx)), prev_direction)
+        else:
+          curve_regions.append((int(start_idx), int(end_idx), direction))
+      else:
+        curve_regions.append((int(start_idx), int(end_idx), direction))
+
+      search_idx = max(int(end_idx) + 1, int(start_idx) + RUN)
+
+    if not curve_regions:
       # No curve detected — still publish a dense road-ahead polyline so the HUD can
       # render the same road frame continuously as the next bend comes into view.
       try:
@@ -4261,6 +4581,7 @@ class VisionTurnController:
         self._curve_preview_direction = 0
         self._curve_preview_severity = 0
         self._curve_preview_points = [(float(x), float(y)) for (x, y) in pts_out]
+        self._curve_preview_tiles = []
         self._curve_preview_last_ts = float(now)
         self._curve_preview_last_cache_raw = cache_raw
         self._curve_preview_last_latlon = (float(gps_lat), float(gps_lon))
@@ -4268,68 +4589,120 @@ class VisionTurnController:
         self._clear_curve_preview()
       return
 
-    end_idx = len(w_k) - 1
-    consec_below = 0
-    for idx in range(int(start_idx), len(w_k)):
-      if float(w_k[idx]) < KAPPA_MIN:
-        consec_below += 1
-      else:
-        consec_below = 0
-      if consec_below >= RUN:
-        end_idx = max(int(start_idx), idx - RUN)
+    preview_tiles: list[dict] = []
+    matched_prev_ids: set[int] = set()
+    preview_meta = None
+    for start_idx, end_idx, direction in curve_regions:
+      if len(preview_tiles) >= TILE_MAX_COUNT:
         break
 
-    # Direction from polyline turning (cross product sign).
-    cross_sum = 0.0
-    for idx in range(int(start_idx), max(int(start_idx), int(end_idx) - 2)):
-      x1, y1 = fwd_left[idx]
-      x2, y2 = fwd_left[idx + 1]
-      x3, y3 = fwd_left[idx + 2]
-      v1x, v1y = (x2 - x1), (y2 - y1)
-      v2x, v2y = (x3 - x2), (y3 - y2)
-      cross_sum += (v1x * v2y - v1y * v2x)
-    if cross_sum > 1e-3:
-      direction = 1  # left
-    elif cross_sum < -1e-3:
-      direction = 2  # right
-    else:
-      direction = 0  # unknown
-
-    # Peak curvature (abs) within curve region for simple display gating.
-    try:
-      kappa_max = 0.0
-      for idx in range(int(start_idx), int(end_idx) + 1):
-        kappa_max = max(kappa_max, float(w_k[idx]))
-      if not (kappa_max > 0.0 and math.isfinite(kappa_max)):
+      try:
         kappa_max = 0.0
-    except Exception:
-      kappa_max = 0.0
+        vs_min = float('inf')
+        for idx in range(int(start_idx), int(end_idx) + 1):
+          kappa = float(w_k[idx])
+          kappa_max = max(kappa_max, kappa)
+          vs_min = min(vs_min, float(self._curve_speed(kappa)))
+        if not (kappa_max > 0.0 and math.isfinite(kappa_max)):
+          kappa_max = 0.0
+      except Exception:
+        kappa_max = 0.0
+        vs_min = float('inf')
 
-    # Severity from min safe speed within the curve region.
-    try:
-      vs_min = float('inf')
-      for idx in range(int(start_idx), int(end_idx) + 1):
-        vs_min = min(vs_min, float(self._curve_speed(float(w_k[idx]))))
       if not math.isfinite(vs_min):
         severity = 0
+        vs_min = 0.0
       elif vs_min < 12.0:
-        severity = 3  # tight
+        severity = 3
       elif vs_min < 20.0:
-        severity = 2  # medium
+        severity = 2
       else:
-        severity = 1  # gentle
-    except Exception:
-      severity = 0
+        severity = 1
+
+      curve_start_s = float(s_pts[int(start_idx)])
+      curve_end_s = float(s_pts[int(end_idx)])
+      curve_len_m = max(1.0, curve_end_s - curve_start_s)
+      lead_in_m = max(TILE_LEAD_IN_MIN_M, min(0.35 * curve_len_m, TILE_LEAD_IN_MAX_M))
+      lead_out_m = max(TILE_LEAD_OUT_MIN_M, min(0.25 * curve_len_m, TILE_LEAD_OUT_MAX_M))
+      tile_s_start = max(float(s_zero_m), curve_start_s - lead_in_m)
+      tile_s_end = min(float(s_pts[-1]), curve_end_s + lead_out_m)
+      tile_src_pts = _slice_polyline_by_s(fwd_left, s_pts, tile_s_start, tile_s_end)
+      tile_pts = _normalize_polyline_to_entry_frame(
+        tile_src_pts,
+        densify_step_m=3.0,
+        smooth_passes=TILE_SMOOTHING_PASSES,
+        resample_count=TILE_RESAMPLE_COUNT,
+      )
+      if len(tile_pts) < 2:
+        continue
+
+      distance_m = max(0.0, curve_start_s - float(s_zero_m))
+      prev_tile = None
+      prev_tile_score = float('inf')
+      for prev_id, cand in prev_tiles_by_id.items():
+        if prev_id in matched_prev_ids:
+          continue
+        try:
+          cand_distance = float(cand.get('distance_m', 0.0) or 0.0)
+          cand_direction = int(cand.get('direction', 0) or 0)
+          cand_severity = int(cand.get('severity', 0) or 0)
+          cand_kappa = float(cand.get('max_curvature', 0.0) or 0.0)
+        except Exception:
+          continue
+        if cand_direction != int(direction):
+          continue
+        dist_delta = abs(cand_distance - float(distance_m))
+        if dist_delta > 55.0:
+          continue
+        score = dist_delta + 6.0 * abs(cand_severity - int(severity)) + 700.0 * abs(cand_kappa - float(kappa_max))
+        if score < prev_tile_score:
+          prev_tile = cand
+          prev_tile_score = score
+
+      if isinstance(prev_tile, dict):
+        try:
+          matched_prev_ids.add(int(prev_tile.get('id', 0) or 0))
+        except Exception:
+          pass
+        prev_points = prev_tile.get('points', [])
+        if isinstance(prev_points, list) and len(prev_points) >= 2:
+          tile_pts = [(float(pt[0]), float(pt[1])) for pt in prev_points]
+        tile_id = int(prev_tile.get('id', 0) or 0)
+      else:
+        abs_start_idx = int(base_idx + int(start_idx))
+        abs_end_idx = int(base_idx + int(end_idx))
+        tile_id = int((((abs_start_idx + 1) & 0xFFFF) << 16) | ((abs_end_idx + 1) & 0xFFFF))
+
+      tile = {
+        'id': tile_id,
+        'distance_m': float(distance_m),
+        'time_to_s': float(distance_m) / max(0.1, float(self._v_ego)),
+        'direction': int(direction),
+        'severity': int(severity),
+        'max_curvature': float(kappa_max),
+        'advisory_speed_mps': float(vs_min),
+        'points': [(float(x), float(y)) for (x, y) in tile_pts],
+      }
+      preview_tiles.append(tile)
+
+      if preview_meta is None:
+        preview_meta = {
+          'distance_m': float(distance_m),
+          'kappa_max': float(kappa_max),
+          'direction': int(direction),
+          'severity': int(severity),
+        }
 
     # Publish preview fields (used by HUD only).
     try:
       self._curve_preview_valid = True
-      self._curve_preview_distance_m = max(0.0, float(s_pts[int(start_idx)]) - float(s_zero_m))
+      self._curve_preview_distance_m = float(preview_meta['distance_m']) if preview_meta is not None else 0.0
       self._curve_preview_time_to_s = float(self._curve_preview_distance_m) / max(0.1, float(self._v_ego))
-      self._curve_preview_kappa_max = float(kappa_max)
-      self._curve_preview_direction = int(direction)
-      self._curve_preview_severity = int(severity)
+      self._curve_preview_kappa_max = float(preview_meta['kappa_max']) if preview_meta is not None else 0.0
+      self._curve_preview_direction = int(preview_meta['direction']) if preview_meta is not None else 0
+      self._curve_preview_severity = int(preview_meta['severity']) if preview_meta is not None else 0
       self._curve_preview_points = [(float(x), float(y)) for (x, y) in pts_out]
+      self._curve_preview_tiles = preview_tiles
       self._curve_preview_last_ts = float(now)
       self._curve_preview_last_cache_raw = cache_raw
       self._curve_preview_last_latlon = (float(gps_lat), float(gps_lon))

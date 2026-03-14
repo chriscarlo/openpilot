@@ -37,6 +37,8 @@ class Step:
   lateral_output: Optional[float] = None
   lateral_saturated: Optional[bool] = None
   lateral_active: Optional[bool] = None
+  gas_pressed: bool = False
+  applied_accel: Optional[float] = None
 
 
 def _mk_sm(curvature: float, curvature_ahead: Optional[float], v_pred: float, confidence: float,
@@ -46,7 +48,7 @@ def _mk_sm(curvature: float, curvature_ahead: Optional[float], v_pred: float, co
            left_blinker: bool = False, right_blinker: bool = False,
            desired_curvature: Optional[float] = None, actual_curvature: Optional[float] = None,
            lateral_output: Optional[float] = None, lateral_saturated: Optional[bool] = None,
-           lateral_active: Optional[bool] = None):
+           lateral_active: Optional[bool] = None, gas_pressed: bool = False):
   """Create a minimal SM stub with modelV2 and optional radarState.leadOne."""
   # modelV2.orientationRate.z is yaw rate (rad/s), not curvature.
   # Curvature κ (1/m) = yaw_rate / speed, so yaw_rate = κ * v.
@@ -102,7 +104,7 @@ def _mk_sm(curvature: float, curvature_ahead: Optional[float], v_pred: float, co
       self._data = {
         'modelV2': model,
         'carState': SimpleNamespace(
-          gasPressed=False,
+          gasPressed=bool(gas_pressed),
           steeringAngleDeg=float(steering_angle_deg),
           leftBlinker=bool(left_blinker),
           rightBlinker=bool(right_blinker),
@@ -199,7 +201,7 @@ def simulate_sequence(
                 st.steering_angle_deg, st.live_map_data, st.lane_change_state,
                 st.lane_change_direction, st.left_blinker, st.right_blinker,
                 st.desired_curvature, st.actual_curvature, st.lateral_output,
-                st.lateral_saturated, st.lateral_active)
+                st.lateral_saturated, st.lateral_active, st.gas_pressed)
     # Patch time used inside controller to advance deterministically
     with patch('sunnypilot.selfdrive.controls.lib.vision_turn_controller.time.time', lambda: t), \
          patch('sunnypilot.selfdrive.controls.lib.vision_turn_controller.time.monotonic', lambda: t):
@@ -207,8 +209,9 @@ def simulate_sequence(
 
     # Integrate acceleration to update speed for next step
     a_cmd = float(ctrl.a_target)
-    v_ego = max(0.0, v_ego + a_cmd * step_dt)
-    a_ego = a_cmd
+    applied_accel = a_cmd if st.applied_accel is None else float(st.applied_accel)
+    v_ego = max(0.0, v_ego + applied_accel * step_dt)
+    a_ego = applied_accel
     t += step_dt
     if history is not None:
       snap_step = ctrl.snapshot_debug_state() or {}
@@ -307,11 +310,12 @@ def simulate_sequence_trace(
   trace: List[Dict[str, Any]] = []
 
   for st in steps:
+    step_dt = float(getattr(st, 'dt', dt) or dt)
     sm = _mk_sm(st.curvature, st.curvature_ahead, v_ego, st.confidence, st.lead_d_rel_m,
                 st.steering_angle_deg, st.live_map_data, st.lane_change_state,
                 st.lane_change_direction, st.left_blinker, st.right_blinker,
                 st.desired_curvature, st.actual_curvature, st.lateral_output,
-                st.lateral_saturated, st.lateral_active)
+                st.lateral_saturated, st.lateral_active, st.gas_pressed)
     with patch('sunnypilot.selfdrive.controls.lib.vision_turn_controller.time.time', lambda: t), \
          patch('sunnypilot.selfdrive.controls.lib.vision_turn_controller.time.monotonic', lambda: t):
       ctrl.update(sm, True, v_ego, a_ego, v_cruise_mps)
@@ -329,15 +333,18 @@ def simulate_sequence_trace(
       'v_turn': float(v_turn),
       'fov_occluded': bool(getattr(ctrl, '_fov_occluded', False)),
       'occl_lead_bypass_active': bool(getattr(ctrl, '_occl_lead_bypass_active', False)),
+      'cap_hold_active': bool(snap.get('cap_hold_active', False)),
+      'winding_release_shape_active': bool(snap.get('winding_release_shape_active', False)),
       'conf': float(snap.get('conf', 0.0) or 0.0),
       'vision_status': str(snap.get('vision_status', 'UNKNOWN') or 'UNKNOWN'),
     })
 
     if integrate_ego:
-      v_ego = max(0.0, v_ego + a_cmd * dt)
-      a_ego = a_cmd
+      applied_accel = a_cmd if st.applied_accel is None else float(st.applied_accel)
+      v_ego = max(0.0, v_ego + applied_accel * step_dt)
+      a_ego = applied_accel
     else:
       a_ego = 0.0
-    t += dt
+    t += step_dt
 
   return trace

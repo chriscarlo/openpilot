@@ -77,27 +77,55 @@ def test_highway_bypass_partial_occlusion():
   assert final >= v0 - 0.5
 
 
-def test_freeway_cap_hold_prevents_single_frame_flicker():
-  # Regression (freeway): we observed many short (<0.5s) VTSC cap dips in rlogs, which the
-  # longitudinal planner/MPC often cannot respond to quickly. VTSC should hold a material cap
-  # reduction briefly so the planner sees a stable target and begins braking sooner.
+def test_freeway_cap_hold_does_not_latch_preview_only_single_frame_pulse():
+  # Regression (freeway): recent rlogs showed model-only preview spikes latching a deep held cap
+  # even though current curvature/steering still looked straight. A one-frame horizon pulse should
+  # not stay latched once the next frame is back to straight.
   v0 = 32.0
   v_cruise = 33.0
   dt = 0.05
 
-  # One-frame "curve ahead" pulse (horizon only), then straight. Without the hold, v_turn would
-  # immediately jump back to cruise on the next frame.
+  # One-frame "curve ahead" pulse (horizon only), then straight.
   steps = [Step(curvature=0.0, curvature_ahead=0.012, confidence=0.95)]
   steps += [Step(curvature=0.0, curvature_ahead=0.0, confidence=0.95) for _ in range(int(VTURN_HOLD_S / dt) + 12)]
 
   trace = simulate_sequence_trace(steps=steps, v0_mps=v0, v_cruise_mps=v_cruise, dt=dt, integrate_ego=False)
   assert trace and len(trace) >= 3
 
-  # First frame should produce a meaningful cap reduction.
+  # First frame can still publish the preview reduction.
   assert float(trace[0]['v_turn']) <= v_cruise - 1.0
-  # Second frame must remain held low even though horizon is straight.
+  # But the next frame should recover promptly instead of latching the preview-only dip.
+  assert float(trace[1]['v_turn']) >= v_cruise - 1e-3
+  assert float(trace[2]['v_turn']) >= v_cruise - 1e-3
+  assert trace[1]['cap_hold_active'] is False
+  assert trace[1]['winding_release_shape_active'] is False
+
+
+def test_freeway_cap_hold_preserves_corroborated_entry_reduction():
+  # When current curvature already agrees a turn is underway, the same one-frame preview pulse
+  # should still be held long enough for the planner to react.
+  v0 = 32.0
+  v_cruise = 33.0
+  dt = 0.05
+  hold_release_idx = math.ceil(VTURN_HOLD_S / dt)
+
+  steps = [Step(curvature=0.0, curvature_ahead=0.012, confidence=0.95, desired_curvature=0.0014, actual_curvature=0.0012)]
+  steps += [
+    Step(curvature=0.0, curvature_ahead=0.0, confidence=0.95, desired_curvature=0.0014, actual_curvature=0.0012)
+    for _ in range(hold_release_idx + 100)
+  ]
+
+  trace = simulate_sequence_trace(steps=steps, v0_mps=v0, v_cruise_mps=v_cruise, dt=dt, integrate_ego=False)
+  assert trace and len(trace) > hold_release_idx + 2
+
+  assert float(trace[0]['v_turn']) <= v_cruise - 1.0
   assert float(trace[1]['v_turn']) <= v_cruise - 1.0
-  # After the hold expires, cap should recover to cruise promptly.
+  assert trace[1]['cap_hold_active'] is True
+  assert trace[1]['winding_release_shape_active'] is True
+  assert trace[hold_release_idx - 1]['cap_hold_active'] is True
+  assert trace[hold_release_idx]['cap_hold_active'] is False
+  assert trace[hold_release_idx]['winding_release_shape_active'] is True
+  assert float(trace[hold_release_idx]['v_turn']) > float(trace[hold_release_idx - 1]['v_turn'])
   assert float(trace[-1]['v_turn']) >= v_cruise - 1e-3
 
 
@@ -120,6 +148,27 @@ def test_low_confidence_hold_stabilizes_single_frame_pulse_without_occlusion_sta
   assert float(trace[first]['v_turn']) <= v_cruise - 1.0
   assert float(trace[first + 1]['v_turn']) <= v_cruise - 1.0
   assert float(trace[-1]['v_turn']) >= v_cruise - 1e-3
+
+
+def test_freeway_low_confidence_hold_requires_local_curve_corroboration():
+  # At freeway speeds, low-confidence preview pulses should not latch by themselves. They need
+  # current steering/lateral corroboration just like the high-confidence freeway path.
+  v0 = 32.0
+  v_cruise = 33.0
+  dt = 0.05
+  conf = 0.69
+
+  steps = [Step(curvature=0.0, curvature_ahead=0.012, confidence=conf)]
+  steps += [Step(curvature=0.0, curvature_ahead=0.0, confidence=conf) for _ in range(int(VTURN_HOLD_S / dt) + 12)]
+
+  trace = simulate_sequence_trace(steps=steps, v0_mps=v0, v_cruise_mps=v_cruise, dt=dt, integrate_ego=False)
+  assert trace and len(trace) >= 3
+
+  assert float(trace[0]['v_turn']) <= v_cruise - 1.0
+  assert float(trace[1]['v_turn']) >= v_cruise - 1e-3
+  assert float(trace[2]['v_turn']) >= v_cruise - 1e-3
+  assert trace[1]['cap_hold_active'] is False
+  assert trace[1]['winding_release_shape_active'] is False
 
 
 def test_low_confidence_with_lead_stays_at_visible_cap_without_bypass():
@@ -227,6 +276,73 @@ def test_low_speed_calibration_relaxes_clean_low_headroom_curve():
   assert float(snap_relax['v_base']) > float(snap_neutral['v_base']) + 0.05
 
 
+def test_low_speed_calibration_driver_override_weights_larger_divergence_more_heavily():
+  v0 = 10.5
+  v_cruise = 16.0
+  common = dict(
+    curvature=0.02,
+    curvature_ahead=0.02,
+    confidence=0.95,
+    desired_curvature=0.020,
+    actual_curvature=0.0195,
+    lateral_output=0.52,
+    lateral_saturated=False,
+    gas_pressed=True,
+  )
+  steps_mild = [Step(**common, applied_accel=0.12) for _ in range(160)]
+  steps_strong = [Step(**common, applied_accel=0.42) for _ in range(160)]
+
+  snap_mild = simulate_sequence(steps=steps_mild, v0_mps=v0, v_cruise_mps=v_cruise, dt=0.05)
+  snap_strong = simulate_sequence(steps=steps_strong, v0_mps=v0, v_cruise_mps=v_cruise, dt=0.05)
+
+  assert float(snap_strong['low_speed_calibration_state']) > float(snap_mild['low_speed_calibration_state']) + 0.010
+  assert float(snap_strong['low_speed_calibration_override_ema']) > float(snap_mild['low_speed_calibration_override_ema']) + 0.20
+  assert float(snap_strong['low_speed_calibration_divergence_mps']) > float(snap_mild['low_speed_calibration_divergence_mps']) + 1.0
+  assert str(snap_strong['low_speed_calibration_reason']) == 'relax_override'
+
+
+def test_low_speed_calibration_discards_driver_override_relax_when_lateral_saturates():
+  v0 = 10.5
+  v_cruise = 16.0
+  steps_override = [
+    Step(
+      curvature=0.02,
+      curvature_ahead=0.02,
+      confidence=0.95,
+      desired_curvature=0.020,
+      actual_curvature=0.0195,
+      lateral_output=0.52,
+      lateral_saturated=False,
+      gas_pressed=True,
+      applied_accel=0.42,
+    )
+    for _ in range(160)
+  ]
+  steps_saturated = [
+    Step(
+      curvature=0.02,
+      curvature_ahead=0.02,
+      confidence=0.95,
+      desired_curvature=0.024,
+      actual_curvature=0.016,
+      lateral_output=0.96,
+      lateral_saturated=True,
+      gas_pressed=True,
+      applied_accel=0.42,
+    )
+    for _ in range(160)
+  ]
+
+  snap_override = simulate_sequence(steps=steps_override, v0_mps=v0, v_cruise_mps=v_cruise, dt=0.05)
+  snap_saturated = simulate_sequence(steps=steps_saturated, v0_mps=v0, v_cruise_mps=v_cruise, dt=0.05)
+
+  assert float(snap_override['low_speed_calibration_state']) > 0.010
+  assert str(snap_override['low_speed_calibration_reason']) == 'relax_override'
+  assert float(snap_saturated['low_speed_calibration_state']) < -0.020
+  assert float(snap_saturated['low_speed_calibration_override_ema']) == pytest.approx(0.0, abs=1e-6)
+  assert str(snap_saturated['low_speed_calibration_reason']) == 'tighten_saturated'
+
+
 def test_low_speed_calibration_tightens_on_sustained_saturation():
   v0 = 11.5
   v_cruise = 16.0
@@ -324,6 +440,31 @@ def test_low_speed_calibration_high_end_param_limits_sigmoid_range():
 
   assert scale_default > 1.03
   assert scale_limited == pytest.approx(1.0, abs=1e-6)
+
+
+def test_physics_sigmoid_lifts_freeway_sweeper_band_without_bloating_sub_50_curve():
+  mph = 2.2369362920544
+
+  # Regression target from the seg-10 "should be high-60s/low-70s" sweeper band.
+  k_ref = 0.004567423064561596
+  k_band_hi = 0.0048
+
+  # Anchor curvatures taken from the current curve's ~40/45/50 mph region. Keep these close.
+  k_40 = 0.006808786689291953
+  k_45 = 0.0058203472225662614
+  k_50 = 0.00526743605396956
+
+  v_ref_mph = float(curvature_to_speed(k_ref)) * mph
+  v_band_hi_mph = float(curvature_to_speed(k_band_hi)) * mph
+  v_50_mph = float(curvature_to_speed(k_50)) * mph
+  v_45_mph = float(curvature_to_speed(k_45)) * mph
+  v_40_mph = float(curvature_to_speed(k_40)) * mph
+
+  assert 68.0 <= v_ref_mph <= 72.0
+  assert 68.0 <= v_band_hi_mph <= 72.0
+  assert v_50_mph <= 53.0
+  assert v_45_mph <= 46.0
+  assert v_40_mph <= 42.0
 
 
 def test_low_speed_calibration_decays_back_toward_neutral_when_curve_feedback_disappears():
