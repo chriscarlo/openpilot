@@ -1562,6 +1562,66 @@ def test_strategic_mode_uses_hidden_apex_profile_for_blind_rising_curve(monkeypa
   assert float(strategic_snap['map_floor_anchor_k']) >= 0.018
 
 
+def test_strategic_mode_lane_change_map_ambiguity_relaxes_to_advisory(monkeypatch):
+  v0 = 15.0
+  v_cruise = 22.0
+  dt = 0.05
+  lat0, lon0 = 37.0, -122.0
+  step_deg = 10.0 / 111000.0
+  k_curve = 0.02
+
+  vtsc = mk_vtsc_with_params()
+  _enable_map_lookahead(vtsc, monkeypatch)
+  _set_map_strategy(vtsc, monkeypatch, 'strategic')
+  _set_longitudinal_response_model(vtsc, min_accel=-6.0, delay_s=0.35)
+
+  pts = []
+  for i in range(80):
+    dist_m = float(i * 10.0)
+    k = k_curve if (60.0 <= dist_m <= 80.0) else 0.0
+    pts.append((lat0 + i * step_deg, lon0, k))
+  _patch_map_tail_inputs(vtsc, monkeypatch, lat0, lon0, pts)
+
+  snap = simulate_sequence(
+    steps=[Step(
+      curvature=0.0,
+      curvature_ahead=0.0,
+      confidence=0.95,
+      live_map_data={'roadGeometryValid': False, 'windingRoadValid': False},
+      lane_change_state=int(log.LaneChangeState.laneChangeStarting),
+      lane_change_direction=int(log.LaneChangeDirection.left),
+      left_blinker=True,
+    ) for _ in range(12)],
+    vtsc=vtsc,
+    v0_mps=v0,
+    v_cruise_mps=v_cruise,
+    dt=dt,
+  )
+  assert snap
+  assert float(snap['map_strategic_cap']) == pytest.approx(0.0, abs=1e-6)
+  assert float(snap['map_advisory_cap']) == pytest.approx(0.0, abs=1e-6)
+  assert str(snap['map_tail_compute_reason']) == 'road_geometry_invalid'
+  assert float(snap['vtsc_cmd']) >= v_cruise - 1e-6
+
+
+def test_lane_change_map_ambiguity_guard_requires_large_raw_map_mismatch():
+  vtsc = mk_vtsc_with_params()
+  vtsc._road_geometry_valid = False
+  vtsc._mapd_winding_valid = False
+  vtsc._lane_change_active = True
+  vtsc._single_blinker_active = True
+
+  vtsc._dbg_k_model = 0.008
+  vtsc._dbg_k_steer = 0.0
+  vtsc._filtered_curvature = 0.008
+
+  mild_candidate = SimpleNamespace(cap_mps=16.0, anchor_dist_m=90.0, anchor_curvature=0.020)
+  tight_candidate = SimpleNamespace(cap_mps=10.0, anchor_dist_m=90.0, anchor_curvature=0.040)
+
+  assert vtsc._should_relax_strategic_map_candidate(mild_candidate) is False
+  assert vtsc._should_relax_strategic_map_candidate(tight_candidate) is True
+
+
 def test_strategic_mode_overshoot_phase_offset_ignored_when_reference_speed_is_not_tighter():
   k_curve = 0.02
   vsafe = float(curvature_to_speed(k_curve))
@@ -2146,10 +2206,36 @@ def test_winding_profile_release_slew_limits_upward_v_turn_step():
 
   assert baseline_first == pytest.approx(10.15, abs=1e-6)
   assert baseline_follow == pytest.approx(10.30, abs=1e-6)
-  assert limited == pytest.approx(10.1475, abs=1e-6)
+  assert limited == pytest.approx(10.14, abs=1e-6)
   assert limited < baseline_first
   assert bool(vtsc._dbg_winding_release_limited) is True
   assert bool(vtsc._dbg_winding_release_shape_active) is True
+
+
+def test_winding_profile_pre_apex_release_rolls_on_gradually():
+  def run_once(current_lat_acc: float, *, apex_exit_ready: bool):
+    vtsc = mk_vtsc_with_params()
+    _set_longitudinal_response_model(vtsc, min_accel=-6.0, max_accel=5.0, delay_s=0.35)
+    vtsc._max_accel = 3.0
+    vtsc._v_cruise_setpoint = 25.0
+    vtsc._v_turn_output = 10.0
+    vtsc._map_tail_active = True
+    vtsc._set_winding_behavior_profile(map_strategy.WINDING_BEHAVIOR_PROFILES[4], source='mapd')
+    vtsc._filtered_curvature = 0.01
+    vtsc._current_lat_acc = float(current_lat_acc)
+    vtsc._max_pred_lat_acc = 2.50
+    vtsc._lat_acc_overshoot_ahead = True
+    vtsc._apex_exit_ready = bool(apex_exit_ready)
+    vtsc._v_turn_release_shape_active = False
+    return vtsc._apply_winding_v_turn_release_slew(20.0, 0.05)
+
+  early = run_once(1.02, apex_exit_ready=False)
+  late = run_once(2.20, apex_exit_ready=False)
+  post = run_once(2.20, apex_exit_ready=True)
+
+  assert 10.05 < early < 10.10
+  assert early < late < post
+  assert post == pytest.approx(10.14, abs=1e-6)
 
 
 def test_winding_profile_near_apex_release_helper_scales_with_severity():

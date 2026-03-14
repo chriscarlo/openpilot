@@ -241,6 +241,37 @@ def test_vtsc_map_curve_preview_invalid_on_straight():
   assert 3 <= len(vtc.curve_preview_points) <= 48
 
 
+def test_vtsc_map_curve_preview_fails_open_when_live_geometry_is_invalid():
+  p = Params()
+  p.put_bool("VisionTurnSpeedControl", True)
+  p.put_bool("MTSCLookaheadEnabled", True)
+
+  lat0, lon0 = 37.0, -122.0
+  p.put("MapCurvatures", json.dumps(_build_map_curvatures_right_curve(lat0=lat0, lon0=lon0)))
+  p.put("LastGPSPosition", json.dumps({"latitude": lat0, "longitude": lon0, "bearing": 90.0}))
+
+  vtc = VisionTurnController(_MockCP())
+  sm = _make_sm(v_ego=25.0)
+  sm._data["liveMapDataSP"] = SimpleNamespace(
+    roadGeometryValid=False,
+    currentRoadSegment=None,
+    nearbyRoadSegments=[],
+  )
+  sm.valid["liveMapDataSP"] = True
+
+  with patch("openpilot.sunnypilot.selfdrive.controls.lib.vision_turn_controller.time.time", lambda: 0.0), \
+       patch("openpilot.sunnypilot.selfdrive.controls.lib.vision_turn_controller.time.monotonic", lambda: 0.0):
+    vtc.update(sm, True, 25.0, 0.0, 40.0)
+
+  snap = vtc.snapshot_debug_state()
+  assert float(vtc.v_turn) == pytest.approx(40.0, abs=1e-6)
+  assert str(snap["active_cap"]) != "map"
+  assert str(snap["map_tail_compute_reason"]) == "road_geometry_invalid"
+  assert bool(vtc.curve_preview_valid) is False
+  assert vtc.curve_preview_tiles == []
+  assert vtc.curve_preview_branch_stubs == []
+
+
 def test_vtsc_map_curve_preview_uses_fixed_ten_second_horizon_on_straight():
   p = Params()
   p.put_bool("VisionTurnSpeedControl", True)

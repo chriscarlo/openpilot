@@ -162,7 +162,7 @@ WINDING_BEHAVIOR_PROFILES: dict[int, WindingBehaviorProfile] = {
     rearm_margin_m=10.0,
     rearm_delta_mps=0.38,
     allow_immediate_post_apex_release=False,
-    v_turn_release_up_slew_mps2=3.8,
+    v_turn_release_up_slew_mps2=3.6,
   ),
   3: WindingBehaviorProfile(
     level=3,
@@ -176,7 +176,7 @@ WINDING_BEHAVIOR_PROFILES: dict[int, WindingBehaviorProfile] = {
     rearm_margin_m=8.0,
     rearm_delta_mps=0.32,
     allow_immediate_post_apex_release=False,
-    v_turn_release_up_slew_mps2=3.35,
+    v_turn_release_up_slew_mps2=3.2,
   ),
   4: WindingBehaviorProfile(
     level=4,
@@ -190,7 +190,7 @@ WINDING_BEHAVIOR_PROFILES: dict[int, WindingBehaviorProfile] = {
     rearm_margin_m=6.0,
     rearm_delta_mps=0.26,
     allow_immediate_post_apex_release=False,
-    v_turn_release_up_slew_mps2=2.95,
+    v_turn_release_up_slew_mps2=2.8,
   ),
   5: WindingBehaviorProfile(
     level=5,
@@ -204,7 +204,7 @@ WINDING_BEHAVIOR_PROFILES: dict[int, WindingBehaviorProfile] = {
     rearm_margin_m=4.0,
     rearm_delta_mps=0.20,
     allow_immediate_post_apex_release=False,
-    v_turn_release_up_slew_mps2=2.75,
+    v_turn_release_up_slew_mps2=2.4,
   ),
 }
 DEFAULT_WINDING_BEHAVIOR_PROFILE = WINDING_BEHAVIOR_PROFILES[0]

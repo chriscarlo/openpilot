@@ -41,6 +41,7 @@ description: Edit, debug, troubleshoot, iterate, and polish the Sunnypilot VTSC 
 - Placement uses an “inner” rect that excludes `UI_BORDER_SIZE`. Adjust placement in `HudRendererSP::drawVTSCCoPilotCurve`.
 - Move the overlay up/down by changing `bottom_safe` (smaller moves it down, larger moves it up).
 - Change overall sizing/thickness/fonts by changing `kScale`.
+- Keep the tile glyph on a shared meters-to-pixels scale for forward and lateral axes; do not independently fit lateral spread to card width or gentle sweepers will render like hairpins.
 - Keep speed on top by drawing it last.
 
 ## References

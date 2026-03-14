@@ -48,6 +48,8 @@ description: >
   start at `sunnypilot/rtid/rtid.py`, `api_key_manager.py`, and `waze_api_client.py`; verify the API key source and the 30 second fetch gate before changing any threat logic.
 - No alerts or no posted speed limit yet, but `apiStatus` is healthy:
   do not assume a bug from one snapshot. Threat presence and posted speed can both legitimately be absent until the provider side, dashboard TSR, or OSM path has actually produced data; during live monitoring, wait through at least one RTID fetch cycle before escalating.
+- `apiStatus=connected` but `rtiStateSP.threats` stays empty:
+  confirm the current `RTIThreatFilter` and the raw provider alert types before debugging same-road or planner logic; a police-only filter with provider-side `jam` alerts legitimately publishes nothing.
 - Threat appears on HUD but the car does not slow:
   inspect `recommendedSpeed`, `speedLimitMs`, `isCausingRecommendation`, `onSameRoad`, and `direction`; visual-only alerts with no usable speed limit are expected in some cases.
 - Threat is visible and carries a usable posted speed, but `onSameRoad=false` and `isCausingRecommendation=false`:
@@ -126,6 +128,7 @@ python3 docs/chauffeur/rti/tests/check_rti_content.py
 - If the HUD is empty, inspect `rtiStateSP` before editing Qt.
 - If posted-mode slowdown feels wrong, inspect the SLC handoff into `RTIController.update(... posted_speed_limit=self.slc.speed_limit)` before retuning threat logic.
 - If posted speed or threat presence is missing at the instant you inspect logs or a live session, first treat that as "not acquired yet" rather than "broken"; if you are watching in real time, give dashboard/OSM acquisition and the next 30 second RTID fetch a chance to populate.
+- If raw API access is healthy but RTI stays empty, check whether the current `RTIThreatFilter` excludes the provider payload (for example police-only while the area only has `jam` alerts) before chasing backend matching bugs.
 - If `threat.speedLimitMs > 0` but `threatAhead` never goes true and `recommendedSpeed` stays `0`, verify whether `onSameRoad` is being rejected by street-name matching before retuning slowdown or resume distances.
 - If a threat is rendered but `recommendedSpeed == 0`, confirm whether RTI intentionally classified it as visual-only.
 - If side-street alerts still slow the car, debug street matching and heading gating before changing the duplicate-collapse radii or HUD sorting.

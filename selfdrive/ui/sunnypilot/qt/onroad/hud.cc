@@ -916,7 +916,7 @@ void HudRendererSP::drawVTSCCoPilotCurve(QPainter &p, const QRect &surface_rect)
   p.save();
   p.setRenderHint(QPainter::Antialiasing, true);
 
-  const float kScale = std::clamp(vtsc_copilot_tuning_.scale * 0.42f, 0.70f, 1.45f);
+  const float kScale = std::clamp(vtsc_copilot_tuning_.scale * 0.525f, 0.70f, 1.70f);
   const auto now_tp = std::chrono::steady_clock::now();
   float dt = 0.0f;
   if (vtsc_copilot_last_draw_time_valid_) {
@@ -1047,15 +1047,17 @@ void HudRendererSP::drawVTSCCoPilotCurve(QPainter &p, const QRect &surface_rect)
       fwd_max = std::max(fwd_max, static_cast<float>(pt.x()));
       lat_max = std::max(lat_max, std::abs(static_cast<float>(pt.y())));
     }
-    const float lat_extent = std::max(4.5f, lat_max * 0.82f);
-    const float horiz_span = glyph_rect.width() * (active ? 0.38f : 0.34f);
     const float usable_h = std::max(static_cast<float>(glyph_rect.height()) - 8.0f * kScale, 16.0f * kScale);
+    const float half_width = std::max(0.5f * static_cast<float>(glyph_rect.width()) - (road_width + 10.0f * kScale), 18.0f * kScale);
+    const float meters_to_px_y = usable_h / std::max(18.0f, fwd_max);
+    const float meters_to_px_x_fit = lat_max > 0.1f ? (half_width / lat_max) : meters_to_px_y;
+    // Preserve turn severity by sharing a meter scale between forward and lateral axes.
+    // A small lateral boost keeps gentle sweepers readable without turning them into hairpins.
+    const float meters_to_px_x = std::min(meters_to_px_x_fit, meters_to_px_y * (active ? 1.18f : 1.12f));
 
     auto to_px = [&](const QPointF &pt) -> QPointF {
-      const float t = std::clamp(static_cast<float>(pt.x()) / fwd_max, 0.0f, 1.0f);
-      const float eased_t = std::pow(t, 0.92f);
-      const float x_px = static_cast<float>(glyph_rect.center().x()) - (static_cast<float>(pt.y()) / lat_extent) * horiz_span;
-      const float y_px = static_cast<float>(glyph_rect.bottom()) - eased_t * usable_h;
+      const float x_px = static_cast<float>(glyph_rect.center().x()) - static_cast<float>(pt.y()) * meters_to_px_x;
+      const float y_px = static_cast<float>(glyph_rect.bottom()) - std::clamp(static_cast<float>(pt.x()) * meters_to_px_y, 0.0f, usable_h);
       return QPointF(x_px, y_px);
     };
 

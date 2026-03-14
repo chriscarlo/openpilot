@@ -96,6 +96,15 @@ STEER_CURVATURE_FALLBACK_MIN_V_MPS = 13.0         # only consider at ~29 mph+
 # model-only curve signal and let map/steering evidence decide whether VTSC should slow.
 LANE_CHANGE_CURVATURE_SUPPRESS_STEER_KAPPA_MAX = 0.003
 LANE_CHANGE_CURVATURE_SUPPRESS_MIN_V_MPS = 1.0
+# When pre-apex unwind starts before the geometric apex, begin with a gentler release slew and
+# ramp up as the measured lateral acceleration closes in on the predicted apex load.
+PRE_APEX_RELEASE_SLEW_MIN_SCALE = 0.55
+# Raw strategic MapCurvatures can occasionally latch onto a ramp/branch before live road geometry
+# resolves the mainline. During a blinker/lane-change context, only trust that raw strategic floor
+# when the local curve evidence is in the same ballpark.
+AMBIGUOUS_RAW_MAP_ANCHOR_MIN_DIST_M = 45.0
+AMBIGUOUS_RAW_MAP_ANCHOR_MIN_KAPPA = 0.010
+AMBIGUOUS_RAW_MAP_CURVATURE_RATIO = 3.0
 
 # ===== Severe-confidence overshoot conservatism =====
 # If lane-line confidence is extremely low, the model often "discovers" tight off-ramp curvature late.
@@ -1226,6 +1235,9 @@ class VisionTurnController:
     self._map_tail_anchor_vsafe = 0.0
     self._map_tail_anchor_index = -1
     self._longitudinal_response_model = None
+    self._road_geometry_valid = False
+    self._lane_change_active = False
+    self._single_blinker_active = False
     # Debug-only map lookahead diagnostics (why map cap is inactive this frame)
     self._map_tail_reason = "init"
     self._map_tail_compute_reason = "init"
@@ -2429,6 +2441,7 @@ class VisionTurnController:
     if (not math.isfinite(slew_limit)) or slew_limit <= 0.0:
       return desired_cap
 
+    slew_limit *= float(self._pre_apex_release_slew_scale())
     self._dbg_winding_release_up_slew_mps2 = float(slew_limit)
     limited_cap = min(desired_cap, prev_cap + float(slew_limit) * max(0.0, float(dt)))
     self._dbg_winding_release_limited = bool(limited_cap < desired_cap - 1e-6)
@@ -2437,7 +2450,7 @@ class VisionTurnController:
       self._dbg_winding_release_shape_active = False
     return float(limited_cap)
 
-  def _is_near_apex_release_ready(self) -> bool:
+  def _effective_apex_release_lat_acc_ratio(self) -> float:
     profile = getattr(self, '_winding_behavior_profile', DEFAULT_WINDING_BEHAVIOR_PROFILE)
     try:
       ratio = float(getattr(profile, 'apex_release_lat_acc_ratio', 0.92))
@@ -2451,6 +2464,36 @@ class VisionTurnController:
       pass
     ratio = min(1.0, max(0.20, ratio))
     self._dbg_apex_release_lat_acc_ratio = float(ratio)
+    return float(ratio)
+
+  def _pre_apex_release_slew_scale(self) -> float:
+    profile = getattr(self, '_winding_behavior_profile', DEFAULT_WINDING_BEHAVIOR_PROFILE)
+    if int(getattr(profile, 'level', 0) or 0) <= 0:
+      return 1.0
+    if bool(getattr(self, '_apex_exit_ready', False)):
+      return 1.0
+    try:
+      peak_lat_acc = max(
+        abs(float(getattr(self, '_current_lat_acc', 0.0) or 0.0)),
+        abs(float(getattr(self, '_max_pred_lat_acc', 0.0) or 0.0)),
+      )
+      current_lat_acc = abs(float(getattr(self, '_current_lat_acc', 0.0) or 0.0))
+    except Exception:
+      return 1.0
+    if peak_lat_acc < float(_ENTERING_PRED_LAT_ACC_TH):
+      return 1.0
+
+    ratio = float(self._effective_apex_release_lat_acc_ratio())
+    trigger_lat_acc = float(ratio) * float(peak_lat_acc)
+    if current_lat_acc < trigger_lat_acc - 1e-6:
+      return 1.0
+
+    denom = max(1e-3, float(peak_lat_acc) - float(trigger_lat_acc))
+    progress = clip((float(current_lat_acc) - float(trigger_lat_acc)) / denom, 0.0, 1.0)
+    return float(PRE_APEX_RELEASE_SLEW_MIN_SCALE + (1.0 - PRE_APEX_RELEASE_SLEW_MIN_SCALE) * float(progress))
+
+  def _is_near_apex_release_ready(self) -> bool:
+    ratio = float(self._effective_apex_release_lat_acc_ratio())
 
     try:
       peak_lat_acc = max(
@@ -2771,6 +2814,7 @@ class VisionTurnController:
           lane_change_active = bool(getattr(getattr(model_data, 'meta', None), 'laneChangeState', LaneChangeState.off) != LaneChangeState.off)
         except Exception:
           lane_change_active = False
+        self._lane_change_active = bool(lane_change_active)
 
         # Calculate lateral acceleration using model-predicted curvature
         # This is more accurate than steering angle at highway speeds
@@ -4236,6 +4280,7 @@ class VisionTurnController:
     self._winding_curve_distance_m = float(context.curve_distance_m)
 
   def _clear_mapd_winding_context(self) -> None:
+    self._road_geometry_valid = False
     self._mapd_winding_valid = False
     self._mapd_winding_level = 0
     self._mapd_winding_score = 0
@@ -4250,6 +4295,10 @@ class VisionTurnController:
     map_data = _sm_get_optional(sm, 'liveMapDataSP')
     if map_data is None:
       return
+    try:
+      self._road_geometry_valid = bool(getattr(map_data, 'roadGeometryValid', False))
+    except Exception:
+      self._road_geometry_valid = False
 
     try:
       valid = bool(getattr(map_data, 'windingRoadValid', False))
@@ -4358,6 +4407,33 @@ class VisionTurnController:
       self._winding_context_level = 0
       self._winding_context_confidence = min(1.0, 0.5 + 0.5 * local_score)
       self._winding_context_source = 'local'
+
+  def _should_relax_strategic_map_candidate(self, candidate) -> bool:
+    if candidate is None or candidate.cap_mps is None:
+      return False
+    if bool(getattr(self, '_road_geometry_valid', False)):
+      return False
+    if bool(getattr(self, '_mapd_winding_valid', False)):
+      return False
+    if not (bool(getattr(self, '_lane_change_active', False)) or bool(getattr(self, '_single_blinker_active', False))):
+      return False
+
+    try:
+      anchor_dist_m = float(candidate.anchor_dist_m or 0.0)
+      anchor_k = abs(float(candidate.anchor_curvature or 0.0))
+    except Exception:
+      return False
+    if anchor_dist_m < float(AMBIGUOUS_RAW_MAP_ANCHOR_MIN_DIST_M):
+      return False
+    if anchor_k < float(AMBIGUOUS_RAW_MAP_ANCHOR_MIN_KAPPA):
+      return False
+
+    local_k = max(
+      abs(float(getattr(self, '_dbg_k_model', 0.0) or 0.0)),
+      abs(float(getattr(self, '_dbg_k_steer', 0.0) or 0.0)),
+      abs(float(getattr(self, '_filtered_curvature', 0.0) or 0.0)),
+    )
+    return bool(anchor_k >= max(float(AMBIGUOUS_RAW_MAP_ANCHOR_MIN_KAPPA), local_k * float(AMBIGUOUS_RAW_MAP_CURVATURE_RATIO)))
 
   def _update_curve_preview_from_map(self, *, gps_lat: float, gps_lon: float, pts: list[tuple[float, float, float]], i0: int,
                                      gps_bearing_deg: float | None = None) -> None:
@@ -4921,6 +4997,17 @@ class VisionTurnController:
       self._map_tail_compute_reason = "no_gps"
       self._clear_curve_preview()
       return (None, 0.0, 0.0)
+    map_data = _sm_get_optional(sm, 'liveMapDataSP') if sm is not None else None
+    if map_data is not None and hasattr(map_data, 'roadGeometryValid'):
+      try:
+        if not bool(getattr(map_data, 'roadGeometryValid', False)):
+          self._map_tail_compute_reason = "road_geometry_invalid"
+          self._map_curv_cache = []
+          self._map_curv_cache_raw = None
+          self._clear_curve_preview()
+          return (None, 0.0, 0.0)
+      except Exception:
+        pass
     lat0, lon0, bearing_deg = gps_pose
     pts = self._load_map_curvatures()
     if len(pts) < 3:
@@ -5064,12 +5151,16 @@ class VisionTurnController:
 
     strategy_mode = normalize_map_strategy(getattr(self, '_map_strategy_mode', DEFAULT_MAP_STRATEGY))
     candidate = strategic_candidate if strategy_mode == MAP_STRATEGY_STRATEGIC else advisory_candidate
+    relaxed_for_ambiguity = False
+    if strategy_mode == MAP_STRATEGY_STRATEGIC and self._should_relax_strategic_map_candidate(strategic_candidate):
+      candidate = advisory_candidate
+      relaxed_for_ambiguity = True
     self._map_tail_candidate = candidate
     self._map_tail_anchor_dist_m = float(candidate.anchor_dist_m or 0.0)
     self._map_tail_anchor_k = float(candidate.anchor_curvature or 0.0)
     self._map_tail_anchor_vsafe = float(candidate.anchor_vsafe_mps or 0.0)
     self._map_tail_anchor_index = int(candidate.anchor_index) if candidate.anchor_index is not None else -1
-    self._map_tail_compute_reason = str(candidate.reason or "unknown")
+    self._map_tail_compute_reason = "lane_change_map_ambiguity" if relaxed_for_ambiguity else str(candidate.reason or "unknown")
     if candidate.cap_mps is None:
       return (None, float(candidate.start_m), float(candidate.coverage))
     return (float(candidate.cap_mps), float(candidate.start_m), float(candidate.coverage))
@@ -5093,6 +5184,10 @@ class VisionTurnController:
       self._steering_angle_deg = float(getattr(cs, 'steeringAngleDeg', 0.0))
     except Exception:
       self._steering_angle_deg = 0.0
+    left_blinker = bool(getattr(cs, 'leftBlinker', False))
+    right_blinker = bool(getattr(cs, 'rightBlinker', False))
+    self._single_blinker_active = bool(left_blinker != right_blinker)
+    self._lane_change_active = False
     self._v_ego = v_ego
     self._a_ego = a_ego
     # Use cluster speed as source of truth if available, otherwise fall back to v_cruise
