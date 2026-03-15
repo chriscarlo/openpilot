@@ -1,0 +1,4 @@
+interface:
+  display_name: "Longitudinal Tuner"
+  short_description: "Debug and tune longitudinal control end to end"
+  default_prompt: "Use $openpilot-longitudinal-tuner to research, tune, or debug openpilot longitudinal behavior, including Hyundai CAN FD and Kia EV6-specific overlays, and to run a live anomaly monitor when behavior looks wrong."
