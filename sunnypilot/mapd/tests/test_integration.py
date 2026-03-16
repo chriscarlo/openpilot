@@ -264,6 +264,58 @@ class TestMapdIntegration(unittest.TestCase):
             self.assertAlmostEqual(map_data.get_current_speed_limit(), 29.1, places=1)
             self.assertIsNone(map_data.get_local_map_health_issue())
 
+    def test_publish_populates_real_capnp_road_geometry_lists(self):
+        """Publishing with real capnp builders should populate list fields without errors."""
+        import cereal.messaging as real_messaging
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self.mock_mapd_root.return_value = tmpdir
+            _write_offline_tile(
+                tmpdir,
+                bounds=(38.5, -121.25, 38.75, -121.0),
+                ways=[{
+                    "name": "US-50 W",
+                    "ref": "US-50 W",
+                    "max_speed": 29.1,
+                    "lanes": 3,
+                    "one_way": True,
+                    "min_lat": 38.6436,
+                    "min_lon": -121.2050,
+                    "max_lat": 38.6439,
+                    "max_lon": -121.1650,
+                    "nodes": [
+                        (38.64373, -121.2050),
+                        (38.64373, -121.18564),
+                        (38.64373, -121.1650),
+                    ],
+                }],
+            )
+
+            map_data = OsmMapData()
+            map_data.mem_params = MagicMock()
+            map_data.mem_params.get.return_value = None
+            map_data.last_position = Coordinate(38.64373, -121.18564)
+            map_data.last_altitude = 23.4
+
+            gps_msg = SimpleNamespace(bearingDeg=math.nan, bearing=math.nan, vNED=[0.0, -18.0, 0.0])
+            map_data.sm = MagicMock()
+            map_data.sm.__getitem__.return_value = gps_msg
+            map_data.sm.all_checks.return_value = True
+            map_data.sm.all_alive.return_value = True
+            map_data.sm.all_valid.return_value = True
+
+            map_data.update_location()
+
+            real_msg = real_messaging.new_message('liveMapDataSP')
+            self.mock_messaging.new_message.return_value = real_msg
+
+            map_data.publish()
+
+            self.assertTrue(real_msg.liveMapDataSP.roadGeometryValid)
+            self.assertEqual(real_msg.liveMapDataSP.roadName, "US-50 W")
+            self.assertGreater(len(real_msg.liveMapDataSP.currentRoadSegment.centerline), 0)
+            self.assertGreaterEqual(len(real_msg.liveMapDataSP.nearbyRoadSegments), 1)
+
     def test_publish_with_no_road_data(self):
         """Test publish method works when no road geometry data is available."""
         map_data = OsmMapData()

@@ -1,4 +1,6 @@
 import unittest
+import json
+from pathlib import Path
 from unittest.mock import patch
 
 from openpilot.sunnypilot.mapd.mapd_manager import get_osm_offroad_alerts
@@ -18,12 +20,8 @@ class TestMapdManagerAlerts(unittest.TestCase):
     alerts = get_osm_offroad_alerts(StubMapData("missing local map context"), True)
 
     self.assertEqual(
-      alerts["Offroad_OSMDataUnavailable"],
-      (True, "missing local map context"),
-    )
-    self.assertEqual(
       alerts["Offroad_OSMUpdateRequired"],
-      (False, "This alert will be cleared when new maps are downloaded."),
+      (True, "missing local map context"),
     )
 
   @patch("openpilot.sunnypilot.mapd.mapd_manager.get_files_for_cleanup", return_value=["/tmp/db"])
@@ -34,10 +32,6 @@ class TestMapdManagerAlerts(unittest.TestCase):
       alerts["Offroad_OSMUpdateRequired"],
       (True, "This alert will be cleared when new maps are downloaded."),
     )
-    self.assertEqual(
-      alerts["Offroad_OSMDataUnavailable"],
-      (False, ""),
-    )
 
   @patch("openpilot.sunnypilot.mapd.mapd_manager.get_files_for_cleanup", return_value=["/tmp/db"])
   def test_alerts_stay_off_when_osm_local_is_disabled(self, _mock_cleanup):
@@ -45,12 +39,30 @@ class TestMapdManagerAlerts(unittest.TestCase):
 
     self.assertEqual(
       alerts["Offroad_OSMUpdateRequired"],
-      (False, "This alert will be cleared when new maps are downloaded."),
-    )
-    self.assertEqual(
-      alerts["Offroad_OSMDataUnavailable"],
       (False, ""),
     )
+
+  @patch("openpilot.sunnypilot.mapd.mapd_manager.get_files_for_cleanup", return_value=["/tmp/db"])
+  def test_update_required_and_local_issue_are_combined(self, _mock_cleanup):
+    alerts = get_osm_offroad_alerts(StubMapData("missing local map context"), True)
+
+    self.assertEqual(
+      alerts["Offroad_OSMUpdateRequired"],
+      (True, "This alert will be cleared when new maps are downloaded.\nmissing local map context"),
+    )
+
+  def test_osm_offroad_alert_keys_are_registered(self):
+    repo_root = Path(__file__).resolve().parents[3]
+    alerts_path = repo_root / "selfdrive" / "selfdrived" / "alerts_offroad.json"
+    params_keys_path = repo_root / "common" / "params_keys.h"
+
+    alerts_json = json.loads(alerts_path.read_text())
+    params_keys_text = params_keys_path.read_text()
+    alert_names = set(get_osm_offroad_alerts(StubMapData("issue"), True).keys())
+
+    for alert_name in alert_names:
+      self.assertIn(alert_name, alerts_json)
+      self.assertIn(f"\"{alert_name}\"", params_keys_text)
 
 
 if __name__ == "__main__":

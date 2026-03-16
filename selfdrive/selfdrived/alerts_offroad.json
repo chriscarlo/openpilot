@@ -42,11 +42,7 @@
     "severity": 0
   },
   "Offroad_OSMUpdateRequired": {
-    "text": "OpenStreetMap database is out of date. New maps must be downloaded if you wish to continue using OpenStreetMap data for Enhanced Speed Control and road name display.\n\n%1",
-    "severity": 0
-  },
-  "Offroad_OSMDataUnavailable": {
-    "text": "OpenStreetMap local data is unavailable or unsupported. Road name display, map-based speed limits, and RTI road matching may not work.\n\n%1",
+    "text": "OpenStreetMap local data needs attention. New maps may be required, or local map data may be unavailable or unsupported for road name display, map-based speed limits, and RTI road matching.\n\n%1",
     "severity": 1
   },
   "Offroad_ExcessiveActuation": {

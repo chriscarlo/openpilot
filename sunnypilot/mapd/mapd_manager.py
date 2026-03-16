@@ -122,15 +122,18 @@ def update_osm_db() -> None:
 def get_osm_offroad_alerts(live_map_sp: OsmMapData, osm_local_enabled: bool) -> dict[str, tuple[bool, str]]:
   update_required = bool(get_files_for_cleanup()) and osm_local_enabled
   local_map_issue = live_map_sp.get_local_map_health_issue() if osm_local_enabled else None
+  show_osm_alert = update_required or bool(local_map_issue)
+  details = []
+
+  if update_required:
+    details.append("This alert will be cleared when new maps are downloaded.")
+  if local_map_issue:
+    details.append(local_map_issue)
 
   return {
     "Offroad_OSMUpdateRequired": (
-      update_required,
-      "This alert will be cleared when new maps are downloaded.",
-    ),
-    "Offroad_OSMDataUnavailable": (
-      bool(local_map_issue),
-      local_map_issue or "",
+      show_osm_alert,
+      "\n".join(details),
     ),
   }
 

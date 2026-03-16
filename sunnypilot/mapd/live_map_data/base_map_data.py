@@ -135,8 +135,10 @@ class BaseMapData(ABC):
 
       # Populate nearby road segments (limit to avoid message size issues)
       nearby_segments = self.get_nearby_road_segments()[:10]  # Limit to 10 segments
-      for segment in nearby_segments:
-        segment_msg = live_map_data.nearbyRoadSegments.add()
+      if nearby_segments:
+        live_map_data.init('nearbyRoadSegments', len(nearby_segments))
+      for i, segment in enumerate(nearby_segments):
+        segment_msg = live_map_data.nearbyRoadSegments[i]
         self._populate_road_segment(segment_msg, segment)
 
     except Exception:
@@ -203,15 +205,20 @@ class BaseMapData(ABC):
 
       # Populate centerline (limit to avoid message size issues)
       centerline_coords = road_segment.centerline[:50]  # Limit to 50 points
-      for coord in centerline_coords:
-        coord_msg = segment_msg.centerline.add()
+      if centerline_coords:
+        segment_msg.init('centerline', len(centerline_coords))
+      for i, coord in enumerate(centerline_coords):
+        coord_msg = segment_msg.centerline[i]
         coord_msg.latitude = coord.latitude
         coord_msg.longitude = coord.longitude
         coord_msg.distanceFromStart = coord.distance_from_start
 
       # Populate lanes (limit to avoid message size issues)
-      for lane in road_segment.lanes[:10]:  # Limit to 10 lanes
-        lane_msg = segment_msg.lanes.add()
+      lanes = road_segment.lanes[:10]
+      if lanes:
+        segment_msg.init('lanes', len(lanes))
+      for lane_index, lane in enumerate(lanes):  # Limit to 10 lanes
+        lane_msg = segment_msg.lanes[lane_index]
         lane_msg.laneIndex = lane.lane_index
         lane_msg.width = lane.width
 
@@ -227,15 +234,21 @@ class BaseMapData(ABC):
         lane_msg.type = lane_type_mapping.get(lane.lane_type, 0)
 
         # Add lane centerline coordinates (limited)
-        for coord in lane.centerline[:20]:  # Limit to 20 points per lane
-          coord_msg = lane_msg.centerline.add()
+        lane_centerline = lane.centerline[:20]
+        if lane_centerline:
+          lane_msg.init('centerline', len(lane_centerline))
+        for coord_index, coord in enumerate(lane_centerline):  # Limit to 20 points per lane
+          coord_msg = lane_msg.centerline[coord_index]
           coord_msg.latitude = coord.latitude
           coord_msg.longitude = coord.longitude
           coord_msg.distanceFromStart = coord.distance_from_start
 
       # Populate barriers (limit to avoid message size issues)
-      for barrier in road_segment.barriers[:5]:  # Limit to 5 barriers
-        barrier_msg = segment_msg.barriers.add()
+      barriers = road_segment.barriers[:5]
+      if barriers:
+        segment_msg.init('barriers', len(barriers))
+      for barrier_index, barrier in enumerate(barriers):  # Limit to 5 barriers
+        barrier_msg = segment_msg.barriers[barrier_index]
 
         # Map barrier type
         barrier_type_mapping = {
@@ -248,8 +261,11 @@ class BaseMapData(ABC):
         barrier_msg.type = barrier_type_mapping.get(barrier.barrier_type, 0)
 
         # Add barrier coordinates (limited)
-        for coord in barrier.coordinates[:20]:  # Limit to 20 points per barrier
-          coord_msg = barrier_msg.coordinates.add()
+        barrier_coords = barrier.coordinates[:20]
+        if barrier_coords:
+          barrier_msg.init('coordinates', len(barrier_coords))
+        for coord_index, coord in enumerate(barrier_coords):  # Limit to 20 points per barrier
+          coord_msg = barrier_msg.coordinates[coord_index]
           coord_msg.latitude = coord.latitude
           coord_msg.longitude = coord.longitude
           coord_msg.distanceFromStart = coord.distance_from_start
