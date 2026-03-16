@@ -9,9 +9,16 @@ road geometry features without breaking existing functionality.
 import unittest
 import time
 import json
+import math
+import tempfile
 from unittest.mock import patch, MagicMock
+from pathlib import Path
+from types import SimpleNamespace
+
+import capnp
 
 from openpilot.sunnypilot.mapd.live_map_data.osm_map_data import OsmMapData
+from openpilot.sunnypilot.mapd.road_geometry import OfflineRoadGeometryExtractor
 from openpilot.sunnypilot.navd.helpers import Coordinate
 
 
@@ -30,6 +37,50 @@ def _make_mock_params():
     params.put.return_value = None
     params.put_bool.return_value = None
     return params
+
+
+def _load_offline_schema():
+    repo_root = Path(__file__).resolve().parents[3]
+    schema_path = repo_root / "mapd_repo" / "openpilot-mapd" / "offline.capnp"
+    import_dir = repo_root / "sunnypilot" / "mapd" / "capnp"
+    return capnp.load(str(schema_path), imports=[str(import_dir)])
+
+
+def _write_offline_tile(mapd_root: str, *, bounds: tuple[float, float, float, float], ways: list[dict]) -> None:
+    schema = _load_offline_schema()
+    msg = schema.Offline.new_message()
+    msg.minLat, msg.minLon, msg.maxLat, msg.maxLon = bounds
+    msg.overlap = 0.01
+
+    way_list = msg.init('ways', len(ways))
+    for idx, way_data in enumerate(ways):
+        way = way_list[idx]
+        way.name = way_data.get("name", "")
+        way.ref = way_data.get("ref", "")
+        way.maxSpeed = way_data.get("max_speed", 0.0)
+        way.maxSpeedForward = way_data.get("max_speed_forward", 0.0)
+        way.maxSpeedBackward = way_data.get("max_speed_backward", 0.0)
+        way.lanes = way_data.get("lanes", 0)
+        way.oneWay = way_data.get("one_way", False)
+        way.minLat = way_data["min_lat"]
+        way.minLon = way_data["min_lon"]
+        way.maxLat = way_data["max_lat"]
+        way.maxLon = way_data["max_lon"]
+
+        nodes = way.init('nodes', len(way_data["nodes"]))
+        for node_idx, (lat, lon) in enumerate(way_data["nodes"]):
+            nodes[node_idx].latitude = lat
+            nodes[node_idx].longitude = lon
+
+    tile_path = (
+        Path(mapd_root)
+        / "offline"
+        / "38"
+        / "-122"
+        / "38.500000_-121.250000_38.750000_-121.000000"
+    )
+    tile_path.parent.mkdir(parents=True, exist_ok=True)
+    tile_path.write_bytes(msg.to_bytes_packed())
 
 
 class TestMapdIntegration(unittest.TestCase):
@@ -151,6 +202,67 @@ class TestMapdIntegration(unittest.TestCase):
         self.assertAlmostEqual(payload.get("longitude"), -120.78821, places=5)
         self.assertAlmostEqual(payload.get("altitude"), 1012.5, places=1)
         self.assertAlmostEqual(payload.get("bearing"), 274.83, places=2)
+
+    def test_update_location_uses_velocity_heading_when_bearing_is_invalid(self):
+        """Fallback to motion-derived heading when gps bearingDeg is invalid."""
+        map_data = OsmMapData()
+        map_data.mem_params = MagicMock()
+
+        map_data.last_position = Coordinate(38.64373, -121.18564)
+        map_data.last_altitude = 23.4
+
+        gps_msg = SimpleNamespace(bearingDeg=math.nan, bearing=math.nan, vNED=[0.0, -12.0, 0.0])
+        map_data.sm = MagicMock()
+        map_data.sm.__getitem__.return_value = gps_msg
+
+        with patch.object(map_data, "_update_road_geometry", return_value=None):
+            map_data.update_location()
+
+        payload = json.loads(map_data.mem_params.put.call_args[0][1])
+        self.assertAlmostEqual(payload.get("bearing"), 270.0, places=1)
+
+    def test_offline_tile_geometry_populates_road_name_and_speed_limit(self):
+        """Offline Cap'n Proto tiles should provide road geometry without a SQLite DB."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self.mock_mapd_root.return_value = tmpdir
+            _write_offline_tile(
+                tmpdir,
+                bounds=(38.5, -121.25, 38.75, -121.0),
+                ways=[{
+                    "name": "US-50 W",
+                    "ref": "US-50 W",
+                    "max_speed": 29.1,
+                    "lanes": 4,
+                    "one_way": True,
+                    "min_lat": 38.6436,
+                    "min_lon": -121.2050,
+                    "max_lat": 38.6439,
+                    "max_lon": -121.1650,
+                    "nodes": [
+                        (38.64373, -121.2050),
+                        (38.64373, -121.1650),
+                    ],
+                }],
+            )
+
+            map_data = OsmMapData()
+            map_data.mem_params = MagicMock()
+            map_data.mem_params.get.return_value = None
+            map_data.last_position = Coordinate(38.64373, -121.18564)
+            map_data.last_altitude = 23.4
+
+            gps_msg = SimpleNamespace(bearingDeg=math.nan, bearing=math.nan, vNED=[0.0, -18.0, 0.0])
+            map_data.sm = MagicMock()
+            map_data.sm.__getitem__.return_value = gps_msg
+
+            map_data.update_location()
+
+            self.assertIsInstance(map_data.road_geometry_extractor, OfflineRoadGeometryExtractor)
+            self.assertTrue(map_data.road_geometry_valid)
+            self.assertIsNotNone(map_data.current_road_segment)
+            self.assertEqual(map_data.get_current_road_name(), "US-50 W")
+            self.assertAlmostEqual(map_data.get_current_speed_limit(), 29.1, places=1)
+            self.assertIsNone(map_data.get_local_map_health_issue())
 
     def test_publish_with_no_road_data(self):
         """Test publish method works when no road geometry data is available."""
@@ -363,6 +475,27 @@ class TestMapdFallbackBehavior(unittest.TestCase):
                 self.assertFalse(map_data.road_geometry_valid)
             except Exception as e:
                 self.fail(f"System failed to gracefully handle road geometry error: {e}")
+
+    def test_reports_local_map_health_issue_when_no_supported_source_exists(self):
+        """OsmLocal should surface a loud health issue when no supported map source exists."""
+        params_instance = self.mock_params_osm.return_value
+        params_instance.get_bool.side_effect = lambda key: key == "OsmLocal"
+
+        map_data = OsmMapData()
+        map_data.mem_params = MagicMock()
+        map_data.last_position = Coordinate(38.64373, -121.18564)
+        map_data.last_altitude = 23.4
+
+        gps_msg = MagicMock()
+        gps_msg.bearingDeg = 270.0
+        map_data.sm = MagicMock()
+        map_data.sm.__getitem__.return_value = gps_msg
+
+        map_data.update_location()
+
+        issue = map_data.get_local_map_health_issue()
+        self.assertIsNotNone(issue)
+        self.assertIn("No supported local road geometry source found", issue)
 
     def test_publish_error_handling(self):
         """Test publish method handles errors in road geometry population."""

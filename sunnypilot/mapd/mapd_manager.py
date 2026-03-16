@@ -119,6 +119,22 @@ def update_osm_db() -> None:
     mem_params.put("LastGPSPosition", "{}")
 
 
+def get_osm_offroad_alerts(live_map_sp: OsmMapData, osm_local_enabled: bool) -> dict[str, tuple[bool, str]]:
+  update_required = bool(get_files_for_cleanup()) and osm_local_enabled
+  local_map_issue = live_map_sp.get_local_map_health_issue() if osm_local_enabled else None
+
+  return {
+    "Offroad_OSMUpdateRequired": (
+      update_required,
+      "This alert will be cleared when new maps are downloaded.",
+    ),
+    "Offroad_OSMDataUnavailable": (
+      bool(local_map_issue),
+      local_map_issue or "",
+    ),
+  }
+
+
 def main_thread():
   update_installed_version(get_target_version(params), params)
   config_realtime_process([0, 1, 2, 3], 5)
@@ -135,11 +151,12 @@ def main_thread():
     cloudlog.exception(f"mapd: failed to make {Paths.mapd_root()}")
 
   while True:
-    show_alert = get_files_for_cleanup() and params.get_bool("OsmLocal")
-    set_offroad_alert("Offroad_OSMUpdateRequired", show_alert, "This alert will be cleared when new maps are downloaded.")
-
     update_osm_db()
     live_map_sp.tick()
+
+    for alert_name, (show_alert, extra_text) in get_osm_offroad_alerts(live_map_sp, params.get_bool("OsmLocal")).items():
+      set_offroad_alert(alert_name, show_alert, extra_text)
+
     rk.keep_time()
 
 

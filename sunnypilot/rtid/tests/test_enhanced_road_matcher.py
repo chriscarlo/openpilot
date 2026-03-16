@@ -46,6 +46,7 @@ class TestEnhancedRoadMatcher(unittest.TestCase):
 
         self.primary_road = RoadSegment(
             way_id=1001,
+            name="Primary Road",
             road_class=RoadClass.PRIMARY,
             centerline=self.primary_road_centerline,
             lanes=self.primary_road_lanes,
@@ -65,6 +66,7 @@ class TestEnhancedRoadMatcher(unittest.TestCase):
 
         self.opposing_road = RoadSegment(
             way_id=1002,  # Different way_id for opposing direction
+            name="Primary Road Opposing",
             road_class=RoadClass.PRIMARY,
             centerline=self.opposing_road_centerline,
             lanes=self.primary_road_lanes,
@@ -77,6 +79,7 @@ class TestEnhancedRoadMatcher(unittest.TestCase):
         # Create bridge road at different location but same level separation concept
         self.bridge_road = RoadSegment(
             way_id=1003,
+            name="Bridge Road",
             road_class=RoadClass.SECONDARY,
             centerline=[
                 RoadCoordinate(37.4220, -122.0835, 0.0),    # More offset
@@ -93,6 +96,7 @@ class TestEnhancedRoadMatcher(unittest.TestCase):
         # Create completely separate road
         self.separate_road = RoadSegment(
             way_id=1004,
+            name="Separate Road",
             road_class=RoadClass.RESIDENTIAL,
             centerline=[
                 RoadCoordinate(37.4241, -122.0861, 0.0),   # 500m away
@@ -233,6 +237,7 @@ class TestEnhancedRoadMatcher(unittest.TestCase):
 
         curved_road = RoadSegment(
             way_id=2001,
+            name="Curved Road",
             road_class=RoadClass.SECONDARY,
             centerline=curved_road_centerline,
             lanes=[Lane(0, 3.5, LaneType.DRIVING, [])],
@@ -302,6 +307,7 @@ class TestEnhancedRoadMatcher(unittest.TestCase):
             ]
             road = RoadSegment(
                 way_id=3000 + i,
+                name=f"Road {i}",
                 road_class=RoadClass.RESIDENTIAL,
                 centerline=centerline,
                 lanes=[Lane(0, 3.0, LaneType.DRIVING, [])],
@@ -377,13 +383,13 @@ class TestRTIMapdIntegration(unittest.TestCase):
         from openpilot.sunnypilot.rtid.threat_detector import ThreatDetector
         from openpilot.sunnypilot.rtid.waze_api_client import WazeAlert
 
-        # Mock enhanced road matcher
-        with patch('openpilot.sunnypilot.rtid.enhanced_road_matcher.EnhancedRoadMatcher') as mock_road_matcher_class:
+        # ThreatDetector currently depends on its internal RoadMatcher contract.
+        with patch('openpilot.sunnypilot.rtid.threat_detector.RoadMatcher') as mock_road_matcher_class:
             mock_road_matcher = MagicMock()
             mock_road_matcher_class.return_value = mock_road_matcher
 
             # Configure enhanced matching responses
-            mock_road_matcher.is_same_road.return_value = True
+            mock_road_matcher.is_same_road.return_value = (True, 1.0)
             mock_road_matcher.get_direction_relative_to_ego.return_value = 'ahead'
 
             detector = ThreatDetector()
@@ -411,9 +417,9 @@ class TestRTIMapdIntegration(unittest.TestCase):
             mock_road_matcher.get_direction_relative_to_ego.assert_called()
 
             # Verify threat was processed correctly
-            self.assertTrue(rti_state.threat_ahead)
             self.assertEqual(len(rti_state.threats), 1)
             self.assertEqual(rti_state.threats[0].direction, 'ahead')
+            self.assertTrue(rti_state.threats[0].on_same_road)
 
     def test_backward_compatibility(self):
         """Test that enhanced road matcher maintains backward compatibility."""
@@ -464,6 +470,7 @@ class TestRealWorldScenarios(unittest.TestCase):
 
         highway_road = RoadSegment(
             way_id=9001,
+            name="Highway Road",
             road_class=RoadClass.MOTORWAY,
             centerline=highway_centerline,
             lanes=[
@@ -554,6 +561,7 @@ class TestRealWorldScenarios(unittest.TestCase):
 
         northbound_road = RoadSegment(
             way_id=9010,
+            name="Northbound Road",
             road_class=RoadClass.MOTORWAY,
             centerline=northbound_centerline,
             lanes=[Lane(0, 3.7, LaneType.DRIVING, [])],
@@ -565,6 +573,7 @@ class TestRealWorldScenarios(unittest.TestCase):
 
         southbound_road = RoadSegment(
             way_id=9011,  # Different way_id
+            name="Southbound Road",
             road_class=RoadClass.MOTORWAY,
             centerline=southbound_centerline,
             lanes=[Lane(0, 3.7, LaneType.DRIVING, [])],
@@ -606,6 +615,7 @@ class TestRealWorldScenarios(unittest.TestCase):
         # Ground level road
         ground_road = RoadSegment(
             way_id=9020,
+            name="Ground Road",
             road_class=RoadClass.PRIMARY,
             centerline=[
                 RoadCoordinate(37.4000, -122.0000, 0.0),
@@ -621,6 +631,7 @@ class TestRealWorldScenarios(unittest.TestCase):
         # Bridge/overpass at slightly different GPS coordinates (GPS inaccuracy)
         bridge_road = RoadSegment(
             way_id=9021,
+            name="Bridge Road",
             road_class=RoadClass.SECONDARY,
             centerline=[
                 RoadCoordinate(37.4000, -122.0001, 0.0),    # Slightly offset GPS coordinates

@@ -14,8 +14,13 @@ import json
 import math
 import sqlite3
 import time
+import zlib
 from dataclasses import dataclass
 from enum import Enum
+from functools import lru_cache
+from pathlib import Path
+
+import capnp
 
 from openpilot.common.swaglog import cloudlog
 from openpilot.sunnypilot.navd.helpers import Coordinate, minimum_distance
@@ -203,6 +208,17 @@ class GeoUtils:
         bearing_deg = math.degrees(bearing_rad)
 
         return (bearing_deg + 360) % 360
+
+
+OFFLINE_TILE_DEGREES = 0.25
+OFFLINE_TILE_GROUP_DEGREES = 2.0
+OFFLINE_CAPNP_SCHEMA_PATH = Path(__file__).resolve().parents[2] / "mapd_repo" / "openpilot-mapd" / "offline.capnp"
+OFFLINE_CAPNP_IMPORT_DIR = Path(__file__).resolve().parent / "capnp"
+
+
+@lru_cache(maxsize=1)
+def _load_offline_capnp_schema():
+    return capnp.load(str(OFFLINE_CAPNP_SCHEMA_PATH), imports=[str(OFFLINE_CAPNP_IMPORT_DIR)])
 
 
 class OSMRoadGeometryExtractor:
@@ -507,6 +523,174 @@ class OSMRoadGeometryExtractor:
         return (bearing_degrees + 360) % 360
 
 
+class OfflineRoadGeometryExtractor:
+    """Extracts road geometry from mapd Cap'n Proto offline tiles."""
+
+    def __init__(self, mapd_root: str):
+        self.offline_root = Path(mapd_root) / "offline"
+        self.schema = _load_offline_capnp_schema()
+        self._logged_missing_tiles: set[str] = set()
+
+    def extract_road_segments_near_position(self,
+                                          latitude: float,
+                                          longitude: float,
+                                          radius_meters: float = 500) -> list[RoadSegment]:
+        """Extract road segments within radius of given position."""
+        bounds_path = self._bounds_file_for_position(latitude, longitude)
+        if not bounds_path.is_file():
+            self._log_missing_tile(bounds_path)
+            return []
+
+        try:
+            offline = self.schema.Offline.from_bytes_packed(bounds_path.read_bytes())
+        except Exception as e:
+            cloudlog.error(f"Failed to read offline road geometry tile {bounds_path}: {e}")
+            return []
+
+        lat_offset = radius_meters / 111000.0
+        cos_lat = max(math.cos(math.radians(latitude)), 0.01)
+        lon_offset = radius_meters / (111000.0 * cos_lat)
+        min_lat = latitude - lat_offset
+        max_lat = latitude + lat_offset
+        min_lon = longitude - lon_offset
+        max_lon = longitude + lon_offset
+
+        road_segments = []
+        for index, way in enumerate(offline.ways):
+            if not self._way_intersects_bounds(way, min_lat, max_lat, min_lon, max_lon):
+                continue
+
+            segment = self._extract_road_segment(bounds_path, index, way)
+            if segment:
+                road_segments.append(segment)
+
+        return road_segments
+
+    def _log_missing_tile(self, bounds_path: Path) -> None:
+        tile_key = str(bounds_path)
+        if tile_key not in self._logged_missing_tiles:
+            cloudlog.warning(f"No offline OSM tile found for road geometry extraction: {bounds_path}")
+            self._logged_missing_tiles.add(tile_key)
+
+    def _bounds_file_for_position(self, latitude: float, longitude: float) -> Path:
+        min_lat = math.floor(latitude / OFFLINE_TILE_DEGREES) * OFFLINE_TILE_DEGREES
+        min_lon = math.floor(longitude / OFFLINE_TILE_DEGREES) * OFFLINE_TILE_DEGREES
+        max_lat = min_lat + OFFLINE_TILE_DEGREES
+        max_lon = min_lon + OFFLINE_TILE_DEGREES
+
+        group_lat_dir = int(math.floor(min_lat / OFFLINE_TILE_GROUP_DEGREES) * OFFLINE_TILE_GROUP_DEGREES)
+        group_lon_dir = int(math.floor(min_lon / OFFLINE_TILE_GROUP_DEGREES) * OFFLINE_TILE_GROUP_DEGREES)
+
+        return self.offline_root / str(group_lat_dir) / str(group_lon_dir) / (
+            f"{min_lat:.6f}_{min_lon:.6f}_{max_lat:.6f}_{max_lon:.6f}"
+        )
+
+    @staticmethod
+    def _way_intersects_bounds(way, min_lat: float, max_lat: float, min_lon: float, max_lon: float) -> bool:
+        return not (
+            float(way.maxLat) < min_lat or
+            float(way.minLat) > max_lat or
+            float(way.maxLon) < min_lon or
+            float(way.minLon) > max_lon
+        )
+
+    def _extract_road_segment(self, bounds_path: Path, index: int, way) -> RoadSegment | None:
+        centerline = self._extract_centerline(way)
+        if len(centerline) < 2:
+            return None
+
+        road_class = self._infer_road_class(way)
+        max_speed = self._extract_speed_limit(way)
+        lane_width = 3.7 if road_class in (RoadClass.MOTORWAY, RoadClass.TRUNK) else 3.5 if int(way.lanes or 0) >= 2 else 3.0
+
+        lane_count = max(int(way.lanes or 0), 1)
+        lanes = [
+            Lane(
+                lane_index=i,
+                width=lane_width,
+                lane_type=LaneType.DRIVING,
+                centerline=[],
+            )
+            for i in range(lane_count)
+        ]
+
+        way_key = zlib.crc32(f"{bounds_path}:{index}".encode("utf-8")) & 0xFFFFFFFF
+
+        return RoadSegment(
+            way_id=way_key,
+            name=str(way.name or way.ref or ""),
+            road_class=road_class,
+            centerline=centerline,
+            lanes=lanes,
+            barriers=[],
+            level_separation=0,
+            max_speed=max_speed,
+            road_direction=self._calculate_road_direction(centerline),
+        )
+
+    @staticmethod
+    def _infer_road_class(way) -> RoadClass:
+        ref = str(way.ref or "").upper()
+        name = str(way.name or "").upper()
+        lanes = int(way.lanes or 0)
+
+        if ref.startswith("I-") or "INTERSTATE" in name:
+            return RoadClass.MOTORWAY
+        if ref.startswith(("US-", "SR-", "CA-", "STATE ROUTE")):
+            return RoadClass.TRUNK if lanes >= 2 else RoadClass.PRIMARY
+        if bool(way.oneWay) and lanes >= 3:
+            return RoadClass.MOTORWAY
+        if lanes >= 4:
+            return RoadClass.TRUNK
+        if lanes >= 2:
+            return RoadClass.PRIMARY
+        return RoadClass.RESIDENTIAL
+
+    @staticmethod
+    def _extract_speed_limit(way) -> float:
+        if bool(way.oneWay):
+            for speed in (float(way.maxSpeedForward), float(way.maxSpeedBackward), float(way.maxSpeed)):
+                if speed > 0:
+                    return speed
+            return 0.0
+
+        base_speed = float(way.maxSpeed)
+        if base_speed > 0:
+            return base_speed
+
+        directional_speeds = [float(speed) for speed in (way.maxSpeedForward, way.maxSpeedBackward) if float(speed) > 0]
+        return max(directional_speeds, default=0.0)
+
+    @staticmethod
+    def _extract_centerline(way) -> list[RoadCoordinate]:
+        coordinates = []
+        total_distance = 0.0
+        prev_coord = None
+
+        for node in way.nodes:
+            coord = Coordinate(float(node.latitude), float(node.longitude))
+            if prev_coord is not None:
+                total_distance += prev_coord.distance_to(coord)
+
+            coordinates.append(RoadCoordinate(
+                latitude=coord.latitude,
+                longitude=coord.longitude,
+                distance_from_start=total_distance,
+            ))
+            prev_coord = coord
+
+        return coordinates
+
+    @staticmethod
+    def _calculate_road_direction(centerline: list[RoadCoordinate]) -> float:
+        if len(centerline) < 2:
+            return 0.0
+
+        start = centerline[0].to_coordinate()
+        end = centerline[1].to_coordinate()
+        return GeoUtils.bearing(start.latitude, start.longitude, end.latitude, end.longitude)
+
+
 class RoadGeometryCache:
     """Caches road geometry data for fast access."""
 
@@ -519,7 +703,7 @@ class RoadGeometryCache:
 
     def get_road_segments_near(self,
                               position: Coordinate,
-                              extractor: OSMRoadGeometryExtractor) -> list[RoadSegment]:
+                              extractor) -> list[RoadSegment]:
         """Get road segments near position, using cache when possible."""
         current_time = time.time()
 

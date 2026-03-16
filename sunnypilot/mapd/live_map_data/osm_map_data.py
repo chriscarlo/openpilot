@@ -14,7 +14,7 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.sunnypilot.mapd.live_map_data.base_map_data import BaseMapData
 from openpilot.sunnypilot.navd.helpers import Coordinate
 from openpilot.sunnypilot.mapd.road_geometry import (
-    OSMRoadGeometryExtractor, RoadGeometryCache, RoadSegment
+    OfflineRoadGeometryExtractor, OSMRoadGeometryExtractor, RoadGeometryCache, RoadSegment
 )
 from openpilot.system.hardware.hw import Paths
 
@@ -26,25 +26,28 @@ class OsmMapData(BaseMapData):
     self.mem_params = Params("/dev/shm/params") if platform.system() != "Darwin" else self.params
 
     # Initialize road geometry components
-    self.road_geometry_extractor: OSMRoadGeometryExtractor | None = None
+    self.road_geometry_extractor: OSMRoadGeometryExtractor | OfflineRoadGeometryExtractor | None = None
     self.road_geometry_cache = RoadGeometryCache()
     self.current_road_segment: RoadSegment | None = None
     self.nearby_road_segments: list[RoadSegment] = []
     self.road_geometry_valid = False
+    self.road_geometry_failure_reason: str | None = None
+    self.local_map_health_issue: str | None = None
+    self._missing_context_cycles = 0
 
     # Initialize road geometry extractor
     self._initialize_road_geometry()
 
   def _initialize_road_geometry(self):
-    """Initialize road geometry extractor with OSM database."""
+    """Initialize road geometry extractor from the best available local source."""
     try:
-      # Find OSM database file
       mapd_root = Paths.mapd_root()
       db_candidates = [
         os.path.join(mapd_root, "osm.db"),
         os.path.join(mapd_root, "db", "osm.db"),
         os.path.join(mapd_root, "data.db"),
       ]
+      offline_root = os.path.join(mapd_root, "offline")
 
       db_path = None
       for candidate in db_candidates:
@@ -55,11 +58,19 @@ class OsmMapData(BaseMapData):
       if db_path:
         self.road_geometry_extractor = OSMRoadGeometryExtractor(db_path)
         cloudlog.info(f"Road geometry extractor initialized with database: {db_path}")
+      elif os.path.isdir(offline_root):
+        self.road_geometry_extractor = OfflineRoadGeometryExtractor(mapd_root)
+        cloudlog.info(f"Road geometry extractor initialized with offline tiles: {offline_root}")
       else:
-        cloudlog.warning("No OSM database found for road geometry extraction")
+        self.road_geometry_failure_reason = (
+          f"No supported local road geometry source found under {mapd_root}. "
+          "Expected an OSM database or extracted offline tiles."
+        )
+        cloudlog.error(self.road_geometry_failure_reason)
 
     except Exception as e:
-      cloudlog.error(f"Failed to initialize road geometry extractor: {e}")
+      self.road_geometry_failure_reason = f"Failed to initialize road geometry extractor: {e}"
+      cloudlog.error(self.road_geometry_failure_reason)
       self.road_geometry_extractor = None
 
   def update_location(self) -> None:
@@ -70,8 +81,7 @@ class OsmMapData(BaseMapData):
     # disambiguate direction on one-way roads. Without it, mapd can fail to match
     # the current way and MTSC/MapCurvatures can stay empty (`[]`).
     try:
-      gps = self.sm[self.gps_location_service]
-      bearing_deg = float(getattr(gps, "bearingDeg", 0.0))
+      bearing_deg = self.extract_bearing_deg(self.sm[self.gps_location_service])
     except Exception:
       bearing_deg = 0.0
 
@@ -97,6 +107,7 @@ class OsmMapData(BaseMapData):
     except Exception as e:
       cloudlog.error(f"Error updating road geometry: {e}")
       self.road_geometry_valid = False
+    self._update_local_map_health_issue()
 
   def _update_road_geometry(self):
     """Update road geometry data for current position."""
@@ -122,7 +133,19 @@ class OsmMapData(BaseMapData):
       self.road_geometry_valid = False
 
   def get_current_speed_limit(self) -> float:
-    return float(self.mem_params.get("MapSpeedLimit") or 0.0)
+    mem_speed_limit = float(self.mem_params.get("MapSpeedLimit") or 0.0)
+    if mem_speed_limit > 0.0:
+      return mem_speed_limit
+
+    try:
+      current_segment_speed = float(getattr(self.current_road_segment, "max_speed", 0.0) or 0.0)
+    except (TypeError, ValueError):
+      current_segment_speed = 0.0
+
+    if current_segment_speed > 0.0:
+      return current_segment_speed
+
+    return 0.0
 
   def _read_mem_json(self, key: str) -> dict:
     raw = self.mem_params.get(key)
@@ -167,6 +190,33 @@ class OsmMapData(BaseMapData):
 
   def get_winding_road_summary(self) -> dict | None:
     return self._read_mem_json("MapWindingSummary")
+
+  def _update_local_map_health_issue(self) -> None:
+    issue = None
+    if self.params.get_bool("OsmLocal"):
+      if self.road_geometry_extractor is None:
+        issue = self.road_geometry_failure_reason or "No supported local road geometry source is available."
+        self._missing_context_cycles = 0
+      else:
+        has_context = self.road_geometry_valid or bool(self.get_current_road_name().strip()) or self.get_current_speed_limit() > 0.0
+        if self.last_position and not has_context:
+          self._missing_context_cycles += 1
+          if self._missing_context_cycles >= 5:
+            issue = (
+              "Local map data is enabled, but the current GPS position still has no "
+              "road name, speed limit, or road geometry context."
+            )
+        else:
+          self._missing_context_cycles = 0
+    else:
+      self._missing_context_cycles = 0
+
+    if issue and issue != self.local_map_health_issue:
+      cloudlog.error(f"Local map data issue: {issue}")
+    self.local_map_health_issue = issue
+
+  def get_local_map_health_issue(self) -> str | None:
+    return self.local_map_health_issue
 
   # Road geometry access methods for RTI integration
   def get_road_geometry_valid(self) -> bool:
