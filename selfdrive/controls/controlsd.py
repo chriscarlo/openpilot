@@ -13,7 +13,8 @@ from openpilot.common.swaglog import cloudlog
 
 from opendbc.car.car_helpers import interfaces
 from opendbc.car.vehicle_model import VehicleModel
-from openpilot.selfdrive.controls.lib.drive_helpers import clip_curvature
+from openpilot.selfdrive.controls.lib.drive_helpers import clip_curvature, get_turn_desire_max_lateral_accel_no_roll
+from openpilot.selfdrive.controls.lib.desire_helper import turn_desire_enabled
 from openpilot.selfdrive.controls.lib.latcontrol import LatControl
 from openpilot.selfdrive.controls.lib.latcontrol_pid import LatControlPID
 from openpilot.selfdrive.controls.lib.latcontrol_angle import LatControlAngle, STEER_ANGLE_SATURATION_THRESHOLD
@@ -142,7 +143,10 @@ class Controls(ControlsExt, ModelStateBase):
     # Steering PID loop and lateral MPC
     # Reset desired curvature to current to avoid violating the limits on engage
     new_desired_curvature = model_v2.action.desiredCurvature if CC.latActive else self.curvature
-    self.desired_curvature, curvature_limited = clip_curvature(CS.vEgo, self.desired_curvature, new_desired_curvature, lp.roll)
+    low_speed_turn_desire_active = turn_desire_enabled(CS.vEgo, CC.latActive, CS.leftBlinker, CS.rightBlinker)
+    max_lateral_accel_no_roll = get_turn_desire_max_lateral_accel_no_roll(CS.vEgo) if low_speed_turn_desire_active else None
+    self.desired_curvature, curvature_limited = clip_curvature(CS.vEgo, self.desired_curvature, new_desired_curvature, lp.roll,
+                                                               max_lateral_accel_no_roll=max_lateral_accel_no_roll)
 
     actuators.curvature = self.desired_curvature
     steer, steeringAngleDeg, lac_log = self.LaC.update(CC.latActive, CS, self.VM, lp,

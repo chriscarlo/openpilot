@@ -1,5 +1,6 @@
 import numpy as np
 from openpilot.common.constants import ACCELERATION_DUE_TO_GRAVITY
+from openpilot.common.constants import CV
 from openpilot.common.realtime import DT_CTRL, DT_MDL
 
 MIN_SPEED = 1.0
@@ -12,6 +13,11 @@ MAX_VEL_ERR = 5.0  # m/s
 # EU guidelines
 MAX_LATERAL_JERK = 5.0  # m/s^3
 MAX_LATERAL_ACCEL_NO_ROLL = 3.0  # m/s^2
+# Turn-desire intersection tracking needs more steering authority than steady lane keeping.
+TURN_DESIRE_MAX_LATERAL_ACCEL_NO_ROLL = 4.5  # m/s^2
+TURN_DESIRE_FULL_AUTHORITY_MAX_LATERAL_ACCEL_NO_ROLL = 6.0  # m/s^2
+TURN_DESIRE_FULL_AUTHORITY_SPEED_MAX = 25 * CV.MPH_TO_MS
+TURN_DESIRE_TAPER_END_SPEED = 35 * CV.MPH_TO_MS
 
 
 def clamp(val, min_val, max_val):
@@ -22,17 +28,27 @@ def smooth_value(val, prev_val, tau, dt=DT_MDL):
   alpha = 1 - np.exp(-dt/tau) if tau > 0 else 1
   return alpha * val + (1 - alpha) * prev_val
 
-def clip_curvature(v_ego, prev_curvature, new_curvature, roll):
+
+def get_turn_desire_max_lateral_accel_no_roll(v_ego):
+  return float(np.interp(v_ego,
+                         [0.0, TURN_DESIRE_FULL_AUTHORITY_SPEED_MAX, TURN_DESIRE_TAPER_END_SPEED],
+                         [TURN_DESIRE_FULL_AUTHORITY_MAX_LATERAL_ACCEL_NO_ROLL,
+                          TURN_DESIRE_FULL_AUTHORITY_MAX_LATERAL_ACCEL_NO_ROLL,
+                          TURN_DESIRE_MAX_LATERAL_ACCEL_NO_ROLL]))
+
+def clip_curvature(v_ego, prev_curvature, new_curvature, roll, max_lateral_accel_no_roll=MAX_LATERAL_ACCEL_NO_ROLL):
   # This function respects ISO lateral jerk and acceleration limits + a max curvature
   v_ego = max(v_ego, MIN_SPEED)
+  if max_lateral_accel_no_roll is None:
+    max_lateral_accel_no_roll = MAX_LATERAL_ACCEL_NO_ROLL
   max_curvature_rate = MAX_LATERAL_JERK / (v_ego ** 2)  # inexact calculation, check https://github.com/commaai/openpilot/pull/24755
   new_curvature = np.clip(new_curvature,
                           prev_curvature - max_curvature_rate * DT_CTRL,
                           prev_curvature + max_curvature_rate * DT_CTRL)
 
   roll_compensation = roll * ACCELERATION_DUE_TO_GRAVITY
-  max_lat_accel = MAX_LATERAL_ACCEL_NO_ROLL + roll_compensation
-  min_lat_accel = -MAX_LATERAL_ACCEL_NO_ROLL + roll_compensation
+  max_lat_accel = max_lateral_accel_no_roll + roll_compensation
+  min_lat_accel = -max_lateral_accel_no_roll + roll_compensation
   new_curvature, limited_accel = clamp(new_curvature, min_lat_accel / v_ego ** 2, max_lat_accel / v_ego ** 2)
 
   new_curvature, limited_max_curv = clamp(new_curvature, -MAX_CURVATURE, MAX_CURVATURE)

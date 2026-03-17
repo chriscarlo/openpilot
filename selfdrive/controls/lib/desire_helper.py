@@ -34,6 +34,10 @@ DESIRES = {
 }
 
 
+def turn_desire_enabled(v_ego: float, lateral_active: bool, left_blinker: bool, right_blinker: bool) -> bool:
+  return lateral_active and v_ego < TURN_DESIRE_SPEED_MAX and (left_blinker != right_blinker)
+
+
 class DesireHelper:
   def __init__(self):
     self.lane_change_state = LaneChangeState.off
@@ -115,8 +119,7 @@ class DesireHelper:
     self.desire = DESIRES[self.lane_change_direction][self.lane_change_state]
 
     # Turn desire logic: Override desire if below turn speed threshold
-    below_turn_speed = v_ego < TURN_DESIRE_SPEED_MAX
-    if lateral_active and below_turn_speed and one_blinker:
+    if turn_desire_enabled(v_ego, lateral_active, carstate.leftBlinker, carstate.rightBlinker):
       # Set turn desire based on blinker direction
       if carstate.leftBlinker:
         self.desire = log.Desire.turnLeft
