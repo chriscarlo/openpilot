@@ -1,5 +1,7 @@
 # docs/chauffeur/vtsc — Agent Instructions
 
+Avoid vague AI-isms such as "clean" or "concrete" when describing work; describe the specific property instead.
+
 ## Non-obvious requirements (must follow)
 - Prefer durable writeups under `docs/chauffeur/vtsc/` and keep raw/large artifacts untracked under `.cache/` unless explicitly requested.
 - For debug sessions, create/extend a dated folder under `docs/chauffeur/vtsc/debug/` (existing convention: `debug_YYYY-MM-DD/`) and include a clear human summary (`NOTES.md` or equivalent).

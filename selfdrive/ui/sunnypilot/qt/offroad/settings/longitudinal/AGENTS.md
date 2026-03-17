@@ -1,5 +1,7 @@
 # Longitudinal Offroad Settings (Qt) — Agent Instructions
 
+Avoid vague AI-isms such as "clean" or "concrete" when describing work; describe the specific property instead.
+
 ## Non-obvious requirements (must follow)
 - Prefer Sunnypilot `*SP` widgets from `selfdrive/ui/sunnypilot/qt/widgets/controls.h` (this directory already uses `ListWidgetSP`, `ScrollViewSP`, `OptionControlSP`, etc.).
 - Do not edit or commit generated Qt/build artifacts in this directory (`moc_*.cc`, `*.o`); edit the corresponding `*.cc`/`*.h` sources.

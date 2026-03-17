@@ -1,0 +1,4 @@
+interface:
+  display_name: "Turn Desire Tuner"
+  short_description: "Trace and debug low-speed turn desire behavior"
+  default_prompt: "Use $turn-desire-tuner to trace, debug, or tune low-speed turn desires, including DesireHelper state, modeld input pulses, and runner-specific verification."

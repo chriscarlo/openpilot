@@ -1,5 +1,7 @@
 # Agent Instructions (Canonical)
 
+Avoid vague AI-isms such as "clean" or "concrete" when describing work; describe the specific property instead.
+
 ## Instruction maintenance
 Use `$context-file-librarian` to audit and maintain instruction entrypoints and prevent drift/duplication (this is instruction-file work only; never application code).
 

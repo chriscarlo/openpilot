@@ -1,5 +1,7 @@
 # common/ — Agent Instructions
 
+Avoid vague AI-isms such as "clean" or "concrete" when describing work; describe the specific property instead.
+
 ## Non-obvious requirements (must follow)
 - Avoid editing or committing build artifacts that live in this tree (examples present here include `*.o`, `*.a`, `*.so`); make changes in the corresponding sources (`*.cc`, `*.h`, `*.py`, `*.pyx`) instead.
 
