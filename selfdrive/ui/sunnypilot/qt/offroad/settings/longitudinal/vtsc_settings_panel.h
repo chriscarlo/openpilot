@@ -40,6 +40,7 @@ private:
   ToggleSP *bypassTog_ = nullptr;
   ToggleSP *dbgTog_ = nullptr;
   ToggleSP *recorderTog_ = nullptr;
+  ToggleSP *learnTog_ = nullptr;
   QLabel *curvePhaseValLabel_ = nullptr;
   QLabel *curvePhaseStatusLabel_ = nullptr;
   QLabel *overshootPhaseValLabel_ = nullptr;
@@ -48,6 +49,7 @@ private:
   QLabel *apexExitStatusLabel_ = nullptr;
   QLabel *learnRangeValLabel_ = nullptr;
   QLabel *learnRangeStatusLabel_ = nullptr;
+  QWidget *learnControls_ = nullptr;
   QLabel *headValLabel_ = nullptr;
   QLabel *headStatusLabel_ = nullptr;
 };

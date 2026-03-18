@@ -320,6 +320,11 @@ def update_vtsc_params(ctrl, *, force: bool = False) -> None:
     10.0, 80.0,
   ))
 
+  ctrl._low_speed_calibration_enabled = getb(
+    "VisionTurnSpeedControlLowSpeedLearningEnabled",
+    getattr(ctrl, "_low_speed_calibration_enabled", True),
+  )
+
   ctrl._low_speed_calibration_high_end_mph = getf(
     "VisionTurnSpeedControlLowSpeedLearnedHighEndMph",
     getattr(ctrl, "_low_speed_calibration_high_end_mph", getattr(vtc_mod, "LOW_SPEED_CALIB_TARGET_END_MPH", 40.0)),

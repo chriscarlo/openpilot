@@ -1270,6 +1270,7 @@ class VisionTurnController:
 
     # Low-speed envelope calibration state. Positive values relax the low-speed sigmoid slightly,
     # negative values tighten it. The state evolves slowly from repeated steering headroom evidence.
+    self._low_speed_calibration_enabled = bool(getattr(self, "_low_speed_calibration_enabled", True))
     self._low_speed_calibration_state = 0.0
     self._low_speed_calibration_headroom_ema = 0.0
     self._low_speed_calibration_override_ema = 0.0
@@ -1438,6 +1439,15 @@ class VisionTurnController:
     return float(clip(state, -float(LOW_SPEED_CALIB_MAX_TIGHTEN), float(LOW_SPEED_CALIB_MAX_RELAX)))
 
   def _sync_low_speed_calibration_param(self, *, force: bool = False) -> None:
+    if not bool(getattr(self, "_low_speed_calibration_enabled", True)):
+      self._low_speed_calibration_state = 0.0
+      self._low_speed_calibration_param_state = 0.0
+      self._low_speed_calibration_persisted_state = 0.0
+      self._low_speed_calibration_headroom_ema = 0.0
+      self._low_speed_calibration_override_ema = 0.0
+      self._low_speed_calibration_last_persist_s = 0.0
+      return
+
     raw_state = self._get_float_param(
       "VisionTurnSpeedControlLowSpeedLearnedState",
       getattr(self, "_low_speed_calibration_param_state", 0.0),
@@ -1454,6 +1464,8 @@ class VisionTurnController:
       self._low_speed_calibration_override_ema = 0.0
 
   def _maybe_persist_low_speed_calibration_state(self, now_s: float) -> None:
+    if not bool(getattr(self, "_low_speed_calibration_enabled", True)):
+      return
     state = self._clip_low_speed_calibration_state(getattr(self, "_low_speed_calibration_state", 0.0))
     persisted = self._clip_low_speed_calibration_state(getattr(self, "_low_speed_calibration_persisted_state", 0.0))
     last_write_s = float(getattr(self, "_low_speed_calibration_last_persist_s", 0.0) or 0.0)
@@ -2108,6 +2120,18 @@ class VisionTurnController:
     self._dbg_low_speed_calibration_saturated = False
     self._dbg_low_speed_calibration_override_ema = float(getattr(self, '_low_speed_calibration_override_ema', 0.0) or 0.0)
     self._dbg_low_speed_calibration_divergence_mps = 0.0
+
+    if not bool(getattr(self, "_low_speed_calibration_enabled", True)):
+      self._low_speed_calibration_state = 0.0
+      self._low_speed_calibration_param_state = 0.0
+      self._low_speed_calibration_persisted_state = 0.0
+      self._low_speed_calibration_headroom_ema = 0.0
+      self._low_speed_calibration_override_ema = 0.0
+      self._dbg_low_speed_calibration_reason = "disabled_by_toggle"
+      self._dbg_low_speed_calibration_headroom_ema = 0.0
+      self._dbg_low_speed_calibration_override_ema = 0.0
+      self._dbg_low_speed_calibration_scale = 1.0
+      return
 
     scale_curvature = float(reference_curvature)
     override_ema = float(getattr(self, '_low_speed_calibration_override_ema', 0.0) or 0.0)

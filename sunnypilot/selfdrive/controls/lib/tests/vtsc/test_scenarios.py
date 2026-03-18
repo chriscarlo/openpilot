@@ -427,6 +427,39 @@ def test_low_speed_calibration_loads_and_persists_learned_state():
   assert persisted_value > 0.025
 
 
+def test_low_speed_calibration_toggle_disables_live_learning_and_persistence():
+  ctrl = mk_vtsc_with_params(
+    bool_overrides={"VisionTurnSpeedControlLowSpeedLearningEnabled": False},
+    value_overrides={"VisionTurnSpeedControlLowSpeedLearnedState": "0.040"},
+  )
+  assert float(getattr(ctrl, '_low_speed_calibration_state', 0.0)) == pytest.approx(0.0, abs=1e-9)
+
+  steps_override = [
+    Step(
+      curvature=0.02,
+      curvature_ahead=0.02,
+      confidence=0.95,
+      desired_curvature=0.020,
+      actual_curvature=0.0195,
+      lateral_output=0.24,
+      lateral_saturated=False,
+      gas_pressed=True,
+      applied_accel=0.42,
+    )
+    for _ in range(220)
+  ]
+  snap = simulate_sequence(steps=steps_override, vtsc=ctrl, v0_mps=10.5, v_cruise_mps=16.0, dt=0.05)
+
+  assert str(snap['low_speed_calibration_reason']) == 'disabled_by_toggle'
+  assert float(snap['low_speed_calibration_state']) == pytest.approx(0.0, abs=1e-9)
+  assert float(snap['low_speed_calibration_scale']) == pytest.approx(1.0, abs=1e-9)
+  persist_calls = [
+    call for call in getattr(ctrl._params, 'put_nonblocking', MagicMock()).call_args_list
+    if call.args and call.args[0] == 'VisionTurnSpeedControlLowSpeedLearnedState'
+  ]
+  assert not persist_calls
+
+
 def test_low_speed_calibration_high_end_param_limits_sigmoid_range():
   k_curve = next(
     k for k in (0.012, 0.011, 0.010, 0.009, 0.008)

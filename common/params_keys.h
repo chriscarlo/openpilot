@@ -268,6 +268,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"VisionTurnSpeedControlMinOperatingSpeed", {PERSISTENT | BACKUP, FLOAT, "2.24"}},
     {"VisionTurnSpeedControlLowSpeedSpeedBiasMph", {PERSISTENT | BACKUP, FLOAT, "0.0"}},
     {"VisionTurnSpeedControlLowSpeedBiasEndMph", {PERSISTENT | BACKUP, FLOAT, "50.0"}},
+    {"VisionTurnSpeedControlLowSpeedLearningEnabled", {PERSISTENT | BACKUP, BOOL, "1"}},
     {"VisionTurnSpeedControlLowSpeedLearnedState", {PERSISTENT | BACKUP, FLOAT, "0.0"}},
     {"VisionTurnSpeedControlLowSpeedLearnedHighEndMph", {PERSISTENT | BACKUP, FLOAT, "40.0"}},
 

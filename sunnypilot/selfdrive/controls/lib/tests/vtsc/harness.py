@@ -148,7 +148,7 @@ def mk_vtsc_with_params(
       if bool_overrides and key in bool_overrides:
         return bool(bool_overrides[key])
       # Keep core VTSC enabled for controller tests by default.
-      if key in ('VisionTurnSpeedControl', 'VisionTurnSpeedControlOcclBypassWithLead'):
+      if key in ('VisionTurnSpeedControl', 'VisionTurnSpeedControlOcclBypassWithLead', 'VisionTurnSpeedControlLowSpeedLearningEnabled'):
         return True
       return False
     mp.get_bool.side_effect = _get_bool

@@ -21,6 +21,7 @@ int vtscStrategyIndexFromParam(const std::string &value) {
 }
 
 constexpr const char *kLowSpeedLearnHighEndParam = "VisionTurnSpeedControlLowSpeedLearnedHighEndMph";
+constexpr const char *kLowSpeedLearningEnabledParam = "VisionTurnSpeedControlLowSpeedLearningEnabled";
 constexpr float kLowSpeedLearnHighEndDefaultMph = 40.0f;
 constexpr float kLowSpeedLearnHighEndMinMph = 20.0f;
 constexpr float kLowSpeedLearnHighEndMaxMph = 60.0f;
@@ -69,6 +70,10 @@ void VTSCSettingsPanel::showEvent(QShowEvent *event) {
     bool on = p.getBool("VTSCInterventionRecorderEnabled");
     if (recorderTog_->on != on) recorderTog_->togglePosition();
   }
+  if (learnTog_) {
+    bool on = p.getBool(kLowSpeedLearningEnabledParam);
+    if (learnTog_->on != on) learnTog_->togglePosition();
+  }
   auto refreshPhaseLabel = [&p](QLabel *valLabel, QLabel *statusLabel, const char *key) {
     if (!valLabel || !statusLabel) return;
     auto clampPhase = [](float x) { return std::max(-3.0f, std::min(3.0f, x)); };
@@ -93,6 +98,9 @@ void VTSCSettingsPanel::showEvent(QShowEvent *event) {
     bool isDefault = std::abs(v - kLowSpeedLearnHighEndDefaultMph) < 0.001f;
     learnRangeStatusLabel_->setText(isDefault ? tr("(Default)") : tr("(Modified)"));
     learnRangeStatusLabel_->setStyleSheet(isDefault ? "font-size: 32px; color: #999999;" : "font-size: 32px; color: #FFC107;");
+  }
+  if (learnControls_) {
+    learnControls_->setEnabled(p.getBool(kLowSpeedLearningEnabledParam));
   }
   if (headValLabel_ && headStatusLabel_) {
     auto clamp = [](float x){ return std::max(0.5f, std::min(5.0f, x)); };
@@ -352,9 +360,37 @@ void VTSCSettingsPanel::setupUI() {
   learningTitle->setStyleSheet("font-size: 42px; font-weight: 500; color: #E4E4E4; padding-bottom: 15px;");
   learningLayout->addWidget(learningTitle);
 
+  QHBoxLayout *learnToggleRow = new QHBoxLayout();
+  QLabel *learnToggleLbl = new QLabel(tr("Persistent Learned State"));
+  learnToggleLbl->setStyleSheet("font-size: 36px; color: #E4E4E4;");
+  learnToggleRow->addWidget(learnToggleLbl);
+  learnToggleRow->addStretch();
+  learnTog_ = new ToggleSP();
+  learnTog_->setFixedSize(150, 80);
+  {
+    Params p;
+    bool on = p.getBool(kLowSpeedLearningEnabledParam);
+    if (learnTog_->on != on) learnTog_->togglePosition();
+  }
+  learnToggleRow->addWidget(learnTog_);
+  learningLayout->addLayout(learnToggleRow);
+
+  QLabel *learnToggleHelp = new QLabel(tr(
+    "When ON, VTSC uses and updates the saved low-speed learned state across drives. "
+    "When OFF, VTSC ignores the saved learned state and leaves the base curve profile unchanged."
+  ));
+  learnToggleHelp->setStyleSheet("font-size: 32px; color: #999999; padding-left: 10px; padding-bottom: 10px;");
+  learnToggleHelp->setWordWrap(true);
+  learningLayout->addWidget(learnToggleHelp);
+
+  learnControls_ = new QWidget();
+  QVBoxLayout *learnControlsLayout = new QVBoxLayout(learnControls_);
+  learnControlsLayout->setContentsMargins(0, 0, 0, 0);
+  learnControlsLayout->setSpacing(0);
+
   QLabel *rangeTitle = new QLabel(tr("Learning High-End Speed (mph)"));
   rangeTitle->setStyleSheet("font-size: 42px; font-weight: 500; color: #E4E4E4;");
-  learningLayout->addWidget(rangeTitle);
+  learnControlsLayout->addWidget(rangeTitle);
 
   QHBoxLayout *learnRow = new QHBoxLayout();
 
@@ -423,8 +459,13 @@ void VTSCSettingsPanel::setupUI() {
     Params().put(kLowSpeedLearnHighEndParam, QString::number(v, 'f', 0).toStdString());
     updateLearnRangeLabels(v);
   });
+  QObject::connect(learnTog_, &ToggleSP::stateChanged, [this](bool s) {
+    Params().putBool(kLowSpeedLearningEnabledParam, s);
+    if (learnControls_) learnControls_->setEnabled(s);
+  });
+  if (learnControls_) learnControls_->setEnabled(learnTog_ && learnTog_->on);
 
-  learningLayout->addLayout(learnRow);
+  learnControlsLayout->addLayout(learnRow);
 
   QLabel *rangeHelp = new QLabel(tr(
     "Sets where the persisted low-speed learning fades out on the high side. "
@@ -433,7 +474,9 @@ void VTSCSettingsPanel::setupUI() {
   ));
   rangeHelp->setStyleSheet("font-size: 32px; color: #999999; padding-left: 10px; padding-bottom: 10px;");
   rangeHelp->setWordWrap(true);
-  learningLayout->addWidget(rangeHelp);
+  learnControlsLayout->addWidget(rangeHelp);
+
+  learningLayout->addWidget(learnControls_);
 
   mainLayout->addWidget(learningFrame);
 
