@@ -2204,8 +2204,8 @@ def test_winding_profile_release_slew_limits_upward_v_turn_step():
   vtsc._map_tail_active = True
   limited = vtsc._apply_winding_v_turn_release_slew(20.0, 0.05)
 
-  assert baseline_first == pytest.approx(10.15, abs=1e-6)
-  assert baseline_follow == pytest.approx(10.30, abs=1e-6)
+  assert baseline_first == pytest.approx(10.225, abs=1e-6)
+  assert baseline_follow == pytest.approx(10.45, abs=1e-6)
   assert limited == pytest.approx(10.14, abs=1e-6)
   assert limited < baseline_first
   assert bool(vtsc._dbg_winding_release_limited) is True

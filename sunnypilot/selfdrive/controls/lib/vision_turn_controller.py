@@ -2423,20 +2423,6 @@ class VisionTurnController:
       return desired_cap
 
     slew_limit = float(profile.v_turn_release_up_slew_mps2)
-    response_model = getattr(self, '_longitudinal_response_model', None)
-    if response_model is not None:
-      try:
-        slew_limit = min(
-          slew_limit,
-          max(0.0, float(getattr(response_model, 'max_accel_mps2', 0.0) or 0.0)),
-          max(0.0, float(getattr(response_model, 'planner_output_max_accel_mps2', 0.0) or 0.0)),
-        )
-      except Exception:
-        pass
-    try:
-      slew_limit = min(slew_limit, max(0.0, float(getattr(self, '_max_accel', slew_limit) or slew_limit)))
-    except Exception:
-      pass
 
     if (not math.isfinite(slew_limit)) or slew_limit <= 0.0:
       return desired_cap
