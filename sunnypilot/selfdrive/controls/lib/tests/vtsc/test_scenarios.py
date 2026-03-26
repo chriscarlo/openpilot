@@ -304,7 +304,7 @@ def test_low_speed_calibration_driver_override_weights_larger_divergence_more_he
   assert str(snap_strong['low_speed_calibration_reason']) == 'relax_override'
 
 
-def test_low_speed_calibration_discards_driver_override_relax_when_lateral_saturates():
+def test_low_speed_calibration_does_not_tighten_during_driver_override_saturation():
   v0 = 10.5
   v_cruise = 16.0
   steps_override = [
@@ -343,9 +343,10 @@ def test_low_speed_calibration_discards_driver_override_relax_when_lateral_satur
   # positive but no longer needs to climb as high before the source curve covers the gap itself.
   assert float(snap_override['low_speed_calibration_state']) > 0.002
   assert str(snap_override['low_speed_calibration_reason']) == 'relax_override'
-  assert float(snap_saturated['low_speed_calibration_state']) < -0.020
+  assert float(snap_saturated['low_speed_calibration_base_state']) > -0.002
+  assert float(snap_saturated['low_speed_calibration_state']) > -0.002
   assert float(snap_saturated['low_speed_calibration_override_ema']) == pytest.approx(0.0, abs=1e-6)
-  assert str(snap_saturated['low_speed_calibration_reason']) == 'tighten_saturated'
+  assert str(snap_saturated['low_speed_calibration_reason']) == 'driver_override_passthrough'
 
 
 def test_low_speed_calibration_tightens_on_sustained_saturation():
@@ -455,7 +456,10 @@ def test_low_speed_calibration_toggle_disables_live_learning_and_persistence():
   assert float(snap['low_speed_calibration_scale']) == pytest.approx(1.0, abs=1e-9)
   persist_calls = [
     call for call in getattr(ctrl._params, 'put_nonblocking', MagicMock()).call_args_list
-    if call.args and call.args[0] == 'VisionTurnSpeedControlLowSpeedLearnedState'
+    if call.args and call.args[0] in (
+      'VisionTurnSpeedControlLowSpeedLearnedState',
+      'VisionTurnSpeedControlDriverOverrideCurveProfile',
+    )
   ]
   assert not persist_calls
 
@@ -478,6 +482,143 @@ def test_low_speed_calibration_high_end_param_limits_sigmoid_range():
 
   assert scale_default > 1.03
   assert scale_limited == pytest.approx(1.0, abs=1e-6)
+
+
+def test_driver_override_learning_applies_above_legacy_low_speed_band():
+  v0 = 31.5
+  v_cruise = 35.0
+  ctrl = mk_vtsc_with_params()
+  steps = [
+    Step(
+      curvature=0.0048,
+      curvature_ahead=0.0048,
+      confidence=0.95,
+      desired_curvature=0.0048,
+      actual_curvature=0.00475,
+      lateral_output=0.52,
+      lateral_saturated=False,
+      gas_pressed=True,
+      applied_accel=0.0,
+    )
+    for _ in range(30)
+  ]
+
+  snap = simulate_sequence(steps=steps, vtsc=ctrl, v0_mps=v0, v_cruise_mps=v_cruise, dt=0.05)
+
+  assert float(snap['low_speed_calibration_curve_mph']) > 60.0
+  assert float(snap['low_speed_calibration_override_state']) > 0.02
+  assert float(snap['low_speed_calibration_scale']) > 1.02
+  assert str(snap['low_speed_calibration_reason']) == 'relax_override'
+
+
+def test_driver_override_learning_only_relaxes_local_curvature_neighborhood():
+  v0 = 31.5
+  v_cruise = 35.0
+  local_k = 0.0048
+  near_k = 0.0055
+  far_k = 0.02
+  ctrl = mk_vtsc_with_params()
+  steps = [
+    Step(
+      curvature=local_k,
+      curvature_ahead=local_k,
+      confidence=0.95,
+      desired_curvature=local_k,
+      actual_curvature=0.00475,
+      lateral_output=0.52,
+      lateral_saturated=False,
+      gas_pressed=True,
+      applied_accel=0.0,
+    )
+    for _ in range(30)
+  ]
+
+  snap = simulate_sequence(steps=steps, vtsc=ctrl, v0_mps=v0, v_cruise_mps=v_cruise, dt=0.05)
+  local_scale = float(ctrl._low_speed_calibration_scale(local_k))
+  near_scale = float(ctrl._low_speed_calibration_scale(near_k))
+  far_scale = float(ctrl._low_speed_calibration_scale(far_k))
+
+  assert str(snap['low_speed_calibration_reason']) == 'relax_override'
+  assert local_scale > 1.02
+  assert near_scale > 1.01
+  assert near_scale < local_scale
+  assert far_scale == pytest.approx(1.0, abs=5e-3)
+  assert local_scale > far_scale + 0.015
+  assert near_scale > far_scale + 0.008
+
+
+def test_driver_override_learning_persists_curvature_local_profile():
+  v0 = 31.5
+  v_cruise = 35.0
+  local_k = 0.0048
+  ctrl = mk_vtsc_with_params()
+  steps = [
+    Step(
+      curvature=local_k,
+      curvature_ahead=local_k,
+      confidence=0.95,
+      desired_curvature=local_k,
+      actual_curvature=0.00475,
+      lateral_output=0.52,
+      lateral_saturated=False,
+      gas_pressed=True,
+      applied_accel=0.0,
+    )
+    for _ in range(220)
+  ]
+
+  simulate_sequence(steps=steps, vtsc=ctrl, v0_mps=v0, v_cruise_mps=v_cruise, dt=0.05)
+
+  persist_calls = [
+    call for call in getattr(ctrl._params, 'put_nonblocking', MagicMock()).call_args_list
+    if call.args and call.args[0] == 'VisionTurnSpeedControlDriverOverrideCurveProfile'
+  ]
+  assert persist_calls
+  persisted_profile = json.loads(persist_calls[-1].args[1])
+  assert isinstance(persisted_profile, dict)
+  assert max(float(v) for v in persisted_profile['values']) > 0.02
+  assert sum(1 for v in persisted_profile['values'] if float(v) > 0.005) >= 3
+
+
+def test_driver_override_learning_reaches_material_relax_after_three_short_bursts():
+  v0 = 12.8
+  v_cruise = 16.0
+  burst = Step(
+    curvature=0.02,
+    curvature_ahead=0.02,
+    confidence=0.95,
+    desired_curvature=0.020,
+    actual_curvature=0.0195,
+    lateral_output=0.52,
+    lateral_saturated=False,
+    gas_pressed=True,
+    applied_accel=0.42,
+  )
+  settle = Step(
+    curvature=0.02,
+    curvature_ahead=0.02,
+    confidence=0.95,
+    desired_curvature=0.020,
+    actual_curvature=0.0195,
+    lateral_output=0.52,
+    lateral_saturated=False,
+    gas_pressed=False,
+    applied_accel=0.0,
+  )
+  steps = [
+    burst, burst, burst, burst, burst,
+    settle, settle, settle,
+    burst, burst, burst, burst, burst,
+    settle, settle, settle,
+    burst, burst, burst, burst, burst,
+  ]
+
+  snap = simulate_sequence(steps=steps, vtsc=mk_vtsc_with_params(), v0_mps=v0, v_cruise_mps=v_cruise, dt=0.05)
+
+  assert float(snap['low_speed_calibration_override_state']) > 0.025
+  assert float(snap['low_speed_calibration_state']) > 0.025
+  assert float(snap['low_speed_calibration_scale']) > 1.025
+  assert str(snap['low_speed_calibration_reason']) == 'relax_override'
 
 
 def test_physics_sigmoid_lifts_freeway_sweeper_band_without_bloating_sub_50_curve():

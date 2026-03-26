@@ -837,11 +837,19 @@ LOW_SPEED_CALIB_TRACKING_RELAX_RATIO_MAX = 0.10
 LOW_SPEED_CALIB_TRACKING_TIGHTEN_RATIO_MIN = 0.22
 LOW_SPEED_CALIB_ENABLE_TIGHTEN_EFFORT = False
 LOW_SPEED_CALIB_ENABLE_TRACKING_TRIGGER = False
-# Driver gas overrides above the current VTSC request are strong relax evidence, but only while
-# the curve is still relevant and lateral control is not saturated.
-LOW_SPEED_CALIB_OVERRIDE_DIVERGENCE_DEADBAND_MPS = 0.20
-LOW_SPEED_CALIB_OVERRIDE_DIVERGENCE_FULL_SCALE_MPS = 1.75
-LOW_SPEED_CALIB_OVERRIDE_EMA_TAU_S = 0.60
+# Driver gas overrides above the current VTSC request are strong relax evidence. Learn that path
+# faster than the passive low-speed headroom path, but only for the local curvature neighborhood.
+LOW_SPEED_CALIB_OVERRIDE_MAX_RELAX = 0.12
+LOW_SPEED_CALIB_OVERRIDE_RELAX_RATE_PER_S = 0.050
+LOW_SPEED_CALIB_OVERRIDE_TIGHTEN_RATE_PER_S = 0.060
+LOW_SPEED_CALIB_OVERRIDE_DIVERGENCE_DEADBAND_MPS = 0.05
+LOW_SPEED_CALIB_OVERRIDE_DIVERGENCE_FULL_SCALE_MPS = 0.75
+LOW_SPEED_CALIB_OVERRIDE_EMA_TAU_S = 0.15
+LOW_SPEED_CALIB_OVERRIDE_PROFILE_MIN_CURVATURE = 1.0e-4
+LOW_SPEED_CALIB_OVERRIDE_PROFILE_MAX_CURVATURE = 0.08
+LOW_SPEED_CALIB_OVERRIDE_PROFILE_BINS = 49
+LOW_SPEED_CALIB_OVERRIDE_PROFILE_SIGMA_LOG10 = 0.12
+LOW_SPEED_CALIB_OVERRIDE_PROFILE_CUTOFF_SIGMA = 3.0
 LOW_SPEED_CALIB_PERSIST_WRITE_S = 5.0
 LOW_SPEED_CALIB_PERSIST_DELTA = 0.005
 LOW_SPEED_CALIB_PARAM_SYNC_EPS = 1e-4
@@ -1271,7 +1279,17 @@ class VisionTurnController:
     # Low-speed envelope calibration state. Positive values relax the low-speed sigmoid slightly,
     # negative values tighten it. The state evolves slowly from repeated steering headroom evidence.
     self._low_speed_calibration_enabled = bool(getattr(self, "_low_speed_calibration_enabled", True))
+    self._low_speed_calibration_override_profile_log10_bins = np.linspace(
+      math.log10(float(LOW_SPEED_CALIB_OVERRIDE_PROFILE_MIN_CURVATURE)),
+      math.log10(float(LOW_SPEED_CALIB_OVERRIDE_PROFILE_MAX_CURVATURE)),
+      int(LOW_SPEED_CALIB_OVERRIDE_PROFILE_BINS),
+    )
+    self._low_speed_calibration_override_profile = self._empty_low_speed_calibration_override_profile()
+    self._low_speed_calibration_override_profile_param_state = self._empty_low_speed_calibration_override_profile()
+    self._low_speed_calibration_override_profile_persisted_state = self._empty_low_speed_calibration_override_profile()
     self._low_speed_calibration_state = 0.0
+    self._low_speed_calibration_base_state = 0.0
+    self._low_speed_calibration_override_state = 0.0
     self._low_speed_calibration_headroom_ema = 0.0
     self._low_speed_calibration_override_ema = 0.0
     self._low_speed_calibration_last_update_s = 0.0
@@ -1438,9 +1456,138 @@ class VisionTurnController:
       state = 0.0
     return float(clip(state, -float(LOW_SPEED_CALIB_MAX_TIGHTEN), float(LOW_SPEED_CALIB_MAX_RELAX)))
 
+  @staticmethod
+  def _clip_low_speed_calibration_override_state(value: float) -> float:
+    try:
+      state = float(value)
+    except Exception:
+      state = 0.0
+    return float(clip(state, 0.0, float(LOW_SPEED_CALIB_OVERRIDE_MAX_RELAX)))
+
+  @staticmethod
+  def _empty_low_speed_calibration_override_profile() -> np.ndarray:
+    return np.zeros(int(LOW_SPEED_CALIB_OVERRIDE_PROFILE_BINS), dtype=np.float64)
+
+  @staticmethod
+  def _clip_low_speed_calibration_override_profile(values) -> np.ndarray:
+    try:
+      arr = np.asarray(values, dtype=np.float64).reshape(-1)
+    except Exception:
+      arr = np.zeros(0, dtype=np.float64)
+    if arr.size != int(LOW_SPEED_CALIB_OVERRIDE_PROFILE_BINS):
+      return VisionTurnController._empty_low_speed_calibration_override_profile()
+    return np.clip(arr, 0.0, float(LOW_SPEED_CALIB_OVERRIDE_MAX_RELAX)).astype(np.float64, copy=False)
+
+  @staticmethod
+  def _low_speed_calibration_override_profile_changed(a: np.ndarray, b: np.ndarray, eps: float) -> bool:
+    aa = VisionTurnController._clip_low_speed_calibration_override_profile(a)
+    bb = VisionTurnController._clip_low_speed_calibration_override_profile(b)
+    if aa.shape != bb.shape:
+      return True
+    try:
+      return bool(np.max(np.abs(aa - bb)) > float(eps))
+    except Exception:
+      return True
+
+  def _parse_low_speed_calibration_override_profile(self, raw, *, fallback: np.ndarray | None = None) -> np.ndarray:
+    fallback_profile = self._clip_low_speed_calibration_override_profile(
+      self._empty_low_speed_calibration_override_profile() if fallback is None else fallback
+    )
+    if raw is None:
+      return fallback_profile.copy()
+    try:
+      s = raw.decode('utf-8') if isinstance(raw, (bytes, bytearray)) else str(raw)
+      obj = json.loads(s)
+    except Exception:
+      return fallback_profile.copy()
+    values = obj.get("values") if isinstance(obj, dict) else obj
+    if not isinstance(values, list):
+      return fallback_profile.copy()
+    try:
+      arr = np.asarray([float(v) for v in values], dtype=np.float64)
+    except Exception:
+      return fallback_profile.copy()
+    clipped = self._clip_low_speed_calibration_override_profile(arr)
+    if clipped.size != int(LOW_SPEED_CALIB_OVERRIDE_PROFILE_BINS):
+      return fallback_profile.copy()
+    return clipped.copy()
+
+  def _serialize_low_speed_calibration_override_profile(self, profile: np.ndarray) -> str:
+    clipped = self._clip_low_speed_calibration_override_profile(profile)
+    payload = {
+      "version": 1,
+      "values": [round(float(v), 6) for v in clipped.tolist()],
+    }
+    return json.dumps(payload, separators=(",", ":"))
+
+  def _low_speed_calibration_override_profile_weights(self, abs_curvature_meters: float) -> np.ndarray:
+    try:
+      kappa = float(abs_curvature_meters)
+    except Exception:
+      return self._empty_low_speed_calibration_override_profile()
+    if not (kappa > 0.0 and math.isfinite(kappa)):
+      return self._empty_low_speed_calibration_override_profile()
+    logk = math.log10(clip(
+      kappa,
+      float(LOW_SPEED_CALIB_OVERRIDE_PROFILE_MIN_CURVATURE),
+      float(LOW_SPEED_CALIB_OVERRIDE_PROFILE_MAX_CURVATURE),
+    ))
+    sigma = max(1e-3, float(LOW_SPEED_CALIB_OVERRIDE_PROFILE_SIGMA_LOG10))
+    d = (self._low_speed_calibration_override_profile_log10_bins - logk) / sigma
+    weights = np.exp(-0.5 * np.square(d))
+    weights[np.abs(d) > float(LOW_SPEED_CALIB_OVERRIDE_PROFILE_CUTOFF_SIGMA)] = 0.0
+    denom = float(np.sum(weights))
+    if denom <= 1e-12:
+      return self._empty_low_speed_calibration_override_profile()
+    return (weights / denom).astype(np.float64, copy=False)
+
+  def _low_speed_calibration_override_state_for_curvature(self, abs_curvature_meters: float) -> float:
+    profile = self._clip_low_speed_calibration_override_profile(
+      getattr(self, "_low_speed_calibration_override_profile", self._empty_low_speed_calibration_override_profile())
+    )
+    weights = self._low_speed_calibration_override_profile_weights(abs_curvature_meters)
+    if profile.shape != weights.shape:
+      return 0.0
+    try:
+      return self._clip_low_speed_calibration_override_state(float(np.dot(profile, weights)))
+    except Exception:
+      return 0.0
+
+  def _apply_low_speed_calibration_override_local_delta(self, abs_curvature_meters: float, delta_local: float) -> float:
+    try:
+      delta = float(delta_local)
+    except Exception:
+      return self._low_speed_calibration_override_state_for_curvature(abs_curvature_meters)
+    if abs(delta) <= 1e-9:
+      return self._low_speed_calibration_override_state_for_curvature(abs_curvature_meters)
+    profile = self._clip_low_speed_calibration_override_profile(
+      getattr(self, "_low_speed_calibration_override_profile", self._empty_low_speed_calibration_override_profile())
+    )
+    weights = self._low_speed_calibration_override_profile_weights(abs_curvature_meters)
+    if profile.shape != weights.shape:
+      return 0.0
+    support = float(np.dot(weights, weights))
+    if support <= 1e-9:
+      return self._low_speed_calibration_override_state_for_curvature(abs_curvature_meters)
+    profile = np.clip(profile + (delta / support) * weights, 0.0, float(LOW_SPEED_CALIB_OVERRIDE_MAX_RELAX)).astype(np.float64, copy=False)
+    self._low_speed_calibration_override_profile = profile
+    return self._clip_low_speed_calibration_override_state(float(np.dot(profile, weights)))
+
+  def _refresh_low_speed_calibration_state(self) -> None:
+    base_state = self._clip_low_speed_calibration_state(getattr(self, "_low_speed_calibration_base_state", 0.0))
+    override_state = self._clip_low_speed_calibration_override_state(getattr(self, "_low_speed_calibration_override_state", 0.0))
+    self._low_speed_calibration_base_state = float(base_state)
+    self._low_speed_calibration_override_state = float(override_state)
+    self._low_speed_calibration_state = float(base_state + override_state)
+
   def _sync_low_speed_calibration_param(self, *, force: bool = False) -> None:
     if not bool(getattr(self, "_low_speed_calibration_enabled", True)):
       self._low_speed_calibration_state = 0.0
+      self._low_speed_calibration_base_state = 0.0
+      self._low_speed_calibration_override_state = 0.0
+      self._low_speed_calibration_override_profile = self._empty_low_speed_calibration_override_profile()
+      self._low_speed_calibration_override_profile_param_state = self._empty_low_speed_calibration_override_profile()
+      self._low_speed_calibration_override_profile_persisted_state = self._empty_low_speed_calibration_override_profile()
       self._low_speed_calibration_param_state = 0.0
       self._low_speed_calibration_persisted_state = 0.0
       self._low_speed_calibration_headroom_ema = 0.0
@@ -1454,28 +1601,73 @@ class VisionTurnController:
       -float(LOW_SPEED_CALIB_MAX_TIGHTEN),
       float(LOW_SPEED_CALIB_MAX_RELAX),
     )
+    try:
+      raw_override_profile = self._params.get("VisionTurnSpeedControlDriverOverrideCurveProfile")
+    except Exception:
+      raw_override_profile = None
+    loaded_override_profile = self._parse_low_speed_calibration_override_profile(
+      raw_override_profile,
+      fallback=getattr(self, "_low_speed_calibration_override_profile_param_state", self._empty_low_speed_calibration_override_profile()),
+    )
     loaded_state = self._clip_low_speed_calibration_state(raw_state)
     tracked_state = self._clip_low_speed_calibration_state(getattr(self, "_low_speed_calibration_param_state", 0.0))
-    if force or abs(float(loaded_state) - float(tracked_state)) > float(LOW_SPEED_CALIB_PARAM_SYNC_EPS):
-      self._low_speed_calibration_state = float(loaded_state)
+    if (
+      force or
+      abs(float(loaded_state) - float(tracked_state)) > float(LOW_SPEED_CALIB_PARAM_SYNC_EPS) or
+      self._low_speed_calibration_override_profile_changed(
+        loaded_override_profile,
+        getattr(self, "_low_speed_calibration_override_profile_param_state", self._empty_low_speed_calibration_override_profile()),
+        float(LOW_SPEED_CALIB_PARAM_SYNC_EPS),
+      )
+    ):
+      self._low_speed_calibration_base_state = float(loaded_state)
+      self._low_speed_calibration_override_profile = loaded_override_profile.copy()
+      self._low_speed_calibration_override_state = 0.0
       self._low_speed_calibration_param_state = float(loaded_state)
       self._low_speed_calibration_persisted_state = float(loaded_state)
+      self._low_speed_calibration_override_profile_param_state = loaded_override_profile.copy()
+      self._low_speed_calibration_override_profile_persisted_state = loaded_override_profile.copy()
       self._low_speed_calibration_headroom_ema = 0.0
       self._low_speed_calibration_override_ema = 0.0
+      self._refresh_low_speed_calibration_state()
 
   def _maybe_persist_low_speed_calibration_state(self, now_s: float) -> None:
     if not bool(getattr(self, "_low_speed_calibration_enabled", True)):
       return
-    state = self._clip_low_speed_calibration_state(getattr(self, "_low_speed_calibration_state", 0.0))
+    state = self._clip_low_speed_calibration_state(getattr(self, "_low_speed_calibration_base_state", 0.0))
     persisted = self._clip_low_speed_calibration_state(getattr(self, "_low_speed_calibration_persisted_state", 0.0))
+    override_profile = self._clip_low_speed_calibration_override_profile(
+      getattr(self, "_low_speed_calibration_override_profile", self._empty_low_speed_calibration_override_profile())
+    )
+    override_persisted = self._clip_low_speed_calibration_override_profile(
+      getattr(self, "_low_speed_calibration_override_profile_persisted_state", self._empty_low_speed_calibration_override_profile())
+    )
     last_write_s = float(getattr(self, "_low_speed_calibration_last_persist_s", 0.0) or 0.0)
-    if abs(float(state) - float(persisted)) < float(LOW_SPEED_CALIB_PERSIST_DELTA):
+    if (
+      abs(float(state) - float(persisted)) < float(LOW_SPEED_CALIB_PERSIST_DELTA) and
+      not self._low_speed_calibration_override_profile_changed(
+        override_profile,
+        override_persisted,
+        float(LOW_SPEED_CALIB_PERSIST_DELTA),
+      )
+    ):
       return
     if float(now_s) < (last_write_s + float(LOW_SPEED_CALIB_PERSIST_WRITE_S)):
       return
     try:
-      self._params.put_nonblocking("VisionTurnSpeedControlLowSpeedLearnedState", f"{float(state):.6f}")
+      if abs(float(state) - float(persisted)) >= float(LOW_SPEED_CALIB_PERSIST_DELTA):
+        self._params.put_nonblocking("VisionTurnSpeedControlLowSpeedLearnedState", f"{float(state):.6f}")
+      if self._low_speed_calibration_override_profile_changed(
+        override_profile,
+        override_persisted,
+        float(LOW_SPEED_CALIB_PERSIST_DELTA),
+      ):
+        self._params.put_nonblocking(
+          "VisionTurnSpeedControlDriverOverrideCurveProfile",
+          self._serialize_low_speed_calibration_override_profile(override_profile),
+        )
       self._low_speed_calibration_persisted_state = float(state)
+      self._low_speed_calibration_override_profile_persisted_state = override_profile.copy()
       self._low_speed_calibration_last_persist_s = float(now_s)
     except Exception:
       pass
@@ -1646,6 +1838,8 @@ class VisionTurnController:
       low_speed_calibration_gap = float(getattr(self, '_dbg_low_speed_calibration_gap', 0.0) or 0.0)
       low_speed_calibration_gap_ratio = float(getattr(self, '_dbg_low_speed_calibration_gap_ratio', 0.0) or 0.0)
       low_speed_calibration_saturated = bool(getattr(self, '_dbg_low_speed_calibration_saturated', False))
+      low_speed_calibration_base_state = float(getattr(self, '_low_speed_calibration_base_state', 0.0) or 0.0)
+      low_speed_calibration_override_state = float(getattr(self, '_low_speed_calibration_override_state', 0.0) or 0.0)
       return {
         'v': v_ego, 'cruise': v_cruise, 'lead': lead, 'hw': hw,
         'conf': conf, 'vision_status': self._vision_status_str(),
@@ -1716,6 +1910,8 @@ class VisionTurnController:
         'low_speed_calibration_override_ema': low_speed_calibration_override_ema,
         'low_speed_calibration_divergence_mps': low_speed_calibration_divergence_mps,
         'low_speed_calibration_state': float(getattr(self, '_low_speed_calibration_state', 0.0) or 0.0),
+        'low_speed_calibration_base_state': low_speed_calibration_base_state,
+        'low_speed_calibration_override_state': low_speed_calibration_override_state,
         'low_speed_calibration_scale': low_speed_calibration_scale,
         'low_speed_calibration_curve_mph': low_speed_calibration_curve_mph,
         'low_speed_calibration_output': low_speed_calibration_output,
@@ -2045,10 +2241,14 @@ class VisionTurnController:
     except Exception:
       return 1.0
     taper = float(self._low_speed_calibration_taper(base_speed_mph))
-    if taper <= 0.0:
-      return 1.0
-    state = float(getattr(self, '_low_speed_calibration_state', 0.0) or 0.0)
-    return float(clip(1.0 + taper * state, 1.0 - float(LOW_SPEED_CALIB_MAX_TIGHTEN), 1.0 + float(LOW_SPEED_CALIB_MAX_RELAX)))
+    base_state = float(getattr(self, '_low_speed_calibration_base_state', 0.0) or 0.0)
+    override_state = float(self._low_speed_calibration_override_state_for_curvature(kappa))
+    effective_state = float(taper * base_state + override_state)
+    return float(clip(
+      1.0 + effective_state,
+      1.0 - float(LOW_SPEED_CALIB_MAX_TIGHTEN),
+      1.0 + float(LOW_SPEED_CALIB_MAX_RELAX + LOW_SPEED_CALIB_OVERRIDE_MAX_RELAX),
+    ))
 
   def _curve_speed(self, abs_curvature_meters: float) -> float:
     return float(curvature_to_speed(
@@ -2123,6 +2323,11 @@ class VisionTurnController:
 
     if not bool(getattr(self, "_low_speed_calibration_enabled", True)):
       self._low_speed_calibration_state = 0.0
+      self._low_speed_calibration_base_state = 0.0
+      self._low_speed_calibration_override_state = 0.0
+      self._low_speed_calibration_override_profile = self._empty_low_speed_calibration_override_profile()
+      self._low_speed_calibration_override_profile_param_state = self._empty_low_speed_calibration_override_profile()
+      self._low_speed_calibration_override_profile_persisted_state = self._empty_low_speed_calibration_override_profile()
       self._low_speed_calibration_param_state = 0.0
       self._low_speed_calibration_persisted_state = 0.0
       self._low_speed_calibration_headroom_ema = 0.0
@@ -2131,16 +2336,23 @@ class VisionTurnController:
       self._dbg_low_speed_calibration_headroom_ema = 0.0
       self._dbg_low_speed_calibration_override_ema = 0.0
       self._dbg_low_speed_calibration_scale = 1.0
+      self._refresh_low_speed_calibration_state()
       return
 
     scale_curvature = float(reference_curvature)
     override_ema = float(getattr(self, '_low_speed_calibration_override_ema', 0.0) or 0.0)
     override_target = 0.0
+    driver_override_active = False
+    driver_gas_pressed = bool(getattr(self, '_gas_pressed', False))
+    relevant_common = False
+    override_relevant = False
+    low_speed_relevant = False
+    raw_score = 0.0
+    curve_basis_speed_mph = 0.0
+    tighten_score = 0.0
     if feedback is None:
-      raw_score = 0.0
-      curve_basis_speed_mph = 0.0
-      taper = 0.0
-      relevant = False
+      override_alpha = float(dt / max(float(LOW_SPEED_CALIB_OVERRIDE_EMA_TAU_S), dt))
+      override_ema = float(max(0.0, override_ema + override_alpha * (0.0 - override_ema)))
     else:
       feedback_curvature = max(
         float(reference_curvature),
@@ -2155,24 +2367,23 @@ class VisionTurnController:
       taper = float(self._low_speed_calibration_taper(curve_basis_speed_mph))
       baseline_target_cap = float(min(self._v_cruise_setpoint, curvature_to_speed(max(1e-8, feedback_curvature))))
       requested_cap = float(min(self._v_cruise_setpoint, self._curve_speed(max(1e-8, feedback_curvature))))
-      relevant = bool(
+      relevant_common = bool(
         bool(self._is_enabled) and
         bool(self._op_enabled) and
         bool(feedback['active']) and
         (feedback_curvature >= float(LOW_SPEED_CALIB_MIN_CURVATURE)) and
-        (taper > 0.0) and
         ((float(self._v_cruise_setpoint) - baseline_target_cap) >= float(LOW_SPEED_CALIB_MIN_CAP_DELTA_MPS))
       )
+      low_speed_relevant = bool(relevant_common and (taper > 0.0) and not driver_gas_pressed)
+      override_relevant = bool(relevant_common and not bool(feedback['saturated']))
+      driver_override_active = bool(override_relevant and driver_gas_pressed)
 
       gap_ratio = float(feedback['tracking_gap']) / max(float(feedback['desired_curvature']), float(LOW_SPEED_CALIB_MIN_CURVATURE))
       base_relax_score = 0.0
-      relax_score = 0.0
-      tighten_score = 0.0
 
-      if relevant:
+      if low_speed_relevant:
         if bool(feedback['saturated']):
           tighten_score = 1.0
-          override_ema = 0.0
           self._dbg_low_speed_calibration_reason = "tighten_saturated"
         else:
           relax_effort = clip(
@@ -2189,17 +2400,6 @@ class VisionTurnController:
           else:
             relax_tracking = 1.0
           base_relax_score = float(relax_effort * relax_tracking)
-
-          if bool(getattr(self, '_gas_pressed', False)):
-            divergence_mps = max(0.0, float(self._v_ego) - float(requested_cap))
-            self._dbg_low_speed_calibration_divergence_mps = float(divergence_mps)
-            divergence_ratio = clip(
-              (float(divergence_mps) - float(LOW_SPEED_CALIB_OVERRIDE_DIVERGENCE_DEADBAND_MPS)) /
-              max(1e-3, float(LOW_SPEED_CALIB_OVERRIDE_DIVERGENCE_FULL_SCALE_MPS)),
-              0.0, 1.0,
-            )
-            # Weight larger driver-taken divergences increasingly heavier than mild bumps.
-            override_target = float(divergence_ratio * (0.5 + 0.5 * divergence_ratio))
 
           if bool(LOW_SPEED_CALIB_ENABLE_TIGHTEN_EFFORT):
             tighten_effort = clip(
@@ -2219,34 +2419,41 @@ class VisionTurnController:
             tighten_tracking = 0.0
           tighten_score = float(max(tighten_effort, tighten_tracking))
 
-          override_alpha = float(dt / max(float(LOW_SPEED_CALIB_OVERRIDE_EMA_TAU_S), dt))
-          override_ema = float(clip(override_ema + override_alpha * (float(override_target) - override_ema), 0.0, 1.0))
-          relax_score = float(max(base_relax_score, override_ema))
+      if driver_override_active:
+        divergence_mps = max(0.0, float(self._v_ego) - float(requested_cap))
+        self._dbg_low_speed_calibration_divergence_mps = float(divergence_mps)
+        divergence_ratio = clip(
+          (float(divergence_mps) - float(LOW_SPEED_CALIB_OVERRIDE_DIVERGENCE_DEADBAND_MPS)) /
+          max(1e-3, float(LOW_SPEED_CALIB_OVERRIDE_DIVERGENCE_FULL_SCALE_MPS)),
+          0.0, 1.0,
+        )
+        # Weight larger driver-taken divergences increasingly heavier than mild bumps.
+        override_target = float(divergence_ratio * (0.5 + 0.5 * divergence_ratio))
 
-          if tighten_tracking >= max(tighten_effort, relax_score) and tighten_tracking > 0.0:
-            self._dbg_low_speed_calibration_reason = "tighten_tracking"
-          elif tighten_effort > max(relax_score, 0.0):
-            self._dbg_low_speed_calibration_reason = "tighten_effort"
-          elif override_ema > max(base_relax_score, 0.0):
-            self._dbg_low_speed_calibration_reason = "relax_override"
-          elif base_relax_score > 0.0:
-            self._dbg_low_speed_calibration_reason = "relax_clean"
-          else:
-            self._dbg_low_speed_calibration_reason = "decay_ambiguous"
+      override_alpha = float(dt / max(float(LOW_SPEED_CALIB_OVERRIDE_EMA_TAU_S), dt))
+      override_ema = float(clip(override_ema + override_alpha * (float(override_target) - override_ema), 0.0, 1.0))
+
+      if low_speed_relevant:
+        if tighten_score > max(base_relax_score, override_ema, 0.0):
+          self._dbg_low_speed_calibration_reason = "tighten_saturated" if bool(feedback['saturated']) else "tighten_effort"
+        elif override_ema > max(base_relax_score, 0.0):
+          self._dbg_low_speed_calibration_reason = "relax_override"
+        elif base_relax_score > 0.0:
+          self._dbg_low_speed_calibration_reason = "relax_clean"
+        else:
+          self._dbg_low_speed_calibration_reason = "decay_ambiguous"
+      elif driver_override_active:
+        self._dbg_low_speed_calibration_reason = "relax_override" if override_ema > 0.0 else "decay_ambiguous"
+      elif relevant_common and driver_gas_pressed:
+        self._dbg_low_speed_calibration_reason = "driver_override_passthrough"
       else:
         self._dbg_low_speed_calibration_reason = "decay_not_relevant"
-        override_alpha = float(dt / max(float(LOW_SPEED_CALIB_OVERRIDE_EMA_TAU_S), dt))
-        override_ema = float(max(0.0, override_ema + override_alpha * (0.0 - override_ema)))
 
-      raw_score = float(clip(relax_score - tighten_score, -1.0, 1.0))
+      raw_score = float(clip(base_relax_score - tighten_score, -1.0, 1.0))
       self._dbg_low_speed_calibration_output = float(feedback['output'])
       self._dbg_low_speed_calibration_gap = float(feedback['tracking_gap'])
       self._dbg_low_speed_calibration_gap_ratio = float(gap_ratio)
       self._dbg_low_speed_calibration_saturated = bool(feedback['saturated'])
-
-    if feedback is None:
-      override_alpha = float(dt / max(float(LOW_SPEED_CALIB_OVERRIDE_EMA_TAU_S), dt))
-      override_ema = float(max(0.0, override_ema + override_alpha * (0.0 - override_ema)))
 
     self._low_speed_calibration_override_ema = float(override_ema)
     ema_alpha = float(dt / max(float(LOW_SPEED_CALIB_HEADROOM_TAU_S), dt))
@@ -2254,8 +2461,16 @@ class VisionTurnController:
     ema = float(clip(ema_prev + ema_alpha * (float(raw_score) - ema_prev), -1.0, 1.0))
     self._low_speed_calibration_headroom_ema = ema
 
-    state = float(getattr(self, '_low_speed_calibration_state', 0.0) or 0.0)
-    if feedback is None or not relevant:
+    state = float(getattr(self, '_low_speed_calibration_base_state', 0.0) or 0.0)
+    if feedback is None or not relevant_common:
+      decay = float(LOW_SPEED_CALIB_DECAY_RATE_PER_S) * dt
+      if state > 0.0:
+        state = max(0.0, state - decay)
+      else:
+        state = min(0.0, state + decay)
+    elif driver_gas_pressed:
+      state = float(state)
+    elif not low_speed_relevant:
       decay = float(LOW_SPEED_CALIB_DECAY_RATE_PER_S) * dt
       if state > 0.0:
         state = max(0.0, state - decay)
@@ -2266,8 +2481,26 @@ class VisionTurnController:
     elif ema < 0.0:
       state = max(-float(LOW_SPEED_CALIB_MAX_TIGHTEN), state + float(LOW_SPEED_CALIB_TIGHTEN_RATE_PER_S) * dt * ema)
 
-    self._low_speed_calibration_state = float(clip(state, -float(LOW_SPEED_CALIB_MAX_TIGHTEN), float(LOW_SPEED_CALIB_MAX_RELAX)))
-    self._low_speed_calibration_param_state = float(self._low_speed_calibration_state)
+    if driver_override_active and override_ema > 0.0:
+      override_state = self._apply_low_speed_calibration_override_local_delta(
+        max(1e-8, float(scale_curvature)),
+        float(LOW_SPEED_CALIB_OVERRIDE_RELAX_RATE_PER_S) * dt * override_ema,
+      )
+    elif relevant_common and not driver_gas_pressed and tighten_score > 0.0:
+      override_state = self._apply_low_speed_calibration_override_local_delta(
+        max(1e-8, float(scale_curvature)),
+        -float(LOW_SPEED_CALIB_OVERRIDE_TIGHTEN_RATE_PER_S) * dt * tighten_score,
+      )
+    else:
+      override_state = float(self._low_speed_calibration_override_state_for_curvature(max(1e-8, float(scale_curvature))))
+
+    self._low_speed_calibration_base_state = float(clip(state, -float(LOW_SPEED_CALIB_MAX_TIGHTEN), float(LOW_SPEED_CALIB_MAX_RELAX)))
+    self._low_speed_calibration_override_state = float(clip(override_state, 0.0, float(LOW_SPEED_CALIB_OVERRIDE_MAX_RELAX)))
+    self._low_speed_calibration_param_state = float(self._low_speed_calibration_base_state)
+    self._low_speed_calibration_override_profile_param_state = self._clip_low_speed_calibration_override_profile(
+      getattr(self, "_low_speed_calibration_override_profile", self._empty_low_speed_calibration_override_profile())
+    )
+    self._refresh_low_speed_calibration_state()
     try:
       applied_scale = float(self._low_speed_calibration_scale(max(1e-8, float(scale_curvature))))
     except Exception:

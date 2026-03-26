@@ -289,12 +289,19 @@ def _extract_route_and_segment(path: Path) -> Tuple[str, str]:
 def _install_low_speed_calibration_replay_bypass(ctrl: VisionTurnController) -> None:
   def _disabled(self, sm, *, reference_curvature: float) -> None:
     self._low_speed_calibration_state = 0.0
+    self._low_speed_calibration_base_state = 0.0
+    self._low_speed_calibration_override_state = 0.0
+    self._low_speed_calibration_override_profile = self._empty_low_speed_calibration_override_profile()
+    self._low_speed_calibration_override_profile_param_state = self._empty_low_speed_calibration_override_profile()
+    self._low_speed_calibration_override_profile_persisted_state = self._empty_low_speed_calibration_override_profile()
     self._low_speed_calibration_headroom_ema = 0.0
     self._low_speed_calibration_last_update_s = 0.0
     self._dbg_low_speed_calibration_active = False
     self._dbg_low_speed_calibration_reason = "disabled_for_replay"
     self._dbg_low_speed_calibration_headroom = 0.0
     self._dbg_low_speed_calibration_headroom_ema = 0.0
+    self._dbg_low_speed_calibration_override_ema = 0.0
+    self._dbg_low_speed_calibration_divergence_mps = 0.0
     self._dbg_low_speed_calibration_scale = 1.0
     self._dbg_low_speed_calibration_curve_mph = 0.0
     self._dbg_low_speed_calibration_output = 0.0
@@ -322,7 +329,11 @@ def _mk_controller_deterministic(*, disable_low_speed_calibration: bool = False)
 
     def _get_bool(key: str) -> bool:
       # Keep core VTSC enabled; everything else deterministic/off unless the controller hard-requires it.
-      if key in ("VisionTurnSpeedControl", "VisionTurnSpeedControlOcclBypassWithLead"):
+      if key in (
+        "VisionTurnSpeedControl",
+        "VisionTurnSpeedControlOcclBypassWithLead",
+        "VisionTurnSpeedControlLowSpeedLearningEnabled",
+      ):
         return True
       return False
 
