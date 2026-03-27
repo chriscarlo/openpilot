@@ -118,25 +118,32 @@ class TestHyundaiAiLeadStability:
     assert mpc.source == "lead0"
 
     jitter_sources = []
-    for d_rel in (44.7, 45.0, 44.8, 45.1):
+    for d_rel, v_rel, v_lead in (
+      (44.7, 0.55, 29.55),
+      (45.0, 0.72, 29.72),
+      (44.8, 0.18, 29.18),
+      (45.1, 0.64, 29.64),
+    ):
       _run_update(
         mpc,
-        _make_lead(d_rel=d_rel, y_rel=0.05, d_path=0.05, v_lat=0.50, v_rel=0.0, model_prob=0.95),
-        _make_lead(d_rel=d_rel - 0.04, y_rel=0.08, d_path=0.08, v_lat=4.00, v_rel=0.02, model_prob=0.93),
+        _make_lead(d_rel=d_rel, y_rel=0.05, d_path=0.05, v_lat=0.50, v_rel=v_rel, v_lead=v_lead, model_prob=0.95),
+        _make_lead(d_rel=d_rel - 0.04, y_rel=0.08, d_path=0.08, v_lat=4.00, v_rel=v_rel - 0.02, v_lead=v_lead, model_prob=0.93),
       )
       jitter_sources.append(mpc.source)
 
     assert jitter_sources == ["lead0", "lead0", "lead0", "lead0"]
+    assert mpc.hyundai_virtual_lead_debug["active"] is True
 
-    for _ in range(5):
+    for _ in range(7):
       _run_update(
         mpc,
-        _make_lead(d_rel=48.4, y_rel=0.05, d_path=0.05, v_lat=0.45, v_rel=0.0, model_prob=0.95),
-        _make_lead(d_rel=48.35, y_rel=0.07, d_path=0.07, v_lat=4.05, v_rel=0.02, model_prob=0.93),
+        _make_lead(d_rel=49.0, y_rel=0.05, d_path=0.05, v_lat=0.45, v_rel=0.85, v_lead=29.85, model_prob=0.95),
+        _make_lead(d_rel=48.95, y_rel=0.07, d_path=0.07, v_lat=4.05, v_rel=0.82, v_lead=29.85, model_prob=0.93),
       )
 
     assert mpc.source == "cruise"
     assert mpc.acc_source_debug["used_hysteresis"] is True
+    assert mpc.acc_source_debug["reason"] in ("filtered_pullaway_dwell", "filtered_pullaway_immediate")
 
   def test_cutin_promotion_reaches_virtual_duplicate_lead(self, monkeypatch):
     monotonic = _MonotonicStub(step=0.2)
@@ -159,9 +166,9 @@ class TestHyundaiAiLeadStability:
     )
 
     assert mpc.lead_role_debug["virtual_duplicate"]["active"] is True
-    assert mpc._cutin_event_t["lead0"] is not None
+    assert mpc._virtual_cutin_event_t is not None
 
-  def test_near_gap_shadow_promotes_lead_instead_of_cruise(self, monkeypatch):
+  def test_raw_near_gap_reacquires_lead_from_cruise_before_filtered_state_catches_up(self, monkeypatch):
     monkeypatch.setattr(
       "openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc.time.monotonic",
       _MonotonicStub(step=0.2),
@@ -184,9 +191,9 @@ class TestHyundaiAiLeadStability:
     )
 
     assert mpc.source == "lead0"
-    assert mpc.acc_source_debug["reason"] == "lead_shadow"
+    assert mpc.acc_source_debug["reason"] == "raw_gap_hold"
 
-  def test_near_gap_lead_caps_positive_accel(self, monkeypatch):
+  def test_near_gap_follow_keeps_full_accel_limit(self, monkeypatch):
     monkeypatch.setattr(
       "openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc.time.monotonic",
       _MonotonicStub(step=0.1),
@@ -199,5 +206,31 @@ class TestHyundaiAiLeadStability:
       _make_lead(d_rel=44.45, y_rel=0.07, d_path=0.07, v_lat=4.00, v_rel=-0.4, v_lead=28.6, model_prob=0.93),
     )
 
-    assert mpc.hyundai_lead_accel_cap < ACCEL_MAX
-    assert mpc.hyundai_lead_accel_cap == pytest.approx(mpc.params[0, 1])
+    assert mpc.source == "lead0"
+    assert mpc.params[0, 1] == pytest.approx(ACCEL_MAX)
+
+  def test_duplicate_slot_jitter_does_not_start_cutin_settle(self, monkeypatch):
+    monkeypatch.setattr(
+      "openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc.time.monotonic",
+      _MonotonicStub(step=0.1),
+    )
+    mpc = _make_hyundai_mpc()
+
+    for lead0, lead1 in (
+      (
+        _make_lead(d_rel=44.7, y_rel=0.05, d_path=0.05, v_lat=0.40, v_rel=-0.1, model_prob=0.96),
+        _make_lead(d_rel=44.66, y_rel=0.08, d_path=0.08, v_lat=4.00, v_rel=-0.08, model_prob=0.92),
+      ),
+      (
+        _make_lead(d_rel=44.8, y_rel=0.04, d_path=0.04, v_lat=0.50, v_rel=-0.1, model_prob=0.96),
+        _make_lead(d_rel=44.74, y_rel=0.07, d_path=0.07, v_lat=4.10, v_rel=-0.08, model_prob=0.92),
+      ),
+      (
+        _make_lead(d_rel=44.75, y_rel=0.06, d_path=0.06, v_lat=0.45, v_rel=-0.1, model_prob=0.95),
+        _make_lead(d_rel=44.70, y_rel=0.09, d_path=0.09, v_lat=4.05, v_rel=-0.08, model_prob=0.92),
+      ),
+    ):
+      _run_update(mpc, lead0, lead1)
+
+    assert mpc.lead_role_debug["virtual_duplicate"]["active"] is True
+    assert mpc._virtual_cutin_event_t is None

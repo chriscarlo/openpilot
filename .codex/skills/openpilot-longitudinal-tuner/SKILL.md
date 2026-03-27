@@ -68,10 +68,12 @@ python3 .codex/skills/openpilot-longitudinal-tuner/scripts/monitor_longitudinal_
   braking still spikes, the issue is usually the post-recognition gap recovery
   path rather than lead selection.
 - Hyundai no-radar AI lead following pulses or chatters near settled headway:
-  inspect `LEADROLEDBG.virtual_duplicate` and `LEADROLEDBG.source_hysteresis`
-  before changing gap reclaim or cut-in settings. On this path the primary
-  failure mode is often duplicate model hypotheses for one physical car causing
-  the active ACC obstacle to bounce between lead-follow and cruise.
+  inspect `LEADROLEDBG.virtual_duplicate`,
+  `LEADROLEDBG.filtered_virtual_lead`, and
+  `LEADROLEDBG.source_hysteresis` before changing gap reclaim or cut-in
+  settings. On this path the primary failure mode is often duplicate model
+  hypotheses for one physical car plus noisy model kinematics causing ACC
+  ownership to bounce between lead-follow and cruise.
 - Planner target looks reasonable, but the car command does not:
   compare `longitudinalPlan.aTarget`, `carControl.actuators.accel`,
   `carOutput.actuatorsOutput.accel`, and delayed `carState.aEgo`. If the first

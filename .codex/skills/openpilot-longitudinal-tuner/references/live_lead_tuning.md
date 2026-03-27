@@ -22,7 +22,9 @@
   `get_gap_reclaim_accel_floor()`, and the cut-in settle decel cap applied
   after MPC.
 - Hyundai-only duplicate-lead stabilization and ACC source hysteresis also live
-  in `LongitudinalMpc`, but those are fixed code paths in v1, not live knobs.
+  in `LongitudinalMpc`, along with a filtered virtual lead used for stable
+  lead-vs-cruise ownership. Those Hyundai source-stability paths are fixed code
+  in v1, not live knobs.
 - On Hyundai EVs, final accel and jerk still pass through the separate
   `opendbc/sunnypilot/car/hyundai/longitudinal/controller.py` overlay, which
   already has EV-specific shaping from
@@ -87,6 +89,7 @@ python3 .codex/skills/openpilot-longitudinal-tuner/scripts/monitor_longitudinal_
 - If behavior becomes springy or late, reset the overrides first and confirm
   the defaults are active before changing more than one knob at once.
 - If `LEADROLEDBG` shows `virtual_duplicate.active=true`, debug lead stability
-  through `virtual_duplicate` and `source_hysteresis` before touching live
-  reclaim or cut-in knobs. Those knobs cannot fix a duplicate same-car
-  hypothesis that keeps replacing the active ACC obstacle.
+  through `virtual_duplicate`, `filtered_virtual_lead`, and
+  `source_hysteresis` before touching live reclaim or cut-in knobs. Those
+  knobs cannot fix duplicate same-car hypotheses or noisy lead-vs-cruise
+  ownership in the fixed Hyundai source-stability path.

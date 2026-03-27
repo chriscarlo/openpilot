@@ -83,21 +83,20 @@ HYUNDAI_DUPLICATE_PATH_SWITCH_M = 0.10
 HYUNDAI_DUPLICATE_MODEL_PROB_SWITCH = 0.10
 HYUNDAI_DUPLICATE_VLAT_SWITCH_MPS = 1.0
 HYUNDAI_DUPLICATE_DREL_SWITCH_M = 0.75
-HYUNDAI_LEAD_SOURCE_ENTER_MARGIN_M = 1.0
-HYUNDAI_LEAD_SOURCE_EXIT_MARGIN_M = 1.5
-HYUNDAI_LEAD_SOURCE_ENTER_DWELL_S = 0.35
-HYUNDAI_LEAD_SOURCE_EXIT_DWELL_S = 0.75
-HYUNDAI_LEAD_SOURCE_ENTER_IMMEDIATE_MARGIN_M = 3.0
-HYUNDAI_LEAD_SOURCE_EXIT_IMMEDIATE_MARGIN_M = 4.0
-HYUNDAI_LEAD_SHADOW_GAP_SURPLUS_M = 2.5
-HYUNDAI_LEAD_SHADOW_PULLAWAY_MPS = 0.6
-HYUNDAI_LEAD_SHADOW_LEAD_ACCEL_MPS2 = 0.3
-HYUNDAI_LEAD_NEAR_GAP_MIN_SPEED = 8.0
-HYUNDAI_LEAD_NEAR_GAP_MAX_SURPLUS_M = 4.0
-HYUNDAI_LEAD_NEAR_GAP_SURPLUS_BP = [-6.0, -3.0, 0.0, 1.5, 3.0, 4.0]
-HYUNDAI_LEAD_NEAR_GAP_ACCEL_V = [0.0, 0.0, 0.08, 0.18, 0.30, 0.45]
-HYUNDAI_LEAD_NEAR_GAP_VREL_BP = [-2.0, -1.0, -0.4, 0.0, 0.4, 0.8]
-HYUNDAI_LEAD_NEAR_GAP_VREL_ACCEL_V = [0.0, 0.0, 0.06, 0.15, 0.30, 0.45]
+HYUNDAI_VIRTUAL_LEAD_FAST_TAU_S = 0.20
+HYUNDAI_VIRTUAL_LEAD_SLOW_TAU_S = 1.00
+HYUNDAI_VIRTUAL_LEAD_PATH_TAU_S = 0.45
+HYUNDAI_VIRTUAL_LEAD_MODEL_PROB_TAU_S = 0.60
+HYUNDAI_VIRTUAL_LEAD_RESET_DREL_M = 8.0
+HYUNDAI_VIRTUAL_LEAD_RESET_DPATH_M = 1.75
+HYUNDAI_VIRTUAL_LEAD_RETAIN_GAP_SURPLUS_M = 2.5
+HYUNDAI_VIRTUAL_LEAD_REACQUIRE_GAP_SURPLUS_M = 3.0
+HYUNDAI_VIRTUAL_LEAD_RELEASE_GAP_SURPLUS_M = 4.0
+HYUNDAI_VIRTUAL_LEAD_RELEASE_PULLAWAY_MPS = 0.35
+HYUNDAI_VIRTUAL_LEAD_RELEASE_DWELL_S = 1.00
+HYUNDAI_VIRTUAL_LEAD_RELEASE_IMMEDIATE_GAP_SURPLUS_M = 7.0
+HYUNDAI_VIRTUAL_LEAD_RELEASE_IMMEDIATE_PULLAWAY_MPS = 1.00
+HYUNDAI_VIRTUAL_LEAD_RAW_OBSTACLE_MARGIN_M = 1.00
 
 
 # Fewer timestamps don't hurt performance and lead to
@@ -447,11 +446,16 @@ class LongitudinalMpc:
     self.cutin_settle_active = False
     self.cutin_settle_accel_floor = 0.0
     self.cutin_settle_debug = {}
-    self.hyundai_lead_accel_cap = ACCEL_MAX
-    self._cutin_event_t = {"lead0": None, "lead1": None}
-    self._prev_lead_roles = {"lead0": LeadRoleClassifier.INVALID, "lead1": LeadRoleClassifier.INVALID}
-    self._prev_control_status = {"lead0": False, "lead1": False}
+    self._virtual_cutin_event_t = None
+    self._prev_virtual_lead_role = LeadRoleClassifier.INVALID
+    self._prev_virtual_lead_control_active = False
     self._hyundai_duplicate_selected_raw_slot = None
+    self._hyundai_virtual_lead = None
+    self._hyundai_virtual_lead_source = None
+    self._hyundai_virtual_lead_last_t = None
+    self._hyundai_virtual_lead_identity_changed = False
+    self._hyundai_virtual_lead_reset_reason = None
+    self.hyundai_virtual_lead_debug = {"active": False}
     self._acc_obstacle_mode = 'cruise'
     self._acc_obstacle_candidate_mode = None
     self._acc_obstacle_candidate_t = None
@@ -510,6 +514,125 @@ class LongitudinalMpc:
       "vRel": 0.0,
       "modelProb": 0.0,
     }
+
+  @staticmethod
+  def _lead_follow_metrics(v_ego: float, t_follow: float, lead, obstacle_0: float | None = None) -> dict[str, float]:
+    if lead is None or not getattr(lead, 'status', False):
+      return {
+        "gap_surplus": 1e9,
+        "pullaway_speed": 0.0,
+        "closing_speed": 0.0,
+        "obstacle_0": float(obstacle_0 if obstacle_0 is not None else 1e9),
+      }
+
+    gap_surplus = float(getattr(lead, 'dRel', 0.0) or 0.0) - get_headway_follow_distance(v_ego, t_follow)
+    v_lead = float(getattr(lead, 'vLead', v_ego) or v_ego)
+    v_rel = float(getattr(lead, 'vRel', 0.0) or 0.0)
+    return {
+      "gap_surplus": float(gap_surplus),
+      "pullaway_speed": float(max(0.0, v_lead - v_ego, v_rel)),
+      "closing_speed": float(max(0.0, v_ego - v_lead, -v_rel)),
+      "obstacle_0": float(obstacle_0 if obstacle_0 is not None else 1e9),
+    }
+
+  @staticmethod
+  def _ema_alpha(dt_s: float, tau_s: float) -> float:
+    if dt_s <= 0.0 or tau_s <= 0.0:
+      return 1.0
+    return float(np.clip(1.0 - np.exp(-dt_s / max(tau_s, 1e-3)), 0.0, 1.0))
+
+  def _filter_metric(self, prev: float, current: float, dt_s: float, *,
+                     danger_if_lower: bool, fast_tau_s: float = HYUNDAI_VIRTUAL_LEAD_FAST_TAU_S,
+                     slow_tau_s: float = HYUNDAI_VIRTUAL_LEAD_SLOW_TAU_S) -> float:
+    use_fast = current <= prev if danger_if_lower else current >= prev
+    alpha = self._ema_alpha(dt_s, fast_tau_s if use_fast else slow_tau_s)
+    return float(prev + alpha * (current - prev))
+
+  def _filter_symmetric_metric(self, prev: float, current: float, dt_s: float, tau_s: float) -> float:
+    alpha = self._ema_alpha(dt_s, tau_s)
+    return float(prev + alpha * (current - prev))
+
+  def _reset_hyundai_virtual_lead(self, reason: str) -> None:
+    self._hyundai_virtual_lead = None
+    self._hyundai_virtual_lead_source = None
+    self._hyundai_virtual_lead_last_t = None
+    self._hyundai_virtual_lead_identity_changed = False
+    self._hyundai_virtual_lead_reset_reason = reason
+    self.hyundai_virtual_lead_debug = {
+      "active": False,
+      "reset_reason": reason,
+    }
+
+  def _should_reset_hyundai_virtual_lead(self, lead_source: str, lead) -> tuple[bool, str | None]:
+    if lead is None or not getattr(lead, 'status', False):
+      return True, "no_control_lead"
+    if self._hyundai_virtual_lead is None or self._hyundai_virtual_lead_source is None:
+      return True, "init"
+    if lead_source != self._hyundai_virtual_lead_source:
+      return True, "source_switch"
+    if abs(float(getattr(lead, 'dRel', 0.0) or 0.0) - float(self._hyundai_virtual_lead.dRel)) > HYUNDAI_VIRTUAL_LEAD_RESET_DREL_M:
+      return True, "drel_jump"
+    if abs(float(getattr(lead, 'dPath', getattr(lead, 'yRel', 0.0)) or 0.0) - float(self._hyundai_virtual_lead.dPath)) > HYUNDAI_VIRTUAL_LEAD_RESET_DPATH_M:
+      return True, "dpath_jump"
+    return False, None
+
+  def _build_lead_obstacle(self, lead) -> np.ndarray:
+    lead_xv = self.process_lead(lead)
+    return lead_xv[:,0] + get_stopped_equivalence_factor(lead_xv[:,1])
+
+  def _update_hyundai_virtual_lead(self, now: float, lead_source: str, lead):
+    self._hyundai_virtual_lead_identity_changed = False
+
+    if not self._hyundai_ai_lead_stability_enabled:
+      self.hyundai_virtual_lead_debug = {"active": False}
+      return None
+
+    should_reset, reset_reason = self._should_reset_hyundai_virtual_lead(lead_source, lead)
+    raw_lead = ControlLead.from_lead(lead) if lead is not None else ControlLead()
+
+    if should_reset:
+      self._hyundai_virtual_lead = raw_lead
+      self._hyundai_virtual_lead_source = lead_source if raw_lead.status else None
+      self._hyundai_virtual_lead_last_t = now if raw_lead.status else None
+      self._hyundai_virtual_lead_identity_changed = bool(raw_lead.status)
+      self._hyundai_virtual_lead_reset_reason = reset_reason
+      if not raw_lead.status:
+        self._reset_hyundai_virtual_lead(reset_reason or "no_control_lead")
+        return None
+    else:
+      dt_s = float(np.clip(now - float(self._hyundai_virtual_lead_last_t or now), 0.0, 1.0))
+      prev = self._hyundai_virtual_lead
+      filtered = copy.deepcopy(prev)
+      filtered.status = raw_lead.status
+      filtered.dRel = self._filter_metric(prev.dRel, raw_lead.dRel, dt_s, danger_if_lower=True)
+      filtered.yRel = self._filter_symmetric_metric(prev.yRel, raw_lead.yRel, dt_s, HYUNDAI_VIRTUAL_LEAD_PATH_TAU_S)
+      filtered.vRel = self._filter_metric(prev.vRel, raw_lead.vRel, dt_s, danger_if_lower=True)
+      filtered.aRel = self._filter_metric(prev.aRel, raw_lead.aRel, dt_s, danger_if_lower=True)
+      filtered.vLead = self._filter_metric(prev.vLead, raw_lead.vLead, dt_s, danger_if_lower=True)
+      filtered.dPath = self._filter_symmetric_metric(prev.dPath, raw_lead.dPath, dt_s, HYUNDAI_VIRTUAL_LEAD_PATH_TAU_S)
+      filtered.vLat = self._filter_symmetric_metric(prev.vLat, raw_lead.vLat, dt_s, HYUNDAI_VIRTUAL_LEAD_PATH_TAU_S)
+      filtered.vLeadK = self._filter_metric(prev.vLeadK, raw_lead.vLeadK, dt_s, danger_if_lower=True)
+      filtered.aLeadK = self._filter_metric(prev.aLeadK, raw_lead.aLeadK, dt_s, danger_if_lower=True)
+      filtered.fcw = raw_lead.fcw
+      filtered.aLeadTau = raw_lead.aLeadTau
+      filtered.modelProb = self._filter_symmetric_metric(prev.modelProb, raw_lead.modelProb, dt_s, HYUNDAI_VIRTUAL_LEAD_MODEL_PROB_TAU_S)
+      filtered.radar = raw_lead.radar
+      filtered.radarTrackId = raw_lead.radarTrackId
+      self._hyundai_virtual_lead = filtered
+      self._hyundai_virtual_lead_source = lead_source
+      self._hyundai_virtual_lead_last_t = now
+      self._hyundai_virtual_lead_reset_reason = None
+
+    metrics = self._lead_follow_metrics(float(self.x0[1]), self.current_t_follow, self._hyundai_virtual_lead)
+    self.hyundai_virtual_lead_debug = {
+      "active": True,
+      "source": str(self._hyundai_virtual_lead_source),
+      "identity_changed": bool(self._hyundai_virtual_lead_identity_changed),
+      "reset_reason": self._hyundai_virtual_lead_reset_reason,
+      "filtered": self._lead_debug_payload(self._hyundai_virtual_lead),
+      "metrics": metrics,
+    }
+    return self._hyundai_virtual_lead
 
   def _duplicate_candidate_metrics(self, lead) -> dict[str, float]:
     return {
@@ -641,40 +764,6 @@ class LongitudinalMpc:
       return 'lead1', self.control_leads[1]
     return None, None
 
-  def _should_hold_hyundai_lead_shadow(self, lead) -> bool:
-    if (not self._hyundai_ai_lead_stability_enabled or
-        lead is None or
-        not getattr(lead, 'status', False) or
-        float(self.x0[1]) < HYUNDAI_LEAD_NEAR_GAP_MIN_SPEED):
-      return False
-
-    headway_gap = get_headway_follow_distance(float(self.x0[1]), self.current_t_follow)
-    gap_surplus = float(getattr(lead, 'dRel', 0.0) or 0.0) - headway_gap
-    if gap_surplus > HYUNDAI_LEAD_SHADOW_GAP_SURPLUS_M:
-      return False
-
-    v_rel = float(getattr(lead, 'vRel', 0.0) or 0.0)
-    lead_accel = float(getattr(lead, 'aLeadK', 0.0) or 0.0)
-    return v_rel <= HYUNDAI_LEAD_SHADOW_PULLAWAY_MPS and lead_accel <= HYUNDAI_LEAD_SHADOW_LEAD_ACCEL_MPS2
-
-  def _get_hyundai_lead_accel_cap(self) -> float:
-    if not self._hyundai_ai_lead_stability_enabled or float(self.x0[1]) < HYUNDAI_LEAD_NEAR_GAP_MIN_SPEED:
-      return ACCEL_MAX
-
-    _, lead = self._get_best_control_lead()
-    if lead is None:
-      return ACCEL_MAX
-
-    headway_gap = get_headway_follow_distance(float(self.x0[1]), self.current_t_follow)
-    gap_surplus = float(getattr(lead, 'dRel', 0.0) or 0.0) - headway_gap
-    if gap_surplus > HYUNDAI_LEAD_NEAR_GAP_MAX_SURPLUS_M:
-      return ACCEL_MAX
-
-    gap_cap = float(np.interp(gap_surplus, HYUNDAI_LEAD_NEAR_GAP_SURPLUS_BP, HYUNDAI_LEAD_NEAR_GAP_ACCEL_V))
-    v_rel = float(getattr(lead, 'vRel', 0.0) or 0.0)
-    vrel_cap = float(np.interp(v_rel, HYUNDAI_LEAD_NEAR_GAP_VREL_BP, HYUNDAI_LEAD_NEAR_GAP_VREL_ACCEL_V))
-    return float(np.clip(min(gap_cap, vrel_cap), 0.0, ACCEL_MAX))
-
   def _advance_acc_obstacle_candidate(self, candidate_mode: str, now: float, dwell_s: float, default_mode: str) -> str:
     if self._acc_obstacle_candidate_mode != candidate_mode:
       self._acc_obstacle_candidate_mode = candidate_mode
@@ -694,6 +783,7 @@ class LongitudinalMpc:
       lead_candidates.append(('lead1', lead_1_obstacle))
 
     if not self._hyundai_ai_lead_stability_enabled:
+      self.hyundai_virtual_lead_debug = {"active": False}
       x_obstacles = np.column_stack([lead_0_obstacle, lead_1_obstacle, cruise_obstacle])
       self.source = SOURCES[np.argmin(x_obstacles[0])]
       self.acc_source_debug = {
@@ -705,6 +795,7 @@ class LongitudinalMpc:
       return np.min(x_obstacles, axis=1)
 
     if not lead_candidates:
+      self._reset_hyundai_virtual_lead("no_control_lead")
       self._acc_obstacle_mode = 'cruise'
       self._reset_acc_obstacle_candidate()
       self.source = 'cruise'
@@ -718,48 +809,81 @@ class LongitudinalMpc:
 
     best_lead_source, best_lead_obstacle = min(lead_candidates, key=lambda item: item[1][0])
     best_lead = self.control_leads[0] if best_lead_source == 'lead0' else self.control_leads[1]
-    lead_delta_m = float(cruise_obstacle[0] - best_lead_obstacle[0])
-    active_mode = self._acc_obstacle_mode
-    reason = "hold"
+    filtered_lead = self._update_hyundai_virtual_lead(now, best_lead_source, best_lead)
+    if filtered_lead is None or not getattr(filtered_lead, 'status', False):
+      self._acc_obstacle_mode = 'cruise'
+      self._reset_acc_obstacle_candidate()
+      self.source = 'cruise'
+      self.acc_source_debug = {
+        "active_mode": "cruise",
+        "best_lead_source": None,
+        "candidate_mode": None,
+        "reason": "no_filtered_lead",
+        "used_hysteresis": True,
+      }
+      return cruise_obstacle
 
-    if self._should_hold_hyundai_lead_shadow(best_lead):
+    filtered_lead_obstacle = self._build_lead_obstacle(filtered_lead)
+    raw_metrics = self._lead_follow_metrics(float(self.x0[1]), self.current_t_follow, best_lead, float(best_lead_obstacle[0]))
+    filtered_metrics = self._lead_follow_metrics(float(self.x0[1]), self.current_t_follow, filtered_lead, float(filtered_lead_obstacle[0]))
+    raw_requires_owner = (
+      raw_metrics["gap_surplus"] <= HYUNDAI_VIRTUAL_LEAD_RETAIN_GAP_SURPLUS_M or
+      raw_metrics["obstacle_0"] <= (float(cruise_obstacle[0]) - HYUNDAI_VIRTUAL_LEAD_RAW_OBSTACLE_MARGIN_M)
+    )
+    release_ready = (
+      filtered_metrics["gap_surplus"] >= HYUNDAI_VIRTUAL_LEAD_RELEASE_GAP_SURPLUS_M and
+      filtered_metrics["pullaway_speed"] >= HYUNDAI_VIRTUAL_LEAD_RELEASE_PULLAWAY_MPS
+    )
+    immediate_release = (
+      filtered_metrics["gap_surplus"] >= HYUNDAI_VIRTUAL_LEAD_RELEASE_IMMEDIATE_GAP_SURPLUS_M and
+      filtered_metrics["pullaway_speed"] >= HYUNDAI_VIRTUAL_LEAD_RELEASE_IMMEDIATE_PULLAWAY_MPS
+    )
+    reacquire_lead = (
+      raw_requires_owner or
+      filtered_metrics["gap_surplus"] <= HYUNDAI_VIRTUAL_LEAD_REACQUIRE_GAP_SURPLUS_M
+    )
+    active_mode = self._acc_obstacle_mode
+    reason = "filtered_hold"
+
+    if raw_requires_owner:
       active_mode = 'lead'
       self._acc_obstacle_mode = 'lead'
       self._reset_acc_obstacle_candidate()
-      reason = "lead_shadow"
+      if raw_metrics["gap_surplus"] <= HYUNDAI_VIRTUAL_LEAD_RETAIN_GAP_SURPLUS_M:
+        reason = "raw_gap_hold"
+      else:
+        reason = "raw_obstacle_hold"
     elif active_mode == 'lead':
-      if lead_delta_m >= -HYUNDAI_LEAD_SOURCE_EXIT_MARGIN_M:
-        self._reset_acc_obstacle_candidate()
-        reason = "lead_hold_margin"
-      elif lead_delta_m <= -HYUNDAI_LEAD_SOURCE_EXIT_IMMEDIATE_MARGIN_M:
+      if immediate_release:
         active_mode = 'cruise'
         self._acc_obstacle_mode = 'cruise'
         self._reset_acc_obstacle_candidate()
-        reason = "cruise_immediate"
-      else:
+        reason = "filtered_pullaway_immediate"
+      elif release_ready:
         active_mode = self._advance_acc_obstacle_candidate(
-          'cruise', now, HYUNDAI_LEAD_SOURCE_EXIT_DWELL_S, default_mode='lead',
+          'cruise', now, HYUNDAI_VIRTUAL_LEAD_RELEASE_DWELL_S, default_mode='lead',
         )
-        reason = "cruise_dwell"
+        reason = "filtered_pullaway_dwell"
+      else:
+        self._reset_acc_obstacle_candidate()
+        reason = "filtered_hold"
     else:
-      if lead_delta_m >= HYUNDAI_LEAD_SOURCE_ENTER_IMMEDIATE_MARGIN_M:
+      if reacquire_lead:
         active_mode = 'lead'
         self._acc_obstacle_mode = 'lead'
         self._reset_acc_obstacle_candidate()
-        reason = "lead_immediate"
-      elif lead_delta_m <= HYUNDAI_LEAD_SOURCE_ENTER_MARGIN_M:
-        self._reset_acc_obstacle_candidate()
-        reason = "cruise_hold_margin"
+        if raw_requires_owner:
+          reason = "lead_reacquire_raw"
+        else:
+          reason = "lead_reacquire_filtered"
       else:
-        active_mode = self._advance_acc_obstacle_candidate(
-          'lead', now, HYUNDAI_LEAD_SOURCE_ENTER_DWELL_S, default_mode='cruise',
-        )
-        reason = "lead_dwell"
+        self._reset_acc_obstacle_candidate()
+        reason = "cruise_hold"
 
     if active_mode == 'lead':
       self._acc_obstacle_mode = 'lead'
       self.source = best_lead_source
-      active_obstacle = best_lead_obstacle
+      active_obstacle = np.minimum(best_lead_obstacle, filtered_lead_obstacle)
     else:
       self._acc_obstacle_mode = 'cruise'
       self.source = 'cruise'
@@ -769,46 +893,51 @@ class LongitudinalMpc:
       "active_mode": str(self._acc_obstacle_mode),
       "best_lead_source": str(best_lead_source),
       "best_lead_obstacle": float(best_lead_obstacle[0]),
+      "filtered_lead_obstacle": float(filtered_lead_obstacle[0]),
       "cruise_obstacle": float(cruise_obstacle[0]),
-      "delta_m": float(lead_delta_m),
-      "near_gap_accel_cap": float(self.hyundai_lead_accel_cap),
+      "raw_gap_surplus_m": float(raw_metrics["gap_surplus"]),
+      "filtered_gap_surplus_m": float(filtered_metrics["gap_surplus"]),
+      "raw_pullaway_mps": float(raw_metrics["pullaway_speed"]),
+      "filtered_pullaway_mps": float(filtered_metrics["pullaway_speed"]),
       "candidate_mode": self._acc_obstacle_candidate_mode,
       "reason": reason,
       "used_hysteresis": True,
     }
     return active_obstacle
 
-  def _update_cutin_settle_state(self, now: float, v_ego: float, leads, lead_role_debug: dict[str, object]) -> None:
-    for idx, lead in enumerate(leads):
-      slot_key = f"lead{idx}"
-      raw = lead_role_debug.get("raw", {}).get(slot_key, {})
-      path_abs_m = abs(float(raw.get("dPath", 0.0) or 0.0))
-      toward_center_mps = float(lead_role_debug.get("toward_center_mps", {}).get(slot_key, 0.0) or 0.0)
-      cutin_promoted = bool(lead_role_debug.get("cutin_promoted", {}).get(slot_key, False))
-      current_role = str(lead_role_debug.get("roles", {}).get(slot_key, LeadRoleClassifier.INVALID))
-      prev_role = self._prev_lead_roles.get(slot_key, LeadRoleClassifier.INVALID)
-      prev_control_active = bool(self._prev_control_status.get(slot_key, False))
+  def _update_cutin_settle_state(self, now: float, v_ego: float, lead_role_debug: dict[str, object]) -> None:
+    slot_key, lead = self._get_best_control_lead()
+    if slot_key is None or lead is None or not bool(getattr(lead, 'status', False)):
+      self._virtual_cutin_event_t = None
+      self._prev_virtual_lead_role = LeadRoleClassifier.INVALID
+      self._prev_virtual_lead_control_active = False
+      return
 
-      if should_start_cutin_settle_event(
-        prev_role,
-        prev_control_active,
-        current_role,
-        lead,
-        cutin_promoted=cutin_promoted,
-        toward_center_mps=toward_center_mps,
-        path_abs_m=path_abs_m,
-        v_ego=v_ego,
-      ):
-        self._cutin_event_t[slot_key] = now
-      elif not bool(getattr(lead, 'status', False)):
-        self._cutin_event_t[slot_key] = None
+    raw = lead_role_debug.get("raw", {}).get(slot_key, {})
+    path_abs_m = abs(float(raw.get("dPath", 0.0) or 0.0))
+    toward_center_mps = float(lead_role_debug.get("toward_center_mps", {}).get(slot_key, 0.0) or 0.0)
+    cutin_promoted = bool(lead_role_debug.get("cutin_promoted", {}).get(slot_key, False))
+    current_role = str(lead_role_debug.get("roles", {}).get(slot_key, LeadRoleClassifier.INVALID))
+    prev_role = LeadRoleClassifier.INVALID if self._hyundai_virtual_lead_identity_changed else self._prev_virtual_lead_role
+    prev_control_active = False if self._hyundai_virtual_lead_identity_changed else self._prev_virtual_lead_control_active
 
-      event_t = self._cutin_event_t.get(slot_key, None)
-      if event_t is not None and (now - float(event_t)) > self._live_tune_cfg.cutin_settle_duration_s:
-        self._cutin_event_t[slot_key] = None
+    if should_start_cutin_settle_event(
+      prev_role,
+      prev_control_active,
+      current_role,
+      lead,
+      cutin_promoted=cutin_promoted,
+      toward_center_mps=toward_center_mps,
+      path_abs_m=path_abs_m,
+      v_ego=v_ego,
+    ):
+      self._virtual_cutin_event_t = now
 
-      self._prev_lead_roles[slot_key] = current_role
-      self._prev_control_status[slot_key] = bool(getattr(lead, 'status', False))
+    if self._virtual_cutin_event_t is not None and (now - float(self._virtual_cutin_event_t)) > self._live_tune_cfg.cutin_settle_duration_s:
+      self._virtual_cutin_event_t = None
+
+    self._prev_virtual_lead_role = current_role
+    self._prev_virtual_lead_control_active = bool(getattr(lead, 'status', False))
 
   def set_cost_weights(self, cost_weights, constraint_cost_weights):
     W = np.asfortranarray(np.diag(cost_weights))
@@ -903,7 +1032,7 @@ class LongitudinalMpc:
     slot_idx = 0 if self.source == 'lead0' else 1
     slot_key = f"lead{slot_idx}"
     lead = self.control_leads[slot_idx]
-    event_t = self._cutin_event_t.get(slot_key, None)
+    event_t = self._virtual_cutin_event_t
     if event_t is None:
       return 0.0
 
@@ -979,7 +1108,7 @@ class LongitudinalMpc:
     control_lead0, control_lead1 = self.control_leads
     self.lead_role_debug = lead_role_debug
     self.status = control_lead0.status or control_lead1.status
-    self._update_cutin_settle_state(now, v_ego, self.control_leads, lead_role_debug)
+    self._update_cutin_settle_state(now, v_ego, lead_role_debug)
 
     response_model = self.get_cruise_response_model(v_ego)
     self.last_cruise_response_model = response_model
@@ -998,19 +1127,14 @@ class LongitudinalMpc:
     lead_1_obstacle = apply_lead_approach_preview(lead_1_obstacle, lead_1_preview)
     self.lead_approach_preview = (lead_0_preview, lead_1_preview)
 
-    self.hyundai_lead_accel_cap = self._get_hyundai_lead_accel_cap() if self.mode == 'acc' else ACCEL_MAX
-
     self.params[:,0] = ACCEL_MIN
-    self.params[:,1] = min(ACCEL_MAX, self.hyundai_lead_accel_cap)
+    self.params[:,1] = ACCEL_MAX
 
     # Update in ACC mode or ACC/e2e blend
     if self.mode == 'acc':
       self.params[:,5] = LEAD_DANGER_FACTOR
 
-      response_model = self.get_cruise_response_model(
-        v_ego,
-        planner_accel_limits=(ACCEL_MIN, min(ACCEL_MAX, self.hyundai_lead_accel_cap)),
-      )
+      response_model = self.get_cruise_response_model(v_ego)
       self.last_cruise_response_model = response_model
 
       # Fake an obstacle for cruise, this ensures smooth acceleration to set speed
@@ -1037,6 +1161,7 @@ class LongitudinalMpc:
       self.last_v_upper = None
       self.last_v_cruise_clipped = None
       self.params[:,5] = 1.0
+      self.hyundai_virtual_lead_debug = {"active": False, "reset_reason": "non_acc_mode"}
 
       x_obstacles = np.column_stack([lead_0_obstacle,
                                      lead_1_obstacle])
@@ -1118,6 +1243,7 @@ class LongitudinalMpc:
             **self.cutin_settle_debug,
           },
           "source_hysteresis": self.acc_source_debug,
+          "filtered_virtual_lead": self.hyundai_virtual_lead_debug,
           "virtual_duplicate": lead_role_debug.get("virtual_duplicate", {"active": False}),
           "raw_duplicate_model": lead_role_debug.get("raw_duplicate_model", {}),
           "raw": lead_role_debug.get("raw", {}),
