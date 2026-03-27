@@ -6,6 +6,7 @@ from cereal import log
 from openpilot.common.params import Params
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import (
   get_cutin_settle_accel_floor,
+  get_gap_reclaim_effective_cap,
   get_gap_reclaim_accel_floor,
   get_lead_approach_preview_buffer,
   should_start_cutin_settle_event,
@@ -95,6 +96,26 @@ class TestLeadInteractionHeuristics:
     assert floor > 0.1
     assert get_gap_reclaim_accel_floor(33.5, slower_lead, 1.3) == pytest.approx(0.0)
     assert get_gap_reclaim_accel_floor(33.5, braking_lead, 1.3) == pytest.approx(0.0)
+
+  def test_gap_reclaim_effective_cap_expands_toward_personality_accel_for_large_surplus_gap(self):
+    wide_pullaway = _make_lead(d_rel=72.0, v_lead=35.2, a_lead=0.2)
+
+    comfort_cap = get_gap_reclaim_effective_cap(33.5, wide_pullaway, 1.3)
+    sport_cap = get_gap_reclaim_effective_cap(33.5, wide_pullaway, 1.3, personality_max_accel=1.15)
+    comfort_floor = get_gap_reclaim_accel_floor(33.5, wide_pullaway, 1.3)
+    sport_floor = get_gap_reclaim_accel_floor(33.5, wide_pullaway, 1.3, personality_max_accel=1.15)
+
+    assert sport_cap > comfort_cap + 0.25
+    assert sport_cap <= 1.15 + 1e-6
+    assert sport_floor > comfort_floor + 0.15
+
+  def test_gap_reclaim_effective_cap_stays_close_to_comfort_near_target_gap(self):
+    near_target_pullaway = _make_lead(d_rel=51.5, v_lead=34.1, a_lead=0.1)
+
+    comfort_cap = get_gap_reclaim_effective_cap(33.5, near_target_pullaway, 1.3)
+    sport_cap = get_gap_reclaim_effective_cap(33.5, near_target_pullaway, 1.3, personality_max_accel=1.15)
+
+    assert sport_cap - comfort_cap < 0.10
 
   def test_approach_preview_only_appears_when_closing_outside_headway(self):
     closing_far = _make_lead(d_rel=79.0, v_lead=27.0, a_lead=0.0)

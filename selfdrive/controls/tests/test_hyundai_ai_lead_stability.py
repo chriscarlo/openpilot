@@ -39,6 +39,13 @@ def _configure_vibe_follow(headway=1.3):
     params.put(f'VibeTune.Follow.Standard.Headway{idx}', float(headway))
 
 
+def _configure_vibe_accel(*, enabled: bool, personality: int = 0):
+  params = Params()
+  params.put_bool('VibePersonalityEnabled', True)
+  params.put_bool('VibeAccelPersonalityEnabled', enabled)
+  params.put('AccelPersonality', str(int(personality)))
+
+
 def _make_hyundai_mpc(v_ego=29.0, a_ego=0.0):
   mpc = LongitudinalMpc(CP=SimpleNamespace(brand='hyundai'))
   mpc.mode = 'acc'
@@ -268,6 +275,31 @@ class TestHyundaiAiLeadStability:
     assert mpc.gap_reclaim_accel_floor > 0.0
     assert mpc.gap_reclaim_obstacle_push > 1.0
     assert mpc.acc_source_debug["raw_reclaim_safety_override"] is False
+
+  def test_reclaim_blend_tapers_when_personality_cap_is_higher_than_comfort_cap(self, monkeypatch):
+    _configure_vibe_accel(enabled=True, personality=0)
+    monkeypatch.setattr(
+      "openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc.time.monotonic",
+      _MonotonicStub(step=0.2),
+    )
+    mpc = _make_hyundai_mpc()
+
+    for _ in range(2):
+      _run_update(
+        mpc,
+        _make_lead(d_rel=44.5, y_rel=0.04, d_path=0.04, v_lat=0.35, v_rel=0.0, v_lead=29.0, a_lead=0.0, model_prob=0.96),
+        _make_lead(d_rel=44.45, y_rel=0.07, d_path=0.07, v_lat=4.00, v_rel=0.0, v_lead=29.0, a_lead=0.0, model_prob=0.93),
+      )
+
+    for _ in range(2):
+      _run_update(
+        mpc,
+        _make_lead(d_rel=60.0, y_rel=0.04, d_path=0.04, v_lat=0.35, v_rel=0.4, v_lead=29.4, a_lead=0.1, model_prob=0.96),
+        _make_lead(d_rel=59.95, y_rel=0.07, d_path=0.07, v_lat=4.00, v_rel=0.4, v_lead=29.4, a_lead=0.1, model_prob=0.93),
+      )
+
+    assert mpc.gap_reclaim_effective_cap > mpc._live_tune_cfg.gap_reclaim_max_accel
+    assert 0.0 < mpc._gap_reclaim_blend < 1.0
 
   def test_reclaim_raw_safety_override_still_engages_for_real_closing(self, monkeypatch):
     monkeypatch.setattr(

@@ -71,6 +71,10 @@ GAP_RECLAIM_PULLAWAY_BP = [0.0, 0.5, 1.5, 3.0]
 GAP_RECLAIM_PULLAWAY_V = [0.0, 0.04, 0.12, 0.20]
 GAP_RECLAIM_LEAD_ACCEL_BP = [0.0, 0.5, 1.5]
 GAP_RECLAIM_LEAD_ACCEL_V = [0.0, 0.03, 0.06]
+GAP_RECLAIM_PERSONALITY_SURPLUS_BP = [0.0, 0.06, 0.18, 0.35]
+GAP_RECLAIM_PERSONALITY_SURPLUS_V = [0.0, 0.0, 0.40, 1.0]
+GAP_RECLAIM_PERSONALITY_PULLAWAY_BP = [0.0, 0.3, 0.8, 1.6]
+GAP_RECLAIM_PERSONALITY_PULLAWAY_V = [0.0, 0.12, 0.45, 1.0]
 GAP_RECLAIM_BLEND_RISE_TAU_S = 0.60
 GAP_RECLAIM_BLEND_FALL_TAU_S = 1.20
 GAP_RECLAIM_HORIZON_RAMP_TAU_S = 1.00
@@ -188,8 +192,37 @@ def apply_lead_approach_preview(lead_obstacle, preview_buffer_m):
   return np.maximum(lead_obstacle - preview_buffer_m * decay, 0.0)
 
 
+def get_gap_reclaim_effective_cap(v_ego, lead, t_follow,
+                                  tuning: LeadResponseTuningConfig | None = None,
+                                  personality_max_accel: float | None = None) -> float:
+  tuning = LeadResponseTuningConfig.defaults() if tuning is None else tuning
+  comfort_cap = max(float(tuning.gap_reclaim_max_accel), 1e-3)
+  if (lead is None or not getattr(lead, 'status', False) or v_ego < GAP_RECLAIM_MIN_SPEED or
+      personality_max_accel is None):
+    return comfort_cap
+
+  personality_cap = max(comfort_cap, float(personality_max_accel))
+  if personality_cap <= comfort_cap:
+    return comfort_cap
+
+  v_lead = float(getattr(lead, 'vLead', v_ego) or v_ego)
+  d_rel = float(getattr(lead, 'dRel', 0.0) or 0.0)
+  gap_surplus = d_rel - get_headway_follow_distance(float(v_ego), t_follow)
+  if gap_surplus <= tuning.gap_reclaim_gap_min_m:
+    return comfort_cap
+
+  headway_surplus = gap_surplus / max(float(v_ego), GAP_RECLAIM_MIN_SPEED)
+  pullaway_speed = max(0.0, v_lead - float(v_ego))
+  surplus_blend = float(np.interp(headway_surplus, GAP_RECLAIM_PERSONALITY_SURPLUS_BP, GAP_RECLAIM_PERSONALITY_SURPLUS_V))
+  pullaway_blend = float(np.interp(pullaway_speed, GAP_RECLAIM_PERSONALITY_PULLAWAY_BP, GAP_RECLAIM_PERSONALITY_PULLAWAY_V))
+  surplus_activation = float(np.interp(headway_surplus, GAP_RECLAIM_PERSONALITY_SURPLUS_BP, [0.0, 0.15, 0.55, 1.0]))
+  cap_blend = max(surplus_blend, pullaway_blend * surplus_activation)
+  return float(comfort_cap + (personality_cap - comfort_cap) * cap_blend)
+
+
 def get_gap_reclaim_accel_floor(v_ego, lead, t_follow,
-                                tuning: LeadResponseTuningConfig | None = None) -> float:
+                                tuning: LeadResponseTuningConfig | None = None,
+                                personality_max_accel: float | None = None) -> float:
   tuning = LeadResponseTuningConfig.defaults() if tuning is None else tuning
   if lead is None or not getattr(lead, 'status', False) or v_ego < GAP_RECLAIM_MIN_SPEED:
     return 0.0
@@ -212,8 +245,18 @@ def get_gap_reclaim_accel_floor(v_ego, lead, t_follow,
   gap_term = float(np.interp(headway_surplus, GAP_RECLAIM_HEADWAY_SURPLUS_BP, GAP_RECLAIM_HEADWAY_SURPLUS_V))
   pullaway_term = float(np.interp(pullaway_speed, GAP_RECLAIM_PULLAWAY_BP, GAP_RECLAIM_PULLAWAY_V))
   accel_term = float(np.interp(max(0.0, lead_accel), GAP_RECLAIM_LEAD_ACCEL_BP, GAP_RECLAIM_LEAD_ACCEL_V))
-  floor = (max(gap_term, pullaway_term) + accel_term) * tuning.gap_reclaim_strength
-  return float(np.clip(floor, 0.0, tuning.gap_reclaim_max_accel))
+  comfort_cap = max(float(tuning.gap_reclaim_max_accel), 1e-3)
+  intent = (max(gap_term, pullaway_term) + accel_term) * tuning.gap_reclaim_strength
+  intent_fraction = float(np.clip(intent / comfort_cap, 0.0, 1.0))
+  effective_cap = get_gap_reclaim_effective_cap(
+    v_ego,
+    lead,
+    t_follow,
+    tuning,
+    personality_max_accel=personality_max_accel,
+  )
+  floor = intent_fraction * effective_cap
+  return float(np.clip(floor, 0.0, effective_cap))
 
 
 def should_start_cutin_settle_event(prev_role: str, prev_control_active: bool, current_role: str,
@@ -450,6 +493,8 @@ class LongitudinalMpc:
     self.lead_approach_preview = (0.0, 0.0)
     self.gap_reclaim_accel_floor = 0.0
     self.gap_reclaim_obstacle_push = 0.0
+    self.gap_reclaim_personality_max_accel = 0.0
+    self.gap_reclaim_effective_cap = 0.0
     self._gap_reclaim_blend = 0.0
     self._gap_reclaim_last_t = None
     self._raw_reclaim_safety_override_active = False
@@ -608,22 +653,46 @@ class LongitudinalMpc:
     self._gap_reclaim_blend = float(self._gap_reclaim_blend + alpha * (target_blend - self._gap_reclaim_blend))
     return self._gap_reclaim_blend
 
+  def _get_gap_reclaim_personality_max_accel(self, v_ego: float) -> float | None:
+    max_accel = self.vibe_controller.get_max_accel(v_ego)
+    if max_accel is None:
+      return None
+    return float(max_accel)
+
   def _apply_hyundai_gap_reclaim(self, raw_lead_obstacle: np.ndarray, filtered_lead_obstacle: np.ndarray,
                                  raw_lead, filtered_lead, now: float) -> np.ndarray:
     self.gap_reclaim_accel_floor = 0.0
     self.gap_reclaim_obstacle_push = 0.0
+    self.gap_reclaim_personality_max_accel = 0.0
+    self.gap_reclaim_effective_cap = 0.0
     self._raw_reclaim_safety_override_active = False
 
     if not self._hyundai_ai_lead_stability_enabled:
       self._gap_reclaim_blend = 0.0
       self._gap_reclaim_last_t = now
+      self.gap_reclaim_effective_cap = 0.0
       return np.minimum(raw_lead_obstacle, filtered_lead_obstacle)
 
     reclaim_lead = self._update_hyundai_reclaim_lead(now, raw_lead, filtered_lead)
+    personality_max_accel = self._get_gap_reclaim_personality_max_accel(float(self.x0[1]))
+    self.gap_reclaim_personality_max_accel = float(personality_max_accel or 0.0)
+    self.gap_reclaim_effective_cap = get_gap_reclaim_effective_cap(
+      float(self.x0[1]),
+      reclaim_lead,
+      self.current_t_follow,
+      self._live_tune_cfg,
+      personality_max_accel=personality_max_accel,
+    )
 
-    reclaim_intent = get_gap_reclaim_accel_floor(float(self.x0[1]), reclaim_lead, self.current_t_follow, self._live_tune_cfg)
+    reclaim_intent = get_gap_reclaim_accel_floor(
+      float(self.x0[1]),
+      reclaim_lead,
+      self.current_t_follow,
+      self._live_tune_cfg,
+      personality_max_accel=personality_max_accel,
+    )
     self.gap_reclaim_accel_floor = float(reclaim_intent)
-    max_intent = max(float(self._live_tune_cfg.gap_reclaim_max_accel), 1e-3)
+    max_intent = max(float(self.gap_reclaim_effective_cap), 1e-3)
     target_blend = reclaim_intent / max_intent if max_intent > 0.0 else 0.0
     blend = self._update_gap_reclaim_blend(target_blend, now)
     obstacle_delta = np.maximum(raw_lead_obstacle - filtered_lead_obstacle, 0.0)
@@ -915,6 +984,7 @@ class LongitudinalMpc:
       self._acc_obstacle_mode = 'cruise'
       self._reset_acc_obstacle_candidate()
       self.gap_reclaim_obstacle_push = 0.0
+      self.gap_reclaim_effective_cap = 0.0
       self._gap_reclaim_blend = 0.0
       self._gap_reclaim_last_t = now
       self.source = 'cruise'
@@ -1007,6 +1077,7 @@ class LongitudinalMpc:
       self._acc_obstacle_mode = 'cruise'
       self.source = 'cruise'
       self.gap_reclaim_obstacle_push = 0.0
+      self.gap_reclaim_effective_cap = 0.0
       self._raw_reclaim_safety_override_active = False
       active_obstacle = cruise_obstacle
 
@@ -1022,6 +1093,8 @@ class LongitudinalMpc:
       "filtered_pullaway_mps": float(filtered_metrics["pullaway_speed"]),
       "gap_reclaim_blend": float(self._gap_reclaim_blend),
       "gap_reclaim_obstacle_push_m": float(self.gap_reclaim_obstacle_push),
+      "gap_reclaim_effective_cap": float(self.gap_reclaim_effective_cap),
+      "gap_reclaim_personality_max_accel": float(self.gap_reclaim_personality_max_accel),
       "raw_reclaim_safety_override": bool(self._raw_reclaim_safety_override_active),
       "candidate_mode": self._acc_obstacle_candidate_mode,
       "reason": reason,
@@ -1143,10 +1216,24 @@ class LongitudinalMpc:
     if self._hyundai_ai_lead_stability_enabled:
       if self.source not in ('lead0', 'lead1') or self._hyundai_reclaim_lead is None:
         return 0.0
-      return float(get_gap_reclaim_accel_floor(v_ego, self._hyundai_reclaim_lead, self.current_t_follow, self._live_tune_cfg))
+      personality_max_accel = self._get_gap_reclaim_personality_max_accel(v_ego)
+      return float(get_gap_reclaim_accel_floor(
+        v_ego,
+        self._hyundai_reclaim_lead,
+        self.current_t_follow,
+        self._live_tune_cfg,
+        personality_max_accel=personality_max_accel,
+      ))
 
+    personality_max_accel = self._get_gap_reclaim_personality_max_accel(v_ego)
     return float(max(
-      get_gap_reclaim_accel_floor(v_ego, lead, self.current_t_follow, self._live_tune_cfg)
+      get_gap_reclaim_accel_floor(
+        v_ego,
+        lead,
+        self.current_t_follow,
+        self._live_tune_cfg,
+        personality_max_accel=personality_max_accel,
+      )
       for lead in self.control_leads
     ))
 
@@ -1310,6 +1397,8 @@ class LongitudinalMpc:
       }
       self.gap_reclaim_accel_floor = 0.0
       self.gap_reclaim_obstacle_push = 0.0
+      self.gap_reclaim_personality_max_accel = 0.0
+      self.gap_reclaim_effective_cap = 0.0
       self._gap_reclaim_blend = 0.0
       self._gap_reclaim_last_t = now
       self.cutin_settle_active = False
