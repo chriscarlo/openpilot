@@ -160,8 +160,85 @@ def get_RadarState_from_vision(lead_msg: capnp._DynamicStructReader, v_ego: floa
   }
 
 
+def _get_model_path_xy(model_msg: capnp._DynamicStructReader) -> tuple[np.ndarray, np.ndarray] | None:
+  try:
+    path_x = np.asarray(model_msg.position.x, dtype=float)
+    path_y = np.asarray(model_msg.position.y, dtype=float)
+  except Exception:
+    return None
+
+  if path_x.size < 2 or path_x.size != path_y.size:
+    return None
+
+  finite = np.isfinite(path_x) & np.isfinite(path_y)
+  path_x = path_x[finite]
+  path_y = path_y[finite]
+  if path_x.size < 2:
+    return None
+
+  # Model path points are published in increasing longitudinal order; guard against
+  # malformed inputs to keep interpolation stable.
+  if np.any(np.diff(path_x) < 0.0):
+    order = np.argsort(path_x)
+    path_x = path_x[order]
+    path_y = path_y[order]
+
+  return path_x, path_y
+
+
+def get_path_y_rel(model_msg: capnp._DynamicStructReader, d_rel: float) -> float:
+  path_xy = _get_model_path_xy(model_msg)
+  if path_xy is None or not math.isfinite(d_rel):
+    return 0.0
+
+  path_x, path_y = path_xy
+  x_device = float(np.clip(d_rel + RADAR_TO_CAMERA, path_x[0], path_x[-1]))
+  return float(-np.interp(x_device, path_x, path_y))
+
+
+def get_path_relative_lead_metrics(lead_dict: dict[str, Any], model_msg: capnp._DynamicStructReader,
+                                   lead_msg: capnp._DynamicStructReader | None = None) -> tuple[float, float]:
+  y_rel = float(lead_dict.get("yRel", 0.0) or 0.0)
+  d_rel = float(lead_dict.get("dRel", 0.0) or 0.0)
+  d_path = y_rel - get_path_y_rel(model_msg, d_rel)
+  v_lat = 0.0
+
+  if lead_msg is not None:
+    try:
+      times = np.asarray(lead_msg.t, dtype=float)
+      xs = np.asarray(lead_msg.x, dtype=float)
+      ys = np.asarray(lead_msg.y, dtype=float)
+      valid = np.isfinite(times) & np.isfinite(xs) & np.isfinite(ys)
+      if np.any(valid):
+        times = times[valid]
+        xs = xs[valid]
+        ys = ys[valid]
+        future_idxs = np.where(times > (times[0] + 1e-3))[0]
+        if future_idxs.size > 0:
+          i = int(future_idxs[0])
+          future_d_rel = float(xs[i] - RADAR_TO_CAMERA)
+          future_y_rel = float(-ys[i])
+          future_d_path = future_y_rel - get_path_y_rel(model_msg, future_d_rel)
+          dt = float(times[i] - times[0])
+          if dt > 1e-3:
+            v_lat = float((future_d_path - d_path) / dt)
+    except Exception:
+      v_lat = 0.0
+
+  return d_path, v_lat
+
+
+def add_path_relative_lead_metrics(lead_dict: dict[str, Any], model_msg: capnp._DynamicStructReader,
+                                   lead_msg: capnp._DynamicStructReader | None = None) -> dict[str, Any]:
+  d_path, v_lat = get_path_relative_lead_metrics(lead_dict, model_msg, lead_msg)
+  lead_dict["dPath"] = float(d_path)
+  lead_dict["vLat"] = float(v_lat)
+  return lead_dict
+
+
 def get_lead(v_ego: float, ready: bool, tracks: dict[int, Track], lead_msg: capnp._DynamicStructReader,
-             model_v_ego: float, CP: structs.CarParams, CP_SP: structs.CarParamsSP, low_speed_override: bool = True) -> dict[str, Any]:
+             model_v_ego: float, CP: structs.CarParams, CP_SP: structs.CarParamsSP, model_msg: capnp._DynamicStructReader,
+             low_speed_override: bool = True) -> dict[str, Any]:
   # Determine leads, this is where the essential logic happens
   if len(tracks) > 0 and ready and lead_msg.prob > .5:
     track = match_vision_to_track(v_ego, lead_msg, tracks)
@@ -183,6 +260,9 @@ def get_lead(v_ego: float, ready: bool, tracks: dict[int, Track], lead_msg: capn
       # Only choose new track if it is actually closer than the previous one
       if (not lead_dict['status']) or (closest_track.dRel < lead_dict['dRel']):
         lead_dict = closest_track.get_RadarState()
+
+  if lead_dict.get("status", False):
+    lead_dict = add_path_relative_lead_metrics(lead_dict, model_msg, lead_msg if ready else None)
 
   return lead_dict
 
@@ -256,8 +336,10 @@ class RadarD:
       model_v_ego = self.v_ego
     leads_v3 = sm['modelV2'].leadsV3
     if len(leads_v3) > 1:
-      self.radar_state.leadOne = get_lead(self.v_ego, self.ready, self.tracks, leads_v3[0], model_v_ego, self.CP, self.CP_SP, low_speed_override=True)
-      self.radar_state.leadTwo = get_lead(self.v_ego, self.ready, self.tracks, leads_v3[1], model_v_ego, self.CP, self.CP_SP, low_speed_override=False)
+      self.radar_state.leadOne = get_lead(self.v_ego, self.ready, self.tracks, leads_v3[0], model_v_ego, self.CP, self.CP_SP, sm['modelV2'],
+                                          low_speed_override=True)
+      self.radar_state.leadTwo = get_lead(self.v_ego, self.ready, self.tracks, leads_v3[1], model_v_ego, self.CP, self.CP_SP, sm['modelV2'],
+                                          low_speed_override=False)
 
   def publish(self, pm: messaging.PubMaster):
     assert self.radar_state is not None

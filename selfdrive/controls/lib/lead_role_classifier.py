@@ -73,6 +73,7 @@ class LeadRoleClassifier:
       "center_y_abs_min_m": 1.2,
       "center_hyst_m": 0.35,
       "cutin_drel_max_m": 55.0,
+      "cutin_path_abs_max_m": 3.5,
       "cutin_yrate_min_mps": 0.8,
       "low_speed_bypass_v_mps": 8.0,
       "dedupe_drel_eps_m": 2.0,
@@ -116,6 +117,12 @@ class LeadRoleClassifier:
     except Exception:
       return False
 
+  @staticmethod
+  def _get_path_offset(lead: Any) -> float:
+    d_path = float(getattr(lead, "dPath", 0.0) or 0.0)
+    y_rel = float(getattr(lead, "yRel", 0.0) or 0.0)
+    return d_path if math.isfinite(d_path) else y_rel
+
   def _refresh_params(self, now: float) -> None:
     if (now - self._last_refresh_t) < self.REFRESH_DT_S:
       return
@@ -142,19 +149,24 @@ class LeadRoleClassifier:
       info["reason"] = "invalid_or_missing"
       return self.INVALID, info
 
-    y_rel = float(getattr(lead, "yRel", 0.0) or 0.0)
-    y_abs = abs(y_rel)
+    path_offset = self._get_path_offset(lead)
+    path_abs = abs(path_offset)
     d_rel = float(getattr(lead, "dRel", 0.0) or 0.0)
+    v_lat = float(getattr(lead, "vLat", 0.0) or 0.0)
 
     prev = self._slot_state.get(slot, {})
     prev_role = str(prev.get("role", self.INVALID))
     prev_y_abs = prev.get("y_abs")
     prev_t = prev.get("t")
 
-    toward_center_mps = 0.0
+    toward_center_hist_mps = 0.0
     if prev_y_abs is not None and prev_t is not None:
       dt = max(now - float(prev_t), 1e-3)
-      toward_center_mps = max(0.0, (float(prev_y_abs) - y_abs) / dt)
+      toward_center_hist_mps = max(0.0, (float(prev_y_abs) - path_abs) / dt)
+    toward_center_model_mps = 0.0
+    if math.isfinite(v_lat) and path_abs > 1e-3:
+      toward_center_model_mps = max(0.0, -v_lat * math.copysign(1.0, path_offset))
+    toward_center_mps = max(toward_center_hist_mps, toward_center_model_mps)
     info["toward_center_mps"] = toward_center_mps
 
     if not gate_active:
@@ -163,12 +175,13 @@ class LeadRoleClassifier:
     else:
       center_enter_m = self._cfg["center_y_abs_min_m"]
       center_exit_m = self._cfg["center_y_abs_max_m"] + self._cfg["center_hyst_m"]
-      in_center = y_abs <= (center_exit_m if prev_role == self.CENTER_CONTROL else center_enter_m)
+      in_center = path_abs <= (center_exit_m if prev_role == self.CENTER_CONTROL else center_enter_m)
+      cutin_enter_m = max(center_exit_m, self._cfg["cutin_path_abs_max_m"])
 
       cutin_ok = (
         (d_rel <= self._cfg["cutin_drel_max_m"])
         and (toward_center_mps >= self._cfg["cutin_yrate_min_mps"])
-        and (y_abs <= center_exit_m)
+        and (path_abs <= cutin_enter_m)
       )
       if (not in_center) and cutin_ok:
         in_center = True
@@ -178,10 +191,10 @@ class LeadRoleClassifier:
         role = self.CENTER_CONTROL
         info["reason"] = "center_lane"
       else:
-        role = self.ADJ_LEFT if y_rel > 0.0 else self.ADJ_RIGHT
+        role = self.ADJ_LEFT if path_offset > 0.0 else self.ADJ_RIGHT
         info["reason"] = "adjacent_lane"
 
-    self._slot_state[slot] = {"role": role, "y_abs": y_abs, "t": now}
+    self._slot_state[slot] = {"role": role, "y_abs": path_abs, "t": now}
     return role, info
 
   def _is_duplicate_pair(self, lead0: Any, lead1: Any) -> bool:
@@ -230,6 +243,8 @@ class LeadRoleClassifier:
           "role": role,
           "dRel": float(getattr(lead, "dRel", 0.0) or 0.0),
           "yRel": float(getattr(lead, "yRel", 0.0) or 0.0),
+          "dPath": float(getattr(lead, "dPath", 0.0) or 0.0),
+          "vLat": float(getattr(lead, "vLat", 0.0) or 0.0),
           "vRel": float(getattr(lead, "vRel", 0.0) or 0.0),
           "dropped_duplicate": dropped_slot == idx,
         })
@@ -260,12 +275,16 @@ class LeadRoleClassifier:
           "status": bool(getattr(lead0, "status", False)),
           "dRel": float(getattr(lead0, "dRel", 0.0) or 0.0),
           "yRel": float(getattr(lead0, "yRel", 0.0) or 0.0),
+          "dPath": float(getattr(lead0, "dPath", 0.0) or 0.0),
+          "vLat": float(getattr(lead0, "vLat", 0.0) or 0.0),
           "vRel": float(getattr(lead0, "vRel", 0.0) or 0.0),
         },
         "lead1": {
           "status": bool(getattr(lead1, "status", False)),
           "dRel": float(getattr(lead1, "dRel", 0.0) or 0.0),
           "yRel": float(getattr(lead1, "yRel", 0.0) or 0.0),
+          "dPath": float(getattr(lead1, "dPath", 0.0) or 0.0),
+          "vLat": float(getattr(lead1, "vLat", 0.0) or 0.0),
           "vRel": float(getattr(lead1, "vRel", 0.0) or 0.0),
         },
       },
@@ -275,6 +294,7 @@ class LeadRoleClassifier:
         "center_y_abs_min_m": float(self._cfg["center_y_abs_min_m"]),
         "center_hyst_m": float(self._cfg["center_hyst_m"]),
         "cutin_drel_max_m": float(self._cfg["cutin_drel_max_m"]),
+        "cutin_path_abs_max_m": float(self._cfg["cutin_path_abs_max_m"]),
         "cutin_yrate_min_mps": float(self._cfg["cutin_yrate_min_mps"]),
       },
     }
