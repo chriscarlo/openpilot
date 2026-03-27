@@ -67,6 +67,11 @@ python3 .codex/skills/openpilot-longitudinal-tuner/scripts/monitor_longitudinal_
   before assuming the classifier is late. If the lead becomes control early but
   braking still spikes, the issue is usually the post-recognition gap recovery
   path rather than lead selection.
+- Hyundai no-radar AI lead following pulses or chatters near settled headway:
+  inspect `LEADROLEDBG.virtual_duplicate` and `LEADROLEDBG.source_hysteresis`
+  before changing gap reclaim or cut-in settings. On this path the primary
+  failure mode is often duplicate model hypotheses for one physical car causing
+  the active ACC obstacle to bounce between lead-follow and cruise.
 - Planner target looks reasonable, but the car command does not:
   compare `longitudinalPlan.aTarget`, `carControl.actuators.accel`,
   `carOutput.actuatorsOutput.accel`, and delayed `carState.aEgo`. If the first
@@ -84,7 +89,9 @@ python3 .codex/skills/openpilot-longitudinal-tuner/scripts/monitor_longitudinal_
 - Hyundai jerk or stop/go complaints:
   inspect `LongControl` state and the Hyundai
   `opendbc/sunnypilot/car/hyundai/longitudinal/controller.py` overlay before
-  concluding the planner is wrong.
+  concluding the planner is wrong. Hyundai EVs already have separate actuator
+  jerk/lookahead tuning in that overlay, so not every follow feel complaint
+  should be solved in MPC.
 
 ## Verification Commands
 

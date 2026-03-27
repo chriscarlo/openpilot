@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import copy
 import json
 import os
 import time
@@ -11,7 +12,7 @@ from openpilot.common.swaglog import cloudlog
 # WARNING: imports outside of constants will not trigger a rebuild
 from openpilot.selfdrive.modeld.constants import index_function
 from openpilot.selfdrive.controls.radard import _LEAD_ACCEL_TAU
-from openpilot.selfdrive.controls.lib.lead_role_classifier import LeadRoleClassifier
+from openpilot.selfdrive.controls.lib.lead_role_classifier import ControlLead, LeadRoleClassifier
 from openpilot.selfdrive.controls.lib.longitudinal_live_tune import (
   LeadResponseTuningConfig,
   read_lead_response_tuning_config,
@@ -78,6 +79,16 @@ CUTIN_SETTLE_DANGER_MARGIN_M = 2.0
 CUTIN_SETTLE_LEAD_ACCEL_MIN = -0.5
 CUTIN_SETTLE_PROGRESS_BP = [0.0, 0.15, 0.5, 1.0]
 CUTIN_SETTLE_PROGRESS_V = [0.0, 0.10, 0.45, 1.0]
+HYUNDAI_DUPLICATE_PATH_SWITCH_M = 0.10
+HYUNDAI_DUPLICATE_MODEL_PROB_SWITCH = 0.10
+HYUNDAI_DUPLICATE_VLAT_SWITCH_MPS = 1.0
+HYUNDAI_DUPLICATE_DREL_SWITCH_M = 0.75
+HYUNDAI_LEAD_SOURCE_ENTER_MARGIN_M = 1.0
+HYUNDAI_LEAD_SOURCE_EXIT_MARGIN_M = 1.5
+HYUNDAI_LEAD_SOURCE_ENTER_DWELL_S = 0.35
+HYUNDAI_LEAD_SOURCE_EXIT_DWELL_S = 0.75
+HYUNDAI_LEAD_SOURCE_ENTER_IMMEDIATE_MARGIN_M = 3.0
+HYUNDAI_LEAD_SOURCE_EXIT_IMMEDIATE_MARGIN_M = 4.0
 
 
 # Fewer timestamps don't hurt performance and lead to
@@ -380,9 +391,10 @@ def gen_long_ocp():
 class LongitudinalMpc:
   LIVE_TUNE_REFRESH_DT_S = 0.50
 
-  def __init__(self, mode='acc', dt=DT_MDL):
+  def __init__(self, mode='acc', dt=DT_MDL, CP=None):
     self.mode = mode
     self.dt = dt
+    self._hyundai_ai_lead_stability_enabled = bool(getattr(CP, 'brand', None) == 'hyundai')
     self.solver = AcadosOcpSolverCython(MODEL_NAME, ACADOS_SOLVER_TYPE, N)
     self._live_tune_params = Params()
     self._last_live_tune_refresh_t = 0.0
@@ -429,6 +441,11 @@ class LongitudinalMpc:
     self._cutin_event_t = {"lead0": None, "lead1": None}
     self._prev_lead_roles = {"lead0": LeadRoleClassifier.INVALID, "lead1": LeadRoleClassifier.INVALID}
     self._prev_control_status = {"lead0": False, "lead1": False}
+    self._hyundai_duplicate_selected_raw_slot = None
+    self._acc_obstacle_mode = 'cruise'
+    self._acc_obstacle_candidate_mode = None
+    self._acc_obstacle_candidate_t = None
+    self.acc_source_debug = {}
     # timers
     self.solve_time = 0.0
     self.time_qp_solution = 0.0
@@ -445,6 +462,263 @@ class LongitudinalMpc:
 
   def get_live_tune_config(self) -> LeadResponseTuningConfig:
     return self._live_tune_cfg
+
+  @staticmethod
+  def _lead_attr(lead, attr: str, default: float = 0.0) -> float:
+    return float(getattr(lead, attr, default) or default)
+
+  @staticmethod
+  def _lead_debug_payload(lead) -> dict[str, float | bool]:
+    if lead is None:
+      return {
+        "status": False,
+        "dRel": 0.0,
+        "yRel": 0.0,
+        "dPath": 0.0,
+        "vLat": 0.0,
+        "vRel": 0.0,
+        "modelProb": 0.0,
+      }
+    return {
+      "status": bool(getattr(lead, "status", False)),
+      "dRel": LongitudinalMpc._lead_attr(lead, "dRel"),
+      "yRel": LongitudinalMpc._lead_attr(lead, "yRel"),
+      "dPath": LongitudinalMpc._lead_attr(lead, "dPath", LongitudinalMpc._lead_attr(lead, "yRel")),
+      "vLat": LongitudinalMpc._lead_attr(lead, "vLat"),
+      "vRel": LongitudinalMpc._lead_attr(lead, "vRel"),
+      "modelProb": LongitudinalMpc._lead_attr(lead, "modelProb"),
+    }
+
+  @staticmethod
+  def _empty_lead_debug_payload() -> dict[str, float | bool]:
+    return {
+      "status": False,
+      "dRel": 0.0,
+      "yRel": 0.0,
+      "dPath": 0.0,
+      "vLat": 0.0,
+      "vRel": 0.0,
+      "modelProb": 0.0,
+    }
+
+  def _duplicate_candidate_metrics(self, lead) -> dict[str, float]:
+    return {
+      "dPath": abs(self._lead_attr(lead, "dPath", self._lead_attr(lead, "yRel"))),
+      "modelProb": self._lead_attr(lead, "modelProb"),
+      "vLat": abs(self._lead_attr(lead, "vLat")),
+      "dRel": self._lead_attr(lead, "dRel", 1e9),
+    }
+
+  def _duplicate_candidate_sort_key(self, lead) -> tuple[float, float, float, float]:
+    metrics = self._duplicate_candidate_metrics(lead)
+    return (metrics["dPath"], -metrics["modelProb"], metrics["vLat"], metrics["dRel"])
+
+  def _is_materially_better_duplicate_candidate(self, challenger, incumbent) -> bool:
+    challenger_metrics = self._duplicate_candidate_metrics(challenger)
+    incumbent_metrics = self._duplicate_candidate_metrics(incumbent)
+
+    if challenger_metrics["dPath"] + HYUNDAI_DUPLICATE_PATH_SWITCH_M < incumbent_metrics["dPath"]:
+      return True
+    if (challenger_metrics["modelProb"] >
+        incumbent_metrics["modelProb"] + HYUNDAI_DUPLICATE_MODEL_PROB_SWITCH and
+        challenger_metrics["dPath"] <= incumbent_metrics["dPath"] + HYUNDAI_DUPLICATE_PATH_SWITCH_M):
+      return True
+    if (challenger_metrics["vLat"] + HYUNDAI_DUPLICATE_VLAT_SWITCH_MPS < incumbent_metrics["vLat"] and
+        challenger_metrics["dPath"] <= incumbent_metrics["dPath"] + HYUNDAI_DUPLICATE_PATH_SWITCH_M):
+      return True
+    if (challenger_metrics["dRel"] + HYUNDAI_DUPLICATE_DREL_SWITCH_M < incumbent_metrics["dRel"] and
+        challenger_metrics["dPath"] <= incumbent_metrics["dPath"] + HYUNDAI_DUPLICATE_PATH_SWITCH_M):
+      return True
+    return False
+
+  def _should_use_hyundai_virtual_duplicate(self, lead_role_debug: dict[str, object]) -> bool:
+    if not self._hyundai_ai_lead_stability_enabled:
+      return False
+    if not bool(lead_role_debug.get("duplicate_pair", False)):
+      return False
+    roles = lead_role_debug.get("roles", {})
+    return (
+      roles.get("lead0") == LeadRoleClassifier.CENTER_CONTROL and
+      roles.get("lead1") == LeadRoleClassifier.CENTER_CONTROL
+    )
+
+  def _stabilize_control_leads(self, raw_lead0, raw_lead1,
+                               control_lead0: ControlLead,
+                               control_lead1: ControlLead,
+                               lead_role_debug: dict[str, object]) -> tuple[tuple[ControlLead, ControlLead], dict[str, object]]:
+    if not self._should_use_hyundai_virtual_duplicate(lead_role_debug):
+      self._hyundai_duplicate_selected_raw_slot = None
+      debug = copy.deepcopy(lead_role_debug)
+      debug["virtual_duplicate"] = {"active": False}
+      return (control_lead0, control_lead1), debug
+
+    raw_leads = {0: raw_lead0, 1: raw_lead1}
+    current_best_slot = min(raw_leads, key=lambda idx: self._duplicate_candidate_sort_key(raw_leads[idx]))
+    previous_slot = self._hyundai_duplicate_selected_raw_slot
+    selected_slot = current_best_slot
+    held_previous = False
+    if previous_slot in raw_leads and previous_slot != current_best_slot:
+      if not self._is_materially_better_duplicate_candidate(raw_leads[current_best_slot], raw_leads[previous_slot]):
+        selected_slot = previous_slot
+        held_previous = True
+    self._hyundai_duplicate_selected_raw_slot = selected_slot
+
+    selected_lead = ControlLead.from_lead(raw_leads[selected_slot])
+    raw_cutin_promoted = lead_role_debug.get("cutin_promoted", {})
+    raw_toward_center = lead_role_debug.get("toward_center_mps", {})
+    raw_roles = lead_role_debug.get("roles", {})
+    raw_reasons = lead_role_debug.get("reasons", {})
+    raw_control_status = lead_role_debug.get("control_status", {})
+
+    debug = copy.deepcopy(lead_role_debug)
+    debug["raw_duplicate_model"] = {
+      "roles": raw_roles,
+      "reasons": raw_reasons,
+      "control_status": raw_control_status,
+      "dropped_slot": lead_role_debug.get("dropped_slot"),
+    }
+    debug["virtual_duplicate"] = {
+      "active": True,
+      "selected_raw_slot": int(selected_slot),
+      "suppressed_raw_slot": int(1 - selected_slot),
+      "held_previous_slot": bool(held_previous),
+      "previous_raw_slot": None if previous_slot is None else int(previous_slot),
+    }
+    debug["roles"] = {"lead0": LeadRoleClassifier.CENTER_CONTROL, "lead1": LeadRoleClassifier.INVALID}
+    debug["reasons"] = {"lead0": f"virtual_duplicate_raw_{selected_slot}", "lead1": "suppressed_duplicate"}
+    debug["toward_center_mps"] = {
+      "lead0": float(max(
+        float(raw_toward_center.get("lead0", 0.0) or 0.0),
+        float(raw_toward_center.get("lead1", 0.0) or 0.0),
+      )),
+      "lead1": 0.0,
+    }
+    debug["cutin_promoted"] = {
+      "lead0": bool(raw_cutin_promoted.get("lead0", False) or raw_cutin_promoted.get("lead1", False)),
+      "lead1": False,
+    }
+    debug["control_status"] = {"lead0": True, "lead1": False}
+    debug["dropped_slot"] = 1
+    debug["raw"] = {
+      "lead0": self._lead_debug_payload(raw_leads[selected_slot]),
+      "lead1": self._empty_lead_debug_payload(),
+    }
+    awareness = [
+      entry for entry in debug.get("awareness", [])
+      if int(entry.get("slot", -1)) != selected_slot
+    ]
+    awareness.append({
+      "slot": 1,
+      "role": "suppressed_duplicate",
+      "dRel": self._lead_attr(raw_leads[1 - selected_slot], "dRel"),
+      "yRel": self._lead_attr(raw_leads[1 - selected_slot], "yRel"),
+      "dPath": self._lead_attr(raw_leads[1 - selected_slot], "dPath", self._lead_attr(raw_leads[1 - selected_slot], "yRel")),
+      "vLat": self._lead_attr(raw_leads[1 - selected_slot], "vLat"),
+      "vRel": self._lead_attr(raw_leads[1 - selected_slot], "vRel"),
+      "dropped_duplicate": True,
+    })
+    debug["awareness"] = awareness
+    return (selected_lead, ControlLead()), debug
+
+  def _reset_acc_obstacle_candidate(self) -> None:
+    self._acc_obstacle_candidate_mode = None
+    self._acc_obstacle_candidate_t = None
+
+  def _advance_acc_obstacle_candidate(self, candidate_mode: str, now: float, dwell_s: float, default_mode: str) -> str:
+    if self._acc_obstacle_candidate_mode != candidate_mode:
+      self._acc_obstacle_candidate_mode = candidate_mode
+      self._acc_obstacle_candidate_t = now
+      return default_mode
+    if self._acc_obstacle_candidate_t is None or (now - self._acc_obstacle_candidate_t) < dwell_s:
+      return default_mode
+    self._acc_obstacle_mode = candidate_mode
+    self._reset_acc_obstacle_candidate()
+    return candidate_mode
+
+  def _select_acc_obstacle(self, lead_0_obstacle, lead_1_obstacle, cruise_obstacle, now: float) -> np.ndarray:
+    lead_candidates: list[tuple[str, np.ndarray]] = []
+    if self.control_leads[0] is not None and getattr(self.control_leads[0], 'status', False):
+      lead_candidates.append(('lead0', lead_0_obstacle))
+    if self.control_leads[1] is not None and getattr(self.control_leads[1], 'status', False):
+      lead_candidates.append(('lead1', lead_1_obstacle))
+
+    if not self._hyundai_ai_lead_stability_enabled:
+      x_obstacles = np.column_stack([lead_0_obstacle, lead_1_obstacle, cruise_obstacle])
+      self.source = SOURCES[np.argmin(x_obstacles[0])]
+      self.acc_source_debug = {
+        "active_mode": "lead" if self.source in ('lead0', 'lead1') else "cruise",
+        "delta_m": None,
+        "candidate_mode": None,
+        "used_hysteresis": False,
+      }
+      return np.min(x_obstacles, axis=1)
+
+    if not lead_candidates:
+      self._acc_obstacle_mode = 'cruise'
+      self._reset_acc_obstacle_candidate()
+      self.source = 'cruise'
+      self.acc_source_debug = {
+        "active_mode": "cruise",
+        "delta_m": None,
+        "candidate_mode": None,
+        "used_hysteresis": True,
+      }
+      return cruise_obstacle
+
+    best_lead_source, best_lead_obstacle = min(lead_candidates, key=lambda item: item[1][0])
+    lead_delta_m = float(cruise_obstacle[0] - best_lead_obstacle[0])
+    active_mode = self._acc_obstacle_mode
+    reason = "hold"
+
+    if active_mode == 'lead':
+      if lead_delta_m >= -HYUNDAI_LEAD_SOURCE_EXIT_MARGIN_M:
+        self._reset_acc_obstacle_candidate()
+        reason = "lead_hold_margin"
+      elif lead_delta_m <= -HYUNDAI_LEAD_SOURCE_EXIT_IMMEDIATE_MARGIN_M:
+        active_mode = 'cruise'
+        self._acc_obstacle_mode = 'cruise'
+        self._reset_acc_obstacle_candidate()
+        reason = "cruise_immediate"
+      else:
+        active_mode = self._advance_acc_obstacle_candidate(
+          'cruise', now, HYUNDAI_LEAD_SOURCE_EXIT_DWELL_S, default_mode='lead',
+        )
+        reason = "cruise_dwell"
+    else:
+      if lead_delta_m >= HYUNDAI_LEAD_SOURCE_ENTER_IMMEDIATE_MARGIN_M:
+        active_mode = 'lead'
+        self._acc_obstacle_mode = 'lead'
+        self._reset_acc_obstacle_candidate()
+        reason = "lead_immediate"
+      elif lead_delta_m <= HYUNDAI_LEAD_SOURCE_ENTER_MARGIN_M:
+        self._reset_acc_obstacle_candidate()
+        reason = "cruise_hold_margin"
+      else:
+        active_mode = self._advance_acc_obstacle_candidate(
+          'lead', now, HYUNDAI_LEAD_SOURCE_ENTER_DWELL_S, default_mode='cruise',
+        )
+        reason = "lead_dwell"
+
+    if active_mode == 'lead':
+      self._acc_obstacle_mode = 'lead'
+      self.source = best_lead_source
+      active_obstacle = best_lead_obstacle
+    else:
+      self._acc_obstacle_mode = 'cruise'
+      self.source = 'cruise'
+      active_obstacle = cruise_obstacle
+
+    self.acc_source_debug = {
+      "active_mode": str(self._acc_obstacle_mode),
+      "best_lead_source": str(best_lead_source),
+      "best_lead_obstacle": float(best_lead_obstacle[0]),
+      "cruise_obstacle": float(cruise_obstacle[0]),
+      "delta_m": float(lead_delta_m),
+      "candidate_mode": self._acc_obstacle_candidate_mode,
+      "reason": reason,
+      "used_hysteresis": True,
+    }
+    return active_obstacle
 
   def _update_cutin_settle_state(self, now: float, v_ego: float, leads, lead_role_debug: dict[str, object]) -> None:
     for idx, lead in enumerate(leads):
@@ -638,12 +912,15 @@ class LongitudinalMpc:
       t_follow = get_T_FOLLOW(personality)
     self.current_t_follow = float(t_follow)
 
-    control_lead0, control_lead1, lead_role_debug = self.lead_role_classifier.classify(
+    raw_control_lead0, raw_control_lead1, lead_role_debug = self.lead_role_classifier.classify(
       v_ego, radarstate.leadOne, radarstate.leadTwo, now=now,
     )
+    self.control_leads, lead_role_debug = self._stabilize_control_leads(
+      radarstate.leadOne, radarstate.leadTwo, raw_control_lead0, raw_control_lead1, lead_role_debug,
+    )
+    control_lead0, control_lead1 = self.control_leads
     self.lead_role_debug = lead_role_debug
     self.status = control_lead0.status or control_lead1.status
-    self.control_leads = (control_lead0, control_lead1)
     self._update_cutin_settle_state(now, v_ego, self.control_leads, lead_role_debug)
 
     response_model = self.get_cruise_response_model(v_ego)
@@ -682,8 +959,7 @@ class LongitudinalMpc:
       self.last_v_upper = v_upper
       self.last_v_cruise_clipped = v_cruise_clipped
       cruise_obstacle = np.cumsum(T_DIFFS * v_cruise_clipped) + get_safe_obstacle_distance(v_cruise_clipped, t_follow)
-      x_obstacles = np.column_stack([lead_0_obstacle, lead_1_obstacle, cruise_obstacle])
-      self.source = SOURCES[np.argmin(x_obstacles[0])]
+      active_obstacle = self._select_acc_obstacle(lead_0_obstacle, lead_1_obstacle, cruise_obstacle, now)
       self.gap_reclaim_accel_floor = self.get_gap_reclaim_floor()
       self.cutin_settle_accel_floor = self.get_cutin_settle_floor(now)
 
@@ -706,6 +982,12 @@ class LongitudinalMpc:
       x = np.min(x_and_cruise, axis=1)
 
       self.source = 'e2e' if x_and_cruise[1,0] < x_and_cruise[1,1] else 'cruise'
+      self.acc_source_debug = {
+        "active_mode": str(self.source),
+        "delta_m": None,
+        "candidate_mode": None,
+        "used_hysteresis": False,
+      }
       self.gap_reclaim_accel_floor = 0.0
       self.cutin_settle_active = False
       self.cutin_settle_accel_floor = 0.0
@@ -722,7 +1004,10 @@ class LongitudinalMpc:
       self.solver.set(i, "yref", self.yref[i])
     self.solver.set(N, "yref", self.yref[N][:COST_E_DIM])
 
-    self.params[:,2] = np.min(x_obstacles, axis=1)
+    if self.mode == 'acc':
+      self.params[:,2] = active_obstacle
+    else:
+      self.params[:,2] = np.min(x_obstacles, axis=1)
     self.params[:,3] = np.copy(self.prev_a)
     self.params[:,4] = t_follow
 
@@ -766,6 +1051,9 @@ class LongitudinalMpc:
             "floor": float(self.cutin_settle_accel_floor),
             **self.cutin_settle_debug,
           },
+          "source_hysteresis": self.acc_source_debug,
+          "virtual_duplicate": lead_role_debug.get("virtual_duplicate", {"active": False}),
+          "raw_duplicate_model": lead_role_debug.get("raw_duplicate_model", {}),
           "raw": lead_role_debug.get("raw", {}),
           "awareness": lead_role_debug.get("awareness", []),
         }
