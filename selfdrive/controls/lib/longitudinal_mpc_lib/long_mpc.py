@@ -1335,8 +1335,27 @@ class LongitudinalMpc:
     self.params[:,4] = t_follow
 
     self.run()
-    if (np.any(lead_xv_0[FCW_IDXS,0] - self.x_sol[FCW_IDXS,0] < CRASH_DISTANCE) and
-            control_lead0.modelProb > 0.9):
+
+    fcw_lead_xv = None
+    fcw_model_prob = 0.0
+    if self.mode == 'acc':
+      if self.source == 'lead0' and control_lead0.status:
+        fcw_lead_xv = lead_xv_0
+        fcw_model_prob = float(control_lead0.modelProb)
+      elif self.source == 'lead1' and control_lead1.status:
+        fcw_lead_xv = lead_xv_1
+        fcw_model_prob = float(control_lead1.modelProb)
+    else:
+      if self.source == 'lead0' and control_lead0.status:
+        fcw_lead_xv = lead_xv_0
+        fcw_model_prob = float(control_lead0.modelProb)
+      elif self.source == 'lead1' and control_lead1.status:
+        fcw_lead_xv = lead_xv_1
+        fcw_model_prob = float(control_lead1.modelProb)
+
+    if (fcw_lead_xv is not None and
+            np.any(fcw_lead_xv[FCW_IDXS,0] - self.x_sol[FCW_IDXS,0] < CRASH_DISTANCE) and
+            fcw_model_prob > 0.9):
       self.crash_cnt += 1
     else:
       self.crash_cnt = 0

@@ -39,10 +39,10 @@ def _configure_vibe_follow(headway=1.3):
     params.put(f'VibeTune.Follow.Standard.Headway{idx}', float(headway))
 
 
-def _make_hyundai_mpc():
+def _make_hyundai_mpc(v_ego=29.0, a_ego=0.0):
   mpc = LongitudinalMpc(CP=SimpleNamespace(brand='hyundai'))
   mpc.mode = 'acc'
-  mpc.set_cur_state(29.0, 0.0)
+  mpc.set_cur_state(v_ego, a_ego)
   return mpc
 
 
@@ -323,3 +323,39 @@ class TestHyundaiAiLeadStability:
 
     assert mpc.lead_role_debug["virtual_duplicate"]["active"] is True
     assert mpc._virtual_cutin_event_t is None
+
+  def test_fcw_counter_ignores_cruise_owned_pullaway_lead(self, monkeypatch):
+    monkeypatch.setattr(
+      "openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc.time.monotonic",
+      _MonotonicStub(step=0.2),
+    )
+    mpc = _make_hyundai_mpc(v_ego=10.976, a_ego=0.726)
+
+    for _ in range(10):
+      _run_update(
+        mpc,
+        _make_lead(d_rel=25.854, y_rel=0.05, d_path=0.05, v_lat=0.10, v_rel=0.488, v_lead=11.392, a_lead=0.334, model_prob=0.99),
+        _make_lead(d_rel=25.975, y_rel=0.08, d_path=0.08, v_lat=0.12, v_rel=0.498, v_lead=11.402, a_lead=0.325, model_prob=0.99),
+        v_cruise=70.833336,
+      )
+
+    assert mpc.source == "cruise"
+    assert mpc.crash_cnt == 0
+
+  def test_fcw_counter_still_accumulates_for_active_closing_lead(self, monkeypatch):
+    monkeypatch.setattr(
+      "openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc.time.monotonic",
+      _MonotonicStub(step=0.2),
+    )
+    mpc = _make_hyundai_mpc(v_ego=12.0, a_ego=0.3)
+
+    for _ in range(10):
+      _run_update(
+        mpc,
+        _make_lead(d_rel=8.0, y_rel=0.05, d_path=0.05, v_lat=0.10, v_rel=-6.0, v_lead=4.0, a_lead=-2.0, model_prob=0.99),
+        _make_lead(d_rel=8.1, y_rel=0.08, d_path=0.08, v_lat=0.12, v_rel=-5.98, v_lead=4.02, a_lead=-2.0, model_prob=0.99),
+        v_cruise=35.0,
+      )
+
+    assert mpc.source == "lead0"
+    assert mpc.crash_cnt > 2
