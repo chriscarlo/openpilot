@@ -89,6 +89,15 @@ HYUNDAI_LEAD_SOURCE_ENTER_DWELL_S = 0.35
 HYUNDAI_LEAD_SOURCE_EXIT_DWELL_S = 0.75
 HYUNDAI_LEAD_SOURCE_ENTER_IMMEDIATE_MARGIN_M = 3.0
 HYUNDAI_LEAD_SOURCE_EXIT_IMMEDIATE_MARGIN_M = 4.0
+HYUNDAI_LEAD_SHADOW_GAP_SURPLUS_M = 2.5
+HYUNDAI_LEAD_SHADOW_PULLAWAY_MPS = 0.6
+HYUNDAI_LEAD_SHADOW_LEAD_ACCEL_MPS2 = 0.3
+HYUNDAI_LEAD_NEAR_GAP_MIN_SPEED = 8.0
+HYUNDAI_LEAD_NEAR_GAP_MAX_SURPLUS_M = 4.0
+HYUNDAI_LEAD_NEAR_GAP_SURPLUS_BP = [-6.0, -3.0, 0.0, 1.5, 3.0, 4.0]
+HYUNDAI_LEAD_NEAR_GAP_ACCEL_V = [0.0, 0.0, 0.08, 0.18, 0.30, 0.45]
+HYUNDAI_LEAD_NEAR_GAP_VREL_BP = [-2.0, -1.0, -0.4, 0.0, 0.4, 0.8]
+HYUNDAI_LEAD_NEAR_GAP_VREL_ACCEL_V = [0.0, 0.0, 0.06, 0.15, 0.30, 0.45]
 
 
 # Fewer timestamps don't hurt performance and lead to
@@ -438,6 +447,7 @@ class LongitudinalMpc:
     self.cutin_settle_active = False
     self.cutin_settle_accel_floor = 0.0
     self.cutin_settle_debug = {}
+    self.hyundai_lead_accel_cap = ACCEL_MAX
     self._cutin_event_t = {"lead0": None, "lead1": None}
     self._prev_lead_roles = {"lead0": LeadRoleClassifier.INVALID, "lead1": LeadRoleClassifier.INVALID}
     self._prev_control_status = {"lead0": False, "lead1": False}
@@ -624,6 +634,47 @@ class LongitudinalMpc:
     self._acc_obstacle_candidate_mode = None
     self._acc_obstacle_candidate_t = None
 
+  def _get_best_control_lead(self) -> tuple[str | None, ControlLead | None]:
+    if self.control_leads[0] is not None and getattr(self.control_leads[0], 'status', False):
+      return 'lead0', self.control_leads[0]
+    if self.control_leads[1] is not None and getattr(self.control_leads[1], 'status', False):
+      return 'lead1', self.control_leads[1]
+    return None, None
+
+  def _should_hold_hyundai_lead_shadow(self, lead) -> bool:
+    if (not self._hyundai_ai_lead_stability_enabled or
+        lead is None or
+        not getattr(lead, 'status', False) or
+        float(self.x0[1]) < HYUNDAI_LEAD_NEAR_GAP_MIN_SPEED):
+      return False
+
+    headway_gap = get_headway_follow_distance(float(self.x0[1]), self.current_t_follow)
+    gap_surplus = float(getattr(lead, 'dRel', 0.0) or 0.0) - headway_gap
+    if gap_surplus > HYUNDAI_LEAD_SHADOW_GAP_SURPLUS_M:
+      return False
+
+    v_rel = float(getattr(lead, 'vRel', 0.0) or 0.0)
+    lead_accel = float(getattr(lead, 'aLeadK', 0.0) or 0.0)
+    return v_rel <= HYUNDAI_LEAD_SHADOW_PULLAWAY_MPS and lead_accel <= HYUNDAI_LEAD_SHADOW_LEAD_ACCEL_MPS2
+
+  def _get_hyundai_lead_accel_cap(self) -> float:
+    if not self._hyundai_ai_lead_stability_enabled or float(self.x0[1]) < HYUNDAI_LEAD_NEAR_GAP_MIN_SPEED:
+      return ACCEL_MAX
+
+    _, lead = self._get_best_control_lead()
+    if lead is None:
+      return ACCEL_MAX
+
+    headway_gap = get_headway_follow_distance(float(self.x0[1]), self.current_t_follow)
+    gap_surplus = float(getattr(lead, 'dRel', 0.0) or 0.0) - headway_gap
+    if gap_surplus > HYUNDAI_LEAD_NEAR_GAP_MAX_SURPLUS_M:
+      return ACCEL_MAX
+
+    gap_cap = float(np.interp(gap_surplus, HYUNDAI_LEAD_NEAR_GAP_SURPLUS_BP, HYUNDAI_LEAD_NEAR_GAP_ACCEL_V))
+    v_rel = float(getattr(lead, 'vRel', 0.0) or 0.0)
+    vrel_cap = float(np.interp(v_rel, HYUNDAI_LEAD_NEAR_GAP_VREL_BP, HYUNDAI_LEAD_NEAR_GAP_VREL_ACCEL_V))
+    return float(np.clip(min(gap_cap, vrel_cap), 0.0, ACCEL_MAX))
+
   def _advance_acc_obstacle_candidate(self, candidate_mode: str, now: float, dwell_s: float, default_mode: str) -> str:
     if self._acc_obstacle_candidate_mode != candidate_mode:
       self._acc_obstacle_candidate_mode = candidate_mode
@@ -666,11 +717,17 @@ class LongitudinalMpc:
       return cruise_obstacle
 
     best_lead_source, best_lead_obstacle = min(lead_candidates, key=lambda item: item[1][0])
+    best_lead = self.control_leads[0] if best_lead_source == 'lead0' else self.control_leads[1]
     lead_delta_m = float(cruise_obstacle[0] - best_lead_obstacle[0])
     active_mode = self._acc_obstacle_mode
     reason = "hold"
 
-    if active_mode == 'lead':
+    if self._should_hold_hyundai_lead_shadow(best_lead):
+      active_mode = 'lead'
+      self._acc_obstacle_mode = 'lead'
+      self._reset_acc_obstacle_candidate()
+      reason = "lead_shadow"
+    elif active_mode == 'lead':
       if lead_delta_m >= -HYUNDAI_LEAD_SOURCE_EXIT_MARGIN_M:
         self._reset_acc_obstacle_candidate()
         reason = "lead_hold_margin"
@@ -714,6 +771,7 @@ class LongitudinalMpc:
       "best_lead_obstacle": float(best_lead_obstacle[0]),
       "cruise_obstacle": float(cruise_obstacle[0]),
       "delta_m": float(lead_delta_m),
+      "near_gap_accel_cap": float(self.hyundai_lead_accel_cap),
       "candidate_mode": self._acc_obstacle_candidate_mode,
       "reason": reason,
       "used_hysteresis": True,
@@ -940,12 +998,20 @@ class LongitudinalMpc:
     lead_1_obstacle = apply_lead_approach_preview(lead_1_obstacle, lead_1_preview)
     self.lead_approach_preview = (lead_0_preview, lead_1_preview)
 
+    self.hyundai_lead_accel_cap = self._get_hyundai_lead_accel_cap() if self.mode == 'acc' else ACCEL_MAX
+
     self.params[:,0] = ACCEL_MIN
-    self.params[:,1] = ACCEL_MAX
+    self.params[:,1] = min(ACCEL_MAX, self.hyundai_lead_accel_cap)
 
     # Update in ACC mode or ACC/e2e blend
     if self.mode == 'acc':
       self.params[:,5] = LEAD_DANGER_FACTOR
+
+      response_model = self.get_cruise_response_model(
+        v_ego,
+        planner_accel_limits=(ACCEL_MIN, min(ACCEL_MAX, self.hyundai_lead_accel_cap)),
+      )
+      self.last_cruise_response_model = response_model
 
       # Fake an obstacle for cruise, this ensures smooth acceleration to set speed
       # when the leads are no factor.

@@ -5,7 +5,7 @@ import pytest
 
 from cereal import log
 from openpilot.common.params import Params
-from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LongitudinalMpc, N
+from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import ACCEL_MAX, LongitudinalMpc, N
 
 
 def _make_lead(*, status=True, d_rel=44.0, y_rel=0.0, d_path=None, v_lat=0.0, v_rel=0.0,
@@ -160,3 +160,44 @@ class TestHyundaiAiLeadStability:
 
     assert mpc.lead_role_debug["virtual_duplicate"]["active"] is True
     assert mpc._cutin_event_t["lead0"] is not None
+
+  def test_near_gap_shadow_promotes_lead_instead_of_cruise(self, monkeypatch):
+    monkeypatch.setattr(
+      "openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc.time.monotonic",
+      _MonotonicStub(step=0.2),
+    )
+    mpc = _make_hyundai_mpc()
+
+    for _ in range(4):
+      _run_update(
+        mpc,
+        _make_lead(d_rel=50.0, y_rel=0.04, d_path=0.04, v_lat=0.40, v_rel=0.6, v_lead=29.7, model_prob=0.96),
+        _make_lead(d_rel=49.95, y_rel=0.07, d_path=0.07, v_lat=4.00, v_rel=0.6, v_lead=29.7, model_prob=0.93),
+      )
+
+    assert mpc.source == "cruise"
+
+    _run_update(
+      mpc,
+      _make_lead(d_rel=44.5, y_rel=0.04, d_path=0.04, v_lat=0.40, v_rel=-0.4, v_lead=28.6, model_prob=0.96),
+      _make_lead(d_rel=44.45, y_rel=0.07, d_path=0.07, v_lat=4.00, v_rel=-0.4, v_lead=28.6, model_prob=0.93),
+    )
+
+    assert mpc.source == "lead0"
+    assert mpc.acc_source_debug["reason"] == "lead_shadow"
+
+  def test_near_gap_lead_caps_positive_accel(self, monkeypatch):
+    monkeypatch.setattr(
+      "openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc.time.monotonic",
+      _MonotonicStub(step=0.1),
+    )
+    mpc = _make_hyundai_mpc()
+
+    _run_update(
+      mpc,
+      _make_lead(d_rel=44.5, y_rel=0.04, d_path=0.04, v_lat=0.40, v_rel=-0.4, v_lead=28.6, model_prob=0.96),
+      _make_lead(d_rel=44.45, y_rel=0.07, d_path=0.07, v_lat=4.00, v_rel=-0.4, v_lead=28.6, model_prob=0.93),
+    )
+
+    assert mpc.hyundai_lead_accel_cap < ACCEL_MAX
+    assert mpc.hyundai_lead_accel_cap == pytest.approx(mpc.params[0, 1])
