@@ -232,6 +232,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
 
     gap_reclaim_floor = float(getattr(self.mpc, 'gap_reclaim_accel_floor', 0.0) or 0.0)
     if (gap_reclaim_floor > 0.0 and
+        not bool(getattr(self.mpc, 'use_upstream_gap_reclaim', False)) and
         not self.output_should_stop and
         output_a_target >= -0.05):
       output_a_target = max(output_a_target, gap_reclaim_floor)

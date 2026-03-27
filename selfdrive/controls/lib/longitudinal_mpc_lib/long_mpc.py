@@ -71,6 +71,9 @@ GAP_RECLAIM_PULLAWAY_BP = [0.0, 0.5, 1.5, 3.0]
 GAP_RECLAIM_PULLAWAY_V = [0.0, 0.04, 0.12, 0.20]
 GAP_RECLAIM_LEAD_ACCEL_BP = [0.0, 0.5, 1.5]
 GAP_RECLAIM_LEAD_ACCEL_V = [0.0, 0.03, 0.06]
+GAP_RECLAIM_BLEND_RISE_TAU_S = 0.60
+GAP_RECLAIM_BLEND_FALL_TAU_S = 1.20
+GAP_RECLAIM_HORIZON_RAMP_TAU_S = 1.00
 CUTIN_SETTLE_MIN_SPEED = 15.0
 CUTIN_SETTLE_DETECT_DREL_MAX = 70.0
 CUTIN_SETTLE_DETECT_PATH_ABS_MIN = 0.8
@@ -403,6 +406,7 @@ class LongitudinalMpc:
     self.mode = mode
     self.dt = dt
     self._hyundai_ai_lead_stability_enabled = bool(getattr(CP, 'brand', None) == 'hyundai')
+    self.use_upstream_gap_reclaim = self._hyundai_ai_lead_stability_enabled
     self.solver = AcadosOcpSolverCython(MODEL_NAME, ACADOS_SOLVER_TYPE, N)
     self._live_tune_params = Params()
     self._last_live_tune_refresh_t = 0.0
@@ -443,6 +447,9 @@ class LongitudinalMpc:
     self.control_leads = (None, None)
     self.lead_approach_preview = (0.0, 0.0)
     self.gap_reclaim_accel_floor = 0.0
+    self.gap_reclaim_obstacle_push = 0.0
+    self._gap_reclaim_blend = 0.0
+    self._gap_reclaim_last_t = None
     self.cutin_settle_active = False
     self.cutin_settle_accel_floor = 0.0
     self.cutin_settle_debug = {}
@@ -579,6 +586,41 @@ class LongitudinalMpc:
   def _build_lead_obstacle(self, lead) -> np.ndarray:
     lead_xv = self.process_lead(lead)
     return lead_xv[:,0] + get_stopped_equivalence_factor(lead_xv[:,1])
+
+  def _update_gap_reclaim_blend(self, target_blend: float, now: float) -> float:
+    target_blend = float(np.clip(target_blend, 0.0, 1.0))
+    if self._gap_reclaim_last_t is None:
+      self._gap_reclaim_last_t = now
+      self._gap_reclaim_blend = target_blend
+      return self._gap_reclaim_blend
+
+    dt_s = float(np.clip(now - self._gap_reclaim_last_t, 0.0, 1.0))
+    self._gap_reclaim_last_t = now
+    tau_s = GAP_RECLAIM_BLEND_RISE_TAU_S if target_blend > self._gap_reclaim_blend else GAP_RECLAIM_BLEND_FALL_TAU_S
+    alpha = self._ema_alpha(dt_s, tau_s)
+    self._gap_reclaim_blend = float(self._gap_reclaim_blend + alpha * (target_blend - self._gap_reclaim_blend))
+    return self._gap_reclaim_blend
+
+  def _apply_hyundai_gap_reclaim(self, raw_lead_obstacle: np.ndarray, filtered_lead_obstacle: np.ndarray,
+                                 raw_lead, now: float) -> np.ndarray:
+    self.gap_reclaim_accel_floor = 0.0
+    self.gap_reclaim_obstacle_push = 0.0
+
+    if not self._hyundai_ai_lead_stability_enabled:
+      self._gap_reclaim_blend = 0.0
+      self._gap_reclaim_last_t = now
+      return np.minimum(raw_lead_obstacle, filtered_lead_obstacle)
+
+    reclaim_intent = get_gap_reclaim_accel_floor(float(self.x0[1]), raw_lead, self.current_t_follow, self._live_tune_cfg)
+    self.gap_reclaim_accel_floor = float(reclaim_intent)
+    max_intent = max(float(self._live_tune_cfg.gap_reclaim_max_accel), 1e-3)
+    target_blend = reclaim_intent / max_intent if max_intent > 0.0 else 0.0
+    blend = self._update_gap_reclaim_blend(target_blend, now)
+    obstacle_delta = np.maximum(raw_lead_obstacle - filtered_lead_obstacle, 0.0)
+    horizon_ramp = 1.0 - np.exp(-T_IDXS / GAP_RECLAIM_HORIZON_RAMP_TAU_S)
+    obstacle_push = obstacle_delta * blend * horizon_ramp
+    self.gap_reclaim_obstacle_push = float(np.max(obstacle_push))
+    return np.minimum(raw_lead_obstacle, filtered_lead_obstacle + obstacle_push)
 
   def _update_hyundai_virtual_lead(self, now: float, lead_source: str, lead):
     self._hyundai_virtual_lead_identity_changed = False
@@ -798,6 +840,9 @@ class LongitudinalMpc:
       self._reset_hyundai_virtual_lead("no_control_lead")
       self._acc_obstacle_mode = 'cruise'
       self._reset_acc_obstacle_candidate()
+      self.gap_reclaim_obstacle_push = 0.0
+      self._gap_reclaim_blend = 0.0
+      self._gap_reclaim_last_t = now
       self.source = 'cruise'
       self.acc_source_debug = {
         "active_mode": "cruise",
@@ -883,10 +928,11 @@ class LongitudinalMpc:
     if active_mode == 'lead':
       self._acc_obstacle_mode = 'lead'
       self.source = best_lead_source
-      active_obstacle = np.minimum(best_lead_obstacle, filtered_lead_obstacle)
+      active_obstacle = self._apply_hyundai_gap_reclaim(best_lead_obstacle, filtered_lead_obstacle, best_lead, now)
     else:
       self._acc_obstacle_mode = 'cruise'
       self.source = 'cruise'
+      self.gap_reclaim_obstacle_push = 0.0
       active_obstacle = cruise_obstacle
 
     self.acc_source_debug = {
@@ -899,6 +945,8 @@ class LongitudinalMpc:
       "filtered_gap_surplus_m": float(filtered_metrics["gap_surplus"]),
       "raw_pullaway_mps": float(raw_metrics["pullaway_speed"]),
       "filtered_pullaway_mps": float(filtered_metrics["pullaway_speed"]),
+      "gap_reclaim_blend": float(self._gap_reclaim_blend),
+      "gap_reclaim_obstacle_push_m": float(self.gap_reclaim_obstacle_push),
       "candidate_mode": self._acc_obstacle_candidate_mode,
       "reason": reason,
       "used_hysteresis": True,
@@ -1180,6 +1228,9 @@ class LongitudinalMpc:
         "used_hysteresis": False,
       }
       self.gap_reclaim_accel_floor = 0.0
+      self.gap_reclaim_obstacle_push = 0.0
+      self._gap_reclaim_blend = 0.0
+      self._gap_reclaim_last_t = now
       self.cutin_settle_active = False
       self.cutin_settle_accel_floor = 0.0
       self.cutin_settle_debug = {}

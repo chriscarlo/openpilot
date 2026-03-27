@@ -134,16 +134,19 @@ class TestHyundaiAiLeadStability:
     assert jitter_sources == ["lead0", "lead0", "lead0", "lead0"]
     assert mpc.hyundai_virtual_lead_debug["active"] is True
 
+    max_reclaim_push = 0.0
     for _ in range(7):
       _run_update(
         mpc,
         _make_lead(d_rel=49.0, y_rel=0.05, d_path=0.05, v_lat=0.45, v_rel=0.85, v_lead=29.85, model_prob=0.95),
         _make_lead(d_rel=48.95, y_rel=0.07, d_path=0.07, v_lat=4.05, v_rel=0.82, v_lead=29.85, model_prob=0.93),
       )
+      max_reclaim_push = max(max_reclaim_push, float(mpc.gap_reclaim_obstacle_push))
 
     assert mpc.source == "cruise"
     assert mpc.acc_source_debug["used_hysteresis"] is True
     assert mpc.acc_source_debug["reason"] in ("filtered_pullaway_dwell", "filtered_pullaway_immediate")
+    assert max_reclaim_push > 0.5
 
   def test_cutin_promotion_reaches_virtual_duplicate_lead(self, monkeypatch):
     monotonic = _MonotonicStub(step=0.2)
