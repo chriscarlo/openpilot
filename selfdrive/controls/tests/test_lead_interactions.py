@@ -5,8 +5,10 @@ import pytest
 from cereal import log
 from openpilot.common.params import Params
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import (
+  get_cutin_settle_accel_floor,
   get_gap_reclaim_accel_floor,
   get_lead_approach_preview_buffer,
+  should_start_cutin_settle_event,
 )
 from openpilot.selfdrive.test.longitudinal_maneuvers.plant import Plant
 from openpilot.sunnypilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPlannerSP
@@ -104,6 +106,51 @@ class TestLeadInteractionHeuristics:
     assert preview > 3.0
     assert get_lead_approach_preview_buffer(34.5, near_headway, 1.3) == pytest.approx(0.0)
     assert get_lead_approach_preview_buffer(34.5, non_closing, 1.3) == pytest.approx(0.0)
+
+  def test_cutin_settle_event_starts_for_adjacent_to_control_transition(self):
+    lead = _make_lead(d_rel=44.0, v_lead=33.0, a_lead=0.0)
+
+    assert should_start_cutin_settle_event(
+      prev_role="adjacent_awareness_left",
+      prev_control_active=False,
+      current_role="center_control",
+      lead=lead,
+      cutin_promoted=False,
+      toward_center_mps=0.2,
+      path_abs_m=0.6,
+      v_ego=33.5,
+    ) is True
+
+  def test_cutin_settle_event_ignores_straight_new_center_lead_without_lateral_hint(self):
+    lead = _make_lead(d_rel=44.0, v_lead=33.0, a_lead=0.0)
+
+    assert should_start_cutin_settle_event(
+      prev_role="invalid",
+      prev_control_active=False,
+      current_role="center_control",
+      lead=lead,
+      cutin_promoted=False,
+      toward_center_mps=0.0,
+      path_abs_m=0.1,
+      v_ego=33.5,
+    ) is False
+
+  def test_cutin_settle_floor_only_appears_for_benign_recent_cutin(self):
+    benign = _make_lead(d_rel=47.0, v_lead=33.0, a_lead=0.0)
+    dangerous = _make_lead(d_rel=38.0, v_lead=30.0, a_lead=-0.8)
+
+    floor = get_cutin_settle_accel_floor(33.5, benign, 1.3, age_s=4.0)
+
+    assert floor is not None
+    assert -0.12 < floor < -0.01
+    assert get_cutin_settle_accel_floor(33.5, dangerous, 1.3, age_s=1.0) is None
+
+  def test_cutin_settle_floor_blocks_braking_for_same_speed_merge(self):
+    same_speed = _make_lead(d_rel=46.0, v_lead=33.5, a_lead=0.0)
+
+    floor = get_cutin_settle_accel_floor(33.5, same_speed, 1.3, age_s=1.0)
+
+    assert floor == pytest.approx(0.0)
 
 
 class TestLeadInteractionScenarios:

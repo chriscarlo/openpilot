@@ -53,11 +53,11 @@ def _rows_by_attr(params: Params) -> dict[str, dict[str, Any]]:
 
 
 def _print_table(rows: list[dict[str, Any]]) -> None:
-  print("label                  stored   default effective bounds")
+  print("label                            stored   default effective bounds")
   for row in rows:
     bounds = f"[{row['minimum']:.3f},{row['maximum']:.3f}]"
     print(
-      f"{row['label']:<22} "
+      f"{row['label']:<32} "
       f"{_format_value(row['stored']):>7} "
       f"{row['default']:>8.3f} "
       f"{row['effective']:>9.3f} "

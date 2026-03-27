@@ -236,6 +236,11 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
         output_a_target >= -0.05):
       output_a_target = max(output_a_target, gap_reclaim_floor)
 
+    cutin_settle_floor = float(getattr(self.mpc, 'cutin_settle_accel_floor', 0.0) or 0.0)
+    if (bool(getattr(self.mpc, 'cutin_settle_active', False)) and
+        not self.output_should_stop):
+      output_a_target = max(output_a_target, cutin_settle_floor)
+
     for idx in range(2):
       accel_clip[idx] = np.clip(accel_clip[idx], self.prev_accel_clip[idx] - 0.05, self.prev_accel_clip[idx] + 0.05)
     self.output_a_target = np.clip(output_a_target, accel_clip[0], accel_clip[1])

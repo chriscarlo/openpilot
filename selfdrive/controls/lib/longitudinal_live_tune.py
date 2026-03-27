@@ -96,6 +96,36 @@ LEAD_RESPONSE_TUNE_SPECS = (
     maximum=0.75,
     description="Cap on the positive accel floor used to close a safe extra gap.",
   ),
+  LeadResponseTuneSpec(
+    attr="cutin_settle_duration_s",
+    key="Longitudinal.LiveTune.CutInSettleDurationS",
+    cli_name="cutin-settle-duration-s",
+    label="cutin_settle_duration_s",
+    default=7.0,
+    minimum=0.0,
+    maximum=12.0,
+    description="Grace-window length for a benign cut-in before the planner fully returns to nominal headway.",
+  ),
+  LeadResponseTuneSpec(
+    attr="cutin_settle_max_decel",
+    key="Longitudinal.LiveTune.CutInSettleMaxDecel",
+    cli_name="cutin-settle-max-decel",
+    label="cutin_settle_max_decel",
+    default=0.30,
+    minimum=0.0,
+    maximum=0.80,
+    description="Maximum braking magnitude allowed during the cut-in grace window after it ramps in.",
+  ),
+  LeadResponseTuneSpec(
+    attr="cutin_settle_max_closing_speed_mps",
+    key="Longitudinal.LiveTune.CutInSettleMaxClosingSpeedMps",
+    cli_name="cutin-settle-max-closing-speed-mps",
+    label="cutin_settle_max_closing_speed_mps",
+    default=2.5,
+    minimum=0.5,
+    maximum=6.0,
+    description="Largest ego-minus-lead closing speed that can still qualify for cut-in grace.",
+  ),
 )
 
 LEAD_RESPONSE_TUNE_SPECS_BY_ATTR = {spec.attr: spec for spec in LEAD_RESPONSE_TUNE_SPECS}
@@ -109,6 +139,9 @@ class LeadResponseTuningConfig:
   gap_reclaim_strength: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["gap_reclaim_strength"].default
   gap_reclaim_gap_min_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["gap_reclaim_gap_min_m"].default
   gap_reclaim_max_accel: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["gap_reclaim_max_accel"].default
+  cutin_settle_duration_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cutin_settle_duration_s"].default
+  cutin_settle_max_decel: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cutin_settle_max_decel"].default
+  cutin_settle_max_closing_speed_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cutin_settle_max_closing_speed_mps"].default
 
   @classmethod
   def defaults(cls) -> LeadResponseTuningConfig:

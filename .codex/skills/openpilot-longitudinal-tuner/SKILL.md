@@ -62,6 +62,11 @@ python3 .codex/skills/openpilot-longitudinal-tuner/scripts/monitor_longitudinal_
   inspect the live lead-tune values before editing code. The helper script and
   runtime refresh path let you change those heuristics without restarting
   services.
+- A freeway cut-in still causes a hard gap snap-back:
+  inspect the cut-in settle live knobs and the `LEADROLEDBG` cut-in fields
+  before assuming the classifier is late. If the lead becomes control early but
+  braking still spikes, the issue is usually the post-recognition gap recovery
+  path rather than lead selection.
 - Planner target looks reasonable, but the car command does not:
   compare `longitudinalPlan.aTarget`, `carControl.actuators.accel`,
   `carOutput.actuatorsOutput.accel`, and delayed `carState.aEgo`. If the first

@@ -365,6 +365,9 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"Longitudinal.LiveTune.GapReclaimStrength", {PERSISTENT | BACKUP, FLOAT, "1.0"}},
     {"Longitudinal.LiveTune.GapReclaimGapMinM", {PERSISTENT | BACKUP, FLOAT, "1.5"}},
     {"Longitudinal.LiveTune.GapReclaimMaxAccel", {PERSISTENT | BACKUP, FLOAT, "0.36"}},
+    {"Longitudinal.LiveTune.CutInSettleDurationS", {PERSISTENT | BACKUP, FLOAT, "7.0"}},
+    {"Longitudinal.LiveTune.CutInSettleMaxDecel", {PERSISTENT | BACKUP, FLOAT, "0.30"}},
+    {"Longitudinal.LiveTune.CutInSettleMaxClosingSpeedMps", {PERSISTENT | BACKUP, FLOAT, "2.5"}},
 
     // Vibe tuning profiles (defaults match current profile tables)
     {"VibeTune.Follow.Relaxed.Headway0", {PERSISTENT | BACKUP, FLOAT, "1.25"}},

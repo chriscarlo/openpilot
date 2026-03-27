@@ -70,6 +70,14 @@ GAP_RECLAIM_PULLAWAY_BP = [0.0, 0.5, 1.5, 3.0]
 GAP_RECLAIM_PULLAWAY_V = [0.0, 0.04, 0.12, 0.20]
 GAP_RECLAIM_LEAD_ACCEL_BP = [0.0, 0.5, 1.5]
 GAP_RECLAIM_LEAD_ACCEL_V = [0.0, 0.03, 0.06]
+CUTIN_SETTLE_MIN_SPEED = 15.0
+CUTIN_SETTLE_DETECT_DREL_MAX = 70.0
+CUTIN_SETTLE_DETECT_PATH_ABS_MIN = 0.8
+CUTIN_SETTLE_DETECT_TOWARD_CENTER_MIN_MPS = 0.35
+CUTIN_SETTLE_DANGER_MARGIN_M = 2.0
+CUTIN_SETTLE_LEAD_ACCEL_MIN = -0.5
+CUTIN_SETTLE_PROGRESS_BP = [0.0, 0.15, 0.5, 1.0]
+CUTIN_SETTLE_PROGRESS_V = [0.0, 0.10, 0.45, 1.0]
 
 
 # Fewer timestamps don't hurt performance and lead to
@@ -182,6 +190,61 @@ def get_gap_reclaim_accel_floor(v_ego, lead, t_follow,
   accel_term = float(np.interp(max(0.0, lead_accel), GAP_RECLAIM_LEAD_ACCEL_BP, GAP_RECLAIM_LEAD_ACCEL_V))
   floor = (max(gap_term, pullaway_term) + accel_term) * tuning.gap_reclaim_strength
   return float(np.clip(floor, 0.0, tuning.gap_reclaim_max_accel))
+
+
+def should_start_cutin_settle_event(prev_role: str, prev_control_active: bool, current_role: str,
+                                    lead, *, cutin_promoted: bool, toward_center_mps: float,
+                                    path_abs_m: float, v_ego: float) -> bool:
+  if lead is None or not getattr(lead, 'status', False) or float(v_ego) < CUTIN_SETTLE_MIN_SPEED:
+    return False
+
+  d_rel = float(getattr(lead, 'dRel', 1e9) or 1e9)
+  if d_rel > CUTIN_SETTLE_DETECT_DREL_MAX:
+    return False
+
+  became_center_from_adjacent = (
+    current_role == LeadRoleClassifier.CENTER_CONTROL and
+    prev_role in (LeadRoleClassifier.ADJ_LEFT, LeadRoleClassifier.ADJ_RIGHT)
+  )
+  new_control = bool(getattr(lead, 'status', False)) and (not prev_control_active)
+  lateral_hint = (
+    float(toward_center_mps) >= CUTIN_SETTLE_DETECT_TOWARD_CENTER_MIN_MPS or
+    float(path_abs_m) >= CUTIN_SETTLE_DETECT_PATH_ABS_MIN
+  )
+  return bool(cutin_promoted or became_center_from_adjacent or (new_control and lateral_hint))
+
+
+def get_cutin_settle_accel_floor(v_ego, lead, t_follow, age_s,
+                                 tuning: LeadResponseTuningConfig | None = None) -> float | None:
+  tuning = LeadResponseTuningConfig.defaults() if tuning is None else tuning
+  if (lead is None or not getattr(lead, 'status', False) or
+      float(v_ego) < CUTIN_SETTLE_MIN_SPEED or
+      tuning.cutin_settle_duration_s <= 0.0):
+    return None
+
+  age_s = float(age_s)
+  if age_s < 0.0 or age_s > tuning.cutin_settle_duration_s:
+    return None
+
+  v_lead = max(0.0, float(getattr(lead, 'vLead', v_ego) or v_ego))
+  closing_speed = max(0.0, float(v_ego) - v_lead)
+  if closing_speed > tuning.cutin_settle_max_closing_speed_mps:
+    return None
+
+  lead_accel = float(getattr(lead, 'aLeadK', 0.0) or 0.0)
+  if lead_accel < CUTIN_SETTLE_LEAD_ACCEL_MIN:
+    return None
+
+  d_rel = float(getattr(lead, 'dRel', 0.0) or 0.0)
+  danger_distance = LEAD_DANGER_FACTOR * desired_follow_distance(float(v_ego), v_lead, t_follow)
+  if d_rel <= (danger_distance + CUTIN_SETTLE_DANGER_MARGIN_M):
+    return None
+
+  progress = float(np.clip(age_s / tuning.cutin_settle_duration_s, 0.0, 1.0))
+  progress_scale = float(np.interp(progress, CUTIN_SETTLE_PROGRESS_BP, CUTIN_SETTLE_PROGRESS_V))
+  closing_scale = float(np.clip(closing_speed / tuning.cutin_settle_max_closing_speed_mps, 0.0, 1.0))
+  floor_mag = tuning.cutin_settle_max_decel * progress_scale * closing_scale
+  return -float(np.clip(floor_mag, 0.0, tuning.cutin_settle_max_decel))
 
 
 def gen_long_model():
@@ -360,6 +423,12 @@ class LongitudinalMpc:
     self.control_leads = (None, None)
     self.lead_approach_preview = (0.0, 0.0)
     self.gap_reclaim_accel_floor = 0.0
+    self.cutin_settle_active = False
+    self.cutin_settle_accel_floor = 0.0
+    self.cutin_settle_debug = {}
+    self._cutin_event_t = {"lead0": None, "lead1": None}
+    self._prev_lead_roles = {"lead0": LeadRoleClassifier.INVALID, "lead1": LeadRoleClassifier.INVALID}
+    self._prev_control_status = {"lead0": False, "lead1": False}
     # timers
     self.solve_time = 0.0
     self.time_qp_solution = 0.0
@@ -376,6 +445,38 @@ class LongitudinalMpc:
 
   def get_live_tune_config(self) -> LeadResponseTuningConfig:
     return self._live_tune_cfg
+
+  def _update_cutin_settle_state(self, now: float, v_ego: float, leads, lead_role_debug: dict[str, object]) -> None:
+    for idx, lead in enumerate(leads):
+      slot_key = f"lead{idx}"
+      raw = lead_role_debug.get("raw", {}).get(slot_key, {})
+      path_abs_m = abs(float(raw.get("dPath", 0.0) or 0.0))
+      toward_center_mps = float(lead_role_debug.get("toward_center_mps", {}).get(slot_key, 0.0) or 0.0)
+      cutin_promoted = bool(lead_role_debug.get("cutin_promoted", {}).get(slot_key, False))
+      current_role = str(lead_role_debug.get("roles", {}).get(slot_key, LeadRoleClassifier.INVALID))
+      prev_role = self._prev_lead_roles.get(slot_key, LeadRoleClassifier.INVALID)
+      prev_control_active = bool(self._prev_control_status.get(slot_key, False))
+
+      if should_start_cutin_settle_event(
+        prev_role,
+        prev_control_active,
+        current_role,
+        lead,
+        cutin_promoted=cutin_promoted,
+        toward_center_mps=toward_center_mps,
+        path_abs_m=path_abs_m,
+        v_ego=v_ego,
+      ):
+        self._cutin_event_t[slot_key] = now
+      elif not bool(getattr(lead, 'status', False)):
+        self._cutin_event_t[slot_key] = None
+
+      event_t = self._cutin_event_t.get(slot_key, None)
+      if event_t is not None and (now - float(event_t)) > self._live_tune_cfg.cutin_settle_duration_s:
+        self._cutin_event_t[slot_key] = None
+
+      self._prev_lead_roles[slot_key] = current_role
+      self._prev_control_status[slot_key] = bool(getattr(lead, 'status', False))
 
   def set_cost_weights(self, cost_weights, constraint_cost_weights):
     W = np.asfortranarray(np.diag(cost_weights))
@@ -459,6 +560,44 @@ class LongitudinalMpc:
       for lead in self.control_leads
     ))
 
+  def get_cutin_settle_floor(self, now: float) -> float:
+    self.cutin_settle_active = False
+    self.cutin_settle_accel_floor = 0.0
+    self.cutin_settle_debug = {}
+
+    if self.mode != 'acc' or self.source not in ('lead0', 'lead1'):
+      return 0.0
+
+    slot_idx = 0 if self.source == 'lead0' else 1
+    slot_key = f"lead{slot_idx}"
+    lead = self.control_leads[slot_idx]
+    event_t = self._cutin_event_t.get(slot_key, None)
+    if event_t is None:
+      return 0.0
+
+    age_s = max(0.0, float(now) - float(event_t))
+    floor = get_cutin_settle_accel_floor(
+      float(self.x0[1]),
+      lead,
+      self.current_t_follow,
+      age_s,
+      self._live_tune_cfg,
+    )
+    if floor is None:
+      return 0.0
+
+    self.cutin_settle_active = True
+    self.cutin_settle_accel_floor = float(floor)
+    self.cutin_settle_debug = {
+      "slot": slot_key,
+      "age_s": float(age_s),
+      "floor": float(floor),
+      "dRel": float(getattr(lead, 'dRel', 0.0) or 0.0),
+      "vLead": float(getattr(lead, 'vLead', 0.0) or 0.0),
+      "aLeadK": float(getattr(lead, 'aLeadK', 0.0) or 0.0),
+    }
+    return float(floor)
+
   def get_cruise_response_model(self, v_ego: float, *, actuation_delay_s: float = 0.0,
                                 planner_accel_limits: tuple[float, float] | None = None) -> CruiseResponseModel:
     if self.vibe_controller.is_accel_enabled():
@@ -505,6 +644,7 @@ class LongitudinalMpc:
     self.lead_role_debug = lead_role_debug
     self.status = control_lead0.status or control_lead1.status
     self.control_leads = (control_lead0, control_lead1)
+    self._update_cutin_settle_state(now, v_ego, self.control_leads, lead_role_debug)
 
     response_model = self.get_cruise_response_model(v_ego)
     self.last_cruise_response_model = response_model
@@ -545,6 +685,7 @@ class LongitudinalMpc:
       x_obstacles = np.column_stack([lead_0_obstacle, lead_1_obstacle, cruise_obstacle])
       self.source = SOURCES[np.argmin(x_obstacles[0])]
       self.gap_reclaim_accel_floor = self.get_gap_reclaim_floor()
+      self.cutin_settle_accel_floor = self.get_cutin_settle_floor(now)
 
       # These are not used in ACC mode
       x[:], v[:], a[:], j[:] = 0.0, 0.0, 0.0, 0.0
@@ -566,6 +707,9 @@ class LongitudinalMpc:
 
       self.source = 'e2e' if x_and_cruise[1,0] < x_and_cruise[1,1] else 'cruise'
       self.gap_reclaim_accel_floor = 0.0
+      self.cutin_settle_active = False
+      self.cutin_settle_accel_floor = 0.0
+      self.cutin_settle_debug = {}
 
     else:
       raise NotImplementedError(f'Planner mode {self.mode} not recognized in planner update')
@@ -617,6 +761,11 @@ class LongitudinalMpc:
           "duplicate_pair": bool(lead_role_debug.get("duplicate_pair", False)),
           "dropped_slot": lead_role_debug.get("dropped_slot", None),
           "control_status": lead_role_debug.get("control_status", {}),
+          "cutin_settle": {
+            "active": bool(self.cutin_settle_active),
+            "floor": float(self.cutin_settle_accel_floor),
+            **self.cutin_settle_debug,
+          },
           "raw": lead_role_debug.get("raw", {}),
           "awareness": lead_role_debug.get("awareness", []),
         }
