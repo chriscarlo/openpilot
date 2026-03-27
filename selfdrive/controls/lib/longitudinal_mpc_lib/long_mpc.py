@@ -74,6 +74,8 @@ GAP_RECLAIM_LEAD_ACCEL_V = [0.0, 0.03, 0.06]
 GAP_RECLAIM_BLEND_RISE_TAU_S = 0.60
 GAP_RECLAIM_BLEND_FALL_TAU_S = 1.20
 GAP_RECLAIM_HORIZON_RAMP_TAU_S = 1.00
+GAP_RECLAIM_RELAX_ROOM_FRACTION = 0.85
+GAP_RECLAIM_RELAX_ROOM_MAX_M = 18.0
 CUTIN_SETTLE_MIN_SPEED = 15.0
 CUTIN_SETTLE_DETECT_DREL_MAX = 70.0
 CUTIN_SETTLE_DETECT_PATH_ABS_MIN = 0.8
@@ -626,9 +628,19 @@ class LongitudinalMpc:
     blend = self._update_gap_reclaim_blend(target_blend, now)
     obstacle_delta = np.maximum(raw_lead_obstacle - filtered_lead_obstacle, 0.0)
     horizon_ramp = 1.0 - np.exp(-T_IDXS / GAP_RECLAIM_HORIZON_RAMP_TAU_S)
-    obstacle_push = obstacle_delta * blend * horizon_ramp
+    stabilization_push = obstacle_delta * blend * horizon_ramp
+
+    gap_surplus = max(0.0, float(reclaim_lead.dRel) - get_headway_follow_distance(float(self.x0[1]), self.current_t_follow))
+    reclaim_room_max = min(
+      GAP_RECLAIM_RELAX_ROOM_MAX_M,
+      max(0.0, gap_surplus - float(self._live_tune_cfg.gap_reclaim_gap_min_m)) * GAP_RECLAIM_RELAX_ROOM_FRACTION,
+    )
+    effective_reclaim_intent = max_intent * blend
+    reclaim_room = np.minimum(0.5 * effective_reclaim_intent * np.square(T_IDXS), reclaim_room_max * horizon_ramp)
+
+    obstacle_push = stabilization_push + reclaim_room
     self.gap_reclaim_obstacle_push = float(np.max(obstacle_push))
-    target_obstacle = filtered_lead_obstacle + obstacle_push
+    target_obstacle = np.minimum(raw_lead_obstacle, filtered_lead_obstacle + stabilization_push) + reclaim_room
 
     raw_obstacle_margin = float(np.min(filtered_lead_obstacle - raw_lead_obstacle))
     raw_closing_speed = float(self.x0[1]) - float(getattr(raw_lead, 'vLead', self.x0[1]) or self.x0[1])
