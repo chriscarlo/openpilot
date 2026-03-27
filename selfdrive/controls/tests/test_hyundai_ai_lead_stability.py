@@ -212,6 +212,67 @@ class TestHyundaiAiLeadStability:
     assert mpc.source == "lead0"
     assert mpc.params[0, 1] == pytest.approx(ACCEL_MAX)
 
+  def test_reclaim_stays_active_through_benign_raw_lead_accel_jitter(self, monkeypatch):
+    monkeypatch.setattr(
+      "openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc.time.monotonic",
+      _MonotonicStub(step=0.2),
+    )
+    mpc = _make_hyundai_mpc()
+
+    for _ in range(2):
+      _run_update(
+        mpc,
+        _make_lead(d_rel=44.5, y_rel=0.04, d_path=0.04, v_lat=0.35, v_rel=0.0, v_lead=29.0, a_lead=0.0, model_prob=0.96),
+        _make_lead(d_rel=44.45, y_rel=0.07, d_path=0.07, v_lat=4.00, v_rel=0.0, v_lead=29.0, a_lead=0.0, model_prob=0.93),
+      )
+    for _ in range(2):
+      _run_update(
+        mpc,
+        _make_lead(d_rel=60.0, y_rel=0.04, d_path=0.04, v_lat=0.35, v_rel=0.0, v_lead=29.0, a_lead=0.0, model_prob=0.96),
+        _make_lead(d_rel=59.95, y_rel=0.07, d_path=0.07, v_lat=4.00, v_rel=0.0, v_lead=29.0, a_lead=0.0, model_prob=0.93),
+      )
+
+    assert mpc.source == "lead0"
+
+    _run_update(
+      mpc,
+      _make_lead(d_rel=60.6, y_rel=0.04, d_path=0.04, v_lat=0.35, v_rel=0.0, v_lead=29.0, a_lead=-0.55, model_prob=0.96),
+      _make_lead(d_rel=60.55, y_rel=0.07, d_path=0.07, v_lat=4.00, v_rel=0.0, v_lead=29.0, a_lead=-0.55, model_prob=0.93),
+    )
+
+    assert mpc.source == "lead0"
+    assert mpc.gap_reclaim_accel_floor > 0.0
+    assert mpc.acc_source_debug["raw_reclaim_safety_override"] is False
+
+  def test_reclaim_raw_safety_override_still_engages_for_real_closing(self, monkeypatch):
+    monkeypatch.setattr(
+      "openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc.time.monotonic",
+      _MonotonicStub(step=0.2),
+    )
+    mpc = _make_hyundai_mpc()
+
+    for _ in range(2):
+      _run_update(
+        mpc,
+        _make_lead(d_rel=44.5, y_rel=0.04, d_path=0.04, v_lat=0.35, v_rel=0.0, v_lead=29.0, a_lead=0.0, model_prob=0.96),
+        _make_lead(d_rel=44.45, y_rel=0.07, d_path=0.07, v_lat=4.00, v_rel=0.0, v_lead=29.0, a_lead=0.0, model_prob=0.93),
+      )
+    for _ in range(2):
+      _run_update(
+        mpc,
+        _make_lead(d_rel=60.0, y_rel=0.04, d_path=0.04, v_lat=0.35, v_rel=0.0, v_lead=29.0, a_lead=0.0, model_prob=0.96),
+        _make_lead(d_rel=59.95, y_rel=0.07, d_path=0.07, v_lat=4.00, v_rel=0.0, v_lead=29.0, a_lead=0.0, model_prob=0.93),
+      )
+
+    _run_update(
+      mpc,
+      _make_lead(d_rel=58.0, y_rel=0.04, d_path=0.04, v_lat=0.35, v_rel=-1.1, v_lead=27.9, a_lead=-0.8, model_prob=0.96),
+      _make_lead(d_rel=57.95, y_rel=0.07, d_path=0.07, v_lat=4.00, v_rel=-1.1, v_lead=27.9, a_lead=-0.8, model_prob=0.93),
+    )
+
+    assert mpc.source == "lead0"
+    assert mpc.acc_source_debug["raw_reclaim_safety_override"] is True
+
   def test_duplicate_slot_jitter_does_not_start_cutin_settle(self, monkeypatch):
     monkeypatch.setattr(
       "openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc.time.monotonic",
