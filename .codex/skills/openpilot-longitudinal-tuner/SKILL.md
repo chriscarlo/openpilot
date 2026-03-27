@@ -33,6 +33,12 @@ description: >
 python3 .codex/skills/openpilot-longitudinal-tuner/scripts/monitor_longitudinal_anomalies.py --hz 5
 ```
 
+- If you are iterating on the new lead-response heuristics, print the effective
+  live tune first:
+```bash
+python3 .codex/skills/openpilot-longitudinal-tuner/scripts/live_lead_tune.py show
+```
+
 - On-device, the same script works from `/data/openpilot`:
 ```bash
 cd /data/openpilot
@@ -43,12 +49,19 @@ python3 .codex/skills/openpilot-longitudinal-tuner/scripts/monitor_longitudinal_
   `references/hyundai_canfd_ev6.md` before changing planner code.
 - If the issue is “why did it choose ACC vs e2e / blended,” read
   `references/pipeline.md`.
+- If you are live-tuning the new lead preview / gap reclaim path, also read
+  `references/live_lead_tuning.md`.
 
 ## Workflow Decision Tree
 
 - Unexpected slowdown or refusal to accelerate:
   check external caps first. Inspect `longitudinalPlanSP` VTSC, SLC, and RTI
   state plus `longitudinalPlan.allowThrottle` before changing PID or car tuning.
+- Lead follows too loosely on pull-away, or reacts too late to a newly
+  recognized lead:
+  inspect the live lead-tune values before editing code. The helper script and
+  runtime refresh path let you change those heuristics without restarting
+  services.
 - Planner target looks reasonable, but the car command does not:
   compare `longitudinalPlan.aTarget`, `carControl.actuators.accel`,
   `carOutput.actuatorsOutput.accel`, and delayed `carState.aEgo`. If the first
@@ -76,6 +89,10 @@ pytest selfdrive/controls/tests/test_following_distance.py -q
 ```
 
 ```bash
+pytest selfdrive/controls/tests/test_longitudinal_live_tune.py -q
+```
+
+```bash
 pytest selfdrive/car/tests/test_cruise_speed.py -q
 ```
 
@@ -97,6 +114,8 @@ pytest selfdrive/car/hyundai/tests/test_ev6_dashboard_speed_limit.py -q
   CAN FD longitudinal ownership details.
 - Read `references/live_monitoring.md` for the watcher field guide and alert
   meanings.
+- Read `references/live_lead_tuning.md` for the runtime ACC lead-response tune,
+  helper script, and no-restart workflow.
 
 ## Skill Maintenance
 

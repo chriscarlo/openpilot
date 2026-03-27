@@ -358,6 +358,14 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"VibeAccelPersonalityEnabled", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"VibeFollowPersonalityEnabled", {PERSISTENT | BACKUP, BOOL, "0"}},
 
+    // Runtime-tunable lead response knobs for ACC lead preview and safe gap reclaim.
+    {"Longitudinal.LiveTune.LeadPreviewStrength", {PERSISTENT | BACKUP, FLOAT, "1.0"}},
+    {"Longitudinal.LiveTune.LeadPreviewGapMinM", {PERSISTENT | BACKUP, FLOAT, "1.5"}},
+    {"Longitudinal.LiveTune.LeadPreviewMaxBufferM", {PERSISTENT | BACKUP, FLOAT, "12.0"}},
+    {"Longitudinal.LiveTune.GapReclaimStrength", {PERSISTENT | BACKUP, FLOAT, "1.0"}},
+    {"Longitudinal.LiveTune.GapReclaimGapMinM", {PERSISTENT | BACKUP, FLOAT, "1.5"}},
+    {"Longitudinal.LiveTune.GapReclaimMaxAccel", {PERSISTENT | BACKUP, FLOAT, "0.36"}},
+
     // Vibe tuning profiles (defaults match current profile tables)
     {"VibeTune.Follow.Relaxed.Headway0", {PERSISTENT | BACKUP, FLOAT, "1.25"}},
     {"VibeTune.Follow.Relaxed.Headway1", {PERSISTENT | BACKUP, FLOAT, "1.60"}},

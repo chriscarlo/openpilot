@@ -5,12 +5,17 @@ import time
 import numpy as np
 from cereal import log
 from opendbc.car.interfaces import ACCEL_MIN, ACCEL_MAX
+from openpilot.common.params import Params
 from openpilot.common.realtime import DT_MDL
 from openpilot.common.swaglog import cloudlog
 # WARNING: imports outside of constants will not trigger a rebuild
 from openpilot.selfdrive.modeld.constants import index_function
 from openpilot.selfdrive.controls.radard import _LEAD_ACCEL_TAU
 from openpilot.selfdrive.controls.lib.lead_role_classifier import LeadRoleClassifier
+from openpilot.selfdrive.controls.lib.longitudinal_live_tune import (
+  LeadResponseTuningConfig,
+  read_lead_response_tuning_config,
+)
 from openpilot.selfdrive.controls.lib.longitudinal_response_model import (
   DEFAULT_COMFORT_BRAKE,
   DEFAULT_CRUISE_MAX_ACCEL,
@@ -54,6 +59,17 @@ CRASH_DISTANCE = .25
 LEAD_DANGER_FACTOR = 0.75
 LIMIT_COST = 1e6
 ACADOS_SOLVER_TYPE = 'SQP_RTI'
+LEAD_APPROACH_PREVIEW_MIN_SPEED = 8.0
+LEAD_APPROACH_PREVIEW_TIME_BP = [0.0, 2.0, 5.0, 10.0]
+LEAD_APPROACH_PREVIEW_TIME_V = [0.0, 0.15, 0.50, 0.95]
+LEAD_APPROACH_PREVIEW_DECAY_TAU = 1.75
+GAP_RECLAIM_MIN_SPEED = 8.0
+GAP_RECLAIM_HEADWAY_SURPLUS_BP = [0.0, 0.08, 0.18, 0.35]
+GAP_RECLAIM_HEADWAY_SURPLUS_V = [0.0, 0.06, 0.20, 0.30]
+GAP_RECLAIM_PULLAWAY_BP = [0.0, 0.5, 1.5, 3.0]
+GAP_RECLAIM_PULLAWAY_V = [0.0, 0.04, 0.12, 0.20]
+GAP_RECLAIM_LEAD_ACCEL_BP = [0.0, 0.5, 1.5]
+GAP_RECLAIM_LEAD_ACCEL_V = [0.0, 0.03, 0.06]
 
 
 # Fewer timestamps don't hurt performance and lead to
@@ -97,10 +113,75 @@ def get_stopped_equivalence_factor(v_lead):
 def get_safe_obstacle_distance(v_ego, t_follow):
   return (v_ego**2) / (2 * COMFORT_BRAKE) + t_follow * v_ego + STOP_DISTANCE
 
+def get_headway_follow_distance(v_ego, t_follow):
+  return STOP_DISTANCE + t_follow * v_ego
+
 def desired_follow_distance(v_ego, v_lead, t_follow=None):
   if t_follow is None:
     t_follow = get_T_FOLLOW()
   return get_safe_obstacle_distance(v_ego, t_follow) - get_stopped_equivalence_factor(v_lead)
+
+
+def get_lead_approach_preview_buffer(v_ego, lead, t_follow,
+                                     tuning: LeadResponseTuningConfig | None = None) -> float:
+  tuning = LeadResponseTuningConfig.defaults() if tuning is None else tuning
+  if lead is None or not getattr(lead, 'status', False) or v_ego < LEAD_APPROACH_PREVIEW_MIN_SPEED:
+    return 0.0
+
+  v_lead = max(0.0, float(getattr(lead, 'vLead', v_ego) or v_ego))
+  closing_speed = max(0.0, float(v_ego) - v_lead)
+  if closing_speed <= 0.5:
+    return 0.0
+
+  d_rel = float(getattr(lead, 'dRel', 0.0) or 0.0)
+  headway_gap = get_headway_follow_distance(float(v_ego), t_follow)
+  gap_surplus = d_rel - headway_gap
+  if gap_surplus <= tuning.lead_preview_gap_min_m:
+    return 0.0
+
+  preview_time = float(np.interp(closing_speed, LEAD_APPROACH_PREVIEW_TIME_BP, LEAD_APPROACH_PREVIEW_TIME_V))
+  preview_buffer = closing_speed * preview_time
+  lead_accel = max(0.0, float(getattr(lead, 'aLeadK', 0.0) or 0.0))
+  accel_scale = float(np.interp(lead_accel, GAP_RECLAIM_LEAD_ACCEL_BP, [1.0, 0.75, 0.5]))
+  max_buffer = min(tuning.lead_preview_max_buffer_m, gap_surplus * 0.7)
+  preview_buffer *= accel_scale * tuning.lead_preview_strength
+  return float(np.clip(preview_buffer, 0.0, max_buffer))
+
+
+def apply_lead_approach_preview(lead_obstacle, preview_buffer_m):
+  if preview_buffer_m <= 0.0:
+    return lead_obstacle
+
+  decay = np.exp(-T_IDXS / LEAD_APPROACH_PREVIEW_DECAY_TAU)
+  return np.maximum(lead_obstacle - preview_buffer_m * decay, 0.0)
+
+
+def get_gap_reclaim_accel_floor(v_ego, lead, t_follow,
+                                tuning: LeadResponseTuningConfig | None = None) -> float:
+  tuning = LeadResponseTuningConfig.defaults() if tuning is None else tuning
+  if lead is None or not getattr(lead, 'status', False) or v_ego < GAP_RECLAIM_MIN_SPEED:
+    return 0.0
+
+  v_lead = float(getattr(lead, 'vLead', v_ego) or v_ego)
+  if v_lead < float(v_ego) - 0.3:
+    return 0.0
+
+  lead_accel = float(getattr(lead, 'aLeadK', 0.0) or 0.0)
+  if lead_accel < -0.4:
+    return 0.0
+
+  d_rel = float(getattr(lead, 'dRel', 0.0) or 0.0)
+  gap_surplus = d_rel - get_headway_follow_distance(float(v_ego), t_follow)
+  if gap_surplus <= tuning.gap_reclaim_gap_min_m:
+    return 0.0
+
+  headway_surplus = gap_surplus / max(float(v_ego), GAP_RECLAIM_MIN_SPEED)
+  pullaway_speed = max(0.0, v_lead - float(v_ego))
+  gap_term = float(np.interp(headway_surplus, GAP_RECLAIM_HEADWAY_SURPLUS_BP, GAP_RECLAIM_HEADWAY_SURPLUS_V))
+  pullaway_term = float(np.interp(pullaway_speed, GAP_RECLAIM_PULLAWAY_BP, GAP_RECLAIM_PULLAWAY_V))
+  accel_term = float(np.interp(max(0.0, lead_accel), GAP_RECLAIM_LEAD_ACCEL_BP, GAP_RECLAIM_LEAD_ACCEL_V))
+  floor = (max(gap_term, pullaway_term) + accel_term) * tuning.gap_reclaim_strength
+  return float(np.clip(floor, 0.0, tuning.gap_reclaim_max_accel))
 
 
 def gen_long_model():
@@ -234,10 +315,15 @@ def gen_long_ocp():
 
 
 class LongitudinalMpc:
+  LIVE_TUNE_REFRESH_DT_S = 0.50
+
   def __init__(self, mode='acc', dt=DT_MDL):
     self.mode = mode
     self.dt = dt
     self.solver = AcadosOcpSolverCython(MODEL_NAME, ACADOS_SOLVER_TYPE, N)
+    self._live_tune_params = Params()
+    self._last_live_tune_refresh_t = 0.0
+    self._live_tune_cfg = LeadResponseTuningConfig.defaults()
     self.reset()
     self.source = SOURCES[2]
     self.vibe_controller = VibePersonalityController()
@@ -270,6 +356,10 @@ class LongitudinalMpc:
     self.last_v_lower = None
     self.last_v_upper = None
     self.last_v_cruise_clipped = None
+    self.current_t_follow = float(get_T_FOLLOW())
+    self.control_leads = (None, None)
+    self.lead_approach_preview = (0.0, 0.0)
+    self.gap_reclaim_accel_floor = 0.0
     # timers
     self.solve_time = 0.0
     self.time_qp_solution = 0.0
@@ -277,6 +367,15 @@ class LongitudinalMpc:
     self.time_integrator = 0.0
     self.x0 = np.zeros(X_DIM)
     self.set_weights()
+
+  def _refresh_live_tune(self, now: float, force: bool = False) -> None:
+    if not force and (now - self._last_live_tune_refresh_t) < self.LIVE_TUNE_REFRESH_DT_S:
+      return
+    self._last_live_tune_refresh_t = now
+    self._live_tune_cfg = read_lead_response_tuning_config(self._live_tune_params)
+
+  def get_live_tune_config(self) -> LeadResponseTuningConfig:
+    return self._live_tune_cfg
 
   def set_cost_weights(self, cost_weights, constraint_cost_weights):
     W = np.asfortranarray(np.diag(cost_weights))
@@ -347,6 +446,19 @@ class LongitudinalMpc:
     lead_xv = self.extrapolate_lead(x_lead, v_lead, a_lead, a_lead_tau)
     return lead_xv
 
+  def get_gap_reclaim_floor(self) -> float:
+    if self.mode != 'acc' or self.last_v_cruise_clipped is None or len(self.last_v_cruise_clipped) < 2:
+      return 0.0
+
+    v_ego = float(self.x0[1])
+    if float(self.last_v_cruise_clipped[1]) <= v_ego + 0.05:
+      return 0.0
+
+    return float(max(
+      get_gap_reclaim_accel_floor(v_ego, lead, self.current_t_follow, self._live_tune_cfg)
+      for lead in self.control_leads
+    ))
+
   def get_cruise_response_model(self, v_ego: float, *, actuation_delay_s: float = 0.0,
                                 planner_accel_limits: tuple[float, float] | None = None) -> CruiseResponseModel:
     if self.vibe_controller.is_accel_enabled():
@@ -375,6 +487,7 @@ class LongitudinalMpc:
   def update(self, radarstate, v_cruise, x, v, a, j, personality=log.LongitudinalPersonality.standard):
     v_ego = self.x0[1]
     now = time.monotonic()
+    self._refresh_live_tune(now)
 
     # Get following distance
     if self.vibe_controller.is_follow_enabled():
@@ -384,12 +497,14 @@ class LongitudinalMpc:
         t_follow = get_T_FOLLOW(personality)
     else:
       t_follow = get_T_FOLLOW(personality)
+    self.current_t_follow = float(t_follow)
 
     control_lead0, control_lead1, lead_role_debug = self.lead_role_classifier.classify(
       v_ego, radarstate.leadOne, radarstate.leadTwo, now=now,
     )
     self.lead_role_debug = lead_role_debug
     self.status = control_lead0.status or control_lead1.status
+    self.control_leads = (control_lead0, control_lead1)
 
     response_model = self.get_cruise_response_model(v_ego)
     self.last_cruise_response_model = response_model
@@ -402,6 +517,11 @@ class LongitudinalMpc:
     # and then treat that as a stopped car/obstacle at this new distance.
     lead_0_obstacle = lead_xv_0[:,0] + get_stopped_equivalence_factor(lead_xv_0[:,1])
     lead_1_obstacle = lead_xv_1[:,0] + get_stopped_equivalence_factor(lead_xv_1[:,1])
+    lead_0_preview = get_lead_approach_preview_buffer(v_ego, control_lead0, t_follow, self._live_tune_cfg)
+    lead_1_preview = get_lead_approach_preview_buffer(v_ego, control_lead1, t_follow, self._live_tune_cfg)
+    lead_0_obstacle = apply_lead_approach_preview(lead_0_obstacle, lead_0_preview)
+    lead_1_obstacle = apply_lead_approach_preview(lead_1_obstacle, lead_1_preview)
+    self.lead_approach_preview = (lead_0_preview, lead_1_preview)
 
     self.params[:,0] = ACCEL_MIN
     self.params[:,1] = ACCEL_MAX
@@ -424,6 +544,7 @@ class LongitudinalMpc:
       cruise_obstacle = np.cumsum(T_DIFFS * v_cruise_clipped) + get_safe_obstacle_distance(v_cruise_clipped, t_follow)
       x_obstacles = np.column_stack([lead_0_obstacle, lead_1_obstacle, cruise_obstacle])
       self.source = SOURCES[np.argmin(x_obstacles[0])]
+      self.gap_reclaim_accel_floor = self.get_gap_reclaim_floor()
 
       # These are not used in ACC mode
       x[:], v[:], a[:], j[:] = 0.0, 0.0, 0.0, 0.0
@@ -444,6 +565,7 @@ class LongitudinalMpc:
       x = np.min(x_and_cruise, axis=1)
 
       self.source = 'e2e' if x_and_cruise[1,0] < x_and_cruise[1,1] else 'cruise'
+      self.gap_reclaim_accel_floor = 0.0
 
     else:
       raise NotImplementedError(f'Planner mode {self.mode} not recognized in planner update')

@@ -10,6 +10,10 @@ python3 .codex/skills/openpilot-longitudinal-tuner/scripts/monitor_longitudinal_
 ```bash
 python3 .codex/skills/openpilot-longitudinal-tuner/scripts/monitor_longitudinal_anomalies.py --hz 5 --only-alerts
 ```
+- Include the current live lead-response tune in the startup header:
+```bash
+python3 .codex/skills/openpilot-longitudinal-tuner/scripts/monitor_longitudinal_anomalies.py --hz 5 --show-live-tune
+```
 - Save rendered samples:
 ```bash
 python3 .codex/skills/openpilot-longitudinal-tuner/scripts/monitor_longitudinal_anomalies.py --jsonl-out .cache/longitudinal_watch.jsonl

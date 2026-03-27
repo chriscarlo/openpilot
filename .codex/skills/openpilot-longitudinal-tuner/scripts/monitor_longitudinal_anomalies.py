@@ -32,6 +32,10 @@ REPO_ROOT = _ensure_repo_on_path()
 
 from cereal import car, custom, messaging  # noqa: E402
 from openpilot.common.params import Params  # noqa: E402
+from openpilot.selfdrive.controls.lib.longitudinal_live_tune import (  # noqa: E402
+  format_lead_response_tune_summary,
+  read_lead_response_tuning_config,
+)
 
 try:  # noqa: E402
   from opendbc.car.hyundai.values import HyundaiFlags
@@ -210,6 +214,7 @@ def main() -> int:
   parser.add_argument("--only-alerts", action="store_true", help="print only alerting rows")
   parser.add_argument("--all-gears", action="store_true", help="do not auto-pause offroad or outside a forward gear")
   parser.add_argument("--jsonl-out", type=str, default="", help="optional JSONL output path")
+  parser.add_argument("--show-live-tune", action="store_true", help="print effective live lead-tune values at startup")
   args = parser.parse_args()
 
   period = 1.0 / max(1.0, float(args.hz))
@@ -233,6 +238,8 @@ def main() -> int:
     f"delay={_fmt(actuator_delay, 2)} bundle_gen={generation if generation is not None else '?'} "
     f"hyundai={hyundai_topology} hy_long_tune={hyundai_tuning} sp_flags={sp_flags}"
   )
+  if args.show_live_tune:
+    print(f"live_tune {format_lead_response_tune_summary(read_lead_response_tuning_config(params))}")
   print("watching longitudinal anomalies: Ctrl-C to stop")
   print("t v aE lp cc can mdl src mode cap lead notes")
 
