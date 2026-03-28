@@ -8,6 +8,7 @@ from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import (
   get_cutin_settle_accel_floor,
   get_gap_reclaim_effective_cap,
   get_gap_reclaim_accel_floor,
+  get_gap_reclaim_projection_scale,
   get_lead_approach_preview_buffer,
   should_start_cutin_settle_event,
 )
@@ -116,6 +117,15 @@ class TestLeadInteractionHeuristics:
     sport_cap = get_gap_reclaim_effective_cap(33.5, near_target_pullaway, 1.3, personality_max_accel=1.15)
 
     assert sport_cap - comfort_cap < 0.10
+
+  def test_gap_reclaim_projection_scale_tapers_room_when_ego_accel_is_already_closing_gap(self):
+    mid_pullaway = _make_lead(d_rel=58.0, v_lead=33.9, a_lead=0.1)
+
+    low_ego_scale = get_gap_reclaim_projection_scale(33.5, mid_pullaway, 1.3, ego_accel=0.0)
+    high_ego_scale = get_gap_reclaim_projection_scale(33.5, mid_pullaway, 1.3, ego_accel=0.9)
+
+    assert low_ego_scale == pytest.approx(1.0)
+    assert high_ego_scale < 0.45
 
   def test_approach_preview_only_appears_when_closing_outside_headway(self):
     closing_far = _make_lead(d_rel=79.0, v_lead=27.0, a_lead=0.0)

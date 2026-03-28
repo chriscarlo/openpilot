@@ -75,6 +75,11 @@ GAP_RECLAIM_PERSONALITY_SURPLUS_BP = [0.0, 0.06, 0.18, 0.35]
 GAP_RECLAIM_PERSONALITY_SURPLUS_V = [0.0, 0.0, 0.40, 1.0]
 GAP_RECLAIM_PERSONALITY_PULLAWAY_BP = [0.0, 0.3, 0.8, 1.6]
 GAP_RECLAIM_PERSONALITY_PULLAWAY_V = [0.0, 0.12, 0.45, 1.0]
+GAP_RECLAIM_PROJECT_HORIZON_S = 1.2
+GAP_RECLAIM_PROJECT_GAP_WEIGHT = 0.35
+GAP_RECLAIM_PROJECT_PULLAWAY_WEIGHT = 0.65
+GAP_RECLAIM_PROJECT_EGO_ACCEL_BP = [0.0, 0.25, 0.55, 0.90]
+GAP_RECLAIM_PROJECT_EGO_ACCEL_V = [0.0, 0.0, 0.45, 1.0]
 GAP_RECLAIM_BLEND_RISE_TAU_S = 0.60
 GAP_RECLAIM_BLEND_FALL_TAU_S = 1.20
 GAP_RECLAIM_HORIZON_RAMP_TAU_S = 1.00
@@ -218,6 +223,45 @@ def get_gap_reclaim_effective_cap(v_ego, lead, t_follow,
   surplus_activation = float(np.interp(headway_surplus, GAP_RECLAIM_PERSONALITY_SURPLUS_BP, [0.0, 0.15, 0.55, 1.0]))
   cap_blend = max(surplus_blend, pullaway_blend * surplus_activation)
   return float(comfort_cap + (personality_cap - comfort_cap) * cap_blend)
+
+
+def get_gap_reclaim_projection_scale(v_ego, lead, t_follow, ego_accel: float = 0.0) -> float:
+  if lead is None or not getattr(lead, 'status', False) or v_ego < GAP_RECLAIM_MIN_SPEED:
+    return 1.0
+
+  ego_accel = max(float(ego_accel), 0.0)
+  accel_activation = float(np.interp(ego_accel, GAP_RECLAIM_PROJECT_EGO_ACCEL_BP, GAP_RECLAIM_PROJECT_EGO_ACCEL_V))
+  if accel_activation <= 0.0:
+    return 1.0
+
+  d_rel = float(getattr(lead, 'dRel', 0.0) or 0.0)
+  v_lead = float(getattr(lead, 'vLead', v_ego) or v_ego)
+  lead_accel = float(getattr(lead, 'aLeadK', 0.0) or 0.0)
+  gap_surplus = max(0.0, d_rel - get_headway_follow_distance(float(v_ego), t_follow))
+  if gap_surplus <= 0.0:
+    return 1.0
+
+  pullaway_speed = max(0.0, v_lead - float(v_ego))
+  horizon_s = GAP_RECLAIM_PROJECT_HORIZON_S
+  projected_gap_surplus = max(
+    0.0,
+    gap_surplus +
+    (v_lead - float(v_ego)) * horizon_s +
+    0.5 * (lead_accel - ego_accel) * (horizon_s ** 2),
+  )
+  gap_scale = float(np.clip(projected_gap_surplus / max(gap_surplus, 1e-3), 0.0, 1.0))
+
+  if pullaway_speed > 0.05:
+    projected_pullaway_speed = max(0.0, pullaway_speed + (lead_accel - ego_accel) * horizon_s)
+    pullaway_scale = float(np.clip(projected_pullaway_speed / max(pullaway_speed, 1e-3), 0.0, 1.0))
+  else:
+    pullaway_scale = gap_scale
+
+  projection_scale = (
+    GAP_RECLAIM_PROJECT_GAP_WEIGHT * gap_scale +
+    GAP_RECLAIM_PROJECT_PULLAWAY_WEIGHT * pullaway_scale
+  )
+  return float(np.clip(1.0 - accel_activation * (1.0 - projection_scale), 0.0, 1.0))
 
 
 def get_gap_reclaim_accel_floor(v_ego, lead, t_follow,
@@ -493,6 +537,7 @@ class LongitudinalMpc:
     self.lead_approach_preview = (0.0, 0.0)
     self.gap_reclaim_accel_floor = 0.0
     self.gap_reclaim_obstacle_push = 0.0
+    self.gap_reclaim_projection_scale = 1.0
     self.gap_reclaim_personality_max_accel = 0.0
     self.gap_reclaim_effective_cap = 0.0
     self._gap_reclaim_blend = 0.0
@@ -663,6 +708,7 @@ class LongitudinalMpc:
                                  raw_lead, filtered_lead, now: float) -> np.ndarray:
     self.gap_reclaim_accel_floor = 0.0
     self.gap_reclaim_obstacle_push = 0.0
+    self.gap_reclaim_projection_scale = 1.0
     self.gap_reclaim_personality_max_accel = 0.0
     self.gap_reclaim_effective_cap = 0.0
     self._raw_reclaim_safety_override_active = False
@@ -674,6 +720,12 @@ class LongitudinalMpc:
       return np.minimum(raw_lead_obstacle, filtered_lead_obstacle)
 
     reclaim_lead = self._update_hyundai_reclaim_lead(now, raw_lead, filtered_lead)
+    self.gap_reclaim_projection_scale = get_gap_reclaim_projection_scale(
+      float(self.x0[1]),
+      reclaim_lead,
+      self.current_t_follow,
+      ego_accel=float(self.x0[2]),
+    )
     personality_max_accel = self._get_gap_reclaim_personality_max_accel(float(self.x0[1]))
     self.gap_reclaim_personality_max_accel = float(personality_max_accel or 0.0)
     self.gap_reclaim_effective_cap = get_gap_reclaim_effective_cap(
@@ -705,7 +757,8 @@ class LongitudinalMpc:
       max(0.0, gap_surplus - float(self._live_tune_cfg.gap_reclaim_gap_min_m)) * GAP_RECLAIM_RELAX_ROOM_FRACTION,
     )
     effective_reclaim_intent = max_intent * blend
-    reclaim_room = np.minimum(0.5 * effective_reclaim_intent * np.square(T_IDXS), reclaim_room_max * horizon_ramp)
+    base_reclaim_room = np.minimum(0.5 * effective_reclaim_intent * np.square(T_IDXS), reclaim_room_max * horizon_ramp)
+    reclaim_room = base_reclaim_room * float(self.gap_reclaim_projection_scale)
 
     obstacle_push = stabilization_push + reclaim_room
     self.gap_reclaim_obstacle_push = float(np.max(obstacle_push))
@@ -1093,6 +1146,7 @@ class LongitudinalMpc:
       "filtered_pullaway_mps": float(filtered_metrics["pullaway_speed"]),
       "gap_reclaim_blend": float(self._gap_reclaim_blend),
       "gap_reclaim_obstacle_push_m": float(self.gap_reclaim_obstacle_push),
+      "gap_reclaim_projection_scale": float(self.gap_reclaim_projection_scale),
       "gap_reclaim_effective_cap": float(self.gap_reclaim_effective_cap),
       "gap_reclaim_personality_max_accel": float(self.gap_reclaim_personality_max_accel),
       "raw_reclaim_safety_override": bool(self._raw_reclaim_safety_override_active),
@@ -1397,6 +1451,7 @@ class LongitudinalMpc:
       }
       self.gap_reclaim_accel_floor = 0.0
       self.gap_reclaim_obstacle_push = 0.0
+      self.gap_reclaim_projection_scale = 1.0
       self.gap_reclaim_personality_max_accel = 0.0
       self.gap_reclaim_effective_cap = 0.0
       self._gap_reclaim_blend = 0.0
