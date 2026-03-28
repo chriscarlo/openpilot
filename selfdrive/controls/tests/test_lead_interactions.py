@@ -9,6 +9,7 @@ from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import (
   get_gap_reclaim_effective_cap,
   get_gap_reclaim_accel_floor,
   get_gap_reclaim_projection_scale,
+  get_lead_present_cruise_accel_cap,
   get_lead_approach_preview_buffer,
   should_start_cutin_settle_event,
 )
@@ -117,6 +118,30 @@ class TestLeadInteractionHeuristics:
     sport_cap = get_gap_reclaim_effective_cap(33.5, near_target_pullaway, 1.3, personality_max_accel=1.15)
 
     assert sport_cap - comfort_cap < 0.10
+
+  def test_lead_present_cruise_accel_cap_stays_moderate_in_traffic(self):
+    traffic_pullaway = _make_lead(d_rel=28.0, v_lead=9.8, a_lead=0.1)
+    setattr(traffic_pullaway, "vRel", 0.6)
+
+    cap = get_lead_present_cruise_accel_cap(9.0, traffic_pullaway, 1.3, personality_max_accel=3.5)
+
+    assert 0.55 < cap < 1.20
+
+  def test_lead_present_cruise_accel_cap_can_expand_for_far_open_gap(self):
+    far_pullaway = _make_lead(d_rel=60.0, v_lead=11.5, a_lead=0.2)
+    setattr(far_pullaway, "vRel", 1.2)
+
+    cap = get_lead_present_cruise_accel_cap(9.0, far_pullaway, 1.3, personality_max_accel=3.5)
+
+    assert cap > 1.5
+
+  def test_lead_present_cruise_accel_cap_ignores_clearly_slower_leads(self):
+    slow_lead = _make_lead(d_rel=100.0, v_lead=0.0, a_lead=0.0)
+    setattr(slow_lead, "vRel", -9.0)
+
+    cap = get_lead_present_cruise_accel_cap(9.0, slow_lead, 1.3, personality_max_accel=3.5)
+
+    assert cap is None
 
   def test_gap_reclaim_projection_scale_tapers_room_when_ego_accel_is_already_closing_gap(self):
     mid_pullaway = _make_lead(d_rel=58.0, v_lead=33.9, a_lead=0.1)

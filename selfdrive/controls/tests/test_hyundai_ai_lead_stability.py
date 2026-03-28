@@ -236,6 +236,25 @@ class TestHyundaiAiLeadStability:
     assert mpc.source == "cruise"
     assert mpc.acc_source_debug["low_speed_queue_hold"] is False
 
+  def test_cruise_owned_lead_present_uses_tapered_accel_cap(self, monkeypatch):
+    monkeypatch.setattr(
+      "openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc.time.monotonic",
+      _MonotonicStub(step=0.2),
+    )
+    _configure_vibe_accel(enabled=True, personality=0)
+    mpc = _make_hyundai_mpc(v_ego=9.0, a_ego=0.1)
+
+    _run_update(
+      mpc,
+      _make_lead(d_rel=28.0, y_rel=0.04, d_path=0.04, v_lat=0.10, v_rel=0.6, v_lead=9.8, a_lead=0.1, model_prob=0.96),
+      _make_lead(status=False),
+    )
+
+    assert mpc.source == "cruise"
+    assert 0.55 < mpc.lead_present_cruise_accel_cap < 1.20
+    assert mpc.last_cruise_response_model is not None
+    assert mpc.last_cruise_response_model.max_accel_mps2 == pytest.approx(mpc.lead_present_cruise_accel_cap)
+
   def test_near_gap_follow_keeps_full_accel_limit(self, monkeypatch):
     monkeypatch.setattr(
       "openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc.time.monotonic",
@@ -360,6 +379,39 @@ class TestHyundaiAiLeadStability:
     assert cold_mpc.acc_source_debug["gap_reclaim_projection_scale"] == pytest.approx(1.0)
     assert loaded_mpc.acc_source_debug["gap_reclaim_projection_scale"] < 0.45
     assert loaded_mpc.gap_reclaim_obstacle_push < cold_mpc.gap_reclaim_obstacle_push - 0.5
+
+  def test_reclaim_dynamic_optimism_releases_quickly_when_pullaway_stops(self, monkeypatch):
+    monkeypatch.setattr(
+      "openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc.time.monotonic",
+      _MonotonicStub(step=0.2),
+    )
+    mpc = _make_hyundai_mpc(v_ego=33.5, a_ego=0.5)
+
+    for _ in range(2):
+      _run_update(
+        mpc,
+        _make_lead(d_rel=44.5, y_rel=0.04, d_path=0.04, v_lat=0.35, v_rel=0.0, v_lead=33.5, a_lead=0.0, model_prob=0.96),
+        _make_lead(d_rel=44.45, y_rel=0.07, d_path=0.07, v_lat=4.00, v_rel=0.0, v_lead=33.5, a_lead=0.0, model_prob=0.93),
+      )
+    for _ in range(2):
+      _run_update(
+        mpc,
+        _make_lead(d_rel=58.0, y_rel=0.04, d_path=0.04, v_lat=0.35, v_rel=0.5, v_lead=34.0, a_lead=0.1, model_prob=0.96),
+        _make_lead(d_rel=57.95, y_rel=0.07, d_path=0.07, v_lat=4.00, v_rel=0.5, v_lead=34.0, a_lead=0.1, model_prob=0.93),
+      )
+
+    optimistic_push = mpc.gap_reclaim_obstacle_push
+    optimistic_reclaim_vlead = float(mpc._hyundai_reclaim_lead.vLead)
+
+    _run_update(
+      mpc,
+      _make_lead(d_rel=55.0, y_rel=0.04, d_path=0.04, v_lat=0.35, v_rel=0.0, v_lead=33.5, a_lead=0.0, model_prob=0.96),
+      _make_lead(d_rel=54.95, y_rel=0.07, d_path=0.07, v_lat=4.00, v_rel=0.0, v_lead=33.5, a_lead=0.0, model_prob=0.93),
+    )
+
+    assert mpc.gap_reclaim_obstacle_push < optimistic_push - 0.5
+    assert float(mpc._hyundai_reclaim_lead.vLead) < optimistic_reclaim_vlead - 0.15
+    assert float(mpc._hyundai_reclaim_lead.vLead) <= float(mpc._hyundai_virtual_lead.vLead) + 0.1
 
   def test_reclaim_raw_safety_override_still_engages_for_real_closing(self, monkeypatch):
     monkeypatch.setattr(

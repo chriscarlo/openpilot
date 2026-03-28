@@ -115,6 +115,17 @@ HYUNDAI_LOW_SPEED_QUEUE_V_EGO_MAX = 6.0
 HYUNDAI_LOW_SPEED_QUEUE_DREL_MAX = 22.0
 HYUNDAI_LOW_SPEED_QUEUE_VLEAD_MAX = 8.0
 HYUNDAI_LOW_SPEED_QUEUE_PULLAWAY_MPS_MAX = 2.5
+HYUNDAI_RECLAIM_PULLAWAY_SUPPORT_MPS = 0.15
+HYUNDAI_RECLAIM_GAP_HOLD_EXTRA_M = 1.0
+HYUNDAI_RECLAIM_DYNAMIC_GAP_SUPPORT_M = 3.0
+LEAD_PRESENT_CRUISE_SPEED_CAP_BP = [0.0, 2.0, 6.0, 10.0, 15.0, 25.0]
+LEAD_PRESENT_CRUISE_SPEED_CAP_V = [0.7, 0.9, 1.3, 1.9, 2.4, ACCEL_MAX]
+LEAD_PRESENT_CRUISE_SURPLUS_BP = [0.0, 2.0, 8.0, 16.0, 28.0]
+LEAD_PRESENT_CRUISE_SURPLUS_V = [0.0, 0.0, 0.35, 0.70, 1.0]
+LEAD_PRESENT_CRUISE_PULLAWAY_BP = [0.0, 0.4, 1.0, 2.0]
+LEAD_PRESENT_CRUISE_PULLAWAY_V = [0.0, 0.08, 0.35, 1.0]
+LEAD_PRESENT_CRUISE_MIN_SPEED = 4.0
+LEAD_PRESENT_CRUISE_MAX_LEAD_DEFICIT = 2.5
 
 
 # Fewer timestamps don't hurt performance and lead to
@@ -305,6 +316,38 @@ def get_gap_reclaim_accel_floor(v_ego, lead, t_follow,
   )
   floor = intent_fraction * effective_cap
   return float(np.clip(floor, 0.0, effective_cap))
+
+
+def get_lead_present_cruise_accel_cap(v_ego, lead, t_follow,
+                                      tuning: LeadResponseTuningConfig | None = None,
+                                      personality_max_accel: float | None = None) -> float | None:
+  tuning = LeadResponseTuningConfig.defaults() if tuning is None else tuning
+  if lead is None or not getattr(lead, 'status', False) or float(v_ego) < LEAD_PRESENT_CRUISE_MIN_SPEED:
+    return None
+
+  comfort_cap = max(float(tuning.gap_reclaim_max_accel), 1e-3)
+  personality_cap = ACCEL_MAX if personality_max_accel is None else max(comfort_cap, float(personality_max_accel))
+
+  d_rel_raw = getattr(lead, 'dRel', 0.0)
+  v_lead_raw = getattr(lead, 'vLead', None)
+  v_rel_raw = getattr(lead, 'vRel', 0.0)
+  d_rel = float(0.0 if d_rel_raw is None else d_rel_raw)
+  v_lead = float(v_ego if v_lead_raw is None else v_lead_raw)
+  v_rel = float(0.0 if v_rel_raw is None else v_rel_raw)
+  if (float(v_ego) - v_lead) > LEAD_PRESENT_CRUISE_MAX_LEAD_DEFICIT:
+    return None
+  gap_surplus = max(0.0, d_rel - get_headway_follow_distance(float(v_ego), t_follow))
+  pullaway_speed = max(0.0, v_lead - float(v_ego), v_rel)
+
+  speed_cap = float(np.interp(float(v_ego), LEAD_PRESENT_CRUISE_SPEED_CAP_BP, LEAD_PRESENT_CRUISE_SPEED_CAP_V))
+  accel_cap = min(personality_cap, speed_cap)
+  if accel_cap <= comfort_cap:
+    return comfort_cap
+
+  gap_blend = float(np.interp(gap_surplus, LEAD_PRESENT_CRUISE_SURPLUS_BP, LEAD_PRESENT_CRUISE_SURPLUS_V))
+  pullaway_blend = float(np.interp(pullaway_speed, LEAD_PRESENT_CRUISE_PULLAWAY_BP, LEAD_PRESENT_CRUISE_PULLAWAY_V))
+  blend = max(gap_blend, pullaway_blend)
+  return float(comfort_cap + (accel_cap - comfort_cap) * blend)
 
 
 def should_start_cutin_settle_event(prev_role: str, prev_control_active: bool, current_role: str,
@@ -544,6 +587,7 @@ class LongitudinalMpc:
     self.gap_reclaim_projection_scale = 1.0
     self.gap_reclaim_personality_max_accel = 0.0
     self.gap_reclaim_effective_cap = 0.0
+    self.lead_present_cruise_accel_cap = 0.0
     self._gap_reclaim_blend = 0.0
     self._gap_reclaim_last_t = None
     self._raw_reclaim_safety_override_active = False
@@ -715,6 +759,7 @@ class LongitudinalMpc:
     self.gap_reclaim_projection_scale = 1.0
     self.gap_reclaim_personality_max_accel = 0.0
     self.gap_reclaim_effective_cap = 0.0
+    self.lead_present_cruise_accel_cap = 0.0
     self._raw_reclaim_safety_override_active = False
 
     if not self._hyundai_ai_lead_stability_enabled:
@@ -786,13 +831,31 @@ class LongitudinalMpc:
 
   def _update_hyundai_reclaim_lead(self, now: float, raw_lead, filtered_lead) -> ControlLead:
     raw_control = ControlLead.from_lead(raw_lead) if raw_lead is not None else ControlLead()
+    raw_metrics = self._lead_follow_metrics(float(self.x0[1]), self.current_t_follow, raw_control)
+    dynamic_gap_supported = (
+      raw_metrics["gap_surplus"] > float(self._live_tune_cfg.gap_reclaim_gap_min_m) + HYUNDAI_RECLAIM_DYNAMIC_GAP_SUPPORT_M and
+      raw_metrics["closing_speed"] < HYUNDAI_RECLAIM_PULLAWAY_SUPPORT_MPS and
+      float(raw_control.aLeadK) > -0.6
+    )
+    dynamic_pullaway_supported = (
+      raw_metrics["pullaway_speed"] > HYUNDAI_RECLAIM_PULLAWAY_SUPPORT_MPS or
+      float(raw_control.aLeadK) > 0.10 or
+      dynamic_gap_supported
+    )
+    distance_hold_supported = (
+      raw_metrics["gap_surplus"] > float(self._live_tune_cfg.gap_reclaim_gap_min_m) + HYUNDAI_RECLAIM_GAP_HOLD_EXTRA_M or
+      dynamic_pullaway_supported
+    )
+
     optimistic = copy.deepcopy(filtered_lead)
-    optimistic.dRel = max(float(filtered_lead.dRel), float(raw_control.dRel))
-    optimistic.vRel = max(float(filtered_lead.vRel), float(raw_control.vRel))
-    optimistic.aRel = max(float(filtered_lead.aRel), float(raw_control.aRel))
-    optimistic.vLead = max(float(filtered_lead.vLead), float(raw_control.vLead))
-    optimistic.vLeadK = max(float(filtered_lead.vLeadK), float(raw_control.vLeadK))
-    optimistic.aLeadK = max(float(filtered_lead.aLeadK), float(raw_control.aLeadK))
+    if distance_hold_supported:
+      optimistic.dRel = max(float(filtered_lead.dRel), float(raw_control.dRel))
+    if dynamic_pullaway_supported:
+      optimistic.vRel = max(float(filtered_lead.vRel), float(raw_control.vRel))
+      optimistic.aRel = max(float(filtered_lead.aRel), float(raw_control.aRel))
+      optimistic.vLead = max(float(filtered_lead.vLead), float(raw_control.vLead))
+      optimistic.vLeadK = max(float(filtered_lead.vLeadK), float(raw_control.vLeadK))
+      optimistic.aLeadK = max(float(filtered_lead.aLeadK), float(raw_control.aLeadK))
     optimistic.modelProb = max(float(filtered_lead.modelProb), float(raw_control.modelProb))
 
     if self._hyundai_virtual_lead_identity_changed or self._hyundai_reclaim_lead is None or self._hyundai_reclaim_last_t is None:
@@ -804,15 +867,15 @@ class LongitudinalMpc:
     prev = self._hyundai_reclaim_lead
     reclaim = copy.deepcopy(prev)
     reclaim.status = optimistic.status
-    reclaim.dRel = self._filter_metric(prev.dRel, optimistic.dRel, dt_s, danger_if_lower=False)
+    reclaim.dRel = self._filter_metric(prev.dRel, optimistic.dRel, dt_s, danger_if_lower=not distance_hold_supported)
     reclaim.yRel = filtered_lead.yRel
     reclaim.dPath = filtered_lead.dPath
     reclaim.vLat = filtered_lead.vLat
-    reclaim.vRel = self._filter_metric(prev.vRel, optimistic.vRel, dt_s, danger_if_lower=False)
-    reclaim.aRel = self._filter_metric(prev.aRel, optimistic.aRel, dt_s, danger_if_lower=False)
-    reclaim.vLead = self._filter_metric(prev.vLead, optimistic.vLead, dt_s, danger_if_lower=False)
-    reclaim.vLeadK = self._filter_metric(prev.vLeadK, optimistic.vLeadK, dt_s, danger_if_lower=False)
-    reclaim.aLeadK = self._filter_metric(prev.aLeadK, optimistic.aLeadK, dt_s, danger_if_lower=False)
+    reclaim.vRel = self._filter_metric(prev.vRel, optimistic.vRel, dt_s, danger_if_lower=not dynamic_pullaway_supported)
+    reclaim.aRel = self._filter_metric(prev.aRel, optimistic.aRel, dt_s, danger_if_lower=not dynamic_pullaway_supported)
+    reclaim.vLead = self._filter_metric(prev.vLead, optimistic.vLead, dt_s, danger_if_lower=not dynamic_pullaway_supported)
+    reclaim.vLeadK = self._filter_metric(prev.vLeadK, optimistic.vLeadK, dt_s, danger_if_lower=not dynamic_pullaway_supported)
+    reclaim.aLeadK = self._filter_metric(prev.aLeadK, optimistic.aLeadK, dt_s, danger_if_lower=not dynamic_pullaway_supported)
     reclaim.fcw = optimistic.fcw
     reclaim.aLeadTau = optimistic.aLeadTau
     reclaim.modelProb = self._filter_symmetric_metric(prev.modelProb, optimistic.modelProb, dt_s, HYUNDAI_VIRTUAL_LEAD_MODEL_PROB_TAU_S)
@@ -1042,6 +1105,7 @@ class LongitudinalMpc:
       self._reset_acc_obstacle_candidate()
       self.gap_reclaim_obstacle_push = 0.0
       self.gap_reclaim_effective_cap = 0.0
+      self.lead_present_cruise_accel_cap = 0.0
       self._gap_reclaim_blend = 0.0
       self._gap_reclaim_last_t = now
       self.source = 'cruise'
@@ -1163,6 +1227,7 @@ class LongitudinalMpc:
       "gap_reclaim_projection_scale": float(self.gap_reclaim_projection_scale),
       "gap_reclaim_effective_cap": float(self.gap_reclaim_effective_cap),
       "gap_reclaim_personality_max_accel": float(self.gap_reclaim_personality_max_accel),
+      "lead_present_cruise_accel_cap": float(self.lead_present_cruise_accel_cap),
       "raw_reclaim_safety_override": bool(self._raw_reclaim_safety_override_active),
       "candidate_mode": self._acc_obstacle_candidate_mode,
       "reason": reason,
@@ -1359,9 +1424,10 @@ class LongitudinalMpc:
     else:
       planner_accel_min = ACCEL_MIN
       planner_accel_max = ACCEL_MAX
+    cruise_max_accel = min(CRUISE_MAX_ACCEL, planner_accel_max)
     return build_cruise_response_model(
       min_accel_mps2=min_accel,
-      max_accel_mps2=CRUISE_MAX_ACCEL,
+      max_accel_mps2=cruise_max_accel,
       comfort_brake_mps2=COMFORT_BRAKE,
       actuation_delay_s=actuation_delay_s,
       planner_output_min_accel_mps2=planner_accel_min,
@@ -1418,7 +1484,26 @@ class LongitudinalMpc:
     if self.mode == 'acc':
       self.params[:,5] = LEAD_DANGER_FACTOR
 
-      response_model = self.get_cruise_response_model(v_ego)
+      lead_for_cruise_cap = None
+      lead_for_cruise_obstacle = 1e9
+      if control_lead0.status:
+        lead_for_cruise_cap = control_lead0
+        lead_for_cruise_obstacle = float(lead_0_obstacle[0])
+      if control_lead1.status and float(lead_1_obstacle[0]) < lead_for_cruise_obstacle:
+        lead_for_cruise_cap = control_lead1
+        lead_for_cruise_obstacle = float(lead_1_obstacle[0])
+
+      personality_max_accel = self._get_gap_reclaim_personality_max_accel(float(v_ego))
+      lead_present_cruise_cap = get_lead_present_cruise_accel_cap(
+        float(v_ego),
+        lead_for_cruise_cap,
+        self.current_t_follow,
+        self._live_tune_cfg,
+        personality_max_accel=personality_max_accel,
+      )
+      self.lead_present_cruise_accel_cap = float(lead_present_cruise_cap or 0.0)
+      planner_accel_limits = None if lead_present_cruise_cap is None else (ACCEL_MIN, float(lead_present_cruise_cap))
+      response_model = self.get_cruise_response_model(v_ego, planner_accel_limits=planner_accel_limits)
       self.last_cruise_response_model = response_model
 
       # Fake an obstacle for cruise, this ensures smooth acceleration to set speed
@@ -1468,6 +1553,7 @@ class LongitudinalMpc:
       self.gap_reclaim_projection_scale = 1.0
       self.gap_reclaim_personality_max_accel = 0.0
       self.gap_reclaim_effective_cap = 0.0
+      self.lead_present_cruise_accel_cap = 0.0
       self._gap_reclaim_blend = 0.0
       self._gap_reclaim_last_t = now
       self.cutin_settle_active = False
