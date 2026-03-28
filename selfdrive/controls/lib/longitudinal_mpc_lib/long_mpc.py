@@ -111,6 +111,10 @@ HYUNDAI_VIRTUAL_LEAD_RELEASE_DWELL_S = 1.00
 HYUNDAI_VIRTUAL_LEAD_RELEASE_IMMEDIATE_GAP_SURPLUS_M = 7.0
 HYUNDAI_VIRTUAL_LEAD_RELEASE_IMMEDIATE_PULLAWAY_MPS = 1.00
 HYUNDAI_VIRTUAL_LEAD_RAW_OBSTACLE_MARGIN_M = 1.00
+HYUNDAI_LOW_SPEED_QUEUE_V_EGO_MAX = 6.0
+HYUNDAI_LOW_SPEED_QUEUE_DREL_MAX = 22.0
+HYUNDAI_LOW_SPEED_QUEUE_VLEAD_MAX = 8.0
+HYUNDAI_LOW_SPEED_QUEUE_PULLAWAY_MPS_MAX = 2.5
 
 
 # Fewer timestamps don't hurt performance and lead to
@@ -1068,7 +1072,14 @@ class LongitudinalMpc:
     filtered_lead_obstacle = self._build_lead_obstacle(filtered_lead)
     raw_metrics = self._lead_follow_metrics(float(self.x0[1]), self.current_t_follow, best_lead, float(best_lead_obstacle[0]))
     filtered_metrics = self._lead_follow_metrics(float(self.x0[1]), self.current_t_follow, filtered_lead, float(filtered_lead_obstacle[0]))
+    low_speed_queue_hold = (
+      float(self.x0[1]) <= HYUNDAI_LOW_SPEED_QUEUE_V_EGO_MAX and
+      float(getattr(best_lead, 'dRel', 1e9) or 1e9) <= HYUNDAI_LOW_SPEED_QUEUE_DREL_MAX and
+      float(getattr(best_lead, 'vLead', self.x0[1]) or self.x0[1]) <= HYUNDAI_LOW_SPEED_QUEUE_VLEAD_MAX and
+      raw_metrics["pullaway_speed"] <= HYUNDAI_LOW_SPEED_QUEUE_PULLAWAY_MPS_MAX
+    )
     raw_requires_owner = (
+      low_speed_queue_hold or
       raw_metrics["gap_surplus"] <= HYUNDAI_VIRTUAL_LEAD_RETAIN_GAP_SURPLUS_M or
       raw_metrics["obstacle_0"] <= (float(cruise_obstacle[0]) - HYUNDAI_VIRTUAL_LEAD_RAW_OBSTACLE_MARGIN_M)
     )
@@ -1091,7 +1102,9 @@ class LongitudinalMpc:
       active_mode = 'lead'
       self._acc_obstacle_mode = 'lead'
       self._reset_acc_obstacle_candidate()
-      if raw_metrics["gap_surplus"] <= HYUNDAI_VIRTUAL_LEAD_RETAIN_GAP_SURPLUS_M:
+      if low_speed_queue_hold:
+        reason = "low_speed_queue_hold"
+      elif raw_metrics["gap_surplus"] <= HYUNDAI_VIRTUAL_LEAD_RETAIN_GAP_SURPLUS_M:
         reason = "raw_gap_hold"
       else:
         reason = "raw_obstacle_hold"
@@ -1144,6 +1157,7 @@ class LongitudinalMpc:
       "filtered_gap_surplus_m": float(filtered_metrics["gap_surplus"]),
       "raw_pullaway_mps": float(raw_metrics["pullaway_speed"]),
       "filtered_pullaway_mps": float(filtered_metrics["pullaway_speed"]),
+      "low_speed_queue_hold": bool(low_speed_queue_hold),
       "gap_reclaim_blend": float(self._gap_reclaim_blend),
       "gap_reclaim_obstacle_push_m": float(self.gap_reclaim_obstacle_push),
       "gap_reclaim_projection_scale": float(self.gap_reclaim_projection_scale),

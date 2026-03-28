@@ -203,6 +203,39 @@ class TestHyundaiAiLeadStability:
     assert mpc.source == "lead0"
     assert mpc.acc_source_debug["reason"] == "raw_gap_hold"
 
+  def test_low_speed_slow_lead_stays_owned_even_with_large_time_headway(self, monkeypatch):
+    monkeypatch.setattr(
+      "openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc.time.monotonic",
+      _MonotonicStub(step=0.2),
+    )
+    mpc = _make_hyundai_mpc(v_ego=1.6, a_ego=0.27)
+
+    _run_update(
+      mpc,
+      _make_lead(d_rel=18.3, y_rel=0.04, d_path=0.04, v_lat=0.10, v_rel=0.5, v_lead=2.11, a_lead=0.03, model_prob=0.96),
+      _make_lead(status=False),
+    )
+
+    assert mpc.source == "lead0"
+    assert mpc.acc_source_debug["reason"] == "low_speed_queue_hold"
+    assert mpc.acc_source_debug["low_speed_queue_hold"] is True
+
+  def test_low_speed_distant_lead_can_still_release_to_cruise(self, monkeypatch):
+    monkeypatch.setattr(
+      "openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc.time.monotonic",
+      _MonotonicStub(step=0.2),
+    )
+    mpc = _make_hyundai_mpc(v_ego=1.8, a_ego=0.1)
+
+    _run_update(
+      mpc,
+      _make_lead(d_rel=30.0, y_rel=0.04, d_path=0.04, v_lat=0.10, v_rel=0.8, v_lead=2.6, a_lead=0.05, model_prob=0.96),
+      _make_lead(status=False),
+    )
+
+    assert mpc.source == "cruise"
+    assert mpc.acc_source_debug["low_speed_queue_hold"] is False
+
   def test_near_gap_follow_keeps_full_accel_limit(self, monkeypatch):
     monkeypatch.setattr(
       "openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc.time.monotonic",
