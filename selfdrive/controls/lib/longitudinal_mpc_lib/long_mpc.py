@@ -49,7 +49,7 @@ COST_E_DIM = 5
 COST_DIM = COST_E_DIM + 1
 CONSTR_DIM = 4
 
-X_EGO_OBSTACLE_COST = 3.
+X_EGO_OBSTACLE_COST = 4.
 X_EGO_COST = 0.
 V_EGO_COST = 0.
 A_EGO_COST = 0.
@@ -125,7 +125,9 @@ LEAD_PRESENT_CRUISE_SURPLUS_V = [0.0, 0.0, 0.35, 0.70, 1.0]
 LEAD_PRESENT_CRUISE_PULLAWAY_BP = [0.0, 0.4, 1.0, 2.0]
 LEAD_PRESENT_CRUISE_PULLAWAY_V = [0.0, 0.08, 0.35, 1.0]
 LEAD_PRESENT_CRUISE_MIN_SPEED = 4.0
-LEAD_PRESENT_CRUISE_MAX_LEAD_DEFICIT = 2.5
+LEAD_PRESENT_CRUISE_CLOSING_TIGHTEN_BP = [0.0, 1.0, 3.0, 5.0]
+LEAD_PRESENT_CRUISE_CLOSING_TIGHTEN_V = [1.0, 0.65, 0.25, 0.10]
+LEAD_PRESENT_CRUISE_CLOSING_PROJECTION_S = 3.0
 
 
 # Fewer timestamps don't hurt performance and lead to
@@ -334,9 +336,11 @@ def get_lead_present_cruise_accel_cap(v_ego, lead, t_follow,
   d_rel = float(0.0 if d_rel_raw is None else d_rel_raw)
   v_lead = float(v_ego if v_lead_raw is None else v_lead_raw)
   v_rel = float(0.0 if v_rel_raw is None else v_rel_raw)
-  if (float(v_ego) - v_lead) > LEAD_PRESENT_CRUISE_MAX_LEAD_DEFICIT:
-    return None
-  gap_surplus = max(0.0, d_rel - get_headway_follow_distance(float(v_ego), t_follow))
+  closing_speed = max(0.0, float(v_ego) - v_lead)
+  gap_surplus_raw = max(0.0, d_rel - get_headway_follow_distance(float(v_ego), t_follow))
+  # Project gap surplus forward: if closing, the gap is shrinking
+  closing_reduction = closing_speed * LEAD_PRESENT_CRUISE_CLOSING_PROJECTION_S
+  gap_surplus = max(0.0, gap_surplus_raw - closing_reduction)
   pullaway_speed = max(0.0, v_lead - float(v_ego), v_rel)
 
   speed_cap = float(np.interp(float(v_ego), LEAD_PRESENT_CRUISE_SPEED_CAP_BP, LEAD_PRESENT_CRUISE_SPEED_CAP_V))
@@ -346,7 +350,8 @@ def get_lead_present_cruise_accel_cap(v_ego, lead, t_follow,
 
   gap_blend = float(np.interp(gap_surplus, LEAD_PRESENT_CRUISE_SURPLUS_BP, LEAD_PRESENT_CRUISE_SURPLUS_V))
   pullaway_blend = float(np.interp(pullaway_speed, LEAD_PRESENT_CRUISE_PULLAWAY_BP, LEAD_PRESENT_CRUISE_PULLAWAY_V))
-  blend = max(gap_blend, pullaway_blend)
+  closing_tighten = float(np.interp(closing_speed, LEAD_PRESENT_CRUISE_CLOSING_TIGHTEN_BP, LEAD_PRESENT_CRUISE_CLOSING_TIGHTEN_V))
+  blend = max(gap_blend, pullaway_blend) * closing_tighten
   return float(comfort_cap + (accel_cap - comfort_cap) * blend)
 
 
@@ -547,6 +552,7 @@ class LongitudinalMpc:
     self._live_tune_params = Params()
     self._last_live_tune_refresh_t = 0.0
     self._live_tune_cfg = LeadResponseTuningConfig.defaults()
+    self._live_obstacle_cost = float(X_EGO_OBSTACLE_COST)
     self.reset()
     self.source = SOURCES[2]
     self.vibe_controller = VibePersonalityController()
@@ -623,6 +629,11 @@ class LongitudinalMpc:
       return
     self._last_live_tune_refresh_t = now
     self._live_tune_cfg = read_lead_response_tuning_config(self._live_tune_params)
+    try:
+      raw = self._live_tune_params.get("Longitudinal.LiveTune.ObstacleCost")
+      self._live_obstacle_cost = float(raw) if raw is not None else float(X_EGO_OBSTACLE_COST)
+    except Exception:
+      self._live_obstacle_cost = float(X_EGO_OBSTACLE_COST)
 
   def get_live_tune_config(self) -> LeadResponseTuningConfig:
     return self._live_tune_cfg
@@ -1289,7 +1300,7 @@ class LongitudinalMpc:
     jerk_factor = get_jerk_factor(personality)
     if self.mode == 'acc':
       a_change_cost = A_CHANGE_COST if prev_accel_constraint else 0
-      cost_weights = [X_EGO_OBSTACLE_COST, X_EGO_COST, V_EGO_COST, A_EGO_COST, jerk_factor * a_change_cost, jerk_factor * J_EGO_COST]
+      cost_weights = [self._live_obstacle_cost, X_EGO_COST, V_EGO_COST, A_EGO_COST, jerk_factor * a_change_cost, jerk_factor * J_EGO_COST]
       constraint_cost_weights = [LIMIT_COST, LIMIT_COST, LIMIT_COST, DANGER_ZONE_COST]
     elif self.mode == 'blended':
       a_change_cost = 40.0 if prev_accel_constraint else 0

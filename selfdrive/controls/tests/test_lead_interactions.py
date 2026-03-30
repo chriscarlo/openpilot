@@ -135,13 +135,15 @@ class TestLeadInteractionHeuristics:
 
     assert cap > 1.5
 
-  def test_lead_present_cruise_accel_cap_ignores_clearly_slower_leads(self):
+  def test_lead_present_cruise_accel_cap_tightens_for_clearly_slower_leads(self):
     slow_lead = _make_lead(d_rel=100.0, v_lead=0.0, a_lead=0.0)
     setattr(slow_lead, "vRel", -9.0)
 
     cap = get_lead_present_cruise_accel_cap(9.0, slow_lead, 1.3, personality_max_accel=3.5)
 
-    assert cap is None
+    # With high closing speed, cap should be tight (near comfort cap) not None
+    assert cap is not None
+    assert cap < 1.0
 
   def test_gap_reclaim_projection_scale_tapers_room_when_ego_accel_is_already_closing_gap(self):
     mid_pullaway = _make_lead(d_rel=58.0, v_lead=33.9, a_lead=0.1)
