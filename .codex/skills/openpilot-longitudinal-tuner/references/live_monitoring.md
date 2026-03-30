@@ -2,21 +2,33 @@
 
 ## Watcher Script
 
-- Run:
+- From the dev box, prefer the repo venv:
 ```bash
-python3 .codex/skills/openpilot-longitudinal-tuner/scripts/monitor_longitudinal_anomalies.py --hz 5
+.venv/bin/python .codex/skills/openpilot-longitudinal-tuner/scripts/monitor_longitudinal_anomalies.py --hz 5
 ```
+
+- For a bounded live sample while the user is driving:
+```bash
+.venv/bin/python .codex/skills/openpilot-longitudinal-tuner/scripts/monitor_longitudinal_anomalies.py --hz 5 --duration 10 --show-live-tune
+```
+
 - Alert-only mode:
 ```bash
-python3 .codex/skills/openpilot-longitudinal-tuner/scripts/monitor_longitudinal_anomalies.py --hz 5 --only-alerts
+.venv/bin/python .codex/skills/openpilot-longitudinal-tuner/scripts/monitor_longitudinal_anomalies.py --hz 5 --only-alerts
 ```
 - Include the current live lead-response tune in the startup header:
 ```bash
-python3 .codex/skills/openpilot-longitudinal-tuner/scripts/monitor_longitudinal_anomalies.py --hz 5 --show-live-tune
+.venv/bin/python .codex/skills/openpilot-longitudinal-tuner/scripts/monitor_longitudinal_anomalies.py --hz 5 --show-live-tune
 ```
 - Save rendered samples:
 ```bash
-python3 .codex/skills/openpilot-longitudinal-tuner/scripts/monitor_longitudinal_anomalies.py --jsonl-out .cache/longitudinal_watch.jsonl
+.venv/bin/python .codex/skills/openpilot-longitudinal-tuner/scripts/monitor_longitudinal_anomalies.py --jsonl-out .cache/longitudinal_watch.jsonl
+```
+
+- On tici, use the device venv explicitly:
+```bash
+cd /data/openpilot
+/usr/local/venv/bin/python3 .codex/skills/openpilot-longitudinal-tuner/scripts/monitor_longitudinal_anomalies.py --hz 5 --duration 10 --only-alerts
 ```
 
 ## What It Compares
@@ -34,9 +46,15 @@ python3 .codex/skills/openpilot-longitudinal-tuner/scripts/monitor_longitudinal_
   `carState.aEgo`
 - Overlay caps:
   VTSC, SLC, and RTI
+- Lead presence:
+  `radarState.leadOne`
 
 ## Important Limitation
 
+- The watcher is best at regime attribution. It does not print the full
+  Hyundai `LEADROLEDBG` internals by itself. Use the watcher to prove whether
+  the car is in `cruise`, `lead0`, `lead1`, or a cap-limited regime first,
+  then inspect `LEADROLEDBG` if the root cause still appears Hyundai-specific.
 - Weather-aware slowdown is internal-only to the planner. The watcher cannot
   attribute weather caps from published buses alone.
 - `longitudinalPlanSP` does not include RTI state. The watcher reads RTI from
@@ -84,5 +102,14 @@ python3 .codex/skills/openpilot-longitudinal-tuner/scripts/monitor_longitudinal_
   request.
 - A persistent `tracking-gap` after the configured actuator delay is more
   suspicious than a transient `shape` note.
+- If `src=cruise` while `lead` stays valid and the car accelerates too hard,
+  the next check is `LEADROLEDBG.source_hysteresis`, not the Hyundai actuator
+  overlay.
+- If `src=lead0` or `src=lead1` stays stable but the car overshoots and then
+  coasts or lightly slows too long, the next check is the Hyundai reclaim path
+  in `LongitudinalMpc`, especially
+  `gap_reclaim_obstacle_push_m`,
+  `gap_reclaim_projection_scale`, and
+  `raw_reclaim_safety_override`.
 - If the watcher says `op_long=N`, controlsd is not owning longitudinal, so the
   script is mainly useful for planner and overlay observation.

@@ -19,6 +19,12 @@ description: >
 - Split the problem by layer before tuning anything:
   planner target generation, `LongControl`, brand `CarController`, and actual
   vehicle response are different failure surfaces.
+- On the dev machine, prefer `.venv/bin/python` for the watcher and helper
+  scripts. Repo-root `python3` can miss `capnp` and other openpilot runtime
+  deps. On tici, use `/usr/local/venv/bin/python3`.
+- While the user is actively driving, prefer bounded captures with
+  `--duration ...` or short one-off probes. Open-ended SSH tails are easy to
+  leave hanging and are rarely the fastest way to isolate a longitudinal bug.
 - On Hyundai CAN FD, do not assume `carControl.actuators.accel` is the final
   car command. Sunnypilot's Hyundai `LongitudinalController` can reshape accel
   and jerk before CAN transmission.
@@ -28,21 +34,27 @@ description: >
 
 ## Quick Start
 
-- If the behavior is happening live, run the watcher first:
+- For a quick bounded live sample from the dev box:
 ```bash
-python3 .codex/skills/openpilot-longitudinal-tuner/scripts/monitor_longitudinal_anomalies.py --hz 5
+.venv/bin/python .codex/skills/openpilot-longitudinal-tuner/scripts/monitor_longitudinal_anomalies.py --hz 5 --duration 10 --show-live-tune
 ```
 
-- If you are iterating on the new lead-response heuristics, print the effective
-  live tune first:
+- For a longer interactive watch while parked or when the user explicitly wants
+  continuous monitoring:
 ```bash
-python3 .codex/skills/openpilot-longitudinal-tuner/scripts/live_lead_tune.py show
+.venv/bin/python .codex/skills/openpilot-longitudinal-tuner/scripts/monitor_longitudinal_anomalies.py --hz 5
 ```
 
-- On-device, the same script works from `/data/openpilot`:
+- If you are iterating on the live lead-response knobs, print the effective tune
+  first:
+```bash
+.venv/bin/python .codex/skills/openpilot-longitudinal-tuner/scripts/live_lead_tune.py show
+```
+
+- On-device, use the tici venv explicitly:
 ```bash
 cd /data/openpilot
-python3 .codex/skills/openpilot-longitudinal-tuner/scripts/monitor_longitudinal_anomalies.py --hz 5 --only-alerts
+/usr/local/venv/bin/python3 .codex/skills/openpilot-longitudinal-tuner/scripts/monitor_longitudinal_anomalies.py --hz 5 --duration 10 --only-alerts --show-live-tune
 ```
 
 - If the issue is Hyundai CAN FD or EV6 specific, read
@@ -59,9 +71,14 @@ python3 .codex/skills/openpilot-longitudinal-tuner/scripts/monitor_longitudinal_
   state plus `longitudinalPlan.allowThrottle` before changing PID or car tuning.
 - Lead follows too loosely on pull-away, or reacts too late to a newly
   recognized lead:
-  inspect the live lead-tune values before editing code. The helper script and
-  runtime refresh path let you change those heuristics without restarting
-  services.
+  first prove whether ownership is already stable. If `source` is steady and
+  the problem is just amplitude/timing, inspect the live lead-tune values.
+  The helper script and runtime refresh path let you change those heuristics
+  without restarting services.
+- A valid lead is still present, but `source=cruise` and accel spikes positive:
+  inspect `LEADROLEDBG.source_hysteresis` and
+  `lead_present_cruise_accel_cap` before touching reclaim knobs. That is a
+  different failure mode from duplicate-lead chatter.
 - A freeway cut-in still causes a hard gap snap-back:
   inspect the cut-in settle live knobs and the `LEADROLEDBG` cut-in fields
   before assuming the classifier is late. If the lead becomes control early but
@@ -74,6 +91,16 @@ python3 .codex/skills/openpilot-longitudinal-tuner/scripts/monitor_longitudinal_
   settings. On this path the primary failure mode is often duplicate model
   hypotheses for one physical car plus noisy model kinematics causing ACC
   ownership to bounce between lead-follow and cruise.
+- Hyundai follow overshoots, then coasts or lightly slows too long while
+  `source` stays on the lead:
+  inspect `gap_reclaim_obstacle_push_m`,
+  `gap_reclaim_projection_scale`, `raw_reclaim_safety_override`, and the
+  reclaim-lead state in `LongitudinalMpc`. That symptom usually lives in the
+  fixed Hyundai reclaim path, not in the live tune knobs.
+- Hard accel behind a slow close lead in stop-and-go:
+  inspect `LEADROLEDBG.source_hysteresis.low_speed_queue_hold` before touching
+  reclaim or the Hyundai controller overlay. That is a lead-ownership bug
+  surface, not a comfort-tuning surface.
 - Planner target looks reasonable, but the car command does not:
   compare `longitudinalPlan.aTarget`, `carControl.actuators.accel`,
   `carOutput.actuatorsOutput.accel`, and delayed `carState.aEgo`. If the first
@@ -97,17 +124,23 @@ python3 .codex/skills/openpilot-longitudinal-tuner/scripts/monitor_longitudinal_
 
 ## Verification Commands
 
-- Core longitudinal behavior:
+- Hyundai no-radar AI lead path:
+```bash
+pytest selfdrive/controls/tests/test_hyundai_ai_lead_stability.py -q
+```
+
+```bash
+pytest selfdrive/controls/tests/test_lead_interactions.py -q
+```
+
+- Cruise-response and steady-state following regressions:
 ```bash
 pytest selfdrive/controls/tests/test_following_distance.py -q
 ```
 
+- Live tuning / runtime-refresh coverage:
 ```bash
 pytest selfdrive/controls/tests/test_longitudinal_live_tune.py -q
-```
-
-```bash
-pytest selfdrive/car/tests/test_cruise_speed.py -q
 ```
 
 - Hyundai longitudinal tuning overlay:
@@ -115,9 +148,9 @@ pytest selfdrive/car/tests/test_cruise_speed.py -q
 pytest opendbc/sunnypilot/car/hyundai/tests/test_tuning_controller.py -q
 ```
 
-- EV6 CAN FD speed-limit ingestion path:
+- Lead classification regressions:
 ```bash
-pytest selfdrive/car/hyundai/tests/test_ev6_dashboard_speed_limit.py -q
+pytest selfdrive/controls/lib/tests/test_lead_role_classifier.py -q
 ```
 
 ## References
@@ -139,3 +172,7 @@ pytest selfdrive/car/hyundai/tests/test_ev6_dashboard_speed_limit.py -q
   forward.
 - Keep only reusable workflow in `SKILL.md`; move dense branch facts into the
   reference files.
+- Treat maintenance as a kaizen loop:
+  when a session proves an older branch-specific hypothesis wrong, replace or
+  delete the old workflow in the same pass so the next invocation starts from
+  the corrected mental model.

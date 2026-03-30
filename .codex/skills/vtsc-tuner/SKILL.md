@@ -19,6 +19,9 @@ Use this skill for two related jobs:
 Do not stop at controller-only outputs when the claim is about apex timing. `v_turn`
 or `vtsc_cmd` can look better while the longitudinal planner still fails to get
 `v_ego` down to target speed in time.
+Do not start VTSC retuning until you have proved VTSC was actually the active
+longitudinal cap. On this branch, Hyundai no-radar lead-follow bugs can mimic
+"VTSC got weird" if you skip cap attribution first.
 
 ## Quick Start (Offline RCA Workbook)
 
@@ -109,6 +112,8 @@ Common startup pitfalls:
 - `tools/vtsc/vtsc_live_params.py` requires a subcommand such as `list`, `set`, `apply`, or `watch`.
 - If you background watchers with `nohup` and do not set `PYTHONUNBUFFERED=1`, the log files can look empty for too long and waste time.
 - Repeated parked lines like `v=0.0 ... cap=map ... reason=short_vis` are expected while stopped and are not, by themselves, the anomaly you are looking for.
+- Recorder run tags and most pulled route timestamps are UTC/Zulu. If the user
+  reports a local event time, convert it before searching bundles or logs.
 
 ### A) You want always-on intervention capture for new drives
 
@@ -145,6 +150,9 @@ Pick the narrowest layer that can falsify the claim:
   when the question is "did the car actually reach target speed before the anchor/apex?"
 
 If the claim is about hitting apex speed in time, controller-only replay is not enough.
+If the claim is really "why did the car surge, pulse, or follow a lead badly,"
+and VTSC was not the active cap, stop here and switch to
+`openpilot-longitudinal-tuner`.
 
 ## Current VTSC Map Strategy Facts (Code-Verified)
 
@@ -337,6 +345,8 @@ tightens the cap relative to `advisory`.
 
 ## Diagnostic Heuristics
 
+- If the event did not have VTSC as the active visible cap, do not tune VTSC on
+  that evidence. Route the RCA to the actual longitudinal limiter first.
 - If a real intervention shows map did see the curve, do not misclassify it as
   "map never saw it." The next question is whether map handed off too early.
 - If the zero-lead planner-backed case still misses the target, the problem is
@@ -376,6 +386,6 @@ After any real VTSC RCA or tuning session:
 
 Treat this skill as a recursive kaizen loop:
 - every real invocation should leave it more accurate, more actionable, more compact, or all three
-- recursively self-improve by reconciling new facts with old guidance in the same pass so the next invocation starts smarter
+- reconcile new facts with old guidance in the same pass so the next invocation starts from one coherent workflow
 - if new evidence proves an older bullet wrong, incomplete, or redundant, replace, tighten, or delete it instead of stacking another warning
-- prefer editing and pruning over adding line after line; a shorter, sharper skill beats a longer noisier one
+- prefer editing and pruning over appending; a shorter, sharper skill beats a longer noisier one

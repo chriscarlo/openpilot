@@ -27,10 +27,23 @@ Use the RCA workbook and traces to validate:
 - Was `vtscVelMps` tightening late (cap collapse), or was it low early and just not enforced?
 - Did `llProbMean` and/or `modelConf` collapse shortly before the intervention?
 - Did `longitudinalPlan.aTarget` start braking early enough relative to the cap?
+- Was VTSC actually the active visible cap at the time?
+  If not, do not retune VTSC on that event. Route the RCA to the real
+  longitudinal limiter first.
+
+## Do Not Misclassify General Longitudinal Bugs As VTSC
+
+- A surge, follow-gap pulse, or lead-handling complaint with no active VTSC cap
+  is not VTSC evidence just because it happened near a curve.
+- If the driver report is about a lead vehicle rather than the road geometry,
+  prove VTSC was constraining before you touch map timing or curve-speed
+  constants.
+- Use VTSC gas-event triage labels literally:
+  `not_constraining` means the event is not relax evidence and usually belongs
+  outside VTSC tuning.
 
 ## Hot-Reload (Optional Future Improvement)
 
 For fast iteration, make the curve params reloadable without restarting:
 - Read curve parameters from `Params` on a timer (e.g., 1 Hz) in the VTSC controller.
 - Keep defaults hardcoded; only override when a valid param is present.
-

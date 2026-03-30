@@ -81,6 +81,28 @@
   `opendbc/sunnypilot/car/hyundai/longitudinal/controller.py`
   calculates jerk-limited `actual_accel` and comfort-band values.
 
+## Current Hyundai No-Radar Lead-Follow Reality
+
+- Recent EV6 lead-follow work in this branch is primarily in
+  `selfdrive/controls/lib/longitudinal_mpc_lib/long_mpc.py`, not in a
+  car-specific EV6 planner fork.
+- The fixed Hyundai layer there now includes:
+  duplicate same-car lead collapse,
+  filtered virtual lead ownership,
+  lead-vs-cruise source hysteresis,
+  low-speed queue hold for slow close leads,
+  a cruise-owned lead accel taper when a valid lead still exists,
+  and reclaim-state logic that sheds optimistic pull-away dynamics quickly once
+  the real lead stops pulling away.
+- On this path, “the AI saw two leads” often really means “two model
+  hypotheses for one physical car.” Treat ownership stability first and live
+  preview/reclaim tuning second.
+- If `longitudinalPlan.aTarget`,
+  `carControl.actuators.accel`, and
+  `carOutput.actuatorsOutput.accel`
+  track closely, the root cause is upstream planner/MPC logic rather than the
+  Hyundai CAN FD actuator overlay.
+
 ## Important EV6 Subtlety: CAN FD Tune Wins Before EV Tune
 
 - `get_car_config(...)` picks:
