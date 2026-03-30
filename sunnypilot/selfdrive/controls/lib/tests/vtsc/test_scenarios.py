@@ -12,7 +12,9 @@ import sunnypilot.selfdrive.controls.lib.vtsc_map_strategy as map_strategy
 from sunnypilot.selfdrive.controls.lib.vision_turn_controller import (
   curvature_to_speed,
   SEVERE_OVERSHOOT_SPEED_SCALE_MIN,
+  VISIBLE_MAINLINE_RELAX_DWELL_S,
   VTURN_HOLD_S,
+  VisionStatus,
 )
 from sunnypilot.selfdrive.controls.lib.vtsc_map_strategy import (
   MapCapCandidate,
@@ -1794,6 +1796,73 @@ def test_lane_change_map_ambiguity_guard_requires_large_raw_map_mismatch():
 
   assert vtsc._should_relax_strategic_map_candidate(mild_candidate) is False
   assert vtsc._should_relax_strategic_map_candidate(tight_candidate) is True
+
+
+def test_visible_mainline_counterevidence_guard_detects_map_overestimate():
+  vtsc = mk_vtsc_with_params()
+  vtsc._road_geometry_valid = True
+  vtsc._mapd_winding_valid = False
+  vtsc._winding_context_active = False
+  vtsc._lane_change_active = False
+  vtsc._single_blinker_active = False
+  vtsc._curve_preview_valid = True
+  vtsc._curve_preview_distance_m = 0.0
+  vtsc._curve_preview_branch_stubs = []
+  vtsc._v_ego = 33.5
+  vtsc._dbg_k_model = 0.0012
+  vtsc._dbg_k_steer = 0.0
+  vtsc._filtered_curvature = 0.0012
+  vtsc._current_lat_acc = 0.31
+  vtsc._max_pred_lat_acc = 1.31
+  vtsc._occlusion_state.vision_status = VisionStatus.FULL_VISIBILITY
+
+  candidate = SimpleNamespace(cap_mps=27.25, anchor_dist_m=69.2, anchor_curvature=0.0042)
+
+  assert vtsc._should_suppress_map_candidate_for_visible_mainline_counterevidence(candidate) is True
+
+
+def test_strategic_mode_visible_mainline_counterevidence_suppresses_map_floor(monkeypatch):
+  v0 = 33.5
+  v_cruise = 65.0
+  dt = 0.05
+  lat0, lon0 = 37.0, -122.0
+  step_deg = 10.0 / 111000.0
+  map_curve_k = 0.0042
+
+  vtsc = mk_vtsc_with_params()
+  _enable_map_lookahead(vtsc, monkeypatch)
+  _set_map_strategy(vtsc, monkeypatch, 'strategic')
+  _set_longitudinal_response_model(vtsc, min_accel=-6.0, delay_s=0.35)
+
+  pts = []
+  for i in range(80):
+    dist_m = float(i * 10.0)
+    k = map_curve_k if (0.0 <= dist_m <= 20.0) else 0.0
+    pts.append((lat0 + i * step_deg, lon0, k))
+  _patch_map_tail_inputs(vtsc, monkeypatch, lat0, lon0, pts)
+
+  dwell_steps = int(math.ceil(VISIBLE_MAINLINE_RELAX_DWELL_S / dt)) + 3
+  snap = simulate_sequence(
+    steps=[Step(
+      curvature=0.0,
+      curvature_ahead=0.0012,
+      confidence=0.95,
+      live_map_data={'roadGeometryValid': True, 'windingRoadValid': False},
+      applied_accel=0.0,
+    ) for _ in range(dwell_steps)],
+    vtsc=vtsc,
+    v0_mps=v0,
+    v_cruise_mps=v_cruise,
+    dt=dt,
+  )
+  assert snap
+  assert snap['strategy_mode'] == 'strategic'
+  assert snap['map_tail_compute_reason'] == 'visible_mainline_counterevidence'
+  assert bool(snap['map_floor_active']) is False
+  assert snap['active_cap'] == 'visible'
+  assert float(snap['map_floor_anchor_k']) >= 0.004
+  assert float(snap['vision_local_cap']) > float(snap['map_strategic_cap']) + 5.0
+  assert float(snap['vtsc_cmd']) > float(snap['map_strategic_cap']) + 5.0
 
 
 def test_strategic_mode_overshoot_phase_offset_ignored_when_reference_speed_is_not_tighter():

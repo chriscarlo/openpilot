@@ -31,6 +31,7 @@ from .vtsc_map_strategy import (
   DEFAULT_MAP_STRATEGY,
   DEFAULT_WINDING_BEHAVIOR_PROFILE,
   MAP_STRATEGY_STRATEGIC,
+  MapCapCandidate,
   MapStrategyState,
   WindingBehaviorProfile,
   WindingRoadContext,
@@ -105,6 +106,15 @@ PRE_APEX_RELEASE_SLEW_MIN_SCALE = 0.55
 AMBIGUOUS_RAW_MAP_ANCHOR_MIN_DIST_M = 45.0
 AMBIGUOUS_RAW_MAP_ANCHOR_MIN_KAPPA = 0.010
 AMBIGUOUS_RAW_MAP_CURVATURE_RATIO = 3.0
+# When live mainline geometry is valid and map says "already in the curve" but local vision/steer
+# evidence remains much milder for a sustained window, suppress the strategic map floor entirely.
+VISIBLE_MAINLINE_RELAX_DWELL_S = 0.45
+VISIBLE_MAINLINE_RELAX_CURVE_START_MAX_M = 8.0
+VISIBLE_MAINLINE_RELAX_MIN_ANCHOR_KAPPA = 0.003
+VISIBLE_MAINLINE_RELAX_CURVATURE_RATIO = 3.0
+VISIBLE_MAINLINE_RELAX_MIN_LOCAL_SPEED_DELTA_MPS = 4.5
+VISIBLE_MAINLINE_RELAX_MIN_MAP_LATACC_NOW = 2.5
+VISIBLE_MAINLINE_RELAX_MAX_LOCAL_LATACC_RATIO = 0.45
 
 # ===== Severe-confidence overshoot conservatism =====
 # If lane-line confidence is extremely low, the model often "discovers" tight off-ramp curvature late.
@@ -1249,6 +1259,7 @@ class VisionTurnController:
     # Debug-only map lookahead diagnostics (why map cap is inactive this frame)
     self._map_tail_reason = "init"
     self._map_tail_compute_reason = "init"
+    self._visible_mainline_counterevidence_since = 0.0
 
     # Rally co-pilot / HUD curve preview derived from VTSC's map lookahead inputs.
     # The HUD must not compute curves; it only renders these fields.
@@ -4491,7 +4502,7 @@ class VisionTurnController:
       self._map_curv_last_ts = now
       return []
 
-  def _clear_curve_preview(self) -> None:
+  def _clear_curve_preview(self, *, reset_visible_mainline_counterevidence: bool = True) -> None:
     self._curve_preview_valid = False
     self._curve_preview_distance_m = 0.0
     self._curve_preview_time_to_s = 0.0
@@ -4501,6 +4512,8 @@ class VisionTurnController:
     self._curve_preview_points = []
     self._curve_preview_tiles = []
     self._curve_preview_branch_stubs = []
+    if reset_visible_mainline_counterevidence:
+      self._visible_mainline_counterevidence_since = 0.0
 
   def _clear_winding_road_context(self) -> None:
     self._winding_road_active = False
@@ -4678,6 +4691,72 @@ class VisionTurnController:
     )
     return bool(anchor_k >= max(float(AMBIGUOUS_RAW_MAP_ANCHOR_MIN_KAPPA), local_k * float(AMBIGUOUS_RAW_MAP_CURVATURE_RATIO)))
 
+  def _should_suppress_map_candidate_for_visible_mainline_counterevidence(self, candidate) -> bool:
+    if candidate is None or candidate.cap_mps is None:
+      return False
+    if not bool(getattr(self, '_road_geometry_valid', False)):
+      return False
+    if bool(getattr(self, '_mapd_winding_valid', False)) or bool(getattr(self, '_winding_context_active', False)):
+      return False
+    if bool(getattr(self, '_lane_change_active', False)) or bool(getattr(self, '_single_blinker_active', False)):
+      return False
+    if not bool(getattr(self, '_curve_preview_valid', False)):
+      return False
+    if len(getattr(self, '_curve_preview_branch_stubs', []) or []) > 0:
+      return False
+    try:
+      if float(getattr(self, '_curve_preview_distance_m', 0.0) or 0.0) > float(VISIBLE_MAINLINE_RELAX_CURVE_START_MAX_M):
+        return False
+    except Exception:
+      return False
+    try:
+      if float(getattr(self, '_v_ego', 0.0) or 0.0) < float(HIGHWAY_MIN_MPS):
+        return False
+    except Exception:
+      return False
+
+    try:
+      if int(getattr(self._occlusion_state, 'vision_status', VisionStatus.FULL_VISIBILITY)) != int(VisionStatus.FULL_VISIBILITY):
+        return False
+    except Exception:
+      return False
+
+    try:
+      anchor_k = abs(float(candidate.anchor_curvature or 0.0))
+      candidate_cap = float(candidate.cap_mps or 0.0)
+      v_ego = float(getattr(self, '_v_ego', 0.0) or 0.0)
+    except Exception:
+      return False
+    if anchor_k < float(VISIBLE_MAINLINE_RELAX_MIN_ANCHOR_KAPPA):
+      return False
+
+    local_k = max(
+      abs(float(getattr(self, '_dbg_k_model', 0.0) or 0.0)),
+      abs(float(getattr(self, '_dbg_k_steer', 0.0) or 0.0)),
+      abs(float(getattr(self, '_filtered_curvature', 0.0) or 0.0)),
+    )
+    if anchor_k < max(float(VISIBLE_MAINLINE_RELAX_MIN_ANCHOR_KAPPA), local_k * float(VISIBLE_MAINLINE_RELAX_CURVATURE_RATIO)):
+      return False
+
+    try:
+      local_curve_speed = float(curvature_to_speed(max(local_k, 1e-8)))
+    except Exception:
+      local_curve_speed = float(MAX_SPEED_DEFAULT)
+    if local_curve_speed < candidate_cap + float(VISIBLE_MAINLINE_RELAX_MIN_LOCAL_SPEED_DELTA_MPS):
+      return False
+
+    map_lat_acc_now = anchor_k * v_ego * v_ego
+    if map_lat_acc_now < float(VISIBLE_MAINLINE_RELAX_MIN_MAP_LATACC_NOW):
+      return False
+    local_lat_acc = max(
+      abs(float(getattr(self, '_current_lat_acc', 0.0) or 0.0)),
+      abs(float(getattr(self, '_max_pred_lat_acc', 0.0) or 0.0)),
+    )
+    if local_lat_acc > map_lat_acc_now * float(VISIBLE_MAINLINE_RELAX_MAX_LOCAL_LATACC_RATIO):
+      return False
+
+    return True
+
   def _update_curve_preview_from_map(self, *, gps_lat: float, gps_lon: float, pts: list[tuple[float, float, float]], i0: int,
                                      gps_bearing_deg: float | None = None) -> None:
     """Update HUD curve preview from mapd curvature samples.
@@ -4726,7 +4805,7 @@ class VisionTurnController:
       return
 
     # Default to invalid; set valid only when we can build a sane preview.
-    self._clear_curve_preview()
+    self._clear_curve_preview(reset_visible_mainline_counterevidence=False)
 
     PREVIEW_TIME_HORIZON_S = 10.0
     PREVIEW_MIN_M = 30.0
@@ -5395,15 +5474,43 @@ class VisionTurnController:
     strategy_mode = normalize_map_strategy(getattr(self, '_map_strategy_mode', DEFAULT_MAP_STRATEGY))
     candidate = strategic_candidate if strategy_mode == MAP_STRATEGY_STRATEGIC else advisory_candidate
     relaxed_for_ambiguity = False
+    suppressed_for_counterevidence = False
+    self._visible_mainline_counterevidence_since = 0.0 if strategy_mode != MAP_STRATEGY_STRATEGIC else float(getattr(self, '_visible_mainline_counterevidence_since', 0.0) or 0.0)
     if strategy_mode == MAP_STRATEGY_STRATEGIC and self._should_relax_strategic_map_candidate(strategic_candidate):
       candidate = advisory_candidate
       relaxed_for_ambiguity = True
+      self._visible_mainline_counterevidence_since = 0.0
+    elif strategy_mode == MAP_STRATEGY_STRATEGIC:
+      now_s = float(time.time())
+      if self._should_suppress_map_candidate_for_visible_mainline_counterevidence(strategic_candidate):
+        if self._visible_mainline_counterevidence_since <= 0.0:
+          self._visible_mainline_counterevidence_since = now_s
+        if (now_s - self._visible_mainline_counterevidence_since) >= float(VISIBLE_MAINLINE_RELAX_DWELL_S):
+          candidate = MapCapCandidate(
+            mode=MAP_STRATEGY_STRATEGIC,
+            cap_mps=None,
+            start_m=float(strategic_candidate.start_m),
+            coverage=float(strategic_candidate.coverage),
+            reason="visible_mainline_counterevidence",
+            anchor_dist_m=strategic_candidate.anchor_dist_m,
+            anchor_vsafe_mps=strategic_candidate.anchor_vsafe_mps,
+            anchor_curvature=strategic_candidate.anchor_curvature,
+            anchor_index=strategic_candidate.anchor_index,
+          )
+          suppressed_for_counterevidence = True
+      else:
+        self._visible_mainline_counterevidence_since = 0.0
     self._map_tail_candidate = candidate
     self._map_tail_anchor_dist_m = float(candidate.anchor_dist_m or 0.0)
     self._map_tail_anchor_k = float(candidate.anchor_curvature or 0.0)
     self._map_tail_anchor_vsafe = float(candidate.anchor_vsafe_mps or 0.0)
     self._map_tail_anchor_index = int(candidate.anchor_index) if candidate.anchor_index is not None else -1
-    self._map_tail_compute_reason = "lane_change_map_ambiguity" if relaxed_for_ambiguity else str(candidate.reason or "unknown")
+    if relaxed_for_ambiguity:
+      self._map_tail_compute_reason = "lane_change_map_ambiguity"
+    elif suppressed_for_counterevidence:
+      self._map_tail_compute_reason = "visible_mainline_counterevidence"
+    else:
+      self._map_tail_compute_reason = str(candidate.reason or "unknown")
     if candidate.cap_mps is None:
       return (None, float(candidate.start_m), float(candidate.coverage))
     return (float(candidate.cap_mps), float(candidate.start_m), float(candidate.coverage))
