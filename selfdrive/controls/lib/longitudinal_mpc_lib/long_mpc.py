@@ -553,6 +553,8 @@ class LongitudinalMpc:
     self._last_live_tune_refresh_t = 0.0
     self._live_tune_cfg = LeadResponseTuningConfig.defaults()
     self._live_obstacle_cost = float(X_EGO_OBSTACLE_COST)
+    self._live_a_change_cost = float(A_CHANGE_COST)
+    self._live_a_ego_cost = float(A_EGO_COST)
     self.reset()
     self.source = SOURCES[2]
     self.vibe_controller = VibePersonalityController()
@@ -634,6 +636,16 @@ class LongitudinalMpc:
       self._live_obstacle_cost = float(raw) if raw is not None else float(X_EGO_OBSTACLE_COST)
     except Exception:
       self._live_obstacle_cost = float(X_EGO_OBSTACLE_COST)
+    try:
+      raw = self._live_tune_params.get("Longitudinal.LiveTune.AccelChangeCost")
+      self._live_a_change_cost = float(raw) if raw is not None else float(A_CHANGE_COST)
+    except Exception:
+      self._live_a_change_cost = float(A_CHANGE_COST)
+    try:
+      raw = self._live_tune_params.get("Longitudinal.LiveTune.AccelCost")
+      self._live_a_ego_cost = float(raw) if raw is not None else float(A_EGO_COST)
+    except Exception:
+      self._live_a_ego_cost = float(A_EGO_COST)
 
   def get_live_tune_config(self) -> LeadResponseTuningConfig:
     return self._live_tune_cfg
@@ -1299,8 +1311,8 @@ class LongitudinalMpc:
   def set_weights(self, prev_accel_constraint=True, personality=log.LongitudinalPersonality.standard):
     jerk_factor = get_jerk_factor(personality)
     if self.mode == 'acc':
-      a_change_cost = A_CHANGE_COST if prev_accel_constraint else 0
-      cost_weights = [self._live_obstacle_cost, X_EGO_COST, V_EGO_COST, A_EGO_COST, jerk_factor * a_change_cost, jerk_factor * J_EGO_COST]
+      a_change_cost = self._live_a_change_cost if prev_accel_constraint else 0
+      cost_weights = [self._live_obstacle_cost, X_EGO_COST, V_EGO_COST, self._live_a_ego_cost, jerk_factor * a_change_cost, jerk_factor * J_EGO_COST]
       constraint_cost_weights = [LIMIT_COST, LIMIT_COST, LIMIT_COST, DANGER_ZONE_COST]
     elif self.mode == 'blended':
       a_change_cost = 40.0 if prev_accel_constraint else 0
@@ -1452,14 +1464,9 @@ class LongitudinalMpc:
 
     # Get following distance
     if self.vibe_controller.is_follow_enabled():
-      desired_headway = self.vibe_controller.get_follow_distance_multiplier(v_ego)
-      if desired_headway is not None:
-        # Compensate for STOP_DISTANCE so the user's headway setting matches
-        # displayed headway (dRel/v_ego) at steady state.
-        # MPC target = t_follow * v + STOP_DISTANCE, displayed = target/v = t_follow + SD/v
-        # To get displayed = desired_headway: t_follow = desired_headway - SD/v
-        t_follow = max(0.5, float(desired_headway) - STOP_DISTANCE / max(float(v_ego), 1.0))
-      else:
+      t_follow = self.vibe_controller.get_follow_distance_multiplier(v_ego)
+      if t_follow is None:
+        # Fallback to stock behavior when vibe controller can't provide a value
         t_follow = get_T_FOLLOW(personality)
     else:
       t_follow = get_T_FOLLOW(personality)
