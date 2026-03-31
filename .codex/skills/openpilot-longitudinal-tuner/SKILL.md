@@ -163,6 +163,9 @@ pytest selfdrive/controls/lib/tests/test_lead_role_classifier.py -q
   meanings.
 - Read `references/live_lead_tuning.md` for the runtime ACC lead-response tune,
   helper script, and no-restart workflow.
+- Read `docs/chauffeur/live_tunable_params.md` for the complete catalog of
+  live-tunable `Longitudinal.LiveTune.*` params with defaults, ranges, and SSH
+  usage examples.
 
 ## Skill Maintenance
 
@@ -176,3 +179,9 @@ pytest selfdrive/controls/lib/tests/test_lead_role_classifier.py -q
   when a session proves an older branch-specific hypothesis wrong, replace or
   delete the old workflow in the same pass so the next invocation starts from
   the corrected mental model.
+- When adding any new tuning parameter that affects longitudinal behavior,
+  always register it in `common/params_keys.h`, add a `LeadResponseTuneSpec`
+  in `longitudinal_live_tune.py`, and update
+  `docs/chauffeur/live_tunable_params.md`. All tuning params must be
+  live-adjustable via the params system — never leave them as hardcoded
+  constants.
