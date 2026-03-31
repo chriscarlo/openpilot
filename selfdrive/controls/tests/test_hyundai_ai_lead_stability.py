@@ -153,7 +153,65 @@ class TestHyundaiAiLeadStability:
     assert mpc.source == "cruise"
     assert mpc.acc_source_debug["used_hysteresis"] is True
     assert mpc.acc_source_debug["reason"] in ("filtered_pullaway_dwell", "filtered_pullaway_immediate", "cruise_hold")
+    assert mpc.acc_source_debug["raw_release_ready"] is True
+    assert mpc.acc_source_debug["release_agreement_ok"] is True
     assert max_reclaim_push > 0.5
+
+  def test_filtered_release_waits_for_raw_agreement_before_leaving_lead(self, monkeypatch):
+    monkeypatch.setattr(
+      "openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc.time.monotonic",
+      _MonotonicStub(step=0.2),
+    )
+    mpc = _make_hyundai_mpc()
+
+    stable_lead = _make_lead(d_rel=38.5, y_rel=0.04, d_path=0.04, v_lat=0.35, v_rel=0.0, v_lead=29.0, a_lead=0.0, model_prob=0.96)
+    for _ in range(4):
+      _run_update(mpc, stable_lead, _make_lead(status=False))
+
+    for _ in range(3):
+      _run_update(
+        mpc,
+        _make_lead(d_rel=46.0, y_rel=0.04, d_path=0.04, v_lat=0.35, v_rel=1.00, v_lead=30.00, a_lead=0.05, model_prob=0.96),
+        _make_lead(status=False),
+      )
+
+    assert mpc.source == "lead0"
+    assert mpc.acc_source_debug["candidate_mode"] == "cruise"
+
+    _run_update(
+      mpc,
+      _make_lead(d_rel=46.0, y_rel=0.04, d_path=0.04, v_lat=0.35, v_rel=0.0, v_lead=29.0, a_lead=0.0, model_prob=0.96),
+      _make_lead(status=False),
+    )
+
+    assert mpc.source == "lead0"
+    assert mpc.acc_source_debug["reason"] == "filtered_hold"
+    assert mpc.acc_source_debug["candidate_mode"] is None
+    assert mpc.acc_source_debug["raw_release_ready"] is False
+    assert mpc.acc_source_debug["release_agreement_ok"] is False
+
+  def test_settled_follow_suppresses_raw_stabilization_push_from_gap_breathing(self, monkeypatch):
+    monkeypatch.setattr(
+      "openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc.time.monotonic",
+      _MonotonicStub(step=0.2),
+    )
+    mpc = _make_hyundai_mpc()
+
+    stable_lead = _make_lead(d_rel=38.5, y_rel=0.04, d_path=0.04, v_lat=0.35, v_rel=0.0, v_lead=29.0, a_lead=0.0, model_prob=0.96)
+    for _ in range(4):
+      _run_update(mpc, stable_lead, _make_lead(status=False))
+
+    _run_update(
+      mpc,
+      _make_lead(d_rel=49.0, y_rel=0.04, d_path=0.04, v_lat=0.35, v_rel=0.0, v_lead=29.0, a_lead=0.0, model_prob=0.96),
+      _make_lead(status=False),
+    )
+
+    assert mpc.source == "lead0"
+    assert mpc.acc_source_debug["steady_follow"] is True
+    assert mpc.acc_source_debug["stabilization_push_suppressed"] is True
+    assert mpc.acc_source_debug["stabilization_push_m"] == pytest.approx(0.0)
+    assert mpc.acc_source_debug["raw_reclaim_safety_override"] is False
 
   def test_brief_total_lead_dropout_holds_stable_virtual_lead_before_releasing(self, monkeypatch):
     monkeypatch.setattr(
@@ -496,8 +554,8 @@ class TestHyundaiAiLeadStability:
     )
 
     assert mpc.gap_reclaim_obstacle_push < optimistic_push - 0.5
-    assert float(mpc._hyundai_reclaim_lead.vLead) < optimistic_reclaim_vlead - 0.15
-    assert float(mpc._hyundai_reclaim_lead.vLead) <= float(mpc._hyundai_virtual_lead.vLead) + 0.1
+    assert float(mpc._hyundai_reclaim_lead.vLead) < optimistic_reclaim_vlead - 0.10
+    assert float(mpc._hyundai_reclaim_lead.vLead) <= float(mpc._hyundai_virtual_lead.vLead) + 0.35
 
   def test_reclaim_raw_safety_override_still_engages_for_real_closing(self, monkeypatch):
     monkeypatch.setattr(

@@ -110,6 +110,11 @@ HYUNDAI_VIRTUAL_LEAD_RELEASE_PULLAWAY_MPS = 0.35
 HYUNDAI_VIRTUAL_LEAD_RELEASE_DWELL_S = 1.00
 HYUNDAI_VIRTUAL_LEAD_RELEASE_IMMEDIATE_GAP_SURPLUS_M = 7.0
 HYUNDAI_VIRTUAL_LEAD_RELEASE_IMMEDIATE_PULLAWAY_MPS = 1.00
+HYUNDAI_VIRTUAL_LEAD_RELEASE_RAW_GAP_SURPLUS_M = 2.5
+HYUNDAI_VIRTUAL_LEAD_RELEASE_RAW_PULLAWAY_MPS = 0.15
+HYUNDAI_VIRTUAL_LEAD_RELEASE_IMMEDIATE_RAW_GAP_SURPLUS_M = 4.5
+HYUNDAI_VIRTUAL_LEAD_RELEASE_IMMEDIATE_RAW_PULLAWAY_MPS = 0.45
+HYUNDAI_VIRTUAL_LEAD_RELEASE_AGREEMENT_MAX_DREL_ERR_M = 3.0
 HYUNDAI_VIRTUAL_LEAD_RAW_OBSTACLE_MARGIN_M = 1.00
 HYUNDAI_VIRTUAL_LEAD_DROPOUT_STABLE_MIN_S = 3.0
 HYUNDAI_VIRTUAL_LEAD_DROPOUT_HOLD_S = 0.75
@@ -117,6 +122,9 @@ HYUNDAI_VIRTUAL_LEAD_DROPOUT_MAX_ABS_VREL_MPS = 0.35
 HYUNDAI_VIRTUAL_LEAD_DROPOUT_MAX_DREL_ERR_M = 1.5
 HYUNDAI_VIRTUAL_LEAD_DROPOUT_MAX_GAP_SURPLUS_M = 3.0
 HYUNDAI_VIRTUAL_LEAD_DROPOUT_MAX_PATH_ABS_M = 0.85
+HYUNDAI_SETTLED_FOLLOW_MAX_GAP_SURPLUS_M = 12.0
+HYUNDAI_SETTLED_FOLLOW_MAX_ABS_VREL_MPS = 0.35
+HYUNDAI_SETTLED_FOLLOW_MAX_ABS_ALEAD_MPS2 = 0.25
 HYUNDAI_LOW_SPEED_QUEUE_V_EGO_MAX = 6.0
 HYUNDAI_LOW_SPEED_QUEUE_DREL_MAX = 22.0
 HYUNDAI_LOW_SPEED_QUEUE_VLEAD_MAX = 8.0
@@ -124,6 +132,12 @@ HYUNDAI_LOW_SPEED_QUEUE_PULLAWAY_MPS_MAX = 2.5
 HYUNDAI_RECLAIM_PULLAWAY_SUPPORT_MPS = 0.15
 HYUNDAI_RECLAIM_GAP_HOLD_EXTRA_M = 1.0
 HYUNDAI_RECLAIM_DYNAMIC_GAP_SUPPORT_M = 3.0
+HYUNDAI_RECLAIM_NOISE_SUPPRESS_CLOSING_MPS = 0.25
+HYUNDAI_RECLAIM_NOISE_SUPPRESS_PULLAWAY_MPS = 0.25
+HYUNDAI_RECLAIM_RAW_SAFETY_MARGIN_M = 1.75
+HYUNDAI_RECLAIM_RAW_SAFETY_CLOSING_MPS = 0.60
+HYUNDAI_RECLAIM_RAW_SAFETY_DECEL_MPS2 = -0.8
+HYUNDAI_RECLAIM_RAW_SAFETY_DECEL_CLOSING_MPS = 0.25
 HYUNDAI_LEAD_TO_CRUISE_TRANSITION_RAMP_S = 1.0
 HYUNDAI_LEAD_TO_CRUISE_TRANSITION_MIN_ACCEL = 0.45
 LEAD_PRESENT_CRUISE_SPEED_CAP_BP = [0.0, 2.0, 6.0, 10.0, 15.0, 25.0]
@@ -655,6 +669,7 @@ class LongitudinalMpc:
     self.lead_approach_preview = (0.0, 0.0)
     self.gap_reclaim_accel_floor = 0.0
     self.gap_reclaim_obstacle_push = 0.0
+    self.gap_reclaim_stabilization_push = 0.0
     self.gap_reclaim_projection_scale = 1.0
     self.gap_reclaim_personality_max_accel = 0.0
     self.gap_reclaim_effective_cap = 0.0
@@ -776,6 +791,30 @@ class LongitudinalMpc:
       "closing_speed": float(max(0.0, v_ego - v_lead, -v_rel)),
       "obstacle_0": float(obstacle_0 if obstacle_0 is not None else 1e9),
     }
+
+  @staticmethod
+  def _is_hyundai_settled_follow(raw_lead, filtered_lead,
+                                 raw_metrics: dict[str, float],
+                                 filtered_metrics: dict[str, float]) -> bool:
+    if raw_lead is None or filtered_lead is None:
+      return False
+    if not getattr(raw_lead, 'status', False) or not getattr(filtered_lead, 'status', False):
+      return False
+
+    abs_vrel = max(
+      abs(float(getattr(raw_lead, 'vRel', 0.0) or 0.0)),
+      abs(float(getattr(filtered_lead, 'vRel', 0.0) or 0.0)),
+    )
+    abs_alead = max(
+      abs(float(getattr(raw_lead, 'aLeadK', 0.0) or 0.0)),
+      abs(float(getattr(filtered_lead, 'aLeadK', 0.0) or 0.0)),
+    )
+    gap_surplus = min(float(raw_metrics["gap_surplus"]), float(filtered_metrics["gap_surplus"]))
+    return bool(
+      gap_surplus <= HYUNDAI_SETTLED_FOLLOW_MAX_GAP_SURPLUS_M and
+      abs_vrel <= HYUNDAI_SETTLED_FOLLOW_MAX_ABS_VREL_MPS and
+      abs_alead <= HYUNDAI_SETTLED_FOLLOW_MAX_ABS_ALEAD_MPS2
+    )
 
   @staticmethod
   def _ema_alpha(dt_s: float, tau_s: float) -> float:
@@ -915,9 +954,11 @@ class LongitudinalMpc:
     return float(max_accel)
 
   def _apply_hyundai_gap_reclaim(self, raw_lead_obstacle: np.ndarray, filtered_lead_obstacle: np.ndarray,
-                                 raw_lead, filtered_lead, now: float) -> np.ndarray:
+                                 raw_lead, filtered_lead, raw_metrics: dict[str, float],
+                                 settled_follow: bool, now: float) -> tuple[np.ndarray, bool]:
     self.gap_reclaim_accel_floor = 0.0
     self.gap_reclaim_obstacle_push = 0.0
+    self.gap_reclaim_stabilization_push = 0.0
     self.gap_reclaim_projection_scale = 1.0
     self.gap_reclaim_personality_max_accel = 0.0
     self.gap_reclaim_effective_cap = 0.0
@@ -928,9 +969,9 @@ class LongitudinalMpc:
       self._gap_reclaim_blend = 0.0
       self._gap_reclaim_last_t = now
       self.gap_reclaim_effective_cap = 0.0
-      return np.minimum(raw_lead_obstacle, filtered_lead_obstacle)
+      return np.minimum(raw_lead_obstacle, filtered_lead_obstacle), False
 
-    reclaim_lead = self._update_hyundai_reclaim_lead(now, raw_lead, filtered_lead)
+    reclaim_lead = self._update_hyundai_reclaim_lead(now, raw_lead, filtered_lead, settled_follow=settled_follow)
     self.gap_reclaim_projection_scale = get_gap_reclaim_projection_scale(
       float(self.x0[1]),
       reclaim_lead,
@@ -961,6 +1002,13 @@ class LongitudinalMpc:
     obstacle_delta = np.maximum(raw_lead_obstacle - filtered_lead_obstacle, 0.0)
     horizon_ramp = 1.0 - np.exp(-T_IDXS / GAP_RECLAIM_HORIZON_RAMP_TAU_S)
     stabilization_push = obstacle_delta * blend * horizon_ramp
+    stabilization_push_suppressed = bool(
+      settled_follow and
+      float(raw_metrics["closing_speed"]) < HYUNDAI_RECLAIM_NOISE_SUPPRESS_CLOSING_MPS and
+      float(raw_metrics["pullaway_speed"]) < HYUNDAI_RECLAIM_NOISE_SUPPRESS_PULLAWAY_MPS
+    )
+    if stabilization_push_suppressed:
+      stabilization_push = np.zeros_like(stabilization_push)
 
     gap_surplus = max(0.0, float(reclaim_lead.dRel) - get_headway_follow_distance(float(self.x0[1]), self.current_t_follow))
     reclaim_room_max = min(
@@ -973,15 +1021,18 @@ class LongitudinalMpc:
 
     obstacle_push = stabilization_push + reclaim_room
     self.gap_reclaim_obstacle_push = float(np.max(obstacle_push))
+    self.gap_reclaim_stabilization_push = float(np.max(stabilization_push))
     target_obstacle = np.minimum(raw_lead_obstacle, filtered_lead_obstacle + stabilization_push) + reclaim_room
 
     raw_obstacle_margin = float(np.min(filtered_lead_obstacle - raw_lead_obstacle))
-    raw_closing_speed = float(self.x0[1]) - float(getattr(raw_lead, 'vLead', self.x0[1]) or self.x0[1])
     raw_lead_accel = float(getattr(raw_lead, 'aLeadK', 0.0) or 0.0)
     raw_safety_override = (
-      raw_obstacle_margin >= HYUNDAI_VIRTUAL_LEAD_RAW_OBSTACLE_MARGIN_M or
-      raw_closing_speed > 0.3 or
-      (raw_lead_accel < -0.6 and raw_closing_speed > 0.1)
+      raw_obstacle_margin >= HYUNDAI_RECLAIM_RAW_SAFETY_MARGIN_M or
+      float(raw_metrics["closing_speed"]) > HYUNDAI_RECLAIM_RAW_SAFETY_CLOSING_MPS or
+      (
+        raw_lead_accel < HYUNDAI_RECLAIM_RAW_SAFETY_DECEL_MPS2 and
+        float(raw_metrics["closing_speed"]) > HYUNDAI_RECLAIM_RAW_SAFETY_DECEL_CLOSING_MPS
+      )
     )
     self._raw_reclaim_safety_override_active = bool(raw_safety_override)
     if raw_safety_override:
@@ -989,9 +1040,10 @@ class LongitudinalMpc:
       self._hyundai_reclaim_last_t = now
       target_obstacle = np.minimum(target_obstacle, raw_lead_obstacle)
 
-    return target_obstacle
+    return target_obstacle, stabilization_push_suppressed
 
-  def _update_hyundai_reclaim_lead(self, now: float, raw_lead, filtered_lead) -> ControlLead:
+  def _update_hyundai_reclaim_lead(self, now: float, raw_lead, filtered_lead, *,
+                                   settled_follow: bool) -> ControlLead:
     raw_control = ControlLead.from_lead(raw_lead) if raw_lead is not None else ControlLead()
     raw_metrics = self._lead_follow_metrics(float(self.x0[1]), self.current_t_follow, raw_control)
     dynamic_gap_supported = (
@@ -1010,7 +1062,7 @@ class LongitudinalMpc:
     )
 
     optimistic = copy.deepcopy(filtered_lead)
-    if distance_hold_supported:
+    if distance_hold_supported and not settled_follow:
       optimistic.dRel = max(float(filtered_lead.dRel), float(raw_control.dRel))
     if dynamic_pullaway_supported:
       optimistic.vRel = max(float(filtered_lead.vRel), float(raw_control.vRel))
@@ -1066,6 +1118,7 @@ class LongitudinalMpc:
           "reset_reason": "dropout_hold",
           "filtered": self._lead_debug_payload(held_lead),
           "metrics": metrics,
+          "drel_consistency_m": float(self._hyundai_virtual_lead_last_drel_error_m),
           "dropout_hold": dropout_hold_debug,
         }
         return held_lead
@@ -1128,6 +1181,7 @@ class LongitudinalMpc:
       "reset_reason": self._hyundai_virtual_lead_reset_reason,
       "filtered": self._lead_debug_payload(self._hyundai_virtual_lead),
       "metrics": metrics,
+      "drel_consistency_m": float(self._hyundai_virtual_lead_last_drel_error_m),
       "dropout_hold": dropout_hold_debug,
     }
     return self._hyundai_virtual_lead
@@ -1352,6 +1406,8 @@ class LongitudinalMpc:
     filtered_lead_obstacle = self._build_lead_obstacle(filtered_lead)
     raw_metrics = self._lead_follow_metrics(float(self.x0[1]), self.current_t_follow, best_lead, float(best_lead_obstacle[0]))
     filtered_metrics = self._lead_follow_metrics(float(self.x0[1]), self.current_t_follow, filtered_lead, float(filtered_lead_obstacle[0]))
+    raw_filtered_drel_error_m = float(self._hyundai_virtual_lead_last_drel_error_m)
+    steady_follow = self._is_hyundai_settled_follow(best_lead, filtered_lead, raw_metrics, filtered_metrics)
     low_speed_queue_hold = (
       float(self.x0[1]) <= HYUNDAI_LOW_SPEED_QUEUE_V_EGO_MAX and
       float(getattr(best_lead, 'dRel', 1e9) or 1e9) <= HYUNDAI_LOW_SPEED_QUEUE_DREL_MAX and
@@ -1367,9 +1423,21 @@ class LongitudinalMpc:
       filtered_metrics["gap_surplus"] >= HYUNDAI_VIRTUAL_LEAD_RELEASE_GAP_SURPLUS_M and
       filtered_metrics["pullaway_speed"] >= HYUNDAI_VIRTUAL_LEAD_RELEASE_PULLAWAY_MPS
     )
+    raw_release_ready = (
+      raw_metrics["gap_surplus"] >= HYUNDAI_VIRTUAL_LEAD_RELEASE_RAW_GAP_SURPLUS_M and
+      raw_metrics["pullaway_speed"] >= HYUNDAI_VIRTUAL_LEAD_RELEASE_RAW_PULLAWAY_MPS
+    )
+    release_agreement_ok = bool(
+      raw_release_ready and
+      (not steady_follow or raw_filtered_drel_error_m <= HYUNDAI_VIRTUAL_LEAD_RELEASE_AGREEMENT_MAX_DREL_ERR_M)
+    )
     immediate_release = (
       filtered_metrics["gap_surplus"] >= HYUNDAI_VIRTUAL_LEAD_RELEASE_IMMEDIATE_GAP_SURPLUS_M and
       filtered_metrics["pullaway_speed"] >= HYUNDAI_VIRTUAL_LEAD_RELEASE_IMMEDIATE_PULLAWAY_MPS
+    )
+    raw_immediate_release_ready = (
+      raw_metrics["gap_surplus"] >= HYUNDAI_VIRTUAL_LEAD_RELEASE_IMMEDIATE_RAW_GAP_SURPLUS_M and
+      raw_metrics["pullaway_speed"] >= HYUNDAI_VIRTUAL_LEAD_RELEASE_IMMEDIATE_RAW_PULLAWAY_MPS
     )
     reacquire_lead = (
       raw_requires_owner or
@@ -1377,6 +1445,7 @@ class LongitudinalMpc:
     )
     active_mode = self._acc_obstacle_mode
     reason = "filtered_hold"
+    stabilization_push_suppressed = False
 
     if raw_requires_owner:
       active_mode = 'lead'
@@ -1389,16 +1458,19 @@ class LongitudinalMpc:
       else:
         reason = "raw_obstacle_hold"
     elif active_mode == 'lead':
-      if immediate_release:
+      if immediate_release and raw_immediate_release_ready and release_agreement_ok:
         active_mode = 'cruise'
         self._acc_obstacle_mode = 'cruise'
         self._reset_acc_obstacle_candidate()
         reason = "filtered_pullaway_immediate"
-      elif release_ready:
+      elif release_ready and release_agreement_ok:
         active_mode = self._advance_acc_obstacle_candidate(
           'cruise', now, HYUNDAI_VIRTUAL_LEAD_RELEASE_DWELL_S, default_mode='lead',
         )
         reason = "filtered_pullaway_dwell"
+      elif release_ready:
+        self._reset_acc_obstacle_candidate()
+        reason = "release_agreement_hold"
       else:
         self._reset_acc_obstacle_candidate()
         reason = "filtered_hold"
@@ -1418,11 +1490,20 @@ class LongitudinalMpc:
     if active_mode == 'lead':
       self._acc_obstacle_mode = 'lead'
       self.source = best_lead_source
-      active_obstacle = self._apply_hyundai_gap_reclaim(best_lead_obstacle, filtered_lead_obstacle, best_lead, filtered_lead, now)
+      active_obstacle, stabilization_push_suppressed = self._apply_hyundai_gap_reclaim(
+        best_lead_obstacle,
+        filtered_lead_obstacle,
+        best_lead,
+        filtered_lead,
+        raw_metrics,
+        steady_follow,
+        now,
+      )
     else:
       self._acc_obstacle_mode = 'cruise'
       self.source = 'cruise'
       self.gap_reclaim_obstacle_push = 0.0
+      self.gap_reclaim_stabilization_push = 0.0
       self.gap_reclaim_effective_cap = 0.0
       self._raw_reclaim_safety_override_active = False
       active_obstacle = cruise_obstacle
@@ -1437,9 +1518,16 @@ class LongitudinalMpc:
       "filtered_gap_surplus_m": float(filtered_metrics["gap_surplus"]),
       "raw_pullaway_mps": float(raw_metrics["pullaway_speed"]),
       "filtered_pullaway_mps": float(filtered_metrics["pullaway_speed"]),
+      "raw_filtered_drel_error_m": float(raw_filtered_drel_error_m),
+      "steady_follow": bool(steady_follow),
+      "filtered_release_ready": bool(release_ready),
+      "raw_release_ready": bool(raw_release_ready),
+      "release_agreement_ok": bool(release_agreement_ok),
       "low_speed_queue_hold": bool(low_speed_queue_hold),
       "gap_reclaim_blend": float(self._gap_reclaim_blend),
       "gap_reclaim_obstacle_push_m": float(self.gap_reclaim_obstacle_push),
+      "stabilization_push_m": float(self.gap_reclaim_stabilization_push),
+      "stabilization_push_suppressed": bool(stabilization_push_suppressed),
       "gap_reclaim_projection_scale": float(self.gap_reclaim_projection_scale),
       "gap_reclaim_effective_cap": float(self.gap_reclaim_effective_cap),
       "gap_reclaim_personality_max_accel": float(self.gap_reclaim_personality_max_accel),
@@ -1815,6 +1903,7 @@ class LongitudinalMpc:
       }
       self.gap_reclaim_accel_floor = 0.0
       self.gap_reclaim_obstacle_push = 0.0
+      self.gap_reclaim_stabilization_push = 0.0
       self.gap_reclaim_projection_scale = 1.0
       self.gap_reclaim_personality_max_accel = 0.0
       self.gap_reclaim_effective_cap = 0.0
