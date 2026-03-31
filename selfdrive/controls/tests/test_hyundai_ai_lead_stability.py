@@ -176,7 +176,10 @@ class TestHyundaiAiLeadStability:
       )
 
     assert mpc.source == "lead0"
-    assert mpc.acc_source_debug["candidate_mode"] == "cruise"
+    assert mpc.acc_source_debug["candidate_mode"] is None
+    assert mpc.acc_source_debug["filtered_release_ready"] is False
+    assert mpc.acc_source_debug["raw_release_ready"] is True
+    assert mpc.acc_source_debug["release_agreement_ok"] is True
 
     _run_update(
       mpc,
@@ -469,7 +472,8 @@ class TestHyundaiAiLeadStability:
 
     assert mpc.source == "lead0"
     assert mpc.gap_reclaim_accel_floor > 0.0
-    assert mpc.gap_reclaim_obstacle_push > 1.0
+    assert mpc.gap_reclaim_obstacle_push > 0.15
+    assert mpc.acc_source_debug["stabilization_push_suppressed"] is True
     assert mpc.acc_source_debug["raw_reclaim_safety_override"] is False
 
   def test_reclaim_blend_tapers_when_personality_cap_is_higher_than_comfort_cap(self, monkeypatch):
@@ -585,6 +589,84 @@ class TestHyundaiAiLeadStability:
 
     assert mpc.source == "lead0"
     assert mpc.acc_source_debug["raw_reclaim_safety_override"] is True
+
+  def test_new_slower_lead_sets_acquire_window_and_preview_mode(self, monkeypatch):
+    monkeypatch.setattr(
+      "openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc.time.monotonic",
+      _MonotonicStub(step=0.2),
+    )
+    mpc = _make_hyundai_mpc(v_ego=33.5, a_ego=0.0)
+
+    _run_update(mpc, _make_lead(status=False), _make_lead(status=False))
+    _run_update(
+      mpc,
+      _make_lead(d_rel=90.0, y_rel=0.02, d_path=0.02, v_lat=0.2, v_rel=-6.5, v_lead=27.0, a_lead=0.0, model_prob=0.97),
+      _make_lead(status=False),
+      v_cruise=40.0,
+    )
+
+    preview_debug = mpc.lead_approach_preview_debug["lead0"]
+
+    assert preview_debug["acquire"]["active"] is True
+    assert preview_debug["mode"] == "acquire"
+    assert float(preview_debug["preview_buffer_m"]) >= 5.9
+    assert mpc.lead_approach_preview[0] >= 5.9
+    assert mpc.source == "lead0"
+
+  def test_opening_noise_is_slew_clamped_without_forcing_reset(self, monkeypatch):
+    monkeypatch.setattr(
+      "openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc.time.monotonic",
+      _MonotonicStub(step=0.2),
+    )
+    mpc = _make_hyundai_mpc(v_ego=29.0, a_ego=0.0)
+
+    for _ in range(3):
+      _run_update(
+        mpc,
+        _make_lead(d_rel=44.0, y_rel=0.03, d_path=0.03, v_lat=0.15, v_rel=0.0, v_lead=29.0, a_lead=0.0, model_prob=0.97),
+        _make_lead(status=False),
+      )
+
+    prev_filtered_drel = float(mpc.hyundai_virtual_lead_debug["filtered"]["dRel"])
+    _run_update(
+      mpc,
+      _make_lead(d_rel=52.5, y_rel=0.04, d_path=0.04, v_lat=0.20, v_rel=0.12, v_lead=29.12, a_lead=0.0, model_prob=0.97),
+      _make_lead(status=False),
+    )
+
+    filtered_drel = float(mpc.hyundai_virtual_lead_debug["filtered"]["dRel"])
+    filter_debug = mpc.hyundai_virtual_lead_debug["filter"]
+
+    assert mpc.hyundai_virtual_lead_debug["reset_reason"] is None
+    assert filter_debug["open_slew_clamped"] is True
+    assert filter_debug["snap_to_raw"] is False
+    assert filtered_drel > prev_filtered_drel
+    assert filtered_drel < 45.0
+
+  def test_real_closing_jump_still_snaps_filter_to_raw(self, monkeypatch):
+    monkeypatch.setattr(
+      "openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc.time.monotonic",
+      _MonotonicStub(step=0.2),
+    )
+    mpc = _make_hyundai_mpc(v_ego=29.0, a_ego=0.0)
+
+    for _ in range(3):
+      _run_update(
+        mpc,
+        _make_lead(d_rel=52.0, y_rel=0.03, d_path=0.03, v_lat=0.15, v_rel=0.0, v_lead=29.0, a_lead=0.0, model_prob=0.97),
+        _make_lead(status=False),
+      )
+
+    _run_update(
+      mpc,
+      _make_lead(d_rel=25.0, y_rel=0.04, d_path=0.04, v_lat=0.18, v_rel=-6.0, v_lead=23.0, a_lead=-1.2, model_prob=0.98),
+      _make_lead(status=False),
+    )
+
+    filter_debug = mpc.hyundai_virtual_lead_debug["filter"]
+
+    assert filter_debug["snap_to_raw"] is True
+    assert mpc.hyundai_virtual_lead_debug["filtered"]["dRel"] == pytest.approx(25.0)
 
   def test_duplicate_slot_jitter_does_not_start_cutin_settle(self, monkeypatch):
     monkeypatch.setattr(

@@ -61,9 +61,17 @@ LEAD_DANGER_FACTOR = 0.75
 LIMIT_COST = 1e6
 ACADOS_SOLVER_TYPE = 'SQP_RTI'
 LEAD_APPROACH_PREVIEW_MIN_SPEED = 8.0
+LEAD_APPROACH_PREVIEW_CLOSING_MIN_MPS = 0.20
 LEAD_APPROACH_PREVIEW_TIME_BP = [0.0, 2.0, 5.0, 10.0]
 LEAD_APPROACH_PREVIEW_TIME_V = [0.0, 0.15, 0.50, 0.95]
 LEAD_APPROACH_PREVIEW_DECAY_TAU = 1.75
+LEAD_APPROACH_PREVIEW_ACQUIRE_GAP_FRACTION = 0.35
+LEAD_APPROACH_PREVIEW_PROJECTED_DEFICIT_GAIN = 0.85
+LEAD_APPROACH_PREVIEW_GAP_CAP_FRACTION = 0.70
+LEAD_APPROACH_PREVIEW_ACQUIRE_GAP_CAP_FRACTION = 0.95
+LEAD_APPROACH_PREVIEW_ACQUIRE_GAIN = 1.45
+LEAD_APPROACH_PREVIEW_DECEL_BP = [0.0, 0.5, 1.5, 3.0]
+LEAD_APPROACH_PREVIEW_DECEL_V = [1.0, 1.05, 1.20, 1.35]
 GAP_RECLAIM_MIN_SPEED = 8.0
 GAP_RECLAIM_HEADWAY_SURPLUS_BP = [0.0, 0.08, 0.18, 0.35]
 GAP_RECLAIM_HEADWAY_SURPLUS_V = [0.0, 0.06, 0.20, 0.30]
@@ -160,20 +168,32 @@ DREL_FILTER_TAU_CLOSE_S = 0.30   # fast response when lead appears closer (safet
 DREL_FILTER_TAU_OPEN_S = 1.00    # slow response when lead appears further (noise rejection)
 DREL_FILTER_INNOVATION_GATE_M = 30.0
 DREL_FILTER_CLOSING_GATE_M = 20.0
+DREL_FILTER_INNOVATION_DEADBAND_M = 0.35
+DREL_FILTER_OPEN_SLEW_MAX_MPS = 1.25
 DREL_FILTER_SNAP_HOLD_FRAMES = 4
 DREL_FILTER_ALPHA_FAST = 0.5
 
 
 class LeadDistanceFilter:
-  __slots__ = ('_filtered', '_frames_since_snap')
+  __slots__ = ('_filtered', '_frames_since_snap', 'last_debug')
 
   def __init__(self):
     self._filtered: float | None = None
     self._frames_since_snap: int = DREL_FILTER_SNAP_HOLD_FRAMES + 1
+    self.last_debug: dict[str, float | bool] = {}
+    self.reset()
 
   def reset(self, drel: float | None = None) -> None:
     self._filtered = drel
     self._frames_since_snap = DREL_FILTER_SNAP_HOLD_FRAMES + 1
+    self.last_debug = {
+      "predicted_vrel_mps": 0.0,
+      "innovation_raw_m": 0.0,
+      "innovation_used_m": 0.0,
+      "deadband_applied": False,
+      "open_slew_clamped": False,
+      "snap_to_raw": False,
+    }
 
   @property
   def value(self) -> float | None:
@@ -183,25 +203,64 @@ class LeadDistanceFilter:
              tau_close: float = DREL_FILTER_TAU_CLOSE_S,
              tau_open: float = DREL_FILTER_TAU_OPEN_S,
              innovation_gate: float = DREL_FILTER_INNOVATION_GATE_M,
-             closing_gate: float = DREL_FILTER_CLOSING_GATE_M) -> float:
+             closing_gate: float = DREL_FILTER_CLOSING_GATE_M,
+             open_slew_max_mps: float = DREL_FILTER_OPEN_SLEW_MAX_MPS) -> float:
     if self._filtered is None or dt_s <= 0.0:
       self._filtered = raw_drel
       self._frames_since_snap = DREL_FILTER_SNAP_HOLD_FRAMES + 1
+      self.last_debug = {
+        "predicted_vrel_mps": float(raw_vrel),
+        "innovation_raw_m": 0.0,
+        "innovation_used_m": 0.0,
+        "deadband_applied": False,
+        "open_slew_clamped": False,
+        "snap_to_raw": True,
+      }
       return raw_drel
 
-    d_pred = self._filtered + raw_vrel * dt_s
-    innov = raw_drel - d_pred
+    prev_filtered = float(self._filtered)
+    predicted_vrel = float(raw_vrel)
+    if predicted_vrel > 0.0:
+      predicted_vrel = min(predicted_vrel, max(0.0, float(open_slew_max_mps)))
 
-    if abs(innov) > innovation_gate or innov < -closing_gate:
+    d_pred = prev_filtered + predicted_vrel * dt_s
+    innov_raw = raw_drel - d_pred
+    deadband = DREL_FILTER_INNOVATION_DEADBAND_M
+    if abs(innov_raw) <= deadband:
+      innov = 0.0
+      deadband_applied = True
+    else:
+      innov = float(np.sign(innov_raw) * (abs(innov_raw) - deadband))
+      deadband_applied = False
+    open_slew_clamped = False
+    snapped = False
+
+    if abs(innov_raw) > innovation_gate or innov_raw < -closing_gate:
       self._filtered = raw_drel
       self._frames_since_snap = 0
+      snapped = True
     elif self._frames_since_snap < DREL_FILTER_SNAP_HOLD_FRAMES:
       self._filtered = d_pred + DREL_FILTER_ALPHA_FAST * innov
       self._frames_since_snap += 1
     else:
-      tau = tau_close if innov < 0.0 else tau_open
+      tau = tau_close if innov_raw < 0.0 else tau_open
       alpha = float(1.0 - np.exp(-dt_s / max(tau, 1e-3)))
       self._filtered = d_pred + alpha * innov
+      if raw_drel >= prev_filtered:
+        max_open_step = max(0.0, float(open_slew_max_mps)) * dt_s
+        max_open_value = prev_filtered + max_open_step
+        if self._filtered > max_open_value:
+          self._filtered = max_open_value
+          open_slew_clamped = True
+
+    self.last_debug = {
+      "predicted_vrel_mps": float(predicted_vrel),
+      "innovation_raw_m": float(innov_raw),
+      "innovation_used_m": float(innov),
+      "deadband_applied": bool(deadband_applied),
+      "open_slew_clamped": bool(open_slew_clamped),
+      "snap_to_raw": bool(snapped),
+    }
 
     return self._filtered
 
@@ -256,30 +315,87 @@ def desired_follow_distance(v_ego, v_lead, t_follow=None):
   return get_safe_obstacle_distance(v_ego, t_follow) - get_stopped_equivalence_factor(v_lead)
 
 
-def get_lead_approach_preview_buffer(v_ego, lead, t_follow,
-                                     tuning: LeadResponseTuningConfig | None = None) -> float:
+def compute_lead_approach_preview(v_ego, lead, t_follow,
+                                  tuning: LeadResponseTuningConfig | None = None,
+                                  *,
+                                  acquire_window_active: bool = False) -> tuple[float, dict[str, float | bool | str | None]]:
   tuning = LeadResponseTuningConfig.defaults() if tuning is None else tuning
+  debug: dict[str, float | bool | str | None] = {
+    "active": False,
+    "mode": "inactive",
+    "acquire_window_active": bool(acquire_window_active),
+    "closing_speed_mps": 0.0,
+    "gap_surplus_m": 0.0,
+    "headway_gap_m": 0.0,
+    "ttc_to_headway_s": None,
+    "projected_deficit_m": 0.0,
+    "preview_time_s": 0.0,
+    "preview_buffer_m": 0.0,
+  }
   if lead is None or not getattr(lead, 'status', False) or v_ego < LEAD_APPROACH_PREVIEW_MIN_SPEED:
-    return 0.0
+    return 0.0, debug
 
   v_lead = max(0.0, float(getattr(lead, 'vLead', v_ego) or v_ego))
   closing_speed = max(0.0, float(v_ego) - v_lead)
-  if closing_speed <= 0.5:
-    return 0.0
-
   d_rel = float(getattr(lead, 'dRel', 0.0) or 0.0)
   headway_gap = get_headway_follow_distance(float(v_ego), t_follow)
   gap_surplus = d_rel - headway_gap
-  if gap_surplus <= tuning.lead_preview_gap_min_m:
-    return 0.0
-
   preview_time = float(np.interp(closing_speed, LEAD_APPROACH_PREVIEW_TIME_BP, LEAD_APPROACH_PREVIEW_TIME_V))
-  preview_buffer = closing_speed * preview_time
-  lead_accel = max(0.0, float(getattr(lead, 'aLeadK', 0.0) or 0.0))
-  accel_scale = float(np.interp(lead_accel, GAP_RECLAIM_LEAD_ACCEL_BP, [1.0, 0.75, 0.5]))
-  max_buffer = min(tuning.lead_preview_max_buffer_m, gap_surplus * 0.7)
-  preview_buffer *= accel_scale * tuning.lead_preview_strength
-  return float(np.clip(preview_buffer, 0.0, max_buffer))
+  gap_min_m = float(tuning.lead_preview_gap_min_m)
+  if acquire_window_active:
+    gap_min_m *= LEAD_APPROACH_PREVIEW_ACQUIRE_GAP_FRACTION
+  if closing_speed <= LEAD_APPROACH_PREVIEW_CLOSING_MIN_MPS and gap_surplus <= gap_min_m:
+    return 0.0, debug
+
+  lead_decel = max(0.0, -float(getattr(lead, 'aLeadK', 0.0) or 0.0))
+  projected_horizon_s = preview_time + (float(tuning.lead_acquire_window_s) if acquire_window_active else 0.0)
+  projected_gap = max(0.0, d_rel - closing_speed * projected_horizon_s - 0.5 * lead_decel * (projected_horizon_s ** 2))
+  projected_deficit = max(0.0, headway_gap - projected_gap)
+  if gap_surplus > 0.0 and closing_speed > LEAD_APPROACH_PREVIEW_CLOSING_MIN_MPS:
+    ttc_to_headway = gap_surplus / max(closing_speed, 1e-3)
+  else:
+    ttc_to_headway = None
+
+  max_buffer_fraction = LEAD_APPROACH_PREVIEW_ACQUIRE_GAP_CAP_FRACTION if acquire_window_active else LEAD_APPROACH_PREVIEW_GAP_CAP_FRACTION
+  max_buffer = min(tuning.lead_preview_max_buffer_m, max(0.0, gap_surplus) * max_buffer_fraction)
+  if max_buffer <= 0.0:
+    return 0.0, debug
+
+  base_preview = closing_speed * preview_time
+  projected_preview = projected_deficit * LEAD_APPROACH_PREVIEW_PROJECTED_DEFICIT_GAIN
+  preview_buffer = max(base_preview, projected_preview)
+  lead_decel_scale = float(np.interp(lead_decel, LEAD_APPROACH_PREVIEW_DECEL_BP, LEAD_APPROACH_PREVIEW_DECEL_V))
+  if acquire_window_active:
+    preview_buffer *= LEAD_APPROACH_PREVIEW_ACQUIRE_GAIN
+  preview_buffer *= lead_decel_scale * tuning.lead_preview_strength
+  preview_buffer = float(np.clip(preview_buffer, 0.0, max_buffer))
+  debug = {
+    "active": bool(preview_buffer > 0.0),
+    "mode": "acquire" if acquire_window_active and preview_buffer > 0.0 else ("base" if preview_buffer > 0.0 else "inactive"),
+    "acquire_window_active": bool(acquire_window_active),
+    "closing_speed_mps": float(closing_speed),
+    "gap_surplus_m": float(gap_surplus),
+    "headway_gap_m": float(headway_gap),
+    "ttc_to_headway_s": None if ttc_to_headway is None else float(ttc_to_headway),
+    "projected_deficit_m": float(projected_deficit),
+    "preview_time_s": float(preview_time),
+    "preview_buffer_m": float(preview_buffer),
+  }
+  return preview_buffer, debug
+
+
+def get_lead_approach_preview_buffer(v_ego, lead, t_follow,
+                                     tuning: LeadResponseTuningConfig | None = None,
+                                     *,
+                                     acquire_window_active: bool = False) -> float:
+  preview_buffer, _ = compute_lead_approach_preview(
+    v_ego,
+    lead,
+    t_follow,
+    tuning,
+    acquire_window_active=acquire_window_active,
+  )
+  return preview_buffer
 
 
 def apply_lead_approach_preview(lead_obstacle, preview_buffer_m):
@@ -667,6 +783,10 @@ class LongitudinalMpc:
     self.current_t_follow = float(get_T_FOLLOW())
     self.control_leads = (None, None)
     self.lead_approach_preview = (0.0, 0.0)
+    self.lead_approach_preview_debug = {
+      "lead0": {"active": False, "mode": "inactive", "acquire_window_active": False, "preview_buffer_m": 0.0},
+      "lead1": {"active": False, "mode": "inactive", "acquire_window_active": False, "preview_buffer_m": 0.0},
+    }
     self.gap_reclaim_accel_floor = 0.0
     self.gap_reclaim_obstacle_push = 0.0
     self.gap_reclaim_stabilization_push = 0.0
@@ -701,6 +821,12 @@ class LongitudinalMpc:
     self._acc_obstacle_candidate_t = None
     self._lead_to_cruise_transition_t = None
     self._lead_to_cruise_transition_source = None
+    self._lead_acquire_until_t = {'lead0': None, 'lead1': None}
+    self._lead_acquire_last_reason = {'lead0': None, 'lead1': None}
+    self._lead_prev_obs = {
+      'lead0': {"status": False, "dRel": None, "vLead": None},
+      'lead1': {"status": False, "dRel": None, "vLead": None},
+    }
     self.acc_source_debug = {}
     # timers
     self.solve_time = 0.0
@@ -759,6 +885,61 @@ class LongitudinalMpc:
       "vRel": LongitudinalMpc._lead_attr(lead, "vRel"),
       "modelProb": LongitudinalMpc._lead_attr(lead, "modelProb"),
     }
+
+  def _update_lead_acquire_state(self, now: float) -> dict[str, dict[str, float | bool | str | None]]:
+    debug: dict[str, dict[str, float | bool | str | None]] = {}
+    acquire_window_s = max(0.0, float(getattr(self._live_tune_cfg, 'lead_acquire_window_s', 0.0)))
+    v_ego = float(self.x0[1])
+
+    for slot_idx, lead in enumerate(self.control_leads):
+      slot_key = f"lead{slot_idx}"
+      prev = self._lead_prev_obs[slot_key]
+      status = bool(lead is not None and getattr(lead, 'status', False))
+      activated = False
+      activation_reason = self._lead_acquire_last_reason[slot_key]
+
+      if status:
+        d_rel = float(getattr(lead, 'dRel', 0.0) or 0.0)
+        v_lead = float(getattr(lead, 'vLead', v_ego) or v_ego)
+        closing_speed = max(0.0, v_ego - v_lead)
+        reason = None
+        if not bool(prev["status"]):
+          reason = "new_lead"
+        else:
+          prev_drel = prev["dRel"]
+          prev_vlead = prev["vLead"]
+          if prev_drel is not None and (float(prev_drel) - d_rel) >= max(4.0, closing_speed * 0.45):
+            reason = "closer_jump"
+          elif prev_vlead is not None and (float(prev_vlead) - v_lead) >= 1.0 and closing_speed > LEAD_APPROACH_PREVIEW_CLOSING_MIN_MPS:
+            reason = "slower_jump"
+
+        if reason is not None and acquire_window_s > 0.0:
+          self._lead_acquire_until_t[slot_key] = now + acquire_window_s
+          self._lead_acquire_last_reason[slot_key] = reason
+          activation_reason = reason
+          activated = True
+
+        remaining_s = 0.0
+        if self._lead_acquire_until_t[slot_key] is not None:
+          remaining_s = max(0.0, float(self._lead_acquire_until_t[slot_key]) - now)
+        active = remaining_s > 0.0
+        prev.update({"status": True, "dRel": d_rel, "vLead": v_lead})
+      else:
+        self._lead_acquire_until_t[slot_key] = None
+        self._lead_acquire_last_reason[slot_key] = None
+        activation_reason = None
+        active = False
+        remaining_s = 0.0
+        prev.update({"status": False, "dRel": None, "vLead": None})
+
+      debug[slot_key] = {
+        "active": bool(active),
+        "activated": bool(activated),
+        "remaining_s": float(remaining_s),
+        "reason": activation_reason,
+      }
+
+    return debug
 
   @staticmethod
   def _empty_lead_debug_payload() -> dict[str, float | bool]:
@@ -923,9 +1104,23 @@ class LongitudinalMpc:
       return True, "init"
     if lead_source != self._hyundai_virtual_lead_source:
       return True, "source_switch"
-    if abs(float(getattr(lead, 'dRel', 0.0) or 0.0) - float(self._hyundai_virtual_lead.dRel)) > HYUNDAI_VIRTUAL_LEAD_RESET_DREL_M:
-      return True, "drel_jump"
-    if abs(float(getattr(lead, 'dPath', getattr(lead, 'yRel', 0.0)) or 0.0) - float(self._hyundai_virtual_lead.dPath)) > HYUNDAI_VIRTUAL_LEAD_RESET_DPATH_M:
+    raw_drel = float(getattr(lead, 'dRel', 0.0) or 0.0)
+    filtered_drel = float(self._hyundai_virtual_lead.dRel)
+    drel_delta = raw_drel - filtered_drel
+    raw_dpath = float(getattr(lead, 'dPath', getattr(lead, 'yRel', 0.0)) or 0.0)
+    filtered_dpath = float(self._hyundai_virtual_lead.dPath)
+    path_delta = abs(raw_dpath - filtered_dpath)
+    if drel_delta < -HYUNDAI_VIRTUAL_LEAD_RESET_DREL_M:
+      return True, "drel_jump_closer"
+    if (
+      drel_delta > HYUNDAI_VIRTUAL_LEAD_RESET_DREL_M and
+      (
+        float(getattr(lead, 'vRel', 0.0) or 0.0) > HYUNDAI_VIRTUAL_LEAD_RELEASE_IMMEDIATE_PULLAWAY_MPS or
+        path_delta > HYUNDAI_VIRTUAL_LEAD_RESET_DPATH_M * 0.7
+      )
+    ):
+      return True, "drel_jump_opening"
+    if path_delta > HYUNDAI_VIRTUAL_LEAD_RESET_DPATH_M:
       return True, "dpath_jump"
     return False, None
 
@@ -1119,6 +1314,7 @@ class LongitudinalMpc:
           "filtered": self._lead_debug_payload(held_lead),
           "metrics": metrics,
           "drel_consistency_m": float(self._hyundai_virtual_lead_last_drel_error_m),
+          "filter": dict(self._drel_filter.last_debug),
           "dropout_hold": dropout_hold_debug,
         }
         return held_lead
@@ -1136,6 +1332,15 @@ class LongitudinalMpc:
       self._hyundai_virtual_lead_stable_since_t = now if raw_lead.status else None
       self._hyundai_virtual_lead_last_drel_error_m = 0.0 if raw_lead.status else 1e9
       self._drel_filter.reset(raw_lead.dRel if raw_lead.status else None)
+      if raw_lead.status and reset_reason == "drel_jump_closer":
+        self._drel_filter.last_debug.update({
+          "predicted_vrel_mps": float(getattr(raw_lead, 'vRel', 0.0) or 0.0),
+          "innovation_raw_m": 0.0,
+          "innovation_used_m": 0.0,
+          "deadband_applied": False,
+          "open_slew_clamped": False,
+          "snap_to_raw": True,
+        })
       if not raw_lead.status:
         self._reset_hyundai_virtual_lead(reset_reason or "no_control_lead")
         return None
@@ -1151,6 +1356,7 @@ class LongitudinalMpc:
         tau_open=getattr(cfg, 'drel_filter_tau_open_s', DREL_FILTER_TAU_OPEN_S),
         innovation_gate=getattr(cfg, 'drel_filter_innovation_gate_m', DREL_FILTER_INNOVATION_GATE_M),
         closing_gate=getattr(cfg, 'drel_filter_closing_gate_m', DREL_FILTER_CLOSING_GATE_M),
+        open_slew_max_mps=getattr(cfg, 'drel_filter_open_slew_max_mps', DREL_FILTER_OPEN_SLEW_MAX_MPS),
       )
       filtered.yRel = self._filter_symmetric_metric(prev.yRel, raw_lead.yRel, dt_s, HYUNDAI_VIRTUAL_LEAD_PATH_TAU_S)
       filtered.vRel = self._filter_metric(prev.vRel, raw_lead.vRel, dt_s, danger_if_lower=True)
@@ -1182,6 +1388,7 @@ class LongitudinalMpc:
       "filtered": self._lead_debug_payload(self._hyundai_virtual_lead),
       "metrics": metrics,
       "drel_consistency_m": float(self._hyundai_virtual_lead_last_drel_error_m),
+      "filter": dict(self._drel_filter.last_debug),
       "dropout_hold": dropout_hold_debug,
     }
     return self._hyundai_virtual_lead
@@ -1767,6 +1974,7 @@ class LongitudinalMpc:
     self.lead_role_debug = lead_role_debug
     self.status = control_lead0.status or control_lead1.status
     self._update_cutin_settle_state(now, v_ego, lead_role_debug)
+    lead_acquire_debug = self._update_lead_acquire_state(now)
 
     response_model = self.get_cruise_response_model(v_ego)
     self.last_cruise_response_model = response_model
@@ -1779,11 +1987,29 @@ class LongitudinalMpc:
     # and then treat that as a stopped car/obstacle at this new distance.
     lead_0_obstacle = lead_xv_0[:,0] + get_stopped_equivalence_factor(lead_xv_0[:,1])
     lead_1_obstacle = lead_xv_1[:,0] + get_stopped_equivalence_factor(lead_xv_1[:,1])
-    lead_0_preview = get_lead_approach_preview_buffer(v_ego, control_lead0, t_follow, self._live_tune_cfg)
-    lead_1_preview = get_lead_approach_preview_buffer(v_ego, control_lead1, t_follow, self._live_tune_cfg)
+    lead_0_preview, lead_0_preview_debug = compute_lead_approach_preview(
+      v_ego,
+      control_lead0,
+      t_follow,
+      self._live_tune_cfg,
+      acquire_window_active=bool(lead_acquire_debug["lead0"]["active"]),
+    )
+    lead_1_preview, lead_1_preview_debug = compute_lead_approach_preview(
+      v_ego,
+      control_lead1,
+      t_follow,
+      self._live_tune_cfg,
+      acquire_window_active=bool(lead_acquire_debug["lead1"]["active"]),
+    )
+    lead_0_preview_debug["acquire"] = lead_acquire_debug["lead0"]
+    lead_1_preview_debug["acquire"] = lead_acquire_debug["lead1"]
     lead_0_obstacle = apply_lead_approach_preview(lead_0_obstacle, lead_0_preview)
     lead_1_obstacle = apply_lead_approach_preview(lead_1_obstacle, lead_1_preview)
     self.lead_approach_preview = (lead_0_preview, lead_1_preview)
+    self.lead_approach_preview_debug = {
+      "lead0": lead_0_preview_debug,
+      "lead1": lead_1_preview_debug,
+    }
 
     self.params[:,0] = ACCEL_MIN
     self.params[:,1] = ACCEL_MAX
@@ -1991,6 +2217,7 @@ class LongitudinalMpc:
             "floor": float(self.cutin_settle_accel_floor),
             **self.cutin_settle_debug,
           },
+          "lead_preview": self.lead_approach_preview_debug,
           "source_hysteresis": self.acc_source_debug,
           "filtered_virtual_lead": self.hyundai_virtual_lead_debug,
           "virtual_duplicate": lead_role_debug.get("virtual_duplicate", {"active": False}),

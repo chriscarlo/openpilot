@@ -67,6 +67,16 @@ LEAD_RESPONSE_TUNE_SPECS = (
     description="Upper cap on how much closer the previewed lead obstacle can be pulled.",
   ),
   LeadResponseTuneSpec(
+    attr="lead_acquire_window_s",
+    key="Longitudinal.LiveTune.LeadAcquireWindowS",
+    cli_name="lead-acquire-window-s",
+    label="lead_acquire_window_s",
+    default=1.25,
+    minimum=0.0,
+    maximum=3.0,
+    description="Short boost window after a lead appears or jumps materially closer/slower.",
+  ),
+  LeadResponseTuneSpec(
     attr="gap_reclaim_strength",
     key="Longitudinal.LiveTune.GapReclaimStrength",
     cli_name="gap-reclaim-strength",
@@ -157,6 +167,16 @@ LEAD_RESPONSE_TUNE_SPECS = (
     description="dRel filter time constant for opening (lead appears farther). Higher = more noise rejection.",
   ),
   LeadResponseTuneSpec(
+    attr="drel_filter_open_slew_max_mps",
+    key="Longitudinal.LiveTune.DRelFilterOpenSlewMaxMps",
+    cli_name="drel-filter-open-slew-max-mps",
+    label="drel_open_slew_max_mps",
+    default=1.25,
+    minimum=0.25,
+    maximum=5.0,
+    description="Max opening-side dRel motion the filter will admit per second before correction.",
+  ),
+  LeadResponseTuneSpec(
     attr="drel_filter_innovation_gate_m",
     key="Longitudinal.LiveTune.DRelFilterInnovationGateM",
     cli_name="drel-filter-ig",
@@ -186,6 +206,7 @@ class LeadResponseTuningConfig:
   lead_preview_strength: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_preview_strength"].default
   lead_preview_gap_min_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_preview_gap_min_m"].default
   lead_preview_max_buffer_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_preview_max_buffer_m"].default
+  lead_acquire_window_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_acquire_window_s"].default
   gap_reclaim_strength: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["gap_reclaim_strength"].default
   gap_reclaim_gap_min_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["gap_reclaim_gap_min_m"].default
   gap_reclaim_max_accel: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["gap_reclaim_max_accel"].default
@@ -195,6 +216,7 @@ class LeadResponseTuningConfig:
   cutin_settle_accel_bias_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cutin_settle_accel_bias_mps2"].default
   drel_filter_tau_close_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["drel_filter_tau_close_s"].default
   drel_filter_tau_open_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["drel_filter_tau_open_s"].default
+  drel_filter_open_slew_max_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["drel_filter_open_slew_max_mps"].default
   drel_filter_innovation_gate_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["drel_filter_innovation_gate_m"].default
   drel_filter_closing_gate_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["drel_filter_closing_gate_m"].default
 

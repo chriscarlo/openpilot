@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import time
+from types import SimpleNamespace
 import numpy as np
 
 from cereal import log
@@ -15,7 +16,8 @@ class Plant:
   messaging_initialized = False
 
   def __init__(self, lead_relevancy=False, speed=0.0, distance_lead=2.0,
-               enabled=True, only_lead2=False, only_radar=False, e2e=False, personality=0, force_decel=False):
+               enabled=True, only_lead2=False, only_radar=False, e2e=False, personality=0, force_decel=False,
+               CP=None, hyundai_controller=False, CP_SP=None):
     self.rate = 1. / DT_MDL
 
     if not Plant.messaging_initialized:
@@ -42,20 +44,66 @@ class Plant:
     self.e2e = e2e
     self.personality = personality
     self.force_decel = force_decel
+    self.hyundai_controller = hyundai_controller
 
     self.rk = Ratekeeper(self.rate, print_delay_threshold=100.0)
     self.ts = 1. / self.rate
     time.sleep(0.1)
     self.sm = messaging.SubMaster(['longitudinalPlan'])
 
-    from opendbc.car.honda.values import CAR
-    from opendbc.car.honda.interface import CarInterface
+    if CP is None:
+      from opendbc.car.honda.values import CAR
+      from opendbc.car.honda.interface import CarInterface
+      CP = CarInterface.get_non_essential_params(CAR.HONDA_CIVIC)
+    self.CP = CP
 
-    self.planner = LongitudinalPlanner(CarInterface.get_non_essential_params(CAR.HONDA_CIVIC), init_v=self.speed)
+    self.planner = LongitudinalPlanner(self.CP, init_v=self.speed)
+    self.planner_acceleration = 0.0
+    self.controller_acceleration = 0.0
+    self.controller_jerk_upper = 0.0
+    self.controller_jerk_lower = 0.0
+
+    self.CP_SP = CP_SP
+    self.longitudinal_controller = None
+    if self.hyundai_controller:
+      from opendbc.sunnypilot.car.hyundai.longitudinal.controller import LongitudinalController
+      self.CP_SP = SimpleNamespace(flags=0) if CP_SP is None else CP_SP
+      self.longitudinal_controller = LongitudinalController(self.CP, self.CP_SP)
 
   @property
   def current_time(self):
     return float(self.rk.frame) / self.rate
+
+  def _apply_hyundai_longitudinal_controller(self, planner_accel: float) -> float:
+    if self.longitudinal_controller is None:
+      self.controller_acceleration = float(planner_accel)
+      return planner_accel
+
+    cc = SimpleNamespace(
+      actuators=SimpleNamespace(
+        accel=float(planner_accel),
+        longControlState=LongCtrlState.pid if self.enabled else LongCtrlState.off,
+      ),
+      longActive=bool(self.enabled),
+      enabled=bool(self.enabled),
+      hudControl=SimpleNamespace(visualAlert=None),
+    )
+    cc_sp = SimpleNamespace(
+      params=getattr(self.CP_SP, 'params', []),
+      flags=getattr(self.CP_SP, 'flags', 0),
+    )
+    cs = SimpleNamespace(
+      out=SimpleNamespace(
+        vEgo=float(self.speed),
+        aEgo=float(self.acceleration),
+      ),
+      aBasis=float(self.acceleration),
+    )
+    self.longitudinal_controller.update(cc, cc_sp, cs)
+    self.controller_jerk_upper = float(self.longitudinal_controller.jerk_upper)
+    self.controller_jerk_lower = float(self.longitudinal_controller.jerk_lower)
+    self.controller_acceleration = float(self.longitudinal_controller.actual_accel)
+    return self.controller_acceleration
 
   def step(self, v_lead=0.0, prob_lead=1.0, v_cruise=50., pitch=0.0, prob_throttle=1.0):
     # ******** publish a fake model going straight and fake calibration ********
@@ -141,7 +189,8 @@ class Plant:
           'liveMapDataSP': live_map_data_sp.liveMapDataSP,
           'gpsLocation': gps_data.gpsLocation}
     self.planner.update(sm)
-    self.acceleration = self.planner.output_a_target
+    self.planner_acceleration = float(self.planner.output_a_target)
+    self.acceleration = self._apply_hyundai_longitudinal_controller(self.planner_acceleration)
     self.speed = self.speed + self.acceleration * self.ts
     self.should_stop = self.planner.output_should_stop
     fcw = self.planner.fcw
@@ -175,6 +224,10 @@ class Plant:
       "distance": self.distance,
       "speed": self.speed,
       "acceleration": self.acceleration,
+      "planner_acceleration": self.planner_acceleration,
+      "controller_acceleration": self.controller_acceleration,
+      "controller_jerk_upper": self.controller_jerk_upper,
+      "controller_jerk_lower": self.controller_jerk_lower,
       "should_stop": self.should_stop,
       "distance_lead": self.distance_lead,
       "fcw": fcw,

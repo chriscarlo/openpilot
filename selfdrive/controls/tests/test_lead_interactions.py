@@ -4,6 +4,8 @@ import pytest
 
 from cereal import log
 from openpilot.common.params import Params
+from opendbc.car.hyundai.values import CAR
+from opendbc.car.hyundai.interface import CarInterface
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import (
   get_cutin_settle_accel_floor,
   get_gap_reclaim_effective_cap,
@@ -36,6 +38,13 @@ def _configure_vibe_follow(headway=1.3):
     params.put(f'VibeTune.Follow.Standard.Headway{idx}', float(headway))
 
 
+def _make_ev6_hkg_cp():
+  cp = CarInterface.get_non_essential_params(CAR.KIA_EV6)
+  cp.openpilotLongitudinalControl = True
+  cp.pcmCruise = False
+  return cp
+
+
 def _run_pullaway_scenario():
   plant = Plant(
     lead_relevancy=True,
@@ -57,22 +66,31 @@ def _run_pullaway_scenario():
   return rows
 
 
-def _run_new_lead_scenario():
+def _run_new_lead_scenario(*, plant_kwargs=None, distance_lead=90.0, recognition_t=1.5,
+                           ego_speed=33.5, lead_speed=27.0):
+  plant_kwargs = {} if plant_kwargs is None else dict(plant_kwargs)
   plant = Plant(
     lead_relevancy=True,
-    speed=33.5,
-    distance_lead=90.0,
+    speed=ego_speed,
+    distance_lead=distance_lead,
     personality=int(log.LongitudinalPersonality.standard),
+    **plant_kwargs,
   )
   rows = []
   for _ in range(120):
     t = plant.current_time
-    prob_lead = 0.0 if t < 1.5 else 1.0
-    logrow = plant.step(v_lead=27.0, prob_lead=prob_lead, v_cruise=40.0, prob_throttle=1.0)
+    prob_lead = 0.0 if t < recognition_t else 1.0
+    logrow = plant.step(v_lead=lead_speed, prob_lead=prob_lead, v_cruise=40.0, prob_throttle=1.0)
+    preview_debug = plant.planner.mpc.lead_approach_preview_debug["lead0"]
     rows.append({
       "t": t,
       "accel": float(logrow["acceleration"]),
+      "planner_accel": float(logrow["planner_acceleration"]),
+      "controller_accel": float(logrow["controller_acceleration"]),
       "preview": float(plant.planner.mpc.lead_approach_preview[0]),
+      "preview_mode": str(preview_debug["mode"]),
+      "acquire_window_active": bool(preview_debug["acquire"]["active"]),
+      "source": str(plant.planner.mpc.source),
     })
   return rows
 
@@ -231,3 +249,22 @@ class TestLeadInteractionScenarios:
 
     assert max_preview >= 5.0
     assert accel_at_2s < 0.30
+
+  def test_ev6_hkg_new_lead_acquisition_uses_real_cp_and_stronger_acquire_preview(self):
+    rows = _run_new_lead_scenario(
+      plant_kwargs={"CP": _make_ev6_hkg_cp(), "hyundai_controller": True},
+    )
+
+    max_preview = max(row["preview"] for row in rows)
+    acquire_active = any(row["acquire_window_active"] for row in rows if row["t"] >= 1.5)
+    acquire_mode_seen = any(row["preview_mode"] == "acquire" for row in rows if row["t"] >= 1.5)
+    accel_at_2s = next(row["accel"] for row in rows if row["t"] >= 2.0)
+    source_after_acquire = next(row["source"] for row in rows if row["t"] >= 2.0)
+    planner_vs_controller = max(abs(row["planner_accel"] - row["controller_accel"]) for row in rows if row["t"] >= 1.5)
+
+    assert acquire_active is True
+    assert acquire_mode_seen is True
+    assert max_preview >= 6.0
+    assert accel_at_2s <= 0.10
+    assert source_after_acquire == "lead0"
+    assert planner_vs_controller < 1e-6

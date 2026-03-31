@@ -25,6 +25,7 @@ All params are read at runtime via `Longitudinal.LiveTune.*` keys. Changes take 
 | `LeadPreviewStrength` | 1.0 | 0.0–2.0 | How early a newly recognized slower lead shapes decel |
 | `LeadPreviewGapMinM` | 1.5 | 0.0–10.0 | Min extra slack before preview activates |
 | `LeadPreviewMaxBufferM` | 12.0 | 0.0–25.0 | Max closer-pull of previewed lead obstacle |
+| `LeadAcquireWindowS` | 1.25 | 0.0–3.0 | Short stronger-preview window after a lead appears or jumps materially slower/closer |
 
 ## Cut-In Settle
 
@@ -41,6 +42,7 @@ All params are read at runtime via `Longitudinal.LiveTune.*` keys. Changes take 
 |---|---|---|---|
 | `DRelFilterTauCloseS` | 0.30 | 0.05–2.0 | Filter tau when lead appears closer (safety). Lower = faster |
 | `DRelFilterTauOpenS` | 1.00 | 0.10–5.0 | Filter tau when lead appears farther (noise rejection). Higher = smoother |
+| `DRelFilterOpenSlewMaxMps` | 1.25 | 0.25–5.0 | Max opening-side dRel motion admitted per second before correction |
 | `DRelFilterInnovationGateM` | 30.0 | 5.0–60.0 | Snap to raw when prediction error exceeds this |
 | `DRelFilterClosingGateM` | 20.0 | 5.0–40.0 | Snap to raw when lead appears this much closer than predicted |
 
