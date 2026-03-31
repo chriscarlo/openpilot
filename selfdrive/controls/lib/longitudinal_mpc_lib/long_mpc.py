@@ -111,6 +111,12 @@ HYUNDAI_VIRTUAL_LEAD_RELEASE_DWELL_S = 1.00
 HYUNDAI_VIRTUAL_LEAD_RELEASE_IMMEDIATE_GAP_SURPLUS_M = 7.0
 HYUNDAI_VIRTUAL_LEAD_RELEASE_IMMEDIATE_PULLAWAY_MPS = 1.00
 HYUNDAI_VIRTUAL_LEAD_RAW_OBSTACLE_MARGIN_M = 1.00
+HYUNDAI_VIRTUAL_LEAD_DROPOUT_STABLE_MIN_S = 3.0
+HYUNDAI_VIRTUAL_LEAD_DROPOUT_HOLD_S = 0.75
+HYUNDAI_VIRTUAL_LEAD_DROPOUT_MAX_ABS_VREL_MPS = 0.35
+HYUNDAI_VIRTUAL_LEAD_DROPOUT_MAX_DREL_ERR_M = 1.5
+HYUNDAI_VIRTUAL_LEAD_DROPOUT_MAX_GAP_SURPLUS_M = 3.0
+HYUNDAI_VIRTUAL_LEAD_DROPOUT_MAX_PATH_ABS_M = 0.85
 HYUNDAI_LOW_SPEED_QUEUE_V_EGO_MAX = 6.0
 HYUNDAI_LOW_SPEED_QUEUE_DREL_MAX = 22.0
 HYUNDAI_LOW_SPEED_QUEUE_VLEAD_MAX = 8.0
@@ -118,6 +124,8 @@ HYUNDAI_LOW_SPEED_QUEUE_PULLAWAY_MPS_MAX = 2.5
 HYUNDAI_RECLAIM_PULLAWAY_SUPPORT_MPS = 0.15
 HYUNDAI_RECLAIM_GAP_HOLD_EXTRA_M = 1.0
 HYUNDAI_RECLAIM_DYNAMIC_GAP_SUPPORT_M = 3.0
+HYUNDAI_LEAD_TO_CRUISE_TRANSITION_RAMP_S = 1.0
+HYUNDAI_LEAD_TO_CRUISE_TRANSITION_MIN_ACCEL = 0.45
 LEAD_PRESENT_CRUISE_SPEED_CAP_BP = [0.0, 2.0, 6.0, 10.0, 15.0, 25.0]
 LEAD_PRESENT_CRUISE_SPEED_CAP_V = [0.7, 0.9, 1.3, 1.9, 2.4, ACCEL_MAX]
 LEAD_PRESENT_CRUISE_SURPLUS_BP = [0.0, 2.0, 8.0, 16.0, 28.0]
@@ -666,6 +674,9 @@ class LongitudinalMpc:
     self._hyundai_virtual_lead_last_t = None
     self._hyundai_virtual_lead_identity_changed = False
     self._hyundai_virtual_lead_reset_reason = None
+    self._hyundai_virtual_lead_stable_since_t = None
+    self._hyundai_virtual_lead_last_drel_error_m = 1e9
+    self._hyundai_virtual_lead_dropout_until_t = None
     self._drel_filter = LeadDistanceFilter()
     self.hyundai_virtual_lead_debug = {"active": False}
     self._hyundai_reclaim_lead = None
@@ -673,6 +684,8 @@ class LongitudinalMpc:
     self._acc_obstacle_mode = 'cruise'
     self._acc_obstacle_candidate_mode = None
     self._acc_obstacle_candidate_t = None
+    self._lead_to_cruise_transition_t = None
+    self._lead_to_cruise_transition_source = None
     self.acc_source_debug = {}
     # timers
     self.solve_time = 0.0
@@ -781,12 +794,81 @@ class LongitudinalMpc:
     alpha = self._ema_alpha(dt_s, tau_s)
     return float(prev + alpha * (current - prev))
 
+  def _clear_hyundai_virtual_lead_dropout_hold(self) -> None:
+    self._hyundai_virtual_lead_dropout_until_t = None
+
+  def _get_hyundai_virtual_lead_dropout_debug(self, now: float) -> dict[str, float | bool]:
+    stable_age_s = 0.0 if self._hyundai_virtual_lead_stable_since_t is None else max(0.0, now - float(self._hyundai_virtual_lead_stable_since_t))
+    hold_remaining_s = 0.0 if self._hyundai_virtual_lead_dropout_until_t is None else max(0.0, float(self._hyundai_virtual_lead_dropout_until_t) - now)
+    lead = self._hyundai_virtual_lead
+    metrics = self._lead_follow_metrics(float(self.x0[1]), self.current_t_follow, lead)
+    abs_vrel = abs(float(getattr(lead, 'vRel', 0.0) or 0.0)) if lead is not None else 1e9
+    path_abs = abs(float(getattr(lead, 'dPath', getattr(lead, 'yRel', 0.0)) or 0.0)) if lead is not None else 1e9
+    drel_consistency = float(self._hyundai_virtual_lead_last_drel_error_m)
+    eligible = bool(
+      lead is not None and
+      getattr(lead, 'status', False) and
+      self._hyundai_virtual_lead_source in ('lead0', 'lead1') and
+      stable_age_s >= HYUNDAI_VIRTUAL_LEAD_DROPOUT_STABLE_MIN_S and
+      abs_vrel <= HYUNDAI_VIRTUAL_LEAD_DROPOUT_MAX_ABS_VREL_MPS and
+      drel_consistency <= HYUNDAI_VIRTUAL_LEAD_DROPOUT_MAX_DREL_ERR_M and
+      metrics["gap_surplus"] <= HYUNDAI_VIRTUAL_LEAD_DROPOUT_MAX_GAP_SURPLUS_M and
+      path_abs <= HYUNDAI_VIRTUAL_LEAD_DROPOUT_MAX_PATH_ABS_M
+    )
+    return {
+      "active": bool(hold_remaining_s > 0.0),
+      "eligible": eligible,
+      "remaining_s": float(hold_remaining_s),
+      "stable_age_s": float(stable_age_s),
+      "abs_vrel_mps": float(abs_vrel),
+      "gap_surplus_m": float(metrics["gap_surplus"]),
+      "drel_consistency_m": float(drel_consistency),
+      "path_abs_m": float(path_abs),
+    }
+
+  def _maybe_hold_hyundai_virtual_lead_dropout(self, now: float) -> tuple[ControlLead | None, dict[str, float | bool]]:
+    debug = self._get_hyundai_virtual_lead_dropout_debug(now)
+    activated = False
+    if self._hyundai_virtual_lead_dropout_until_t is None and bool(debug["eligible"]):
+      self._hyundai_virtual_lead_dropout_until_t = now + HYUNDAI_VIRTUAL_LEAD_DROPOUT_HOLD_S
+      debug = self._get_hyundai_virtual_lead_dropout_debug(now)
+      activated = True
+    debug["activated"] = bool(activated)
+    if not bool(debug["active"]) or self._hyundai_virtual_lead is None:
+      return None, debug
+    held_lead = copy.deepcopy(self._hyundai_virtual_lead)
+    held_lead.status = True
+    return held_lead, debug
+
+  def _get_lead_to_cruise_transition_accel_cap(self, now: float, v_ego: float,
+                                               personality_max_accel: float | None) -> float | None:
+    if self._lead_to_cruise_transition_t is None or self.source != 'cruise':
+      return None
+    elapsed_s = max(0.0, now - float(self._lead_to_cruise_transition_t))
+    if elapsed_s >= HYUNDAI_LEAD_TO_CRUISE_TRANSITION_RAMP_S:
+      return None
+
+    speed_cap = float(np.interp(float(v_ego), LEAD_PRESENT_CRUISE_SPEED_CAP_BP, LEAD_PRESENT_CRUISE_SPEED_CAP_V))
+    if personality_max_accel is None:
+      target_cap = speed_cap
+    else:
+      target_cap = min(speed_cap, max(0.0, float(personality_max_accel)))
+    start_cap = min(
+      target_cap,
+      max(float(self._live_tune_cfg.gap_reclaim_max_accel), HYUNDAI_LEAD_TO_CRUISE_TRANSITION_MIN_ACCEL),
+    )
+    progress = float(np.clip(elapsed_s / HYUNDAI_LEAD_TO_CRUISE_TRANSITION_RAMP_S, 0.0, 1.0))
+    return float(start_cap + (target_cap - start_cap) * progress)
+
   def _reset_hyundai_virtual_lead(self, reason: str) -> None:
     self._hyundai_virtual_lead = None
     self._hyundai_virtual_lead_source = None
     self._hyundai_virtual_lead_last_t = None
     self._hyundai_virtual_lead_identity_changed = False
     self._hyundai_virtual_lead_reset_reason = reason
+    self._hyundai_virtual_lead_stable_since_t = None
+    self._hyundai_virtual_lead_last_drel_error_m = 1e9
+    self._clear_hyundai_virtual_lead_dropout_hold()
     self._drel_filter.reset()
     self._hyundai_reclaim_lead = None
     self._hyundai_reclaim_last_t = None
@@ -965,15 +1047,32 @@ class LongitudinalMpc:
     self._hyundai_reclaim_last_t = now
     return copy.deepcopy(reclaim)
 
-  def _update_hyundai_virtual_lead(self, now: float, lead_source: str, lead):
+  def _update_hyundai_virtual_lead(self, now: float, lead_source: str | None, lead):
     self._hyundai_virtual_lead_identity_changed = False
 
     if not self._hyundai_ai_lead_stability_enabled:
       self.hyundai_virtual_lead_debug = {"active": False}
       return None
 
-    should_reset, reset_reason = self._should_reset_hyundai_virtual_lead(lead_source, lead)
     raw_lead = ControlLead.from_lead(lead) if lead is not None else ControlLead()
+    if not raw_lead.status:
+      held_lead, dropout_hold_debug = self._maybe_hold_hyundai_virtual_lead_dropout(now)
+      if held_lead is not None:
+        metrics = self._lead_follow_metrics(float(self.x0[1]), self.current_t_follow, held_lead)
+        self.hyundai_virtual_lead_debug = {
+          "active": True,
+          "source": str(self._hyundai_virtual_lead_source),
+          "identity_changed": False,
+          "reset_reason": "dropout_hold",
+          "filtered": self._lead_debug_payload(held_lead),
+          "metrics": metrics,
+          "dropout_hold": dropout_hold_debug,
+        }
+        return held_lead
+    else:
+      self._clear_hyundai_virtual_lead_dropout_hold()
+
+    should_reset, reset_reason = self._should_reset_hyundai_virtual_lead(lead_source, lead)
 
     if should_reset:
       self._hyundai_virtual_lead = raw_lead
@@ -981,6 +1080,8 @@ class LongitudinalMpc:
       self._hyundai_virtual_lead_last_t = now if raw_lead.status else None
       self._hyundai_virtual_lead_identity_changed = bool(raw_lead.status)
       self._hyundai_virtual_lead_reset_reason = reset_reason
+      self._hyundai_virtual_lead_stable_since_t = now if raw_lead.status else None
+      self._hyundai_virtual_lead_last_drel_error_m = 0.0 if raw_lead.status else 1e9
       self._drel_filter.reset(raw_lead.dRel if raw_lead.status else None)
       if not raw_lead.status:
         self._reset_hyundai_virtual_lead(reset_reason or "no_control_lead")
@@ -1011,12 +1112,15 @@ class LongitudinalMpc:
       filtered.modelProb = self._filter_symmetric_metric(prev.modelProb, raw_lead.modelProb, dt_s, HYUNDAI_VIRTUAL_LEAD_MODEL_PROB_TAU_S)
       filtered.radar = raw_lead.radar
       filtered.radarTrackId = raw_lead.radarTrackId
+      self._hyundai_virtual_lead_last_drel_error_m = abs(float(raw_lead.dRel) - float(filtered.dRel))
       self._hyundai_virtual_lead = filtered
       self._hyundai_virtual_lead_source = lead_source
       self._hyundai_virtual_lead_last_t = now
       self._hyundai_virtual_lead_reset_reason = None
 
     metrics = self._lead_follow_metrics(float(self.x0[1]), self.current_t_follow, self._hyundai_virtual_lead)
+    dropout_hold_debug = self._get_hyundai_virtual_lead_dropout_debug(now)
+    dropout_hold_debug["activated"] = False
     self.hyundai_virtual_lead_debug = {
       "active": True,
       "source": str(self._hyundai_virtual_lead_source),
@@ -1024,6 +1128,7 @@ class LongitudinalMpc:
       "reset_reason": self._hyundai_virtual_lead_reset_reason,
       "filtered": self._lead_debug_payload(self._hyundai_virtual_lead),
       "metrics": metrics,
+      "dropout_hold": dropout_hold_debug,
     }
     return self._hyundai_virtual_lead
 
@@ -1188,19 +1293,42 @@ class LongitudinalMpc:
       return np.min(x_obstacles, axis=1)
 
     if not lead_candidates:
-      self._reset_hyundai_virtual_lead("no_control_lead")
-      self._acc_obstacle_mode = 'cruise'
-      self._reset_acc_obstacle_candidate()
+      held_lead = self._update_hyundai_virtual_lead(now, None, None)
+      self.gap_reclaim_accel_floor = 0.0
       self.gap_reclaim_obstacle_push = 0.0
+      self.gap_reclaim_projection_scale = 1.0
+      self.gap_reclaim_personality_max_accel = 0.0
       self.gap_reclaim_effective_cap = 0.0
+      self._raw_reclaim_safety_override_active = False
       self.lead_present_cruise_accel_cap = 0.0
       self._gap_reclaim_blend = 0.0
       self._gap_reclaim_last_t = now
+      self._hyundai_reclaim_lead = None
+      self._hyundai_reclaim_last_t = None
+      if held_lead is not None and getattr(held_lead, 'status', False):
+        self.status = True
+        self._acc_obstacle_mode = 'lead'
+        self._reset_acc_obstacle_candidate()
+        self.source = str(self._hyundai_virtual_lead_source or 'lead0')
+        active_obstacle = self._build_lead_obstacle(held_lead)
+        self.acc_source_debug = {
+          "active_mode": "lead",
+          "best_lead_source": str(self._hyundai_virtual_lead_source),
+          "candidate_mode": None,
+          "reason": "dropout_hold",
+          "used_hysteresis": True,
+        }
+        return active_obstacle
+
+      self._reset_hyundai_virtual_lead("no_control_lead")
+      self._acc_obstacle_mode = 'cruise'
+      self._reset_acc_obstacle_candidate()
       self.source = 'cruise'
       self.acc_source_debug = {
         "active_mode": "cruise",
-        "delta_m": None,
+        "best_lead_source": None,
         "candidate_mode": None,
+        "reason": "no_control_lead",
         "used_hysteresis": True,
       }
       return cruise_obstacle
@@ -1526,6 +1654,7 @@ class LongitudinalMpc:
     v_ego = self.x0[1]
     now = time.monotonic()
     self._refresh_live_tune(now)
+    prev_source = self.source
 
     # Get following distance
     if self.vibe_controller.is_follow_enabled():
@@ -1610,6 +1739,49 @@ class LongitudinalMpc:
       self.last_v_cruise_clipped = v_cruise_clipped
       cruise_obstacle = np.cumsum(T_DIFFS * v_cruise_clipped) + get_safe_obstacle_distance(v_cruise_clipped, t_follow)
       active_obstacle = self._select_acc_obstacle(lead_0_obstacle, lead_1_obstacle, cruise_obstacle, now)
+      if prev_source in ('lead0', 'lead1') and self.source == 'cruise':
+        self._lead_to_cruise_transition_t = now
+        self._lead_to_cruise_transition_source = prev_source
+      elif self.source != 'cruise':
+        self._lead_to_cruise_transition_t = None
+        self._lead_to_cruise_transition_source = None
+
+      transition_accel_cap = self._get_lead_to_cruise_transition_accel_cap(now, float(v_ego), personality_max_accel)
+      if self.source == 'cruise' and transition_accel_cap is not None:
+        capped_max_accel = float(transition_accel_cap)
+        if lead_present_cruise_cap is not None:
+          capped_max_accel = min(capped_max_accel, float(lead_present_cruise_cap))
+        response_model = self.get_cruise_response_model(v_ego, planner_accel_limits=(ACCEL_MIN, capped_max_accel))
+        self.last_cruise_response_model = response_model
+        v_lower, v_upper, v_cruise_clipped = clip_cruise_speed_profile(
+          v_ego=v_ego,
+          v_cruise=v_cruise,
+          t_idxs=T_IDXS,
+          response_model=response_model,
+        )
+        self.last_v_lower = v_lower
+        self.last_v_upper = v_upper
+        self.last_v_cruise_clipped = v_cruise_clipped
+        cruise_obstacle = np.cumsum(T_DIFFS * v_cruise_clipped) + get_safe_obstacle_distance(v_cruise_clipped, t_follow)
+        active_obstacle = cruise_obstacle
+      elif (self._lead_to_cruise_transition_t is not None and
+            (now - float(self._lead_to_cruise_transition_t)) >= HYUNDAI_LEAD_TO_CRUISE_TRANSITION_RAMP_S):
+        self._lead_to_cruise_transition_t = None
+        self._lead_to_cruise_transition_source = None
+
+      if self.mode == 'acc' and self.source == 'cruise' and self.acc_source_debug:
+        transition_active = bool(self._lead_to_cruise_transition_t is not None and transition_accel_cap is not None)
+        transition_elapsed_s = None if self._lead_to_cruise_transition_t is None else max(0.0, now - float(self._lead_to_cruise_transition_t))
+        self.acc_source_debug["source_transition_active"] = transition_active
+        self.acc_source_debug["source_transition_from"] = self._lead_to_cruise_transition_source
+        self.acc_source_debug["source_transition_elapsed_s"] = transition_elapsed_s
+        self.acc_source_debug["source_transition_accel_cap"] = None if transition_accel_cap is None else float(transition_accel_cap)
+      elif self.acc_source_debug:
+        self.acc_source_debug["source_transition_active"] = False
+        self.acc_source_debug["source_transition_from"] = None
+        self.acc_source_debug["source_transition_elapsed_s"] = None
+        self.acc_source_debug["source_transition_accel_cap"] = None
+
       self.gap_reclaim_accel_floor = self.get_gap_reclaim_floor()
       self.cutin_settle_accel_floor = self.get_cutin_settle_floor(now)
 
@@ -1617,6 +1789,8 @@ class LongitudinalMpc:
       x[:], v[:], a[:], j[:] = 0.0, 0.0, 0.0, 0.0
 
     elif self.mode == 'blended':
+      self._lead_to_cruise_transition_t = None
+      self._lead_to_cruise_transition_source = None
       self.last_v_lower = None
       self.last_v_upper = None
       self.last_v_cruise_clipped = None

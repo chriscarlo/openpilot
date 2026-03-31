@@ -155,6 +155,92 @@ class TestHyundaiAiLeadStability:
     assert mpc.acc_source_debug["reason"] in ("filtered_pullaway_dwell", "filtered_pullaway_immediate", "cruise_hold")
     assert max_reclaim_push > 0.5
 
+  def test_brief_total_lead_dropout_holds_stable_virtual_lead_before_releasing(self, monkeypatch):
+    monkeypatch.setattr(
+      "openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc.time.monotonic",
+      _MonotonicStub(step=0.1),
+    )
+    mpc = _make_hyundai_mpc()
+
+    stable_lead = _make_lead(d_rel=35.6, y_rel=0.04, d_path=0.04, v_lat=0.10, v_rel=0.02, v_lead=29.02, model_prob=0.98)
+    for _ in range(32):
+      _run_update(mpc, stable_lead, _make_lead(status=False))
+
+    assert mpc.source == "lead0"
+
+    held_sources = []
+    for _ in range(4):
+      _run_update(mpc, _make_lead(status=False), _make_lead(status=False))
+      held_sources.append(mpc.source)
+      assert mpc.acc_source_debug["reason"] == "dropout_hold"
+      assert mpc.hyundai_virtual_lead_debug["dropout_hold"]["active"] is True
+
+    assert held_sources == ["lead0", "lead0", "lead0", "lead0"]
+
+    _run_update(mpc, _make_lead(status=False), _make_lead(status=False))
+
+    assert mpc.source == "cruise"
+    assert mpc.acc_source_debug["reason"] == "no_control_lead"
+
+  def test_dropout_hold_rejects_real_pullaway_and_releases_to_cruise_immediately(self, monkeypatch):
+    monkeypatch.setattr(
+      "openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc.time.monotonic",
+      _MonotonicStub(step=0.2),
+    )
+    mpc = _make_hyundai_mpc()
+
+    stable_lead = _make_lead(d_rel=35.4, y_rel=0.04, d_path=0.04, v_lat=0.10, v_rel=0.00, v_lead=29.0, model_prob=0.98)
+    for _ in range(16):
+      _run_update(mpc, stable_lead, _make_lead(status=False))
+
+    for d_rel in (35.8, 36.1, 36.4):
+      _run_update(
+        mpc,
+        _make_lead(d_rel=d_rel, y_rel=0.04, d_path=0.04, v_lat=0.10, v_rel=1.50, v_lead=30.50, model_prob=0.98),
+        _make_lead(status=False),
+      )
+    assert mpc.source == "lead0"
+
+    _run_update(mpc, _make_lead(status=False), _make_lead(status=False))
+
+    assert mpc.source == "cruise"
+    assert mpc.acc_source_debug["reason"] == "no_control_lead"
+    assert mpc.acc_source_debug["source_transition_active"] is True
+    assert mpc.hyundai_virtual_lead_debug["active"] is False
+
+  def test_lead_to_cruise_transition_caps_accel_then_expires(self, monkeypatch):
+    monkeypatch.setattr(
+      "openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc.time.monotonic",
+      _MonotonicStub(step=0.2),
+    )
+    mpc = _make_hyundai_mpc()
+
+    stable_lead = _make_lead(d_rel=35.4, y_rel=0.04, d_path=0.04, v_lat=0.10, v_rel=0.00, v_lead=29.0, model_prob=0.98)
+    for _ in range(16):
+      _run_update(mpc, stable_lead, _make_lead(status=False))
+
+    for d_rel in (35.9, 36.2, 36.5):
+      _run_update(
+        mpc,
+        _make_lead(d_rel=d_rel, y_rel=0.04, d_path=0.04, v_lat=0.10, v_rel=1.50, v_lead=30.50, model_prob=0.98),
+        _make_lead(status=False),
+      )
+    _run_update(mpc, _make_lead(status=False), _make_lead(status=False))
+
+    first_cap = float(mpc.acc_source_debug["source_transition_accel_cap"])
+    assert mpc.source == "cruise"
+    assert mpc.acc_source_debug["source_transition_active"] is True
+    assert 0.44 <= first_cap <= 0.60
+    assert mpc.last_cruise_response_model is not None
+    assert mpc.last_cruise_response_model.max_accel_mps2 == pytest.approx(first_cap)
+
+    for _ in range(6):
+      _run_update(mpc, _make_lead(status=False), _make_lead(status=False))
+
+    assert mpc.acc_source_debug["source_transition_active"] is False
+    assert mpc.last_cruise_response_model is not None
+    assert mpc.last_cruise_response_model.max_accel_mps2 > first_cap + 0.20
+
   def test_cutin_promotion_reaches_virtual_duplicate_lead(self, monkeypatch):
     monotonic = _MonotonicStub(step=0.2)
     monkeypatch.setattr(

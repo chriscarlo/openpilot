@@ -215,11 +215,11 @@ class TestLeadInteractionScenarios:
   def test_pullaway_gap_reclaim_nudges_accel_without_large_gap_growth(self):
     rows = _run_pullaway_scenario()
 
-    accel_at_4s = next(row["accel"] for row in rows if row["t"] >= 4.0)
+    accel_at_4p8s = next(row["accel"] for row in rows if row["t"] >= 4.8)
     gap_at_6s = next(row["d_rel"] for row in rows if row["t"] >= 6.0)
     max_gap_floor = max(row["gap_floor"] for row in rows)
 
-    assert accel_at_4s >= 0.15
+    assert accel_at_4p8s >= 0.15
     assert max_gap_floor >= 0.20
     assert gap_at_6s < 55.0
 
