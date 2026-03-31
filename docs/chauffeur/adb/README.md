@@ -1,6 +1,6 @@
 # ADB → SSH/SFTP (WinSCP) Quick Reference
 
-This guide shows how to browse and SSH into a comma 3/3X from a Windows 11 laptop using ADB port‑forwarding. It lists the exact PowerShell and WSL commands used here.
+This guide shows how to browse and SSH into a comma 3/3X from a Windows 11 laptop using WSL-direct ADB over `usbipd-win`, then an ADB SSH port forward on the Linux side. It lists the exact Windows and WSL commands used here.
 
 ## Prereqs
 - Windows PowerShell (run as Administrator)
@@ -13,24 +13,26 @@ This guide shows how to browse and SSH into a comma 3/3X from a Windows 11 lapto
    - `usbipd list`
    - `wsl -l -v`  (note distro name, e.g. `Ubuntu`)
 3) Attach the ADB device (BUSID from `usbipd list`, e.g. `2-1`):
-   - `usbipd attach --wsl Ubuntu-24.04 --busid 2-1`
-   - Recheck: `usbipd list` → device shows `Shared`.
+   - `usbipd attach --wsl Ubuntu-24.04 --busid 2-1 --auto-attach`
+   - Recheck: `usbipd list` → device shows `Attached`.
 
 ## 2) Enable SSH on device + ADB port‑forward (WSL)
 - Start ADB and verify device:
-  - `sudo adb kill-server && sudo adb start-server`
-  - `sudo adb devices`
+  - `adb kill-server && adb devices -l`
+- If `adb` reports a permissions problem in WSL, retry the same commands with `sudo`.
 - Enable/Start SSH on device (enable may warn about read‑only; active is enough):
-  - `sudo adb shell 'systemctl enable --now ssh || true'`
-  - Check: `sudo adb shell 'systemctl is-active ssh'`  → `active`
+  - `adb shell 'systemctl enable --now ssh || true'`
+  - Check: `adb shell 'systemctl is-active ssh'`  → `active`
 - Forward local port 2222 → device 22 and verify:
-  - `sudo adb forward tcp:2222 tcp:22`
-  - `sudo adb forward --list`
+  - `adb forward tcp:2222 tcp:22`
+  - `adb forward --list`
 
 ## 3) Connect (WinSCP or SSH)
 - WinSCP (GUI): Protocol SFTP, Host `127.0.0.1`, Port `2222`, Username `comma`, Password `comma`.
 - SSH (CLI): `ssh -p 2222 comma@127.0.0.1`
 - Change password (optional): `sudo adb shell 'sudo passwd comma'`
+- If `ssh` reports `REMOTE HOST IDENTIFICATION HAS CHANGED` for `[127.0.0.1]:2222`, remove the stale entry and reconnect:
+  - `ssh-keygen -f ~/.ssh/known_hosts -R '[127.0.0.1]:2222'`
 
 Quick connect from this repo (one command)
 - `./sshCommaAdb.sh` → sets up ADB forward and SSHes to `comma@127.0.0.1 -p 2222`.
@@ -47,6 +49,10 @@ Install a `ssh commaAdb` profile automatically
   - Replace an existing stanza: `./installCommaAdbProfile.sh -f`
   - Different config path: `./installCommaAdbProfile.sh -t /some/ssh_config`
 - Then use it like your other profiles: `ssh commaAdb`
+- On Windows + WSL2, the working path is:
+  - Attach the USB ADB interface into WSL with `usbipd attach --wsl <distro> --busid <BUSID> --auto-attach`
+  - From WSL, run `adb forward tcp:2222 tcp:22`
+  - Then `ssh commaAdb`
 
 ## 3a) Reuse the exact commaHome/commaCar SSH certs
 Goal: connect over ADB‑forwarded SSH using the same private key and OpenSSH certificate your `commaHome` or `commaCar` profile already uses.
@@ -109,6 +115,7 @@ WinSCP using the same key/cert
 Important notes
 - ADB forwarding (`127.0.0.1:2222 → device:22`) does not change device SSH auth; it continues to honor the same authorized keys/certificates fetched from your GitHub username in device settings.
 - First connection will prompt a host key for `127.0.0.1:2222` (it’s the device’s host key). Accept to cache it.
+- If you switch devices, reflash the device, or reconnect after a different device previously used `127.0.0.1:2222`, reset the cached key with `ssh-keygen -f ~/.ssh/known_hosts -R '[127.0.0.1]:2222'`.
 
 ## 4) Common Paths
 - `/data/openpilot` (source)
@@ -117,8 +124,9 @@ Important notes
 - `/system` (read‑mostly)
 
 ## 5) Cleanup / Troubleshooting
-- Remove forward: `sudo adb forward --remove tcp:2222` (or `--remove-all`)
-- Stop SSH: `sudo adb shell 'systemctl stop ssh'`
-- ADB permissions: use `sudo adb ...` in WSL.
-- Not visible in WSL: `usbipd attach --wsl --busid <BUSID> --distribution "Ubuntu"`, ensure `usbipd list` shows `Shared`.
-- Reboot: `sudo adb reboot`  |  EDL (flash): `sudo adb reboot edl`
+- Remove forward: `adb forward --remove tcp:2222` (or `--remove-all`)
+- Stop SSH: `adb shell 'systemctl stop ssh'`
+- ADB permissions: if plain `adb ...` fails in WSL, retry with `sudo adb ...`.
+- Not visible in WSL: `usbipd attach --wsl <distro> --busid <BUSID> --auto-attach`, then confirm `usbipd list` shows `Attached`.
+- Host key mismatch on `ssh commaAdb`: `ssh-keygen -f ~/.ssh/known_hosts -R '[127.0.0.1]:2222'`
+- Reboot: `adb reboot`  |  EDL (flash): `adb reboot edl`

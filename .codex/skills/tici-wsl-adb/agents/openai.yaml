@@ -1,0 +1,4 @@
+interface:
+  display_name: "Tici WSL ADB"
+  short_description: "Attach tici USB ADB to WSL and repair access"
+  default_prompt: "Use $tici-wsl-adb to attach a tici USB ADB device into WSL, verify adb access, and repair the commaAdb SSH path if needed."
