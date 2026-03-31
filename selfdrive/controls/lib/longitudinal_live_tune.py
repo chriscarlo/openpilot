@@ -126,6 +126,16 @@ LEAD_RESPONSE_TUNE_SPECS = (
     maximum=6.0,
     description="Largest ego-minus-lead closing speed that can still qualify for cut-in grace.",
   ),
+  LeadResponseTuneSpec(
+    attr="cutin_settle_accel_bias_mps2",
+    key="Longitudinal.LiveTune.CutInSettleAccelBiasMps2",
+    cli_name="cutin-settle-accel-bias",
+    label="cutin_settle_accel_bias",
+    default=0.10,
+    minimum=0.0,
+    maximum=0.30,
+    description="Positive accel bias added to settle floor to counteract EV regen braking on coast.",
+  ),
 )
 
 LEAD_RESPONSE_TUNE_SPECS_BY_ATTR = {spec.attr: spec for spec in LEAD_RESPONSE_TUNE_SPECS}
@@ -142,6 +152,7 @@ class LeadResponseTuningConfig:
   cutin_settle_duration_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cutin_settle_duration_s"].default
   cutin_settle_max_decel: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cutin_settle_max_decel"].default
   cutin_settle_max_closing_speed_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cutin_settle_max_closing_speed_mps"].default
+  cutin_settle_accel_bias_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cutin_settle_accel_bias_mps2"].default
 
   @classmethod
   def defaults(cls) -> LeadResponseTuningConfig:

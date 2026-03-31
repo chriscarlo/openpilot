@@ -407,7 +407,8 @@ def get_cutin_settle_accel_floor(v_ego, lead, t_follow, age_s,
   progress_scale = float(np.interp(progress, CUTIN_SETTLE_PROGRESS_BP, CUTIN_SETTLE_PROGRESS_V))
   closing_scale = float(np.clip(closing_speed / tuning.cutin_settle_max_closing_speed_mps, 0.0, 1.0))
   floor_mag = tuning.cutin_settle_max_decel * progress_scale * closing_scale
-  return -float(np.clip(floor_mag, 0.0, tuning.cutin_settle_max_decel))
+  bias = float(getattr(tuning, 'cutin_settle_accel_bias_mps2', 0.0) or 0.0)
+  return bias - float(np.clip(floor_mag, 0.0, tuning.cutin_settle_max_decel))
 
 
 def gen_long_model():

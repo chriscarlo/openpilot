@@ -200,7 +200,7 @@ class TestLeadInteractionHeuristics:
     floor = get_cutin_settle_accel_floor(33.5, benign, 1.3, age_s=4.0)
 
     assert floor is not None
-    assert -0.12 < floor < -0.01
+    assert -0.02 < floor < 0.10  # positive due to default regen bias (+0.10)
     assert get_cutin_settle_accel_floor(33.5, dangerous, 1.3, age_s=1.0) is None
 
   def test_cutin_settle_floor_blocks_braking_for_same_speed_merge(self):
@@ -208,7 +208,7 @@ class TestLeadInteractionHeuristics:
 
     floor = get_cutin_settle_accel_floor(33.5, same_speed, 1.3, age_s=1.0)
 
-    assert floor == pytest.approx(0.0)
+    assert floor == pytest.approx(0.10)  # pure regen bias, no decel (closing_speed=0)
 
 
 class TestLeadInteractionScenarios:
