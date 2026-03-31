@@ -118,18 +118,18 @@ class TestHyundaiAiLeadStability:
     )
     mpc = _make_hyundai_mpc()
 
-    warmup_lead0 = _make_lead(d_rel=41.6, y_rel=0.05, d_path=0.05, v_lat=0.45, v_rel=-0.1, model_prob=0.96)
-    warmup_lead1 = _make_lead(d_rel=41.55, y_rel=0.08, d_path=0.08, v_lat=4.10, v_rel=-0.08, model_prob=0.92)
+    warmup_lead0 = _make_lead(d_rel=35.6, y_rel=0.05, d_path=0.05, v_lat=0.45, v_rel=-0.1, model_prob=0.96)
+    warmup_lead1 = _make_lead(d_rel=35.55, y_rel=0.08, d_path=0.08, v_lat=4.10, v_rel=-0.08, model_prob=0.92)
     for _ in range(4):
       _run_update(mpc, warmup_lead0, warmup_lead1)
     assert mpc.source == "lead0"
 
     jitter_sources = []
     for d_rel, v_rel, v_lead in (
-      (44.7, 0.55, 29.55),
-      (45.0, 0.72, 29.72),
-      (44.8, 0.18, 29.18),
-      (45.1, 0.64, 29.64),
+      (38.7, 0.55, 29.55),
+      (39.0, 0.72, 29.72),
+      (38.8, 0.18, 29.18),
+      (39.1, 0.64, 29.64),
     ):
       _run_update(
         mpc,
@@ -145,8 +145,8 @@ class TestHyundaiAiLeadStability:
     for _ in range(7):
       _run_update(
         mpc,
-        _make_lead(d_rel=49.0, y_rel=0.05, d_path=0.05, v_lat=0.45, v_rel=0.85, v_lead=29.85, model_prob=0.95),
-        _make_lead(d_rel=48.95, y_rel=0.07, d_path=0.07, v_lat=4.05, v_rel=0.82, v_lead=29.85, model_prob=0.93),
+        _make_lead(d_rel=43.0, y_rel=0.05, d_path=0.05, v_lat=0.45, v_rel=0.85, v_lead=29.85, model_prob=0.95),
+        _make_lead(d_rel=42.95, y_rel=0.07, d_path=0.07, v_lat=4.05, v_rel=0.82, v_lead=29.85, model_prob=0.93),
       )
       max_reclaim_push = max(max_reclaim_push, float(mpc.gap_reclaim_obstacle_push))
 
@@ -188,16 +188,16 @@ class TestHyundaiAiLeadStability:
     for _ in range(4):
       _run_update(
         mpc,
-        _make_lead(d_rel=50.0, y_rel=0.04, d_path=0.04, v_lat=0.40, v_rel=0.6, v_lead=29.7, model_prob=0.96),
-        _make_lead(d_rel=49.95, y_rel=0.07, d_path=0.07, v_lat=4.00, v_rel=0.6, v_lead=29.7, model_prob=0.93),
+        _make_lead(d_rel=44.0, y_rel=0.04, d_path=0.04, v_lat=0.40, v_rel=0.6, v_lead=29.7, model_prob=0.96),
+        _make_lead(d_rel=43.95, y_rel=0.07, d_path=0.07, v_lat=4.00, v_rel=0.6, v_lead=29.7, model_prob=0.93),
       )
 
     assert mpc.source == "cruise"
 
     _run_update(
       mpc,
-      _make_lead(d_rel=44.5, y_rel=0.04, d_path=0.04, v_lat=0.40, v_rel=-0.4, v_lead=28.6, model_prob=0.96),
-      _make_lead(d_rel=44.45, y_rel=0.07, d_path=0.07, v_lat=4.00, v_rel=-0.4, v_lead=28.6, model_prob=0.93),
+      _make_lead(d_rel=38.5, y_rel=0.04, d_path=0.04, v_lat=0.40, v_rel=-0.4, v_lead=28.6, model_prob=0.96),
+      _make_lead(d_rel=38.45, y_rel=0.07, d_path=0.07, v_lat=4.00, v_rel=-0.4, v_lead=28.6, model_prob=0.93),
     )
 
     assert mpc.source == "lead0"
@@ -246,7 +246,7 @@ class TestHyundaiAiLeadStability:
 
     _run_update(
       mpc,
-      _make_lead(d_rel=28.0, y_rel=0.04, d_path=0.04, v_lat=0.10, v_rel=0.6, v_lead=9.8, a_lead=0.1, model_prob=0.96),
+      _make_lead(d_rel=19.0, y_rel=0.04, d_path=0.04, v_lat=0.10, v_rel=0.6, v_lead=9.8, a_lead=0.1, model_prob=0.96),
       _make_lead(status=False),
     )
 
@@ -264,8 +264,8 @@ class TestHyundaiAiLeadStability:
 
     _run_update(
       mpc,
-      _make_lead(d_rel=44.5, y_rel=0.04, d_path=0.04, v_lat=0.40, v_rel=-0.4, v_lead=28.6, model_prob=0.96),
-      _make_lead(d_rel=44.45, y_rel=0.07, d_path=0.07, v_lat=4.00, v_rel=-0.4, v_lead=28.6, model_prob=0.93),
+      _make_lead(d_rel=38.5, y_rel=0.04, d_path=0.04, v_lat=0.40, v_rel=-0.4, v_lead=28.6, model_prob=0.96),
+      _make_lead(d_rel=38.45, y_rel=0.07, d_path=0.07, v_lat=4.00, v_rel=-0.4, v_lead=28.6, model_prob=0.93),
     )
 
     assert mpc.source == "lead0"
@@ -281,22 +281,22 @@ class TestHyundaiAiLeadStability:
     for _ in range(2):
       _run_update(
         mpc,
-        _make_lead(d_rel=44.5, y_rel=0.04, d_path=0.04, v_lat=0.35, v_rel=0.0, v_lead=29.0, a_lead=0.0, model_prob=0.96),
-        _make_lead(d_rel=44.45, y_rel=0.07, d_path=0.07, v_lat=4.00, v_rel=0.0, v_lead=29.0, a_lead=0.0, model_prob=0.93),
+        _make_lead(d_rel=38.5, y_rel=0.04, d_path=0.04, v_lat=0.35, v_rel=0.0, v_lead=29.0, a_lead=0.0, model_prob=0.96),
+        _make_lead(d_rel=38.45, y_rel=0.07, d_path=0.07, v_lat=4.00, v_rel=0.0, v_lead=29.0, a_lead=0.0, model_prob=0.93),
       )
     for _ in range(2):
       _run_update(
         mpc,
-        _make_lead(d_rel=60.0, y_rel=0.04, d_path=0.04, v_lat=0.35, v_rel=0.0, v_lead=29.0, a_lead=0.0, model_prob=0.96),
-        _make_lead(d_rel=59.95, y_rel=0.07, d_path=0.07, v_lat=4.00, v_rel=0.0, v_lead=29.0, a_lead=0.0, model_prob=0.93),
+        _make_lead(d_rel=54.0, y_rel=0.04, d_path=0.04, v_lat=0.35, v_rel=0.0, v_lead=29.0, a_lead=0.0, model_prob=0.96),
+        _make_lead(d_rel=53.95, y_rel=0.07, d_path=0.07, v_lat=4.00, v_rel=0.0, v_lead=29.0, a_lead=0.0, model_prob=0.93),
       )
 
     assert mpc.source == "lead0"
 
     _run_update(
       mpc,
-      _make_lead(d_rel=60.6, y_rel=0.04, d_path=0.04, v_lat=0.35, v_rel=0.0, v_lead=29.0, a_lead=-0.55, model_prob=0.96),
-      _make_lead(d_rel=60.55, y_rel=0.07, d_path=0.07, v_lat=4.00, v_rel=0.0, v_lead=29.0, a_lead=-0.55, model_prob=0.93),
+      _make_lead(d_rel=54.6, y_rel=0.04, d_path=0.04, v_lat=0.35, v_rel=0.0, v_lead=29.0, a_lead=-0.55, model_prob=0.96),
+      _make_lead(d_rel=54.55, y_rel=0.07, d_path=0.07, v_lat=4.00, v_rel=0.0, v_lead=29.0, a_lead=-0.55, model_prob=0.93),
     )
 
     assert mpc.source == "lead0"
@@ -313,14 +313,14 @@ class TestHyundaiAiLeadStability:
     for _ in range(2):
       _run_update(
         mpc,
-        _make_lead(d_rel=44.5, y_rel=0.04, d_path=0.04, v_lat=0.35, v_rel=0.0, v_lead=29.0, a_lead=0.0, model_prob=0.96),
-        _make_lead(d_rel=44.45, y_rel=0.07, d_path=0.07, v_lat=4.00, v_rel=0.0, v_lead=29.0, a_lead=0.0, model_prob=0.93),
+        _make_lead(d_rel=38.5, y_rel=0.04, d_path=0.04, v_lat=0.35, v_rel=0.0, v_lead=29.0, a_lead=0.0, model_prob=0.96),
+        _make_lead(d_rel=38.45, y_rel=0.07, d_path=0.07, v_lat=4.00, v_rel=0.0, v_lead=29.0, a_lead=0.0, model_prob=0.93),
       )
     for _ in range(2):
       _run_update(
         mpc,
-        _make_lead(d_rel=60.0, y_rel=0.04, d_path=0.04, v_lat=0.35, v_rel=0.0, v_lead=29.0, a_lead=0.0, model_prob=0.96),
-        _make_lead(d_rel=59.95, y_rel=0.07, d_path=0.07, v_lat=4.00, v_rel=0.0, v_lead=29.0, a_lead=0.0, model_prob=0.93),
+        _make_lead(d_rel=54.0, y_rel=0.04, d_path=0.04, v_lat=0.35, v_rel=0.0, v_lead=29.0, a_lead=0.0, model_prob=0.96),
+        _make_lead(d_rel=53.95, y_rel=0.07, d_path=0.07, v_lat=4.00, v_rel=0.0, v_lead=29.0, a_lead=0.0, model_prob=0.93),
       )
 
     assert mpc.source == "lead0"
@@ -339,15 +339,15 @@ class TestHyundaiAiLeadStability:
     for _ in range(2):
       _run_update(
         mpc,
-        _make_lead(d_rel=44.5, y_rel=0.04, d_path=0.04, v_lat=0.35, v_rel=0.0, v_lead=29.0, a_lead=0.0, model_prob=0.96),
-        _make_lead(d_rel=44.45, y_rel=0.07, d_path=0.07, v_lat=4.00, v_rel=0.0, v_lead=29.0, a_lead=0.0, model_prob=0.93),
+        _make_lead(d_rel=38.5, y_rel=0.04, d_path=0.04, v_lat=0.35, v_rel=0.0, v_lead=29.0, a_lead=0.0, model_prob=0.96),
+        _make_lead(d_rel=38.45, y_rel=0.07, d_path=0.07, v_lat=4.00, v_rel=0.0, v_lead=29.0, a_lead=0.0, model_prob=0.93),
       )
 
     for _ in range(2):
       _run_update(
         mpc,
-        _make_lead(d_rel=60.0, y_rel=0.04, d_path=0.04, v_lat=0.35, v_rel=0.4, v_lead=29.4, a_lead=0.1, model_prob=0.96),
-        _make_lead(d_rel=59.95, y_rel=0.07, d_path=0.07, v_lat=4.00, v_rel=0.4, v_lead=29.4, a_lead=0.1, model_prob=0.93),
+        _make_lead(d_rel=54.0, y_rel=0.04, d_path=0.04, v_lat=0.35, v_rel=0.4, v_lead=29.4, a_lead=0.1, model_prob=0.96),
+        _make_lead(d_rel=53.95, y_rel=0.07, d_path=0.07, v_lat=4.00, v_rel=0.4, v_lead=29.4, a_lead=0.1, model_prob=0.93),
       )
 
     assert mpc.gap_reclaim_effective_cap > mpc._live_tune_cfg.gap_reclaim_max_accel
@@ -423,20 +423,20 @@ class TestHyundaiAiLeadStability:
     for _ in range(2):
       _run_update(
         mpc,
-        _make_lead(d_rel=44.5, y_rel=0.04, d_path=0.04, v_lat=0.35, v_rel=0.0, v_lead=29.0, a_lead=0.0, model_prob=0.96),
-        _make_lead(d_rel=44.45, y_rel=0.07, d_path=0.07, v_lat=4.00, v_rel=0.0, v_lead=29.0, a_lead=0.0, model_prob=0.93),
+        _make_lead(d_rel=38.5, y_rel=0.04, d_path=0.04, v_lat=0.35, v_rel=0.0, v_lead=29.0, a_lead=0.0, model_prob=0.96),
+        _make_lead(d_rel=38.45, y_rel=0.07, d_path=0.07, v_lat=4.00, v_rel=0.0, v_lead=29.0, a_lead=0.0, model_prob=0.93),
       )
     for _ in range(2):
       _run_update(
         mpc,
-        _make_lead(d_rel=60.0, y_rel=0.04, d_path=0.04, v_lat=0.35, v_rel=0.0, v_lead=29.0, a_lead=0.0, model_prob=0.96),
-        _make_lead(d_rel=59.95, y_rel=0.07, d_path=0.07, v_lat=4.00, v_rel=0.0, v_lead=29.0, a_lead=0.0, model_prob=0.93),
+        _make_lead(d_rel=54.0, y_rel=0.04, d_path=0.04, v_lat=0.35, v_rel=0.0, v_lead=29.0, a_lead=0.0, model_prob=0.96),
+        _make_lead(d_rel=53.95, y_rel=0.07, d_path=0.07, v_lat=4.00, v_rel=0.0, v_lead=29.0, a_lead=0.0, model_prob=0.93),
       )
 
     _run_update(
       mpc,
-      _make_lead(d_rel=58.0, y_rel=0.04, d_path=0.04, v_lat=0.35, v_rel=-1.1, v_lead=27.9, a_lead=-0.8, model_prob=0.96),
-      _make_lead(d_rel=57.95, y_rel=0.07, d_path=0.07, v_lat=4.00, v_rel=-1.1, v_lead=27.9, a_lead=-0.8, model_prob=0.93),
+      _make_lead(d_rel=52.0, y_rel=0.04, d_path=0.04, v_lat=0.35, v_rel=-1.1, v_lead=27.9, a_lead=-0.8, model_prob=0.96),
+      _make_lead(d_rel=51.95, y_rel=0.07, d_path=0.07, v_lat=4.00, v_rel=-1.1, v_lead=27.9, a_lead=-0.8, model_prob=0.93),
     )
 
     assert mpc.source == "lead0"

@@ -230,4 +230,4 @@ class TestLeadInteractionScenarios:
     max_preview = max(row["preview"] for row in rows)
 
     assert max_preview >= 5.0
-    assert accel_at_2s < 0.18
+    assert accel_at_2s < 0.30

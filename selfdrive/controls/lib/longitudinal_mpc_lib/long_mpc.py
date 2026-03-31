@@ -1464,9 +1464,12 @@ class LongitudinalMpc:
 
     # Get following distance
     if self.vibe_controller.is_follow_enabled():
-      t_follow = self.vibe_controller.get_follow_distance_multiplier(v_ego)
-      if t_follow is None:
-        # Fallback to stock behavior when vibe controller can't provide a value
+      desired_headway = self.vibe_controller.get_follow_distance_multiplier(v_ego)
+      if desired_headway is not None:
+        # Compensate for STOP_DISTANCE so the user's headway setting matches
+        # displayed headway (dRel/v_ego) at steady state.
+        t_follow = max(0.5, float(desired_headway) - STOP_DISTANCE / max(float(v_ego), 1.0))
+      else:
         t_follow = get_T_FOLLOW(personality)
     else:
       t_follow = get_T_FOLLOW(personality)
