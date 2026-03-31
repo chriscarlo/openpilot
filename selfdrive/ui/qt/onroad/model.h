@@ -69,4 +69,15 @@ protected:
   QPointF lead_status_pos;
   QString lead_status_text;
   QColor lead_status_color;
+
+  // Smoothed lead display values (visual-only, does not affect control)
+  struct SmoothedLead {
+    float dRel = 0.0f;
+    float yRel = 0.0f;
+    float vRel = 0.0f;
+    bool initialized = false;
+  };
+  SmoothedLead smooth_leads[2] = {};
+  static constexpr float LEAD_SMOOTH_TAU = 0.5f;  // seconds
+  static constexpr float LEAD_SMOOTH_DT = 0.05f;  // ~20fps
 };

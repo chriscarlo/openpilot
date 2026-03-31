@@ -1,3 +1,4 @@
+#include <cmath>
 #include "selfdrive/ui/qt/onroad/model.h"
 
 void ModelRenderer::draw(QPainter &painter, const QRect &surface_rect) {
@@ -56,7 +57,7 @@ void ModelRenderer::draw(QPainter &painter, const QRect &surface_rect) {
     if (lead_one.getStatus()) {
       drawLead(painter, lead_one, lead_vertices[0], surface_rect);
     }
-    if (lead_two.getStatus() && (std::abs(lead_one.getDRel() - lead_two.getDRel()) > 3.0)) {
+    if (lead_two.getStatus() && (std::abs(smooth_leads[0].dRel - smooth_leads[1].dRel) > 3.0 || !smooth_leads[0].initialized)) {
       drawLead(painter, lead_two, lead_vertices[1], surface_rect);
     }
   }
@@ -66,11 +67,24 @@ void ModelRenderer::draw(QPainter &painter, const QRect &surface_rect) {
 }
 
 void ModelRenderer::update_leads(const cereal::RadarState::Reader &radar_state, const cereal::XYZTData::Reader &line) {
+  const float alpha = 1.0f - std::exp(-LEAD_SMOOTH_DT / LEAD_SMOOTH_TAU);
   for (int i = 0; i < 2; ++i) {
     const auto &lead_data = (i == 0) ? radar_state.getLeadOne() : radar_state.getLeadTwo();
     if (lead_data.getStatus()) {
-      float z = line.getZ()[get_path_length_idx(line, lead_data.getDRel())];
-      mapToScreen(lead_data.getDRel(), -lead_data.getYRel(), z + path_offset_z, &lead_vertices[i]);
+      float raw_d = lead_data.getDRel();
+      float raw_y = lead_data.getYRel();
+      float raw_v = lead_data.getVRel();
+      if (!smooth_leads[i].initialized) {
+        smooth_leads[i] = {raw_d, raw_y, raw_v, true};
+      } else {
+        smooth_leads[i].dRel += alpha * (raw_d - smooth_leads[i].dRel);
+        smooth_leads[i].yRel += alpha * (raw_y - smooth_leads[i].yRel);
+        smooth_leads[i].vRel += alpha * (raw_v - smooth_leads[i].vRel);
+      }
+      float z = line.getZ()[get_path_length_idx(line, smooth_leads[i].dRel)];
+      mapToScreen(smooth_leads[i].dRel, -smooth_leads[i].yRel, z + path_offset_z, &lead_vertices[i]);
+    } else {
+      smooth_leads[i].initialized = false;
     }
   }
 }
@@ -230,7 +244,9 @@ void ModelRenderer::drawLeadStatus(QPainter &painter, int height, int width) {
         drawLeadStatusAtPosition(painter, lead_one, lead_vertices[0], height, width, "L1");
     }
 
-    if (has_lead_two && std::abs(lead_one.getDRel() - lead_two.getDRel()) > 3.0) {
+    float l1d = smooth_leads[0].initialized ? smooth_leads[0].dRel : lead_one.getDRel();
+    float l2d = smooth_leads[1].initialized ? smooth_leads[1].dRel : lead_two.getDRel();
+    if (has_lead_two && std::abs(l1d - l2d) > 3.0) {
         drawLeadStatusAtPosition(painter, lead_two, lead_vertices[1], height, width, "L2");
     }
 }
@@ -241,8 +257,9 @@ void ModelRenderer::drawLeadStatusAtPosition(QPainter &painter,
                                            int height, int width,
                                            const QString &label) {
 
-    float d_rel = lead_data.getDRel();
-    float v_rel = lead_data.getVRel();
+    int lead_idx = (&chevron_pos == &lead_vertices[0]) ? 0 : 1;
+    float d_rel = smooth_leads[lead_idx].initialized ? smooth_leads[lead_idx].dRel : lead_data.getDRel();
+    float v_rel = smooth_leads[lead_idx].initialized ? smooth_leads[lead_idx].vRel : lead_data.getVRel();
     auto *s = uiState();
     auto &sm = *(s->sm);
     float v_ego = sm["carState"].getCarState().getVEgo();
@@ -373,8 +390,10 @@ void ModelRenderer::drawLead(QPainter &painter, const cereal::RadarState::LeadDa
                              const QPointF &vd, const QRect &surface_rect) {
   const float speedBuff = 10.;
   const float leadBuff = 40.;
-  const float d_rel = lead_data.getDRel();
-  const float v_rel = lead_data.getVRel();
+  // Use smoothed values for stable chevron sizing/opacity (lead_vertices already smoothed)
+  int lead_idx = (&vd == &lead_vertices[0]) ? 0 : 1;
+  const float d_rel = smooth_leads[lead_idx].initialized ? smooth_leads[lead_idx].dRel : lead_data.getDRel();
+  const float v_rel = smooth_leads[lead_idx].initialized ? smooth_leads[lead_idx].vRel : lead_data.getVRel();
 
   float fillAlpha = 0;
   if (d_rel < leadBuff) {
