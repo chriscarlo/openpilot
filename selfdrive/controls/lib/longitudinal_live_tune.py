@@ -136,6 +136,46 @@ LEAD_RESPONSE_TUNE_SPECS = (
     maximum=0.30,
     description="Positive accel bias added to settle floor to counteract EV regen braking on coast.",
   ),
+  LeadResponseTuneSpec(
+    attr="drel_filter_tau_close_s",
+    key="Longitudinal.LiveTune.DRelFilterTauCloseS",
+    cli_name="drel-filter-tau-close",
+    label="drel_tau_close",
+    default=0.30,
+    minimum=0.05,
+    maximum=2.0,
+    description="dRel filter time constant for closing (lead appears nearer). Lower = faster safety response.",
+  ),
+  LeadResponseTuneSpec(
+    attr="drel_filter_tau_open_s",
+    key="Longitudinal.LiveTune.DRelFilterTauOpenS",
+    cli_name="drel-filter-tau-open",
+    label="drel_tau_open",
+    default=1.00,
+    minimum=0.10,
+    maximum=5.0,
+    description="dRel filter time constant for opening (lead appears farther). Higher = more noise rejection.",
+  ),
+  LeadResponseTuneSpec(
+    attr="drel_filter_innovation_gate_m",
+    key="Longitudinal.LiveTune.DRelFilterInnovationGateM",
+    cli_name="drel-filter-ig",
+    label="drel_ig",
+    default=30.0,
+    minimum=5.0,
+    maximum=60.0,
+    description="Innovation gate: snap to raw when prediction error exceeds this (meters).",
+  ),
+  LeadResponseTuneSpec(
+    attr="drel_filter_closing_gate_m",
+    key="Longitudinal.LiveTune.DRelFilterClosingGateM",
+    cli_name="drel-filter-cg",
+    label="drel_cg",
+    default=20.0,
+    minimum=5.0,
+    maximum=40.0,
+    description="Closing gate: snap to raw when lead appears this much closer than predicted (meters).",
+  ),
 )
 
 LEAD_RESPONSE_TUNE_SPECS_BY_ATTR = {spec.attr: spec for spec in LEAD_RESPONSE_TUNE_SPECS}
@@ -153,6 +193,10 @@ class LeadResponseTuningConfig:
   cutin_settle_max_decel: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cutin_settle_max_decel"].default
   cutin_settle_max_closing_speed_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cutin_settle_max_closing_speed_mps"].default
   cutin_settle_accel_bias_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cutin_settle_accel_bias_mps2"].default
+  drel_filter_tau_close_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["drel_filter_tau_close_s"].default
+  drel_filter_tau_open_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["drel_filter_tau_open_s"].default
+  drel_filter_innovation_gate_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["drel_filter_innovation_gate_m"].default
+  drel_filter_closing_gate_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["drel_filter_closing_gate_m"].default
 
   @classmethod
   def defaults(cls) -> LeadResponseTuningConfig:

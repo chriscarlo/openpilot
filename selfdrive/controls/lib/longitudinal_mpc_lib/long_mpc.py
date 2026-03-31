@@ -157,7 +157,11 @@ class LeadDistanceFilter:
   def value(self) -> float | None:
     return self._filtered
 
-  def update(self, raw_drel: float, raw_vrel: float, dt_s: float) -> float:
+  def update(self, raw_drel: float, raw_vrel: float, dt_s: float,
+             tau_close: float = DREL_FILTER_TAU_CLOSE_S,
+             tau_open: float = DREL_FILTER_TAU_OPEN_S,
+             innovation_gate: float = DREL_FILTER_INNOVATION_GATE_M,
+             closing_gate: float = DREL_FILTER_CLOSING_GATE_M) -> float:
     if self._filtered is None or dt_s <= 0.0:
       self._filtered = raw_drel
       self._frames_since_snap = DREL_FILTER_SNAP_HOLD_FRAMES + 1
@@ -166,14 +170,14 @@ class LeadDistanceFilter:
     d_pred = self._filtered + raw_vrel * dt_s
     innov = raw_drel - d_pred
 
-    if abs(innov) > DREL_FILTER_INNOVATION_GATE_M or innov < -DREL_FILTER_CLOSING_GATE_M:
+    if abs(innov) > innovation_gate or innov < -closing_gate:
       self._filtered = raw_drel
       self._frames_since_snap = 0
     elif self._frames_since_snap < DREL_FILTER_SNAP_HOLD_FRAMES:
       self._filtered = d_pred + DREL_FILTER_ALPHA_FAST * innov
       self._frames_since_snap += 1
     else:
-      tau = DREL_FILTER_TAU_CLOSE_S if innov < 0.0 else DREL_FILTER_TAU_OPEN_S
+      tau = tau_close if innov < 0.0 else tau_open
       alpha = float(1.0 - np.exp(-dt_s / max(tau, 1e-3)))
       self._filtered = d_pred + alpha * innov
 
@@ -986,7 +990,14 @@ class LongitudinalMpc:
       prev = self._hyundai_virtual_lead
       filtered = copy.deepcopy(prev)
       filtered.status = raw_lead.status
-      filtered.dRel = self._drel_filter.update(raw_lead.dRel, float(getattr(raw_lead, 'vRel', 0.0) or 0.0), dt_s)
+      cfg = self._live_tune_cfg
+      filtered.dRel = self._drel_filter.update(
+        raw_lead.dRel, float(getattr(raw_lead, 'vRel', 0.0) or 0.0), dt_s,
+        tau_close=getattr(cfg, 'drel_filter_tau_close_s', DREL_FILTER_TAU_CLOSE_S),
+        tau_open=getattr(cfg, 'drel_filter_tau_open_s', DREL_FILTER_TAU_OPEN_S),
+        innovation_gate=getattr(cfg, 'drel_filter_innovation_gate_m', DREL_FILTER_INNOVATION_GATE_M),
+        closing_gate=getattr(cfg, 'drel_filter_closing_gate_m', DREL_FILTER_CLOSING_GATE_M),
+      )
       filtered.yRel = self._filter_symmetric_metric(prev.yRel, raw_lead.yRel, dt_s, HYUNDAI_VIRTUAL_LEAD_PATH_TAU_S)
       filtered.vRel = self._filter_metric(prev.vRel, raw_lead.vRel, dt_s, danger_if_lower=True)
       filtered.aRel = self._filter_metric(prev.aRel, raw_lead.aRel, dt_s, danger_if_lower=True)
