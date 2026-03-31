@@ -129,6 +129,56 @@ LEAD_PRESENT_CRUISE_CLOSING_TIGHTEN_BP = [0.0, 1.0, 3.0, 5.0]
 LEAD_PRESENT_CRUISE_CLOSING_TIGHTEN_V = [1.0, 0.65, 0.25, 0.10]
 LEAD_PRESENT_CRUISE_CLOSING_PROJECTION_S = 3.0
 
+# ---------------------------------------------------------------------------
+# Lead distance prediction-corrector filter
+# Smooths noisy AI-model dRel while preserving fast response to real changes.
+# Parameters from simulation sweep (.cache/lead_filter_sim.py).
+# ---------------------------------------------------------------------------
+DREL_FILTER_TAU_CLOSE_S = 0.30   # fast response when lead appears closer (safety)
+DREL_FILTER_TAU_OPEN_S = 1.00    # slow response when lead appears further (noise rejection)
+DREL_FILTER_INNOVATION_GATE_M = 30.0
+DREL_FILTER_CLOSING_GATE_M = 20.0
+DREL_FILTER_SNAP_HOLD_FRAMES = 4
+DREL_FILTER_ALPHA_FAST = 0.5
+
+
+class LeadDistanceFilter:
+  __slots__ = ('_filtered', '_frames_since_snap')
+
+  def __init__(self):
+    self._filtered: float | None = None
+    self._frames_since_snap: int = DREL_FILTER_SNAP_HOLD_FRAMES + 1
+
+  def reset(self, drel: float | None = None) -> None:
+    self._filtered = drel
+    self._frames_since_snap = DREL_FILTER_SNAP_HOLD_FRAMES + 1
+
+  @property
+  def value(self) -> float | None:
+    return self._filtered
+
+  def update(self, raw_drel: float, raw_vrel: float, dt_s: float) -> float:
+    if self._filtered is None or dt_s <= 0.0:
+      self._filtered = raw_drel
+      self._frames_since_snap = DREL_FILTER_SNAP_HOLD_FRAMES + 1
+      return raw_drel
+
+    d_pred = self._filtered + raw_vrel * dt_s
+    innov = raw_drel - d_pred
+
+    if abs(innov) > DREL_FILTER_INNOVATION_GATE_M or innov < -DREL_FILTER_CLOSING_GATE_M:
+      self._filtered = raw_drel
+      self._frames_since_snap = 0
+    elif self._frames_since_snap < DREL_FILTER_SNAP_HOLD_FRAMES:
+      self._filtered = d_pred + DREL_FILTER_ALPHA_FAST * innov
+      self._frames_since_snap += 1
+    else:
+      tau = DREL_FILTER_TAU_CLOSE_S if innov < 0.0 else DREL_FILTER_TAU_OPEN_S
+      alpha = float(1.0 - np.exp(-dt_s / max(tau, 1e-3)))
+      self._filtered = d_pred + alpha * innov
+
+    return self._filtered
+
 
 # Fewer timestamps don't hurt performance and lead to
 # much better convergence of the MPC with low iterations
@@ -612,6 +662,7 @@ class LongitudinalMpc:
     self._hyundai_virtual_lead_last_t = None
     self._hyundai_virtual_lead_identity_changed = False
     self._hyundai_virtual_lead_reset_reason = None
+    self._drel_filter = LeadDistanceFilter()
     self.hyundai_virtual_lead_debug = {"active": False}
     self._hyundai_reclaim_lead = None
     self._hyundai_reclaim_last_t = None
@@ -732,6 +783,7 @@ class LongitudinalMpc:
     self._hyundai_virtual_lead_last_t = None
     self._hyundai_virtual_lead_identity_changed = False
     self._hyundai_virtual_lead_reset_reason = reason
+    self._drel_filter.reset()
     self._hyundai_reclaim_lead = None
     self._hyundai_reclaim_last_t = None
     self.hyundai_virtual_lead_debug = {
@@ -925,6 +977,7 @@ class LongitudinalMpc:
       self._hyundai_virtual_lead_last_t = now if raw_lead.status else None
       self._hyundai_virtual_lead_identity_changed = bool(raw_lead.status)
       self._hyundai_virtual_lead_reset_reason = reset_reason
+      self._drel_filter.reset(raw_lead.dRel if raw_lead.status else None)
       if not raw_lead.status:
         self._reset_hyundai_virtual_lead(reset_reason or "no_control_lead")
         return None
@@ -933,7 +986,7 @@ class LongitudinalMpc:
       prev = self._hyundai_virtual_lead
       filtered = copy.deepcopy(prev)
       filtered.status = raw_lead.status
-      filtered.dRel = self._filter_metric(prev.dRel, raw_lead.dRel, dt_s, danger_if_lower=True)
+      filtered.dRel = self._drel_filter.update(raw_lead.dRel, float(getattr(raw_lead, 'vRel', 0.0) or 0.0), dt_s)
       filtered.yRel = self._filter_symmetric_metric(prev.yRel, raw_lead.yRel, dt_s, HYUNDAI_VIRTUAL_LEAD_PATH_TAU_S)
       filtered.vRel = self._filter_metric(prev.vRel, raw_lead.vRel, dt_s, danger_if_lower=True)
       filtered.aRel = self._filter_metric(prev.aRel, raw_lead.aRel, dt_s, danger_if_lower=True)

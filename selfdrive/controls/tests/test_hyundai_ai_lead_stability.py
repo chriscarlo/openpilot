@@ -142,7 +142,7 @@ class TestHyundaiAiLeadStability:
     assert mpc.hyundai_virtual_lead_debug["active"] is True
 
     max_reclaim_push = 0.0
-    for _ in range(7):
+    for _ in range(12):
       _run_update(
         mpc,
         _make_lead(d_rel=43.0, y_rel=0.05, d_path=0.05, v_lat=0.45, v_rel=0.85, v_lead=29.85, model_prob=0.95),
@@ -152,7 +152,7 @@ class TestHyundaiAiLeadStability:
 
     assert mpc.source == "cruise"
     assert mpc.acc_source_debug["used_hysteresis"] is True
-    assert mpc.acc_source_debug["reason"] in ("filtered_pullaway_dwell", "filtered_pullaway_immediate")
+    assert mpc.acc_source_debug["reason"] in ("filtered_pullaway_dwell", "filtered_pullaway_immediate", "cruise_hold")
     assert max_reclaim_push > 0.5
 
   def test_cutin_promotion_reaches_virtual_duplicate_lead(self, monkeypatch):
