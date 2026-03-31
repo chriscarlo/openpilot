@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "items": [
+    {
+      "id": "RMD-20260327-0001",
+      "title": "Blend cruise-to-lead accel handoff",
+      "details": "When cruise acceleration hands off to lead-follow, the accel profile change can cause a decel lurch even with a stable lead. Follow up by blending stable follow accel behavior with the active accel personality tables so lead acquisition does not abruptly drop commanded accel while still preserving safe lead response.",
+      "status": "inbox",
+      "priority": "P2",
+      "effort": "M",
+      "timeframe": "later",
+      "tags": [
+        "comfort",
+        "hyundai",
+        "longitudinal",
+        "planner"
+      ],
+      "areas": [
+        "selfdrive/controls/lib/longitudinal_mpc_lib/long_mpc.py",
+        "selfdrive/controls/lib/longitudinal_planner.py",
+        "sunnypilot/selfdrive/controls/lib/vibe_personality/vibe_personality.py"
+      ],
+      "acceptance": [],
+      "risks": [],
+      "dependencies": [],
+      "notes": [],
+      "created_at": "2026-03-27T20:45:12+00:00",
+      "last_mentioned_at": "2026-03-27T20:46:17+00:00",
+      "mentions": 2,
+      "source": {
+        "kind": "chat",
+        "excerpt": "the further away a lead is the harder we can accelerate but that tapers off to a tuned comfort rate as we approach desired follow distance"
+      }
+    }
+  ]
+}
