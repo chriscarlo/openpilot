@@ -407,23 +407,23 @@ void HudRendererSP::drawSystemReadiness(QPainter &p, const QRect &surface_rect) 
   p.save();
   p.setRenderHint(QPainter::Antialiasing, true);
 
-  const float opacity = readiness_opacity_;
+  const float opacity = std::max(readiness_opacity_, 0.65f);
   const bool show_labels = true;
 
-  const QFont subsystem_font = InterFont(54, QFont::DemiBold);
-  const QFont master_font = InterFont(54, QFont::Bold);
+  const QFont subsystem_font = InterFont(27, QFont::DemiBold);
+  const QFont master_font = InterFont(27, QFont::Bold);
   const QFontMetrics subsystem_metrics(subsystem_font);
   const QFontMetrics master_metrics(master_font);
 
   // Dot sizing and layout
-  const int dot_r = 8;
-  const int master_r = 12;
-  const int spacing = subsystem_metrics.height() + 10;
-  const int master_gap = std::max(16, master_metrics.height() / 3);
-  const int label_gap = 14;
-  const int pill_pad = 12;
-  const int pill_left = surface_rect.left() + 8;
-  const int x_center = pill_left + 24;
+  const int dot_r = 6;
+  const int master_r = 9;
+  const int spacing = subsystem_metrics.height() + 4;
+  const int master_gap = std::max(10, master_metrics.height() / 4);
+  const int label_gap = 10;
+  const int pill_pad = 10;
+  const int pill_left = surface_rect.left() + 12;
+  const int x_center = pill_left + 18;
 
   // Total column height: N subsystem dots + gap + master dot
   const int n = static_cast<int>(subsystem_statuses_.size());
@@ -448,12 +448,6 @@ void HudRendererSP::drawSystemReadiness(QPainter &p, const QRect &surface_rect) 
     max_label_w = std::max(max_label_w, subsystem_metrics.horizontalAdvance(QString::fromStdString(name)));
   }
   const int label_x = x_center + master_r + label_gap;
-  const int pill_w = show_labels ? (label_x + max_label_w + pill_pad - pill_left) : 48;
-  QRect pill(pill_left, y_top - pill_pad, pill_w, col_h + 2 * pill_pad);
-  p.setPen(Qt::NoPen);
-  p.setBrush(QColor(0, 0, 0, static_cast<int>(100 * opacity)));
-  p.drawRoundedRect(pill, 12, 12);
-
   // Draw subsystem dots (bottom to top: index 0 at bottom)
   for (int i = 0; i < n; i++) {
     const auto &[name, st] = subsystem_statuses_[i];
