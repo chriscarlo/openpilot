@@ -947,16 +947,18 @@ void HudRendererSP::drawVTSCCoPilotCurve(QPainter &p, const QRect &surface_rect)
     return 1.0f - inv * inv * inv;
   };
 
-  // === Left-edge vignette: subtle darkening so white curve reads over bright camera feed ===
+  // === Right-side vignette: matches the existing top-edge header gradient ===
+  // Header gradient: 0.45 alpha black over a 168px fade (UI_HEADER_HEIGHT / 2.5).
+  // Replicate the same values horizontally: transparent at left edge, 0.45 at right.
   {
-    constexpr int kVignetteFeather = 100;  // gradient width in px
-    QLinearGradient vignette(panel.left() - 20, 0, panel.left() + kVignetteFeather, 0);
-    vignette.setColorAt(0.00, QColor(0, 0, 0, 0));
-    vignette.setColorAt(0.30, QColor(0, 0, 0, 45));
-    vignette.setColorAt(1.00, QColor(0, 0, 0, 0));
+    const int fade_dist = static_cast<int>(UI_HEADER_HEIGHT / 2.5f);  // 168px
+    QLinearGradient vignette(panel.left(), 0, panel.left() + fade_dist, 0);
+    vignette.setColorAt(0.0, QColor::fromRgbF(0, 0, 0, 0));
+    vignette.setColorAt(1.0, QColor::fromRgbF(0, 0, 0, 0.45));
     p.setPen(Qt::NoPen);
     p.setBrush(vignette);
-    p.drawRect(QRect(panel.left() - 20, panel.top(), kVignetteFeather + 20, panel.height()));
+    p.drawRect(QRect(panel.left(), panel.top(),
+                     surface_rect.right() - panel.left(), panel.height()));
   }
 
   // === Pick which tile to display (single tile, apex-flip for linked curves) ===
@@ -997,23 +999,26 @@ void HudRendererSP::drawVTSCCoPilotCurve(QPainter &p, const QRect &surface_rect)
     }
     const float fwd_range = std::max(fwd_max - fwd_min, 1.0f);
     const float lat_range = std::max(lat_max - lat_min, 0.1f);
-    // Scale to fill panel with padding, preserving aspect ratio.
-    // Use shared meters-to-px scale so gentle sweepers don't render like hairpins.
+    // Scale to fill panel with padding. Forward and lateral axes use separate scales:
+    // the lateral axis gets a modest boost (up to 1.5x the forward scale) so that
+    // gentle sweepers show visible curvature without distorting into hairpins.
     const float pad = road_w + glow_extra + 30.0f;
     const float usable_w = std::max(static_cast<float>(panel.width()) - 2.0f * pad, 40.0f);
     const float usable_h = std::max(static_cast<float>(panel.height()) - 2.0f * pad, 40.0f);
     const float scale_fwd = usable_h / fwd_range;
-    const float scale_lat = lat_range > 0.1f ? (usable_w / lat_range) : scale_fwd;
-    const float m_to_px = std::min(scale_fwd, scale_lat);
+    const float scale_lat_fit = lat_range > 0.1f ? (usable_w / lat_range) : scale_fwd;
+    const float m_to_px_fwd = scale_fwd;
+    const float m_to_px_lat = std::min(scale_lat_fit, scale_fwd * 1.5f);
 
     // Center the curve geometry within the panel.
-    const float rendered_w = lat_range * m_to_px;
+    const float rendered_w = lat_range * m_to_px_lat;
     const float offset_x = static_cast<float>(panel.center().x()) - rendered_w * 0.5f;
     const float offset_y = static_cast<float>(panel.bottom()) - pad;
 
+    // yLeftM is positive-left: negate so left curves render on the left side of the glyph.
     auto to_px = [&](const QPointF &pt) -> QPointF {
-      const float px_x = offset_x + (static_cast<float>(pt.y()) - lat_min) * m_to_px;
-      const float px_y = offset_y - (static_cast<float>(pt.x()) - fwd_min) * m_to_px;
+      const float px_x = offset_x + (lat_max - static_cast<float>(pt.y())) * m_to_px_lat;
+      const float px_y = offset_y - (static_cast<float>(pt.x()) - fwd_min) * m_to_px_fwd;
       return QPointF(px_x, px_y);
     };
 
