@@ -13,6 +13,7 @@
 #include <QPainterPath>
 #include <QLinearGradient>
 #include <QRadialGradient>
+#include <QFontMetrics>
 #include <QTransform>
 #include <QTime>
 #include <QMutexLocker>
@@ -407,19 +408,26 @@ void HudRendererSP::drawSystemReadiness(QPainter &p, const QRect &surface_rect) 
   p.setRenderHint(QPainter::Antialiasing, true);
 
   const float opacity = readiness_opacity_;
-  const bool show_labels = !all_systems_ready_;
+  const bool show_labels = true;
 
   // Dot sizing and layout
-  const int dot_r = 6;       // small dot radius (12px diameter)
-  const int master_r = 10;   // master dot radius (20px diameter)
-  const int spacing = 28;    // vertical spacing between dot centers
-  const int master_gap = 8;  // extra gap before master dot
-  const int label_gap = 6;   // gap between dot and label
+  const int dot_r = 8;
+  const int master_r = 12;
+  const int spacing = 56;
+  const int master_gap = 16;
+  const int label_gap = 14;
+  const int pill_pad = 12;
+  const int pill_left = surface_rect.left() + 8;
+  const int x_center = pill_left + 24;
+
+  const QFont subsystem_font = InterFont(54, QFont::DemiBold);
+  const QFont master_font = InterFont(54, QFont::Bold);
+  const QFontMetrics subsystem_metrics(subsystem_font);
+  const QFontMetrics master_metrics(master_font);
 
   // Total column height: N subsystem dots + gap + master dot
   const int n = static_cast<int>(subsystem_statuses_.size());
   const int col_h = (n - 1) * spacing + 2 * dot_r + master_gap + 2 * master_r;
-  const int x_center = 30;   // dot center x from left edge
   const int y_top = (surface_rect.height() - col_h) / 2;
 
   // Colors
@@ -434,10 +442,14 @@ void HudRendererSP::drawSystemReadiness(QPainter &p, const QRect &surface_rect) 
   };
 
   // Background pill
-  const int pill_pad = 8;
-  int pill_w = show_labels ? 80 : 36;
-  QRect pill(x_center - pill_w / 2, y_top - pill_pad,
-             pill_w, col_h + 2 * pill_pad);
+  int max_label_w = master_metrics.horizontalAdvance(QStringLiteral("ALL"));
+  for (const auto &[name, st] : subsystem_statuses_) {
+    (void)st;
+    max_label_w = std::max(max_label_w, subsystem_metrics.horizontalAdvance(QString::fromStdString(name)));
+  }
+  const int label_x = x_center + master_r + label_gap;
+  const int pill_w = show_labels ? (label_x + max_label_w + pill_pad - pill_left) : 48;
+  QRect pill(pill_left, y_top - pill_pad, pill_w, col_h + 2 * pill_pad);
   p.setPen(Qt::NoPen);
   p.setBrush(QColor(0, 0, 0, static_cast<int>(100 * opacity)));
   p.drawRoundedRect(pill, 12, 12);
@@ -464,11 +476,12 @@ void HudRendererSP::drawSystemReadiness(QPainter &p, const QRect &surface_rect) 
 
     // Label (only when not all green)
     if (show_labels) {
-      QFont lbl_font = InterFont(18, QFont::DemiBold);
-      p.setFont(lbl_font);
+      p.setFont(subsystem_font);
       c.setAlphaF(0.9 * opacity);
       p.setPen(c);
-      p.drawText(x_center + dot_r + label_gap, y + 5, QString::fromStdString(name));
+      QRect text_rect(label_x, y - subsystem_metrics.height() / 2,
+                      max_label_w + pill_pad, subsystem_metrics.height());
+      p.drawText(text_rect, Qt::AlignVCenter | Qt::AlignLeft, QString::fromStdString(name));
     }
   }
 
@@ -499,11 +512,12 @@ void HudRendererSP::drawSystemReadiness(QPainter &p, const QRect &surface_rect) 
 
   // Master label
   if (show_labels) {
-    QFont lbl_font = InterFont(18, QFont::Bold);
-    p.setFont(lbl_font);
+    p.setFont(master_font);
     master_c.setAlphaF(0.9 * opacity);
     p.setPen(master_c);
-    p.drawText(x_center + master_r + label_gap, master_y + 5, "ALL");
+    QRect text_rect(label_x, master_y - master_metrics.height() / 2,
+                    max_label_w + pill_pad, master_metrics.height());
+    p.drawText(text_rect, Qt::AlignVCenter | Qt::AlignLeft, QStringLiteral("ALL"));
   }
 
   p.restore();
@@ -947,18 +961,17 @@ void HudRendererSP::drawVTSCCoPilotCurve(QPainter &p, const QRect &surface_rect)
     return 1.0f - inv * inv * inv;
   };
 
-  // === Right-edge vignette: match the header fade without blanketing the whole panel ===
-  // Qt repeats the terminal stop color after the gradient ends, so the drawn rect must stay
-  // bounded to the fade width or the rest of the panel becomes a flat dark slab.
+  // === Right-edge vignette: full-height strip that feathers only on the inboard edge ===
+  // The strip runs flush to the top/right/bottom screen borders; only the left edge fades.
   {
-    const int fade_dist = std::min(static_cast<int>(UI_HEADER_HEIGHT / 2.5f), panel.width());  // 168px nominal
-    const int vignette_x = panel.left() + panel.width() - fade_dist;
-    QLinearGradient vignette(vignette_x, 0, panel.left() + panel.width(), 0);
+    const int fade_dist = std::min(static_cast<int>(UI_HEADER_HEIGHT / 2.5f), surface_rect.width());
+    const int vignette_x = surface_rect.right() + 1 - fade_dist;
+    QLinearGradient vignette(vignette_x, 0, surface_rect.right() + 1, 0);
     vignette.setColorAt(0.0, QColor::fromRgbF(0, 0, 0, 0));
     vignette.setColorAt(1.0, QColor::fromRgbF(0, 0, 0, 0.45));
     p.setPen(Qt::NoPen);
     p.setBrush(vignette);
-    p.drawRect(QRect(vignette_x, panel.top(), fade_dist, panel.height()));
+    p.drawRect(QRect(vignette_x, surface_rect.top(), fade_dist, surface_rect.height()));
   }
 
   // === Pick which tile to display (single tile, apex-flip for linked curves) ===
@@ -1048,19 +1061,15 @@ void HudRendererSP::drawVTSCCoPilotCurve(QPainter &p, const QRect &surface_rect)
     glow_grad.setColorAt(0.88, QColor(255, 255, 255, 50));
     glow_grad.setColorAt(1.00, QColor(255, 255, 255, 0));
 
-    // 1) Shadow
-    p.setPen(QPen(QColor(0, 0, 0, 100), road_w + glow_extra + 6.0f, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-    p.drawPath(road_path.translated(0.0f, 4.0f));
-
-    // 2) Glow
+    // 1) Glow
     p.setPen(QPen(QBrush(glow_grad), road_w + glow_extra, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
     p.drawPath(road_path);
 
-    // 3) Main road stroke
+    // 2) Main road stroke
     p.setPen(QPen(QBrush(road_grad), road_w, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
     p.drawPath(road_path);
 
-    // 4) Bright center highlight
+    // 3) Bright center highlight
     p.setOpacity(opacity * vtsc_copilot_alpha_ * 0.30f);
     p.setPen(QPen(QColor(255, 255, 255, 210), std::max(1.5f, road_w * 0.14f), Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
     p.drawPath(road_path);

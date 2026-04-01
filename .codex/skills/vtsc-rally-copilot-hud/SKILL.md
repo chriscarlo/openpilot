@@ -41,7 +41,7 @@ description: Edit, debug, troubleshoot, iterate, and polish the Sunnypilot VTSC 
 - Placement uses an “inner” rect that excludes `UI_BORDER_SIZE`. Adjust placement in `HudRendererSP::drawVTSCCoPilotCurve`.
 - Move the overlay up/down by changing `bottom_safe` (smaller moves it down, larger moves it up).
 - Change overall sizing/thickness/fonts by changing `kScale`.
-- Keep vignette draw rects bounded to the intended fade width; Qt repeats the last gradient stop color beyond the stop range, so oversized rects turn the rest of the panel into a flat dark slab.
+- Keep the vignette flush only where it meets the screen border; the inboard edge must remain a soft gradient. Qt repeats the last gradient stop color beyond the stop range, so oversized rects or zero-feather inboard edges create a visible hard seam or a flat dark slab.
 - Keep the tile glyph on a shared meters-to-pixels scale for forward and lateral axes; do not independently fit lateral spread to card width or gentle sweepers will render like hairpins.
 - Keep speed on top by drawing it last.
 
