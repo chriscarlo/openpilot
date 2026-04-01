@@ -410,20 +410,20 @@ void HudRendererSP::drawSystemReadiness(QPainter &p, const QRect &surface_rect) 
   const float opacity = readiness_opacity_;
   const bool show_labels = true;
 
-  // Dot sizing and layout
-  const int dot_r = 8;
-  const int master_r = 12;
-  const int spacing = 56;
-  const int master_gap = 16;
-  const int label_gap = 14;
-  const int pill_pad = 12;
-  const int pill_left = surface_rect.left() + 8;
-  const int x_center = pill_left + 24;
-
   const QFont subsystem_font = InterFont(54, QFont::DemiBold);
   const QFont master_font = InterFont(54, QFont::Bold);
   const QFontMetrics subsystem_metrics(subsystem_font);
   const QFontMetrics master_metrics(master_font);
+
+  // Dot sizing and layout
+  const int dot_r = 8;
+  const int master_r = 12;
+  const int spacing = subsystem_metrics.height() + 10;
+  const int master_gap = std::max(16, master_metrics.height() / 3);
+  const int label_gap = 14;
+  const int pill_pad = 12;
+  const int pill_left = surface_rect.left() + 8;
+  const int x_center = pill_left + 24;
 
   // Total column height: N subsystem dots + gap + master dot
   const int n = static_cast<int>(subsystem_statuses_.size());
