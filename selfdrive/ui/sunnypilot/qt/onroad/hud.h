@@ -127,16 +127,17 @@ protected:
     std::vector<QPointF> points_m;
   };
   std::vector<VTSCCoPilotTileState> vtsc_copilot_tiles_;
-  std::vector<VTSCCoPilotTileState> vtsc_copilot_prev_tiles_;
   VTSCCoPilotTileState vtsc_copilot_exiting_tile_;
   bool vtsc_copilot_exiting_tile_active_ = false;
-  float vtsc_copilot_stack_anim_progress_ = 1.0f;
   float vtsc_copilot_exit_anim_progress_ = 1.0f;
-  struct VTSCCoPilotBranchStubState {
-    bool highlighted = false;
-    std::vector<QPointF> points_m;
-  };
-  std::vector<VTSCCoPilotBranchStubState> vtsc_copilot_branch_stubs_;
+  float vtsc_copilot_enter_anim_progress_ = 1.0f;  // fade-in for new tile
+
+  // Speed flash animation (green bump / red drop)
+  float vtsc_prev_advisory_speed_mps_ = 0.0f;
+  uint32_t vtsc_prev_tile_id_ = 0;
+  std::chrono::steady_clock::time_point vtsc_speed_flash_start_{};
+  bool vtsc_speed_flash_active_ = false;
+  bool vtsc_speed_flash_is_increase_ = false;  // true=green, false=red
 
   // Ego-advance interpolation for smooth 60 Hz scrolling between 5 Hz producer updates.
   float vtsc_copilot_v_ego_mps_ = 0.0f;
@@ -153,20 +154,10 @@ protected:
     float kappa_hold_min = 1.0e-3f;
     float fade_in_alpha = 0.22f;
     float fade_out_alpha = 0.12f;
-    float scale = 2.5f;
-    float bottom_safe_px_at_scale1 = 4.0f;
-    float pad_px_at_scale1 = 18.0f;
-    float gap_px_at_scale1 = 12.0f;
-    float top_height_px_at_scale1 = 32.0f;
-    float bottom_height_px_at_scale1 = 34.0f;
-    float min_curve_area_px_at_scale1 = 80.0f;
-    float road_main_width_px_at_scale1 = 13.0f;
-    float glow_width_px_at_scale1 = 40.0f;
-    float outline_width_px_at_scale1 = 20.0f;
-    float main_stroke_width_px_at_scale1 = 14.0f;
-    float distance_label_sep_px_at_scale1 = 26.0f;
-    float speed_font_px_at_scale1 = 22.0f;
-    float bottom_font_px_at_scale1 = 24.0f;
+    float road_width_px = 18.0f;
+    float glow_width_px = 10.0f;
+    float speed_font_px = 52.0f;
+    float unit_font_px = 22.0f;
   };
   VTSCCoPilotHudTuning vtsc_copilot_tuning_;
 };

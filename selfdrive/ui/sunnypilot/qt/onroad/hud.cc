@@ -147,20 +147,10 @@ void HudRendererSP::refreshVTSCCoPilotTuning() {
   tuning.kappa_hold_min = std::min(tuning.kappa_hold_min, tuning.kappa_show_min);
   tuning.fade_in_alpha = readParamFloatClamped(params, "VTSCHUD.FadeInAlpha", tuning.fade_in_alpha, 0.01f, 0.95f);
   tuning.fade_out_alpha = readParamFloatClamped(params, "VTSCHUD.FadeOutAlpha", tuning.fade_out_alpha, 0.01f, 0.95f);
-  tuning.scale = readParamFloatClamped(params, "VTSCHUD.Scale", tuning.scale, 0.5f, 4.0f);
-  tuning.bottom_safe_px_at_scale1 = readParamFloatClamped(params, "VTSCHUD.BottomSafePxAtScale1", tuning.bottom_safe_px_at_scale1, 0.0f, 120.0f);
-  tuning.pad_px_at_scale1 = readParamFloatClamped(params, "VTSCHUD.PadPxAtScale1", tuning.pad_px_at_scale1, 2.0f, 80.0f);
-  tuning.gap_px_at_scale1 = readParamFloatClamped(params, "VTSCHUD.GapPxAtScale1", tuning.gap_px_at_scale1, 0.0f, 80.0f);
-  tuning.top_height_px_at_scale1 = readParamFloatClamped(params, "VTSCHUD.TopHeightPxAtScale1", tuning.top_height_px_at_scale1, 8.0f, 120.0f);
-  tuning.bottom_height_px_at_scale1 = readParamFloatClamped(params, "VTSCHUD.BottomHeightPxAtScale1", tuning.bottom_height_px_at_scale1, 8.0f, 140.0f);
-  tuning.min_curve_area_px_at_scale1 = readParamFloatClamped(params, "VTSCHUD.MinCurveAreaPxAtScale1", tuning.min_curve_area_px_at_scale1, 16.0f, 240.0f);
-  tuning.road_main_width_px_at_scale1 = readParamFloatClamped(params, "VTSCHUD.RoadMainWidthPxAtScale1", tuning.road_main_width_px_at_scale1, 2.0f, 48.0f);
-  tuning.glow_width_px_at_scale1 = readParamFloatClamped(params, "VTSCHUD.GlowWidthPxAtScale1", tuning.glow_width_px_at_scale1, 2.0f, 120.0f);
-  tuning.outline_width_px_at_scale1 = readParamFloatClamped(params, "VTSCHUD.OutlineWidthPxAtScale1", tuning.outline_width_px_at_scale1, 1.0f, 100.0f);
-  tuning.main_stroke_width_px_at_scale1 = readParamFloatClamped(params, "VTSCHUD.MainStrokeWidthPxAtScale1", tuning.main_stroke_width_px_at_scale1, 1.0f, 100.0f);
-  tuning.distance_label_sep_px_at_scale1 = readParamFloatClamped(params, "VTSCHUD.DistanceLabelSepPxAtScale1", tuning.distance_label_sep_px_at_scale1, 0.0f, 120.0f);
-  tuning.speed_font_px_at_scale1 = readParamFloatClamped(params, "VTSCHUD.SpeedFontPxAtScale1", tuning.speed_font_px_at_scale1, 8.0f, 80.0f);
-  tuning.bottom_font_px_at_scale1 = readParamFloatClamped(params, "VTSCHUD.BottomFontPxAtScale1", tuning.bottom_font_px_at_scale1, 8.0f, 80.0f);
+  tuning.road_width_px = readParamFloatClamped(params, "VTSCHUD.RoadWidthPx", tuning.road_width_px, 4.0f, 60.0f);
+  tuning.glow_width_px = readParamFloatClamped(params, "VTSCHUD.GlowWidthPx", tuning.glow_width_px, 2.0f, 40.0f);
+  tuning.speed_font_px = readParamFloatClamped(params, "VTSCHUD.SpeedFontPx", tuning.speed_font_px, 20.0f, 120.0f);
+  tuning.unit_font_px = readParamFloatClamped(params, "VTSCHUD.UnitFontPx", tuning.unit_font_px, 10.0f, 60.0f);
 
   vtsc_copilot_tuning_ = tuning;
 }
@@ -275,15 +265,16 @@ void HudRendererSP::updateState(const UIState &s) {
     }
   }
 
-  // ===== VTSC Rally Co-Pilot: always-on road preview =====
+  // ===== VTSC Rally Co-Pilot: single-curve full-panel preview =====
   if (!vtsc_copilot_hud_enabled_ || !s.sm) {
     vtsc_copilot_alpha_ = 0.0f;
     vtsc_copilot_curve_points_m_.clear();
     vtsc_copilot_tiles_.clear();
-    vtsc_copilot_prev_tiles_.clear();
     vtsc_copilot_exiting_tile_active_ = false;
     vtsc_copilot_last_nonempty_tiles_time_valid_ = false;
-    vtsc_copilot_branch_stubs_.clear();
+    vtsc_prev_tile_id_ = 0;
+    vtsc_prev_advisory_speed_mps_ = 0.0f;
+    vtsc_speed_flash_active_ = false;
     return;
   }
 
@@ -327,6 +318,7 @@ void HudRendererSP::updateState(const UIState &s) {
     }
   } catch (const std::exception&) {}
 
+  // Hold previous tiles briefly when data goes empty to prevent flicker.
   const auto tiles_now = std::chrono::steady_clock::now();
   if (!new_tiles.empty()) {
     vtsc_copilot_last_nonempty_tiles_time_ = tiles_now;
@@ -339,31 +331,26 @@ void HudRendererSP::updateState(const UIState &s) {
     }
   }
 
-  auto same_tile_order = [](const auto &lhs, const auto &rhs) {
-    if (lhs.size() != rhs.size()) return false;
-    for (size_t i = 0; i < lhs.size(); ++i) {
-      if (lhs[i].id != rhs[i].id) return false;
-    }
-    return true;
-  };
-  auto contains_tile_id = [](const auto &tiles, uint32_t id) {
-    return std::any_of(tiles.begin(), tiles.end(), [id](const auto &tile) { return tile.id == id; });
-  };
-
-  if (!same_tile_order(new_tiles, vtsc_copilot_tiles_)) {
-    const uint32_t previous_bottom_id = vtsc_copilot_tiles_.empty() ? 0 : vtsc_copilot_tiles_.front().id;
-    if (previous_bottom_id != 0 && !contains_tile_id(new_tiles, previous_bottom_id)) {
+  // Detect front-tile change for transition animation.
+  const uint32_t new_front_id = new_tiles.empty() ? 0 : new_tiles.front().id;
+  const uint32_t old_front_id = vtsc_copilot_tiles_.empty() ? 0 : vtsc_copilot_tiles_.front().id;
+  if (new_front_id != old_front_id) {
+    // Previous front tile exits
+    if (old_front_id != 0 && !vtsc_copilot_tiles_.front().points_m.empty()) {
       vtsc_copilot_exiting_tile_ = vtsc_copilot_tiles_.front();
-      vtsc_copilot_exiting_tile_active_ = !vtsc_copilot_exiting_tile_.points_m.empty();
+      vtsc_copilot_exiting_tile_active_ = true;
       vtsc_copilot_exit_anim_progress_ = 0.0f;
     }
-    vtsc_copilot_prev_tiles_ = vtsc_copilot_tiles_;
-    vtsc_copilot_tiles_ = std::move(new_tiles);
-    vtsc_copilot_stack_anim_progress_ = vtsc_copilot_prev_tiles_.empty() ? 1.0f : 0.0f;
-  } else {
-    vtsc_copilot_tiles_ = std::move(new_tiles);
+    // New front tile enters
+    vtsc_copilot_enter_anim_progress_ = 0.0f;
+    // Reset speed flash on tile change
+    vtsc_prev_tile_id_ = new_front_id;
+    vtsc_prev_advisory_speed_mps_ = new_tiles.empty() ? 0.0f : new_tiles.front().advisory_speed_mps;
+    vtsc_speed_flash_active_ = false;
   }
+  vtsc_copilot_tiles_ = std::move(new_tiles);
 
+  // Update convenience state from front tile.
   if (!vtsc_copilot_tiles_.empty()) {
     const auto &tile = vtsc_copilot_tiles_.front();
     vtsc_copilot_curve_distance_m_ = tile.distance_m;
@@ -372,6 +359,16 @@ void HudRendererSP::updateState(const UIState &s) {
     vtsc_copilot_curve_direction_ = tile.direction;
     vtsc_copilot_curve_severity_ = tile.severity;
     vtsc_target_speed_mps_ = tile.advisory_speed_mps;
+
+    // Detect mid-turn speed adjustment for flash animation.
+    if (tile.id == vtsc_prev_tile_id_ &&
+        std::abs(tile.advisory_speed_mps - vtsc_prev_advisory_speed_mps_) > 0.15f) {
+      vtsc_speed_flash_is_increase_ = tile.advisory_speed_mps > vtsc_prev_advisory_speed_mps_;
+      vtsc_speed_flash_active_ = true;
+      vtsc_speed_flash_start_ = std::chrono::steady_clock::now();
+    }
+    vtsc_prev_advisory_speed_mps_ = tile.advisory_speed_mps;
+    vtsc_prev_tile_id_ = tile.id;
   } else {
     vtsc_copilot_curve_distance_m_ = 0.0f;
     vtsc_copilot_curve_time_to_s_ = 0.0f;
@@ -385,16 +382,16 @@ void HudRendererSP::updateState(const UIState &s) {
 }
 
 void HudRendererSP::draw(QPainter &p, const QRect &surface_rect) {
-  // Draw base HUD elements
+  // Draw VTSC rally co-pilot curve FIRST so it renders behind speed/set-speed
+  if (vtsc_copilot_hud_enabled_ && vtsc_copilot_alpha_ > 0.01f) {
+    drawVTSCCoPilotCurve(p, surface_rect);
+  }
+
+  // Draw base HUD elements (speed, set speed, etc.) on top of curve
   HudRenderer::draw(p, surface_rect);
 
   // Draw system readiness indicator
   drawSystemReadiness(p, surface_rect);
-
-  // Draw VTSC rally co-pilot curve preview when enabled and visible (with fade)
-  if (vtsc_copilot_hud_enabled_ && vtsc_copilot_alpha_ > 0.01f) {
-    drawVTSCCoPilotCurve(p, surface_rect);
-  }
 
   // Draw RTI widget when enabled (multi-threat only)
   if (rti_enabled && rti_hud_enabled) {
@@ -910,13 +907,21 @@ void HudRendererSP::drawVTSCCoPilotCurve(QPainter &p, const QRect &surface_rect)
     return;
   }
 
+  // === Layout: right 33% of usable area, below steering wheel exclusion zone ===
   const QRect inner = surface_rect.adjusted(UI_BORDER_SIZE, UI_BORDER_SIZE, -UI_BORDER_SIZE, -UI_BORDER_SIZE);
-  const QRect right_third(inner.left() + (2 * inner.width()) / 3, inner.top(), inner.width() / 3, inner.height());
+  constexpr int kSteeringWheelClearance = 242;  // UI_BORDER_SIZE(30) + btn_size(192) + 20px padding
+  constexpr int kBottomMargin = 40;
+  constexpr int kSidePad = 30;
+  const int panel_left = inner.left() + (2 * inner.width()) / 3;
+  const QRect panel(panel_left, kSteeringWheelClearance,
+                    inner.right() - panel_left - kSidePad,
+                    inner.bottom() - kSteeringWheelClearance - kBottomMargin);
+  if (panel.width() < 80 || panel.height() < 80) return;
 
   p.save();
   p.setRenderHint(QPainter::Antialiasing, true);
 
-  const float kScale = std::clamp(vtsc_copilot_tuning_.scale * 0.525f, 0.70f, 1.70f);
+  // === Timing ===
   const auto now_tp = std::chrono::steady_clock::now();
   float dt = 0.0f;
   if (vtsc_copilot_last_draw_time_valid_) {
@@ -925,8 +930,9 @@ void HudRendererSP::drawVTSCCoPilotCurve(QPainter &p, const QRect &surface_rect)
   vtsc_copilot_last_draw_time_ = now_tp;
   vtsc_copilot_last_draw_time_valid_ = true;
 
-  if (vtsc_copilot_stack_anim_progress_ < 1.0f) {
-    vtsc_copilot_stack_anim_progress_ = std::min(1.0f, vtsc_copilot_stack_anim_progress_ + dt / 0.18f);
+  // Advance enter/exit animations.
+  if (vtsc_copilot_enter_anim_progress_ < 1.0f) {
+    vtsc_copilot_enter_anim_progress_ = std::min(1.0f, vtsc_copilot_enter_anim_progress_ + dt / 0.22f);
   }
   if (vtsc_copilot_exiting_tile_active_) {
     vtsc_copilot_exit_anim_progress_ = std::min(1.0f, vtsc_copilot_exit_anim_progress_ + dt / 0.26f);
@@ -935,241 +941,195 @@ void HudRendererSP::drawVTSCCoPilotCurve(QPainter &p, const QRect &surface_rect)
     }
   }
 
-  auto ease_out = [](float t) {
+  auto ease_out = [](float t) -> float {
     t = std::clamp(t, 0.0f, 1.0f);
     const float inv = 1.0f - t;
     return 1.0f - inv * inv * inv;
   };
-  auto ease_in = [](float t) {
-    t = std::clamp(t, 0.0f, 1.0f);
-    return t * t * t;
-  };
-  auto severity_text = [](int severity) -> QString {
-    switch (severity) {
-      case 3: return QStringLiteral("TIGHT");
-      case 2: return QStringLiteral("MEDIUM");
-      case 1: return QStringLiteral("GENTLE");
-      default: return QStringLiteral("CURVE");
-    }
-  };
-  auto direction_text = [](int direction) -> QString {
-    switch (direction) {
-      case 1: return QStringLiteral("LEFT");
-      case 2: return QStringLiteral("RIGHT");
-      default: return QStringLiteral("AHEAD");
-    }
-  };
-  auto slot_for_tile = [&](uint32_t id) -> int {
-    for (size_t i = 0; i < vtsc_copilot_prev_tiles_.size(); ++i) {
-      if (vtsc_copilot_prev_tiles_[i].id == id) {
-        return static_cast<int>(i);
+
+  // === Left-edge vignette: subtle darkening so white curve reads over bright camera feed ===
+  {
+    constexpr int kVignetteFeather = 100;  // gradient width in px
+    QLinearGradient vignette(panel.left() - 20, 0, panel.left() + kVignetteFeather, 0);
+    vignette.setColorAt(0.00, QColor(0, 0, 0, 0));
+    vignette.setColorAt(0.30, QColor(0, 0, 0, 45));
+    vignette.setColorAt(1.00, QColor(0, 0, 0, 0));
+    p.setPen(Qt::NoPen);
+    p.setBrush(vignette);
+    p.drawRect(QRect(panel.left() - 20, panel.top(), kVignetteFeather + 20, panel.height()));
+  }
+
+  // === Pick which tile to display (single tile, apex-flip for linked curves) ===
+  const VTSCCoPilotTileState *display_tile = nullptr;
+  if (!vtsc_copilot_tiles_.empty()) {
+    display_tile = &vtsc_copilot_tiles_.front();
+    // Linked-curve apex flip: if we're inside the first curve (distanceM <= 0) and past
+    // the approximate midpoint, and there's a next curve, flip to it.
+    if (vtsc_copilot_tiles_.size() > 1 && display_tile->distance_m <= 0.0f) {
+      float fwd_extent = 0.0f;
+      for (const auto &pt : display_tile->points_m) {
+        fwd_extent = std::max(fwd_extent, static_cast<float>(pt.x()));
+      }
+      if (fwd_extent > 0.1f && std::abs(display_tile->distance_m) > fwd_extent * 0.5f) {
+        display_tile = &vtsc_copilot_tiles_[1];
       }
     }
-    return -1;
-  };
-  auto speed_text = [&](float speed_mps) -> QString {
-    const float display = std::max(0.0f, speed_mps) * (is_metric ? MS_TO_KPH : MS_TO_MPH);
-    return QString::number(static_cast<int>(std::round(display)));
-  };
-  const QString speed_unit = is_metric ? QStringLiteral("km/h") : QStringLiteral("mph");
+  }
 
-  const int bottom_safe = roundToInt(vtsc_copilot_tuning_.bottom_safe_px_at_scale1 * kScale) + roundToInt(12.0f * kScale);
-  const float active_h = 228.0f * kScale;
-  const float queued_h = 154.0f * kScale;
-  const float stack_step = 96.0f * kScale;
-  const float stack_w = std::min(static_cast<float>(right_third.width()) * 0.88f, 392.0f * kScale);
-  const float stack_left = static_cast<float>(right_third.center().x()) - stack_w * 0.5f;
-  const float active_bottom = static_cast<float>(inner.bottom()) - static_cast<float>(bottom_safe);
-  const int visible_count = std::min<int>(4, static_cast<int>(vtsc_copilot_tiles_.size()));
-  const float stack_top = active_bottom - active_h - std::max(0, visible_count - 1) * stack_step - 26.0f * kScale;
-  const QRectF ambient_rect(stack_left - 24.0f * kScale, stack_top, stack_w + 48.0f * kScale,
-                            active_h + std::max(0, visible_count - 1) * stack_step + 56.0f * kScale);
+  // === Helper: draw a single curve segment in the panel ===
+  const float road_w = vtsc_copilot_tuning_.road_width_px;
+  const float glow_extra = vtsc_copilot_tuning_.glow_width_px;
 
-  QRadialGradient ambient_glow(ambient_rect.center(), std::max(ambient_rect.width(), ambient_rect.height()) * 0.58f);
-  ambient_glow.setColorAt(0.00, QColor(245, 188, 92, 32));
-  ambient_glow.setColorAt(0.34, QColor(16, 20, 26, 34));
-  ambient_glow.setColorAt(1.00, QColor(0, 0, 0, 0));
-  p.setPen(Qt::NoPen);
-  p.setBrush(ambient_glow);
-  p.drawEllipse(ambient_rect);
-
-  auto draw_tile = [&](const VTSCCoPilotTileState &tile, const QRectF &rect, float opacity, bool active) {
-    if (rect.width() < 40.0f || rect.height() < 40.0f || tile.points_m.size() < 2 || opacity <= 0.01f) {
-      return;
-    }
+  auto draw_curve = [&](const VTSCCoPilotTileState &tile, float opacity) {
+    if (tile.points_m.size() < 2 || opacity <= 0.01f) return;
 
     p.save();
     p.setOpacity(opacity * vtsc_copilot_alpha_);
 
-    const float radius = 22.0f * kScale;
-    const float shadow_offset = (active ? 12.0f : 9.0f) * kScale;
-    const float road_width = (active ? 15.5f : 12.0f) * kScale;
-    const QColor accent = active ? QColor(245, 188, 92, 255) : QColor(178, 188, 202, 255);
-    const QColor surface_top = active ? QColor(22, 28, 34, 238) : QColor(18, 23, 29, 224);
-    const QColor surface_bottom = active ? QColor(10, 13, 18, 232) : QColor(8, 11, 16, 216);
-
-    QPainterPath tile_path;
-    tile_path.addRoundedRect(rect, radius, radius);
-
-    p.setPen(Qt::NoPen);
-    p.setBrush(QColor(0, 0, 0, active ? 92 : 72));
-    p.drawPath(tile_path.translated(0.0f, shadow_offset));
-
-    QLinearGradient tile_grad(rect.topLeft(), rect.bottomLeft());
-    tile_grad.setColorAt(0.00, surface_top);
-    tile_grad.setColorAt(0.70, surface_bottom);
-    tile_grad.setColorAt(1.00, QColor(5, 8, 12, active ? 238 : 220));
-    p.setBrush(tile_grad);
-    p.drawPath(tile_path);
-
-    QPen border_pen(QColor(255, 255, 255, active ? 34 : 22), 1.4f * kScale);
-    p.setBrush(Qt::NoBrush);
-    p.setPen(border_pen);
-    p.drawPath(tile_path);
-
-    QLinearGradient accent_grad(rect.left(), rect.top(), rect.right(), rect.top());
-    accent_grad.setColorAt(0.00, QColor(accent.red(), accent.green(), accent.blue(), active ? 0 : 0));
-    accent_grad.setColorAt(0.22, QColor(accent.red(), accent.green(), accent.blue(), active ? 196 : 68));
-    accent_grad.setColorAt(0.80, QColor(accent.red(), accent.green(), accent.blue(), active ? 128 : 28));
-    accent_grad.setColorAt(1.00, QColor(accent.red(), accent.green(), accent.blue(), 0));
-    QRectF accent_bar(rect.left() + 18.0f * kScale, rect.top() + 12.0f * kScale,
-                      rect.width() - 36.0f * kScale, 3.0f * kScale);
-    p.fillRect(accent_bar, accent_grad);
-
-    QRectF glyph_rect = active
-      ? rect.adjusted(22.0f * kScale, 26.0f * kScale, -22.0f * kScale, -70.0f * kScale)
-      : rect.adjusted(20.0f * kScale, 24.0f * kScale, -20.0f * kScale, -34.0f * kScale);
-    glyph_rect.setHeight(std::max(static_cast<float>(glyph_rect.height()), 28.0f * kScale));
-
-    float fwd_max = 18.0f;
-    float lat_max = 0.0f;
+    // Compute geometry bounding box.
+    float fwd_min = std::numeric_limits<float>::max(), fwd_max = 0.0f;
+    float lat_min = std::numeric_limits<float>::max(), lat_max = std::numeric_limits<float>::lowest();
     for (const auto &pt : tile.points_m) {
+      fwd_min = std::min(fwd_min, static_cast<float>(pt.x()));
       fwd_max = std::max(fwd_max, static_cast<float>(pt.x()));
-      lat_max = std::max(lat_max, std::abs(static_cast<float>(pt.y())));
+      lat_min = std::min(lat_min, static_cast<float>(pt.y()));
+      lat_max = std::max(lat_max, static_cast<float>(pt.y()));
     }
-    const float usable_h = std::max(static_cast<float>(glyph_rect.height()) - 8.0f * kScale, 16.0f * kScale);
-    const float half_width = std::max(0.5f * static_cast<float>(glyph_rect.width()) - (road_width + 10.0f * kScale), 18.0f * kScale);
-    const float meters_to_px_y = usable_h / std::max(18.0f, fwd_max);
-    const float meters_to_px_x_fit = lat_max > 0.1f ? (half_width / lat_max) : meters_to_px_y;
-    // Preserve turn severity by sharing a meter scale between forward and lateral axes.
-    // A small lateral boost keeps gentle sweepers readable without turning them into hairpins.
-    const float meters_to_px_x = std::min(meters_to_px_x_fit, meters_to_px_y * (active ? 1.18f : 1.12f));
+    const float fwd_range = std::max(fwd_max - fwd_min, 1.0f);
+    const float lat_range = std::max(lat_max - lat_min, 0.1f);
+    // Scale to fill panel with padding, preserving aspect ratio.
+    // Use shared meters-to-px scale so gentle sweepers don't render like hairpins.
+    const float pad = road_w + glow_extra + 30.0f;
+    const float usable_w = std::max(static_cast<float>(panel.width()) - 2.0f * pad, 40.0f);
+    const float usable_h = std::max(static_cast<float>(panel.height()) - 2.0f * pad, 40.0f);
+    const float scale_fwd = usable_h / fwd_range;
+    const float scale_lat = lat_range > 0.1f ? (usable_w / lat_range) : scale_fwd;
+    const float m_to_px = std::min(scale_fwd, scale_lat);
+
+    // Center the curve geometry within the panel.
+    const float rendered_w = lat_range * m_to_px;
+    const float offset_x = static_cast<float>(panel.center().x()) - rendered_w * 0.5f;
+    const float offset_y = static_cast<float>(panel.bottom()) - pad;
 
     auto to_px = [&](const QPointF &pt) -> QPointF {
-      const float x_px = static_cast<float>(glyph_rect.center().x()) - static_cast<float>(pt.y()) * meters_to_px_x;
-      const float y_px = static_cast<float>(glyph_rect.bottom()) - std::clamp(static_cast<float>(pt.x()) * meters_to_px_y, 0.0f, usable_h);
-      return QPointF(x_px, y_px);
+      const float px_x = offset_x + (static_cast<float>(pt.y()) - lat_min) * m_to_px;
+      const float px_y = offset_y - (static_cast<float>(pt.x()) - fwd_min) * m_to_px;
+      return QPointF(px_x, px_y);
     };
 
-    std::vector<QPointF> glyph_pts;
-    glyph_pts.reserve(tile.points_m.size());
+    // Build pixel path.
+    std::vector<QPointF> pts;
+    pts.reserve(tile.points_m.size());
     for (const auto &pt : tile.points_m) {
-      glyph_pts.push_back(to_px(pt));
+      pts.push_back(to_px(pt));
     }
 
     QPainterPath road_path;
-    road_path.moveTo(glyph_pts.front());
-    for (size_t i = 1; i < glyph_pts.size(); ++i) {
-      road_path.lineTo(glyph_pts[i]);
+    road_path.moveTo(pts.front());
+    for (size_t i = 1; i < pts.size(); ++i) {
+      road_path.lineTo(pts[i]);
     }
 
-    QLinearGradient road_grad(glyph_pts.front(), glyph_pts.back());
+    // Road gradient: fade at entry (bottom) and exit (top).
+    QLinearGradient road_grad(pts.front(), pts.back());
     road_grad.setColorAt(0.00, QColor(255, 255, 255, 0));
-    road_grad.setColorAt(0.14, QColor(255, 255, 255, active ? 238 : 212));
-    road_grad.setColorAt(0.82, QColor(255, 255, 255, active ? 232 : 200));
+    road_grad.setColorAt(0.10, QColor(255, 255, 255, 240));
+    road_grad.setColorAt(0.85, QColor(255, 255, 255, 235));
     road_grad.setColorAt(1.00, QColor(255, 255, 255, 0));
 
-    QLinearGradient glow_grad(glyph_pts.front(), glyph_pts.back());
+    QLinearGradient glow_grad(pts.front(), pts.back());
     glow_grad.setColorAt(0.00, QColor(255, 255, 255, 0));
-    glow_grad.setColorAt(0.16, QColor(255, 255, 255, active ? 74 : 52));
-    glow_grad.setColorAt(0.84, QColor(255, 255, 255, active ? 56 : 40));
+    glow_grad.setColorAt(0.12, QColor(255, 255, 255, 60));
+    glow_grad.setColorAt(0.88, QColor(255, 255, 255, 50));
     glow_grad.setColorAt(1.00, QColor(255, 255, 255, 0));
 
-    p.setPen(QPen(QColor(0, 0, 0, active ? 110 : 88), road_width + 9.0f * kScale, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-    p.drawPath(road_path.translated(0.0f, 4.5f * kScale));
-    p.setPen(QPen(QBrush(glow_grad), road_width + 7.0f * kScale, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    // 1) Shadow
+    p.setPen(QPen(QColor(0, 0, 0, 100), road_w + glow_extra + 6.0f, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    p.drawPath(road_path.translated(0.0f, 4.0f));
+
+    // 2) Glow
+    p.setPen(QPen(QBrush(glow_grad), road_w + glow_extra, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
     p.drawPath(road_path);
-    p.setPen(QPen(QBrush(road_grad), road_width, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+
+    // 3) Main road stroke
+    p.setPen(QPen(QBrush(road_grad), road_w, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
     p.drawPath(road_path);
-    p.setPen(QPen(QColor(255, 255, 255, active ? 224 : 192), std::max(1.2f, 2.1f * kScale), Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-    p.setOpacity(opacity * vtsc_copilot_alpha_ * (active ? 0.36f : 0.26f));
+
+    // 4) Bright center highlight
+    p.setOpacity(opacity * vtsc_copilot_alpha_ * 0.30f);
+    p.setPen(QPen(QColor(255, 255, 255, 210), std::max(1.5f, road_w * 0.14f), Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
     p.drawPath(road_path);
     p.setOpacity(opacity * vtsc_copilot_alpha_);
-
-    const QString title = QString("%1 %2").arg(severity_text(tile.severity), direction_text(tile.direction));
-    const QString distance = formatDistance(std::max(0.0f, tile.distance_m));
-    const QString eta = tile.time_to_s > 0.05f ? QString("%1s").arg(tile.time_to_s, 0, 'f', tile.time_to_s >= 10.0f ? 0 : 1)
-                                               : QStringLiteral("NOW");
-
-    p.setPen(QColor(accent.red(), accent.green(), accent.blue(), active ? 255 : 220));
-    p.setFont(InterFont(roundToInt((active ? 20.0f : 17.0f) * kScale), QFont::DemiBold));
-    p.drawText(QRectF(rect.left() + 22.0f * kScale, rect.top() + 18.0f * kScale,
-                      rect.width() - 44.0f * kScale, 28.0f * kScale),
-               Qt::AlignLeft | Qt::AlignVCenter, title);
-
-    p.setPen(QColor(228, 234, 242, active ? 228 : 192));
-    p.setFont(InterFont(roundToInt((active ? 18.0f : 16.0f) * kScale), QFont::DemiBold));
-    p.drawText(QRectF(rect.left() + 22.0f * kScale, rect.top() + 18.0f * kScale,
-                      rect.width() - 44.0f * kScale, 28.0f * kScale),
-               Qt::AlignRight | Qt::AlignVCenter, eta);
-
-    if (active) {
-      p.setPen(QColor(232, 237, 244, 220));
-      p.setFont(InterFont(roundToInt(18.0f * kScale), QFont::DemiBold));
-      p.drawText(QRectF(rect.left() + 22.0f * kScale, rect.bottom() - 42.0f * kScale,
-                        rect.width() * 0.48f, 22.0f * kScale),
-                 Qt::AlignLeft | Qt::AlignVCenter, distance);
-
-      p.setPen(QColor(255, 255, 255, 246));
-      p.setFont(InterFont(roundToInt(34.0f * kScale), QFont::Bold));
-      p.drawText(QRectF(rect.right() - 132.0f * kScale, rect.bottom() - 58.0f * kScale,
-                        88.0f * kScale, 34.0f * kScale),
-                 Qt::AlignRight | Qt::AlignVCenter, speed_text(tile.advisory_speed_mps));
-      p.setPen(QColor(214, 221, 230, 200));
-      p.setFont(InterFont(roundToInt(16.0f * kScale), QFont::DemiBold));
-      p.drawText(QRectF(rect.right() - 126.0f * kScale, rect.bottom() - 31.0f * kScale,
-                        112.0f * kScale, 18.0f * kScale),
-                 Qt::AlignRight | Qt::AlignVCenter, speed_unit);
-    } else {
-      p.setPen(QColor(224, 229, 236, 176));
-      p.setFont(InterFont(roundToInt(15.0f * kScale), QFont::DemiBold));
-      p.drawText(QRectF(rect.left() + 22.0f * kScale, rect.bottom() - 30.0f * kScale,
-                        rect.width() - 44.0f * kScale, 18.0f * kScale),
-                 Qt::AlignLeft | Qt::AlignVCenter, distance);
-    }
 
     p.restore();
   };
 
-  const float shift_eased = ease_out(vtsc_copilot_stack_anim_progress_);
-  for (size_t i = 0; i < vtsc_copilot_tiles_.size() && i < 4; ++i) {
-    const auto &tile = vtsc_copilot_tiles_[i];
-    const int previous_slot = slot_for_tile(tile.id);
-    const float start_slot = previous_slot >= 0 ? static_cast<float>(previous_slot) : static_cast<float>(i) + 0.40f;
-    const float display_slot = start_slot + (static_cast<float>(i) - start_slot) * shift_eased;
-    const float depth = std::clamp(display_slot, 0.0f, 3.0f);
-    const float width_scale = 1.0f - 0.06f * depth;
-    const float height_scale = 1.0f - 0.08f * depth;
-    const float tile_h = (i == 0 ? active_h : queued_h) * height_scale;
-    const float tile_w = stack_w * width_scale;
-    const float tile_bottom = active_bottom - display_slot * stack_step;
-    const QRectF tile_rect(stack_left + 0.5f * (stack_w - tile_w), tile_bottom - tile_h, tile_w, tile_h);
-    const float opacity = (i == 0 ? 1.0f : std::max(0.34f, 0.88f - 0.16f * depth));
-    draw_tile(tile, tile_rect, opacity, i == 0);
+  // === Draw exiting tile (cross-fade out) ===
+  if (vtsc_copilot_exiting_tile_active_ && vtsc_copilot_exiting_tile_.points_m.size() >= 2) {
+    const float exit_opacity = 1.0f - ease_out(vtsc_copilot_exit_anim_progress_);
+    draw_curve(vtsc_copilot_exiting_tile_, exit_opacity);
   }
 
-  if (vtsc_copilot_exiting_tile_active_ && vtsc_copilot_exiting_tile_.points_m.size() >= 2) {
-    const float exit_t = ease_in(vtsc_copilot_exit_anim_progress_);
-    const float drop_distance = 140.0f * kScale;
-    const float tile_bottom = active_bottom + exit_t * drop_distance;
-    const QRectF exit_rect(stack_left, tile_bottom - active_h, stack_w, active_h);
+  // === Draw active tile (cross-fade in) ===
+  if (display_tile && display_tile->points_m.size() >= 2) {
+    const float enter_opacity = ease_out(vtsc_copilot_enter_anim_progress_);
+    draw_curve(*display_tile, enter_opacity);
 
-    p.save();
-    p.translate(exit_rect.center());
-    p.rotate(-3.5f * exit_t);
-    p.translate(-exit_rect.center());
-    draw_tile(vtsc_copilot_exiting_tile_, exit_rect, 1.0f - exit_t, true);
-    p.restore();
+    // === Speed recommendation in lower-right of panel ===
+    const float speed_mps = display_tile->advisory_speed_mps;
+    const float display_speed = std::max(0.0f, speed_mps) * (is_metric ? MS_TO_KPH : MS_TO_MPH);
+    const QString speed_str = QString::number(static_cast<int>(std::round(display_speed)));
+    const QString unit_str = is_metric ? QStringLiteral("km/h") : QStringLiteral("mph");
+
+    // Determine speed text color (white, or two-phase flash green/red).
+    // Phase 1 (0–350ms): snap to bright flash color, hold at peak.
+    // Phase 2 (350ms–1.35s): ease-out fade from flash color back to white.
+    QColor speed_color(255, 255, 255, 240);
+    if (vtsc_speed_flash_active_) {
+      const float flash_elapsed = std::chrono::duration<float>(now_tp - vtsc_speed_flash_start_).count();
+      constexpr float kPeakDuration = 0.35f;   // bright hold
+      constexpr float kFadeDuration = 1.00f;    // fade back to white
+      constexpr float kTotalDuration = kPeakDuration + kFadeDuration;
+      if (flash_elapsed >= kTotalDuration) {
+        vtsc_speed_flash_active_ = false;
+      } else {
+        const QColor flash_base = vtsc_speed_flash_is_increase_
+          ? QColor(0, 220, 80, 240)   // green for bump
+          : QColor(240, 60, 60, 240);  // red for drop
+        if (flash_elapsed < kPeakDuration) {
+          // Phase 1: hold at full flash color
+          speed_color = flash_base;
+        } else {
+          // Phase 2: ease-out fade from flash color → white
+          const float fade_t = ease_out((flash_elapsed - kPeakDuration) / kFadeDuration);
+          speed_color = QColor(
+            flash_base.red()   + static_cast<int>(fade_t * (255 - flash_base.red())),
+            flash_base.green() + static_cast<int>(fade_t * (255 - flash_base.green())),
+            flash_base.blue()  + static_cast<int>(fade_t * (255 - flash_base.blue())),
+            240);
+        }
+      }
+    }
+
+    p.setOpacity(enter_opacity * vtsc_copilot_alpha_);
+    const int speed_font = roundToInt(vtsc_copilot_tuning_.speed_font_px);
+    const int unit_font = roundToInt(vtsc_copilot_tuning_.unit_font_px);
+    const int text_right_pad = 24;
+    const int text_bottom_pad = 20;
+
+    // Speed number
+    p.setPen(speed_color);
+    p.setFont(InterFont(speed_font, QFont::Bold));
+    QRectF speed_rect(panel.right() - 200.0f, panel.bottom() - text_bottom_pad - speed_font - unit_font - 6,
+                      200.0f - text_right_pad, static_cast<float>(speed_font) + 4.0f);
+    p.drawText(speed_rect, Qt::AlignRight | Qt::AlignBottom, speed_str);
+
+    // Unit label
+    p.setPen(QColor(210, 218, 228, 190));
+    p.setFont(InterFont(unit_font, QFont::DemiBold));
+    QRectF unit_rect(panel.right() - 200.0f, speed_rect.bottom() + 2.0f,
+                     200.0f - text_right_pad, static_cast<float>(unit_font) + 4.0f);
+    p.drawText(unit_rect, Qt::AlignRight | Qt::AlignTop, unit_str);
   }
 
   p.restore();
