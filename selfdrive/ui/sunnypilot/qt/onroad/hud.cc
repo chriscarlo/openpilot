@@ -947,18 +947,18 @@ void HudRendererSP::drawVTSCCoPilotCurve(QPainter &p, const QRect &surface_rect)
     return 1.0f - inv * inv * inv;
   };
 
-  // === Right-side vignette: matches the existing top-edge header gradient ===
-  // Header gradient: 0.45 alpha black over a 168px fade (UI_HEADER_HEIGHT / 2.5).
-  // Replicate the same values horizontally: transparent at left edge, 0.45 at right.
+  // === Right-edge vignette: match the header fade without blanketing the whole panel ===
+  // Qt repeats the terminal stop color after the gradient ends, so the drawn rect must stay
+  // bounded to the fade width or the rest of the panel becomes a flat dark slab.
   {
-    const int fade_dist = static_cast<int>(UI_HEADER_HEIGHT / 2.5f);  // 168px
-    QLinearGradient vignette(panel.left(), 0, panel.left() + fade_dist, 0);
+    const int fade_dist = std::min(static_cast<int>(UI_HEADER_HEIGHT / 2.5f), panel.width());  // 168px nominal
+    const int vignette_x = panel.left() + panel.width() - fade_dist;
+    QLinearGradient vignette(vignette_x, 0, panel.left() + panel.width(), 0);
     vignette.setColorAt(0.0, QColor::fromRgbF(0, 0, 0, 0));
     vignette.setColorAt(1.0, QColor::fromRgbF(0, 0, 0, 0.45));
     p.setPen(Qt::NoPen);
     p.setBrush(vignette);
-    p.drawRect(QRect(panel.left(), panel.top(),
-                     surface_rect.right() - panel.left(), panel.height()));
+    p.drawRect(QRect(vignette_x, panel.top(), fade_dist, panel.height()));
   }
 
   // === Pick which tile to display (single tile, apex-flip for linked curves) ===
