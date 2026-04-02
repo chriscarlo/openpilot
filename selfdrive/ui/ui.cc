@@ -132,6 +132,7 @@ UIState::UIState(QObject *parent) : QObject(parent) {
     "modelV2", "controlsState", "liveCalibration", "radarState", "deviceState",
     "pandaStates", "carParams", "driverMonitoringState", "carState", "driverStateV2",
     "wideRoadCameraState", "managerState", "selfdriveState", "longitudinalPlan",
+    "carControl", "carOutput",
     "liveMapDataSP", "longitudinalPlanSP", "rtiStateSP", "gpsLocationExternal",
   });
   prime_state = new PrimeState(this);

@@ -18,7 +18,7 @@ UIStateSP::UIStateSP(QObject *parent) : UIState(parent) {
     "modelV2", "controlsState", "liveCalibration", "radarState", "deviceState",
     "pandaStates", "carParams", "driverMonitoringState", "carState", "driverStateV2",
     "wideRoadCameraState", "managerState", "selfdriveState", "longitudinalPlan",
-    "modelManagerSP", "selfdriveStateSP", "longitudinalPlanSP", "backupManagerSP", "carControl", "liveMapDataSP",
+    "modelManagerSP", "selfdriveStateSP", "longitudinalPlanSP", "backupManagerSP", "carControl", "carOutput", "liveMapDataSP",
     "rtiStateSP",  // RTI (Realtime Traffic Intelligence) state with pre-computed threat display data
     // GPS subscriptions removed - bearing calculations now handled by rtid
   });
