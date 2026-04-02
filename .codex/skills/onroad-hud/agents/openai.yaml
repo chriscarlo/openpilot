@@ -1,0 +1,4 @@
+interface:
+  display_name: "Onroad HUD"
+  short_description: "Map and modify openpilot onroad HUD layers"
+  default_prompt: "Use $onroad-hud to trace and modify the onroad HUD or Sunnypilot overlays."

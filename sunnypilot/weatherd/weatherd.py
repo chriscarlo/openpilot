@@ -68,6 +68,11 @@ def _classify_weather(data: dict) -> dict:
   showers_mm = float(current.get("showers", 0.0))
   snowfall_mm = float(current.get("snowfall", 0.0))
 
+  # Keep the aggregate precipitation field usable downstream even when the
+  # provider only populates component buckets such as rain or showers.
+  if precipitation_mm <= 0.0:
+    precipitation_mm = rain_mm + showers_mm
+
   severity = WMO_SEVERITY.get(weather_code, "none")
 
   # Belt-and-suspenders: if the WMO code says none but we see actual

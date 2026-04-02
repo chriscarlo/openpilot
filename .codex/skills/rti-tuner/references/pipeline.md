@@ -14,6 +14,8 @@
   `selfdrive/ui/sunnypilot/qt/onroad/hud.cc`, `selfdrive/ui/sunnypilot/ui.cc`
 - Offroad UI:
   `selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/rti_control.cc`, `selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/rti_settings_panel.cc`
+- Adjacent weather path that shares the RTI settings screen but not RTI runtime:
+  `sunnypilot/weatherd/weatherd.py`, `sunnypilot/selfdrive/controls/lib/weather_controller.py`, `system/manager/process_config.py`
 
 ## Branch Facts Worth Rechecking Before Tuning
 
@@ -25,6 +27,7 @@
 - `ThreatDetector` publishes at most five processed threats, sorted nearest-first.
 - `RTIController` re-checks `RTIEnabled` live, but most RTI distance and speed tuning knobs are still init-cached across RTID, `ThreatDetector`, and `RTIController`.
 - Current RTI settings UI shows miles for range knobs and mph for custom speed reduction while storing meter and km/h params underneath.
+- `RTISettingsPanel` also contains the Inclement Weather section, but weather speed reduction is a separate `weatherd` → `WeatherCondition` → `WeatherController` planner path rather than an `rtid` or `rtiStateSP` path.
 - `RTIDataSource` and `RTIAggressiveness` have a lot of legacy surface area in params, UI, and tests; confirm runtime effect in the current branch before tuning around them.
 
 ## Test Map

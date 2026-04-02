@@ -41,6 +41,7 @@ description: >
 - RTID explicitly handles the case where neither map nor dashboard speed-limit input has produced a usable posted speed yet; missing posted speed at a snapshot is not by itself a fault.
 - `ThreatDetector` and `SpeedRecommendationEngine` still cache many params in `__init__`, and `RTIController` also caches most speed and distance params on init. `RTIEnabled` is checked live, and RTI threat filtering gets an extra live read in the controller. Do not assume a param is live-tuneable without checking its actual read site.
 - Current RTI offroad range controls display miles and store meters; custom speed reduction displays mph and stores km/h. Do not assume older metric or imperial plans or broad historical tests match the current panel behavior.
+- `RTISettingsPanel` also hosts the Inclement Weather controls, but weather slowdown is not part of `rtid` or `rtiStateSP`. Runtime weather ownership is `sunnypilot/weatherd/weatherd.py` plus `sunnypilot/selfdrive/controls/lib/weather_controller.py`, and `longitudinal_planner.py` applies it as a separate cap alongside RTI.
 
 ## Workflow Decision Tree
 
@@ -58,6 +59,8 @@ description: >
   debug `ThreatDetector` and `RoadMatcher` first; do not paper over a same-road or direction bug in the HUD.
 - Duplicate police or hazard pins clutter the HUD:
   tune duplicate-collapse behavior in `ThreatDetector`; the HUD mostly renders the ranked threats it receives.
+- A report mentions weather behavior because the toggle lives in the RTI settings screen:
+  separate UI placement from runtime ownership. `selfdrive/ui/sunnypilot/qt/offroad/settings/longitudinal/rti_settings_panel.cc` hosts the weather controls, but weather slowdown comes from `weatherd` and `WeatherController`, not from `rtid` or `rtiStateSP`.
 - A param change seems ignored:
   verify whether the param is live-read or init-cached and whether `rtid` or `plannerd` must be restarted before concluding the tuning has no effect.
 - UI looks wrong but message content is already wrong:

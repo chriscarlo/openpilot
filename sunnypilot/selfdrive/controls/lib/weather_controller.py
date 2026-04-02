@@ -71,6 +71,16 @@ def _interpolate_reduction(precip_mm: float,
   return red_heavy
 
 
+def _extract_precipitation_mm(condition: dict) -> float:
+  precip_mm = float(condition.get("precipitation_mm", 0.0))
+  if precip_mm > 0.0:
+    return precip_mm
+
+  rain_mm = float(condition.get("rain_mm", 0.0))
+  showers_mm = float(condition.get("showers_mm", 0.0))
+  return max(0.0, rain_mm + showers_mm)
+
+
 class WeatherController:
   """Weather-aware speed reduction with continuous precipitation interpolation."""
 
@@ -147,7 +157,7 @@ class WeatherController:
 
     severity = condition.get("severity", "none")
     self._severity = severity
-    precip_mm = float(condition.get("precipitation_mm", 0.0))
+    precip_mm = _extract_precipitation_mm(condition)
 
     # No precipitation at all → no reduction
     if severity == "none" and precip_mm <= 0.0:
