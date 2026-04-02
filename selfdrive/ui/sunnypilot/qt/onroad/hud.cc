@@ -391,10 +391,10 @@ void HudRendererSP::draw(QPainter &p, const QRect &surface_rect) {
   // Draw base HUD elements (speed, set speed, etc.) on top of curve
   HudRenderer::draw(p, surface_rect);
 
-  // Draw system readiness indicator
+  // Keep the readiness tree beneath the RTI stack when both occupy the left edge.
   drawSystemReadiness(p, surface_rect);
 
-  // Draw RTI widget when enabled (multi-threat only)
+  // Draw RTI widget last so its cards render on top of the readiness tree.
   if (rti_enabled && rti_hud_enabled) {
     drawRTIThreatIndicatorMulti(p, surface_rect);
   }
@@ -425,10 +425,12 @@ void HudRendererSP::drawSystemReadiness(QPainter &p, const QRect &surface_rect) 
   const int pill_left = surface_rect.left() + 12;
   const int x_center = pill_left + 18;
 
-  // Total column height: N subsystem dots + gap + master dot
   const int n = static_cast<int>(subsystem_statuses_.size());
-  const int col_h = (n - 1) * spacing + 2 * dot_r + master_gap + 2 * master_r;
-  const int y_top = (surface_rect.height() - col_h) / 2;
+  const int legacy_col_h = (n - 1) * spacing + 2 * dot_r + master_gap + 2 * master_r;
+  const int master_y = (surface_rect.height() - legacy_col_h) / 2 + master_r;
+  const int master_to_first_spacing = std::max(master_r + dot_r,
+                                               (master_metrics.height() + subsystem_metrics.height()) / 2) + master_gap;
+  const int first_subsystem_y = master_y + master_to_first_spacing;
 
   // Colors
   static const QColor kRed(0xFF, 0x33, 0x33);
@@ -448,13 +450,12 @@ void HudRendererSP::drawSystemReadiness(QPainter &p, const QRect &surface_rect) 
     max_label_w = std::max(max_label_w, subsystem_metrics.horizontalAdvance(QString::fromStdString(name)));
   }
   const int label_x = x_center + master_r + label_gap;
-  // Draw subsystem dots (bottom to top: index 0 at bottom)
+  // Draw subsystem dots (bottom to top: index 0 at bottom) below the master row.
   for (int i = 0; i < n; i++) {
     const auto &[name, st] = subsystem_statuses_[i];
     QColor c = colorForStatus(st);
 
-    // Y position: first dot at bottom, last at top
-    int y = y_top + col_h - 2 * master_r - master_gap - dot_r - i * spacing;
+    int y = first_subsystem_y + (n - 1 - i) * spacing;
 
     // Glow (larger circle at reduced opacity)
     QColor glow = c;
@@ -479,8 +480,6 @@ void HudRendererSP::drawSystemReadiness(QPainter &p, const QRect &surface_rect) 
     }
   }
 
-  // Master dot at top
-  int master_y = y_top + master_r;
   QColor master_c = all_systems_ready_ ? kGreen : kRed;
 
   // Pulse effect when not all green
