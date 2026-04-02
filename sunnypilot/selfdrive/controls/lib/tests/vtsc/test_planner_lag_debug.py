@@ -96,6 +96,10 @@ def test_recorder_dumps_event_bundle_on_low_cadence_streak(tmp_path, monkeypatch
   monkeypatch.setattr(dbg.threading, "Thread", _InlineThread)
   monkeypatch.setattr(dbg.PlannerLagRecorder, "_guess_current_segment", staticmethod(lambda route: 90))
   monkeypatch.setattr(dbg, "STARTUP_GRACE_S", 0.0)
+  events = []
+  exceptions = []
+  monkeypatch.setattr(dbg.cloudlog, "event", lambda *args, **kwargs: events.append((args, kwargs)))
+  monkeypatch.setattr(dbg.cloudlog, "exception", lambda *args, **kwargs: exceptions.append((args, kwargs)))
 
   clock = _FakeClock(dbg.STARTUP_GRACE_S + 1.0)
   params = _FakeParams(enabled=True, route="00000099--22d46c0f3d")
@@ -142,3 +146,7 @@ def test_recorder_dumps_event_bundle_on_low_cadence_streak(tmp_path, monkeypatch
   assert "low_cadence_streak" in trigger["lag_reasons"]
   assert trigger["curve_preview_points"] == 36
   assert len(trace_lines) == dbg.LOW_CADENCE_STREAK_TRIGGER
+  assert len(events) == 1
+  assert events[0][0] == ("VTSC planner lag dump",)
+  assert events[0][1]["event_id"].endswith("_seg090")
+  assert not exceptions

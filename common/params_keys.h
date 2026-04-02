@@ -538,6 +538,8 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"VTSCVerboseDebug", {PERSISTENT | BACKUP, BOOL, "0"}},
     // VTSC onroad snapshot file writer (JSONL, small/rotating)
     {"VTSCWriteSnapshotFile", {PERSISTENT | BACKUP, BOOL, "0"}},
+    // VTSC planner lag event bundle recorder (heavyweight, developer-only)
+    {"VTSCPlannerLagRecorderEnabled", {PERSISTENT | BACKUP, BOOL, "0"}},
     // VTSC intervention recorder daemon (event bundles under /data/media/0/VTSCTuner/events)
     {"VTSCInterventionRecorderEnabled", {PERSISTENT | BACKUP, BOOL, "1"}},
     // VTSC occlusion arbitration tunables (psi gate + double-cap guard + fov_exit relax)

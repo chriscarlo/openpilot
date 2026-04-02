@@ -13,7 +13,10 @@ from typing import Any
 from openpilot.common.params import Params
 from openpilot.common.swaglog import cloudlog
 
-ENABLE_PARAM = "VTSCWriteSnapshotFile"
+# Planner lag bundle capture is a heavyweight debug path. Keep it behind its own
+# opt-in param so the VTSC snapshot JSONL toggle does not arm this recorder in
+# normal driving.
+ENABLE_PARAM = "VTSCPlannerLagRecorderEnabled"
 REALDATA_DIR = Path("/data/media/0/realdata")
 EVENTS_DIR_DEFAULT = Path("/data/media/0/VTSCDebug/planner_lag_events")
 
@@ -520,7 +523,7 @@ class PlannerLagRecorder:
       self._write_json(event_dir / "summary.json", summary)
       self._write_json(event_dir / "trigger_cycle.json", trigger_cycle)
       self._write_jsonl(event_dir / "trace_20s.jsonl", window)
-      cloudlog.warning(
+      cloudlog.event(
         "VTSC planner lag dump",
         event_id=str(meta.get("event_id", "")),
         route=str(meta.get("route", "")),
