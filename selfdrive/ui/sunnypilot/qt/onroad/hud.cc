@@ -444,7 +444,7 @@ void HudRendererSP::drawSystemReadiness(QPainter &p, const QRect &surface_rect) 
   };
 
   // Background pill
-  int max_label_w = master_metrics.horizontalAdvance(QStringLiteral("ALL"));
+  int max_label_w = master_metrics.horizontalAdvance(QStringLiteral("MSTR"));
   for (const auto &[name, st] : subsystem_statuses_) {
     (void)st;
     max_label_w = std::max(max_label_w, subsystem_metrics.horizontalAdvance(QString::fromStdString(name)));
@@ -510,7 +510,7 @@ void HudRendererSP::drawSystemReadiness(QPainter &p, const QRect &surface_rect) 
     p.setPen(master_c);
     QRect text_rect(label_x, master_y - master_metrics.height() / 2,
                     max_label_w + pill_pad, master_metrics.height());
-    p.drawText(text_rect, Qt::AlignVCenter | Qt::AlignLeft, QStringLiteral("ALL"));
+    p.drawText(text_rect, Qt::AlignVCenter | Qt::AlignLeft, QStringLiteral("MSTR"));
   }
 
   p.restore();
@@ -954,17 +954,21 @@ void HudRendererSP::drawVTSCCoPilotCurve(QPainter &p, const QRect &surface_rect)
     return 1.0f - inv * inv * inv;
   };
 
-  // === Right-edge vignette: full-height strip that feathers only on the inboard edge ===
-  // The strip runs flush to the top/right/bottom screen borders; only the left edge fades.
+  // === Rally HUD backdrop: full-height strip with an in-panel left-edge fade ===
+  // Keep the right/top/bottom edges flush to the screen border, and fade the backdrop
+  // out to transparent as it reaches the rally HUD's left edge.
   {
-    const int fade_dist = std::min(static_cast<int>(UI_HEADER_HEIGHT / 2.5f), surface_rect.width());
-    const int vignette_x = surface_rect.right() + 1 - fade_dist;
-    QLinearGradient vignette(vignette_x, 0, surface_rect.right() + 1, 0);
+    const int fade_dist = std::min(static_cast<int>((UI_HEADER_HEIGHT / 2.5f) * 3.0f), panel.width());
+    const int backdrop_left = panel.left();
+    const int backdrop_right = surface_rect.right() + 1;
+    const int backdrop_width = std::max(1, backdrop_right - backdrop_left);
+    const int fade_end_x = std::min(backdrop_right, backdrop_left + std::max(1, fade_dist));
+    QLinearGradient vignette(backdrop_left, 0, fade_end_x, 0);
     vignette.setColorAt(0.0, QColor::fromRgbF(0, 0, 0, 0));
     vignette.setColorAt(1.0, QColor::fromRgbF(0, 0, 0, 0.45));
     p.setPen(Qt::NoPen);
     p.setBrush(vignette);
-    p.drawRect(QRect(vignette_x, surface_rect.top(), fade_dist, surface_rect.height()));
+    p.drawRect(QRect(backdrop_left, surface_rect.top(), backdrop_width, surface_rect.height()));
   }
 
   // === Pick which tile to display (single tile, apex-flip for linked curves) ===
@@ -985,8 +989,8 @@ void HudRendererSP::drawVTSCCoPilotCurve(QPainter &p, const QRect &surface_rect)
   }
 
   // === Helper: draw a single curve segment in the panel ===
-  const float road_w = vtsc_copilot_tuning_.road_width_px;
-  const float glow_extra = vtsc_copilot_tuning_.glow_width_px;
+  const float road_w = vtsc_copilot_tuning_.road_width_px * 1.5f;
+  const float glow_extra = vtsc_copilot_tuning_.glow_width_px * 1.5f;
 
   auto draw_curve = [&](const VTSCCoPilotTileState &tile, float opacity) {
     if (tile.points_m.size() < 2 || opacity <= 0.01f) return;
@@ -1035,10 +1039,41 @@ void HudRendererSP::drawVTSCCoPilotCurve(QPainter &p, const QRect &surface_rect)
       pts.push_back(to_px(pt));
     }
 
+    auto smooth_pts = [](std::vector<QPointF> in) {
+      if (in.size() < 3) return in;
+
+      constexpr int kChaikinPasses = 3;
+      for (int pass = 0; pass < kChaikinPasses; ++pass) {
+        if (in.size() < 3) break;
+        std::vector<QPointF> next;
+        next.reserve(in.size() * 2);
+        next.push_back(in.front());
+        for (size_t i = 0; i + 1 < in.size(); ++i) {
+          const QPointF &a = in[i];
+          const QPointF &b = in[i + 1];
+          const QPointF q = a * 0.75 + b * 0.25;
+          const QPointF r = a * 0.25 + b * 0.75;
+          next.push_back(q);
+          next.push_back(r);
+        }
+        next.push_back(in.back());
+        in.swap(next);
+      }
+      return in;
+    };
+
+    pts = smooth_pts(std::move(pts));
+
     QPainterPath road_path;
     road_path.moveTo(pts.front());
-    for (size_t i = 1; i < pts.size(); ++i) {
-      road_path.lineTo(pts[i]);
+    if (pts.size() == 2) {
+      road_path.lineTo(pts.back());
+    } else {
+      for (size_t i = 1; i + 1 < pts.size(); ++i) {
+        const QPointF mid = (pts[i] + pts[i + 1]) * 0.5;
+        road_path.quadTo(pts[i], mid);
+      }
+      road_path.quadTo(pts[pts.size() - 2], pts.back());
     }
 
     // Road gradient: fade at entry (bottom) and exit (top).
