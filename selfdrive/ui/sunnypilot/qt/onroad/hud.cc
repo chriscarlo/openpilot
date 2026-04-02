@@ -411,19 +411,20 @@ void HudRendererSP::drawSystemReadiness(QPainter &p, const QRect &surface_rect) 
   const bool show_labels = true;
 
   const QFont subsystem_font = InterFont(27, QFont::DemiBold);
-  const QFont master_font = InterFont(27, QFont::Bold);
+  const QFont master_font = InterFont(36, QFont::Bold);
   const QFontMetrics subsystem_metrics(subsystem_font);
   const QFontMetrics master_metrics(master_font);
 
   // Dot sizing and layout
   const int dot_r = 6;
-  const int master_r = 9;
+  const int master_r = 10;
   const int spacing = subsystem_metrics.height() + 4;
   const int master_gap = std::max(10, master_metrics.height() / 4);
   const int label_gap = 10;
   const int pill_pad = 10;
   const int pill_left = surface_rect.left() + 12;
   const int x_center = pill_left + 18;
+  const int master_x_center = x_center - ((master_r - dot_r) / 2);
 
   const int n = static_cast<int>(subsystem_statuses_.size());
   const int legacy_col_h = (n - 1) * spacing + 2 * dot_r + master_gap + 2 * master_r;
@@ -497,11 +498,11 @@ void HudRendererSP::drawSystemReadiness(QPainter &p, const QRect &surface_rect) 
   master_glow.setAlphaF(0.3 * opacity);
   p.setPen(Qt::NoPen);
   p.setBrush(master_glow);
-  p.drawEllipse(QPoint(x_center, master_y), master_r + 5, master_r + 5);
+  p.drawEllipse(QPoint(master_x_center, master_y), master_r + 5, master_r + 5);
 
   // Master dot
   p.setBrush(master_c);
-  p.drawEllipse(QPoint(x_center, master_y), master_r, master_r);
+  p.drawEllipse(QPoint(master_x_center, master_y), master_r, master_r);
 
   // Master label
   if (show_labels) {
