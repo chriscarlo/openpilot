@@ -2637,7 +2637,7 @@ struct Event {
     liveMapDataSP @115 :Custom.LiveMapDataSP;
     rtiStateSP @116 :Custom.RtiStateSP;
     mapTurnSpeedControlSP @136 :Custom.MapTurnSpeedControlSP;
-    customReserved11 @137 :Custom.CustomReserved11;
+    weatherOverlaySP @137 :Custom.WeatherOverlaySP;
     customReserved12 @138 :Custom.CustomReserved12;
     customReserved13 @139 :Custom.CustomReserved13;
     customReserved14 @140 :Custom.CustomReserved14;

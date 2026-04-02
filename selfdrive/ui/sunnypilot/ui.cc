@@ -20,6 +20,7 @@ UIStateSP::UIStateSP(QObject *parent) : UIState(parent) {
     "wideRoadCameraState", "managerState", "selfdriveState", "longitudinalPlan",
     "modelManagerSP", "selfdriveStateSP", "longitudinalPlanSP", "backupManagerSP", "carControl", "carOutput", "liveMapDataSP",
     "rtiStateSP",  // RTI (Realtime Traffic Intelligence) state with pre-computed threat display data
+    "weatherOverlaySP",  // North-up precipitation wash for the SP onroad HUD
     // GPS subscriptions removed - bearing calculations now handled by rtid
   });
 

@@ -89,6 +89,19 @@ static float readParamFloatClamped(Params &params, const char *key, float fallba
   }
 }
 
+static int readParamIntClamped(Params &params, const char *key, int fallback, int lo, int hi) {
+  try {
+    const std::string raw = params.get(key);
+    if (raw.empty()) {
+      return fallback;
+    }
+    const int v = std::stoi(raw);
+    return std::clamp(v, lo, hi);
+  } catch (const std::exception&) {
+    return fallback;
+  }
+}
+
 
 
 // Template function for pruning caches based on active IDs
@@ -129,6 +142,16 @@ static const ThreatTypeInfo kDefaultThreatInfo = {"ALERT", QColor(80, 80, 80)};
 HudRendererSP::HudRendererSP() {
   // RTI state initialized with safe defaults
   // rti_enabled will be updated periodically in updateState()
+}
+
+void HudRendererSP::clearWeatherOverlay() {
+  weather_overlay_available_ = false;
+  weather_overlay_precipitation_in_range_ = false;
+  weather_overlay_stale_ = true;
+  weather_overlay_rain_image_ = QImage();
+  weather_overlay_snow_image_ = QImage();
+  weather_overlay_has_rain_image_ = false;
+  weather_overlay_has_snow_image_ = false;
 }
 
 void HudRendererSP::refreshVTSCCoPilotTuning() {
@@ -182,10 +205,58 @@ void HudRendererSP::updateState(const UIState &s) {
 
   // Refresh params at 5 Hz for live tuning responsiveness without per-frame overhead.
   if (s.sm && s.sm->frame % 4 == 0) {
-    rti_enabled = Params().getBool("RTIEnabled");  // Master switch
-    rti_hud_enabled = Params().getBool("RTIHUDEnabled");  // HUD display switch
-    vtsc_copilot_hud_enabled_ = Params().getBool("VTSCRallyCoPilotHUDEnabled");
+    Params params;
+    rti_enabled = params.getBool("RTIEnabled");  // Master switch
+    rti_hud_enabled = params.getBool("RTIHUDEnabled");  // HUD display switch
+    vtsc_copilot_hud_enabled_ = params.getBool("VTSCRallyCoPilotHUDEnabled");
+    weather_overlay_enabled_ = params.getBool("WeatherOverlayEnabled");
+    weather_overlay_force_visible_ = params.getBool("WeatherOverlayForceVisible");
+    weather_overlay_rain_opacity_ = readParamIntClamped(params, "WeatherOverlayRainOpacity", 38, 0, 100) / 100.0f;
+    weather_overlay_snow_opacity_ = readParamIntClamped(params, "WeatherOverlaySnowOpacity", 44, 0, 100) / 100.0f;
+    weather_overlay_refresh_seconds_ = readParamIntClamped(params, "WeatherOverlayRefreshSeconds", 120, 30, 600);
     refreshVTSCCoPilotTuning();
+  }
+
+  const bool overlay_msg_recent = s.sm && s.sm->valid("weatherOverlaySP") && s.sm->rcv_frame("weatherOverlaySP") > 0 &&
+                                  (s.sm->frame - s.sm->rcv_frame("weatherOverlaySP")) <= ((weather_overlay_refresh_seconds_ + 20) * UI_FREQ);
+  if (!weather_overlay_enabled_) {
+    clearWeatherOverlay();
+  } else if (!overlay_msg_recent) {
+    weather_overlay_stale_ = true;
+    weather_overlay_available_ = false;
+  } else if (s.sm && s.sm->updated("weatherOverlaySP")) {
+    try {
+      const auto overlay = (*s.sm)["weatherOverlaySP"].getWeatherOverlaySP();
+      weather_overlay_available_ = overlay.getAvailable();
+      weather_overlay_precipitation_in_range_ = overlay.getPrecipitationInRange();
+      weather_overlay_stale_ = overlay.getStale();
+      weather_overlay_anchor_x_ = overlay.getCarAnchorX();
+      weather_overlay_anchor_y_ = overlay.getCarAnchorY();
+
+      const auto rain_png = overlay.getRainLayerPng();
+      if (rain_png.size() > 0) {
+        QImage rain_image;
+        rain_image.loadFromData(reinterpret_cast<const uchar *>(rain_png.begin()), static_cast<int>(rain_png.size()), "PNG");
+        weather_overlay_rain_image_ = rain_image;
+        weather_overlay_has_rain_image_ = !rain_image.isNull();
+      } else {
+        weather_overlay_rain_image_ = QImage();
+        weather_overlay_has_rain_image_ = false;
+      }
+
+      const auto snow_png = overlay.getSnowLayerPng();
+      if (snow_png.size() > 0) {
+        QImage snow_image;
+        snow_image.loadFromData(reinterpret_cast<const uchar *>(snow_png.begin()), static_cast<int>(snow_png.size()), "PNG");
+        weather_overlay_snow_image_ = snow_image;
+        weather_overlay_has_snow_image_ = !snow_image.isNull();
+      } else {
+        weather_overlay_snow_image_ = QImage();
+        weather_overlay_has_snow_image_ = false;
+      }
+    } catch (const std::exception&) {
+      clearWeatherOverlay();
+    }
   }
   
   // Update multiple threats only if RTI HUD is enabled
@@ -383,6 +454,13 @@ void HudRendererSP::updateState(const UIState &s) {
 }
 
 void HudRendererSP::draw(QPainter &p, const QRect &surface_rect) {
+  const bool show_weather_overlay = weather_overlay_enabled_ && weather_overlay_available_ &&
+                                    (weather_overlay_has_rain_image_ || weather_overlay_has_snow_image_) &&
+                                    ((weather_overlay_precipitation_in_range_ && !weather_overlay_stale_) || weather_overlay_force_visible_);
+  if (show_weather_overlay) {
+    drawWeatherOverlay(p, surface_rect);
+  }
+
   // Draw VTSC rally co-pilot curve FIRST so it renders behind speed/set-speed
   if (vtsc_copilot_hud_enabled_ && vtsc_copilot_alpha_ > 0.01f) {
     drawVTSCCoPilotCurve(p, surface_rect);
@@ -398,6 +476,46 @@ void HudRendererSP::draw(QPainter &p, const QRect &surface_rect) {
   if (rti_enabled && rti_hud_enabled) {
     drawRTIThreatIndicatorMulti(p, surface_rect);
   }
+}
+
+void HudRendererSP::drawWeatherOverlay(QPainter &p, const QRect &surface_rect) {
+  p.save();
+  p.setRenderHint(QPainter::Antialiasing, true);
+  p.setRenderHint(QPainter::SmoothPixmapTransform, true);
+
+  if (weather_overlay_has_rain_image_ && weather_overlay_rain_opacity_ > 0.0f) {
+    p.setOpacity(weather_overlay_rain_opacity_);
+    p.drawImage(surface_rect, weather_overlay_rain_image_);
+  }
+  if (weather_overlay_has_snow_image_ && weather_overlay_snow_opacity_ > 0.0f) {
+    p.setOpacity(weather_overlay_snow_opacity_);
+    p.drawImage(surface_rect, weather_overlay_snow_image_);
+  }
+
+  const QPointF car_center(
+    surface_rect.left() + (weather_overlay_anchor_x_ * surface_rect.width()),
+    surface_rect.top() + (weather_overlay_anchor_y_ * surface_rect.height())
+  );
+
+  p.setOpacity(0.75);
+  QPen marker_ring(QColor(255, 255, 255, 165));
+  marker_ring.setWidth(4);
+  p.setPen(marker_ring);
+  p.setBrush(Qt::NoBrush);
+  p.drawEllipse(car_center, 15.0, 15.0);
+
+  p.setPen(Qt::NoPen);
+  p.setBrush(QColor(255, 255, 255, 215));
+  p.drawEllipse(car_center, 4.5, 4.5);
+
+  const QRect north_rect(surface_rect.center().x() - 22, surface_rect.top() + 26, 44, 44);
+  p.setBrush(QColor(10, 10, 10, 120));
+  p.drawEllipse(north_rect);
+  p.setPen(QColor(255, 255, 255, 185));
+  p.setFont(InterFont(24, QFont::DemiBold));
+  p.drawText(north_rect, Qt::AlignCenter, "N");
+
+  p.restore();
 }
 
 

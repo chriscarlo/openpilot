@@ -589,4 +589,12 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"WeatherSpeedReductionModerate", {PERSISTENT | BACKUP, INT, "10"}},   // mph
     {"WeatherSpeedReductionHeavy", {PERSISTENT | BACKUP, INT, "15"}},      // mph
     {"WeatherCondition", {CLEAR_ON_OFFROAD_TRANSITION, STRING}},           // JSON from weatherd
+    {"WeatherOverlayEnabled", {PERSISTENT | BACKUP, BOOL, "0"}},
+    {"WeatherOverlayForceVisible", {PERSISTENT | BACKUP, BOOL, "0"}},
+    {"WeatherOverlayRainOpacity", {PERSISTENT | BACKUP, INT, "38"}},       // percent
+    {"WeatherOverlaySnowOpacity", {PERSISTENT | BACKUP, INT, "44"}},       // percent
+    {"WeatherOverlayRangeKm", {PERSISTENT | BACKUP, INT, "12"}},
+    {"WeatherOverlayZoomLevel", {PERSISTENT | BACKUP, INT, "10"}},
+    {"WeatherOverlayRefreshSeconds", {PERSISTENT | BACKUP, INT, "120"}},
+    {"WeatherOverlayManualApiKey", {PERSISTENT | BACKUP | DONT_LOG, STRING}},
 };

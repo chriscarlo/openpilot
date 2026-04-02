@@ -118,6 +118,15 @@ RTIRangeControl::RTIRangeControl(const QString &title, const QString &descriptio
   mainLayout->addLayout(controlLayout);
   
   // Load current value from params (stored in meters, display in miles)
+  reloadFromParams();
+
+  // Connect signals
+  connect(minusBtn, &QPushButton::clicked, this, &RTIRangeControl::decrement);
+  connect(plusBtn, &QPushButton::clicked, this, &RTIRangeControl::increment);
+  connect(resetBtn, &QPushButton::clicked, this, &RTIRangeControl::reset);
+}
+
+void RTIRangeControl::reloadFromParams() {
   QString storedValue = QString::fromStdString(params.get(paramKey.toStdString()));
   if (storedValue.isEmpty()) {
     currentValue = defaultValue;
@@ -126,12 +135,6 @@ RTIRangeControl::RTIRangeControl(const QString &title, const QString &descriptio
     float meters = storedValue.toFloat();
     currentValue = meters * METERS_TO_MILES;
   }
-  
-  // Connect signals
-  connect(minusBtn, &QPushButton::clicked, this, &RTIRangeControl::decrement);
-  connect(plusBtn, &QPushButton::clicked, this, &RTIRangeControl::increment);
-  connect(resetBtn, &QPushButton::clicked, this, &RTIRangeControl::reset);
-  
   updateLabels();
 }
 
@@ -251,18 +254,20 @@ IntRangeControl::IntRangeControl(const QString &title, const QString &descriptio
 
   mainLayout->addLayout(controlLayout);
 
-  // Load current value (stored as plain integer string)
+  reloadFromParams();
+
+  connect(minusBtn, &QPushButton::clicked, this, &IntRangeControl::decrement);
+  connect(plusBtn, &QPushButton::clicked, this, &IntRangeControl::increment);
+  connect(resetBtn, &QPushButton::clicked, this, &IntRangeControl::reset);
+}
+
+void IntRangeControl::reloadFromParams() {
   QString storedValue = QString::fromStdString(params.get(paramKey.toStdString()));
   if (storedValue.isEmpty()) {
     currentValue = defaultValue;
   } else {
     currentValue = storedValue.toInt();
   }
-
-  connect(minusBtn, &QPushButton::clicked, this, &IntRangeControl::decrement);
-  connect(plusBtn, &QPushButton::clicked, this, &IntRangeControl::increment);
-  connect(resetBtn, &QPushButton::clicked, this, &IntRangeControl::reset);
-
   updateLabels();
 }
 
@@ -746,6 +751,125 @@ void RTISettingsPanel::setupMainLayout() {
 
   mainLayout->addWidget(weatherFrame);
 
+  // ================================================================
+  // Weather Overlay Section
+  // ================================================================
+  QFrame *weatherOverlayFrame = createSectionFrame();
+  QVBoxLayout *weatherOverlayLayout = new QVBoxLayout(weatherOverlayFrame);
+
+  QLabel *weatherOverlaySectionLabel = new QLabel(tr("Weather Overlay"));
+  weatherOverlaySectionLabel->setStyleSheet("font-size: 42px; font-weight: 500; color: #E4E4E4; padding-bottom: 5px;");
+  weatherOverlayLayout->addWidget(weatherOverlaySectionLabel);
+
+  QLabel *weatherOverlayDesc = new QLabel(tr("North-up rain and snow wash on the driving HUD. It appears when precipitation is inside the selected range."));
+  weatherOverlayDesc->setWordWrap(true);
+  weatherOverlayDesc->setStyleSheet("font-size: 32px; color: #999999; padding-bottom: 20px;");
+  weatherOverlayLayout->addWidget(weatherOverlayDesc);
+
+  QHBoxLayout *weatherOverlayToggleLayout = new QHBoxLayout();
+  QLabel *weatherOverlayToggleLabel = new QLabel(tr("Show Onroad Overlay"));
+  weatherOverlayToggleLabel->setStyleSheet("font-size: 36px; color: #E4E4E4;");
+  weatherOverlayToggleLayout->addWidget(weatherOverlayToggleLabel);
+  weatherOverlayToggleLayout->addStretch();
+
+  weatherOverlayToggle = new ToggleSP();
+  weatherOverlayToggle->setFixedSize(150, 80);
+  {
+    bool overlay_on = params.getBool("WeatherOverlayEnabled");
+    if (weatherOverlayToggle->on != overlay_on) {
+      weatherOverlayToggle->togglePosition();
+    }
+  }
+  weatherOverlayToggleLayout->addWidget(weatherOverlayToggle);
+  weatherOverlayLayout->addLayout(weatherOverlayToggleLayout);
+
+  weatherOverlayLayout->addSpacing(20);
+
+  weatherOverlayControlsFrame = new QFrame();
+  weatherOverlayControlsFrame->setStyleSheet("background-color: transparent;");
+  QVBoxLayout *weatherOverlayControlsLayout = new QVBoxLayout(weatherOverlayControlsFrame);
+  weatherOverlayControlsLayout->setContentsMargins(0, 0, 0, 0);
+
+  QHBoxLayout *weatherOverlayForceLayout = new QHBoxLayout();
+  QLabel *weatherOverlayForceLabel = new QLabel(tr("Force Visible"));
+  weatherOverlayForceLabel->setStyleSheet("font-size: 36px; color: #E4E4E4;");
+  weatherOverlayForceLayout->addWidget(weatherOverlayForceLabel);
+  weatherOverlayForceLayout->addStretch();
+
+  weatherOverlayForceToggle = new ToggleSP();
+  weatherOverlayForceToggle->setFixedSize(150, 80);
+  {
+    bool force_on = params.getBool("WeatherOverlayForceVisible");
+    if (weatherOverlayForceToggle->on != force_on) {
+      weatherOverlayForceToggle->togglePosition();
+    }
+  }
+  weatherOverlayForceLayout->addWidget(weatherOverlayForceToggle);
+  weatherOverlayControlsLayout->addLayout(weatherOverlayForceLayout);
+  weatherOverlayControlsLayout->addSpacing(20);
+
+  weatherOverlayRainOpacityControl = new IntRangeControl(
+    tr("Rain Opacity"),
+    tr("Overall rain-layer alpha applied on the HUD wash"),
+    "WeatherOverlayRainOpacity",
+    0, 100, 2, 38, "%",
+    this
+  );
+  weatherOverlayControlsLayout->addWidget(weatherOverlayRainOpacityControl);
+  weatherOverlayControlsLayout->addSpacing(15);
+
+  weatherOverlaySnowOpacityControl = new IntRangeControl(
+    tr("Snow Opacity"),
+    tr("Overall snow-layer alpha applied on the HUD wash"),
+    "WeatherOverlaySnowOpacity",
+    0, 100, 2, 44, "%",
+    this
+  );
+  weatherOverlayControlsLayout->addWidget(weatherOverlaySnowOpacityControl);
+  weatherOverlayControlsLayout->addSpacing(15);
+
+  weatherOverlayRangeControl = new IntRangeControl(
+    tr("Overlay Range"),
+    tr("Show the overlay when precipitation exists anywhere inside this look-ahead distance"),
+    "WeatherOverlayRangeKm",
+    3, 40, 1, 12, "km",
+    this
+  );
+  weatherOverlayControlsLayout->addWidget(weatherOverlayRangeControl);
+  weatherOverlayControlsLayout->addSpacing(15);
+
+  weatherOverlayZoomControl = new IntRangeControl(
+    tr("Map Zoom"),
+    tr("Tile zoom used to sample the weather layers"),
+    "WeatherOverlayZoomLevel",
+    6, 13, 1, 10, "z",
+    this
+  );
+  weatherOverlayControlsLayout->addWidget(weatherOverlayZoomControl);
+  weatherOverlayControlsLayout->addSpacing(15);
+
+  weatherOverlayRefreshControl = new IntRangeControl(
+    tr("Refresh Cadence"),
+    tr("How often to refresh the weather tiles from the provider"),
+    "WeatherOverlayRefreshSeconds",
+    30, 600, 30, 120, "s",
+    this
+  );
+  weatherOverlayControlsLayout->addWidget(weatherOverlayRefreshControl);
+
+  weatherOverlayLayout->addWidget(weatherOverlayControlsFrame);
+  weatherOverlayControlsFrame->setVisible(params.getBool("WeatherOverlayEnabled"));
+
+  connect(weatherOverlayToggle, &ToggleSP::stateChanged, [this](bool checked) {
+    params.putBool("WeatherOverlayEnabled", checked);
+    weatherOverlayControlsFrame->setVisible(checked);
+  });
+  connect(weatherOverlayForceToggle, &ToggleSP::stateChanged, [this](bool checked) {
+    params.putBool("WeatherOverlayForceVisible", checked);
+  });
+
+  mainLayout->addWidget(weatherOverlayFrame);
+
   // Add stretch at the end
   mainLayout->addStretch();
 }
@@ -772,6 +896,28 @@ void RTISettingsPanel::showEvent(QShowEvent *event) {
     if (weatherToggle->on != weather_on) weatherToggle->togglePosition();
     if (weatherControlsFrame) weatherControlsFrame->setVisible(weather_on);
   }
+  if (weatherOverlayToggle) {
+    bool overlay_on = params.getBool("WeatherOverlayEnabled");
+    if (weatherOverlayToggle->on != overlay_on) weatherOverlayToggle->togglePosition();
+    if (weatherOverlayControlsFrame) weatherOverlayControlsFrame->setVisible(overlay_on);
+  }
+  if (weatherOverlayForceToggle) {
+    bool force_on = params.getBool("WeatherOverlayForceVisible");
+    if (weatherOverlayForceToggle->on != force_on) weatherOverlayForceToggle->togglePosition();
+  }
+  if (detectionRadiusControl) detectionRadiusControl->reloadFromParams();
+  if (forwardSlowdownControl) forwardSlowdownControl->reloadFromParams();
+  if (resumeSpeedControl) resumeSpeedControl->reloadFromParams();
+  if (duplicateCollapseControl) duplicateCollapseControl->reloadFromParams();
+  if (policeCollapseControl) policeCollapseControl->reloadFromParams();
+  if (weatherLightControl) weatherLightControl->reloadFromParams();
+  if (weatherModerateControl) weatherModerateControl->reloadFromParams();
+  if (weatherHeavyControl) weatherHeavyControl->reloadFromParams();
+  if (weatherOverlayRainOpacityControl) weatherOverlayRainOpacityControl->reloadFromParams();
+  if (weatherOverlaySnowOpacityControl) weatherOverlaySnowOpacityControl->reloadFromParams();
+  if (weatherOverlayRangeControl) weatherOverlayRangeControl->reloadFromParams();
+  if (weatherOverlayZoomControl) weatherOverlayZoomControl->reloadFromParams();
+  if (weatherOverlayRefreshControl) weatherOverlayRefreshControl->reloadFromParams();
 }
 
 void RTISettingsPanel::loadWazeApiKey() {

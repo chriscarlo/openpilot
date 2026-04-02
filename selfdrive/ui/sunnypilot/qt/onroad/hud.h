@@ -9,6 +9,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <QImage>
 #include <QPainter>
 #include <unordered_map>
 #include <string>
@@ -48,6 +49,9 @@ public:
   void draw(QPainter &p, const QRect &surface_rect) override;
 
 protected:
+  void drawWeatherOverlay(QPainter &p, const QRect &surface_rect);
+  void clearWeatherOverlay();
+
   // VTSC Rally Co-Pilot curve preview (HUD-only rendering)
   void drawVTSCCoPilotCurve(QPainter &p, const QRect &surface_rect);
   void drawVTSCCoPilotNavArrow(QPainter &p, const QPointF &center, float size_px) const;
@@ -160,4 +164,20 @@ protected:
     float unit_font_px = 22.0f;
   };
   VTSCCoPilotHudTuning vtsc_copilot_tuning_;
+
+  // Weather overlay HUD state
+  bool weather_overlay_enabled_ = false;
+  bool weather_overlay_force_visible_ = false;
+  bool weather_overlay_available_ = false;
+  bool weather_overlay_precipitation_in_range_ = false;
+  bool weather_overlay_stale_ = true;
+  float weather_overlay_rain_opacity_ = 0.38f;
+  float weather_overlay_snow_opacity_ = 0.44f;
+  float weather_overlay_anchor_x_ = 0.5f;
+  float weather_overlay_anchor_y_ = 0.68f;
+  int weather_overlay_refresh_seconds_ = 120;
+  QImage weather_overlay_rain_image_;
+  QImage weather_overlay_snow_image_;
+  bool weather_overlay_has_rain_image_ = false;
+  bool weather_overlay_has_snow_image_ = false;
 };

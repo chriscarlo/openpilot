@@ -32,6 +32,7 @@ public:
                   const QString &paramKey, float minVal, float maxVal, 
                   float step, float defaultVal, const QString &units,
                   QWidget *parent = nullptr);
+  void reloadFromParams();
   
 private:
   void updateLabels();
@@ -91,6 +92,7 @@ public:
                   const QString &paramKey, int minVal, int maxVal,
                   int step, int defaultVal, const QString &units,
                   QWidget *parent = nullptr);
+  void reloadFromParams();
 
 private:
   void updateLabels();
@@ -151,6 +153,16 @@ private:
   IntRangeControl *weatherModerateControl;
   IntRangeControl *weatherHeavyControl;
   QFrame *weatherControlsFrame;
+
+  // Weather overlay controls
+  ToggleSP *weatherOverlayToggle;
+  ToggleSP *weatherOverlayForceToggle;
+  IntRangeControl *weatherOverlayRainOpacityControl;
+  IntRangeControl *weatherOverlaySnowOpacityControl;
+  IntRangeControl *weatherOverlayRangeControl;
+  IntRangeControl *weatherOverlayZoomControl;
+  IntRangeControl *weatherOverlayRefreshControl;
+  QFrame *weatherOverlayControlsFrame;
 
   // Unit conversion helpers
   static constexpr float MILES_TO_METERS = 1609.344f;

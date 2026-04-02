@@ -100,6 +100,10 @@ def weather_enabled(started: bool, params: Params, CP: car.CarParams) -> bool:
   """Check if Weather-Aware Speed Control is enabled."""
   return started and params.get_bool("WeatherAwareControlEnabled")
 
+def weather_overlay_enabled(started: bool, params: Params, CP: car.CarParams) -> bool:
+  """Check if the weather HUD overlay is enabled."""
+  return started and params.get_bool("WeatherOverlayEnabled")
+
 def mtsc_enabled(started: bool, params: Params, CP: car.CarParams) -> bool:
   # Deprecated: MTSC publisher removed in favor of direct VTSC map lookahead.
   return False
@@ -198,6 +202,7 @@ procs += [
 
   # Weather-Aware Speed Control
   PythonProcess("weatherd", "sunnypilot.weatherd.weatherd", weather_enabled),
+  PythonProcess("weather_overlayd", "sunnypilot.weather_overlayd.weather_overlayd", weather_overlay_enabled),
 ]
 
 if os.path.exists("./github_runner.sh"):

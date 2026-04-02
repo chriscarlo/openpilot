@@ -576,7 +576,27 @@ struct MapTurnSpeedControlSP @0xcb9fd56c7057593a {
   vSafeMps @16 :List(Float32);
 }
 
-struct CustomReserved11 @0xc2243c65e0340384 {
+struct WeatherOverlaySP @0xc2243c65e0340384 {
+  available @0 :Bool;
+  precipitationInRange @1 :Bool;
+  stale @2 :Bool;
+  zoom @3 :UInt8;
+  rangeKm @4 :Float32;
+  carAnchorX @5 :Float32;
+  carAnchorY @6 :Float32;
+  rainLayerPng @7 :Data;
+  snowLayerPng @8 :Data;
+  generatedAtUnixSec @9 :Int64;
+  providerStatus @10 :ProviderStatus;
+  rainTileCount @11 :UInt16;
+  snowTileCount @12 :UInt16;
+
+  enum ProviderStatus {
+    offline @0;
+    ok @1;
+    missingKey @2;
+    fetchError @3;
+  }
 }
 
 struct CustomReserved12 @0x9ccdc8676701b412 {
