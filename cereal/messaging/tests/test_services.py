@@ -19,3 +19,6 @@ class TestServices:
     with tempfile.NamedTemporaryFile(suffix=".h") as f:
       ret = os.system(f"python3 {services.__file__} > {f.name} && clang++ {f.name} -std=c++11")
       assert ret == 0, "generated services header is not valid C"
+
+  def test_weather_overlay_service_registered(self):
+    assert "weatherOverlaySP" in SERVICE_LIST
