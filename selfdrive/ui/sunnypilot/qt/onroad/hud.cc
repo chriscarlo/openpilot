@@ -217,6 +217,26 @@ void HudRendererSP::updateState(const UIState &s) {
     refreshVTSCCoPilotTuning();
   }
 
+  // Update cached ego heading from livePose (20 Hz) for heading-up overlay rotation.
+  // livePose.orientationNED.z is euler yaw in radians, NED convention:
+  // 0 = facing north, positive = rotate clockwise (toward east).
+  if (s.sm && s.sm->valid("livePose")) {
+    try {
+      const auto pose = (*s.sm)["livePose"].getLivePose();
+      const auto &ori = pose.getOrientationNED();
+      if (ori.getValid() && pose.getInputsOK()) {
+        weather_overlay_heading_rad_ = ori.getZ();
+        weather_overlay_heading_valid_ = true;
+      } else {
+        weather_overlay_heading_valid_ = false;
+      }
+    } catch (const std::exception &) {
+      weather_overlay_heading_valid_ = false;
+    }
+  } else {
+    weather_overlay_heading_valid_ = false;
+  }
+
   const bool overlay_msg_recent = s.sm && s.sm->valid("weatherOverlaySP") && s.sm->rcv_frame("weatherOverlaySP") > 0 &&
                                   (s.sm->frame - s.sm->rcv_frame("weatherOverlaySP")) <= ((weather_overlay_refresh_seconds_ + 20) * UI_FREQ);
   if (!weather_overlay_enabled_) {
@@ -483,6 +503,24 @@ void HudRendererSP::drawWeatherOverlay(QPainter &p, const QRect &surface_rect) {
   p.setRenderHint(QPainter::Antialiasing, true);
   p.setRenderHint(QPainter::SmoothPixmapTransform, true);
 
+  const QPointF car_center(
+    surface_rect.left() + (weather_overlay_anchor_x_ * surface_rect.width()),
+    surface_rect.top() + (weather_overlay_anchor_y_ * surface_rect.height())
+  );
+
+  // Heading-up: rotate the north-up precipitation image about the car anchor
+  // so the ego's current heading points "up" on screen. When heading is not
+  // valid (e.g. locationd not ready) we fall back to north-up (0 rotation).
+  const double heading_rad = weather_overlay_heading_valid_
+    ? static_cast<double>(weather_overlay_heading_rad_)
+    : 0.0;
+  const double heading_deg = heading_rad * 180.0 / M_PI;
+
+  p.save();
+  p.translate(car_center);
+  p.rotate(-heading_deg);  // Qt rotates clockwise for positive angles in screen coords
+  p.translate(-car_center);
+
   if (weather_overlay_has_rain_image_ && weather_overlay_rain_opacity_ > 0.0f) {
     p.setOpacity(weather_overlay_rain_opacity_);
     p.drawImage(surface_rect, weather_overlay_rain_image_);
@@ -491,11 +529,7 @@ void HudRendererSP::drawWeatherOverlay(QPainter &p, const QRect &surface_rect) {
     p.setOpacity(weather_overlay_snow_opacity_);
     p.drawImage(surface_rect, weather_overlay_snow_image_);
   }
-
-  const QPointF car_center(
-    surface_rect.left() + (weather_overlay_anchor_x_ * surface_rect.width()),
-    surface_rect.top() + (weather_overlay_anchor_y_ * surface_rect.height())
-  );
+  p.restore();
 
   p.setOpacity(0.75);
   QPen marker_ring(QColor(255, 255, 255, 165));
@@ -508,7 +542,16 @@ void HudRendererSP::drawWeatherOverlay(QPainter &p, const QRect &surface_rect) {
   p.setBrush(QColor(255, 255, 255, 215));
   p.drawEllipse(car_center, 4.5, 4.5);
 
-  const QRect north_rect(surface_rect.center().x() - 22, surface_rect.top() + 26, 44, 44);
+  // Compass "N" marker — placed at the true-north direction on the rotated map.
+  // When heading=0 (north-up) it sits above the car anchor; as the car turns,
+  // the N badge orbits the car anchor to always point at real-world north.
+  const double radius_px = surface_rect.height() * 0.25;
+  const double north_angle_rad = -heading_rad - M_PI / 2.0;
+  const QPointF north_center(
+    car_center.x() + radius_px * std::cos(north_angle_rad),
+    car_center.y() + radius_px * std::sin(north_angle_rad)
+  );
+  const QRectF north_rect(north_center.x() - 22, north_center.y() - 22, 44, 44);
   p.setBrush(QColor(10, 10, 10, 120));
   p.drawEllipse(north_rect);
   p.setPen(QColor(255, 255, 255, 185));

@@ -180,4 +180,8 @@ protected:
   QImage weather_overlay_snow_image_;
   bool weather_overlay_has_rain_image_ = false;
   bool weather_overlay_has_snow_image_ = false;
+  // Ego heading (radians, NED-frame yaw) used to rotate the weather overlay
+  // to a heading-up view. Falls back to 0 (north-up) when not valid.
+  float weather_overlay_heading_rad_ = 0.0f;
+  bool weather_overlay_heading_valid_ = false;
 };
