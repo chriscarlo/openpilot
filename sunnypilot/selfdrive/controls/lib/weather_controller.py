@@ -20,23 +20,31 @@ from openpilot.selfdrive.car.cruise import V_CRUISE_UNSET
 # Speed reductions stored in mph; converted to m/s at runtime.
 MPH_TO_MS = CV.MPH_TO_MS
 
-# Maximum decel rate for weather speed ramp-down (m/s^2)
+# Ramp rates (m/s^2). Decel is gentle so severity onset is smooth; accel is
+# faster so that when rain clears (or the driver raises cruise) the weather
+# cap releases the driver-commanded set speed promptly.
 WEATHER_DECEL_RATE = 1.0
+WEATHER_ACCEL_RATE = 2.5
 
 # How old weather data can be before we ignore it (seconds)
 MAX_DATA_AGE_S = 600  # 10 minutes
 
-# Precipitation intensity breakpoints (mm of current precipitation rate).
-# Open-Meteo's "precipitation" field is the instantaneous rate in mm.
-# These define the centers of light/moderate/heavy severity ranges:
-#   0.0 mm  → no reduction
-#   0.5 mm  → light rain center
-#   2.5 mm  → moderate rain center
-#   7.5 mm  → heavy rain center (and above)
+# Precipitation intensity breakpoints in mm/hour. weatherd samples RainViewer's
+# doppler-radar tiles and publishes a point mm/hr intensity (Marshall-Palmer
+# Z-R conversion). These anchors map onto standard rain-rate classifications:
+#   0.0 mm/hr → no reduction
+#   0.5 mm/hr → light rain center
+#   2.5 mm/hr → moderate rain center
+#   7.5 mm/hr → heavy rain center (and above)
 PRECIP_NONE = 0.0
 PRECIP_LIGHT = 0.5
 PRECIP_MODERATE = 2.5
 PRECIP_HEAVY = 7.5
+
+# Minimum precipitation to activate. Since the signal is now a radar observation
+# (not a lagged NWP forecast), we don't need a secondary WMO-code corroboration:
+# the pixel at ego position is either opaque (rain hitting now) or transparent.
+MIN_PRECIP_MM_PER_HR = 0.1
 
 
 def _lerp(a: float, b: float, t: float) -> float:
@@ -72,13 +80,7 @@ def _interpolate_reduction(precip_mm: float,
 
 
 def _extract_precipitation_mm(condition: dict) -> float:
-  precip_mm = float(condition.get("precipitation_mm", 0.0))
-  if precip_mm > 0.0:
-    return precip_mm
-
-  rain_mm = float(condition.get("rain_mm", 0.0))
-  showers_mm = float(condition.get("showers_mm", 0.0))
-  return max(0.0, rain_mm + showers_mm)
+  return max(0.0, float(condition.get("precipitation_mm", 0.0)))
 
 
 class WeatherController:
@@ -159,8 +161,10 @@ class WeatherController:
     self._severity = severity
     precip_mm = _extract_precipitation_mm(condition)
 
-    # No precipitation at all → no reduction
-    if severity == "none" and precip_mm <= 0.0:
+    # Require non-trivial precipitation to activate. The signal is a doppler
+    # radar observation at ego position, so a non-zero value means rain is
+    # physically falling here right now.
+    if precip_mm < MIN_PRECIP_MM_PER_HR:
       self._reset()
       return
 
@@ -202,8 +206,10 @@ class WeatherController:
         max_drop = WEATHER_DECEL_RATE * dt
         self._ramped_speed = max(target_speed, self._ramped_speed - max_drop)
       elif self._ramped_speed < target_speed and dt > 0.0:
-        # Severity decreased — ramp back up gently too
-        max_rise = WEATHER_DECEL_RATE * dt
+        # Severity decreased or driver raised cruise — release the cap at the
+        # faster accel rate so we don't artificially hold the driver below
+        # their set speed.
+        max_rise = WEATHER_ACCEL_RATE * dt
         self._ramped_speed = min(target_speed, self._ramped_speed + max_rise)
 
     self._speed_recommendation = min(self._ramped_speed, v_cruise)
