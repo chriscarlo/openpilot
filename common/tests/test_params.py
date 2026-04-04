@@ -113,6 +113,7 @@ class TestParams:
     self.params.remove("LanguageSetting")
     self.params.remove("LongitudinalPersonality")
     self.params.remove("LiveParameters")
+    self.params.remove("CameraOffsetAutoLearned")
 
     assert self.params.get("LanguageSetting") is None
     assert self.params.get("LanguageSetting", return_default=False) is None
@@ -120,6 +121,8 @@ class TestParams:
     assert isinstance(self.params.get("LongitudinalPersonality", return_default=True), int)
     assert self.params.get("LiveParameters") is None
     assert self.params.get("LiveParameters", return_default=True) is None
+    assert self.params.get("CameraOffsetAutoLearned") is None
+    assert isinstance(self.params.get("CameraOffsetAutoLearned", return_default=True), float)
 
   def test_params_get_type(self):
     # json

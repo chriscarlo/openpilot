@@ -71,6 +71,9 @@ private:
   ParamControlSP *lagd_toggle_control;
   OptionControlSP *delay_control;
   OptionControlSP *camera_offset_control;
+  LabelControlSP *learned_camera_offset_label;
+  LabelControlSP *effective_camera_offset_label;
+  ButtonControlSP *reset_auto_offset_btn;
   QProgressBar *supercomboProgressBar;
   QFrame *supercomboFrame;
   QProgressBar *navigationProgressBar;

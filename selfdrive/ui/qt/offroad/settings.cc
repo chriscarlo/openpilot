@@ -293,6 +293,7 @@ DevicePanel::DevicePanel(SettingsWindow *parent) : ListWidget(parent) {
           params.remove("LiveParameters");
           params.remove("LiveParametersV2");
           params.remove("LiveDelay");
+          params.remove("CameraOffsetAutoLearned");
           params.putBool("OnroadCycleRequested", true);
           updateCalibDescription();
         }

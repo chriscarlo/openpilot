@@ -5,6 +5,27 @@ import numpy as np
 from openpilot.common.filter_simple import FirstOrderFilter
 
 
+AUTO_TUNE_PERSIST_MIN_DELTA = 0.002
+AUTO_TUNE_PERSIST_INTERVAL_S = 5.0
+
+
+def should_persist_auto_offset(current_offset: float, last_saved_offset: float,
+                               now_monotonic: float, last_save_monotonic: float,
+                               min_delta: float = AUTO_TUNE_PERSIST_MIN_DELTA,
+                               min_interval: float = AUTO_TUNE_PERSIST_INTERVAL_S) -> bool:
+  if not all(math.isfinite(v) for v in (current_offset, last_saved_offset, now_monotonic, last_save_monotonic)):
+    return False
+
+  delta = abs(current_offset - last_saved_offset)
+  if delta < min_delta:
+    return False
+
+  if abs(last_saved_offset) < min_delta and abs(current_offset) >= min_delta:
+    return True
+
+  return (now_monotonic - last_save_monotonic) >= min_interval
+
+
 class CameraOffsetHelper:
   SMOOTH_ALPHA = 0.1
   MAX_TOTAL_OFFSET = 0.35
@@ -40,15 +61,24 @@ class CameraOffsetHelper:
   def set_auto_enabled(self, enabled: bool):
     enabled = bool(enabled)
     if self.auto_enabled and not enabled:
-      self.reset_auto_tune()
+      self.reset_runtime_state()
     self.auto_enabled = enabled
 
-  def reset_auto_tune(self) -> None:
-    self.auto_camera_offset = 0.0
+  def load_auto_tune_offset(self, offset: float) -> None:
+    self.auto_camera_offset = float(np.clip(offset, -self.AUTO_TUNE_MAX_OFFSET, self.AUTO_TUNE_MAX_OFFSET))
+
+  def get_auto_tune_offset(self) -> float:
+    return float(self.auto_camera_offset)
+
+  def reset_runtime_state(self) -> None:
     self._valid_frames = 0
     self._invalid_frames = 0
     self._curve_hold_active = False
     self._center_filter.initialized = False
+
+  def reset_auto_tune(self) -> None:
+    self.auto_camera_offset = 0.0
+    self.reset_runtime_state()
 
   @property
   def target_camera_offset(self) -> float:

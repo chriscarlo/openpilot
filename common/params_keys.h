@@ -498,6 +498,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"LagdValueCache", {PERSISTENT, FLOAT, "0.2"}},
     {"CameraOffset", {PERSISTENT | BACKUP, FLOAT, "0.0"}},
     {"CameraOffsetAuto", {PERSISTENT | BACKUP, BOOL, "1"}},
+    {"CameraOffsetAutoLearned", {PERSISTENT | BACKUP, FLOAT, "0.0"}},
 
     // mapd + MTSC
     {"MapAdvisorySpeedLimit", {CLEAR_ON_ONROAD_TRANSITION, FLOAT}},

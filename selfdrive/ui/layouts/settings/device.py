@@ -104,6 +104,7 @@ class DeviceLayout(Widget):
     self._params.remove("LiveParameters")
     self._params.remove("LiveParametersV2")
     self._params.remove("LiveDelay")
+    self._params.remove("CameraOffsetAutoLearned")
     self._params.put_bool("OnroadCycleRequested", True)
 
   def _reboot_prompt(self):

@@ -6,6 +6,7 @@
  */
 
 #include <algorithm>
+#include <cmath>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -244,6 +245,29 @@ ModelsPanel::ModelsPanel(QWidget *parent) : QWidget(parent) {
   });
   camera_offset_control->showDescription();
   list->addItem(camera_offset_control);
+
+  learned_camera_offset_label = new LabelControlSP(
+      tr("Learned Auto Offset"), "",
+      tr("Displays the persisted auto-learned camera offset stored across drives."), this);
+  learned_camera_offset_label->showDescription();
+  list->addItem(learned_camera_offset_label);
+
+  effective_camera_offset_label = new LabelControlSP(
+      tr("Effective Camera Offset"), "",
+      tr("Manual camera offset plus the learned auto offset that is currently being applied."), this);
+  effective_camera_offset_label->showDescription();
+  list->addItem(effective_camera_offset_label);
+
+  reset_auto_offset_btn = new ButtonControlSP(
+      tr("Reset Auto Offset"), tr("RESET"),
+      tr("Clear the persisted learned auto camera offset and let it relearn from zero."), this);
+  connect(reset_auto_offset_btn, &ButtonControlSP::clicked, this, [=]() {
+    if (showConfirmationDialog(tr("Are you sure you want to reset the learned auto camera offset?"), tr("Reset Auto Offset"))) {
+      params.remove("CameraOffsetAutoLearned");
+      updateLabels();
+    }
+  });
+  list->addItem(reset_auto_offset_btn);
 }
 
 QProgressBar* ModelsPanel::createProgressBar(QWidget *parent) {
@@ -552,8 +576,16 @@ void ModelsPanel::updateLabels() {
   }
 
   {
-    float value = QString::fromStdString(params.get("CameraOffset")).toFloat();
-    camera_offset_control->setLabel(QString::number(value, 'f', 2) + " m");
+    const float manual_offset = QString::fromStdString(params.get("CameraOffset")).toFloat();
+    const float learned_offset = QString::fromStdString(params.get("CameraOffsetAutoLearned")).toFloat();
+    const bool auto_offset_enabled = params.getBool("CameraOffsetAuto");
+    const float effective_offset = std::clamp(manual_offset + (auto_offset_enabled ? learned_offset : 0.0f), -0.35f, 0.35f);
+
+    camera_offset_control->setLabel(QString::number(manual_offset, 'f', 2) + " m");
+    learned_camera_offset_label->setText(QString("%1 (%2)")
+      .arg(QString::number(learned_offset, 'f', 2) + " m", auto_offset_enabled ? tr("applied") : tr("stored")));
+    effective_camera_offset_label->setText(QString::number(effective_offset, 'f', 2) + " m");
+    reset_auto_offset_btn->setEnabled(std::fabs(learned_offset) >= 1e-3f);
   }
 
   clearModelCacheBtn->setValue(QString::number(calculateCacheSize(), 'f', 2) + " MB");
@@ -575,6 +607,7 @@ void ModelsPanel::showResetParamsDialog() {
   if (showConfirmationDialog(content, button_text, false)) {
     params.remove("CalibrationParams");
     params.remove("LiveTorqueParameters");
+    params.remove("CameraOffsetAutoLearned");
   }
 }
 
@@ -613,4 +646,7 @@ void ModelsPanel::showEvent(QShowEvent *event) {
     delay_control->showDescription();
   }
   camera_offset_control->showDescription();
+  learned_camera_offset_label->showDescription();
+  effective_camera_offset_label->showDescription();
+  reset_auto_offset_btn->showDescription();
 }
