@@ -77,18 +77,6 @@ def main():
     except Exception as e:
         print(f"Error running mypy: {e}")
     
-    # Update session to mark that linter was run
-    session_file = f"/tmp/openpilot_session_{os.getppid()}.json"
-    try:
-        if os.path.exists(session_file):
-            with open(session_file, 'r') as f:
-                session_data = json.load(f)
-            session_data["linter_run"] = True
-            with open(session_file, 'w') as f:
-                json.dump(session_data, f, indent=2)
-    except Exception:
-        pass  # Don't fail on session update errors
-    
     return 0  # Never block operations, just provide feedback
 
 if __name__ == "__main__":
