@@ -131,3 +131,16 @@ docs/chauffeur/bluetooth3x/archived/
 docs/chauffeur/bluetooth3x/diagnostics/
 docs/chauffeur/bluetooth3x/bootloops/
 cythonize
+
+### Secrets / private keys (defense-in-depth; keys should never live in this tree) ###
+id_rsa*
+id_ed25519*
+id_ecdsa*
+id_dsa*
+*.pem
+*.key
+*.p12
+*.pfx
+*.asc
+# Allow the tracked upstream comma device key (public, ships with every tici)
+!system/hardware/tici/id_rsa
