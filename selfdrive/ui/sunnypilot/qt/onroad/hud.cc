@@ -1151,13 +1151,18 @@ void HudRendererSP::drawVTSCCoPilotCurve(QPainter &p, const QRect &surface_rect)
   }
 
   // === Helper: draw a single curve segment in the panel ===
-  const float road_w = vtsc_copilot_tuning_.road_width_px * 1.5f;
-  const float glow_extra = vtsc_copilot_tuning_.glow_width_px * 1.5f;
+  const float road_w = vtsc_copilot_tuning_.road_width_px * 2.25f;
+  const float glow_extra = vtsc_copilot_tuning_.glow_width_px * 2.25f;
 
   auto draw_curve = [&](const VTSCCoPilotTileState &tile, float opacity) {
     if (tile.points_m.size() < 2 || opacity <= 0.01f) return;
 
     p.save();
+    // drawPath() strokes AND fills using the painter's current brush. We only want strokes
+    // here; if we inherit a brush (e.g. the vignette backdrop) drawPath implicitly closes
+    // the open curve path with a start→end chord and fills that lune, producing a dark
+    // "hypotenuse" slab on the inside of every curve.
+    p.setBrush(Qt::NoBrush);
     p.setOpacity(opacity * vtsc_copilot_alpha_);
 
     // Compute geometry bounding box.
