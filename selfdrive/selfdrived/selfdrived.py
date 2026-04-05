@@ -66,6 +66,24 @@ def compute_subsystem_status(sm, services: list[str], ignore_valid_services: set
   return 2  # green
 
 
+def get_subsystem_services(object_hazard_enabled: bool) -> list[tuple[str, list[str]]]:
+  subsystems = [
+    ("VEH", ["pandaStates", "deviceState", "peripheralState"]),
+    ("CAM", ["roadCameraState", "driverCameraState", "wideRoadCameraState"]),
+    ("MDL", ["modelV2"]),
+    ("LOC", ["livePose"]),
+    ("CAL", ["liveCalibration"]),
+    ("PRM", ["liveParameters"]),
+    ("RAD", ["radarState"]),
+    ("DRV", ["driverMonitoringState"]),
+    ("CTL", ["controlsState", "carOutput", "carControl"]),
+    ("PLN", ["longitudinalPlan"]),
+  ]
+  if object_hazard_enabled:
+    subsystems.insert(3, ("OBJ", ["objectHazardStateSP"]))
+  return subsystems
+
+
 class SelfdriveD(CruiseHelper):
   def __init__(self, CP=None, CP_SP=None):
     self.params = Params()
@@ -128,6 +146,7 @@ class SelfdriveD(CruiseHelper):
     self.sm = messaging.SubMaster(['deviceState', 'pandaStates', 'peripheralState', 'modelV2', 'liveCalibration',
                                    'carOutput', 'driverMonitoringState', 'longitudinalPlan', 'livePose', 'liveDelay',
                                    'managerState', 'liveParameters', 'radarState', 'liveTorqueParameters',
+                                   'objectHazardStateSP',
                                    'controlsState', 'carControl', 'driverAssistance', 'alertDebug', 'userBookmark', 'audioFeedback'] + \
                                    self.camera_packets + self.sensor_packets + self.gps_packets,
                                   ignore_alive=ignore, ignore_avg_freq=ignore,
@@ -137,6 +156,7 @@ class SelfdriveD(CruiseHelper):
     self.is_metric = self.params.get_bool("IsMetric")
     self.is_ldw_enabled = self.params.get_bool("IsLdwEnabled")
     self.disengage_on_accelerator = self.params.get_bool("DisengageOnAccelerator")
+    self.object_hazard_enabled = self.params.get_bool("ObjectHazardEnabled")
 
     car_recognized = self.CP.brand != 'mock'
 
@@ -578,18 +598,7 @@ class SelfdriveD(CruiseHelper):
     mads.available = self.mads.enabled_toggle
 
     # Subsystem readiness statuses
-    SUBSYSTEM_SERVICES = [
-      ("VEH", ["pandaStates", "deviceState", "peripheralState"]),
-      ("CAM", ["roadCameraState", "driverCameraState", "wideRoadCameraState"]),
-      ("MDL", ["modelV2"]),
-      ("LOC", ["livePose"]),
-      ("CAL", ["liveCalibration"]),
-      ("PRM", ["liveParameters"]),
-      ("RAD", ["radarState"]),
-      ("DRV", ["driverMonitoringState"]),
-      ("CTL", ["controlsState", "carOutput", "carControl"]),
-      ("PLN", ["longitudinalPlan"]),
-    ]
+    SUBSYSTEM_SERVICES = get_subsystem_services(self.object_hazard_enabled)
     statuses = ss_sp.init('subsystemStatuses', len(SUBSYSTEM_SERVICES))
     all_green = True
     ignore_valid_services = set(self.sm.ignore_valid)
@@ -629,6 +638,7 @@ class SelfdriveD(CruiseHelper):
       self.is_metric = self.params.get_bool("IsMetric")
       self.is_ldw_enabled = self.params.get_bool("IsLdwEnabled")
       self.disengage_on_accelerator = self.params.get_bool("DisengageOnAccelerator")
+      self.object_hazard_enabled = self.params.get_bool("ObjectHazardEnabled")
       self.experimental_mode = self.params.get_bool("ExperimentalMode") and self.CP.openpilotLongitudinalControl
       self.personality = self.params.get("LongitudinalPersonality", return_default=True)
 

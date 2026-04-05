@@ -1,0 +1,4 @@
+interface:
+  display_name: "Object Hazard Monitor"
+  short_description: "Monitor tici object-hazard bring-up and resource budgets"
+  default_prompt: "Use $object-hazard-live-monitor to validate live object-hazard bring-up on a tici, inspect planner and hazard outputs, and identify the lowest-impact mitigation when CPU, GPU, memory, or thermal pressure rises."

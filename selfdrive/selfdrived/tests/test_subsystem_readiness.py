@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from openpilot.selfdrive.selfdrived.selfdrived import compute_subsystem_status
+from openpilot.selfdrive.selfdrived.selfdrived import compute_subsystem_status, get_subsystem_services
 
 
 def make_sm(service: str, *, alive: bool, freq_ok: bool, valid: bool) -> SimpleNamespace:
@@ -42,3 +42,13 @@ def test_prm_readiness_checks_valid_even_if_comm_checks_ignore_valid():
   sm = make_sm("liveParameters", alive=True, freq_ok=True, valid=False)
   status = compute_subsystem_status(sm, ["liveParameters"], {"liveParameters"}, set())
   assert status == 1
+
+
+def test_object_hazard_subsystem_hidden_when_feature_disabled():
+  names = [name for name, _services in get_subsystem_services(False)]
+  assert "OBJ" not in names
+
+
+def test_object_hazard_subsystem_shown_when_feature_enabled():
+  services = get_subsystem_services(True)
+  assert services[3] == ("OBJ", ["objectHazardStateSP"])
