@@ -104,6 +104,9 @@ def weather_overlay_enabled(started: bool, params: Params, CP: car.CarParams) ->
   """Check if the weather HUD overlay is enabled."""
   return started and params.get_bool("WeatherOverlayEnabled")
 
+def object_hazard_enabled(started: bool, params: Params, CP: car.CarParams) -> bool:
+  return started and (not CP.notCar) and params.get_bool("ObjectHazardEnabled")
+
 def mtsc_enabled(started: bool, params: Params, CP: car.CarParams) -> bool:
   # Deprecated: MTSC publisher removed in favor of direct VTSC map lookahead.
   return False
@@ -199,6 +202,9 @@ procs += [
 
   # RTI (Realtime Traffic Intelligence)
   PythonProcess("rtid", "sunnypilot.rtid.rtid", rti_enabled),
+
+  # Object hazard slow/stop perception
+  PythonProcess("objectd", "sunnypilot.objectd.objectd", object_hazard_enabled),
 
   # Weather-Aware Speed Control
   PythonProcess("weatherd", "sunnypilot.weatherd.weatherd", weather_enabled),

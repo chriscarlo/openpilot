@@ -20,6 +20,7 @@ from openpilot.sunnypilot.selfdrive.selfdrived.events import EventsSP
 from openpilot.sunnypilot.selfdrive.controls.lib.vision_turn_controller import VisionTurnController
 from openpilot.sunnypilot.selfdrive.controls.lib.rti_controller import RTIController
 from openpilot.sunnypilot.selfdrive.controls.lib.weather_controller import WeatherController
+from openpilot.sunnypilot.selfdrive.controls.lib.object_hazard_controller import ObjectHazardController
 from openpilot.sunnypilot.selfdrive.controls.lib.planner_lag_debug import (
   PlannerLagRecorder,
   SPAN_PUBLISH_LONGITUDINAL_PLAN_SP,
@@ -48,6 +49,7 @@ class LongitudinalPlannerSP:
     self.slc = SpeedLimitController(CP)
     self.rti = RTIController(CP)
     self.weather = WeatherController()
+    self.object_hazard = ObjectHazardController()
     self.planner_lag_debug = PlannerLagRecorder()
     model_bundle = get_active_bundle()
     self.generation = int(model_bundle.generation) if (model_bundle := get_active_bundle()) else None
@@ -164,6 +166,10 @@ class LongitudinalPlannerSP:
       self.weather.update(v_ego, v_cruise)
       v_cruise_weather = self.weather.speed_recommendation if self.weather.is_active else V_CRUISE_UNSET
 
+      # Update object hazard controller
+      self.object_hazard.update(sm, v_ego, a_ego, v_cruise)
+      v_cruise_object_hazard = self.object_hazard.speed_recommendation if self.object_hazard.is_active else V_CRUISE_UNSET
+
       cruise_speeds = [v_cruise]
 
       # MTSC publisher deprecated: VTSC handles map lookahead internally
@@ -176,6 +182,8 @@ class LongitudinalPlannerSP:
         cruise_speeds.append(v_cruise_rti)
       if self.weather.is_active and v_cruise_weather != V_CRUISE_UNSET:
         cruise_speeds.append(v_cruise_weather)
+      if self.object_hazard.is_active and v_cruise_object_hazard != V_CRUISE_UNSET:
+        cruise_speeds.append(v_cruise_object_hazard)
 
       v_cruise_final = min(cruise_speeds)
       return v_cruise_final
@@ -345,6 +353,17 @@ class LongitudinalPlannerSP:
       except Exception:
         # Backward compatibility if older custom.capnp without source field
         pass
+
+      objectHazardControl = longitudinalPlanSP.objectHazardControl
+      objectHazardControl.enabled = bool(self.object_hazard.enabled)
+      objectHazardControl.active = bool(self.object_hazard.is_active)
+      objectHazardControl.recommendedSpeed = float(
+        0.0 if self.object_hazard.speed_recommendation == V_CRUISE_UNSET else self.object_hazard.speed_recommendation
+      )
+      objectHazardControl.stopRequired = bool(self.object_hazard.stop_required)
+      objectHazardControl.hazardDistanceM = float(self.object_hazard.hazard_distance_m)
+      objectHazardControl.hazardConfidence = float(self.object_hazard.hazard_confidence)
+      objectHazardControl.hazardClass = self.object_hazard.hazard_class
 
       pm.send('longitudinalPlanSP', plan_sp_send)
     finally:

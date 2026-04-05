@@ -38,9 +38,13 @@ class FakeSubMaster:
   - `sm[...]` to return message-like objects with attributes
   """
 
-  def __init__(self, data: Dict[str, Any], valid: Dict[str, bool]):
+  def __init__(self, data: Dict[str, Any], valid: Dict[str, bool],
+               alive: Optional[Dict[str, bool]] = None,
+               recv_time: Optional[Dict[str, float]] = None):
     self._data = dict(data)
     self.valid = dict(valid)
+    self.alive = {k: self.valid.get(k, False) for k in self._data} if alive is None else dict(alive)
+    self.recv_time = {k: 0.0 for k in self._data} if recv_time is None else dict(recv_time)
 
   def __getitem__(self, key: str) -> Any:
     return self._data[key]
@@ -119,8 +123,9 @@ def install_fake_long_mpc(*, module_name: str = 'openpilot.selfdrive.controls.li
   """
 
   class FakeLongitudinalMpc:
-    def __init__(self, dt: float = 0.05):
+    def __init__(self, dt: float = 0.05, CP=None):
       self.dt = float(dt)
+      self.CP = CP
       self.mode = 'acc'
       self.solve_time = 0.0
       self.crash_cnt = 0

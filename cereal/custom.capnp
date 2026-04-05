@@ -134,6 +134,7 @@ struct LongitudinalPlanSP @0xf35cc4560bbf6ec2 {
   slc @2 :SpeedLimitControl;
   visionTurnSpeedControl @3 :VisionTurnSpeedControl;
   accelPersonality @4 :AccelerationPersonality;
+  objectHazardControl @5 :ObjectHazardControl;
 
   struct DynamicExperimentalControl {
     state @0 :DynamicExperimentalControlState;
@@ -248,6 +249,16 @@ struct LongitudinalPlanSP @0xf35cc4560bbf6ec2 {
     sport @0;
     normal @1;
     eco @2;
+  }
+
+  struct ObjectHazardControl {
+    enabled @0 :Bool;
+    active @1 :Bool;
+    recommendedSpeed @2 :Float32;
+    stopRequired @3 :Bool;
+    hazardDistanceM @4 :Float32;
+    hazardConfidence @5 :Float32;
+    hazardClass @6 :Text;
   }
 
   # Source for Speed Limit Control selection
@@ -602,7 +613,33 @@ struct WeatherOverlaySP @0xc2243c65e0340384 {
 struct CustomReserved12 @0x9ccdc8676701b412 {
 }
 
-struct CustomReserved13 @0xcd96dafb67a082d0 {
+struct ObjectHazardStateSP @0xcd96dafb67a082d0 {
+  timeStamp @0 :UInt64;
+  enabled @1 :Bool;
+  active @2 :Bool;
+  modelReady @3 :Bool;
+  backend @4 :Text;
+  hazardOnPath @5 :Bool;
+  stopRequired @6 :Bool;
+  recommendedSpeed @7 :Float32;
+  hazardDistanceM @8 :Float32;
+  hazardConfidence @9 :Float32;
+  hazardClass @10 :Text;
+  imageX @11 :Float32;
+  imageY @12 :Float32;
+  sourceFrameId @13 :UInt32;
+  detections @14 :List(Detection);
+
+  struct Detection {
+    className @0 :Text;
+    confidence @1 :Float32;
+    xMin @2 :Float32;
+    yMin @3 :Float32;
+    xMax @4 :Float32;
+    yMax @5 :Float32;
+    onPath @6 :Bool;
+    distanceM @7 :Float32;
+  }
 }
 
 struct CustomReserved14 @0xb057204d7deadf3f {

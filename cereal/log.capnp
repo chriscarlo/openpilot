@@ -2639,7 +2639,7 @@ struct Event {
     mapTurnSpeedControlSP @136 :Custom.MapTurnSpeedControlSP;
     weatherOverlaySP @137 :Custom.WeatherOverlaySP;
     customReserved12 @138 :Custom.CustomReserved12;
-    customReserved13 @139 :Custom.CustomReserved13;
+    objectHazardStateSP @139 :Custom.ObjectHazardStateSP;
     customReserved14 @140 :Custom.CustomReserved14;
     customReserved15 @141 :Custom.CustomReserved15;
     customReserved16 @142 :Custom.CustomReserved16;

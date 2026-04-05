@@ -230,6 +230,9 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
       output_a_target = self.blend_accel_transition(output_a_target_mpc, output_a_target_e2e, v_ego)
       self.output_should_stop = output_should_stop_e2e or output_should_stop_mpc
 
+    if self.object_hazard.is_active and self.object_hazard.stop_required:
+      self.output_should_stop = True
+
     gap_reclaim_floor = float(getattr(self.mpc, 'gap_reclaim_accel_floor', 0.0) or 0.0)
     if (gap_reclaim_floor > 0.0 and
         not bool(getattr(self.mpc, 'use_upstream_gap_reclaim', False)) and
