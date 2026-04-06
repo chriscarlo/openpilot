@@ -2744,6 +2744,7 @@ def test_strategic_counterevidence_dwell_releases_helper_state():
     anchor_index=12,
   )
 
+  # Frame 1: enter takeover zone, vision above cap (no approach)
   d0 = evaluate_map_strategy(
     mode='strategic',
     state=state,
@@ -2760,6 +2761,7 @@ def test_strategic_counterevidence_dwell_releases_helper_state():
   assert d0.apply_map_cap is True
   assert d0.vision_relax_allowed is False
 
+  # Frame 2: zone dwell >= takeover_dwell_s (0.35), CE eligible and starts
   d1 = evaluate_map_strategy(
     mode='strategic',
     state=state,
@@ -2770,13 +2772,30 @@ def test_strategic_counterevidence_dwell_releases_helper_state():
     turn_visible=True,
     s_visible_m=35.0,
     vis_margin_m=10.0,
-    now_s=0.95,
+    now_s=0.50,
     apex_exit_ready=False,
   )
-  assert d1.apply_map_cap is False
-  assert d1.vision_relax_allowed is True
-  assert d1.vision_relax_reason == 'counterevidence_dwell'
-  assert d1.strategy_state == 'vision_owns'
+  assert d1.apply_map_cap is True
+  assert state.counterevidence_since == 0.50
+
+  # Frame 3: CE dwell expired (0.50 + 0.75 = 1.25), release fires
+  d2 = evaluate_map_strategy(
+    mode='strategic',
+    state=state,
+    candidate=candidate,
+    raw_target_pre_map=16.0,
+    full_visibility=True,
+    vision_good=True,
+    turn_visible=True,
+    s_visible_m=35.0,
+    vis_margin_m=10.0,
+    now_s=1.30,
+    apex_exit_ready=False,
+  )
+  assert d2.apply_map_cap is False
+  assert d2.vision_relax_allowed is True
+  assert d2.vision_relax_reason == 'counterevidence_dwell'
+  assert d2.strategy_state == 'vision_owns'
 
 
 def test_strategic_counterevidence_dwell_waits_for_anchor_visibility():
@@ -2826,6 +2845,248 @@ def test_strategic_counterevidence_dwell_waits_for_anchor_visibility():
   assert d1.map_floor_active is True
   assert d1.vision_relax_allowed is False
   assert d1.strategy_state == 'vision_clear_waiting'
+
+
+def test_counterevidence_blocked_when_vision_approached_cap():
+  """Counterevidence must not fire if vision ever got close to map cap in this zone."""
+  state = MapStrategyState()
+  candidate = MapCapCandidate(
+    mode='strategic',
+    cap_mps=15.0,
+    start_m=0.0,
+    coverage=0.8,
+    reason='cap_available',
+    anchor_dist_m=20.0,
+    anchor_vsafe_mps=9.0,
+    anchor_curvature=0.02,
+    anchor_index=12,
+  )
+
+  # Frame 1: vision approaches cap (15.2 <= 15.0 + 0.25)
+  evaluate_map_strategy(
+    mode='strategic',
+    state=state,
+    candidate=candidate,
+    raw_target_pre_map=15.2,
+    full_visibility=True,
+    vision_good=True,
+    turn_visible=True,
+    s_visible_m=35.0,
+    vis_margin_m=10.0,
+    now_s=0.10,
+    apex_exit_ready=False,
+  )
+  assert state.takeover_ever_approached is True
+
+  # Frame 2: vision relaxes above cap + counterevidence_delta, wait long enough
+  d = evaluate_map_strategy(
+    mode='strategic',
+    state=state,
+    candidate=candidate,
+    raw_target_pre_map=16.0,
+    full_visibility=True,
+    vision_good=True,
+    turn_visible=True,
+    s_visible_m=35.0,
+    vis_margin_m=10.0,
+    now_s=2.00,
+    apex_exit_ready=False,
+  )
+  # Counterevidence must NOT fire because takeover_ever_approached is True
+  assert state.counterevidence_since == 0.0
+  assert d.apply_map_cap is True
+
+
+def test_counterevidence_fires_after_zone_dwell_without_approach():
+  """Counterevidence fires when vision never approached cap and zone dwell expired."""
+  state = MapStrategyState()
+  candidate = MapCapCandidate(
+    mode='strategic',
+    cap_mps=15.0,
+    start_m=0.0,
+    coverage=0.8,
+    reason='cap_available',
+    anchor_dist_m=20.0,
+    anchor_vsafe_mps=9.0,
+    anchor_curvature=0.02,
+    anchor_index=12,
+  )
+
+  # Frame 1: enter zone, vision above cap (no approach)
+  evaluate_map_strategy(
+    mode='strategic',
+    state=state,
+    candidate=candidate,
+    raw_target_pre_map=16.0,
+    full_visibility=True,
+    vision_good=True,
+    turn_visible=True,
+    s_visible_m=35.0,
+    vis_margin_m=10.0,
+    now_s=0.10,
+    apex_exit_ready=False,
+  )
+  assert state.takeover_ever_approached is False
+  assert state.zone_entry_since == 0.10
+
+  # Frame 2: zone_elapsed=0.30 (< takeover_dwell_s=0.35), CE not eligible
+  d2 = evaluate_map_strategy(
+    mode='strategic',
+    state=state,
+    candidate=candidate,
+    raw_target_pre_map=16.0,
+    full_visibility=True,
+    vision_good=True,
+    turn_visible=True,
+    s_visible_m=35.0,
+    vis_margin_m=10.0,
+    now_s=0.40,
+    apex_exit_ready=False,
+  )
+  assert d2.apply_map_cap is True
+  assert state.counterevidence_since == 0.0
+
+  # Frame 3: zone_elapsed=0.46s (>= 0.35), CE starts accumulating
+  evaluate_map_strategy(
+    mode='strategic',
+    state=state,
+    candidate=candidate,
+    raw_target_pre_map=16.0,
+    full_visibility=True,
+    vision_good=True,
+    turn_visible=True,
+    s_visible_m=35.0,
+    vis_margin_m=10.0,
+    now_s=0.56,
+    apex_exit_ready=False,
+  )
+  assert state.counterevidence_since == 0.56
+
+  # Frame 4: CE dwell expired (0.56 + 0.75 = 1.31)
+  d4 = evaluate_map_strategy(
+    mode='strategic',
+    state=state,
+    candidate=candidate,
+    raw_target_pre_map=16.0,
+    full_visibility=True,
+    vision_good=True,
+    turn_visible=True,
+    s_visible_m=35.0,
+    vis_margin_m=10.0,
+    now_s=1.35,
+    apex_exit_ready=False,
+  )
+  assert d4.apply_map_cap is False
+  assert d4.vision_relax_allowed is True
+  assert d4.vision_relax_reason == 'counterevidence_dwell'
+
+
+def test_rearm_cooldown_prevents_instant_rearm():
+  """After counterevidence release, rearm must not happen for at least
+  counterevidence_dwell_s even if anchor changes to a far-away point."""
+  state = MapStrategyState()
+  candidate_near = MapCapCandidate(
+    mode='strategic',
+    cap_mps=15.0,
+    start_m=0.0,
+    coverage=0.8,
+    reason='cap_available',
+    anchor_dist_m=20.0,
+    anchor_vsafe_mps=9.0,
+    anchor_curvature=0.02,
+    anchor_index=12,
+  )
+
+  # Drive into counterevidence release: zone entry → CE eligible → CE dwell expired
+  evaluate_map_strategy(
+    mode='strategic',
+    state=state,
+    candidate=candidate_near,
+    raw_target_pre_map=16.0,
+    full_visibility=True,
+    vision_good=True,
+    turn_visible=True,
+    s_visible_m=35.0,
+    vis_margin_m=10.0,
+    now_s=0.10,
+    apex_exit_ready=False,
+  )
+  evaluate_map_strategy(
+    mode='strategic',
+    state=state,
+    candidate=candidate_near,
+    raw_target_pre_map=16.0,
+    full_visibility=True,
+    vision_good=True,
+    turn_visible=True,
+    s_visible_m=35.0,
+    vis_margin_m=10.0,
+    now_s=0.56,
+    apex_exit_ready=False,
+  )
+  d_release = evaluate_map_strategy(
+    mode='strategic',
+    state=state,
+    candidate=candidate_near,
+    raw_target_pre_map=16.0,
+    full_visibility=True,
+    vision_good=True,
+    turn_visible=True,
+    s_visible_m=35.0,
+    vis_margin_m=10.0,
+    now_s=1.35,
+    apex_exit_ready=False,
+  )
+  assert d_release.apply_map_cap is False
+  assert state.release_latched is True
+  assert state.release_at > 0.0
+
+  # Next frame: anchor jumps far away, normally would rearm instantly
+  candidate_far = MapCapCandidate(
+    mode='strategic',
+    cap_mps=18.0,
+    start_m=0.0,
+    coverage=0.8,
+    reason='cap_available',
+    anchor_dist_m=106.5,
+    anchor_vsafe_mps=12.0,
+    anchor_curvature=0.01,
+    anchor_index=30,
+  )
+  d_after = evaluate_map_strategy(
+    mode='strategic',
+    state=state,
+    candidate=candidate_far,
+    raw_target_pre_map=19.0,
+    full_visibility=True,
+    vision_good=True,
+    turn_visible=False,
+    s_visible_m=35.0,
+    vis_margin_m=10.0,
+    now_s=1.40,
+    apex_exit_ready=False,
+  )
+  # Cooldown NOT expired (1.40 - 1.35 = 0.05 < 0.75), still released
+  assert d_after.apply_map_cap is False
+  assert state.release_latched is True
+
+  # Much later: cooldown expired
+  d_rearm = evaluate_map_strategy(
+    mode='strategic',
+    state=state,
+    candidate=candidate_far,
+    raw_target_pre_map=19.0,
+    full_visibility=True,
+    vision_good=True,
+    turn_visible=False,
+    s_visible_m=35.0,
+    vis_margin_m=10.0,
+    now_s=2.20,
+    apex_exit_ready=False,
+  )
+  # Now rearm succeeds (2.20 - 1.35 = 0.85 >= 0.75)
+  assert d_rearm.apply_map_cap is True
+  assert state.release_latched is False
 
 
 def test_map_lookahead_absent_no_cap(monkeypatch):

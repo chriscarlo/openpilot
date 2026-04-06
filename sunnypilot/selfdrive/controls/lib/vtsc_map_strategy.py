@@ -77,6 +77,9 @@ class MapStrategyState:
   counterevidence_since: float = 0.0
   release_reason: str = ""
   strategy_state: str = "idle"
+  takeover_ever_approached: bool = False
+  zone_entry_since: float = 0.0
+  release_at: float = 0.0
 
   def reset(self) -> None:
     self.release_latched = False
@@ -84,6 +87,9 @@ class MapStrategyState:
     self.counterevidence_since = 0.0
     self.release_reason = ""
     self.strategy_state = "idle"
+    self.takeover_ever_approached = False
+    self.zone_entry_since = 0.0
+    self.release_at = 0.0
 
 
 @dataclass
@@ -849,29 +855,54 @@ def evaluate_map_strategy(
     state.release_reason = ""
     state.takeover_since = 0.0
     state.counterevidence_since = 0.0
+    state.takeover_ever_approached = False
+    state.zone_entry_since = 0.0
+    state.release_at = 0.0
 
   anchor_dist_m = float(candidate.anchor_dist_m if candidate.anchor_dist_m is not None else 1e9)
   takeover_zone_m = max(0.0, float(s_visible_m))
   in_takeover_zone = bool(full_visibility and vision_good and turn_visible and anchor_dist_m <= takeover_zone_m)
 
   if in_takeover_zone:
+    if state.zone_entry_since <= 0.0:
+      state.zone_entry_since = float(now_s)
+
     if float(raw_target_pre_map) <= float(candidate.cap_mps) + takeover_eps_mps:
       if state.takeover_since <= 0.0:
         state.takeover_since = float(now_s)
+      state.takeover_ever_approached = True
     else:
       state.takeover_since = 0.0
 
-    if float(raw_target_pre_map) >= float(candidate.cap_mps) + counterevidence_delta_mps:
+    # Counterevidence: only eligible after zone dwell AND vision never approached cap.
+    # In strategic mode, vision being above map cap is expected during curve approach
+    # (map sees curves before vision).  Only treat it as counterevidence when vision
+    # has had time to tighten (zone_elapsed >= takeover_dwell) and never did.
+    zone_elapsed = (max(0.0, float(now_s) - float(state.zone_entry_since))
+                    if state.zone_entry_since > 0.0 else 0.0)
+    ce_eligible = bool(not state.takeover_ever_approached
+                       and zone_elapsed >= float(takeover_dwell_s))
+
+    if ce_eligible and float(raw_target_pre_map) >= float(candidate.cap_mps) + counterevidence_delta_mps:
       if state.counterevidence_since <= 0.0:
         state.counterevidence_since = float(now_s)
     else:
-      state.counterevidence_since = 0.0
+      if not ce_eligible:
+        state.counterevidence_since = 0.0
   else:
     state.takeover_since = 0.0
     state.counterevidence_since = 0.0
-    if anchor_dist_m > (takeover_zone_m + float(rearm_margin_m)):
+    state.takeover_ever_approached = False
+    state.zone_entry_since = 0.0
+    # Rearm cooldown: after release, don't rearm for at least counterevidence_dwell_s
+    # to prevent instant re-engagement when anchor identity changes between frames.
+    release_age = (max(0.0, float(now_s) - float(state.release_at))
+                   if state.release_at > 0.0 else float('inf'))
+    rearm_cooldown_ok = bool(release_age >= float(counterevidence_dwell_s))
+    if rearm_cooldown_ok and anchor_dist_m > (takeover_zone_m + float(rearm_margin_m)):
       state.release_latched = False
       state.release_reason = ""
+      state.release_at = 0.0
 
   takeover_elapsed = max(0.0, float(now_s) - float(state.takeover_since)) if state.takeover_since > 0.0 else 0.0
   counterevidence_elapsed = max(0.0, float(now_s) - float(state.counterevidence_since)) if state.counterevidence_since > 0.0 else 0.0
@@ -880,19 +911,33 @@ def evaluate_map_strategy(
   if allow_immediate_post_apex_release and apex_exit_ready and full_visibility and turn_visible:
     state.release_latched = True
     state.release_reason = "post_apex_release"
+    if state.release_at <= 0.0:
+      state.release_at = float(now_s)
   elif takeover_elapsed >= float(takeover_dwell_s):
     state.release_latched = True
     state.release_reason = "takeover_dwell"
+    if state.release_at <= 0.0:
+      state.release_at = float(now_s)
   elif counterevidence_elapsed >= float(counterevidence_dwell_s):
     state.release_latched = True
     state.release_reason = "counterevidence_dwell"
+    if state.release_at <= 0.0:
+      state.release_at = float(now_s)
 
   if state.release_latched:
     if in_takeover_zone:
       vision_relax_reason = state.release_reason or "vision_takeover"
-    elif float(candidate.cap_mps) + float(rearm_delta_mps) < float(raw_target_pre_map) and anchor_dist_m > (takeover_zone_m + float(rearm_margin_m)):
-      state.release_latched = False
-      state.release_reason = ""
+    else:
+      # Rearm cooldown: prevent instant rearm when anchor identity changes.
+      release_age = (max(0.0, float(now_s) - float(state.release_at))
+                     if state.release_at > 0.0 else float('inf'))
+      rearm_cooldown_ok = bool(release_age >= float(counterevidence_dwell_s))
+      if (rearm_cooldown_ok
+          and float(candidate.cap_mps) + float(rearm_delta_mps) < float(raw_target_pre_map)
+          and anchor_dist_m > (takeover_zone_m + float(rearm_margin_m))):
+        state.release_latched = False
+        state.release_reason = ""
+        state.release_at = 0.0
 
   if state.release_latched:
     state.strategy_state = "vision_owns"
