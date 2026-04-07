@@ -5,9 +5,10 @@ This file is part of sunnypilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 """
 
+import time
+
 from cereal import log, custom
 import numpy as np
-from openpilot.common.realtime import DT_MDL
 from openpilot.common.params import Params
 
 LongPersonality = log.LongitudinalPersonality
@@ -91,6 +92,9 @@ MAX_ACCEL_PARAM_KEYS = {
   for personality in ACCEL_PERSONALITIES
 }
 
+PARAM_REFRESH_S = 1.0  # 1 Hz param refresh — profiles change rarely
+
+
 class VibePersonalityController:
   """
   Controller for managing separated acceleration and distance controls:
@@ -100,7 +104,7 @@ class VibePersonalityController:
 
   def __init__(self):
     self.params = Params()
-    self.frame = 0
+    self._last_param_refresh_t = 0.0
 
     # Separate personalities for acceleration and distance control
     self.accel_personality = AccelPersonality.normal
@@ -187,9 +191,11 @@ class VibePersonalityController:
       self._precompute_slopes()
 
   def _update_from_params(self):
-    """Update personalities from params (rate limited)"""
-    if self.frame % int(1. / DT_MDL) != 0:
+    """Update personalities from params (rate limited via wall-clock debounce)."""
+    now = time.monotonic()
+    if (now - self._last_param_refresh_t) < PARAM_REFRESH_S:
       return
+    self._last_param_refresh_t = now
 
     # Update AccelPersonality
     try:
@@ -365,11 +371,11 @@ class VibePersonalityController:
     """Reset to default modes"""
     self.accel_personality = AccelPersonality.normal
     self.long_personality = LongPersonality.standard
-    self.frame = 0
+    self._last_param_refresh_t = 0.0
 
   def update(self):
-    """Update frame counter"""
-    self.frame = (self.frame + 1) % 1000000
+    """No-op — kept for caller compatibility. Rate limiting is wall-clock based."""
+    pass
 
   def _compute_slopes(self, x, y):
     """Compute slopes for Hermite interpolation using symmetric difference method."""

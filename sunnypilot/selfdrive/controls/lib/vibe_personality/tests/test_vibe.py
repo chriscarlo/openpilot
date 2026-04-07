@@ -70,7 +70,7 @@ class TestVibePersonalityController:
     """Controller should initialize with expected default values"""
     assert controller.accel_personality == AccelPersonality.normal
     assert controller.long_personality == LongPersonality.standard
-    assert controller.frame == 0
+    assert controller._last_param_refresh_t == 0.0
     assert hasattr(controller, 'max_accel_slopes')
     assert hasattr(controller, 'min_accel_slopes')
     assert hasattr(controller, 'follow_distance_slopes')
@@ -246,24 +246,17 @@ class TestVibePersonalityController:
     # Change from defaults
     controller.set_accel_personality(AccelPersonality.sport)
     controller.set_long_personality(LongPersonality.aggressive)
-    controller.frame = 1000
+    controller._last_param_refresh_t = 99.0
 
     # Reset and verify defaults
     controller.reset()
     assert controller.accel_personality == AccelPersonality.normal
     assert controller.long_personality == LongPersonality.standard
-    assert controller.frame == 0
+    assert controller._last_param_refresh_t == 0.0
 
-  def test_update_increments_frame_counter(self, controller):
-    """Update should increment frame counter with wraparound"""
-    initial_frame = controller.frame
-    controller.update()
-    assert controller.frame == initial_frame + 1
-
-    # Test wraparound
-    controller.frame = 999999
-    controller.update()
-    assert controller.frame == 0
+  def test_update_is_noop(self, controller):
+    """update() is a no-op kept for caller compatibility."""
+    controller.update()  # should not raise
 
   def test_individual_accel_methods(self, controller):
     """Test individual min/max accel convenience methods"""
@@ -284,7 +277,7 @@ class TestVibePersonalityController:
     """Aggressive personality uses enum value 0 and must still load from Params."""
     controller.params._store["LongitudinalPersonality"] = str(LongPersonality.aggressive)
     controller.long_personality = LongPersonality.relaxed
-    controller.frame = 0
+    controller._last_param_refresh_t = 0.0  # force refresh on next call
 
     assert controller.get_long_personality() == LongPersonality.aggressive
 
