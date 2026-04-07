@@ -117,6 +117,7 @@ class TestVibePersonalityController:
     controller.params._store["VibePersonalityEnabled"] = "1"
     controller.params._store["VibeAccelPersonalityEnabled"] = "1"
     controller.params._store["VibeFollowPersonalityEnabled"] = "1"
+    controller._last_param_refresh_t = 0.0  # force refresh after store mutation
     assert controller.is_enabled() is True
     assert controller.is_accel_enabled() is True
     assert controller.is_follow_enabled() is True
@@ -125,6 +126,7 @@ class TestVibePersonalityController:
     controller.params._store["VibePersonalityEnabled"] = "0"
     controller.params._store["VibeAccelPersonalityEnabled"] = "0"
     controller.params._store["VibeFollowPersonalityEnabled"] = "0"
+    controller._last_param_refresh_t = 0.0
     assert controller.is_enabled() is False
     assert controller.is_accel_enabled() is False
     assert controller.is_follow_enabled() is False
@@ -133,6 +135,7 @@ class TestVibePersonalityController:
     controller.params._store["VibePersonalityEnabled"] = "0"
     controller.params._store["VibeAccelPersonalityEnabled"] = "1"
     controller.params._store["VibeFollowPersonalityEnabled"] = "1"
+    controller._last_param_refresh_t = 0.0
     assert controller.is_accel_enabled() is False
     assert controller.is_follow_enabled() is False
 
@@ -153,6 +156,7 @@ class TestVibePersonalityController:
   def test_get_accel_limits_returns_none_when_disabled(self, controller):
     """Should return None when acceleration control is disabled"""
     controller.params._store["VibePersonalityEnabled"] = "0"
+    controller._last_param_refresh_t = 0.0
     assert controller.get_accel_limits(20.0) is None
 
   def test_get_follow_distance_multiplier_returns_positive_value(self, controller):
@@ -165,6 +169,7 @@ class TestVibePersonalityController:
   def test_get_follow_distance_multiplier_returns_none_when_disabled(self, controller):
     """Should return None when follow distance control is disabled"""
     controller.params._store["VibePersonalityEnabled"] = "0"
+    controller._last_param_refresh_t = 0.0
     assert controller.get_follow_distance_multiplier(20.0) is None
 
   def test_personality_differences_produce_different_results(self, controller):
@@ -270,6 +275,7 @@ class TestVibePersonalityController:
 
     # Test disabled state
     controller.params._store["VibePersonalityEnabled"] = "0"
+    controller._last_param_refresh_t = 0.0
     assert controller.get_min_accel(15.0) is None
     assert controller.get_max_accel(15.0) is None
 

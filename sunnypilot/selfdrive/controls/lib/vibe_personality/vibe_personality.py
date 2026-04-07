@@ -110,6 +110,11 @@ class VibePersonalityController:
     self.accel_personality = AccelPersonality.normal
     self.long_personality = LongPersonality.standard
 
+    # Cached toggle states (refreshed by _update_from_params)
+    self._enabled = True
+    self._accel_enabled = True
+    self._follow_enabled = True
+
     # Parameter keys
     self.param_keys = {
       'accel_personality': 'AccelPersonality',        # eco=0, normal=1, sport=2
@@ -219,14 +224,29 @@ class VibePersonalityController:
     except (ValueError, TypeError):
       pass
 
-  def _get_toggle_state(self, key: str, default: bool = True) -> bool:
-    """Get toggle state with default fallback"""
-    return self.params.get_bool(self.param_keys.get(key, key)) if key in self.param_keys else default
+    # Refresh cached toggle states
+    self._enabled = self._read_toggle('enabled')
+    self._accel_enabled = self._read_toggle('accel_enabled')
+    self._follow_enabled = self._read_toggle('follow_enabled')
+
+  def _read_toggle(self, key: str, default: bool = True) -> bool:
+    """Read toggle state from Params (call only inside _update_from_params)."""
+    try:
+      return self.params.get_bool(self.param_keys[key]) if key in self.param_keys else default
+    except Exception:
+      return default
 
   def _set_toggle_state(self, key: str, value: bool):
-    """Set toggle state in params"""
+    """Set toggle state in params and update cache."""
     if key in self.param_keys:
       self.params.put_bool(self.param_keys[key], value)
+      # Update cached value immediately
+      if key == 'enabled':
+        self._enabled = value
+      elif key == 'accel_enabled':
+        self._accel_enabled = value
+      elif key == 'follow_enabled':
+        self._follow_enabled = value
 
   # AccelPersonality Management (for acceleration)
   def set_accel_personality(self, personality: int) -> bool:
@@ -278,25 +298,24 @@ class VibePersonalityController:
   def toggle_follow_distance_personality(self): return self._toggle_flag('follow_enabled')
 
   def _toggle_flag(self, key):
-    current = self._get_toggle_state(key)
+    current = self._read_toggle(key)
     self._set_toggle_state(key, not current)
     return not current
 
   def set_personality_enabled(self, enabled: bool): self._set_toggle_state('enabled', enabled)
 
-  # Feature-specific enable checks
+  # Feature-specific enable checks (use cached toggle values)
   def is_accel_enabled(self) -> bool:
     self._update_from_params()
-    return self._get_toggle_state('enabled') and self._get_toggle_state('accel_enabled')
+    return self._enabled and self._accel_enabled
 
   def is_follow_enabled(self) -> bool:
     self._update_from_params()
-    return self._get_toggle_state('enabled') and self._get_toggle_state('follow_enabled')
+    return self._enabled and self._follow_enabled
 
   def is_enabled(self) -> bool:
     self._update_from_params()
-    return (self._get_toggle_state('enabled') and
-            (self._get_toggle_state('accel_enabled') or self._get_toggle_state('follow_enabled')))
+    return self._enabled and (self._accel_enabled or self._follow_enabled)
 
   def get_accel_limits(self, v_ego: float) -> tuple[float, float] | None:
     """
@@ -348,9 +367,9 @@ class VibePersonalityController:
       "accel_personality_int": self.accel_personality,
       "long_personality": long_names.get(self.long_personality, "Unknown"),
       "long_personality_int": self.long_personality,
-      "enabled": self._get_toggle_state('enabled'),
-      "accel_enabled": self._get_toggle_state('accel_enabled'),
-      "follow_enabled": self._get_toggle_state('follow_enabled'),
+      "enabled": self._enabled,
+      "accel_enabled": self._accel_enabled,
+      "follow_enabled": self._follow_enabled,
       "accel_description": f"Acceleration: {accel_names.get(self.accel_personality, 'Unknown')}",
       "long_description": f"Following/Braking: {long_names.get(self.long_personality, 'Unknown')}",
     }
