@@ -1244,6 +1244,12 @@ class VisionTurnController:
     self._map_tail_candidate = None
     self._map_tail_active = False
     self._map_tail_last_cap = None
+    # Holdover: bridge transient map data dropouts (GPS flicker, road geometry
+    # invalidation, empty MapCurvatures) so the strategic cap doesn't release
+    # for 1-2 frames and then slam back on, causing bucking.
+    self._map_holdover_cap = None       # last valid v_cap (m/s)
+    self._map_holdover_candidate = None # last valid candidate
+    self._map_holdover_ts = 0.0         # monotonic time when holdover was saved
     self._map_tail_advisory_cap = None
     self._map_tail_strategic_cap = None
     self._map_tail_last_start = 0.0
@@ -3361,6 +3367,10 @@ class VisionTurnController:
           self._dbg_map_anchor_k = float(getattr(candidate, 'anchor_curvature', 0.0) or 0.0)
         if v_cap is not None and candidate is not None:
           v_cap_f = float(v_cap)
+          # Save holdover for bridging transient map dropouts
+          self._map_holdover_cap = v_cap_f
+          self._map_holdover_candidate = candidate
+          self._map_holdover_ts = now
           raw_target_pre_map = float(raw_target)
           try:
             v_ego_local = float(max(0.0, self._v_ego))
@@ -3410,9 +3420,36 @@ class VisionTurnController:
             self._map_tail_reason = "applied"
             raw_target = min(raw_target, v_cap_f)
         else:
-          self._map_strategy_state.reset()
-          self._map_tail_active = False
-          self._map_tail_reason = str(getattr(self, '_map_tail_compute_reason', '') or 'no_cap')
+          # Holdover: bridge transient map data dropouts (1-2 frames of GPS
+          # flicker, road geometry invalidation, or empty MapCurvatures) by
+          # keeping the last valid cap active for up to 1 second.
+          # Do NOT holdover intentional suppressions (counterevidence, lane
+          # change ambiguity) — those should release immediately.
+          _MAP_HOLDOVER_TIMEOUT_S = 1.0
+          _MAP_HOLDOVER_DATA_DROPOUT_REASONS = frozenset({
+            'no_gps', 'road_geometry_invalid', 'no_map_curvatures',
+            'insufficient_map_points', 'unknown', 'no_cap',
+            'enabled_no_cap', '',
+          })
+          _compute_reason = str(getattr(self, '_map_tail_compute_reason', '') or '')
+          _is_data_dropout = _compute_reason in _MAP_HOLDOVER_DATA_DROPOUT_REASONS
+          if (_is_data_dropout and
+              self._map_holdover_cap is not None and
+              self._map_holdover_candidate is not None and
+              (now - self._map_holdover_ts) < _MAP_HOLDOVER_TIMEOUT_S):
+            raw_target = min(raw_target, self._map_holdover_cap)
+            self._map_tail_active = True
+            self._map_tail_last_cap = self._map_holdover_cap
+            self._map_tail_reason = "holdover"
+            self._dbg_map_floor_active = True
+            self._dbg_map_floor_reason = "holdover"
+            self._dbg_map_strategic_cap = self._map_holdover_cap
+          else:
+            self._map_strategy_state.reset()
+            self._map_tail_active = False
+            self._map_tail_reason = str(_compute_reason or 'no_cap')
+            self._map_holdover_cap = None
+            self._map_holdover_candidate = None
       else:
         # Ensure HUD preview does not persist when map lookahead is disabled.
         self._map_strategy_state.reset()
