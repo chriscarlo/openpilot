@@ -262,8 +262,21 @@ class LongitudinalController:
 
     # Skip custom processing if tuning is disabled or radar unavailable
     if not self.enabled or self.CP.radarUnavailable:
+      if not CC.longActive:
+        self.desired_accel = 0.0
+        self.actual_accel = 0.0
+        self.accel_last = 0.0
+        return
       self.desired_accel = self.accel_cmd
-      self.actual_accel = self.accel_cmd
+      # No-radar AI lead: apply 1-pole low-pass to damp micro-flutter.
+      # The AI model's lead kinematics oscillate ±0.03 m/s² which EVs
+      # amplify ~5x through the low-inertia drivetrain.
+      # alpha=0.20 → ~3.5 Hz corner at 100 Hz, adds ~45 ms latency.
+      if self.CP.radarUnavailable:
+        self.actual_accel = float(0.20 * self.accel_cmd + 0.80 * self.accel_last)
+      else:
+        self.actual_accel = self.accel_cmd
+      self.accel_last = self.actual_accel
       return
 
     # Reset acceleration when control is inactive
