@@ -159,6 +159,11 @@ HYUNDAI_RECLAIM_RAW_SAFETY_DECEL_MPS2 = -0.8
 HYUNDAI_RECLAIM_RAW_SAFETY_DECEL_CLOSING_MPS = 0.25
 HYUNDAI_LEAD_TO_CRUISE_TRANSITION_RAMP_S = 1.0
 HYUNDAI_LEAD_TO_CRUISE_TRANSITION_MIN_ACCEL = 0.45
+# Close-range lead safety memory: if a lead was seen within this distance
+# in the last N seconds, cap cruise accel even if the source flickers to cruise.
+CLOSE_LEAD_MEMORY_DREL_M = 25.0       # leads within this distance are remembered
+CLOSE_LEAD_MEMORY_HOLD_S = 5.0        # remember for this long after last sighting
+CLOSE_LEAD_MEMORY_ACCEL_CAP = 0.30    # max cruise accel while memory is active (m/s²)
 LEAD_PRESENT_CRUISE_SPEED_CAP_BP = [0.0, 2.0, 6.0, 10.0, 15.0, 25.0]
 LEAD_PRESENT_CRUISE_SPEED_CAP_V = [0.7, 0.9, 1.3, 1.9, 2.4, ACCEL_MAX]
 LEAD_PRESENT_CRUISE_SURPLUS_BP = [0.0, 2.0, 8.0, 16.0, 28.0]
@@ -930,6 +935,10 @@ class LongitudinalMpc:
     self._acc_obstacle_candidate_t = None
     self._lead_to_cruise_transition_t = None
     self._lead_to_cruise_transition_source = None
+    # Close-range lead memory: safety cap on cruise accel when a lead was
+    # recently visible nearby, even if the model is currently flickering.
+    self._close_lead_last_seen_t: float | None = None
+    self._close_lead_last_drel: float = 1e9
     self._lead_handoff_until_t = None
     self._lead_handoff_from_source = None
     self._lead_handoff_to_source = None
@@ -1837,6 +1846,12 @@ class LongitudinalMpc:
 
     best_lead_source, best_lead_obstacle = min(lead_candidates, key=lambda item: item[1][0])
     best_lead = self.control_leads[0] if best_lead_source == 'lead0' else self.control_leads[1]
+    # Update close-range lead memory — only when we're actively following a lead
+    # (not when cruise already owns the lead, to avoid overriding cruise's taper)
+    raw_drel = float(getattr(best_lead, 'dRel', 1e9) or 1e9)
+    if raw_drel < CLOSE_LEAD_MEMORY_DREL_M and self._acc_obstacle_mode != 'cruise':
+      self._close_lead_last_seen_t = now
+      self._close_lead_last_drel = raw_drel
     filtered_lead = self._update_hyundai_virtual_lead(now, best_lead_source, best_lead)
     if filtered_lead is None or not getattr(filtered_lead, 'status', False):
       self._acc_obstacle_mode = 'cruise'
@@ -2323,8 +2338,24 @@ class LongitudinalMpc:
       elif self.source != 'cruise':
         self._lead_to_cruise_transition_t = None
         self._lead_to_cruise_transition_source = None
+        # Clear close-lead memory once we're stably on a lead — no longer needed
+        if self._close_lead_last_seen_t is not None:
+          self._close_lead_last_seen_t = None
+          self._close_lead_last_drel = 1e9
+
+      # Close-range lead safety memory: if a lead was seen nearby recently,
+      # hard-cap cruise accel even if the model is currently flickering.
+      # This prevents accelerating toward a car the model saw 0.5s ago.
+      close_lead_memory_active = (
+        self._close_lead_last_seen_t is not None and
+        (now - float(self._close_lead_last_seen_t)) < CLOSE_LEAD_MEMORY_HOLD_S
+      )
 
       transition_accel_cap = self._get_lead_to_cruise_transition_accel_cap(now, float(v_ego), personality_max_accel)
+      # Close-lead memory: if the normal transition cap expired but a lead was
+      # recently seen nearby, apply the safety cap as a backstop.
+      if self.source == 'cruise' and close_lead_memory_active and transition_accel_cap is None:
+        transition_accel_cap = CLOSE_LEAD_MEMORY_ACCEL_CAP
       if self.source == 'cruise' and transition_accel_cap is not None:
         capped_max_accel = float(transition_accel_cap)
         if lead_present_cruise_cap is not None:
@@ -2353,6 +2384,8 @@ class LongitudinalMpc:
         self.acc_source_debug["source_transition_active"] = transition_active
         self.acc_source_debug["source_transition_from"] = self._lead_to_cruise_transition_source
         self.acc_source_debug["source_transition_elapsed_s"] = transition_elapsed_s
+        self.acc_source_debug["close_lead_memory_active"] = bool(close_lead_memory_active)
+        self.acc_source_debug["close_lead_memory_drel"] = float(self._close_lead_last_drel) if close_lead_memory_active else None
         self.acc_source_debug["source_transition_accel_cap"] = None if transition_accel_cap is None else float(transition_accel_cap)
       elif self.acc_source_debug:
         self.acc_source_debug["source_transition_active"] = False
