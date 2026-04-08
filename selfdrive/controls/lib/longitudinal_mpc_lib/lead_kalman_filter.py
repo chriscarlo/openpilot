@@ -102,8 +102,15 @@ class LeadKalmanFilter:
   def update(self, raw_drel: float, raw_vrel: float, dt_s: float,
              tau_close: float = 0.0, tau_open: float = 0.0,
              innovation_gate: float = 0.0, closing_gate: float = 0.0,
-             open_slew_max_mps: float = 0.0) -> float:
-    """Run one predict-update cycle (LeadDistanceFilter-compatible signature)."""
+             open_slew_max_mps: float = 0.0,
+             r_meas: float | None = None) -> float:
+    """Run one predict-update cycle.
+
+    Args:
+      r_meas: per-frame measurement noise override (e.g. model xStd²).
+              When provided, replaces the nominal R for this frame.
+              Clamped to [0.5, 50.0] to prevent degenerate values.
+    """
     slew_max = open_slew_max_mps if open_slew_max_mps > 0.0 else self._open_slew_max_mps
 
     if not self._initialised or dt_s <= 0.0:
@@ -129,11 +136,15 @@ class LeadKalmanFilter:
     # ---- INNOVATE --------------------------------------------------------
     innov_raw = raw_drel - x_pred
 
-    # Adaptive R: raise R when recent innovations are large (noisy period).
-    # Cap at 3x nominal to prevent over-damping during real dynamics.
-    # Innovation variance is updated AFTER the gate check (below) so that
-    # rejected outliers don't inflate the estimate.
-    r_eff = max(self._r, min(self._innov_var, self._r * 3.0))
+    # Determine effective R for this frame.
+    # Priority: per-frame r_meas (from model xStd²) > adaptive innov_var > nominal R
+    if r_meas is not None:
+      r_frame = float(max(0.5, min(50.0, r_meas)))
+    else:
+      r_frame = self._r
+    # Adaptive R: raise above r_frame when recent innovations are large.
+    # Cap at 3x to prevent over-damping during real dynamics.
+    r_eff = max(r_frame, min(self._innov_var, r_frame * 3.0))
 
     s = p_pred + r_eff
     innov_std = math.sqrt(max(s, 1e-6))

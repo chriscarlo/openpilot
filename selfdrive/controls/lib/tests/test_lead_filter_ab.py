@@ -31,13 +31,23 @@ OUTLIER_EXTRA_SIGMA_M = 4.0   # extra σ added during an outlier frame
 DT_S = 0.05                   # 20 Hz model output rate
 
 
-def _noisy_drel(true_drel: float, rng: np.random.Generator) -> float:
-  """Add realistic AI-model noise to a ground-truth dRel."""
-  # Scale noise with sqrt(distance) — farther objects are noisier
+def _noisy_drel(true_drel: float, rng: np.random.Generator) -> tuple[float, float]:
+  """Add realistic AI-model noise and generate a simulated xStd.
+
+  Returns (noisy_drel, x_std).
+  The model's xStd correlates with actual noise but isn't perfect —
+  it has its own estimation error (~30% relative noise on the std itself).
+  """
   sigma = BASE_SIGMA_M * math.sqrt(max(true_drel, 5.0) / 30.0)
-  if rng.random() < OUTLIER_PROB:
+  is_outlier = rng.random() < OUTLIER_PROB
+  if is_outlier:
     sigma += OUTLIER_EXTRA_SIGMA_M
-  return float(true_drel + rng.normal(0.0, sigma))
+  noise = float(rng.normal(0.0, sigma))
+  raw = true_drel + noise
+  # Model's xStd: tracks the true sigma with its own estimation noise
+  # During outliers the model usually knows it's uncertain (xStd rises)
+  x_std = float(max(0.3, sigma * (1.0 + rng.normal(0.0, 0.3))))
+  return float(raw), x_std
 
 
 # ---------------------------------------------------------------------------
@@ -49,6 +59,7 @@ class ScenarioStep:
   true_vrel: float   # positive = opening, negative = closing
   raw_drel: float     # noisy measurement
   raw_vrel: float     # noisy vRel (mild noise)
+  x_std: float = 1.5  # model's own uncertainty estimate for this detection
 
 
 @dataclass
@@ -82,9 +93,9 @@ def _build_scenario(name: str, duration_s: float,
     d += v * DT_S
     d = max(d, 1.0)  # can't go through the lead
 
-    raw_d = _noisy_drel(d, rng)
+    raw_d, x_std = _noisy_drel(d, rng)
     raw_v = float(v + rng.normal(0.0, 0.3))  # mild vRel noise
-    steps.append(ScenarioStep(true_drel=d, true_vrel=v, raw_drel=raw_d, raw_vrel=raw_v))
+    steps.append(ScenarioStep(true_drel=d, true_vrel=v, raw_drel=raw_d, raw_vrel=raw_v, x_std=x_std))
   return Scenario(name=name, steps=steps)
 
 
@@ -134,9 +145,10 @@ def _make_scenarios(seed: int = 42) -> list[Scenario]:
   # At t=3s, lead "appears" at 20 m
   cut_frame = int(3.0 / DT_S)
   for i in range(cut_frame, len(base.steps)):
+    _rd, _xs = _noisy_drel(20.0, rng)
     base.steps[i] = ScenarioStep(
       true_drel=20.0, true_vrel=-0.5,
-      raw_drel=_noisy_drel(20.0, rng), raw_vrel=float(-0.5 + rng.normal(0.0, 0.3)))
+      raw_drel=_rd, raw_vrel=float(-0.5 + rng.normal(0.0, 0.3)), x_std=_xs)
   scenarios.append(base)
 
   # 9. Jumpy lead — extra-noisy model output (bad lighting, occlusion)
@@ -229,9 +241,10 @@ def _make_scenarios(seed: int = 42) -> list[Scenario]:
   for i in range(cut_frame, len(cutin_decel.steps)):
     t_since = (i - cut_frame) * DT_S
     d_cutin_now = max(5.0, 18.0 - 2.0 * t_since)  # lead braking, closing
+    _rd, _xs = _noisy_drel(d_cutin_now, rng)
     cutin_decel.steps[i] = ScenarioStep(
       true_drel=d_cutin_now, true_vrel=-2.0,
-      raw_drel=_noisy_drel(d_cutin_now, rng), raw_vrel=float(-2.0 + rng.normal(0.0, 0.3)))
+      raw_drel=_rd, raw_vrel=float(-2.0 + rng.normal(0.0, 0.3)), x_std=_xs)
   scenarios.append(cutin_decel)
 
   return scenarios
@@ -341,7 +354,7 @@ def run_ab_comparison(kalman_q_d: float = 1.0, kalman_q_v: float = 0.0,
       ema_out.append(float(val))
     ema_metrics = _compute_metrics(true_vals, ema_out, raw_vals)
 
-    # --- Kalman filter ---
+    # --- Kalman filter (fixed R) ---
     kalman.reset()
     kal_out: list[float] = []
     for step in sc.steps:
@@ -349,7 +362,16 @@ def run_ab_comparison(kalman_q_d: float = 1.0, kalman_q_v: float = 0.0,
       kal_out.append(float(val))
     kal_metrics = _compute_metrics(true_vals, kal_out, raw_vals)
 
-    results[sc.name] = {"ema": ema_metrics, "kalman": kal_metrics}
+    # --- Kalman filter (xStd-adaptive R) ---
+    kalman.reset()
+    kal_xstd_out: list[float] = []
+    for step in sc.steps:
+      val = kalman.update(step.raw_drel, step.raw_vrel, DT_S,
+                          r_meas=step.x_std * step.x_std)
+      kal_xstd_out.append(float(val))
+    kal_xstd_metrics = _compute_metrics(true_vals, kal_xstd_out, raw_vals)
+
+    results[sc.name] = {"ema": ema_metrics, "kalman": kal_metrics, "kalman_xstd": kal_xstd_metrics}
 
   if print_table:
     _print_comparison(results)
