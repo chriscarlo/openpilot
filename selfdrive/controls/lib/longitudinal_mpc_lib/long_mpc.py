@@ -921,6 +921,7 @@ class LongitudinalMpc:
     self._drel_filter = LeadDistanceFilter()
     self._drel_kalman = LeadKalmanFilter()
     self._use_kalman_drel = False
+    self._use_kalman_drel_prev = False
     self.hyundai_virtual_lead_debug = {"active": False}
     self._hyundai_reclaim_lead = None
     self._hyundai_reclaim_last_t = None
@@ -972,6 +973,14 @@ class LongitudinalMpc:
       self._use_kalman_drel = bool(self._live_tune_params.get_bool("Longitudinal.LiveTune.UseKalmanDRelFilter"))
     except Exception:
       self._use_kalman_drel = False
+    # On toggle: seed the newly-active filter from the outgoing filter's state
+    if self._use_kalman_drel != self._use_kalman_drel_prev:
+      current_drel = (self._drel_filter.value if self._use_kalman_drel_prev is False else self._drel_kalman.value)
+      if self._use_kalman_drel:
+        self._drel_kalman.reset(current_drel)
+      else:
+        self._drel_filter.reset(current_drel)
+      self._use_kalman_drel_prev = self._use_kalman_drel
     try:
       q = self._live_tune_params.get("Longitudinal.LiveTune.KalmanDRelQ")
       r = self._live_tune_params.get("Longitudinal.LiveTune.KalmanDRelR")
@@ -1576,17 +1585,17 @@ class LongitudinalMpc:
       filtered.status = raw_lead.status
       cfg = self._live_tune_cfg
       raw_vrel = float(getattr(raw_lead, 'vRel', 0.0) or 0.0)
-      # Run both filters in parallel so switching is seamless (no cold-start)
-      ema_drel = self._drel_filter.update(
-        raw_lead.dRel, raw_vrel, dt_s,
-        tau_close=getattr(cfg, 'drel_filter_tau_close_s', DREL_FILTER_TAU_CLOSE_S),
-        tau_open=getattr(cfg, 'drel_filter_tau_open_s', DREL_FILTER_TAU_OPEN_S),
-        innovation_gate=getattr(cfg, 'drel_filter_innovation_gate_m', DREL_FILTER_INNOVATION_GATE_M),
-        closing_gate=getattr(cfg, 'drel_filter_closing_gate_m', DREL_FILTER_CLOSING_GATE_M),
-        open_slew_max_mps=getattr(cfg, 'drel_filter_open_slew_max_mps', DREL_FILTER_OPEN_SLEW_MAX_MPS),
-      )
-      kal_drel = self._drel_kalman.update(raw_lead.dRel, raw_vrel, dt_s)
-      filtered.dRel = kal_drel if self._use_kalman_drel else ema_drel
+      if self._use_kalman_drel:
+        filtered.dRel = self._drel_kalman.update(raw_lead.dRel, raw_vrel, dt_s)
+      else:
+        filtered.dRel = self._drel_filter.update(
+          raw_lead.dRel, raw_vrel, dt_s,
+          tau_close=getattr(cfg, 'drel_filter_tau_close_s', DREL_FILTER_TAU_CLOSE_S),
+          tau_open=getattr(cfg, 'drel_filter_tau_open_s', DREL_FILTER_TAU_OPEN_S),
+          innovation_gate=getattr(cfg, 'drel_filter_innovation_gate_m', DREL_FILTER_INNOVATION_GATE_M),
+          closing_gate=getattr(cfg, 'drel_filter_closing_gate_m', DREL_FILTER_CLOSING_GATE_M),
+          open_slew_max_mps=getattr(cfg, 'drel_filter_open_slew_max_mps', DREL_FILTER_OPEN_SLEW_MAX_MPS),
+        )
       filtered.yRel = self._filter_symmetric_metric(prev.yRel, raw_lead.yRel, dt_s, HYUNDAI_VIRTUAL_LEAD_PATH_TAU_S)
       filtered.vRel = self._filter_metric(prev.vRel, raw_lead.vRel, dt_s, danger_if_lower=True)
       filtered.aRel = self._filter_metric(prev.aRel, raw_lead.aRel, dt_s, danger_if_lower=True)
