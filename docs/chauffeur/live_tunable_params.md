@@ -14,15 +14,15 @@ All params are read at runtime via `Longitudinal.LiveTune.*` keys. Changes take 
 
 | Param Key | Default | Range | Description |
 |---|---|---|---|
-| `GapReclaimStrength` | 1.0 | 0.0–2.0 | How eagerly ACC closes extra gap on pullaway |
-| `GapReclaimGapMinM` | 1.5 | 0.0–10.0 | Minimum extra gap before reclaim activates |
-| `GapReclaimMaxAccel` | 0.36 | 0.0–0.75 | Cap on positive accel floor for gap closing |
+| `GapReclaimStrength` | 1.5 | 0.0–2.0 | How eagerly ACC closes extra gap on pullaway |
+| `GapReclaimGapMinM` | 0.0 | 0.0–10.0 | Minimum extra gap before reclaim activates |
+| `GapReclaimMaxAccel` | 0.24 | 0.0–0.75 | Cap on positive accel floor for gap closing |
 
 ## Lead Preview
 
 | Param Key | Default | Range | Description |
 |---|---|---|---|
-| `LeadPreviewStrength` | 1.0 | 0.0–2.0 | How early a newly recognized slower lead shapes decel |
+| `LeadPreviewStrength` | 1.8 | 0.0–2.0 | How early a newly recognized slower lead shapes decel |
 | `LeadPreviewGapMinM` | 1.5 | 0.0–10.0 | Min extra slack before preview activates |
 | `LeadPreviewMaxBufferM` | 12.0 | 0.0–25.0 | Max closer-pull of previewed lead obstacle |
 | `LeadAcquireWindowS` | 1.25 | 0.0–3.0 | Short stronger-preview window after a lead appears or jumps materially slower/closer |
@@ -34,7 +34,13 @@ All params are read at runtime via `Longitudinal.LiveTune.*` keys. Changes take 
 | `CutInSettleDurationS` | 7.0 | 0.0–12.0 | Grace window length after cut-in detection |
 | `CutInSettleMaxDecel` | 0.30 | 0.0–0.80 | Max braking magnitude during grace window |
 | `CutInSettleMaxClosingSpeedMps` | 2.5 | 0.5–6.0 | Max ego-lead closing speed to qualify for grace |
-| `CutInSettleAccelBiasMps2` | 0.10 | 0.0–0.30 | Positive accel offset to counteract EV regen during settle |
+| `CutInSettleAccelBiasMps2` | 0.20 | 0.0–0.30 | Positive accel offset to counteract EV regen during settle |
+
+## Virtual Lead EMA Filter
+
+| Param Key | Default | Range | Description |
+|---|---|---|---|
+| `VirtualLeadSlowTauS` | 1.00 | 0.10–3.0 | EMA tau for aLeadK in safe/noise-rejection direction. Sign transitions (decel→accel) use a fixed 0.30s tau regardless |
 
 ## dRel Noise Filter
 

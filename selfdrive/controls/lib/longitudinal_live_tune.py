@@ -41,7 +41,7 @@ LEAD_RESPONSE_TUNE_SPECS = (
     key="Longitudinal.LiveTune.LeadPreviewStrength",
     cli_name="lead-preview-strength",
     label="preview_strength",
-    default=1.0,
+    default=1.8,
     minimum=0.0,
     maximum=2.0,
     description="Scale factor for how early a newly recognized slower lead starts shaping decel.",
@@ -81,7 +81,7 @@ LEAD_RESPONSE_TUNE_SPECS = (
     key="Longitudinal.LiveTune.GapReclaimStrength",
     cli_name="gap-reclaim-strength",
     label="reclaim_strength",
-    default=1.0,
+    default=1.5,
     minimum=0.0,
     maximum=2.0,
     description="Scale factor for how eagerly ACC closes a safe extra gap when the lead is pulling away.",
@@ -91,7 +91,7 @@ LEAD_RESPONSE_TUNE_SPECS = (
     key="Longitudinal.LiveTune.GapReclaimGapMinM",
     cli_name="gap-reclaim-gap-min-m",
     label="reclaim_gap_min_m",
-    default=1.5,
+    default=0.0,
     minimum=0.0,
     maximum=10.0,
     description="Minimum extra slack above nominal headway before gap reclaim is allowed.",
@@ -101,7 +101,7 @@ LEAD_RESPONSE_TUNE_SPECS = (
     key="Longitudinal.LiveTune.GapReclaimMaxAccel",
     cli_name="gap-reclaim-max-accel",
     label="reclaim_max_accel",
-    default=0.36,
+    default=0.24,
     minimum=0.0,
     maximum=0.75,
     description="Cap on the positive accel floor used to close a safe extra gap.",
@@ -141,10 +141,22 @@ LEAD_RESPONSE_TUNE_SPECS = (
     key="Longitudinal.LiveTune.CutInSettleAccelBiasMps2",
     cli_name="cutin-settle-accel-bias",
     label="cutin_settle_accel_bias",
-    default=0.10,
+    default=0.20,
     minimum=0.0,
     maximum=0.30,
     description="Positive accel bias added to settle floor to counteract EV regen braking on coast.",
+  ),
+  LeadResponseTuneSpec(
+    attr="virtual_lead_slow_tau_s",
+    key="Longitudinal.LiveTune.VirtualLeadSlowTauS",
+    cli_name="virtual-lead-slow-tau",
+    label="vl_slow_tau",
+    default=1.00,
+    minimum=0.10,
+    maximum=3.0,
+    description="EMA time constant for lead kinematics (aLeadK) in the safe/noise-rejection direction. "
+                "Lower = faster response to lead accel changes, more model noise passed through. "
+                "Sign transitions (decel-to-accel) always use a faster fixed tau regardless of this value.",
   ),
   LeadResponseTuneSpec(
     attr="drel_filter_tau_close_s",
@@ -214,6 +226,7 @@ class LeadResponseTuningConfig:
   cutin_settle_max_decel: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cutin_settle_max_decel"].default
   cutin_settle_max_closing_speed_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cutin_settle_max_closing_speed_mps"].default
   cutin_settle_accel_bias_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cutin_settle_accel_bias_mps2"].default
+  virtual_lead_slow_tau_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["virtual_lead_slow_tau_s"].default
   drel_filter_tau_close_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["drel_filter_tau_close_s"].default
   drel_filter_tau_open_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["drel_filter_tau_open_s"].default
   drel_filter_open_slew_max_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["drel_filter_open_slew_max_mps"].default

@@ -7,10 +7,12 @@ from openpilot.common.params import Params
 from opendbc.car.hyundai.values import CAR
 from opendbc.car.hyundai.interface import CarInterface
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import (
+  LEAD_DANGER_FACTOR,
   get_cutin_settle_accel_floor,
   get_gap_reclaim_effective_cap,
   get_gap_reclaim_accel_floor,
   get_gap_reclaim_projection_scale,
+  get_lead_handoff_danger_factor,
   get_lead_present_cruise_accel_cap,
   get_lead_approach_preview_buffer,
   should_start_cutin_settle_event,
@@ -183,6 +185,35 @@ class TestLeadInteractionHeuristics:
     assert get_lead_approach_preview_buffer(34.5, near_headway, 1.3) == pytest.approx(0.0)
     assert get_lead_approach_preview_buffer(34.5, non_closing, 1.3) == pytest.approx(0.0)
 
+  def test_lead_handoff_danger_factor_engages_for_high_speed_cutin_inside_current_headway(self):
+    inside_headway = _make_lead(d_rel=23.0, v_lead=24.0, a_lead=0.0)
+
+    factor = get_lead_handoff_danger_factor(27.0, inside_headway, 1.3, handoff_remaining_s=1.25)
+
+    assert factor > 0.93
+
+  def test_lead_handoff_danger_factor_supports_projected_slower_far_lead(self):
+    slower_far_lead = _make_lead(d_rel=56.0, v_lead=22.0, a_lead=0.0)
+
+    factor = get_lead_handoff_danger_factor(35.0, slower_far_lead, 1.3, handoff_remaining_s=1.25)
+
+    assert factor > 0.90
+
+  def test_lead_handoff_danger_factor_fades_as_window_expires(self):
+    inside_headway = _make_lead(d_rel=23.0, v_lead=24.0, a_lead=0.0)
+
+    early = get_lead_handoff_danger_factor(27.0, inside_headway, 1.3, handoff_remaining_s=1.25)
+    late = get_lead_handoff_danger_factor(27.0, inside_headway, 1.3, handoff_remaining_s=0.20)
+
+    assert early > late > LEAD_DANGER_FACTOR
+
+  def test_lead_handoff_danger_factor_ignores_low_speed_cutin(self):
+    inside_headway = _make_lead(d_rel=12.0, v_lead=4.0, a_lead=0.0)
+
+    factor = get_lead_handoff_danger_factor(8.0, inside_headway, 1.3, handoff_remaining_s=1.25)
+
+    assert factor == pytest.approx(LEAD_DANGER_FACTOR)
+
   def test_cutin_settle_event_starts_for_adjacent_to_control_transition(self):
     lead = _make_lead(d_rel=44.0, v_lead=33.0, a_lead=0.0)
 
@@ -218,7 +249,7 @@ class TestLeadInteractionHeuristics:
     floor = get_cutin_settle_accel_floor(33.5, benign, 1.3, age_s=4.0)
 
     assert floor is not None
-    assert -0.02 < floor < 0.10  # positive due to default regen bias (+0.10)
+    assert 0.15 < floor < 0.20  # positive due to the stronger default regen bias (+0.20)
     assert get_cutin_settle_accel_floor(33.5, dangerous, 1.3, age_s=1.0) is None
 
   def test_cutin_settle_floor_blocks_braking_for_same_speed_merge(self):
@@ -226,7 +257,7 @@ class TestLeadInteractionHeuristics:
 
     floor = get_cutin_settle_accel_floor(33.5, same_speed, 1.3, age_s=1.0)
 
-    assert floor == pytest.approx(0.10)  # pure regen bias, no decel (closing_speed=0)
+    assert floor == pytest.approx(0.20)  # pure regen bias, no decel (closing_speed=0)
 
 
 class TestLeadInteractionScenarios:

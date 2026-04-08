@@ -138,3 +138,16 @@ class TestLeadRoleClassifier:
     assert dbg["cutin_promoted"]["lead0"] is True
     assert dbg["roles"]["lead0"] == LeadRoleClassifier.CENTER_CONTROL
     assert ctrl0.status is True
+
+  def test_cutin_promotion_supports_farther_adjacent_lead_before_handoff(self):
+    c = _make_classifier()
+    lead0_far = _make_lead(d_rel=62.0, y_rel=1.8, d_path=1.8, v_lat=-0.8, v_rel=-8.0)
+    lead0_cutin = _make_lead(d_rel=59.0, y_rel=1.7, d_path=1.7, v_lat=-0.8, v_rel=-8.0)
+    lead1 = _make_lead(status=False)
+
+    c.classify(v_ego=35.0, lead0=lead0_far, lead1=lead1, now=1.0)
+    ctrl0, _ctrl1, dbg = c.classify(v_ego=35.0, lead0=lead0_cutin, lead1=lead1, now=1.2)
+
+    assert dbg["cutin_promoted"]["lead0"] is True
+    assert dbg["roles"]["lead0"] == LeadRoleClassifier.CENTER_CONTROL
+    assert ctrl0.status is True

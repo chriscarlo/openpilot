@@ -5,7 +5,11 @@ import pytest
 
 from cereal import log
 from openpilot.common.params import Params
-from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import ACCEL_MAX, LongitudinalMpc, N
+from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import (
+  ACCEL_MAX,
+  LongitudinalMpc,
+  N,
+)
 
 
 def _make_lead(*, status=True, d_rel=44.0, y_rel=0.0, d_path=None, v_lat=0.0, v_rel=0.0,
@@ -76,6 +80,9 @@ class _MonotonicStub:
 @pytest.fixture(autouse=True)
 def _planner_test_setup():
   _configure_vibe_follow()
+  params = Params()
+  params.put_bool("VTSC.Expert.AdjLeadControlEnabled", True)
+  params.put("VTSC.Expert.AdjLeadCutInDRelMaxM", 60.0)
 
 
 class TestHyundaiAiLeadStability:
@@ -611,6 +618,111 @@ class TestHyundaiAiLeadStability:
     assert preview_debug["mode"] == "acquire"
     assert float(preview_debug["preview_buffer_m"]) >= 5.9
     assert mpc.lead_approach_preview[0] >= 5.9
+    assert mpc.source == "lead0"
+
+  def test_adjacent_awareness_preview_lowers_obstacle_before_control_handoff(self, monkeypatch):
+    monkeypatch.setattr(
+      "openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc.time.monotonic",
+      _MonotonicStub(step=0.1),
+    )
+    baseline_mpc = _make_hyundai_mpc(v_ego=34.73, a_ego=0.0)
+    preview_mpc = _make_hyundai_mpc(v_ego=34.73, a_ego=0.0)
+
+    primary_lead = _make_lead(
+      d_rel=73.55,
+      y_rel=0.0,
+      d_path=0.0,
+      v_lat=0.15,
+      v_rel=-2.73,
+      v_lead=32.0,
+      a_lead=0.0,
+      model_prob=1.0,
+    )
+    adjacent_lead = _make_lead(
+      d_rel=80.0,
+      y_rel=1.8,
+      d_path=1.8,
+      v_lat=-0.8,
+      v_rel=-12.73,
+      v_lead=22.0,
+      a_lead=0.0,
+      model_prob=0.92,
+    )
+
+    for mpc in (baseline_mpc, preview_mpc):
+      _run_update(mpc, primary_lead, _make_lead(status=False), v_cruise=40.0)
+
+    _run_update(baseline_mpc, primary_lead, _make_lead(status=False), v_cruise=40.0)
+    _run_update(preview_mpc, primary_lead, adjacent_lead, v_cruise=40.0)
+
+    assert baseline_mpc.source == "lead0"
+    assert preview_mpc.source == "lead0"
+    assert preview_mpc.adjacent_awareness_preview_debug["active"] is True
+    assert preview_mpc.adjacent_awareness_preview_debug["applied"] is True
+    assert preview_mpc.adjacent_awareness_preview_debug["slot"] == "lead1"
+    assert preview_mpc.lead_approach_preview_debug["lead1"]["active"] is False
+    assert float(preview_mpc.params[0, 2]) < float(baseline_mpc.params[0, 2]) - 3.0
+
+  def test_low_speed_hostile_new_lead_still_gets_acquire_preview(self, monkeypatch):
+    monkeypatch.setattr(
+      "openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc.time.monotonic",
+      _MonotonicStub(step=0.2),
+    )
+    mpc = _make_hyundai_mpc(v_ego=0.83, a_ego=0.0)
+
+    _run_update(mpc, _make_lead(status=False), _make_lead(status=False), v_cruise=40.0)
+    _run_update(
+      mpc,
+      _make_lead(
+        d_rel=9.56,
+        y_rel=0.15,
+        d_path=0.15,
+        v_rel=-20.24,
+        v_lead=-19.76,
+        a_lead=-0.04,
+        model_prob=0.20,
+      ),
+      _make_lead(status=False),
+      v_cruise=40.0,
+    )
+
+    preview_debug = mpc.lead_approach_preview_debug["lead0"]
+
+    assert preview_debug["acquire"]["active"] is True
+    assert preview_debug["mode"] == "acquire"
+    assert float(preview_debug["preview_buffer_m"]) > 1.0
+    assert mpc.lead_approach_preview[0] > 1.0
+    assert mpc.source == "lead0"
+
+  def test_new_tight_gap_lead_gets_capped_acquire_preview_inside_headway(self, monkeypatch):
+    monkeypatch.setattr(
+      "openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc.time.monotonic",
+      _MonotonicStub(step=0.2),
+    )
+    mpc = _make_hyundai_mpc(v_ego=6.75, a_ego=0.0)
+
+    _run_update(mpc, _make_lead(status=False), _make_lead(status=False), v_cruise=40.0)
+    _run_update(
+      mpc,
+      _make_lead(
+        d_rel=6.53,
+        y_rel=-0.36,
+        d_path=-0.36,
+        v_rel=-6.82,
+        v_lead=-0.07,
+        a_lead=0.0,
+        model_prob=0.20,
+      ),
+      _make_lead(status=False),
+      v_cruise=40.0,
+    )
+
+    preview_debug = mpc.lead_approach_preview_debug["lead0"]
+
+    assert preview_debug["acquire"]["active"] is True
+    assert preview_debug["mode"] == "acquire"
+    assert float(preview_debug["preview_buffer_m"]) > 0.5
+    assert mpc.lead_approach_preview[0] > 0.5
     assert mpc.source == "lead0"
 
   def test_opening_noise_is_slew_clamped_without_forcing_reset(self, monkeypatch):

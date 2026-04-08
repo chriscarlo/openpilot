@@ -72,7 +72,7 @@ class LeadRoleClassifier:
       "center_y_abs_max_m": 2.2,
       "center_y_abs_min_m": 1.2,
       "center_hyst_m": 0.35,
-      "cutin_drel_max_m": 55.0,
+      "cutin_drel_max_m": 60.0,
       "cutin_path_abs_max_m": 3.5,
       "cutin_yrate_min_mps": 0.8,
       "low_speed_bypass_v_mps": 8.0,
