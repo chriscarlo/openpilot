@@ -13,6 +13,7 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.modeld.constants import index_function
 from openpilot.selfdrive.controls.radard import _LEAD_ACCEL_TAU
 from openpilot.selfdrive.controls.lib.lead_role_classifier import ControlLead, LeadRoleClassifier
+from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.lead_kalman_filter import LeadKalmanFilter
 from openpilot.selfdrive.controls.lib.longitudinal_live_tune import (
   LeadResponseTuningConfig,
   read_lead_response_tuning_config,
@@ -918,6 +919,8 @@ class LongitudinalMpc:
     self._hyundai_virtual_lead_last_drel_error_m = 1e9
     self._hyundai_virtual_lead_dropout_until_t = None
     self._drel_filter = LeadDistanceFilter()
+    self._drel_kalman = LeadKalmanFilter()
+    self._use_kalman_drel = False
     self.hyundai_virtual_lead_debug = {"active": False}
     self._hyundai_reclaim_lead = None
     self._hyundai_reclaim_last_t = None
@@ -964,6 +967,26 @@ class LongitudinalMpc:
       self._live_a_ego_cost = float(raw) if raw is not None else float(A_EGO_COST)
     except Exception:
       self._live_a_ego_cost = float(A_EGO_COST)
+    # Kalman dRel filter toggle and tuning
+    try:
+      self._use_kalman_drel = bool(self._live_tune_params.get_bool("Longitudinal.LiveTune.UseKalmanDRelFilter"))
+    except Exception:
+      self._use_kalman_drel = False
+    try:
+      q = self._live_tune_params.get("Longitudinal.LiveTune.KalmanDRelQ")
+      r = self._live_tune_params.get("Longitudinal.LiveTune.KalmanDRelR")
+      km = self._live_tune_params.get("Longitudinal.LiveTune.KalmanDRelGainMax")
+      db = self._live_tune_params.get("Longitudinal.LiveTune.KalmanDRelDeadbandM")
+      self._drel_kalman.set_tuning(
+        q_drel=float(q) if q is not None else None,
+        r_drel=float(r) if r is not None else None,
+      )
+      if km is not None:
+        self._drel_kalman._k_max = float(km)
+      if db is not None:
+        self._drel_kalman._deadband_m = float(db)
+    except Exception:
+      pass
 
   def get_live_tune_config(self) -> LeadResponseTuningConfig:
     return self._live_tune_cfg
@@ -1287,6 +1310,7 @@ class LongitudinalMpc:
     self._hyundai_virtual_lead_last_drel_error_m = 1e9
     self._clear_hyundai_virtual_lead_dropout_hold()
     self._drel_filter.reset()
+    self._drel_kalman.reset()
     self._hyundai_reclaim_lead = None
     self._hyundai_reclaim_last_t = None
     self.hyundai_virtual_lead_debug = {
@@ -1513,7 +1537,8 @@ class LongitudinalMpc:
           "filtered": self._lead_debug_payload(held_lead),
           "metrics": metrics,
           "drel_consistency_m": float(self._hyundai_virtual_lead_last_drel_error_m),
-          "filter": dict(self._drel_filter.last_debug),
+          "filter": dict((self._drel_kalman if self._use_kalman_drel else self._drel_filter).last_debug),
+          "drel_filter_type": "kalman" if self._use_kalman_drel else "ema",
           "dropout_hold": dropout_hold_debug,
         }
         return held_lead
@@ -1531,6 +1556,7 @@ class LongitudinalMpc:
       self._hyundai_virtual_lead_stable_since_t = now if raw_lead.status else None
       self._hyundai_virtual_lead_last_drel_error_m = 0.0 if raw_lead.status else 1e9
       self._drel_filter.reset(raw_lead.dRel if raw_lead.status else None)
+      self._drel_kalman.reset(raw_lead.dRel if raw_lead.status else None)
       if raw_lead.status and reset_reason == "drel_jump_closer":
         self._drel_filter.last_debug.update({
           "predicted_vrel_mps": float(getattr(raw_lead, 'vRel', 0.0) or 0.0),
@@ -1549,14 +1575,18 @@ class LongitudinalMpc:
       filtered = copy.deepcopy(prev)
       filtered.status = raw_lead.status
       cfg = self._live_tune_cfg
-      filtered.dRel = self._drel_filter.update(
-        raw_lead.dRel, float(getattr(raw_lead, 'vRel', 0.0) or 0.0), dt_s,
+      raw_vrel = float(getattr(raw_lead, 'vRel', 0.0) or 0.0)
+      # Run both filters in parallel so switching is seamless (no cold-start)
+      ema_drel = self._drel_filter.update(
+        raw_lead.dRel, raw_vrel, dt_s,
         tau_close=getattr(cfg, 'drel_filter_tau_close_s', DREL_FILTER_TAU_CLOSE_S),
         tau_open=getattr(cfg, 'drel_filter_tau_open_s', DREL_FILTER_TAU_OPEN_S),
         innovation_gate=getattr(cfg, 'drel_filter_innovation_gate_m', DREL_FILTER_INNOVATION_GATE_M),
         closing_gate=getattr(cfg, 'drel_filter_closing_gate_m', DREL_FILTER_CLOSING_GATE_M),
         open_slew_max_mps=getattr(cfg, 'drel_filter_open_slew_max_mps', DREL_FILTER_OPEN_SLEW_MAX_MPS),
       )
+      kal_drel = self._drel_kalman.update(raw_lead.dRel, raw_vrel, dt_s)
+      filtered.dRel = kal_drel if self._use_kalman_drel else ema_drel
       filtered.yRel = self._filter_symmetric_metric(prev.yRel, raw_lead.yRel, dt_s, HYUNDAI_VIRTUAL_LEAD_PATH_TAU_S)
       filtered.vRel = self._filter_metric(prev.vRel, raw_lead.vRel, dt_s, danger_if_lower=True)
       filtered.aRel = self._filter_metric(prev.aRel, raw_lead.aRel, dt_s, danger_if_lower=True)
@@ -1589,7 +1619,8 @@ class LongitudinalMpc:
       "filtered": self._lead_debug_payload(self._hyundai_virtual_lead),
       "metrics": metrics,
       "drel_consistency_m": float(self._hyundai_virtual_lead_last_drel_error_m),
-      "filter": dict(self._drel_filter.last_debug),
+      "filter": dict((self._drel_kalman if self._use_kalman_drel else self._drel_filter).last_debug),
+      "drel_filter_type": "kalman" if self._use_kalman_drel else "ema",
       "dropout_hold": dropout_hold_debug,
     }
     return self._hyundai_virtual_lead
