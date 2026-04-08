@@ -25,27 +25,54 @@ from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.lead_kalman_filter im
 # ---------------------------------------------------------------------------
 # Noise model (fitted to real EV6 captures)
 # ---------------------------------------------------------------------------
-BASE_SIGMA_M = 1.5           # base measurement noise at 30 m
-OUTLIER_PROB = 0.05           # probability of a large jump per frame
-OUTLIER_EXTRA_SIGMA_M = 4.0   # extra σ added during an outlier frame
+# Noise model calibrated against real EV6 AI-model captures (2026-04-08).
+# Real frame-to-frame |Δd| distribution:
+#   ≤1m: 53%  1-5m: 39%  5-12m: 7%  >12m: 2%
+# Real noise by distance band:
+#   30-50m: σ≈0.7m   50-80m: σ≈2.5m   >80m: σ≈7m
+OUTLIER_EXTRA_SIGMA_M = 8.0   # produces 10-20 m outliers matching real tail
 DT_S = 0.05                   # 20 Hz model output rate
+
+
+def _noise_sigma(true_drel: float) -> float:
+  """Distance-dependent base noise σ matched to real EV6 captures.
+
+  Calibrated against real frame-to-frame |Δd| at each distance band:
+    30-50m: real mean|Δd|=0.73m → σ≈0.5m
+    50-80m: real mean|Δd|=2.36m → σ≈2.0m
+    >80m:   real mean|Δd|=7.73m → σ≈5.0m
+  """
+  d = max(true_drel, 5.0)
+  if d < 40.0:
+    return 0.5
+  elif d < 80.0:
+    return 0.5 + (d - 40.0) * 0.04  # 0.5 at 40 m → 2.1 at 80 m
+  else:
+    return 2.1 + (d - 80.0) * 0.15  # 2.1 at 80 m → 5.1 at 100 m
+
+
+def _outlier_prob(true_drel: float) -> float:
+  """Distance-dependent outlier probability.  Close = rare, far = frequent."""
+  d = max(true_drel, 5.0)
+  if d < 40.0:
+    return 0.03
+  elif d < 80.0:
+    return 0.03 + (d - 40.0) * 0.001  # 3% at 40m → 7% at 80m
+  else:
+    return 0.07 + (d - 80.0) * 0.004  # 7% at 80m → 15% at 100m
 
 
 def _noisy_drel(true_drel: float, rng: np.random.Generator) -> tuple[float, float]:
   """Add realistic AI-model noise and generate a simulated xStd.
 
   Returns (noisy_drel, x_std).
-  The model's xStd correlates with actual noise but isn't perfect —
-  it has its own estimation error (~30% relative noise on the std itself).
   """
-  sigma = BASE_SIGMA_M * math.sqrt(max(true_drel, 5.0) / 30.0)
-  is_outlier = rng.random() < OUTLIER_PROB
+  sigma = _noise_sigma(true_drel)
+  is_outlier = rng.random() < _outlier_prob(true_drel)
   if is_outlier:
     sigma += OUTLIER_EXTRA_SIGMA_M
   noise = float(rng.normal(0.0, sigma))
   raw = true_drel + noise
-  # Model's xStd: tracks the true sigma with its own estimation noise
-  # During outliers the model usually knows it's uncertain (xStd rises)
   x_std = float(max(0.3, sigma * (1.0 + rng.normal(0.0, 0.3))))
   return float(raw), x_std
 
