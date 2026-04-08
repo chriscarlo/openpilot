@@ -268,12 +268,17 @@ class LongitudinalController:
         self.accel_last = 0.0
         return
       self.desired_accel = self.accel_cmd
-      # No-radar AI lead: apply 1-pole low-pass to damp micro-flutter.
-      # The AI model's lead kinematics oscillate ±0.03 m/s² which EVs
-      # amplify ~5x through the low-inertia drivetrain.
-      # alpha=0.20 → ~3.5 Hz corner at 100 Hz, adds ~45 ms latency.
+      # No-radar AI lead: deadband + low-pass to damp EV micro-flutter.
+      # Real data shows 0.019 m/s² command jitter → 0.192 m/s² at wheels (10x).
+      # Deadband: don't change the CAN command for sub-threshold changes.
+      #   Zero latency on real changes, eliminates micro-jitter entirely.
+      # Low-pass: smooth changes that exceed the deadband.
+      #   alpha=0.12 → ~2 Hz corner at 100 Hz, ~80 ms latency.
       if self.CP.radarUnavailable:
-        self.actual_accel = float(0.20 * self.accel_cmd + 0.80 * self.accel_last)
+        if abs(self.accel_cmd - self.accel_last) < 0.02:
+          self.actual_accel = self.accel_last
+        else:
+          self.actual_accel = float(0.12 * self.accel_cmd + 0.88 * self.accel_last)
       else:
         self.actual_accel = self.accel_cmd
       self.accel_last = self.actual_accel
