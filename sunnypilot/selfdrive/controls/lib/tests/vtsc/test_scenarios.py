@@ -623,6 +623,263 @@ def test_driver_override_learning_reaches_material_relax_after_three_short_burst
   assert str(snap['low_speed_calibration_reason']) == 'relax_override'
 
 
+# ===== Map-aware calibration tests =====
+
+
+def test_map_aware_calibration_gas_override_during_approach():
+  """Gas override on a straight approach with strategic map active should learn at the map anchor curvature."""
+  v0 = 15.0
+  v_cruise = 20.0
+  map_anchor_k = 0.015  # map sees a curve ahead
+  map_cap_mps = 12.0    # map cap speed
+  ctrl = mk_vtsc_with_params()
+  steps = [
+    Step(
+      curvature=0.0,            # straight road (approach phase)
+      curvature_ahead=0.0,
+      confidence=0.95,
+      desired_curvature=0.0005,
+      actual_curvature=0.0004,
+      lateral_output=0.10,
+      lateral_saturated=False,
+      gas_pressed=True,
+      applied_accel=0.0,        # hold speed above map cap
+      map_anchor_k=map_anchor_k,
+      map_cap_mps=map_cap_mps,
+    )
+    for _ in range(160)
+  ]
+
+  snap = simulate_sequence(steps=steps, vtsc=ctrl, v0_mps=v0, v_cruise_mps=v_cruise, dt=0.05)
+
+  # The override profile should have learned at the map anchor curvature
+  scale_at_anchor = float(ctrl._low_speed_calibration_scale(map_anchor_k))
+  assert scale_at_anchor > 1.005, f"scale at anchor {scale_at_anchor} should be > 1.005"
+  assert bool(snap['low_speed_calibration_map_active']) is True
+  assert float(snap['low_speed_calibration_map_anchor_k']) == pytest.approx(map_anchor_k, abs=1e-6)
+  assert str(snap['low_speed_calibration_reason']) == 'relax_override'
+
+
+def test_map_aware_calibration_does_not_contaminate_zero_curvature_bin():
+  """Learning at map anchor curvature should not bleed into near-zero curvature bins."""
+  v0 = 15.0
+  v_cruise = 20.0
+  map_anchor_k = 0.015
+  map_cap_mps = 12.0
+  ctrl = mk_vtsc_with_params()
+  steps = [
+    Step(
+      curvature=0.0,
+      curvature_ahead=0.0,
+      confidence=0.95,
+      desired_curvature=0.0005,
+      actual_curvature=0.0004,
+      lateral_output=0.10,
+      lateral_saturated=False,
+      gas_pressed=True,
+      applied_accel=0.0,
+      map_anchor_k=map_anchor_k,
+      map_cap_mps=map_cap_mps,
+    )
+    for _ in range(160)
+  ]
+
+  simulate_sequence(steps=steps, vtsc=ctrl, v0_mps=v0, v_cruise_mps=v_cruise, dt=0.05)
+
+  # Near-zero curvature should remain at baseline (Gaussian spread shouldn't reach it)
+  scale_near_zero = float(ctrl._low_speed_calibration_scale(0.001))
+  assert scale_near_zero == pytest.approx(1.0, abs=0.005), \
+    f"scale at k=0.001 should be ~1.0 but got {scale_near_zero}"
+
+
+def test_map_aware_calibration_dual_bin_when_curvatures_differ():
+  """When experienced curvature differs from map anchor by >1 sigma, both bins should learn."""
+  v0 = 12.0
+  v_cruise = 18.0
+  experienced_k = 0.005   # in the curve, model sees this
+  map_anchor_k = 0.015    # map anchor is tighter (different part of curve)
+  map_cap_mps = 10.0
+  ctrl = mk_vtsc_with_params()
+  steps = [
+    Step(
+      curvature=experienced_k,
+      curvature_ahead=experienced_k,
+      confidence=0.95,
+      desired_curvature=experienced_k,
+      actual_curvature=experienced_k * 0.97,
+      lateral_output=0.30,
+      lateral_saturated=False,
+      gas_pressed=True,
+      applied_accel=0.0,
+      map_anchor_k=map_anchor_k,
+      map_cap_mps=map_cap_mps,
+    )
+    for _ in range(160)
+  ]
+
+  snap = simulate_sequence(steps=steps, vtsc=ctrl, v0_mps=v0, v_cruise_mps=v_cruise, dt=0.05)
+
+  scale_at_anchor = float(ctrl._low_speed_calibration_scale(map_anchor_k))
+  scale_at_experienced = float(ctrl._low_speed_calibration_scale(experienced_k))
+
+  # log10(0.015) - log10(0.005) = 0.48, sigma=0.12, so 4 sigma apart → dual-bin
+  assert bool(snap['low_speed_calibration_dual_bin']) is True
+  assert scale_at_anchor > 1.005, f"map anchor bin should have learned: {scale_at_anchor}"
+  assert scale_at_experienced > 1.002, f"experienced bin should have learned (secondary): {scale_at_experienced}"
+  # Primary bin (map anchor) should have learned more than secondary
+  assert scale_at_anchor > scale_at_experienced
+
+
+def test_map_aware_calibration_no_dual_bin_when_curvatures_close():
+  """When experienced curvature is close to map anchor (<1 sigma), no dual-bin."""
+  v0 = 12.0
+  v_cruise = 18.0
+  experienced_k = 0.014
+  map_anchor_k = 0.015    # very close to experienced
+  map_cap_mps = 10.0
+  ctrl = mk_vtsc_with_params()
+  steps = [
+    Step(
+      curvature=experienced_k,
+      curvature_ahead=experienced_k,
+      confidence=0.95,
+      desired_curvature=experienced_k,
+      actual_curvature=experienced_k * 0.97,
+      lateral_output=0.30,
+      lateral_saturated=False,
+      gas_pressed=True,
+      applied_accel=0.0,
+      map_anchor_k=map_anchor_k,
+      map_cap_mps=map_cap_mps,
+    )
+    for _ in range(80)
+  ]
+
+  snap = simulate_sequence(steps=steps, vtsc=ctrl, v0_mps=v0, v_cruise_mps=v_cruise, dt=0.05)
+
+  # log10(0.015) - log10(0.014) ≈ 0.03, less than 1 sigma (0.12) → no dual-bin
+  assert bool(snap['low_speed_calibration_dual_bin']) is False
+
+
+def test_map_aware_calibration_tighten_uses_experienced_curvature():
+  """Saturation tighten should write to the experienced curvature bin, not the map anchor.
+
+  Use curvatures far enough apart (>3σ in log10 space) that the Gaussian tails
+  from the tighten at the experienced bin don't cross-contaminate the anchor bin.
+  σ=0.12, 3σ cutoff → curvatures must be >10^0.36 ≈ 2.3× apart.
+  k=0.003 vs k=0.015 → 5× apart (log10 distance=0.70, 5.8σ) — well beyond cutoff.
+  """
+  v0 = 12.0
+  v_cruise = 18.0
+  experienced_k = 0.003   # far from anchor (beyond Gaussian cutoff)
+  map_anchor_k = 0.015
+  map_cap_mps = 10.0
+  ctrl = mk_vtsc_with_params()
+
+  # First, learn some relax at the map anchor bin via gas override
+  relax_steps = [
+    Step(
+      curvature=experienced_k,
+      curvature_ahead=experienced_k,
+      confidence=0.95,
+      desired_curvature=experienced_k,
+      actual_curvature=experienced_k * 0.97,
+      lateral_output=0.30,
+      lateral_saturated=False,
+      gas_pressed=True,
+      applied_accel=0.0,
+      map_anchor_k=map_anchor_k,
+      map_cap_mps=map_cap_mps,
+    )
+    for _ in range(200)
+  ]
+  simulate_sequence(steps=relax_steps, vtsc=ctrl, v0_mps=v0, v_cruise_mps=v_cruise, dt=0.05)
+  scale_anchor_after_relax = float(ctrl._low_speed_calibration_scale(map_anchor_k))
+
+  # Now saturate at experienced curvature (no gas, with map still active)
+  tighten_steps = [
+    Step(
+      curvature=experienced_k,
+      curvature_ahead=experienced_k,
+      confidence=0.95,
+      desired_curvature=experienced_k * 1.2,
+      actual_curvature=experienced_k * 0.8,
+      lateral_output=0.96,
+      lateral_saturated=True,
+      gas_pressed=False,
+      applied_accel=0.0,
+      map_anchor_k=map_anchor_k,
+      map_cap_mps=map_cap_mps,
+    )
+    for _ in range(200)
+  ]
+  simulate_sequence(steps=tighten_steps, vtsc=ctrl, v0_mps=v0, v_cruise_mps=v_cruise, dt=0.05)
+  scale_anchor_after_tighten = float(ctrl._low_speed_calibration_scale(map_anchor_k))
+
+  # Map anchor bin should be preserved (tighten targets experienced curvature,
+  # and at 5.8σ distance the Gaussian bleed is zero)
+  assert scale_anchor_after_tighten >= scale_anchor_after_relax - 0.005, \
+    f"anchor bin should be preserved: {scale_anchor_after_relax} -> {scale_anchor_after_tighten}"
+
+
+def test_steering_headroom_per_curvature_relax_accumulates():
+  """Sustained low steering effort at a curve should slowly relax the per-curvature override profile."""
+  v0 = 10.5
+  v_cruise = 16.0
+  curve_k = 0.02  # maps to ~24 mph → within taper band
+  ctrl = mk_vtsc_with_params()
+  steps = [
+    Step(
+      curvature=curve_k,
+      curvature_ahead=curve_k,
+      confidence=0.95,
+      desired_curvature=curve_k,
+      actual_curvature=curve_k * 0.97,
+      lateral_output=0.15,       # low effort → headroom
+      lateral_saturated=False,
+      gas_pressed=False,
+    )
+    for _ in range(400)  # ~20 seconds
+  ]
+
+  simulate_sequence(steps=steps, vtsc=ctrl, v0_mps=v0, v_cruise_mps=v_cruise, dt=0.05)
+
+  scale_at_k = float(ctrl._low_speed_calibration_scale(curve_k))
+  override_state = float(ctrl._low_speed_calibration_override_state_for_curvature(curve_k))
+  # Per-curvature override should have accumulated a small positive value
+  assert override_state > 0.003, \
+    f"steering headroom should have relaxed per-curvature profile: {override_state}"
+  assert scale_at_k > 1.003, f"scale should reflect per-curvature relax: {scale_at_k}"
+
+
+def test_no_regression_without_map_context():
+  """Without map context, gas override should behave identically to before (no map_active)."""
+  v0 = 10.5
+  v_cruise = 16.0
+  steps = [
+    Step(
+      curvature=0.02,
+      curvature_ahead=0.02,
+      confidence=0.95,
+      desired_curvature=0.020,
+      actual_curvature=0.0195,
+      lateral_output=0.52,
+      lateral_saturated=False,
+      gas_pressed=True,
+      applied_accel=0.42,
+      # No map_anchor_k / map_cap_mps → no map context
+    )
+    for _ in range(160)
+  ]
+
+  snap = simulate_sequence(steps=steps, v0_mps=v0, v_cruise_mps=v_cruise, dt=0.05)
+
+  assert bool(snap['low_speed_calibration_map_active']) is False
+  assert float(snap['low_speed_calibration_override_ema']) > 0.20
+  assert str(snap['low_speed_calibration_reason']) == 'relax_override'
+  assert float(snap['low_speed_calibration_state']) > 0.002
+
+
 def test_physics_sigmoid_lifts_freeway_sweeper_band_without_bloating_sub_50_curve():
   mph = 2.2369362920544
 

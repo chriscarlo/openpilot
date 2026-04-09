@@ -863,6 +863,16 @@ LOW_SPEED_CALIB_OVERRIDE_PROFILE_CUTOFF_SIGMA = 3.0
 LOW_SPEED_CALIB_PERSIST_WRITE_S = 5.0
 LOW_SPEED_CALIB_PERSIST_DELTA = 0.005
 LOW_SPEED_CALIB_PARAM_SYNC_EPS = 1e-4
+# When steering headroom (low effort, good tracking) is detected in the speed-tapered
+# calibration band, also write a slow per-curvature relax to the override profile at
+# 1/10 the gas override rate.  Gated by the speed-band taper so that going slow at a
+# gentle freeway curve because of a speed limit doesn't contaminate the profile.
+LOW_SPEED_CALIB_STEERING_HEADROOM_PER_CURVATURE_RATE_FACTOR = 0.10
+# When a gas override fires and the experienced curvature differs from the map anchor
+# curvature by more than this many sigma in log10 space, also update the secondary
+# (experienced) bin at a reduced weight.
+LOW_SPEED_CALIB_MAP_OVERRIDE_DUAL_BIN_MIN_SIGMA_DISTANCE = 1.0
+LOW_SPEED_CALIB_MAP_OVERRIDE_DUAL_BIN_SECONDARY_WEIGHT = 0.5
 
 # ===== Hidden-turn early deceleration trigger (occlusion-only, sub-65 mph) =====
 # Allows jerk-limited early braking when a short-horizon physics deficit is provably large
@@ -1322,6 +1332,9 @@ class VisionTurnController:
     self._dbg_low_speed_calibration_gap = 0.0
     self._dbg_low_speed_calibration_gap_ratio = 0.0
     self._dbg_low_speed_calibration_saturated = False
+    self._dbg_low_speed_calibration_map_active = False
+    self._dbg_low_speed_calibration_map_anchor_k = 0.0
+    self._dbg_low_speed_calibration_dual_bin = False
     self._low_speed_calibration_param_state = 0.0
     self._low_speed_calibration_persisted_state = 0.0
     self._low_speed_calibration_last_persist_s = 0.0
@@ -1855,6 +1868,9 @@ class VisionTurnController:
       low_speed_calibration_gap = float(getattr(self, '_dbg_low_speed_calibration_gap', 0.0) or 0.0)
       low_speed_calibration_gap_ratio = float(getattr(self, '_dbg_low_speed_calibration_gap_ratio', 0.0) or 0.0)
       low_speed_calibration_saturated = bool(getattr(self, '_dbg_low_speed_calibration_saturated', False))
+      low_speed_calibration_map_active = bool(getattr(self, '_dbg_low_speed_calibration_map_active', False))
+      low_speed_calibration_map_anchor_k = float(getattr(self, '_dbg_low_speed_calibration_map_anchor_k', 0.0) or 0.0)
+      low_speed_calibration_dual_bin = bool(getattr(self, '_dbg_low_speed_calibration_dual_bin', False))
       low_speed_calibration_base_state = float(getattr(self, '_low_speed_calibration_base_state', 0.0) or 0.0)
       low_speed_calibration_override_state = float(getattr(self, '_low_speed_calibration_override_state', 0.0) or 0.0)
       return {
@@ -1935,6 +1951,9 @@ class VisionTurnController:
         'low_speed_calibration_gap': low_speed_calibration_gap,
         'low_speed_calibration_gap_ratio': low_speed_calibration_gap_ratio,
         'low_speed_calibration_saturated': low_speed_calibration_saturated,
+        'low_speed_calibration_map_active': low_speed_calibration_map_active,
+        'low_speed_calibration_map_anchor_k': low_speed_calibration_map_anchor_k,
+        'low_speed_calibration_dual_bin': low_speed_calibration_dual_bin,
         # κ-bias diagnostics
         'onset_bias_active': bool(getattr(self, '_dbg_onset_bias_active', False)),
         'onset_gate_reason': getattr(self, '_dbg_onset_gate_reason', None),
@@ -2337,6 +2356,9 @@ class VisionTurnController:
     self._dbg_low_speed_calibration_saturated = False
     self._dbg_low_speed_calibration_override_ema = float(getattr(self, '_low_speed_calibration_override_ema', 0.0) or 0.0)
     self._dbg_low_speed_calibration_divergence_mps = 0.0
+    self._dbg_low_speed_calibration_map_active = False
+    self._dbg_low_speed_calibration_map_anchor_k = 0.0
+    self._dbg_low_speed_calibration_dual_bin = False
 
     if not bool(getattr(self, "_low_speed_calibration_enabled", True)):
       self._low_speed_calibration_state = 0.0
@@ -2361,6 +2383,16 @@ class VisionTurnController:
     override_target = 0.0
     driver_override_active = False
     driver_gas_pressed = bool(getattr(self, '_gas_pressed', False))
+    # Previous-frame map context (set in _update_solution, read here with 1-frame lag)
+    map_tail_active_prev = bool(getattr(self, '_map_tail_active', False))
+    map_anchor_k_prev = float(getattr(self, '_map_tail_anchor_k', 0.0) or 0.0)
+    map_last_cap_prev = float(getattr(self, '_map_tail_last_cap', 0.0) or 0.0)
+    map_context_valid = bool(
+      map_tail_active_prev and
+      map_anchor_k_prev >= float(LOW_SPEED_CALIB_MIN_CURVATURE) and
+      map_last_cap_prev > 0.0
+    )
+    primary_override_curvature = 0.0
     relevant_common = False
     override_relevant = False
     low_speed_relevant = False
@@ -2384,16 +2416,32 @@ class VisionTurnController:
       taper = float(self._low_speed_calibration_taper(curve_basis_speed_mph))
       baseline_target_cap = float(min(self._v_cruise_setpoint, curvature_to_speed(max(1e-8, feedback_curvature))))
       requested_cap = float(min(self._v_cruise_setpoint, self._curve_speed(max(1e-8, feedback_curvature))))
+      vision_curvature_relevant = bool(
+        (feedback_curvature >= float(LOW_SPEED_CALIB_MIN_CURVATURE)) and
+        ((float(self._v_cruise_setpoint) - baseline_target_cap) >= float(LOW_SPEED_CALIB_MIN_CAP_DELTA_MPS))
+      )
+      map_curvature_relevant = bool(
+        map_context_valid and
+        ((float(self._v_cruise_setpoint) - map_last_cap_prev) >= float(LOW_SPEED_CALIB_MIN_CAP_DELTA_MPS))
+      )
       relevant_common = bool(
         bool(self._is_enabled) and
         bool(self._op_enabled) and
         bool(feedback['active']) and
-        (feedback_curvature >= float(LOW_SPEED_CALIB_MIN_CURVATURE)) and
-        ((float(self._v_cruise_setpoint) - baseline_target_cap) >= float(LOW_SPEED_CALIB_MIN_CAP_DELTA_MPS))
+        (vision_curvature_relevant or map_curvature_relevant)
       )
       low_speed_relevant = bool(relevant_common and (taper > 0.0) and not driver_gas_pressed)
       override_relevant = bool(relevant_common and not bool(feedback['saturated']))
       driver_override_active = bool(override_relevant and driver_gas_pressed)
+
+      # When map is the binding constraint during a gas override, route the override
+      # profile update to the map anchor curvature so the correct bin learns.
+      if map_context_valid and driver_gas_pressed:
+        primary_override_curvature = float(map_anchor_k_prev)
+        self._dbg_low_speed_calibration_map_active = True
+        self._dbg_low_speed_calibration_map_anchor_k = float(map_anchor_k_prev)
+      else:
+        primary_override_curvature = float(scale_curvature)
 
       gap_ratio = float(feedback['tracking_gap']) / max(float(feedback['desired_curvature']), float(LOW_SPEED_CALIB_MIN_CURVATURE))
       base_relax_score = 0.0
@@ -2437,7 +2485,10 @@ class VisionTurnController:
           tighten_score = float(max(tighten_effort, tighten_tracking))
 
       if driver_override_active:
-        divergence_mps = max(0.0, float(self._v_ego) - float(requested_cap))
+        # When map is the binding constraint, measure divergence against the map cap
+        # (the constraint the driver is actually overriding), not just the vision cap.
+        effective_cap = min(float(requested_cap), float(map_last_cap_prev)) if map_context_valid else float(requested_cap)
+        divergence_mps = max(0.0, float(self._v_ego) - float(effective_cap))
         self._dbg_low_speed_calibration_divergence_mps = float(divergence_mps)
         divergence_ratio = clip(
           (float(divergence_mps) - float(LOW_SPEED_CALIB_OVERRIDE_DIVERGENCE_DEADBAND_MPS)) /
@@ -2495,21 +2546,52 @@ class VisionTurnController:
         state = min(0.0, state + decay)
     elif ema > 0.0:
       state = min(float(LOW_SPEED_CALIB_MAX_RELAX), state + float(LOW_SPEED_CALIB_RELAX_RATE_PER_S) * dt * ema)
+      # Per-curvature micro-relax from steering headroom, gated by taper so that going
+      # slow at a gentle freeway curve because of a speed limit doesn't contaminate.
+      if (float(scale_curvature) >= float(LOW_SPEED_CALIB_MIN_CURVATURE) and
+          float(base_relax_score) > 0.0 and float(taper) > 0.0):
+        self._apply_low_speed_calibration_override_local_delta(
+          max(1e-8, float(scale_curvature)),
+          float(LOW_SPEED_CALIB_OVERRIDE_RELAX_RATE_PER_S) *
+          float(LOW_SPEED_CALIB_STEERING_HEADROOM_PER_CURVATURE_RATE_FACTOR) *
+          dt * float(base_relax_score) * float(taper),
+        )
     elif ema < 0.0:
       state = max(-float(LOW_SPEED_CALIB_MAX_TIGHTEN), state + float(LOW_SPEED_CALIB_TIGHTEN_RATE_PER_S) * dt * ema)
 
     if driver_override_active and override_ema > 0.0:
+      delta = float(LOW_SPEED_CALIB_OVERRIDE_RELAX_RATE_PER_S) * dt * override_ema
       override_state = self._apply_low_speed_calibration_override_local_delta(
-        max(1e-8, float(scale_curvature)),
-        float(LOW_SPEED_CALIB_OVERRIDE_RELAX_RATE_PER_S) * dt * override_ema,
+        max(1e-8, float(primary_override_curvature)),
+        delta,
       )
+      # Dual-bin: also update experienced-curvature bin when it differs from map anchor
+      dual_bin = False
+      if (map_context_valid and
+          float(scale_curvature) >= float(LOW_SPEED_CALIB_MIN_CURVATURE) and
+          abs(float(primary_override_curvature) - float(scale_curvature)) > 1e-6):
+        log10_dist = abs(
+          math.log10(max(1e-8, float(primary_override_curvature))) -
+          math.log10(max(1e-8, float(scale_curvature)))
+        )
+        sigma = max(1e-3, float(LOW_SPEED_CALIB_OVERRIDE_PROFILE_SIGMA_LOG10))
+        if log10_dist > float(LOW_SPEED_CALIB_MAP_OVERRIDE_DUAL_BIN_MIN_SIGMA_DISTANCE) * sigma:
+          self._apply_low_speed_calibration_override_local_delta(
+            max(1e-8, float(scale_curvature)),
+            delta * float(LOW_SPEED_CALIB_MAP_OVERRIDE_DUAL_BIN_SECONDARY_WEIGHT),
+          )
+          dual_bin = True
+      self._dbg_low_speed_calibration_dual_bin = bool(dual_bin)
     elif relevant_common and not driver_gas_pressed and tighten_score > 0.0:
+      # Tighten uses experienced curvature — saturation is about what the car is
+      # physically doing, not what the map predicts ahead.
       override_state = self._apply_low_speed_calibration_override_local_delta(
         max(1e-8, float(scale_curvature)),
         -float(LOW_SPEED_CALIB_OVERRIDE_TIGHTEN_RATE_PER_S) * dt * tighten_score,
       )
     else:
-      override_state = float(self._low_speed_calibration_override_state_for_curvature(max(1e-8, float(scale_curvature))))
+      read_curvature = float(primary_override_curvature) if map_context_valid else float(scale_curvature)
+      override_state = float(self._low_speed_calibration_override_state_for_curvature(max(1e-8, read_curvature)))
 
     self._low_speed_calibration_base_state = float(clip(state, -float(LOW_SPEED_CALIB_MAX_TIGHTEN), float(LOW_SPEED_CALIB_MAX_RELAX)))
     self._low_speed_calibration_override_state = float(clip(override_state, 0.0, float(LOW_SPEED_CALIB_OVERRIDE_MAX_RELAX)))
@@ -2518,8 +2600,9 @@ class VisionTurnController:
       getattr(self, "_low_speed_calibration_override_profile", self._empty_low_speed_calibration_override_profile())
     )
     self._refresh_low_speed_calibration_state()
+    scale_report_curvature = float(primary_override_curvature) if map_context_valid else float(scale_curvature)
     try:
-      applied_scale = float(self._low_speed_calibration_scale(max(1e-8, float(scale_curvature))))
+      applied_scale = float(self._low_speed_calibration_scale(max(1e-8, scale_report_curvature)))
     except Exception:
       applied_scale = 1.0
     self._dbg_low_speed_calibration_active = bool(abs(applied_scale - 1.0) > 1e-3)

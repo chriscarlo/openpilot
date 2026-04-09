@@ -39,6 +39,8 @@ class Step:
   lateral_active: Optional[bool] = None
   gas_pressed: bool = False
   applied_accel: Optional[float] = None
+  map_anchor_k: Optional[float] = None   # inject strategic map anchor curvature (1/m)
+  map_cap_mps: Optional[float] = None    # inject strategic map cap speed (m/s)
 
 
 def _mk_sm(curvature: float, curvature_ahead: Optional[float], v_pred: float, confidence: float,
@@ -206,6 +208,13 @@ def simulate_sequence(
     with patch('sunnypilot.selfdrive.controls.lib.vision_turn_controller.time.time', lambda: t), \
          patch('sunnypilot.selfdrive.controls.lib.vision_turn_controller.time.monotonic', lambda: t):
       ctrl.update(sm, True, v_ego, a_ego, v_cruise_mps)
+
+    # Inject map context for next frame's calibration (overwrites _update_solution output)
+    if getattr(st, 'map_anchor_k', None) is not None:
+      ctrl._map_tail_active = True
+      ctrl._map_tail_anchor_k = float(st.map_anchor_k)
+      ctrl._map_tail_last_cap = float(st.map_cap_mps or 0.0)
+      ctrl._dbg_map_floor_active = True
 
     # Integrate acceleration to update speed for next step
     a_cmd = float(ctrl.a_target)
