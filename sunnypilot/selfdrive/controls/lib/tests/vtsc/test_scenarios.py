@@ -2300,6 +2300,98 @@ def test_strategic_compute_feeds_chain_envelope_with_reaccelerate_retighten_anch
   assert [int(row[4]) for row in points] == [1, 4, 6]
 
 
+# ===== Strategic kinematic headroom gate tests =====
+
+
+def test_strategic_map_does_not_front_load_decel_for_distant_curve(monkeypatch):
+  """A curve 400m ahead with ample kinematic headroom should not cause early slowing."""
+  # Build map: straight for 350m, then k=0.008 from 360-440m (vsafe ≈ 18 m/s)
+  # At v_ego=29, kinematic entry at 360m with planning_decel=2.5:
+  #   sqrt(18² + 2*2.5*360) = sqrt(324+1800) = sqrt(2124) = 46.1 >> 29+3=32 → skipped
+  map_profile = [0.008] * 9  # 9 points × 10m = 80m of curve
+  snap = _run_profile_map_snapshot(
+    monkeypatch,
+    mode='strategic',
+    map_profile=map_profile,
+    profile_start_m=360.0,
+    v0=29.0,
+    v_cruise=31.3,
+    current_curve=0.0,
+    curvature_ahead=0.0,
+    confidence=0.95,
+    planner_delay_s=0.15,
+  )
+  cap = float(snap['map_strategic_cap'])
+  v_ego = 29.0
+  # The binary search front-loading should be skipped; chain envelope gives no cap at this distance
+  assert cap > v_ego - 0.5, \
+    f"distant curve should not front-load decel: cap={cap:.1f}, v_ego={v_ego:.1f}, delta={v_ego-cap:.1f}"
+
+
+def test_strategic_map_still_caps_for_close_curve(monkeypatch):
+  """A curve 80m ahead should still trigger the binary search and lower the cap."""
+  map_profile = [0.008] * 6  # 60m of curve
+  snap = _run_profile_map_snapshot(
+    monkeypatch,
+    mode='strategic',
+    map_profile=map_profile,
+    profile_start_m=80.0,
+    v0=29.0,
+    v_cruise=31.3,
+    current_curve=0.0,
+    curvature_ahead=0.0,
+    confidence=0.95,
+    planner_delay_s=0.15,
+  )
+  cap = float(snap['map_strategic_cap'])
+  v_ego = 29.0
+  # At 80m with vsafe≈18, kinematic entry = sqrt(324+400) = 26.9 < 29+3=32 → constraint KEPT
+  assert cap < v_ego - 1.0, \
+    f"close curve should lower cap: cap={cap:.1f}, v_ego={v_ego:.1f}, delta={v_ego-cap:.1f}"
+
+
+def test_strategic_kinematic_headroom_threshold_boundary(monkeypatch):
+  """Verify the headroom gate activates at the expected distance boundary."""
+  from sunnypilot.selfdrive.controls.lib.vtsc_map_strategy import STRATEGIC_KINEMATIC_HEADROOM_SKIP_MPS
+  # Find the approximate distance where kinematic entry ≈ v_ego + headroom threshold
+  # For v_ego=29, vsafe=18, planning_decel=2.5:
+  #   v_entry = sqrt(18² + 2*2.5*d) = 29 + 3 = 32 → d = (32²-18²)/(2*2.5) = (1024-324)/5 = 140m
+  # So at 140m the constraint should just barely be included.
+  # At 180m the constraint should be excluded.
+
+  # Close side: 120m → kinematic entry ≈ sqrt(324+600)=30.4 < 32 → constraint KEPT
+  snap_close = _run_profile_map_snapshot(
+    monkeypatch,
+    mode='strategic',
+    map_profile=[0.008] * 6,
+    profile_start_m=120.0,
+    v0=29.0,
+    v_cruise=31.3,
+    current_curve=0.0,
+    curvature_ahead=0.0,
+    confidence=0.95,
+    planner_delay_s=0.15,
+  )
+  # Far side: 200m → kinematic entry ≈ sqrt(324+1000)=36.4 > 32 → constraint SKIPPED
+  snap_far = _run_profile_map_snapshot(
+    monkeypatch,
+    mode='strategic',
+    map_profile=[0.008] * 6,
+    profile_start_m=200.0,
+    v0=29.0,
+    v_cruise=31.3,
+    current_curve=0.0,
+    curvature_ahead=0.0,
+    confidence=0.95,
+    planner_delay_s=0.15,
+  )
+  cap_close = float(snap_close['map_strategic_cap'])
+  cap_far = float(snap_far['map_strategic_cap'])
+  # The close-side cap should be materially lower than the far-side cap
+  assert cap_close < cap_far - 0.5, \
+    f"close cap ({cap_close:.1f}) should be lower than far cap ({cap_far:.1f})"
+
+
 def test_winding_road_context_detects_dense_curve_cluster():
   vsafe_list = [23.0, 20.0, 13.0, 16.0, 21.0, 18.0, 12.0, 16.0, 20.0, 17.0, 11.0, 15.0, 21.0, 23.0]
   s_list = [10.0 * (idx + 1) for idx in range(len(vsafe_list))]

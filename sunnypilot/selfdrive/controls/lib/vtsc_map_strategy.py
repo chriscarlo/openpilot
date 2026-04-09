@@ -24,6 +24,10 @@ CURVE_PHASE_OFFSET_ZERO_BASELINE_S = -3.0
 STRATEGIC_OVERSHOOT_DELTA_MPS = 1.0
 STRATEGIC_CHAIN_LOCAL_MIN_EPS_MPS = 0.05
 STRATEGIC_CHAIN_REARM_RISE_MPS = 0.75
+# When the kinematic entry speed exceeds v_ego by this much, skip the binary
+# search planner-response probe for that constraint.  The chain envelope still
+# handles it via the simpler (and non-front-loading) kinematic formula.
+STRATEGIC_KINEMATIC_HEADROOM_SKIP_MPS = 3.0
 WINDING_ROAD_LOOKAHEAD_M = 325.0
 WINDING_ROAD_BASELINE_QUANTILE = 0.85
 WINDING_ROAD_MIN_DROP_MPS = 2.0
@@ -669,7 +673,16 @@ def compute_map_cap_candidate(
             v_allow = float(v_cruise)
           else:
             required_decel = max(0.0, (float(v_ego) * float(v_ego) - vsafe * vsafe) / (2.0 * braking_distance))
-            response_constraints.append((float(required_decel), float(di), float(vsafe), float(ki), int(abs_idx), int(seq)))
+            # Skip the binary search probe when the kinematic formula says the car
+            # has ample headroom.  The chain envelope (which uses the same kinematic
+            # formula) still handles these points without front-loading deceleration.
+            kinematic_entry = _max_entry_speed_for_target(
+              target_speed=vsafe,
+              distance_m=braking_distance,
+              response_model=response_model,
+            )
+            if kinematic_entry <= float(v_ego) + float(STRATEGIC_KINEMATIC_HEADROOM_SKIP_MPS):
+              response_constraints.append((float(required_decel), float(di), float(vsafe), float(ki), int(abs_idx), int(seq)))
             v_allow = float(v_cruise)
         except Exception:
           v_allow = float(v_ego)
