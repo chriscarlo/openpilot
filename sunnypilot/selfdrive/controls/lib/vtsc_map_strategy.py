@@ -84,6 +84,7 @@ class MapStrategyState:
   takeover_ever_approached: bool = False
   zone_entry_since: float = 0.0
   release_at: float = 0.0
+  zone_exit_since: float = 0.0
 
   def reset(self) -> None:
     self.release_latched = False
@@ -94,6 +95,7 @@ class MapStrategyState:
     self.takeover_ever_approached = False
     self.zone_entry_since = 0.0
     self.release_at = 0.0
+    self.zone_exit_since = 0.0
 
 
 @dataclass
@@ -826,6 +828,7 @@ def evaluate_map_strategy(
   rearm_margin_m: float = 15.0,
   rearm_delta_mps: float = 0.50,
   winding_profile: WindingBehaviorProfile | None = None,
+  zone_debounce_s: float = 0.25,
 ) -> MapStrategyDecision:
   strategy_mode = normalize_map_strategy(mode)
   profile = winding_profile or DEFAULT_WINDING_BEHAVIOR_PROFILE
@@ -871,12 +874,14 @@ def evaluate_map_strategy(
     state.takeover_ever_approached = False
     state.zone_entry_since = 0.0
     state.release_at = 0.0
+    state.zone_exit_since = 0.0
 
   anchor_dist_m = float(candidate.anchor_dist_m if candidate.anchor_dist_m is not None else 1e9)
   takeover_zone_m = max(0.0, float(s_visible_m))
   in_takeover_zone = bool(full_visibility and vision_good and turn_visible and anchor_dist_m <= takeover_zone_m)
 
   if in_takeover_zone:
+    state.zone_exit_since = 0.0  # cancel pending debounce on re-entry
     if state.zone_entry_since <= 0.0:
       state.zone_entry_since = float(now_s)
 
@@ -903,19 +908,29 @@ def evaluate_map_strategy(
       if not ce_eligible:
         state.counterevidence_since = 0.0
   else:
-    state.takeover_since = 0.0
-    state.counterevidence_since = 0.0
-    state.takeover_ever_approached = False
-    state.zone_entry_since = 0.0
-    # Rearm cooldown: after release, don't rearm for at least counterevidence_dwell_s
-    # to prevent instant re-engagement when anchor identity changes between frames.
-    release_age = (max(0.0, float(now_s) - float(state.release_at))
-                   if state.release_at > 0.0 else float('inf'))
-    rearm_cooldown_ok = bool(release_age >= float(counterevidence_dwell_s))
-    if rearm_cooldown_ok and anchor_dist_m > (takeover_zone_m + float(rearm_margin_m)):
-      state.release_latched = False
-      state.release_reason = ""
-      state.release_at = 0.0
+    # Zone exit debounce: don't wipe accumulators on a brief zone flicker.
+    # Only start debounce if we had a prior zone entry worth preserving.
+    if state.zone_exit_since <= 0.0 and state.zone_entry_since > 0.0:
+      state.zone_exit_since = float(now_s)
+    zone_exit_elapsed = (max(0.0, float(now_s) - float(state.zone_exit_since))
+                         if state.zone_exit_since > 0.0 else float('inf'))
+    if zone_exit_elapsed >= float(zone_debounce_s):
+      # Sustained exit confirmed: wipe accumulators
+      state.takeover_since = 0.0
+      state.counterevidence_since = 0.0
+      state.takeover_ever_approached = False
+      state.zone_entry_since = 0.0
+      state.zone_exit_since = 0.0
+      # Rearm cooldown: after release, don't rearm for at least counterevidence_dwell_s
+      # to prevent instant re-engagement when anchor identity changes between frames.
+      release_age = (max(0.0, float(now_s) - float(state.release_at))
+                     if state.release_at > 0.0 else float('inf'))
+      rearm_cooldown_ok = bool(release_age >= float(counterevidence_dwell_s))
+      if rearm_cooldown_ok and anchor_dist_m > (takeover_zone_m + float(rearm_margin_m)):
+        state.release_latched = False
+        state.release_reason = ""
+        state.release_at = 0.0
+    # else: debounce window — preserve all dwell timers and suppress rearm
 
   takeover_elapsed = max(0.0, float(now_s) - float(state.takeover_since)) if state.takeover_since > 0.0 else 0.0
   counterevidence_elapsed = max(0.0, float(now_s) - float(state.counterevidence_since)) if state.counterevidence_since > 0.0 else 0.0
@@ -937,8 +952,14 @@ def evaluate_map_strategy(
     if state.release_at <= 0.0:
       state.release_at = float(now_s)
 
+  # Treat debounce window as virtually in-zone for rearm suppression
+  in_zone_or_debouncing = bool(in_takeover_zone or (
+    state.zone_exit_since > 0.0
+    and (max(0.0, float(now_s) - float(state.zone_exit_since)) < float(zone_debounce_s))
+  ))
+
   if state.release_latched:
-    if in_takeover_zone:
+    if in_zone_or_debouncing:
       vision_relax_reason = state.release_reason or "vision_takeover"
     else:
       # Rearm cooldown: prevent instant rearm when anchor identity changes.

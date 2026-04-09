@@ -3438,6 +3438,306 @@ def test_rearm_cooldown_prevents_instant_rearm():
   assert state.release_latched is False
 
 
+def test_zone_debounce_preserves_dwell_through_brief_flicker():
+  """A single frame of turn_visible=False must NOT wipe zone dwell accumulators."""
+  state = MapStrategyState()
+  candidate = MapCapCandidate(
+    mode='strategic',
+    cap_mps=15.0,
+    start_m=0.0,
+    coverage=0.8,
+    reason='cap_available',
+    anchor_dist_m=20.0,
+    anchor_vsafe_mps=9.0,
+    anchor_curvature=0.02,
+    anchor_index=12,
+  )
+
+  # Frame 1: enter takeover zone, start accumulating dwell
+  evaluate_map_strategy(
+    mode='strategic', state=state, candidate=candidate,
+    raw_target_pre_map=16.0, full_visibility=True, vision_good=True,
+    turn_visible=True, s_visible_m=35.0, vis_margin_m=10.0,
+    now_s=0.10, apex_exit_ready=False,
+  )
+  assert state.zone_entry_since == 0.10
+
+  # Frame 2: still in zone, CE starts
+  evaluate_map_strategy(
+    mode='strategic', state=state, candidate=candidate,
+    raw_target_pre_map=16.0, full_visibility=True, vision_good=True,
+    turn_visible=True, s_visible_m=35.0, vis_margin_m=10.0,
+    now_s=0.50, apex_exit_ready=False,
+  )
+  assert state.counterevidence_since == 0.50
+
+  # Frame 3: ONE frame of turn_visible=False (flicker)
+  d_flicker = evaluate_map_strategy(
+    mode='strategic', state=state, candidate=candidate,
+    raw_target_pre_map=16.0, full_visibility=True, vision_good=True,
+    turn_visible=False, s_visible_m=35.0, vis_margin_m=10.0,
+    now_s=0.55, apex_exit_ready=False,
+  )
+  # Debounce preserves accumulators
+  assert state.zone_entry_since == 0.10, "zone_entry_since should survive brief flicker"
+  assert state.counterevidence_since == 0.50, "counterevidence_since should survive brief flicker"
+  assert state.zone_exit_since == 0.55, "zone_exit_since should record the exit"
+  assert d_flicker.apply_map_cap is True
+
+  # Frame 4: turn_visible=True again, debounce cancelled
+  evaluate_map_strategy(
+    mode='strategic', state=state, candidate=candidate,
+    raw_target_pre_map=16.0, full_visibility=True, vision_good=True,
+    turn_visible=True, s_visible_m=35.0, vis_margin_m=10.0,
+    now_s=0.60, apex_exit_ready=False,
+  )
+  assert state.zone_exit_since == 0.0, "zone_exit_since should clear on re-entry"
+  assert state.zone_entry_since == 0.10, "zone_entry_since preserved through flicker"
+  assert state.counterevidence_since == 0.50, "counterevidence_since preserved through flicker"
+
+
+def test_zone_debounce_resets_after_sustained_exit():
+  """After 0.25s+ of sustained zone exit, accumulators MUST be wiped."""
+  state = MapStrategyState()
+  candidate = MapCapCandidate(
+    mode='strategic',
+    cap_mps=15.0,
+    start_m=0.0,
+    coverage=0.8,
+    reason='cap_available',
+    anchor_dist_m=20.0,
+    anchor_vsafe_mps=9.0,
+    anchor_curvature=0.02,
+    anchor_index=12,
+  )
+
+  # Enter zone and accumulate
+  evaluate_map_strategy(
+    mode='strategic', state=state, candidate=candidate,
+    raw_target_pre_map=16.0, full_visibility=True, vision_good=True,
+    turn_visible=True, s_visible_m=35.0, vis_margin_m=10.0,
+    now_s=0.10, apex_exit_ready=False,
+  )
+  evaluate_map_strategy(
+    mode='strategic', state=state, candidate=candidate,
+    raw_target_pre_map=16.0, full_visibility=True, vision_good=True,
+    turn_visible=True, s_visible_m=35.0, vis_margin_m=10.0,
+    now_s=0.50, apex_exit_ready=False,
+  )
+  assert state.zone_entry_since > 0.0
+  assert state.counterevidence_since > 0.0
+
+  # Exit zone (first frame)
+  evaluate_map_strategy(
+    mode='strategic', state=state, candidate=candidate,
+    raw_target_pre_map=16.0, full_visibility=True, vision_good=True,
+    turn_visible=False, s_visible_m=35.0, vis_margin_m=10.0,
+    now_s=0.55, apex_exit_ready=False,
+  )
+  # Still in debounce
+  assert state.zone_entry_since == 0.10
+
+  # 0.30s later: past debounce threshold (0.55 + 0.30 = 0.85, elapsed = 0.30 >= 0.25)
+  evaluate_map_strategy(
+    mode='strategic', state=state, candidate=candidate,
+    raw_target_pre_map=16.0, full_visibility=True, vision_good=True,
+    turn_visible=False, s_visible_m=35.0, vis_margin_m=10.0,
+    now_s=0.85, apex_exit_ready=False,
+  )
+  assert state.zone_entry_since == 0.0, "zone_entry_since should be wiped after sustained exit"
+  assert state.counterevidence_since == 0.0, "counterevidence_since should be wiped"
+  assert state.takeover_ever_approached is False
+  assert state.zone_exit_since == 0.0, "zone_exit_since should clear after wipe"
+
+
+def test_counterevidence_release_survives_zone_flicker():
+  """Full counterevidence release should complete despite mid-accumulation zone flicker."""
+  state = MapStrategyState()
+  candidate = MapCapCandidate(
+    mode='strategic',
+    cap_mps=15.0,
+    start_m=0.0,
+    coverage=0.8,
+    reason='cap_available',
+    anchor_dist_m=20.0,
+    anchor_vsafe_mps=9.0,
+    anchor_curvature=0.02,
+    anchor_index=12,
+  )
+
+  # Frame 1: zone entry
+  evaluate_map_strategy(
+    mode='strategic', state=state, candidate=candidate,
+    raw_target_pre_map=16.0, full_visibility=True, vision_good=True,
+    turn_visible=True, s_visible_m=35.0, vis_margin_m=10.0,
+    now_s=0.10, apex_exit_ready=False,
+  )
+
+  # Frame 2: zone dwell passes, CE starts
+  evaluate_map_strategy(
+    mode='strategic', state=state, candidate=candidate,
+    raw_target_pre_map=16.0, full_visibility=True, vision_good=True,
+    turn_visible=True, s_visible_m=35.0, vis_margin_m=10.0,
+    now_s=0.50, apex_exit_ready=False,
+  )
+  assert state.counterevidence_since == 0.50
+
+  # Frame 3: brief flicker (turn_visible=False for 1 frame)
+  evaluate_map_strategy(
+    mode='strategic', state=state, candidate=candidate,
+    raw_target_pre_map=16.0, full_visibility=True, vision_good=True,
+    turn_visible=False, s_visible_m=35.0, vis_margin_m=10.0,
+    now_s=0.55, apex_exit_ready=False,
+  )
+  # CE timestamp preserved through flicker
+  assert state.counterevidence_since == 0.50
+
+  # Frame 4: back in zone
+  evaluate_map_strategy(
+    mode='strategic', state=state, candidate=candidate,
+    raw_target_pre_map=16.0, full_visibility=True, vision_good=True,
+    turn_visible=True, s_visible_m=35.0, vis_margin_m=10.0,
+    now_s=0.60, apex_exit_ready=False,
+  )
+
+  # Frame 5: CE dwell expired (0.60 + enough time from CE start at 0.50: need 0.50 + 0.75 = 1.25)
+  d_release = evaluate_map_strategy(
+    mode='strategic', state=state, candidate=candidate,
+    raw_target_pre_map=16.0, full_visibility=True, vision_good=True,
+    turn_visible=True, s_visible_m=35.0, vis_margin_m=10.0,
+    now_s=1.30, apex_exit_ready=False,
+  )
+  assert d_release.apply_map_cap is False, "CE release should fire despite earlier flicker"
+  assert d_release.vision_relax_allowed is True
+  assert d_release.vision_relax_reason == 'counterevidence_dwell'
+
+
+def test_no_rearm_during_zone_debounce():
+  """Released state must be protected from rearm during the debounce window."""
+  state = MapStrategyState()
+  candidate = MapCapCandidate(
+    mode='strategic',
+    cap_mps=15.0,
+    start_m=0.0,
+    coverage=0.8,
+    reason='cap_available',
+    anchor_dist_m=20.0,
+    anchor_vsafe_mps=9.0,
+    anchor_curvature=0.02,
+    anchor_index=12,
+  )
+
+  # Drive to counterevidence release
+  evaluate_map_strategy(
+    mode='strategic', state=state, candidate=candidate,
+    raw_target_pre_map=16.0, full_visibility=True, vision_good=True,
+    turn_visible=True, s_visible_m=35.0, vis_margin_m=10.0,
+    now_s=0.10, apex_exit_ready=False,
+  )
+  evaluate_map_strategy(
+    mode='strategic', state=state, candidate=candidate,
+    raw_target_pre_map=16.0, full_visibility=True, vision_good=True,
+    turn_visible=True, s_visible_m=35.0, vis_margin_m=10.0,
+    now_s=0.56, apex_exit_ready=False,
+  )
+  d_release = evaluate_map_strategy(
+    mode='strategic', state=state, candidate=candidate,
+    raw_target_pre_map=16.0, full_visibility=True, vision_good=True,
+    turn_visible=True, s_visible_m=35.0, vis_margin_m=10.0,
+    now_s=1.35, apex_exit_ready=False,
+  )
+  assert d_release.apply_map_cap is False
+  assert state.release_latched is True
+
+  # Now exit zone with a far anchor that would normally satisfy rearm conditions.
+  # Use a timestamp well past the rearm cooldown (1.35 + 0.75 = 2.10).
+  candidate_far = MapCapCandidate(
+    mode='strategic',
+    cap_mps=18.0,
+    start_m=0.0,
+    coverage=0.8,
+    reason='cap_available',
+    anchor_dist_m=106.5,
+    anchor_vsafe_mps=12.0,
+    anchor_curvature=0.01,
+    anchor_index=30,
+  )
+  d_debounce = evaluate_map_strategy(
+    mode='strategic', state=state, candidate=candidate_far,
+    raw_target_pre_map=19.0, full_visibility=True, vision_good=True,
+    turn_visible=False, s_visible_m=35.0, vis_margin_m=10.0,
+    now_s=2.15, apex_exit_ready=False,
+  )
+  # During debounce: rearm suppressed despite cooldown expiry and far anchor
+  assert d_debounce.apply_map_cap is False, "rearm must be suppressed during debounce"
+  assert state.release_latched is True
+
+  # After debounce expires (2.15 + 0.25 = 2.40): rearm should now succeed
+  d_post = evaluate_map_strategy(
+    mode='strategic', state=state, candidate=candidate_far,
+    raw_target_pre_map=19.0, full_visibility=True, vision_good=True,
+    turn_visible=False, s_visible_m=35.0, vis_margin_m=10.0,
+    now_s=2.45, apex_exit_ready=False,
+  )
+  assert d_post.apply_map_cap is True, "rearm should succeed after debounce expires"
+  assert state.release_latched is False
+
+
+def test_vision_degradation_overrides_zone_debounce():
+  """full_visibility=False must reset everything immediately, even during debounce."""
+  state = MapStrategyState()
+  candidate = MapCapCandidate(
+    mode='strategic',
+    cap_mps=15.0,
+    start_m=0.0,
+    coverage=0.8,
+    reason='cap_available',
+    anchor_dist_m=20.0,
+    anchor_vsafe_mps=9.0,
+    anchor_curvature=0.02,
+    anchor_index=12,
+  )
+
+  # Enter zone and accumulate
+  evaluate_map_strategy(
+    mode='strategic', state=state, candidate=candidate,
+    raw_target_pre_map=16.0, full_visibility=True, vision_good=True,
+    turn_visible=True, s_visible_m=35.0, vis_margin_m=10.0,
+    now_s=0.10, apex_exit_ready=False,
+  )
+  evaluate_map_strategy(
+    mode='strategic', state=state, candidate=candidate,
+    raw_target_pre_map=16.0, full_visibility=True, vision_good=True,
+    turn_visible=True, s_visible_m=35.0, vis_margin_m=10.0,
+    now_s=0.50, apex_exit_ready=False,
+  )
+  assert state.zone_entry_since > 0.0
+  assert state.counterevidence_since > 0.0
+
+  # Start debounce (turn_visible=False)
+  evaluate_map_strategy(
+    mode='strategic', state=state, candidate=candidate,
+    raw_target_pre_map=16.0, full_visibility=True, vision_good=True,
+    turn_visible=False, s_visible_m=35.0, vis_margin_m=10.0,
+    now_s=0.55, apex_exit_ready=False,
+  )
+  assert state.zone_exit_since == 0.55
+
+  # Vision degrades during debounce window
+  d_degrade = evaluate_map_strategy(
+    mode='strategic', state=state, candidate=candidate,
+    raw_target_pre_map=16.0, full_visibility=False, vision_good=True,
+    turn_visible=False, s_visible_m=35.0, vis_margin_m=10.0,
+    now_s=0.60, apex_exit_ready=False,
+  )
+  # Everything reset immediately — debounce does NOT protect against visibility loss
+  assert state.zone_entry_since == 0.0, "visibility loss must override debounce"
+  assert state.counterevidence_since == 0.0
+  assert state.zone_exit_since == 0.0
+  assert state.release_latched is False
+  assert d_degrade.apply_map_cap is True
+
+
 def test_map_lookahead_absent_no_cap(monkeypatch):
   # When GPS or map points are absent, map cap stays inactive
   v0 = 25.0

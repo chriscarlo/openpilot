@@ -1251,6 +1251,7 @@ class VisionTurnController:
     self._map_curv_last_ts = 0.0
     self._map_strategy_mode = DEFAULT_MAP_STRATEGY
     self._map_strategy_state = MapStrategyState()
+    self._turn_visible_sticky = False
     self._map_tail_candidate = None
     self._map_tail_active = False
     self._map_tail_last_cap = None
@@ -3461,7 +3462,12 @@ class VisionTurnController:
             vis_margin = float(max(0.0, getattr(self, '_vis_margin_m', 10.0)))
             k_turn_min = float(max(1e-6, getattr(self, '_fov_k_min', 2e-4)))
             k_now = float(abs(getattr(self, '_filtered_curvature', 0.0)))
-            turn_visible_now = bool(k_now >= k_turn_min)
+            # Hysteresis: onset at k_turn_min, clear at 0.6 * k_turn_min
+            if self._turn_visible_sticky:
+              turn_visible_now = bool(k_now >= k_turn_min * 0.6)
+            else:
+              turn_visible_now = bool(k_now >= k_turn_min)
+            self._turn_visible_sticky = turn_visible_now
             turn_visible_ahead = bool(
               bool(getattr(self, '_lat_acc_overshoot_ahead', False)) and
               (float(getattr(self, '_v_overshoot_distance', 1e9)) <= (s_visible + vis_margin))
@@ -3529,6 +3535,7 @@ class VisionTurnController:
             self._dbg_map_strategic_cap = self._map_holdover_cap
           else:
             self._map_strategy_state.reset()
+            self._turn_visible_sticky = False
             self._map_tail_active = False
             self._map_tail_reason = str(_compute_reason or 'no_cap')
             self._map_holdover_cap = None
@@ -3536,10 +3543,12 @@ class VisionTurnController:
       else:
         # Ensure HUD preview does not persist when map lookahead is disabled.
         self._map_strategy_state.reset()
+        self._turn_visible_sticky = False
         self._clear_curve_preview()
         self._clear_winding_road_context()
     except Exception:
       self._map_strategy_state.reset()
+      self._turn_visible_sticky = False
       self._map_tail_active = False
       self._map_tail_reason = "exception"
       self._clear_winding_road_context()
