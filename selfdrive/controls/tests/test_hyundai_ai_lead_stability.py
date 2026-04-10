@@ -841,3 +841,31 @@ class TestHyundaiAiLeadStability:
 
     assert mpc.source == "lead0"
     assert mpc.crash_cnt > 2
+
+  def test_lead_faster_than_cruise_does_not_exceed_set_speed(self, monkeypatch):
+    # Regression: ego must not accelerate past v_cruise when following a lead
+    # that is faster than the set speed. The Hyundai-stabilized lead path in
+    # _select_acc_obstacle returns only the lead obstacle; without a cruise
+    # ceiling clamp in the caller, the MPC plans velocities above v_cruise.
+    monkeypatch.setattr(
+      "openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc.time.monotonic",
+      _MonotonicStub(step=0.2),
+    )
+    v_cruise = 33.5  # 75 mph
+    mpc = _make_hyundai_mpc(v_ego=v_cruise, a_ego=0.0)
+
+    for _ in range(20):
+      _run_update(
+        mpc,
+        _make_lead(d_rel=45.0, y_rel=0.0, d_path=0.0, v_lat=0.0,
+                   v_rel=2.5, v_lead=36.0, a_lead=0.3, model_prob=0.99),
+        _make_lead(status=False),
+        v_cruise=v_cruise,
+      )
+
+    v_solution_max = float(np.max(mpc.v_solution))
+    a_solution_max = float(np.max(mpc.a_solution))
+    assert v_solution_max <= v_cruise + 0.1, (
+      f"MPC planned v={v_solution_max:.2f} m/s above v_cruise={v_cruise:.2f} m/s "
+      f"(max accel={a_solution_max:.2f} m/s²)"
+    )

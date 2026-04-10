@@ -2317,6 +2317,12 @@ class LongitudinalMpc:
       self.last_v_cruise_clipped = v_cruise_clipped
       cruise_obstacle = np.cumsum(T_DIFFS * v_cruise_clipped) + get_safe_obstacle_distance(v_cruise_clipped, t_follow)
       active_obstacle = self._select_acc_obstacle(lead_0_obstacle, lead_1_obstacle, cruise_obstacle, now)
+      # Enforce v_cruise set speed as a hard ceiling even while following a lead.
+      # The Hyundai-stabilized lead path in _select_acc_obstacle returns a lead-only
+      # obstacle, so without this clamp the MPC will follow a lead that exceeds the
+      # driver's set speed. The non-stabilized path already does np.min with
+      # cruise_obstacle; this line restores the same invariant.
+      active_obstacle = np.minimum(active_obstacle, cruise_obstacle)
       adjacent_preview_applied = False
       if (adjacent_awareness_preview_obstacle is not None and
           float(adjacent_awareness_preview_obstacle[0]) < float(active_obstacle[0])):
