@@ -17,13 +17,6 @@ CAR_ANCHOR_X = 0.50
 CAR_ANCHOR_Y = 0.68
 MASK_FEATHER = 0.10
 ALPHA_THRESHOLD = 8
-RAIN_LAYER = "PAR0"
-SNOW_LAYER = "PAS0"
-
-# OpenWeather palettes use RGBA hex strings. The first stop is fully transparent
-# so dry areas disappear before UI-side opacity is applied.
-RAIN_PALETTE = "0:00000000;0.05:8BE06CFF;0.25:D8E86CFF;0.75:F4A63AFF;2:E35C28FF;5:C81D25FF"
-SNOW_PALETTE = "0:00000000;0.05:A5DAFFFF;0.25:85AEFFFF;0.75:BA8FFFFF;2:FF8EE7FF;5:FF60D0FF"
 
 
 @dataclass(frozen=True)
@@ -45,7 +38,6 @@ class Viewport:
 
 @dataclass(frozen=True)
 class TileRequest:
-  layer: str
   zoom: int
   logical_x: int
   tile_x: int
@@ -99,11 +91,10 @@ def build_viewport(lat: float, lon: float, range_km: int, zoom: int) -> Viewport
   )
 
 
-def iter_tile_requests(layer: str, zoom: int, viewport: Viewport) -> list[TileRequest]:
+def iter_tile_requests(zoom: int, viewport: Viewport) -> list[TileRequest]:
   tile_mod = 2 ** zoom
   return [
     TileRequest(
-      layer=layer,
       zoom=zoom,
       logical_x=logical_x,
       tile_x=logical_x % tile_mod,

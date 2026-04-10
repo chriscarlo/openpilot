@@ -6,7 +6,6 @@ from openpilot.sunnypilot.weather_overlayd.overlay_core import (
   CAR_ANCHOR_Y,
   CANVAS_SIZE_PX,
   OverlayConfig,
-  RAIN_LAYER,
   build_viewport,
   compose_layer,
   encode_png,
@@ -25,7 +24,7 @@ class StaticLookup:
 
 
 def test_viewport_anchor_bias_shows_more_ahead_than_behind():
-  viewport = build_viewport(37.7749, -122.4194, 12, 10)
+  viewport = build_viewport(37.7749, -122.4194, 12, 7)
   assert viewport.world_size_px > 0.0
   ahead_px = CAR_ANCHOR_Y * viewport.world_size_px
   behind_px = (1.0 - CAR_ANCHOR_Y) * viewport.world_size_px
@@ -34,9 +33,9 @@ def test_viewport_anchor_bias_shows_more_ahead_than_behind():
 
 def test_compose_layer_masks_to_dry_when_tiles_are_empty():
   transparent = Image.new("RGBA", (256, 256), (0, 0, 0, 0))
-  viewport = build_viewport(37.7749, -122.4194, 12, 10)
+  viewport = build_viewport(37.7749, -122.4194, 12, 7)
   lookup = StaticLookup(transparent)
-  lookup.requests = iter_tile_requests(RAIN_LAYER, 10, viewport)
+  lookup.requests = iter_tile_requests(7, viewport)
   image, tile_count = compose_layer(lookup, viewport, CANVAS_SIZE_PX)
 
   assert tile_count == len(lookup.requests)
@@ -45,9 +44,9 @@ def test_compose_layer_masks_to_dry_when_tiles_are_empty():
 
 def test_compose_layer_preserves_precipitation_inside_range():
   wet = Image.new("RGBA", (256, 256), (120, 220, 90, 255))
-  viewport = build_viewport(37.7749, -122.4194, 12, 10)
+  viewport = build_viewport(37.7749, -122.4194, 12, 7)
   lookup = StaticLookup(wet)
-  lookup.requests = iter_tile_requests(RAIN_LAYER, 10, viewport)
+  lookup.requests = iter_tile_requests(7, viewport)
   image, tile_count = compose_layer(lookup, viewport, CANVAS_SIZE_PX)
   png_bytes = encode_png(image)
 

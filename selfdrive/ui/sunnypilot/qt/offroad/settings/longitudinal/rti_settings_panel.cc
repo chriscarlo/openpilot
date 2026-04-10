@@ -832,7 +832,7 @@ void RTISettingsPanel::setupMainLayout() {
     tr("Overlay Range"),
     tr("Show the overlay when precipitation exists anywhere inside this look-ahead distance"),
     "WeatherOverlayRangeKm",
-    3, 40, 1, 12, "km",
+    3, 40, 1, 16, "km",
     this
   );
   weatherOverlayControlsLayout->addWidget(weatherOverlayRangeControl);
@@ -840,9 +840,9 @@ void RTISettingsPanel::setupMainLayout() {
 
   weatherOverlayZoomControl = new IntRangeControl(
     tr("Map Zoom"),
-    tr("Tile zoom used to sample the weather layers"),
+    tr("RainViewer tile zoom (free tier caps at 7)"),
     "WeatherOverlayZoomLevel",
-    6, 13, 1, 10, "z",
+    6, 7, 1, 7, "z",
     this
   );
   weatherOverlayControlsLayout->addWidget(weatherOverlayZoomControl);

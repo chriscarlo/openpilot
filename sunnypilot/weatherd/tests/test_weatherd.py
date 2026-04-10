@@ -1,38 +1,13 @@
 #!/usr/bin/env python3
 
-import struct
-import zlib
-
 import pytest
 
 from sunnypilot.weatherd import weatherd
 
 
-def _encode_png_rgba(width: int, height: int, rgba: bytes) -> bytes:
-  """Encode a raw RGBA byte buffer to a PNG (for round-tripping through decoder)."""
-  assert len(rgba) == width * height * 4
-  ihdr = struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)
-  raw = bytearray()
-  stride = width * 4
-  for y in range(height):
-    raw.append(0)
-    raw.extend(rgba[y * stride:(y + 1) * stride])
-  idat = zlib.compress(bytes(raw), 9)
-
-  def _chunk(t: bytes, d: bytes) -> bytes:
-    crc = zlib.crc32(t + d)
-    return struct.pack(">I", len(d)) + t + d + struct.pack(">I", crc)
-
-  return (b"\x89PNG\r\n\x1a\n"
-          + _chunk(b"IHDR", ihdr)
-          + _chunk(b"IDAT", idat)
-          + _chunk(b"IEND", b""))
-
-
 class FakeResponse:
-  def __init__(self, json_body=None, content=None):
+  def __init__(self, json_body=None):
     self._json = json_body
-    self.content = content
 
   def json(self):
     return self._json
@@ -46,13 +21,13 @@ class RequestsStub:
 
   def __init__(self):
     self.handlers: dict[str, object] = {}
-    self.call_count = 0
+    self.calls: list[tuple[str, dict]] = []
 
   def register(self, url_substring: str, response_or_exc):
     self.handlers[url_substring] = response_or_exc
 
-  def get(self, url: str, *args, **kwargs):
-    self.call_count += 1
+  def get(self, url: str, params=None, *args, **kwargs):
+    self.calls.append((url, params or {}))
     for substr, resp in self.handlers.items():
       if substr in url:
         if isinstance(resp, Exception):
@@ -61,166 +36,16 @@ class RequestsStub:
     raise AssertionError(f"No handler registered for URL: {url}")
 
 
-def test_decode_png_rgba_roundtrip_solid_color():
-  yellow_px = bytes([255, 224, 0, 255])
-  raw = yellow_px * 16
-  png = _encode_png_rgba(4, 4, raw)
-  result = weatherd._decode_png_rgba(png)
-  assert result is not None
-  w, h, pixels = result
-  assert w == 4 and h == 4
-  assert pixels == raw
-
-
-def test_decode_png_rgba_rejects_garbage():
-  assert weatherd._decode_png_rgba(b"") is None
-  assert weatherd._decode_png_rgba(b"not a png") is None
-  assert weatherd._decode_png_rgba(b"\x89PNG\r\n\x1a\n garbage after header") is None
-
-
-def test_decode_png_rgba_handles_transparent_and_opaque_pixels():
-  transparent = bytes([0, 0, 0, 0])
-  yellow = bytes([255, 224, 0, 255])
-  blue = bytes([0, 112, 163, 255])
-  red = bytes([255, 68, 0, 255])
-  raw = transparent + yellow + blue + red
-  png = _encode_png_rgba(2, 2, raw)
-  result = weatherd._decode_png_rgba(png)
-  assert result is not None
-  w, h, pixels = result
-  assert (w, h) == (2, 2)
-  assert pixels[0:4] == transparent
-  assert pixels[4:8] == yellow
-  assert pixels[8:12] == blue
-  assert pixels[12:16] == red
-
-
-def test_metadata_cache_stores_newest_past_frame(monkeypatch):
-  stub = RequestsStub()
-  stub.register("weather-maps.json", FakeResponse(json_body={
-    "host": "https://tilecache.example.com",
-    "radar": {
-      "past": [
-        {"time": 1000, "path": "/v2/radar/aaa"},
-        {"time": 1600, "path": "/v2/radar/bbb"},
-        {"time": 2200, "path": "/v2/radar/ccc"},
-      ],
-    },
-  }))
-  monkeypatch.setattr(weatherd, "requests", stub)
-
-  cache = weatherd.MetadataCache()
-  out = cache.get(now_monotonic=100.0)
-  assert out == ("https://tilecache.example.com", "/v2/radar/ccc", 2200)
-  assert stub.call_count == 1
-
-  # Second call within cache window reuses cached data, no new HTTP
-  out2 = cache.get(now_monotonic=100.0 + 30.0)
-  assert out2 == out
-  assert stub.call_count == 1
-
-  # After cache expiry, refetches
-  out3 = cache.get(now_monotonic=100.0 + weatherd.METADATA_CACHE_S + 1.0)
-  assert out3 is not None
-  assert stub.call_count == 2
-
-
-def test_metadata_cache_returns_none_on_http_failure(monkeypatch):
-  stub = RequestsStub()
-  stub.register("weather-maps.json", Exception("boom"))
-  monkeypatch.setattr(weatherd, "requests", stub)
-  cache = weatherd.MetadataCache()
-  assert cache.get(now_monotonic=100.0) is None
-
-
-def test_metadata_cache_returns_none_when_past_is_empty(monkeypatch):
-  stub = RequestsStub()
-  stub.register("weather-maps.json", FakeResponse(json_body={
-    "host": "h",
-    "radar": {"past": []},
-  }))
-  monkeypatch.setattr(weatherd, "requests", stub)
-  cache = weatherd.MetadataCache()
-  assert cache.get(now_monotonic=100.0) is None
-
-
-def test_fetch_tile_decodes_response(monkeypatch):
-  size = 256
-  transparent = bytes([0, 0, 0, 0])
-  yellow = bytes([255, 224, 0, 255])
-  raw = bytearray(transparent * (size * size))
-  for dy in (-1, 0, 1):
-    for dx in (-1, 0, 1):
-      idx = ((size // 2 + dy) * size + (size // 2 + dx)) * 4
-      raw[idx:idx + 4] = yellow
-  png = _encode_png_rgba(size, size, bytes(raw))
-
-  stub = RequestsStub()
-  stub.register(".png", FakeResponse(content=png))
-  monkeypatch.setattr(weatherd, "requests", stub)
-  result = weatherd._fetch_tile("host", "/path", 40.0, -95.0)
-  assert result is not None
-  w, h, _ = result
-  assert (w, h) == (size, size)
-
-
-def test_fetch_tile_returns_none_on_http_failure(monkeypatch):
-  stub = RequestsStub()
-  stub.register(".png", Exception("network down"))
-  monkeypatch.setattr(weatherd, "requests", stub)
-  assert weatherd._fetch_tile("host", "/path", 40.0, -95.0) is None
-
-
-def _register_meta_and_tile(monkeypatch, tile_png: bytes):
-  stub = RequestsStub()
-  stub.register("weather-maps.json", FakeResponse(json_body={
-    "host": "https://tile.example.com",
-    "radar": {"past": [{"time": 1_700_000_000, "path": "/p"}]},
-  }))
-  stub.register(".png", FakeResponse(content=tile_png))
-  monkeypatch.setattr(weatherd, "requests", stub)
-
-
-def test_measure_precipitation_end_to_end_with_rainy_tile(monkeypatch):
-  size = 256
-  red = bytes([255, 68, 0, 255])
-  transparent = bytes([0, 0, 0, 0])
-  raw = bytearray(transparent * (size * size))
-  for dy in (-1, 0, 1):
-    for dx in (-1, 0, 1):
-      idx = ((size // 2 + dy) * size + (size // 2 + dx)) * 4
-      raw[idx:idx + 4] = red
-  _register_meta_and_tile(monkeypatch, _encode_png_rgba(size, size, bytes(raw)))
-
-  metadata = weatherd.MetadataCache()
-  out = weatherd._measure_precipitation(40.0, -95.0, metadata, now_monotonic=100.0)
-  assert out is not None
-  mm, frame_time = out
-  assert frame_time == 1_700_000_000
-  assert mm > 5.0
-
-
-def test_measure_precipitation_returns_zero_for_transparent_tile(monkeypatch):
-  size = 256
-  transparent_tile = bytes([0, 0, 0, 0]) * (size * size)
-  _register_meta_and_tile(monkeypatch, _encode_png_rgba(size, size, transparent_tile))
-  metadata = weatherd.MetadataCache()
-  out = weatherd._measure_precipitation(40.0, -95.0, metadata, now_monotonic=100.0)
-  assert out is not None
-  mm, _ = out
-  assert mm == 0.0
-
-
-def test_measure_precipitation_returns_none_when_tile_fetch_fails(monkeypatch):
-  stub = RequestsStub()
-  stub.register("weather-maps.json", FakeResponse(json_body={
-    "host": "h", "radar": {"past": [{"time": 1, "path": "/p"}]},
-  }))
-  stub.register(".png", Exception("tile fetch failed"))
-  monkeypatch.setattr(weatherd, "requests", stub)
-  metadata = weatherd.MetadataCache()
-  out = weatherd._measure_precipitation(40.0, -95.0, metadata, now_monotonic=100.0)
-  assert out is None
+def test_severity_from_mm_per_hr_matches_controller_anchors():
+  # WeatherController PRECIP anchors: LIGHT=0.5, MODERATE=2.5, HEAVY=7.5 mm/hr.
+  assert weatherd.severity_from_mm_per_hr(0.0) == "none"
+  assert weatherd.severity_from_mm_per_hr(0.3) == "none"
+  assert weatherd.severity_from_mm_per_hr(0.5) == "light"
+  assert weatherd.severity_from_mm_per_hr(1.5) == "light"
+  assert weatherd.severity_from_mm_per_hr(2.5) == "moderate"
+  assert weatherd.severity_from_mm_per_hr(5.0) == "moderate"
+  assert weatherd.severity_from_mm_per_hr(7.5) == "heavy"
+  assert weatherd.severity_from_mm_per_hr(20.0) == "heavy"
 
 
 def test_haversine_km_identity_zero():
@@ -233,3 +58,80 @@ def test_haversine_km_reference_distance():
   la = (34.0522, -118.2437)
   d = weatherd._haversine_km(nyc[0], nyc[1], la[0], la[1])
   assert 3900.0 < d < 4000.0
+
+
+def test_fetch_point_conditions_parses_currently_block(monkeypatch):
+  stub = RequestsStub()
+  stub.register("api.pirateweather.net/forecast", FakeResponse(json_body={
+    "currently": {
+      "time": 1_700_000_000,
+      "precipIntensity": 3.5,
+      "precipType": "rain",
+      "precipProbability": 0.9,
+    },
+  }))
+  monkeypatch.setattr(weatherd, "requests", stub)
+  out = weatherd.fetch_point_conditions("KEY", 40.0, -95.0)
+  assert out == (3.5, 1_700_000_000)
+
+  # Confirm we requested units=si so precipIntensity is mm/hr.
+  assert stub.calls[0][1] == {"units": weatherd.PIRATE_WEATHER_UNITS}
+  assert "KEY/40.0,-95.0" in stub.calls[0][0]
+
+
+def test_fetch_point_conditions_returns_none_on_http_failure(monkeypatch):
+  stub = RequestsStub()
+  stub.register("api.pirateweather.net", Exception("network down"))
+  monkeypatch.setattr(weatherd, "requests", stub)
+  assert weatherd.fetch_point_conditions("KEY", 40.0, -95.0) is None
+
+
+def test_fetch_point_conditions_clamps_negative_precip(monkeypatch):
+  # Defensive: a nonsensical negative intensity should not become a negative mm/hr.
+  stub = RequestsStub()
+  stub.register("api.pirateweather.net", FakeResponse(json_body={
+    "currently": {"time": 1_700_000_000, "precipIntensity": -0.2},
+  }))
+  monkeypatch.setattr(weatherd, "requests", stub)
+  out = weatherd.fetch_point_conditions("KEY", 40.0, -95.0)
+  assert out is not None
+  mm, _ = out
+  assert mm == 0.0
+
+
+def test_fetch_point_conditions_treats_null_precip_as_zero(monkeypatch):
+  stub = RequestsStub()
+  stub.register("api.pirateweather.net", FakeResponse(json_body={
+    "currently": {"time": 1_700_000_000, "precipIntensity": None},
+  }))
+  monkeypatch.setattr(weatherd, "requests", stub)
+  out = weatherd.fetch_point_conditions("KEY", 40.0, -95.0)
+  assert out is not None
+  mm, ts = out
+  assert mm == 0.0
+  assert ts == 1_700_000_000
+
+
+def test_fetch_point_conditions_rejects_response_without_time(monkeypatch):
+  stub = RequestsStub()
+  stub.register("api.pirateweather.net", FakeResponse(json_body={
+    "currently": {"precipIntensity": 2.0},
+  }))
+  monkeypatch.setattr(weatherd, "requests", stub)
+  assert weatherd.fetch_point_conditions("KEY", 40.0, -95.0) is None
+
+
+def test_fetch_point_conditions_rejects_missing_currently_block(monkeypatch):
+  stub = RequestsStub()
+  stub.register("api.pirateweather.net", FakeResponse(json_body={"minutely": {}}))
+  monkeypatch.setattr(weatherd, "requests", stub)
+  assert weatherd.fetch_point_conditions("KEY", 40.0, -95.0) is None
+
+
+def test_fetch_point_conditions_rejects_non_numeric_precip(monkeypatch):
+  stub = RequestsStub()
+  stub.register("api.pirateweather.net", FakeResponse(json_body={
+    "currently": {"time": 1_700_000_000, "precipIntensity": "wet"},
+  }))
+  monkeypatch.setattr(weatherd, "requests", stub)
+  assert weatherd.fetch_point_conditions("KEY", 40.0, -95.0) is None
