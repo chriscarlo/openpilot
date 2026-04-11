@@ -27,6 +27,13 @@ COMFORT_BAND_V = [0.0, 0.02, 0.04, 0.06, 0.08, 0.10]
 
 DYNAMIC_LOWER_JERK_BP = [-2.0, -1.5, -1.0, -0.25, -0.1, -0.025, -0.01, -0.005]
 DYNAMIC_LOWER_JERK_V  = [3.3,  2.5,  2.0,   1.9,  1.8,   1.65,  1.15,    0.5]
+BRAKE_TRACKING_GAP_JERK_SCALE_MPS2 = 1.4
+FOLLOW_REQUIRED_DECEL_SCALE_MPS2 = 1.6
+FOLLOW_LEAD_BRAKE_SCALE_MPS2 = 2.0
+FOLLOW_DISTANCE_SCALE_M = 55.0
+FOLLOW_PATH_SCALE_M = 0.9
+FOLLOW_VLAT_SCALE_MPS = 1.5
+FOLLOW_URGENCY_POWER = 1.5
 
 SPEED_BP = [0.0, 5.0, 20.0]
 
@@ -197,7 +204,53 @@ class LongitudinalController:
 
     return dynamic_lower_jerk
 
-  def calculate_jerk(self, CC: structs.CarControl, CS: CarStateBase, long_control_state: LongCtrlState) -> None:
+  @staticmethod
+  def _lead_field(lead, field_name: str, default):
+    if lead is None:
+      return default
+    if isinstance(lead, dict):
+      return lead.get(field_name, default)
+    return getattr(lead, field_name, default)
+
+  def _calculate_follow_urgency(self, CC_SP: structs.CarControlSP) -> float:
+    """Continuously score how much the current brake request is tied to a centered slowing lead."""
+    best_urgency = 0.0
+    for slot_name in ("leadOne", "leadTwo"):
+      lead = getattr(CC_SP, slot_name, None)
+      if not bool(self._lead_field(lead, "status", False)):
+        continue
+
+      d_rel = max(0.0, float(self._lead_field(lead, "dRel", 0.0)))
+      v_rel = float(self._lead_field(lead, "vRel", 0.0))
+      a_lead_k = float(self._lead_field(lead, "aLeadK", 0.0))
+      d_path = abs(float(self._lead_field(lead, "dPath", self._lead_field(lead, "yRel", 0.0))))
+      v_lat = abs(float(self._lead_field(lead, "vLat", 0.0)))
+
+      closing_speed = max(0.0, -v_rel)
+      required_decel = (closing_speed ** 2) / max(2.0 * max(d_rel, 1.0), 1.0)
+      closing_urgency = 1.0 - np.exp(-required_decel / FOLLOW_REQUIRED_DECEL_SCALE_MPS2)
+
+      lead_brake_urgency = 1.0 - np.exp(-max(0.0, -a_lead_k) / FOLLOW_LEAD_BRAKE_SCALE_MPS2)
+      closeness_weight = 1.0 / (1.0 + (d_rel / FOLLOW_DISTANCE_SCALE_M))
+      path_weight = np.exp(-((d_path / FOLLOW_PATH_SCALE_M) ** 2)) * np.exp(-((v_lat / FOLLOW_VLAT_SCALE_MPS) ** 2))
+
+      closing_term = closing_urgency * closeness_weight
+      brake_term = lead_brake_urgency * closeness_weight
+      slot_urgency = float(path_weight * (1.0 - ((1.0 - closing_term) * (1.0 - brake_term))))
+      best_urgency = max(best_urgency, slot_urgency)
+
+    return best_urgency
+
+  def _calculate_brake_tracking_lower_jerk(self, CC_SP: structs.CarControlSP) -> float:
+    """Raise brake-entry jerk only when the controller lags a centered follow-braking demand."""
+    lower_max = 5.0 if self.CP.radarUnavailable else self.car_config.jerk_limits
+    brake_tracking_gap = max(0.0, self.accel_last - self.accel_cmd)
+    tracking_urgency = 1.0 - np.exp(-brake_tracking_gap / BRAKE_TRACKING_GAP_JERK_SCALE_MPS2)
+    follow_urgency = self._calculate_follow_urgency(CC_SP)
+    urgency = tracking_urgency * (follow_urgency ** FOLLOW_URGENCY_POWER)
+    return self.car_config.min_lower_jerk + (lower_max - self.car_config.min_lower_jerk) * urgency
+
+  def calculate_jerk(self, CC: structs.CarControl, CC_SP: structs.CarControlSP, CS: CarStateBase, long_control_state: LongCtrlState) -> None:
     """Calculate appropriate jerk limits for smooth acceleration/deceleration.
 
     Args:
@@ -236,7 +289,9 @@ class LongitudinalController:
     a_ego_blended = float(np.interp(velocity, [1.0, 2.0], [CS.aBasis, CS.out.aEgo]))
     dynamic_accel_error = a_ego_blended - self.accel_last
     dynamic_lower_jerk = self._calculate_dynamic_lower_jerk(dynamic_accel_error, velocity)
-    dynamic_desired_lower_jerk = max(self.car_config.min_lower_jerk, min(dynamic_lower_jerk, lower_speed_factor))
+    brake_tracking_lower_jerk = self._calculate_brake_tracking_lower_jerk(CC_SP)
+    dynamic_desired_lower_jerk = max(self.car_config.min_lower_jerk,
+                                     min(max(dynamic_lower_jerk, brake_tracking_lower_jerk), lower_speed_factor))
 
     # Apply jerk limits based on tuning approach
     self.jerk_upper = ramp_update(self.jerk_upper, desired_jerk_upper, self.car_config.min_upper_jerk)
@@ -366,7 +421,7 @@ class LongitudinalController:
     if self.fcw(CC):
       self.emergency_control(CC)
     else:
-      self.calculate_jerk(CC, CS, long_control_state)
+      self.calculate_jerk(CC, CC_SP, CS, long_control_state)
       self.calculate_accel(CC)
       self.calculate_comfort_band(CC, CS)
 

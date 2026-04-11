@@ -50,6 +50,7 @@ def summarize_trace(trace: list[dict], *, vehicle: dict, scenario_name: str, noi
   )
   lead_event_overshoot_growth_mps = _max_lead_event_overshoot_growth(trace)
   handoff_prereveal_mean_overshoot_mps = _max_handoff_prereveal_mean_overshoot(trace)
+  handoff_prereveal_speed_loss_mps = _max_handoff_prereveal_speed_loss(trace)
   handoff_prereveal_cruise_fraction = _max_handoff_prereveal_cruise_fraction(trace)
 
   return {
@@ -67,6 +68,7 @@ def summarize_trace(trace: list[dict], *, vehicle: dict, scenario_name: str, noi
     "maxFollowOvershootMps": follow_overshoot,
     "leadEventOvershootGrowthMps": lead_event_overshoot_growth_mps,
     "handoffPrerevealMeanOvershootMps": handoff_prereveal_mean_overshoot_mps,
+    "handoffPrerevealSpeedLossMps": handoff_prereveal_speed_loss_mps,
     "handoffPrerevealCruiseFraction": handoff_prereveal_cruise_fraction,
     "maxFollowUndershootMps": follow_undershoot,
     "minTrueGapM": min((row["true_min_gap_m"] for row in active_gap_rows), default=None),
@@ -188,6 +190,43 @@ def _max_handoff_prereveal_mean_overshoot(trace: list[dict]) -> float:
     event_means.append(sum(overshoots) / len(overshoots))
 
   return max(event_means, default=0.0)
+
+
+def _max_handoff_prereveal_speed_loss(trace: list[dict]) -> float:
+  if not trace:
+    return 0.0
+
+  event_losses: list[float] = []
+  for event_row in trace:
+    if event_row.get("event") != "handoff_reveal":
+      continue
+
+    reveal_source = str(event_row.get("planner_source") or "")
+    incoming_status_key = {
+      "lead0": "lead_one_status",
+      "lead1": "lead_two_status",
+    }.get(reveal_source)
+
+    event_t = float(event_row["t_s"])
+    window_start_t = max(0.0, event_t - HANDOFF_PREREVEAL_WINDOW_S)
+    prereveal_rows = [
+      row for row in trace
+      if window_start_t <= float(row["t_s"]) < event_t
+    ]
+    fallback_rows = list(prereveal_rows)
+    if incoming_status_key is not None:
+      prereveal_rows = [row for row in prereveal_rows if bool(row.get(incoming_status_key))]
+    else:
+      prereveal_rows = [row for row in prereveal_rows if bool(row.get("lead_one_status")) or bool(row.get("lead_two_status"))]
+    if len(prereveal_rows) < 2:
+      prereveal_rows = fallback_rows
+    if len(prereveal_rows) < 2:
+      continue
+
+    speeds = [float(row["v_ego_true_mps"]) for row in prereveal_rows]
+    event_losses.append(max(speeds) - min(speeds))
+
+  return max(event_losses, default=0.0)
 
 
 def _max_handoff_prereveal_cruise_fraction(trace: list[dict]) -> float:

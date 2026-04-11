@@ -1173,6 +1173,9 @@ class LongitudinalMpc:
       lead_xv = self.process_lead(raw_lead)
       handoff_remaining_s = max(0.0, path_abs_m - center_enter_m) / max(toward_center_mps, 1e-3)
       projected_deficit_m = float(preview_debug.get("projected_deficit_m", 0.0) or 0.0)
+      path_scale = float(np.interp(path_abs_m, [center_enter_m, center_exit_m], [1.0, 0.55]))
+      handoff_scale = float(np.interp(handoff_remaining_s, [0.0, 1.5], [1.0, 0.65]))
+      application_blend = float(np.clip(model_prob * path_scale * handoff_scale, 0.0, 1.0))
       obstacle = apply_lead_approach_preview(
         lead_xv[:, 0] + get_stopped_equivalence_factor(lead_xv[:, 1]),
         preview_buffer_m,
@@ -1187,6 +1190,9 @@ class LongitudinalMpc:
           "toward_center_gate_mps": float(toward_center_gate_mps),
           "model_prob": float(model_prob),
           "confidence_scale": float(model_prob),
+          "path_scale": float(path_scale),
+          "handoff_scale": float(handoff_scale),
+          "application_blend": float(application_blend),
           "preview_buffer_raw_m": float(preview_buffer_raw),
           "preview_buffer_m": float(preview_buffer_m),
           "preview_obstacle_m": float(obstacle[0]),
@@ -2518,13 +2524,22 @@ class LongitudinalMpc:
       # cruise_obstacle; this line restores the same invariant.
       active_obstacle = np.minimum(active_obstacle, cruise_obstacle)
       adjacent_preview_applied = False
+      adjacent_preview_application_blend = 0.0
       if (adjacent_awareness_preview_obstacle is not None and
           float(adjacent_awareness_preview_obstacle[0]) < float(active_obstacle[0])):
-        active_obstacle = np.minimum(active_obstacle, adjacent_awareness_preview_obstacle)
-        adjacent_preview_applied = True
+        adjacent_preview_application_blend = float(np.clip(
+          self.adjacent_awareness_preview_debug.get("application_blend", 0.0) or 0.0,
+          0.0,
+          1.0,
+        ))
+        if adjacent_preview_application_blend > 0.0:
+          preview_target = np.minimum(active_obstacle, adjacent_awareness_preview_obstacle)
+          active_obstacle = active_obstacle - (active_obstacle - preview_target) * adjacent_preview_application_blend
+          adjacent_preview_applied = True
       self.adjacent_awareness_preview_debug = {
         **self.adjacent_awareness_preview_debug,
         "applied": bool(adjacent_preview_applied),
+        "applied_blend": float(adjacent_preview_application_blend),
         "active_obstacle_m": float(active_obstacle[0]),
       }
       self.lead_handoff_danger_factor = float(LEAD_DANGER_FACTOR)

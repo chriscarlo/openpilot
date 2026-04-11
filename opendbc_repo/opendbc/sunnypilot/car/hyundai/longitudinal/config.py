@@ -23,7 +23,7 @@ class CarTuningConfig:
   lower_jerk_v: list[float] = field(default_factory=lambda: [5.0, 8.0, 5.0])
   min_upper_jerk: float = 0.5
   min_lower_jerk: float = 0.5
-  accel_min: float = -3.5
+  accel_min: float = -5.5
   accel_max: float = 2.0
 
 
@@ -62,7 +62,7 @@ CAR_SPECIFIC_CONFIGS = {
     lookahead_jerk_upper_v=[1.0, 1.0, 1.0],
     lookahead_jerk_lower_v=[0.05, 0.05, 0.05],
     jerk_limits=2.5,
-    accel_min=-2.5,
+    accel_min=-5.5,
     accel_max=1.0,
   ),
   CAR.KIA_NIRO_PHEV_2022: CarTuningConfig(

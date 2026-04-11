@@ -63,6 +63,10 @@ class LeadRoleClassifier:
   ADJ_LEFT = "adjacent_awareness_left"
   ADJ_RIGHT = "adjacent_awareness_right"
   INVALID = "invalid"
+  CENTER_DEMOTION_GRACE_S = 0.25
+  CENTER_DEMOTION_MAX_PATH_ABS_M = 3.2
+  CENTER_DEMOTION_MAX_PATH_DELTA_M = 2.25
+  CENTER_DEMOTION_MAX_DREL_DELTA_M = 6.0
 
   def __init__(self):
     self._params = Params()
@@ -83,8 +87,8 @@ class LeadRoleClassifier:
     }
     # slot state keyed by lead slot index (0/1)
     self._slot_state: dict[int, dict[str, Any]] = {
-      0: {"role": self.INVALID, "y_abs": None, "t": None},
-      1: {"role": self.INVALID, "y_abs": None, "t": None},
+      0: {"role": self.INVALID, "y_abs": None, "t": None, "center_hold_until_t": None, "center_path_abs": None, "center_d_rel": None},
+      1: {"role": self.INVALID, "y_abs": None, "t": None, "center_hold_until_t": None, "center_path_abs": None, "center_d_rel": None},
     }
 
   @staticmethod
@@ -143,9 +147,16 @@ class LeadRoleClassifier:
     )
 
   def _classify_slot(self, slot: int, lead: Any, v_ego: float, now: float, gate_active: bool) -> tuple[str, dict[str, Any]]:
-    info: dict[str, Any] = {"reason": "-", "toward_center_mps": 0.0, "cutin_promoted": False}
+    info: dict[str, Any] = {
+      "reason": "-",
+      "toward_center_mps": 0.0,
+      "cutin_promoted": False,
+      "grace_active": False,
+      "grace_remaining_s": 0.0,
+      "path_abs": None,
+      "d_rel": None,
+    }
     if not self._lead_valid(lead):
-      self._slot_state[slot] = {"role": self.INVALID, "y_abs": None, "t": None}
       info["reason"] = "invalid_or_missing"
       return self.INVALID, info
 
@@ -153,6 +164,8 @@ class LeadRoleClassifier:
     path_abs = abs(path_offset)
     d_rel = float(getattr(lead, "dRel", 0.0) or 0.0)
     v_lat = float(getattr(lead, "vLat", 0.0) or 0.0)
+    info["path_abs"] = path_abs
+    info["d_rel"] = d_rel
 
     prev = self._slot_state.get(slot, {})
     prev_role = str(prev.get("role", self.INVALID))
@@ -194,8 +207,73 @@ class LeadRoleClassifier:
         role = self.ADJ_LEFT if path_offset > 0.0 else self.ADJ_RIGHT
         info["reason"] = "adjacent_lane"
 
-    self._slot_state[slot] = {"role": role, "y_abs": path_abs, "t": now}
     return role, info
+
+  def _maybe_apply_center_demotion_grace(self, slot: int, lead: Any, role: str, info: dict[str, Any], *,
+                                         other_role: str, dropped_slot: int | None, now: float) -> tuple[str, dict[str, Any]]:
+    if role == self.CENTER_CONTROL or not self._lead_valid(lead):
+      return role, info
+    if other_role == self.CENTER_CONTROL or dropped_slot == slot:
+      return role, info
+
+    prev = self._slot_state.get(slot, {})
+    if str(prev.get("role", self.INVALID)) != self.CENTER_CONTROL:
+      return role, info
+
+    hold_until_t = prev.get("center_hold_until_t")
+    center_path_abs = prev.get("center_path_abs")
+    center_d_rel = prev.get("center_d_rel")
+    path_abs = info.get("path_abs")
+    d_rel = info.get("d_rel")
+    if hold_until_t is None or center_path_abs is None or center_d_rel is None or path_abs is None or d_rel is None:
+      return role, info
+
+    remaining_s = float(hold_until_t) - now
+    if remaining_s <= 0.0:
+      return role, info
+    if float(path_abs) > self.CENTER_DEMOTION_MAX_PATH_ABS_M:
+      return role, info
+    if abs(float(path_abs) - float(center_path_abs)) > self.CENTER_DEMOTION_MAX_PATH_DELTA_M:
+      return role, info
+    if abs(float(d_rel) - float(center_d_rel)) > self.CENTER_DEMOTION_MAX_DREL_DELTA_M:
+      return role, info
+
+    info["reason"] = "center_lane_grace"
+    info["grace_active"] = True
+    info["grace_remaining_s"] = float(remaining_s)
+    return self.CENTER_CONTROL, info
+
+  def _commit_slot_state(self, slot: int, lead: Any, role: str, info: dict[str, Any], now: float) -> None:
+    if not self._lead_valid(lead):
+      self._slot_state[slot] = {
+        "role": self.INVALID,
+        "y_abs": None,
+        "t": None,
+        "center_hold_until_t": None,
+        "center_path_abs": None,
+        "center_d_rel": None,
+      }
+      return
+
+    prev = self._slot_state.get(slot, {})
+    state = {
+      "role": role,
+      "y_abs": info.get("path_abs"),
+      "t": now,
+      "center_hold_until_t": None,
+      "center_path_abs": None,
+      "center_d_rel": None,
+    }
+    if role == self.CENTER_CONTROL:
+      if bool(info.get("grace_active", False)):
+        state["center_hold_until_t"] = prev.get("center_hold_until_t")
+        state["center_path_abs"] = prev.get("center_path_abs")
+        state["center_d_rel"] = prev.get("center_d_rel")
+      else:
+        state["center_hold_until_t"] = now + self.CENTER_DEMOTION_GRACE_S
+        state["center_path_abs"] = info.get("path_abs")
+        state["center_d_rel"] = info.get("d_rel")
+    self._slot_state[slot] = state
 
   def _is_duplicate_pair(self, lead0: Any, lead1: Any) -> bool:
     if not (self._lead_valid(lead0) and self._lead_valid(lead1)):
@@ -225,6 +303,13 @@ class LeadRoleClassifier:
       d0 = float(getattr(lead0, "dRel", 1e9) or 1e9) if self._lead_valid(lead0) else 1e9
       d1 = float(getattr(lead1, "dRel", 1e9) or 1e9) if self._lead_valid(lead1) else 1e9
       dropped_slot = 1 if d0 <= d1 else 0
+
+    role0, info0 = self._maybe_apply_center_demotion_grace(
+      0, lead0, role0, info0, other_role=role1, dropped_slot=dropped_slot, now=now,
+    )
+    role1, info1 = self._maybe_apply_center_demotion_grace(
+      1, lead1, role1, info1, other_role=role0, dropped_slot=dropped_slot, now=now,
+    )
 
     control0 = ControlLead()
     control1 = ControlLead()
@@ -270,6 +355,16 @@ class LeadRoleClassifier:
         "lead0": bool(control0.status),
         "lead1": bool(control1.status),
       },
+      "center_grace": {
+        "lead0": {
+          "active": bool(info0["grace_active"]),
+          "remaining_s": float(info0["grace_remaining_s"]),
+        },
+        "lead1": {
+          "active": bool(info1["grace_active"]),
+          "remaining_s": float(info1["grace_remaining_s"]),
+        },
+      },
       "raw": {
         "lead0": {
           "status": bool(getattr(lead0, "status", False)),
@@ -298,4 +393,6 @@ class LeadRoleClassifier:
         "cutin_yrate_min_mps": float(self._cfg["cutin_yrate_min_mps"]),
       },
     }
+    self._commit_slot_state(0, lead0, role0, info0, now)
+    self._commit_slot_state(1, lead1, role1, info1, now)
     return control0, control1, debug

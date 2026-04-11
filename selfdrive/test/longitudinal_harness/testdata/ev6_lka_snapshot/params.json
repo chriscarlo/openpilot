@@ -1,7 +1,7 @@
 {
   "HyundaiLongitudinalTuning": "1",
   "LongTuningAccelMax": "2.0",
-  "LongTuningAccelMin": "-3.5",
+  "LongTuningAccelMin": "-5.5",
   "LongTuningCustomToggle": "0",
   "Longitudinal.LiveTune.AccelChangeCost": "115.0",
   "Longitudinal.LiveTune.AccelCost": "0.0",

@@ -8,18 +8,28 @@ See the LICENSE.md file in the root directory for more details.
 import unittest
 import numpy as np
 from unittest.mock import Mock
+from types import SimpleNamespace
 
 from opendbc.sunnypilot.car.hyundai.longitudinal import config
 from opendbc.sunnypilot.car.hyundai.longitudinal.controller import LongitudinalController, LongitudinalState, SPEED_BP
 from opendbc.sunnypilot.car.hyundai.values import HyundaiFlagsSP
 from opendbc.car import DT_CTRL, structs
 from opendbc.car.interfaces import CarStateBase
-from opendbc.car.hyundai.values import HyundaiFlags
+from opendbc.car.hyundai.values import CarControllerParams, HyundaiFlags
 
 LongCtrlState = structs.CarControl.Actuators.LongControlState
 
 
 class TestLongitudinalTuningController(unittest.TestCase):
+  @staticmethod
+  def make_cc_sp(*, lead_one=None, lead_two=None):
+    return SimpleNamespace(
+      params=[],
+      flags=HyundaiFlagsSP.LONG_TUNING_DYNAMIC,
+      leadOne=lead_one or SimpleNamespace(status=False, dRel=0.0, dPath=0.0, yRel=0.0, vRel=0.0, vLat=0.0, aLeadK=0.0),
+      leadTwo=lead_two or SimpleNamespace(status=False, dRel=0.0, dPath=0.0, yRel=0.0, vRel=0.0, vLat=0.0, aLeadK=0.0),
+    )
+
   def for_all_configs(self, test_func):
     all_configs = list(config.TUNING_CONFIGS.items()) + list(config.CAR_SPECIFIC_CONFIGS.items())
     for name, cfg in all_configs:
@@ -73,7 +83,7 @@ class TestLongitudinalTuningController(unittest.TestCase):
       controller.accel_cmd = 1.0
       controller.accel_last = 0.5
       try:
-        controller.calculate_jerk(CC, CS, LongCtrlState.pid)
+        controller.calculate_jerk(CC, self.make_cc_sp(), CS, LongCtrlState.pid)
         controller._calculate_dynamic_lower_jerk(-1.0, 5.0)
         controller._calculate_lookahead_jerk(0.5, 5.0)
         controller._calculate_speed_based_jerk_limits(5.0, LongCtrlState.pid)
@@ -96,7 +106,7 @@ class TestLongitudinalTuningController(unittest.TestCase):
   def test_accel_min_max_config(self):
     """Test that all configs have valid accel min and accel max values."""
     def check_accel_limits(controller, CP, CP_SP, name, cfg):
-      self.assertGreaterEqual(cfg.accel_min, -3.5,  f"{name}: accel min must not exceed -3.5 m/s^2")
+      self.assertGreaterEqual(cfg.accel_min, -5.5,  f"{name}: accel min must not exceed -5.5 m/s^2")
       self.assertLessEqual(cfg.accel_max, 2.0,  f"{name}: accel max must not exceed 2.0 m/s^2")
       self.assertLess(cfg.accel_min, cfg.accel_max, f"{name}: accel min > accel max")
       self.assertLess(cfg.accel_min, 0.0, f"{name}: accel min must be negative")
@@ -120,7 +130,7 @@ class TestLongitudinalTuningController(unittest.TestCase):
         controller.CP.flags = flags
         if enabled is not None:
           CC.enabled = enabled
-        controller.calculate_jerk(CC, CS, state)
+        controller.calculate_jerk(CC, self.make_cc_sp(), CS, state)
         print(f"[FlagOff][{name}] flags={flags}, enabled={enabled}, state={state}, " +
               f"jerk_upper={controller.jerk_upper:.3f}, jerk_lower={controller.jerk_lower:.3f}")
         self.assertEqual(controller.jerk_upper, upper)
@@ -141,7 +151,7 @@ class TestLongitudinalTuningController(unittest.TestCase):
         CS = Mock()
         CS.out = Mock(aEgo=0.8, vEgo=3.0)
         CS.aBasis = 0.8
-        controller.calculate_jerk(CC, CS, LongCtrlState.pid)
+        controller.calculate_jerk(CC, self.make_cc_sp(), CS, LongCtrlState.pid)
         print(f"[FlagOn][{name}][mode={mode}] jerk_upper={controller.jerk_upper:.3f}, jerk_lower={controller.jerk_lower:.3f}")
         self.assertGreater(controller.jerk_upper, 0.0)
         self.assertGreater(controller.jerk_lower, 0.0)
@@ -203,20 +213,91 @@ class TestLongitudinalTuningController(unittest.TestCase):
           CS.out.aEgo = float(a)
           CS.aBasis = float(a)
           CC.actuators.accel = float(a)
-          controller.calculate_jerk(CC, CS, LongCtrlState.pid)
+          controller.calculate_jerk(CC, self.make_cc_sp(), CS, LongCtrlState.pid)
           print(f"[realistic][mode={mode}][{name}] v={v:.2f}, a={a:.2f}, jerk_upper={controller.jerk_upper:.2f}, jerk_lower={controller.jerk_lower:.2f}")
           self.assertGreater(controller.jerk_upper, 0.0)
     self.for_all_configs(check_realistic)
 
+  def test_brake_tracking_gap_without_lead_context_stays_at_floor(self):
+    """A raw brake request alone should not raise jerk without visible follow context."""
+    controller = LongitudinalController(Mock(flags=HyundaiFlags.CANFD, radarUnavailable=False), Mock(flags=HyundaiFlagsSP.LONG_TUNING_DYNAMIC))
+    controller.long_tuning_param = 1
+    controller.car_config = config.TUNING_CONFIGS["CANFD"]
+    controller.accel_last = 0.0
+    controller.accel_cmd = -5.5
+
+    jerk = controller._calculate_brake_tracking_lower_jerk(self.make_cc_sp())
+    self.assertAlmostEqual(jerk, controller.car_config.min_lower_jerk)
+
+  def test_centered_closing_lead_raises_brake_tracking_lower_jerk_more_than_adjacent_lead(self):
+    """A centered slowing lead should raise brake-entry jerk more than an adjacent preview lead."""
+    controller = LongitudinalController(Mock(flags=HyundaiFlags.CANFD, radarUnavailable=False), Mock(flags=HyundaiFlagsSP.LONG_TUNING_DYNAMIC))
+    controller.long_tuning_param = 1
+    controller.car_config = config.TUNING_CONFIGS["CANFD"]
+    controller.accel_last = 0.0
+    controller.accel_cmd = -5.5
+
+    centered_cc_sp = self.make_cc_sp(
+      lead_one=SimpleNamespace(status=True, dRel=45.0, dPath=0.1, yRel=0.1, vRel=-4.0, vLat=0.0, aLeadK=-3.0),
+    )
+    adjacent_cc_sp = self.make_cc_sp(
+      lead_one=SimpleNamespace(status=True, dRel=45.0, dPath=1.7, yRel=1.7, vRel=-4.0, vLat=0.7, aLeadK=-3.0),
+    )
+
+    centered_jerk = controller._calculate_brake_tracking_lower_jerk(centered_cc_sp)
+    adjacent_jerk = controller._calculate_brake_tracking_lower_jerk(adjacent_cc_sp)
+
+    self.assertGreater(centered_jerk, adjacent_jerk)
+    self.assertGreater(centered_jerk, controller.car_config.min_lower_jerk)
+    self.assertLess(adjacent_jerk, centered_jerk - 0.5)
+    self.assertLessEqual(centered_jerk, controller.car_config.jerk_limits)
+
+  def test_lead_braking_signal_raises_brake_tracking_lower_jerk_even_before_large_closing_speed(self):
+    """Straight-ahead lead braking should raise jerk before large vRel builds."""
+    CP = Mock(flags=HyundaiFlags.CANFD, radarUnavailable=False)
+    CP_SP = Mock(flags=HyundaiFlagsSP.LONG_TUNING_DYNAMIC)
+    controller = LongitudinalController(CP, CP_SP)
+    controller.car_config = config.TUNING_CONFIGS["CANFD"]
+    controller.long_tuning_param = 1
+    controller.accel_last = 0.0
+    controller.accel_cmd = -5.5
+    cc_sp = self.make_cc_sp(
+      lead_one=SimpleNamespace(status=True, dRel=45.0, dPath=0.0, yRel=0.0, vRel=-0.2, vLat=0.0, aLeadK=-4.0),
+    )
+
+    jerk = controller._calculate_brake_tracking_lower_jerk(cc_sp)
+    self.assertGreater(jerk, controller.car_config.min_lower_jerk + 0.5)
+
+  def test_farther_centered_closing_lead_gets_less_brake_entry_jerk_than_nearer_one(self):
+    """Distance weighting should keep far centered leads less urgent than near ones for the same closing speed."""
+    controller = LongitudinalController(Mock(flags=HyundaiFlags.CANFD, radarUnavailable=False), Mock(flags=HyundaiFlagsSP.LONG_TUNING_DYNAMIC))
+    controller.long_tuning_param = 1
+    controller.car_config = config.TUNING_CONFIGS["CANFD"]
+    controller.accel_last = 0.0
+    controller.accel_cmd = -5.5
+
+    near_cc_sp = self.make_cc_sp(
+      lead_one=SimpleNamespace(status=True, dRel=30.0, dPath=0.0, yRel=0.0, vRel=-4.0, vLat=0.0, aLeadK=0.0),
+    )
+    far_cc_sp = self.make_cc_sp(
+      lead_one=SimpleNamespace(status=True, dRel=60.0, dPath=0.0, yRel=0.0, vRel=-4.0, vLat=0.0, aLeadK=0.0),
+    )
+
+    near_jerk = controller._calculate_brake_tracking_lower_jerk(near_cc_sp)
+    far_jerk = controller._calculate_brake_tracking_lower_jerk(far_cc_sp)
+
+    self.assertGreater(near_jerk, far_jerk)
+    self.assertGreater(far_jerk, controller.car_config.min_lower_jerk)
+
   def test_emergency_control_negative_accel_limit(self):
-    """Test that emergency_control method does not allow accel to exceed -3.5 m/s^2 when jerk_lower is 8.0"""
+    """Test that emergency_control uses the platform emergency accel floor."""
     def check_emergency(controller, CP, CP_SP, name, cfg):
       CC = Mock(spec=structs.CarControl)
       CC.longActive = True
       controller.accel_cmd = -5.0
       controller.accel_last = 0.0
       controller.emergency_control(CC)
-      self.assertGreaterEqual(controller.actual_accel, -3.5)
+      self.assertGreaterEqual(controller.actual_accel, CarControllerParams.ACCEL_MIN)
     self.for_all_configs(check_emergency)
 
 

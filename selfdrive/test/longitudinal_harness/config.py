@@ -43,6 +43,7 @@ FRIENDLY_PARAM_NAMES = {
 }
 
 DEFAULT_PARAM_VALUES = {
+  "DynamicExperimentalControl": "0",
   "Longitudinal.LiveTune.ObstacleCost": "4.0",
   "Longitudinal.LiveTune.AccelChangeCost": "200.0",
   "Longitudinal.LiveTune.AccelCost": "0.0",
@@ -64,13 +65,20 @@ DEFAULT_PARAM_VALUES = {
   "Longitudinal.LiveTune.DRelFilterClosingGateM": "20.0",
   "HyundaiLongitudinalTuning": str(LongitudinalTuningType.OFF),
   "LongTuningCustomToggle": "0",
-  "LongTuningAccelMin": "-3.5",
+  "LongTuningAccelMin": "-5.5",
   "LongTuningAccelMax": "2.0",
   "LongTuningVEgoStopping": "0.25",
   "LongTuningStoppingDecelRate": "0.40",
   "LongTuningMinUpperJerk": "0.5",
   "LongTuningMinLowerJerk": "0.5",
   "LongTuningJerkLimits": "4.0",
+  "VibePersonalityEnabled": "0",
+  "VibeFollowPersonalityEnabled": "0",
+  "VibeAccelPersonalityEnabled": "0",
+  "VisionTurnSpeedControl": "0",
+  "SpeedLimitControl": "0",
+  "RTIEnabled": "0",
+  "WeatherAwareControlEnabled": "0",
 }
 
 

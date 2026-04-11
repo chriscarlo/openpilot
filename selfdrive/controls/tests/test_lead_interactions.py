@@ -281,7 +281,7 @@ class TestLeadInteractionScenarios:
     assert max_preview >= 5.0
     assert accel_at_2s < 0.30
 
-  def test_ev6_hkg_new_lead_acquisition_uses_real_cp_and_stronger_acquire_preview(self):
+  def test_ev6_hkg_new_lead_acquisition_uses_real_cp_and_no_radar_damping(self):
     rows = _run_new_lead_scenario(
       plant_kwargs={"CP": _make_ev6_hkg_cp(), "hyundai_controller": True},
     )
@@ -290,12 +290,18 @@ class TestLeadInteractionScenarios:
     acquire_active = any(row["acquire_window_active"] for row in rows if row["t"] >= 1.5)
     acquire_mode_seen = any(row["preview_mode"] == "acquire" for row in rows if row["t"] >= 1.5)
     accel_at_2s = next(row["accel"] for row in rows if row["t"] >= 2.0)
+    planner_accel_at_2s = next(row["planner_accel"] for row in rows if row["t"] >= 2.0)
+    accel_at_2p25s = next(row["accel"] for row in rows if row["t"] >= 2.25)
+    accel_at_2p3s = next(row["accel"] for row in rows if row["t"] >= 2.3)
     source_after_acquire = next(row["source"] for row in rows if row["t"] >= 2.0)
     planner_vs_controller = max(abs(row["planner_accel"] - row["controller_accel"]) for row in rows if row["t"] >= 1.5)
 
     assert acquire_active is True
     assert acquire_mode_seen is True
     assert max_preview >= 6.0
-    assert accel_at_2s <= 0.10
+    assert planner_accel_at_2s < -0.10
+    assert accel_at_2s > 0.40
+    assert accel_at_2p25s <= 0.05
+    assert accel_at_2p3s < 0.0
     assert source_after_acquire == "lead0"
-    assert planner_vs_controller < 1e-6
+    assert planner_vs_controller > 0.5

@@ -10,40 +10,89 @@ from cereal import log, messaging
 from opendbc.car.hyundai.interface import CarInterface
 from opendbc.car.interfaces import ACCEL_MAX, ACCEL_MIN
 from opendbc.car.structs import CarControlSP
+from openpilot.common.gps import get_gps_location_service
 from openpilot.common.realtime import DT_CTRL, DT_MDL
 from openpilot.selfdrive.controls.lib.longcontrol import LongControl, LongCtrlState
 from openpilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPlanner
 from openpilot.selfdrive.controls.radard import _LEAD_ACCEL_TAU
 from openpilot.selfdrive.modeld.constants import ModelConstants
+from openpilot.sunnypilot.selfdrive.controls.lib.vision_turn_params import update_vtsc_params
 
 from .config import NOISE_PROFILES, NoiseProfile, NoiseSeeds, ResolvedVehicleConfig
 from .inputs import LeadDirective, SnapshotBundle, StepInput
 from .metrics import summarize_trace
 
 
-class ParamsDict:
+class HarnessParams:
   def __init__(self, params: dict[str, str]):
     self.params = dict(params)
 
-  def get(self, key: str, block: bool = False):
+  def get(self, key: str, block: bool = False, encoding: str | None = None, return_default: bool = False):
     return self.params.get(key)
 
   def get_bool(self, key: str) -> bool:
     raw = self.params.get(key)
     if raw is None:
-      raise KeyError(key)
+      return False
     raw_text = str(raw).strip().lower()
     if raw_text in ("1", "true", "t", "yes", "y", "on"):
       return True
     if raw_text in ("0", "false", "f", "no", "n", "off"):
       return False
-    raise ValueError(f"invalid bool param value for {key}: {raw!r}")
+    return False
 
   def put(self, key: str, value: Any) -> None:
     self.params[key] = str(value)
 
+  def put_bool(self, key: str, value: bool) -> None:
+    self.params[key] = "1" if value else "0"
+
+  def put_nonblocking(self, key: str, value: Any) -> None:
+    self.put(key, value)
+
   def remove(self, key: str) -> None:
     self.params.pop(key, None)
+
+
+def _bind_planner_params(planner: LongitudinalPlanner, harness_params: HarnessParams) -> None:
+  planner.params = harness_params
+  planner.mpc._live_tune_params = harness_params
+  planner.mpc._refresh_live_tune(now=0.0, force=True)
+  planner.mpc.lead_role_classifier._params = harness_params
+  planner.mpc.lead_role_classifier._last_refresh_t = 0.0
+  planner.mpc.vibe_controller.params = harness_params
+  planner.mpc.vibe_controller._last_param_refresh_t = float("-inf")
+  planner.mpc.vibe_controller._update_tuning_profiles(force=True)
+  planner.mpc.vibe_controller._update_from_params()
+
+  planner.dec._params = harness_params
+  planner.dec._frame = 0
+  planner.dec._read_params()
+
+  planner.vibe_controller.params = harness_params
+  planner.vibe_controller._last_param_refresh_t = float("-inf")
+  planner.vibe_controller._update_tuning_profiles(force=True)
+  planner.vibe_controller._update_from_params()
+
+  planner.v_tsc._params = harness_params
+  planner.v_tsc._mem_params = harness_params
+  update_vtsc_params(planner.v_tsc, force=True)
+  planner.v_tsc._sync_low_speed_calibration_param(force=True)
+
+  planner.slc._params = harness_params
+  planner.slc._resolver._gps_location_service = get_gps_location_service(harness_params)
+  planner.slc._current_time = 1e9
+  planner.slc._last_params_update = -1e9
+  planner.slc._update_params()
+
+  planner.rti.params = harness_params
+  planner.rti._load_user_params()
+  planner.rti._reset_state()
+
+  planner.weather.params = harness_params
+  planner.weather._last_param_read = -1e9
+  planner.weather._load_user_params()
+  planner.weather._reset()
 
 
 class SubMasterStub(dict):
@@ -186,10 +235,8 @@ def run_harness(*,
   planner = LongitudinalPlanner(vehicle_config.cp, init_v=initial_speed_mps, init_a=initial_accel_mps2)
   sim_time_s = [0.0]
   planner.mpc._time_fn = lambda: sim_time_s[0]
-  planner.mpc._live_tune_params = ParamsDict(vehicle_config.params)
-  planner.mpc._refresh_live_tune(now=0.0, force=True)
-  planner.mpc.lead_role_classifier._params = ParamsDict(vehicle_config.params)
-  planner.mpc.lead_role_classifier._last_refresh_t = 0.0
+  harness_params = HarnessParams(vehicle_config.params)
+  _bind_planner_params(planner, harness_params)
 
   long_control = LongControl(vehicle_config.cp)
   hyundai_controller = None
@@ -250,6 +297,8 @@ def run_harness(*,
           hudControl=SimpleNamespace(visualAlert=None),
         )
         CC_SP = SimpleNamespace(params=vehicle_config.cc_sp_params, flags=vehicle_config.cp_sp.flags)
+        CC_SP.leadOne = radar_state.leadOne
+        CC_SP.leadTwo = radar_state.leadTwo
         CS = SimpleNamespace(
           out=SimpleNamespace(vEgo=state.measured_speed_mps, aEgo=state.measured_accel_mps2),
           aBasis=state.measured_accel_mps2,

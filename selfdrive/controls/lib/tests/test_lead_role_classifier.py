@@ -151,3 +151,89 @@ class TestLeadRoleClassifier:
     assert dbg["cutin_promoted"]["lead0"] is True
     assert dbg["roles"]["lead0"] == LeadRoleClassifier.CENTER_CONTROL
     assert ctrl0.status is True
+
+  def test_center_control_grace_holds_one_frame_path_spike(self):
+    c = _make_classifier()
+    lead1 = _make_lead(status=False)
+
+    c.classify(v_ego=30.0, lead0=_make_lead(d_rel=40.0, y_rel=1.0, d_path=1.0, v_rel=0.0), lead1=lead1, now=1.0)
+    ctrl0, _ctrl1, dbg = c.classify(
+      v_ego=30.0,
+      lead0=_make_lead(d_rel=40.0, y_rel=3.0, d_path=3.0, v_rel=0.0),
+      lead1=lead1,
+      now=1.1,
+    )
+
+    assert dbg["roles"]["lead0"] == LeadRoleClassifier.CENTER_CONTROL
+    assert dbg["reasons"]["lead0"] == "center_lane_grace"
+    assert dbg["center_grace"]["lead0"]["active"] is True
+    assert ctrl0.status is True
+
+  def test_center_control_grace_expires_under_sustained_demotion(self):
+    c = _make_classifier()
+    lead1 = _make_lead(status=False)
+
+    c.classify(v_ego=30.0, lead0=_make_lead(d_rel=40.0, y_rel=1.0, d_path=1.0, v_rel=0.0), lead1=lead1, now=1.0)
+    c.classify(v_ego=30.0, lead0=_make_lead(d_rel=40.0, y_rel=3.0, d_path=3.0, v_rel=0.0), lead1=lead1, now=1.1)
+    ctrl0, _ctrl1, dbg = c.classify(
+      v_ego=30.0,
+      lead0=_make_lead(d_rel=40.0, y_rel=3.0, d_path=3.0, v_rel=0.0),
+      lead1=lead1,
+      now=1.4,
+    )
+
+    assert dbg["roles"]["lead0"] == LeadRoleClassifier.ADJ_LEFT
+    assert dbg["reasons"]["lead0"] == "adjacent_lane"
+    assert dbg["center_grace"]["lead0"]["active"] is False
+    assert ctrl0.status is False
+
+  def test_center_control_grace_rejects_invalid_frame(self):
+    c = _make_classifier()
+    lead1 = _make_lead(status=False)
+
+    c.classify(v_ego=30.0, lead0=_make_lead(d_rel=40.0, y_rel=1.0, d_path=1.0, v_rel=0.0), lead1=lead1, now=1.0)
+    ctrl0, _ctrl1, dbg = c.classify(v_ego=30.0, lead0=_make_lead(status=False), lead1=lead1, now=1.1)
+
+    assert dbg["roles"]["lead0"] == LeadRoleClassifier.INVALID
+    assert dbg["reasons"]["lead0"] == "invalid_or_missing"
+    assert dbg["center_grace"]["lead0"]["active"] is False
+    assert ctrl0.status is False
+
+  def test_center_control_grace_rejects_large_drel_jump(self):
+    c = _make_classifier()
+    lead1 = _make_lead(status=False)
+
+    c.classify(v_ego=30.0, lead0=_make_lead(d_rel=40.0, y_rel=1.0, d_path=1.0, v_rel=0.0), lead1=lead1, now=1.0)
+    ctrl0, _ctrl1, dbg = c.classify(
+      v_ego=30.0,
+      lead0=_make_lead(d_rel=50.0, y_rel=3.0, d_path=3.0, v_rel=0.0),
+      lead1=lead1,
+      now=1.1,
+    )
+
+    assert dbg["roles"]["lead0"] == LeadRoleClassifier.ADJ_LEFT
+    assert dbg["reasons"]["lead0"] == "adjacent_lane"
+    assert dbg["center_grace"]["lead0"]["active"] is False
+    assert ctrl0.status is False
+
+  def test_center_control_grace_does_not_override_other_center_lead(self):
+    c = _make_classifier()
+
+    c.classify(
+      v_ego=30.0,
+      lead0=_make_lead(d_rel=40.0, y_rel=1.0, d_path=1.0, v_rel=0.0),
+      lead1=_make_lead(status=False),
+      now=1.0,
+    )
+    ctrl0, ctrl1, dbg = c.classify(
+      v_ego=30.0,
+      lead0=_make_lead(d_rel=40.0, y_rel=3.0, d_path=3.0, v_rel=0.0),
+      lead1=_make_lead(d_rel=41.0, y_rel=0.2, d_path=0.2, v_rel=0.0),
+      now=1.1,
+    )
+
+    assert dbg["roles"]["lead0"] == LeadRoleClassifier.ADJ_LEFT
+    assert dbg["roles"]["lead1"] == LeadRoleClassifier.CENTER_CONTROL
+    assert dbg["center_grace"]["lead0"]["active"] is False
+    assert ctrl0.status is False
+    assert ctrl1.status is True
