@@ -15,15 +15,25 @@ EARTH_CIRCUMFERENCE_M = 40075016.68557849
 CANVAS_SIZE_PX = 1024
 CAR_ANCHOR_X = 0.50
 CAR_ANCHOR_Y = 0.68
-MASK_FEATHER = 0.10
 ALPHA_THRESHOLD = 8
 
-# The mask circle must fit entirely inside the square canvas so that heading-up
-# rotation in the HUD never exposes a flat canvas edge. The largest such circle
-# is bounded by the shortest distance from the car anchor to any canvas edge.
-# With anchor_y > 0.5 (car biased forward), the behind-the-car distance is the
-# binding constraint, and this min ratio is what we scale the world viewport by.
-CAR_MIN_ANCHOR_DISTANCE = min(CAR_ANCHOR_X, 1.0 - CAR_ANCHOR_X, CAR_ANCHOR_Y, 1.0 - CAR_ANCHOR_Y)
+# The HUD draws the overlay into a square centered on the car anchor so the map
+# can rotate heading-up without exposing camera corners. Model that square here
+# using the tici's landscape aspect ratio, then size the world viewport so the
+# visible behind-the-car distance is the configured range times the requested
+# zoom-out factor.
+HUD_TARGET_ASPECT_RATIO = 2.0
+HUD_ZOOM_OUT_FACTOR = 1.5
+
+_ANCHOR_X_ASPECT = CAR_ANCHOR_X * HUD_TARGET_ASPECT_RATIO
+HUD_ROTATION_COVER_RADIUS = max(
+  math.hypot(_ANCHOR_X_ASPECT, CAR_ANCHOR_Y),
+  math.hypot(HUD_TARGET_ASPECT_RATIO - _ANCHOR_X_ASPECT, CAR_ANCHOR_Y),
+  math.hypot(_ANCHOR_X_ASPECT, 1.0 - CAR_ANCHOR_Y),
+  math.hypot(HUD_TARGET_ASPECT_RATIO - _ANCHOR_X_ASPECT, 1.0 - CAR_ANCHOR_Y),
+)
+HUD_ROTATION_COVER_SIDE = HUD_ROTATION_COVER_RADIUS * 2.0
+HUD_VISIBLE_BEHIND_FRACTION = (1.0 - CAR_ANCHOR_Y) / HUD_ROTATION_COVER_SIDE
 
 
 @dataclass(frozen=True)
@@ -70,12 +80,11 @@ def meters_per_world_px(lat: float, zoom: int) -> float:
 
 def build_viewport(lat: float, lon: float, range_km: int, zoom: int) -> Viewport:
   world_x, world_y = latlon_to_world_px(lat, lon, zoom)
-  # range_km is the desired inscribed-circle radius around the car (the visible
-  # disc the user sees on the HUD). Inflate the square world window so that the
-  # largest circle centered on the offset anchor fits inside it — i.e. the
-  # shortest anchor-to-edge distance equals range_km in real-world terms.
   range_world_px = (range_km * 1000.0) / meters_per_world_px(lat, zoom)
-  world_size_px = range_world_px / CAR_MIN_ANCHOR_DISTANCE
+  # Fit the map to the full tici HUD instead of the old inscribed-circle mask.
+  # The configured range now maps to the visible behind-the-car distance, then
+  # expands by HUD_ZOOM_OUT_FACTOR to show roughly 50% more area.
+  world_size_px = (range_world_px * HUD_ZOOM_OUT_FACTOR) / HUD_VISIBLE_BEHIND_FRACTION
 
   left = world_x - (CAR_ANCHOR_X * world_size_px)
   top = world_y - (CAR_ANCHOR_Y * world_size_px)
@@ -116,21 +125,6 @@ def iter_tile_requests(zoom: int, viewport: Viewport) -> list[TileRequest]:
   ]
 
 
-def build_mask(size_px: int = CANVAS_SIZE_PX) -> Image.Image:
-  y_idx, x_idx = np.ogrid[:size_px, :size_px]
-  center_x = CAR_ANCHOR_X * (size_px - 1)
-  center_y = CAR_ANCHOR_Y * (size_px - 1)
-  # Largest circle around the car anchor that fits entirely inside the canvas.
-  # This must match build_viewport's inflation factor so the circle's radius in
-  # canvas pixels corresponds to range_km in real-world km.
-  radius = min(center_x, center_y, (size_px - 1) - center_x, (size_px - 1) - center_y)
-  inner_radius = radius * (1.0 - MASK_FEATHER)
-  distance = np.sqrt((x_idx - center_x) ** 2 + (y_idx - center_y) ** 2)
-  ramp = np.clip((radius - distance) / max(radius - inner_radius, 1.0), 0.0, 1.0)
-  smooth = ramp * ramp * (3.0 - 2.0 * ramp)
-  return Image.fromarray((smooth * 255.0).astype(np.uint8), mode="L")
-
-
 def compose_layer(tile_lookup, viewport: Viewport, canvas_size_px: int = CANVAS_SIZE_PX) -> tuple[Image.Image, int]:
   atlas_width_tiles = viewport.logical_tile_x_max - viewport.logical_tile_x_min + 1
   atlas_height_tiles = viewport.tile_y_max - viewport.tile_y_min + 1
@@ -152,11 +146,6 @@ def compose_layer(tile_lookup, viewport: Viewport, canvas_size_px: int = CANVAS_
     viewport.src_box,
     resample=RESAMPLING_BILINEAR,
   )
-
-  alpha_src = np.asarray(composed.getchannel("A"), dtype=np.float32)
-  mask = np.asarray(build_mask(canvas_size_px), dtype=np.float32) / 255.0
-  alpha = Image.fromarray(np.clip(alpha_src * mask, 0.0, 255.0).astype(np.uint8), mode="L")
-  composed.putalpha(alpha)
   return composed, loaded_tiles
 
 

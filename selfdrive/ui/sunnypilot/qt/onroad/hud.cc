@@ -515,6 +515,20 @@ void HudRendererSP::drawWeatherOverlay(QPainter &p, const QRect &surface_rect) {
     ? static_cast<double>(weather_overlay_heading_rad_)
     : 0.0;
   const double heading_deg = heading_rad * 180.0 / M_PI;
+  // Draw the precomposited square map into a cover square centered on the car
+  // anchor so heading-up rotation never exposes the camera in the screen corners.
+  const double cover_radius = std::max({
+    std::hypot(car_center.x() - surface_rect.left(), car_center.y() - surface_rect.top()),
+    std::hypot(surface_rect.right() - car_center.x(), car_center.y() - surface_rect.top()),
+    std::hypot(car_center.x() - surface_rect.left(), surface_rect.bottom() - car_center.y()),
+    std::hypot(surface_rect.right() - car_center.x(), surface_rect.bottom() - car_center.y()),
+  });
+  const QRectF overlay_rect(
+    car_center.x() - cover_radius,
+    car_center.y() - cover_radius,
+    cover_radius * 2.0,
+    cover_radius * 2.0
+  );
 
   p.save();
   p.translate(car_center);
@@ -523,11 +537,11 @@ void HudRendererSP::drawWeatherOverlay(QPainter &p, const QRect &surface_rect) {
 
   if (weather_overlay_has_rain_image_ && weather_overlay_rain_opacity_ > 0.0f) {
     p.setOpacity(weather_overlay_rain_opacity_);
-    p.drawImage(surface_rect, weather_overlay_rain_image_);
+    p.drawImage(overlay_rect, weather_overlay_rain_image_);
   }
   if (weather_overlay_has_snow_image_ && weather_overlay_snow_opacity_ > 0.0f) {
     p.setOpacity(weather_overlay_snow_opacity_);
-    p.drawImage(surface_rect, weather_overlay_snow_image_);
+    p.drawImage(overlay_rect, weather_overlay_snow_image_);
   }
   p.restore();
 
