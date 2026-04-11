@@ -250,6 +250,138 @@ class TestHyundaiAiLeadStability:
     assert mpc.source == "cruise"
     assert mpc.acc_source_debug["reason"] == "no_control_lead"
 
+  def test_classifier_demotion_hold_rides_through_one_frame_path_spike(self, monkeypatch):
+    # Reproduces the source-flap pattern observed in the field: a stable
+    # follow, then one-frame classifier demotion when the raw lead's path
+    # offset briefly jumps above the center-lane exit hysteresis (2.55m).
+    # Raw radarstate still reports the lead at the same dRel, so the
+    # classifier-demotion hold engages via fresh raw corroboration.
+    #
+    # The warmup uses y_rel=1.0 — within CENTER_CONTROL (< 1.2 first-time
+    # entry threshold) but above the existing dropout_hold path check
+    # (0.85). That forces dropout_hold to be ineligible on the stored
+    # state, so this test specifically exercises the new demotion hold
+    # path, not the existing dropout mechanism.
+    monkeypatch.setattr(
+      "openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc.time.monotonic",
+      _MonotonicStub(step=0.1),
+    )
+    mpc = _make_hyundai_mpc(v_ego=29.0, a_ego=0.0)
+
+    stable_lead = _make_lead(d_rel=35.6, y_rel=1.0, d_path=1.0, v_lat=0.0, v_rel=0.0, v_lead=29.0, model_prob=0.97)
+    for _ in range(10):
+      _run_update(mpc, stable_lead, _make_lead(status=False))
+    assert mpc.source == "lead0"
+    # Confirm the stored virtual lead would fail dropout_hold's strict
+    # path_abs check — the test is meaningful only if dropout_hold cannot
+    # engage here, so the demotion hold is the sole mechanism under test.
+    assert mpc._hyundai_virtual_lead is not None
+    assert abs(mpc._hyundai_virtual_lead.dPath) > 0.85
+
+    # Single-frame raw path spike: same dRel, same vRel, but dPath/yRel jump
+    # above the classifier's center-lane exit hysteresis (2.55m). _lead_valid
+    # still passes (finite fields, status=True), but _classify_slot routes
+    # to ADJ and control_lead0 comes back empty — driving lead_candidates
+    # empty in _select_acc_obstacle.
+    flicker_lead = _make_lead(d_rel=35.6, y_rel=3.0, d_path=3.0, v_lat=0.0, v_rel=0.0, v_lead=29.0, model_prob=0.97)
+    _run_update(mpc, flicker_lead, _make_lead(status=False))
+
+    assert mpc.source == "lead0"
+    assert mpc.acc_source_debug["reason"] == "classifier_demotion_hold"
+    demotion_debug = mpc.acc_source_debug["classifier_demotion_hold"]
+    assert demotion_debug["active"] is True
+    assert demotion_debug["eligible"] is True
+    assert demotion_debug["corroboration"]["matched"] is True
+    assert demotion_debug["corroboration"]["dRel_delta_m"] <= 2.0
+
+    # Classifier recovers next frame: lead is back in center, source stays
+    # lead0 via the normal path and the demotion hold state is cleared.
+    _run_update(mpc, stable_lead, _make_lead(status=False))
+    assert mpc.source == "lead0"
+    assert mpc._classifier_demotion_hold_until_t is None
+
+  def test_classifier_demotion_hold_releases_when_raw_radar_is_also_gone(self, monkeypatch):
+    # Safety backstop: if the raw radarstate has no lead anywhere,
+    # corroboration fails and the demotion hold must NOT engage — otherwise
+    # stale state would be held through a genuine cut-out.
+    monkeypatch.setattr(
+      "openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc.time.monotonic",
+      _MonotonicStub(step=0.1),
+    )
+    mpc = _make_hyundai_mpc(v_ego=29.0, a_ego=0.0)
+
+    stable_lead = _make_lead(d_rel=35.6, y_rel=1.0, d_path=1.0, v_lat=0.0, v_rel=0.0, v_lead=29.0, model_prob=0.97)
+    for _ in range(10):
+      _run_update(mpc, stable_lead, _make_lead(status=False))
+    assert mpc.source == "lead0"
+    assert abs(mpc._hyundai_virtual_lead.dPath) > 0.85
+
+    # Total sensor loss on both slots — no raw lead anywhere in radarstate.
+    _run_update(mpc, _make_lead(status=False), _make_lead(status=False))
+
+    assert mpc.source == "cruise"
+    assert mpc.acc_source_debug["reason"] == "no_control_lead"
+
+  def test_classifier_demotion_hold_releases_when_raw_lead_is_different_object(self, monkeypatch):
+    # Safety backstop: if the only fresh raw lead is at a very different
+    # dRel from the stored virtual lead, corroboration must fail so the
+    # planner does not hold a phantom of the previous lead while an
+    # unrelated object appears far ahead.
+    monkeypatch.setattr(
+      "openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc.time.monotonic",
+      _MonotonicStub(step=0.1),
+    )
+    mpc = _make_hyundai_mpc(v_ego=29.0, a_ego=0.0)
+
+    stable_lead = _make_lead(d_rel=35.6, y_rel=1.0, d_path=1.0, v_lat=0.0, v_rel=0.0, v_lead=29.0, model_prob=0.97)
+    for _ in range(10):
+      _run_update(mpc, stable_lead, _make_lead(status=False))
+    assert mpc.source == "lead0"
+    assert abs(mpc._hyundai_virtual_lead.dPath) > 0.85
+
+    # Raw lead appears at 100m (dRel delta ~65m from stored ~35m), well
+    # beyond the 10m corroboration tolerance, and also out of center lane.
+    far_lead = _make_lead(d_rel=100.0, y_rel=3.0, d_path=3.0, v_lat=0.0, v_rel=0.0, v_lead=29.0, model_prob=0.97)
+    _run_update(mpc, far_lead, _make_lead(status=False))
+
+    assert mpc.source == "cruise"
+    assert mpc.acc_source_debug["reason"] == "no_control_lead"
+
+  def test_classifier_demotion_hold_expires_after_sustained_demotion(self, monkeypatch):
+    # The demotion hold is intended to ride through brief classifier
+    # flicker only. Under sustained demotion with raw corroboration still
+    # available, the hold must expire within HYUNDAI_CLASSIFIER_DEMOTION_HOLD_S
+    # and release to cruise cleanly. Note: the MPC solver path makes
+    # multiple time.monotonic() calls per update, so actual per-frame
+    # time advance is much larger than the _MonotonicStub step value.
+    # One update is already enough to exceed the 0.30s hold window.
+    monkeypatch.setattr(
+      "openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc.time.monotonic",
+      _MonotonicStub(step=0.1),
+    )
+    mpc = _make_hyundai_mpc(v_ego=29.0, a_ego=0.0)
+
+    stable_lead = _make_lead(d_rel=35.6, y_rel=1.0, d_path=1.0, v_lat=0.0, v_rel=0.0, v_lead=29.0, model_prob=0.97)
+    for _ in range(10):
+      _run_update(mpc, stable_lead, _make_lead(status=False))
+    assert mpc.source == "lead0"
+    assert abs(mpc._hyundai_virtual_lead.dPath) > 0.85
+
+    # Sustained classifier demotion with fresh raw corroboration.
+    demoted_lead = _make_lead(d_rel=35.6, y_rel=3.0, d_path=3.0, v_lat=0.0, v_rel=0.0, v_lead=29.0, model_prob=0.97)
+    sources = []
+    for _ in range(5):
+      _run_update(mpc, demoted_lead, _make_lead(status=False))
+      sources.append(mpc.source)
+
+    # The hold must engage at least once then expire and release to cruise.
+    assert sources[0] == "lead0", f"first demotion frame should hold, got {sources}"
+    assert sources[-1] == "cruise", f"sustained demotion should eventually release, got {sources}"
+    assert mpc.acc_source_debug["reason"] == "no_control_lead"
+    # The hold should not be indefinite.
+    held_frames = sum(1 for s in sources if s == "lead0")
+    assert held_frames <= 3, f"demotion hold should not hold beyond ~0.3s worth of frames, got {sources}"
+
   def test_dropout_hold_rejects_real_pullaway_and_releases_to_cruise_immediately(self, monkeypatch):
     monkeypatch.setattr(
       "openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc.time.monotonic",

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import copy
 import json
+import math
 import os
 import time
 import numpy as np
@@ -141,6 +142,19 @@ HYUNDAI_VIRTUAL_LEAD_DROPOUT_MAX_ABS_VREL_MPS = 0.35
 HYUNDAI_VIRTUAL_LEAD_DROPOUT_MAX_DREL_ERR_M = 1.5
 HYUNDAI_VIRTUAL_LEAD_DROPOUT_MAX_GAP_SURPLUS_M = 3.0
 HYUNDAI_VIRTUAL_LEAD_DROPOUT_MAX_PATH_ABS_M = 0.85
+# Classifier demotion hold: shorter, raw-corroborated fallback when the lead
+# role classifier briefly rejects a steady-follow lead (e.g. path_abs spike,
+# one-frame validity failure). Distinct from dropout hold in three ways:
+# (1) it fires only when the previous cycle was actively following,
+# (2) it requires fresh raw-lead corroboration in radarState so no stale
+#     state is held through a genuine cut-out,
+# (3) its max duration is shorter, since the failure mode it addresses is
+#     single-frame classifier flicker rather than sustained sensor dropout.
+HYUNDAI_CLASSIFIER_DEMOTION_HOLD_S = 0.30
+HYUNDAI_CLASSIFIER_DEMOTION_HOLD_MIN_STABLE_S = 1.00
+HYUNDAI_CLASSIFIER_DEMOTION_HOLD_MAX_PATH_ABS_M = 1.20
+HYUNDAI_CLASSIFIER_DEMOTION_HOLD_MAX_DREL_ERR_M = 2.00
+HYUNDAI_CLASSIFIER_DEMOTION_HOLD_CORROB_DREL_M = 10.0
 HYUNDAI_SETTLED_FOLLOW_MAX_GAP_SURPLUS_M = 12.0
 HYUNDAI_SETTLED_FOLLOW_MAX_ABS_VREL_MPS = 0.35
 HYUNDAI_SETTLED_FOLLOW_MAX_ABS_ALEAD_MPS2 = 0.25
@@ -933,6 +947,8 @@ class LongitudinalMpc:
     self._acc_obstacle_mode = 'cruise'
     self._acc_obstacle_candidate_mode = None
     self._acc_obstacle_candidate_t = None
+    self._classifier_demotion_hold_until_t: float | None = None
+    self._last_raw_radar_leads: tuple = (None, None)
     self._lead_to_cruise_transition_t = None
     self._lead_to_cruise_transition_source = None
     # Close-range lead memory: safety cap on cruise accel when a lead was
@@ -1297,6 +1313,120 @@ class LongitudinalMpc:
     held_lead = copy.deepcopy(self._hyundai_virtual_lead)
     held_lead.status = True
     return held_lead, debug
+
+  def _has_fresh_raw_radar_corroboration(self, stored_lead) -> tuple[bool, dict[str, object]]:
+    """Is there still a valid raw radar lead near the stored virtual lead?
+
+    Used by _maybe_hold_hyundai_classifier_demotion to verify that the physical
+    object is still present in the sensor frame before holding stored state.
+    This is what separates "classifier briefly demoted a lead that is still
+    there" from "lead genuinely disappeared".
+    """
+    debug: dict[str, object] = {"matched": False}
+    if stored_lead is None:
+      debug["reason"] = "no_stored_lead"
+      return False, debug
+    stored_d = float(getattr(stored_lead, 'dRel', 0.0) or 0.0)
+    best_delta: float | None = None
+    best_slot: int | None = None
+    for idx, raw in enumerate(self._last_raw_radar_leads):
+      if raw is None:
+        continue
+      try:
+        if not bool(getattr(raw, 'status', False)):
+          continue
+        raw_d = float(getattr(raw, 'dRel', 0.0) or 0.0)
+        raw_yrel = float(getattr(raw, 'yRel', 0.0) or 0.0)
+        raw_vrel = float(getattr(raw, 'vRel', 0.0) or 0.0)
+      except (TypeError, ValueError):
+        continue
+      if not (math.isfinite(raw_d) and math.isfinite(raw_yrel) and math.isfinite(raw_vrel)):
+        continue
+      delta = abs(raw_d - stored_d)
+      if delta > HYUNDAI_CLASSIFIER_DEMOTION_HOLD_CORROB_DREL_M:
+        continue
+      if best_delta is None or delta < best_delta:
+        best_delta = delta
+        best_slot = idx
+    if best_delta is None:
+      debug["reason"] = "no_raw_match_within_tolerance"
+      return False, debug
+    debug["matched"] = True
+    debug["matched_slot"] = int(best_slot) if best_slot is not None else None
+    debug["dRel_delta_m"] = float(best_delta)
+    return True, debug
+
+  def _maybe_hold_hyundai_classifier_demotion(self, now: float) -> tuple[ControlLead | None, dict[str, object]]:
+    """Short hold when the lead role classifier briefly demotes a steady-follow lead.
+
+    This is distinct from _maybe_hold_hyundai_virtual_lead_dropout:
+      - fires only when the previous cycle was actively following a lead
+      - requires fresh raw radar corroboration (stored state alone is not enough)
+      - uses a shorter max-hold duration than dropout hold
+      - permits a wider gap-surplus envelope than dropout hold, since highway
+        steady-state following naturally sits above the tight-gap threshold
+
+    Safety: if no raw radar lead is still present near the stored position,
+    this returns None and the caller releases to cruise immediately — no
+    stale state is held through a genuine cut-out or lateral departure.
+    """
+    debug: dict[str, object] = {
+      "active": False,
+      "eligible": False,
+      "remaining_s": 0.0,
+    }
+    if self._acc_obstacle_mode != 'lead':
+      debug["reason"] = "not_following"
+      self._classifier_demotion_hold_until_t = None
+      return None, debug
+    stored_lead = self._hyundai_virtual_lead
+    if stored_lead is None or not bool(getattr(stored_lead, 'status', False)):
+      debug["reason"] = "no_stored_lead"
+      self._classifier_demotion_hold_until_t = None
+      return None, debug
+
+    stable_age_s = (
+      0.0 if self._hyundai_virtual_lead_stable_since_t is None
+      else max(0.0, now - float(self._hyundai_virtual_lead_stable_since_t))
+    )
+    path_abs = abs(float(getattr(stored_lead, 'dPath', getattr(stored_lead, 'yRel', 0.0)) or 0.0))
+    drel_consistency = float(self._hyundai_virtual_lead_last_drel_error_m)
+    debug["stable_age_s"] = float(stable_age_s)
+    debug["path_abs_m"] = float(path_abs)
+    debug["drel_consistency_m"] = float(drel_consistency)
+
+    preconditions_ok = (
+      stable_age_s >= HYUNDAI_CLASSIFIER_DEMOTION_HOLD_MIN_STABLE_S and
+      path_abs <= HYUNDAI_CLASSIFIER_DEMOTION_HOLD_MAX_PATH_ABS_M and
+      drel_consistency <= HYUNDAI_CLASSIFIER_DEMOTION_HOLD_MAX_DREL_ERR_M
+    )
+    if not preconditions_ok:
+      debug["reason"] = "preconditions_failed"
+      self._classifier_demotion_hold_until_t = None
+      return None, debug
+
+    corroborated, corrob_debug = self._has_fresh_raw_radar_corroboration(stored_lead)
+    debug["corroboration"] = corrob_debug
+    if not corroborated:
+      debug["reason"] = "no_raw_corroboration"
+      self._classifier_demotion_hold_until_t = None
+      return None, debug
+
+    if self._classifier_demotion_hold_until_t is None:
+      self._classifier_demotion_hold_until_t = now + HYUNDAI_CLASSIFIER_DEMOTION_HOLD_S
+
+    remaining = float(self._classifier_demotion_hold_until_t) - now
+    if remaining <= 0.0:
+      debug["reason"] = "expired"
+      self._classifier_demotion_hold_until_t = None
+      return None, debug
+
+    debug["eligible"] = True
+    debug["active"] = True
+    debug["remaining_s"] = float(remaining)
+    held = copy.deepcopy(stored_lead)
+    held.status = True
+    return held, debug
 
   def _get_lead_to_cruise_transition_accel_cap(self, now: float, v_ego: float,
                                                personality_max_accel: float | None) -> float | None:
@@ -1804,6 +1934,14 @@ class LongitudinalMpc:
       return np.min(x_obstacles, axis=1)
 
     if not lead_candidates:
+      # Snapshot virtual-lead state before calling _update_hyundai_virtual_lead,
+      # which resets that state as a side effect if dropout hold fails. The
+      # classifier demotion hold needs the pre-reset snapshot to evaluate.
+      snap_virtual_lead = copy.deepcopy(self._hyundai_virtual_lead) if self._hyundai_virtual_lead is not None else None
+      snap_virtual_lead_source = self._hyundai_virtual_lead_source
+      snap_virtual_lead_stable_since_t = self._hyundai_virtual_lead_stable_since_t
+      snap_virtual_lead_last_drel_error_m = self._hyundai_virtual_lead_last_drel_error_m
+
       held_lead = self._update_hyundai_virtual_lead(now, None, None)
       self.gap_reclaim_accel_floor = 0.0
       self.gap_reclaim_obstacle_push = 0.0
@@ -1820,6 +1958,7 @@ class LongitudinalMpc:
         self.status = True
         self._acc_obstacle_mode = 'lead'
         self._reset_acc_obstacle_candidate()
+        self._classifier_demotion_hold_until_t = None
         self.source = str(self._hyundai_virtual_lead_source or 'lead0')
         active_obstacle = self._build_lead_obstacle(held_lead)
         self.acc_source_debug = {
@@ -1831,7 +1970,41 @@ class LongitudinalMpc:
         }
         return active_obstacle
 
+      # Dropout hold did not engage; _update_hyundai_virtual_lead cleared the
+      # stored virtual-lead state. Restore the snapshot and see whether the
+      # classifier demotion hold can ride through a one-frame classifier reject
+      # with fresh raw-radar corroboration.
+      self._hyundai_virtual_lead = snap_virtual_lead
+      self._hyundai_virtual_lead_source = snap_virtual_lead_source
+      self._hyundai_virtual_lead_stable_since_t = snap_virtual_lead_stable_since_t
+      self._hyundai_virtual_lead_last_drel_error_m = snap_virtual_lead_last_drel_error_m
+
+      demotion_held_lead, demotion_debug = self._maybe_hold_hyundai_classifier_demotion(now)
+      if demotion_held_lead is not None:
+        self.status = True
+        self._acc_obstacle_mode = 'lead'
+        self._reset_acc_obstacle_candidate()
+        self.source = str(self._hyundai_virtual_lead_source or 'lead0')
+        active_obstacle = self._build_lead_obstacle(demotion_held_lead)
+        self.acc_source_debug = {
+          "active_mode": "lead",
+          "best_lead_source": str(self._hyundai_virtual_lead_source),
+          "candidate_mode": None,
+          "reason": "classifier_demotion_hold",
+          "used_hysteresis": True,
+          "classifier_demotion_hold": demotion_debug,
+        }
+        self.hyundai_virtual_lead_debug = {
+          "active": True,
+          "source": str(self._hyundai_virtual_lead_source),
+          "reset_reason": "classifier_demotion_hold",
+        }
+        return active_obstacle
+
+      # Genuine loss: neither dropout hold nor demotion hold engaged.
+      # Re-clear state since the snapshot restore above was provisional.
       self._reset_hyundai_virtual_lead("no_control_lead")
+      self._classifier_demotion_hold_until_t = None
       self._acc_obstacle_mode = 'cruise'
       self._reset_acc_obstacle_candidate()
       self.source = 'cruise'
@@ -1844,6 +2017,10 @@ class LongitudinalMpc:
       }
       return cruise_obstacle
 
+    # Lead candidates present — classifier is happy with at least one slot.
+    # Clear the opportunistic classifier-demotion hold so it starts fresh the
+    # next time the classifier transiently rejects.
+    self._classifier_demotion_hold_until_t = None
     best_lead_source, best_lead_obstacle = min(lead_candidates, key=lambda item: item[1][0])
     best_lead = self.control_leads[0] if best_lead_source == 'lead0' else self.control_leads[1]
     # Update close-range lead memory — only when we're actively following a lead
@@ -2228,6 +2405,12 @@ class LongitudinalMpc:
     )
     self.control_leads, lead_role_debug = self._stabilize_control_leads(
       radarstate.leadOne, radarstate.leadTwo, raw_control_lead0, raw_control_lead1, lead_role_debug,
+    )
+    # Snapshot raw radar leads so _maybe_hold_hyundai_classifier_demotion can
+    # corroborate against fresh sensor data without plumbing radarstate deeper.
+    self._last_raw_radar_leads = (
+      getattr(radarstate, 'leadOne', None),
+      getattr(radarstate, 'leadTwo', None),
     )
     control_lead0, control_lead1 = self.control_leads
     self.lead_role_debug = lead_role_debug
