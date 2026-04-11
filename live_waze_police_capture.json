@@ -405,5 +405,1152 @@
         "num_comments": 0
       }
     }
+  },
+  {
+    "timestamp": 222.071796633,
+    "location": [
+      38.751330427679186,
+      -120.60875267433407
+    ],
+    "alert": {
+      "id": "1687827808",
+      "type": "police",
+      "latitude": 38.763658,
+      "longitude": -120.557452,
+      "confidence": 4.0,
+      "speed_limit": null,
+      "street": "US-50",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "1687827808",
+        "type": "POLICE",
+        "subtype": null,
+        "reported_by": null,
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2026-04-11T19:59:42.000Z",
+        "country": "US",
+        "city": "Pollock Pines, CA",
+        "street": "US-50",
+        "latitude": 38.763658,
+        "longitude": -120.557452,
+        "num_thumbs_up": 10,
+        "alert_reliability": 10,
+        "alert_confidence": 4,
+        "near_by": null,
+        "comments": [],
+        "num_comments": 0
+      }
+    }
+  },
+  {
+    "timestamp": 222.071796633,
+    "location": [
+      38.751330427679186,
+      -120.60875267433407
+    ],
+    "alert": {
+      "id": "1688031186",
+      "type": "policeHiding",
+      "latitude": 38.743798,
+      "longitude": -120.651647,
+      "confidence": 0.0,
+      "speed_limit": null,
+      "street": "US-50 W",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "1688031186",
+        "type": "POLICE",
+        "subtype": "POLICE_HIDING",
+        "reported_by": null,
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2026-04-11T20:44:17.000Z",
+        "country": "US",
+        "city": null,
+        "street": "US-50 W",
+        "latitude": 38.743798,
+        "longitude": -120.651647,
+        "num_thumbs_up": 2,
+        "alert_reliability": 8,
+        "alert_confidence": 0,
+        "near_by": "Camino",
+        "comments": [],
+        "num_comments": 0
+      }
+    }
+  },
+  {
+    "timestamp": 135.217431069,
+    "location": [
+      38.74350760684079,
+      -120.65985181132227
+    ],
+    "alert": {
+      "id": "1688031186",
+      "type": "policeHiding",
+      "latitude": 38.743798,
+      "longitude": -120.651647,
+      "confidence": 0.0,
+      "speed_limit": null,
+      "street": "US-50 W",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "1688031186",
+        "type": "POLICE",
+        "subtype": "POLICE_HIDING",
+        "reported_by": null,
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2026-04-11T20:44:17.000Z",
+        "country": "US",
+        "city": null,
+        "street": "US-50 W",
+        "latitude": 38.743798,
+        "longitude": -120.651647,
+        "num_thumbs_up": 2,
+        "alert_reliability": 8,
+        "alert_confidence": 0,
+        "near_by": "Camino",
+        "comments": [],
+        "num_comments": 0
+      }
+    }
+  },
+  {
+    "timestamp": 435.223496226,
+    "location": [
+      38.73209793455476,
+      -120.75560749668327
+    ],
+    "alert": {
+      "id": "1688003561",
+      "type": "police",
+      "latitude": 38.737912,
+      "longitude": -120.731616,
+      "confidence": 2.0,
+      "speed_limit": null,
+      "street": "US-50 W",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "1688003561",
+        "type": "POLICE",
+        "subtype": null,
+        "reported_by": null,
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2026-04-11T20:40:29.000Z",
+        "country": "US",
+        "city": null,
+        "street": "US-50 W",
+        "latitude": 38.737912,
+        "longitude": -120.731616,
+        "num_thumbs_up": 6,
+        "alert_reliability": 10,
+        "alert_confidence": 2,
+        "near_by": "Camino",
+        "comments": [],
+        "num_comments": 0
+      }
+    }
+  },
+  {
+    "timestamp": 1335.275226664,
+    "location": [
+      38.65530439948719,
+      -121.02394208689557
+    ],
+    "alert": {
+      "id": "1688113145",
+      "type": "police",
+      "latitude": 38.655682,
+      "longitude": -121.031193,
+      "confidence": 0.0,
+      "speed_limit": null,
+      "street": "to US-50 W \u00bb Sacramento",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "1688113145",
+        "type": "POLICE",
+        "subtype": null,
+        "reported_by": null,
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2026-04-11T21:07:00.000Z",
+        "country": "US",
+        "city": "El Dorado Hills, CA",
+        "street": "to US-50 W \u00bb Sacramento",
+        "latitude": 38.655682,
+        "longitude": -121.031193,
+        "num_thumbs_up": 0,
+        "alert_reliability": 6,
+        "alert_confidence": 0,
+        "near_by": null,
+        "comments": [],
+        "num_comments": 0
+      }
+    }
+  },
+  {
+    "timestamp": 1335.275226664,
+    "location": [
+      38.65530439948719,
+      -121.02394208689557
+    ],
+    "alert": {
+      "id": "1688120973",
+      "type": "police",
+      "latitude": 38.655244,
+      "longitude": -121.028563,
+      "confidence": 0.0,
+      "speed_limit": null,
+      "street": "US-50 E",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "1688120973",
+        "type": "POLICE",
+        "subtype": null,
+        "reported_by": null,
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2026-04-11T21:04:49.000Z",
+        "country": "US",
+        "city": "El Dorado Hills, CA",
+        "street": "US-50 E",
+        "latitude": 38.655244,
+        "longitude": -121.028563,
+        "num_thumbs_up": 3,
+        "alert_reliability": 10,
+        "alert_confidence": 0,
+        "near_by": null,
+        "comments": [],
+        "num_comments": 0
+      }
+    }
+  },
+  {
+    "timestamp": 1335.275226664,
+    "location": [
+      38.65530439948719,
+      -121.02394208689557
+    ],
+    "alert": {
+      "id": "1688130105",
+      "type": "police",
+      "latitude": 38.655426,
+      "longitude": -121.030197,
+      "confidence": 0.0,
+      "speed_limit": null,
+      "street": "US-50 W",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "1688130105",
+        "type": "POLICE",
+        "subtype": null,
+        "reported_by": null,
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2026-04-11T21:05:47.000Z",
+        "country": "US",
+        "city": "El Dorado Hills, CA",
+        "street": "US-50 W",
+        "latitude": 38.655426,
+        "longitude": -121.030197,
+        "num_thumbs_up": 0,
+        "alert_reliability": 6,
+        "alert_confidence": 0,
+        "near_by": null,
+        "comments": [],
+        "num_comments": 0
+      }
+    }
+  },
+  {
+    "timestamp": 1335.275226664,
+    "location": [
+      38.65530439948719,
+      -121.02394208689557
+    ],
+    "alert": {
+      "id": "1688186087",
+      "type": "police",
+      "latitude": 38.651143,
+      "longitude": -121.075692,
+      "confidence": 0.0,
+      "speed_limit": null,
+      "street": "US-50 E",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "1688186087",
+        "type": "POLICE",
+        "subtype": null,
+        "reported_by": null,
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2026-04-11T21:20:31.000Z",
+        "country": "US",
+        "city": "El Dorado Hills, CA",
+        "street": "US-50 E",
+        "latitude": 38.651143,
+        "longitude": -121.075692,
+        "num_thumbs_up": 0,
+        "alert_reliability": 6,
+        "alert_confidence": 0,
+        "near_by": null,
+        "comments": [],
+        "num_comments": 0
+      }
+    }
+  },
+  {
+    "timestamp": 1635.295514673,
+    "location": [
+      38.643203310289564,
+      -121.119105941349
+    ],
+    "alert": {
+      "id": "1688102194",
+      "type": "police",
+      "latitude": 38.650185,
+      "longitude": -121.081808,
+      "confidence": 0.0,
+      "speed_limit": null,
+      "street": "Saratoga Way",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "1688102194",
+        "type": "POLICE",
+        "subtype": null,
+        "reported_by": null,
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2026-04-11T21:01:50.000Z",
+        "country": "US",
+        "city": "El Dorado Hills, CA",
+        "street": "Saratoga Way",
+        "latitude": 38.650185,
+        "longitude": -121.081808,
+        "num_thumbs_up": 0,
+        "alert_reliability": 5,
+        "alert_confidence": 0,
+        "near_by": null,
+        "comments": [],
+        "num_comments": 0
+      }
+    }
+  },
+  {
+    "timestamp": 1635.295514673,
+    "location": [
+      38.643203310289564,
+      -121.119105941349
+    ],
+    "alert": {
+      "id": "1688049294",
+      "type": "police",
+      "latitude": 38.649202,
+      "longitude": -121.081527,
+      "confidence": 2.0,
+      "speed_limit": null,
+      "street": "US-50 E",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "1688049294",
+        "type": "POLICE",
+        "subtype": null,
+        "reported_by": null,
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2026-04-11T20:53:44.000Z",
+        "country": "US",
+        "city": "El Dorado Hills, CA",
+        "street": "US-50 E",
+        "latitude": 38.649202,
+        "longitude": -121.081527,
+        "num_thumbs_up": 0,
+        "alert_reliability": 10,
+        "alert_confidence": 2,
+        "near_by": null,
+        "comments": [],
+        "num_comments": 0
+      }
+    }
+  },
+  {
+    "timestamp": 1935.296777497,
+    "location": [
+      38.632578108142305,
+      -121.21455192179914
+    ],
+    "alert": {
+      "id": "1688218453",
+      "type": "police",
+      "latitude": 38.661797,
+      "longitude": -121.202448,
+      "confidence": 0.0,
+      "speed_limit": null,
+      "street": "Main Ave",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "1688218453",
+        "type": "POLICE",
+        "subtype": null,
+        "reported_by": null,
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2026-04-11T21:33:29.000Z",
+        "country": "US",
+        "city": "Orangevale, CA",
+        "street": "Main Ave",
+        "latitude": 38.661797,
+        "longitude": -121.202448,
+        "num_thumbs_up": 0,
+        "alert_reliability": 5,
+        "alert_confidence": 0,
+        "near_by": null,
+        "comments": [],
+        "num_comments": 0
+      }
+    }
+  },
+  {
+    "timestamp": 1935.296777497,
+    "location": [
+      38.632578108142305,
+      -121.21455192179914
+    ],
+    "alert": {
+      "id": "1688205129",
+      "type": "police",
+      "latitude": 38.654988,
+      "longitude": -121.181977,
+      "confidence": 3.0,
+      "speed_limit": null,
+      "street": "Folsom Blvd",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "1688205129",
+        "type": "POLICE",
+        "subtype": null,
+        "reported_by": null,
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2026-04-11T21:24:26.000Z",
+        "country": "US",
+        "city": "Folsom, CA",
+        "street": "Folsom Blvd",
+        "latitude": 38.654988,
+        "longitude": -121.181977,
+        "num_thumbs_up": 6,
+        "alert_reliability": 10,
+        "alert_confidence": 3,
+        "near_by": null,
+        "comments": [],
+        "num_comments": 0
+      }
+    }
+  },
+  {
+    "timestamp": 2235.314821289,
+    "location": [
+      38.66843164335434,
+      -121.22569225883109
+    ],
+    "alert": {
+      "id": "1688218453",
+      "type": "police",
+      "latitude": 38.661797,
+      "longitude": -121.202448,
+      "confidence": 0.0,
+      "speed_limit": null,
+      "street": "Main Ave",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "1688218453",
+        "type": "POLICE",
+        "subtype": null,
+        "reported_by": null,
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2026-04-11T21:33:29.000Z",
+        "country": "US",
+        "city": "Orangevale, CA",
+        "street": "Main Ave",
+        "latitude": 38.661797,
+        "longitude": -121.202448,
+        "num_thumbs_up": 0,
+        "alert_reliability": 5,
+        "alert_confidence": 0,
+        "near_by": null,
+        "comments": [],
+        "num_comments": 0
+      }
+    }
+  },
+  {
+    "timestamp": 2235.314821289,
+    "location": [
+      38.66843164335434,
+      -121.22569225883109
+    ],
+    "alert": {
+      "id": "1688205129",
+      "type": "police",
+      "latitude": 38.654988,
+      "longitude": -121.181977,
+      "confidence": 3.0,
+      "speed_limit": null,
+      "street": "Folsom Blvd",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "1688205129",
+        "type": "POLICE",
+        "subtype": null,
+        "reported_by": null,
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2026-04-11T21:24:26.000Z",
+        "country": "US",
+        "city": "Folsom, CA",
+        "street": "Folsom Blvd",
+        "latitude": 38.654988,
+        "longitude": -121.181977,
+        "num_thumbs_up": 7,
+        "alert_reliability": 10,
+        "alert_confidence": 3,
+        "near_by": null,
+        "comments": [],
+        "num_comments": 0
+      }
+    }
+  },
+  {
+    "timestamp": 2535.333614799,
+    "location": [
+      38.699345705628794,
+      -121.22513357172227
+    ],
+    "alert": {
+      "id": "1688218453",
+      "type": "police",
+      "latitude": 38.661797,
+      "longitude": -121.202448,
+      "confidence": 0.0,
+      "speed_limit": null,
+      "street": "Main Ave",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "1688218453",
+        "type": "POLICE",
+        "subtype": null,
+        "reported_by": null,
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2026-04-11T21:33:29.000Z",
+        "country": "US",
+        "city": "Orangevale, CA",
+        "street": "Main Ave",
+        "latitude": 38.661797,
+        "longitude": -121.202448,
+        "num_thumbs_up": 0,
+        "alert_reliability": 5,
+        "alert_confidence": 0,
+        "near_by": null,
+        "comments": [],
+        "num_comments": 0
+      }
+    }
+  },
+  {
+    "timestamp": 6067.987244777,
+    "location": [
+      38.74912443105028,
+      -121.28483818753607
+    ],
+    "alert": {
+      "id": "1688460967",
+      "type": "police",
+      "latitude": 38.771014,
+      "longitude": -121.247673,
+      "confidence": 0.0,
+      "speed_limit": null,
+      "street": "Exit 106: CA-65 \u00bb Lincoln / Marysville",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "1688460967",
+        "type": "POLICE",
+        "subtype": null,
+        "reported_by": null,
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2026-04-11T22:28:17.000Z",
+        "country": "US",
+        "city": "Roseville, CA",
+        "street": "Exit 106: CA-65 \u00bb Lincoln / Marysville",
+        "latitude": 38.771014,
+        "longitude": -121.247673,
+        "num_thumbs_up": 0,
+        "alert_reliability": 7,
+        "alert_confidence": 0,
+        "near_by": null,
+        "comments": [],
+        "num_comments": 0
+      }
+    }
+  },
+  {
+    "timestamp": 6067.987244777,
+    "location": [
+      38.74912443105028,
+      -121.28483818753607
+    ],
+    "alert": {
+      "id": "1688364676",
+      "type": "police",
+      "latitude": 38.786513,
+      "longitude": -121.2858,
+      "confidence": 0.0,
+      "speed_limit": null,
+      "street": "to CA-65 S",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "1688364676",
+        "type": "POLICE",
+        "subtype": "POLICE_WITH_MOBILE_CAMERA",
+        "reported_by": null,
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2026-04-11T22:10:16.000Z",
+        "country": "US",
+        "city": "Roseville, CA",
+        "street": "to CA-65 S",
+        "latitude": 38.786513,
+        "longitude": -121.2858,
+        "num_thumbs_up": 0,
+        "alert_reliability": 7,
+        "alert_confidence": 0,
+        "near_by": null,
+        "comments": [],
+        "num_comments": 0
+      }
+    }
+  },
+  {
+    "timestamp": 6067.987244777,
+    "location": [
+      38.74912443105028,
+      -121.28483818753607
+    ],
+    "alert": {
+      "id": "1688479023",
+      "type": "police",
+      "latitude": 38.770118,
+      "longitude": -121.248576,
+      "confidence": 4.0,
+      "speed_limit": null,
+      "street": "I-80 W",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "1688479023",
+        "type": "POLICE",
+        "subtype": null,
+        "reported_by": null,
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2026-04-11T22:38:28.000Z",
+        "country": "US",
+        "city": null,
+        "street": "I-80 W",
+        "latitude": 38.770118,
+        "longitude": -121.248576,
+        "num_thumbs_up": 7,
+        "alert_reliability": 10,
+        "alert_confidence": 4,
+        "near_by": "Rocklin",
+        "comments": [],
+        "num_comments": 0
+      }
+    }
+  },
+  {
+    "timestamp": 6067.987244777,
+    "location": [
+      38.74912443105028,
+      -121.28483818753607
+    ],
+    "alert": {
+      "id": "1688431089",
+      "type": "police",
+      "latitude": 38.769766,
+      "longitude": -121.249142,
+      "confidence": 2.0,
+      "speed_limit": null,
+      "street": "I-80 W",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "1688431089",
+        "type": "POLICE",
+        "subtype": null,
+        "reported_by": null,
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2026-04-11T22:21:32.000Z",
+        "country": "US",
+        "city": null,
+        "street": "I-80 W",
+        "latitude": 38.769766,
+        "longitude": -121.249142,
+        "num_thumbs_up": 0,
+        "alert_reliability": 10,
+        "alert_confidence": 2,
+        "near_by": "Roseville",
+        "comments": [],
+        "num_comments": 0
+      }
+    }
+  },
+  {
+    "timestamp": 6067.987244777,
+    "location": [
+      38.74912443105028,
+      -121.28483818753607
+    ],
+    "alert": {
+      "id": "1688442157",
+      "type": "police",
+      "latitude": 38.723954,
+      "longitude": -121.291479,
+      "confidence": 0.0,
+      "speed_limit": null,
+      "street": "I-80 W",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "1688442157",
+        "type": "POLICE",
+        "subtype": null,
+        "reported_by": null,
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2026-04-11T22:25:20.000Z",
+        "country": "US",
+        "city": "Roseville, CA",
+        "street": "I-80 W",
+        "latitude": 38.723954,
+        "longitude": -121.291479,
+        "num_thumbs_up": 0,
+        "alert_reliability": 5,
+        "alert_confidence": 0,
+        "near_by": null,
+        "comments": [],
+        "num_comments": 0
+      }
+    }
+  },
+  {
+    "timestamp": 6368.016906073,
+    "location": [
+      38.750238824858656,
+      -121.28329952736263
+    ],
+    "alert": {
+      "id": "1688364676",
+      "type": "police",
+      "latitude": 38.786513,
+      "longitude": -121.2858,
+      "confidence": 0.0,
+      "speed_limit": null,
+      "street": "to CA-65 S",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "1688364676",
+        "type": "POLICE",
+        "subtype": "POLICE_WITH_MOBILE_CAMERA",
+        "reported_by": null,
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2026-04-11T22:10:16.000Z",
+        "country": "US",
+        "city": "Roseville, CA",
+        "street": "to CA-65 S",
+        "latitude": 38.786513,
+        "longitude": -121.2858,
+        "num_thumbs_up": 0,
+        "alert_reliability": 7,
+        "alert_confidence": 0,
+        "near_by": null,
+        "comments": [],
+        "num_comments": 0
+      }
+    }
+  },
+  {
+    "timestamp": 6368.016906073,
+    "location": [
+      38.750238824858656,
+      -121.28329952736263
+    ],
+    "alert": {
+      "id": "1688460967",
+      "type": "police",
+      "latitude": 38.771023,
+      "longitude": -121.247672,
+      "confidence": 1.0,
+      "speed_limit": null,
+      "street": "Exit 106: CA-65 \u00bb Lincoln / Marysville",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "1688460967",
+        "type": "POLICE",
+        "subtype": null,
+        "reported_by": null,
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2026-04-11T22:28:17.000Z",
+        "country": "US",
+        "city": "Roseville, CA",
+        "street": "Exit 106: CA-65 \u00bb Lincoln / Marysville",
+        "latitude": 38.771023,
+        "longitude": -121.247672,
+        "num_thumbs_up": 0,
+        "alert_reliability": 8,
+        "alert_confidence": 1,
+        "near_by": null,
+        "comments": [],
+        "num_comments": 0
+      }
+    }
+  },
+  {
+    "timestamp": 6368.016906073,
+    "location": [
+      38.750238824858656,
+      -121.28329952736263
+    ],
+    "alert": {
+      "id": "1688479023",
+      "type": "police",
+      "latitude": 38.770118,
+      "longitude": -121.248576,
+      "confidence": 5.0,
+      "speed_limit": null,
+      "street": "I-80 W",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "1688479023",
+        "type": "POLICE",
+        "subtype": null,
+        "reported_by": null,
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2026-04-11T22:38:28.000Z",
+        "country": "US",
+        "city": null,
+        "street": "I-80 W",
+        "latitude": 38.770118,
+        "longitude": -121.248576,
+        "num_thumbs_up": 10,
+        "alert_reliability": 10,
+        "alert_confidence": 5,
+        "near_by": "Rocklin",
+        "comments": [],
+        "num_comments": 0
+      }
+    }
+  },
+  {
+    "timestamp": 6368.016906073,
+    "location": [
+      38.750238824858656,
+      -121.28329952736263
+    ],
+    "alert": {
+      "id": "1688431089",
+      "type": "police",
+      "latitude": 38.769766,
+      "longitude": -121.249142,
+      "confidence": 2.0,
+      "speed_limit": null,
+      "street": "I-80 W",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "1688431089",
+        "type": "POLICE",
+        "subtype": null,
+        "reported_by": null,
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2026-04-11T22:21:32.000Z",
+        "country": "US",
+        "city": null,
+        "street": "I-80 W",
+        "latitude": 38.769766,
+        "longitude": -121.249142,
+        "num_thumbs_up": 0,
+        "alert_reliability": 10,
+        "alert_confidence": 2,
+        "near_by": "Roseville",
+        "comments": [],
+        "num_comments": 0
+      }
+    }
+  },
+  {
+    "timestamp": 6368.016906073,
+    "location": [
+      38.750238824858656,
+      -121.28329952736263
+    ],
+    "alert": {
+      "id": "1688442157",
+      "type": "police",
+      "latitude": 38.723954,
+      "longitude": -121.291479,
+      "confidence": 0.0,
+      "speed_limit": null,
+      "street": "I-80 W",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "1688442157",
+        "type": "POLICE",
+        "subtype": null,
+        "reported_by": null,
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2026-04-11T22:25:20.000Z",
+        "country": "US",
+        "city": "Roseville, CA",
+        "street": "I-80 W",
+        "latitude": 38.723954,
+        "longitude": -121.291479,
+        "num_thumbs_up": 0,
+        "alert_reliability": 5,
+        "alert_confidence": 0,
+        "near_by": null,
+        "comments": [],
+        "num_comments": 0
+      }
+    }
+  },
+  {
+    "timestamp": 6668.027017771,
+    "location": [
+      38.76126855346102,
+      -121.25927277374318
+    ],
+    "alert": {
+      "id": "1688364676",
+      "type": "police",
+      "latitude": 38.786513,
+      "longitude": -121.2858,
+      "confidence": 0.0,
+      "speed_limit": null,
+      "street": "to CA-65 S",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "1688364676",
+        "type": "POLICE",
+        "subtype": "POLICE_WITH_MOBILE_CAMERA",
+        "reported_by": null,
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2026-04-11T22:10:16.000Z",
+        "country": "US",
+        "city": "Roseville, CA",
+        "street": "to CA-65 S",
+        "latitude": 38.786513,
+        "longitude": -121.2858,
+        "num_thumbs_up": 0,
+        "alert_reliability": 7,
+        "alert_confidence": 0,
+        "near_by": null,
+        "comments": [],
+        "num_comments": 0
+      }
+    }
+  },
+  {
+    "timestamp": 6668.027017771,
+    "location": [
+      38.76126855346102,
+      -121.25927277374318
+    ],
+    "alert": {
+      "id": "1688460967",
+      "type": "police",
+      "latitude": 38.771023,
+      "longitude": -121.247672,
+      "confidence": 1.0,
+      "speed_limit": null,
+      "street": "Exit 106: CA-65 \u00bb Lincoln / Marysville",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "1688460967",
+        "type": "POLICE",
+        "subtype": null,
+        "reported_by": null,
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2026-04-11T22:28:17.000Z",
+        "country": "US",
+        "city": "Roseville, CA",
+        "street": "Exit 106: CA-65 \u00bb Lincoln / Marysville",
+        "latitude": 38.771023,
+        "longitude": -121.247672,
+        "num_thumbs_up": 0,
+        "alert_reliability": 8,
+        "alert_confidence": 1,
+        "near_by": null,
+        "comments": [],
+        "num_comments": 0
+      }
+    }
+  },
+  {
+    "timestamp": 6668.027017771,
+    "location": [
+      38.76126855346102,
+      -121.25927277374318
+    ],
+    "alert": {
+      "id": "1688442157",
+      "type": "police",
+      "latitude": 38.723954,
+      "longitude": -121.291479,
+      "confidence": 0.0,
+      "speed_limit": null,
+      "street": "I-80 W",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "1688442157",
+        "type": "POLICE",
+        "subtype": null,
+        "reported_by": null,
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2026-04-11T22:25:20.000Z",
+        "country": "US",
+        "city": "Roseville, CA",
+        "street": "I-80 W",
+        "latitude": 38.723954,
+        "longitude": -121.291479,
+        "num_thumbs_up": 0,
+        "alert_reliability": 5,
+        "alert_confidence": 0,
+        "near_by": null,
+        "comments": [],
+        "num_comments": 0
+      }
+    }
+  },
+  {
+    "timestamp": 6668.027017771,
+    "location": [
+      38.76126855346102,
+      -121.25927277374318
+    ],
+    "alert": {
+      "id": "1688479023",
+      "type": "police",
+      "latitude": 38.770118,
+      "longitude": -121.248576,
+      "confidence": 5.0,
+      "speed_limit": null,
+      "street": "I-80 W",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "1688479023",
+        "type": "POLICE",
+        "subtype": null,
+        "reported_by": null,
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2026-04-11T22:38:28.000Z",
+        "country": "US",
+        "city": null,
+        "street": "I-80 W",
+        "latitude": 38.770118,
+        "longitude": -121.248576,
+        "num_thumbs_up": 12,
+        "alert_reliability": 10,
+        "alert_confidence": 5,
+        "near_by": "Rocklin",
+        "comments": [],
+        "num_comments": 0
+      }
+    }
+  },
+  {
+    "timestamp": 6968.028740569,
+    "location": [
+      38.79501601213999,
+      -121.21751888113013
+    ],
+    "alert": {
+      "id": "1688460967",
+      "type": "police",
+      "latitude": 38.771023,
+      "longitude": -121.247672,
+      "confidence": 1.0,
+      "speed_limit": null,
+      "street": "Exit 106: CA-65 \u00bb Lincoln / Marysville",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "1688460967",
+        "type": "POLICE",
+        "subtype": null,
+        "reported_by": null,
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2026-04-11T22:28:17.000Z",
+        "country": "US",
+        "city": "Roseville, CA",
+        "street": "Exit 106: CA-65 \u00bb Lincoln / Marysville",
+        "latitude": 38.771023,
+        "longitude": -121.247672,
+        "num_thumbs_up": 0,
+        "alert_reliability": 8,
+        "alert_confidence": 1,
+        "near_by": null,
+        "comments": [],
+        "num_comments": 0
+      }
+    }
+  },
+  {
+    "timestamp": 6968.028740569,
+    "location": [
+      38.79501601213999,
+      -121.21751888113013
+    ],
+    "alert": {
+      "id": "1688479023",
+      "type": "police",
+      "latitude": 38.770118,
+      "longitude": -121.248576,
+      "confidence": 5.0,
+      "speed_limit": null,
+      "street": "I-80 W",
+      "country": "US",
+      "raw_data": {
+        "alert_id": "1688479023",
+        "type": "POLICE",
+        "subtype": null,
+        "reported_by": null,
+        "description": null,
+        "image": null,
+        "publish_datetime_utc": "2026-04-11T22:38:28.000Z",
+        "country": "US",
+        "city": null,
+        "street": "I-80 W",
+        "latitude": 38.770118,
+        "longitude": -121.248576,
+        "num_thumbs_up": 13,
+        "alert_reliability": 10,
+        "alert_confidence": 5,
+        "near_by": "Rocklin",
+        "comments": [],
+        "num_comments": 0
+      }
+    }
   }
 ]
