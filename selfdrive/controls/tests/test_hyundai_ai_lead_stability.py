@@ -50,10 +50,12 @@ def _configure_vibe_accel(*, enabled: bool, personality: int = 0):
   params.put('AccelPersonality', str(int(personality)))
 
 
-def _make_hyundai_mpc(v_ego=29.0, a_ego=0.0):
+def _make_hyundai_mpc(v_ego=29.0, a_ego=0.0, *, time_fn=None):
   mpc = LongitudinalMpc(CP=SimpleNamespace(brand='hyundai'))
   mpc.mode = 'acc'
   mpc.set_cur_state(v_ego, a_ego)
+  if time_fn is not None:
+    mpc._time_fn = time_fn
   return mpc
 
 
@@ -164,12 +166,8 @@ class TestHyundaiAiLeadStability:
     assert mpc.acc_source_debug["release_agreement_ok"] is True
     assert max_reclaim_push > 0.5
 
-  def test_filtered_release_waits_for_raw_agreement_before_leaving_lead(self, monkeypatch):
-    monkeypatch.setattr(
-      "openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc.time.monotonic",
-      _MonotonicStub(step=0.2),
-    )
-    mpc = _make_hyundai_mpc()
+  def test_filtered_release_waits_for_raw_agreement_before_leaving_lead(self):
+    mpc = _make_hyundai_mpc(time_fn=_MonotonicStub(step=0.2))
 
     stable_lead = _make_lead(d_rel=38.5, y_rel=0.04, d_path=0.04, v_lat=0.35, v_rel=0.0, v_lead=29.0, a_lead=0.0, model_prob=0.96)
     for _ in range(4):
@@ -223,12 +221,8 @@ class TestHyundaiAiLeadStability:
     assert mpc.acc_source_debug["stabilization_push_m"] == pytest.approx(0.0)
     assert mpc.acc_source_debug["raw_reclaim_safety_override"] is False
 
-  def test_brief_total_lead_dropout_holds_stable_virtual_lead_before_releasing(self, monkeypatch):
-    monkeypatch.setattr(
-      "openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc.time.monotonic",
-      _MonotonicStub(step=0.1),
-    )
-    mpc = _make_hyundai_mpc()
+  def test_brief_total_lead_dropout_holds_stable_virtual_lead_before_releasing(self):
+    mpc = _make_hyundai_mpc(time_fn=_MonotonicStub(step=0.2))
 
     stable_lead = _make_lead(d_rel=35.6, y_rel=0.04, d_path=0.04, v_lat=0.10, v_rel=0.02, v_lead=29.02, model_prob=0.98)
     for _ in range(32):
@@ -857,12 +851,8 @@ class TestHyundaiAiLeadStability:
     assert mpc.lead_approach_preview[0] > 0.5
     assert mpc.source == "lead0"
 
-  def test_opening_noise_is_slew_clamped_without_forcing_reset(self, monkeypatch):
-    monkeypatch.setattr(
-      "openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc.time.monotonic",
-      _MonotonicStub(step=0.2),
-    )
-    mpc = _make_hyundai_mpc(v_ego=29.0, a_ego=0.0)
+  def test_opening_noise_is_slew_clamped_without_forcing_reset(self):
+    mpc = _make_hyundai_mpc(v_ego=29.0, a_ego=0.0, time_fn=_MonotonicStub(step=0.2))
 
     for _ in range(3):
       _run_update(

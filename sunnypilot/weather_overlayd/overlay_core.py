@@ -18,6 +18,13 @@ CAR_ANCHOR_Y = 0.68
 MASK_FEATHER = 0.10
 ALPHA_THRESHOLD = 8
 
+# The mask circle must fit entirely inside the square canvas so that heading-up
+# rotation in the HUD never exposes a flat canvas edge. The largest such circle
+# is bounded by the shortest distance from the car anchor to any canvas edge.
+# With anchor_y > 0.5 (car biased forward), the behind-the-car distance is the
+# binding constraint, and this min ratio is what we scale the world viewport by.
+CAR_MIN_ANCHOR_DISTANCE = min(CAR_ANCHOR_X, 1.0 - CAR_ANCHOR_X, CAR_ANCHOR_Y, 1.0 - CAR_ANCHOR_Y)
+
 
 @dataclass(frozen=True)
 class OverlayConfig:
@@ -63,8 +70,12 @@ def meters_per_world_px(lat: float, zoom: int) -> float:
 
 def build_viewport(lat: float, lon: float, range_km: int, zoom: int) -> Viewport:
   world_x, world_y = latlon_to_world_px(lat, lon, zoom)
-  half_span_world_px = (range_km * 1000.0) / meters_per_world_px(lat, zoom)
-  world_size_px = half_span_world_px * 2.0
+  # range_km is the desired inscribed-circle radius around the car (the visible
+  # disc the user sees on the HUD). Inflate the square world window so that the
+  # largest circle centered on the offset anchor fits inside it — i.e. the
+  # shortest anchor-to-edge distance equals range_km in real-world terms.
+  range_world_px = (range_km * 1000.0) / meters_per_world_px(lat, zoom)
+  world_size_px = range_world_px / CAR_MIN_ANCHOR_DISTANCE
 
   left = world_x - (CAR_ANCHOR_X * world_size_px)
   top = world_y - (CAR_ANCHOR_Y * world_size_px)
@@ -109,7 +120,10 @@ def build_mask(size_px: int = CANVAS_SIZE_PX) -> Image.Image:
   y_idx, x_idx = np.ogrid[:size_px, :size_px]
   center_x = CAR_ANCHOR_X * (size_px - 1)
   center_y = CAR_ANCHOR_Y * (size_px - 1)
-  radius = size_px * 0.5
+  # Largest circle around the car anchor that fits entirely inside the canvas.
+  # This must match build_viewport's inflation factor so the circle's radius in
+  # canvas pixels corresponds to range_km in real-world km.
+  radius = min(center_x, center_y, (size_px - 1) - center_x, (size_px - 1) - center_y)
   inner_radius = radius * (1.0 - MASK_FEATHER)
   distance = np.sqrt((x_idx - center_x) ** 2 + (y_idx - center_y) ** 2)
   ramp = np.clip((radius - distance) / max(radius - inner_radius, 1.0), 0.0, 1.0)

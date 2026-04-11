@@ -43,6 +43,7 @@ EXPORT_DIR = os.path.join(LONG_MPC_DIR, "c_generated_code")
 JSON_FILE = os.path.join(LONG_MPC_DIR, "acados_ocp_long.json")
 
 SOURCES = ['lead0', 'lead1', 'cruise', 'e2e']
+REAL_MONOTONIC = time.monotonic
 
 X_DIM = 3
 U_DIM = 1
@@ -1939,8 +1940,13 @@ class LongitudinalMpc:
       # classifier demotion hold needs the pre-reset snapshot to evaluate.
       snap_virtual_lead = copy.deepcopy(self._hyundai_virtual_lead) if self._hyundai_virtual_lead is not None else None
       snap_virtual_lead_source = self._hyundai_virtual_lead_source
+      snap_virtual_lead_last_t = self._hyundai_virtual_lead_last_t
+      snap_virtual_lead_reset_reason = self._hyundai_virtual_lead_reset_reason
       snap_virtual_lead_stable_since_t = self._hyundai_virtual_lead_stable_since_t
       snap_virtual_lead_last_drel_error_m = self._hyundai_virtual_lead_last_drel_error_m
+      snap_virtual_lead_dropout_until_t = self._hyundai_virtual_lead_dropout_until_t
+      snap_drel_filter = copy.deepcopy(self._drel_filter)
+      snap_drel_kalman = copy.deepcopy(self._drel_kalman)
 
       held_lead = self._update_hyundai_virtual_lead(now, None, None)
       self.gap_reclaim_accel_floor = 0.0
@@ -1976,8 +1982,13 @@ class LongitudinalMpc:
       # with fresh raw-radar corroboration.
       self._hyundai_virtual_lead = snap_virtual_lead
       self._hyundai_virtual_lead_source = snap_virtual_lead_source
+      self._hyundai_virtual_lead_last_t = snap_virtual_lead_last_t
+      self._hyundai_virtual_lead_reset_reason = snap_virtual_lead_reset_reason
       self._hyundai_virtual_lead_stable_since_t = snap_virtual_lead_stable_since_t
       self._hyundai_virtual_lead_last_drel_error_m = snap_virtual_lead_last_drel_error_m
+      self._hyundai_virtual_lead_dropout_until_t = snap_virtual_lead_dropout_until_t
+      self._drel_filter = snap_drel_filter
+      self._drel_kalman = snap_drel_kalman
 
       demotion_held_lead, demotion_debug = self._maybe_hold_hyundai_classifier_demotion(now)
       if demotion_held_lead is not None:
@@ -2758,7 +2769,9 @@ class LongitudinalMpc:
 
     self.prev_a = np.interp(T_IDXS + self.dt, T_IDXS, self.a_solution)
 
-    t = time.monotonic()
+    # Keep solver warning throttling on a real wall clock so tests can inject
+    # self._time_fn without also accelerating unrelated bookkeeping.
+    t = REAL_MONOTONIC()
     if self.solution_status != 0:
       if t > self.last_cloudlog_t + 5.0:
         self.last_cloudlog_t = t
