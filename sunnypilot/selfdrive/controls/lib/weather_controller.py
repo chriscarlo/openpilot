@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """
-Weather Controller — reads WeatherCondition param from weatherd and
-computes a speed-cap recommendation for the longitudinal planner.
+Weather Controller — reads WeatherCondition param from weatherd (Pirate
+Weather point-forecast) and computes a speed-cap recommendation for the
+longitudinal planner.
 
-Uses continuous interpolation across precipitation intensity rather than
-discrete severity buckets, giving a smooth speed curve that prevents
-oscillation at severity boundaries.
+The reduction curve is a C1-continuous smoothstep through four anchor
+points. Knots removed the piecewise-linear "hard breakpoints" feel of the
+previous version: the speed cap now ramps up gently through drizzle, hits
+each user-configured reduction at the corresponding precipitation threshold,
+and only saturates at red_heavy once the radar observation looks like a
+proper downpour.
 
 Follows the same pattern as RTIController: Params → speed_recommendation + is_active.
 """
@@ -29,21 +33,26 @@ WEATHER_ACCEL_RATE = 2.5
 # How old weather data can be before we ignore it (seconds)
 MAX_DATA_AGE_S = 600  # 10 minutes
 
-# Precipitation intensity breakpoints in mm/hour. weatherd samples RainViewer's
-# doppler-radar tiles and publishes a point mm/hr intensity (Marshall-Palmer
-# Z-R conversion). These anchors map onto standard rain-rate classifications:
-#   0.0 mm/hr → no reduction
-#   0.5 mm/hr → light rain center
-#   2.5 mm/hr → moderate rain center
-#   7.5 mm/hr → heavy rain center (and above)
+# Precipitation intensity anchor points (mm/hour). These are placed deeper
+# into each meteorological rain category than the literal thresholds so that
+# drizzle doesn't instantly jump to the full "light rain" reduction:
+#
+#   meteorological "light"   : 0.5 – 2.5 mm/hr  → LIGHT anchor placed at 1.5
+#   meteorological "moderate": 2.5 – 7.6 mm/hr  → MODERATE anchor placed at 5.0
+#   meteorological "heavy"   : > 7.6 mm/hr      → HEAVY anchor placed at 10.0
+#
+# Between anchors the reduction is a cubic smoothstep (3t^2 - 2t^3) of the
+# two adjacent user-configured reductions. Smoothstep has f'(0)=f'(1)=0,
+# which removes the slope discontinuity the old linear interpolation had at
+# each knot.
 PRECIP_NONE = 0.0
-PRECIP_LIGHT = 0.5
-PRECIP_MODERATE = 2.5
-PRECIP_HEAVY = 7.5
+PRECIP_LIGHT = 1.5
+PRECIP_MODERATE = 5.0
+PRECIP_HEAVY = 10.0
 
-# Minimum precipitation to activate. Since the signal is now a radar observation
-# (not a lagged NWP forecast), we don't need a secondary WMO-code corroboration:
-# the pixel at ego position is either opaque (rain hitting now) or transparent.
+# Minimum precipitation to activate. Below this threshold the smoothstep
+# curve would produce a sub-0.1 mph reduction that isn't worth a control
+# cycle — reset the controller instead so other constraints take over.
 MIN_PRECIP_MM_PER_HR = 0.1
 
 
@@ -53,30 +62,39 @@ def _lerp(a: float, b: float, t: float) -> float:
   return a + (b - a) * t
 
 
+def _smoothstep(t: float) -> float:
+  """Cubic Hermite smoothstep. f(0)=0, f(1)=1, f'(0)=f'(1)=0.
+
+  Produces a C1-continuous transition between two anchor values so the
+  speed-reduction curve has no slope kinks where segments meet.
+  """
+  t = max(0.0, min(1.0, t))
+  return t * t * (3.0 - 2.0 * t)
+
+
 def _interpolate_reduction(precip_mm: float,
                            red_none: float, red_light: float,
                            red_moderate: float, red_heavy: float) -> float:
-  """Compute a smooth speed reduction (m/s) based on precipitation intensity.
+  """Compute a C1-continuous, monotonically-increasing speed reduction (m/s).
 
-  Linearly interpolates between the four anchor points:
-    0 mm       → red_none    (0)
-    LIGHT mm   → red_light
-    MODERATE mm → red_moderate
-    HEAVY mm   → red_heavy   (clamped above)
+  Smoothstep-interpolates between four anchor points:
+    0 mm             → red_none     (0 m/s)
+    PRECIP_LIGHT     → red_light
+    PRECIP_MODERATE  → red_moderate
+    PRECIP_HEAVY     → red_heavy    (clamped above)
   """
   if precip_mm <= PRECIP_NONE:
     return red_none
+  if precip_mm >= PRECIP_HEAVY:
+    return red_heavy
   if precip_mm <= PRECIP_LIGHT:
-    t = (precip_mm - PRECIP_NONE) / (PRECIP_LIGHT - PRECIP_NONE)
+    t = _smoothstep((precip_mm - PRECIP_NONE) / (PRECIP_LIGHT - PRECIP_NONE))
     return _lerp(red_none, red_light, t)
   if precip_mm <= PRECIP_MODERATE:
-    t = (precip_mm - PRECIP_LIGHT) / (PRECIP_MODERATE - PRECIP_LIGHT)
+    t = _smoothstep((precip_mm - PRECIP_LIGHT) / (PRECIP_MODERATE - PRECIP_LIGHT))
     return _lerp(red_light, red_moderate, t)
-  if precip_mm <= PRECIP_HEAVY:
-    t = (precip_mm - PRECIP_MODERATE) / (PRECIP_HEAVY - PRECIP_MODERATE)
-    return _lerp(red_moderate, red_heavy, t)
-  # Above heavy threshold — clamp to heavy reduction
-  return red_heavy
+  t = _smoothstep((precip_mm - PRECIP_MODERATE) / (PRECIP_HEAVY - PRECIP_MODERATE))
+  return _lerp(red_moderate, red_heavy, t)
 
 
 def _extract_precipitation_mm(condition: dict) -> float:

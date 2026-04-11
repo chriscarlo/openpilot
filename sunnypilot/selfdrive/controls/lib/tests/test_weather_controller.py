@@ -150,3 +150,90 @@ def test_weather_controller_disabled_by_param(monkeypatch):
   controller.params._bools["WeatherAwareControlEnabled"] = False
   controller.update(v_ego=30.0, v_cruise=30.0)
   assert controller.is_active is False
+
+
+# ---------------------------------------------------------------------------
+# Speed-reduction curve shape: smoothstep between four anchor points
+# ---------------------------------------------------------------------------
+#
+# The curve goes through:
+#   (PRECIP_NONE,      0.0)
+#   (PRECIP_LIGHT,     red_light)
+#   (PRECIP_MODERATE,  red_moderate)
+#   (PRECIP_HEAVY,     red_heavy)
+# using a cubic smoothstep so slopes match at knots (no hard breakpoints).
+
+RED_LIGHT = 5.0       # mph-equivalent units for readability in tests
+RED_MODERATE = 10.0
+RED_HEAVY = 15.0
+
+
+def _reduce(precip_mm: float) -> float:
+  return weather_mod._interpolate_reduction(
+    precip_mm,
+    red_none=0.0,
+    red_light=RED_LIGHT,
+    red_moderate=RED_MODERATE,
+    red_heavy=RED_HEAVY,
+  )
+
+
+def test_interpolate_reduction_hits_each_anchor_exactly():
+  assert _reduce(weather_mod.PRECIP_NONE) == 0.0
+  assert _reduce(weather_mod.PRECIP_LIGHT) == pytest.approx(RED_LIGHT)
+  assert _reduce(weather_mod.PRECIP_MODERATE) == pytest.approx(RED_MODERATE)
+  assert _reduce(weather_mod.PRECIP_HEAVY) == pytest.approx(RED_HEAVY)
+
+
+def test_interpolate_reduction_clamps_above_heavy_anchor():
+  assert _reduce(weather_mod.PRECIP_HEAVY + 0.1) == pytest.approx(RED_HEAVY)
+  assert _reduce(50.0) == pytest.approx(RED_HEAVY)
+  assert _reduce(1000.0) == pytest.approx(RED_HEAVY)
+
+
+def test_interpolate_reduction_zero_below_none_anchor():
+  assert _reduce(0.0) == 0.0
+  assert _reduce(-0.5) == 0.0
+
+
+def test_drizzle_produces_much_smaller_reduction_than_red_light():
+  # 0.3 mm/hr is classical drizzle. The new curve should give much less
+  # than the full red_light value (contrast with the old linear code,
+  # where 0.3 mm/hr → 3.0 mph once the LIGHT anchor was at 0.5 mm/hr).
+  drizzle = _reduce(0.3)
+  assert drizzle > 0.0
+  assert drizzle < RED_LIGHT * 0.3, f"drizzle too aggressive: {drizzle}"
+
+
+def test_interpolate_reduction_monotonic_across_spectrum():
+  samples = [0.0, 0.1, 0.3, 0.5, 1.0, 1.5, 2.0, 3.0, 5.0, 6.0, 7.5, 10.0, 15.0, 30.0]
+  values = [_reduce(p) for p in samples]
+  for prev, curr in zip(values, values[1:], strict=False):
+    assert curr >= prev - 1e-9, f"non-monotonic: {prev} → {curr}"
+
+
+def test_smoothstep_c1_continuity_at_anchor_knots():
+  # A numerical derivative on both sides of each anchor should match
+  # closely — smoothstep has f'(0)=f'(1)=0, so the curve's slope approaches
+  # zero from both sides at each knot. We assert the slopes match to within
+  # a small tolerance (they're both near zero).
+  eps = 1e-4
+  for anchor in (weather_mod.PRECIP_LIGHT, weather_mod.PRECIP_MODERATE, weather_mod.PRECIP_HEAVY):
+    left = (_reduce(anchor) - _reduce(anchor - eps)) / eps
+    right = (_reduce(anchor + eps) - _reduce(anchor)) / eps
+    assert abs(left - right) < 0.01, (
+      f"slope discontinuity at {anchor}: left={left}, right={right}"
+    )
+
+
+def test_interpolate_reduction_midpoint_equals_anchor_average():
+  # Smoothstep is antisymmetric about t=0.5, so the midpoint between two
+  # anchors should produce exactly the average of the two Y values.
+  mid_0_to_light = (weather_mod.PRECIP_NONE + weather_mod.PRECIP_LIGHT) / 2.0
+  assert _reduce(mid_0_to_light) == pytest.approx(RED_LIGHT / 2.0, rel=1e-6)
+
+  mid_light_to_mod = (weather_mod.PRECIP_LIGHT + weather_mod.PRECIP_MODERATE) / 2.0
+  assert _reduce(mid_light_to_mod) == pytest.approx((RED_LIGHT + RED_MODERATE) / 2.0, rel=1e-6)
+
+  mid_mod_to_heavy = (weather_mod.PRECIP_MODERATE + weather_mod.PRECIP_HEAVY) / 2.0
+  assert _reduce(mid_mod_to_heavy) == pytest.approx((RED_MODERATE + RED_HEAVY) / 2.0, rel=1e-6)
