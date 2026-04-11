@@ -41,6 +41,32 @@ _A_TOTAL_MAX_BP = [0., 20., 40.]
 def get_max_accel(v_ego):
   return np.interp(v_ego, A_CRUISE_MAX_BP, A_CRUISE_MAX_VALS)
 
+
+def should_release_stop_for_lead_launch(CP, *, standstill: bool, v_ego: float,
+                                        a_target: float, lead_source: str,
+                                        control_leads) -> bool:
+  if (not bool(standstill) or
+      float(a_target) <= 0.0 or
+      lead_source not in ("lead0", "lead1")):
+    return False
+
+  lead_idx = 0 if lead_source == "lead0" else 1
+  if lead_idx >= len(control_leads):
+    return False
+
+  lead = control_leads[lead_idx]
+  if lead is None or not bool(getattr(lead, "status", False)):
+    return False
+
+  lead_vrel = float(getattr(lead, "vRel", 0.0) or 0.0)
+  lead_v = float(getattr(lead, "vLead", v_ego) or v_ego)
+  lead_arel = float(getattr(lead, "aRel", 0.0) or 0.0)
+  lead_a = float(getattr(lead, "aLeadK", 0.0) or 0.0)
+  lead_pullaway_speed = max(0.0, lead_vrel, lead_v - float(v_ego))
+  lead_pullaway_accel = max(0.0, lead_arel, lead_a)
+  return bool(lead_pullaway_speed > max(float(getattr(CP, "vEgoStarting", 0.0)), 0.1) or lead_pullaway_accel > 0.2)
+
+
 def get_coast_accel(pitch):
   return np.sin(pitch) * -5.65 - 0.3  # fitted from data using xx/projects/allow_throttle/compute_coast_accel.py
 
@@ -220,6 +246,16 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     action_t =  self.CP.longitudinalActuatorDelay + DT_MDL
     output_a_target_mpc, output_should_stop_mpc = get_accel_from_plan(self.v_desired_trajectory, self.a_desired_trajectory, CONTROL_N_T_IDX,
                                                                       action_t=action_t, vEgoStopping=self.CP.vEgoStopping)
+    if output_should_stop_mpc and should_release_stop_for_lead_launch(
+      self.CP,
+      standstill=sm['carState'].standstill,
+      v_ego=v_ego,
+      a_target=output_a_target_mpc,
+      lead_source=str(getattr(self.mpc, "source", "")),
+      control_leads=getattr(self.mpc, "control_leads", ()),
+    ):
+      output_should_stop_mpc = False
+
     output_a_target_e2e = sm['modelV2'].action.desiredAcceleration
     output_should_stop_e2e = sm['modelV2'].action.shouldStop
 

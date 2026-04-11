@@ -89,6 +89,28 @@ def _build_slower_lead_probe(*, dt_s: float = DT_MDL, duration_s: float = 5.0, r
   return initial_speed_mps, initial_accel_mps2, steps
 
 
+def _build_stoplight_launch_probe(*, dt_s: float = DT_MDL, duration_s: float = 8.0) -> tuple[float, float, list[StepInput]]:
+  initial_speed_mps = 0.0
+  initial_accel_mps2 = 0.0
+  steps: list[StepInput] = []
+  for idx in range(int(round(duration_s / dt_s))):
+    t_s = idx * dt_s
+    lead_speed_mps = min(5.0, max(0.0, (t_s - 1.0) * 2.5)) if t_s >= 1.0 else 0.0
+    steps.append(StepInput(
+      t_s=t_s,
+      cruise_speed_mps=15.0,
+      lead_one=LeadDirective(
+        status=True,
+        v_lead_mps=lead_speed_mps,
+        model_prob_target=1.0,
+        d_rel_override_m=6.0 if idx == 0 else None,
+        acquisition_reset=idx == 0,
+      ),
+      note="stopped behind a lead that launches from a light",
+    ))
+  return initial_speed_mps, initial_accel_mps2, steps
+
+
 def _count_sign_reversals(rows: list[dict], field: str, *, epsilon: float = 0.05) -> int:
   previous_sign = 0
   reversals = 0
@@ -330,6 +352,28 @@ def test_slower_lead_probe_acquires_immediately_without_repeated_settle_hunting(
   assert settle_window
   assert _count_sign_reversals(settle_window, "controller_accel_mps2") <= 1
   assert _count_sign_reversals(settle_window, "realized_accel_mps2") <= 1
+
+
+def test_stoplight_launch_releases_planner_stop_as_lead_pulls_away() -> None:
+  vehicle = resolve_ev6_vehicle_config(topology="lka", controller_mode="shaped")
+  initial_speed_mps, initial_accel_mps2, steps = _build_stoplight_launch_probe()
+  result = run_harness(
+    vehicle_config=vehicle,
+    scenario_name="stoplight_launch_probe",
+    steps=steps,
+    initial_speed_mps=initial_speed_mps,
+    initial_accel_mps2=initial_accel_mps2,
+    noise_profile="off",
+    seed=1,
+  )
+
+  lead_moving_row = next(row for row in result.trace if row["active_lead_speed_mps"] > 0.1)
+  release_row = next(row for row in result.trace if not row["planner_should_stop"])
+
+  assert release_row["planner_source"] == "lead0"
+  assert release_row["planner_accel_mps2"] > 0.0
+  assert release_row["v_ego_true_mps"] < 0.05
+  assert release_row["t_s"] - lead_moving_row["t_s"] <= (DT_MDL * 2.0)
 
 
 def test_cutin_lead_acquisition_smoothing() -> None:
