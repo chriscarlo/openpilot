@@ -5,6 +5,7 @@ import pytest
 
 from cereal import log
 from openpilot.common.params import Params
+from openpilot.selfdrive.controls.lib.longitudinal_planner import get_max_accel
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import (
   ACCEL_MAX,
   LongitudinalMpc,
@@ -637,6 +638,12 @@ class TestHyundaiAiLeadStability:
 
     assert mpc.gap_reclaim_effective_cap > mpc._live_tune_cfg.gap_reclaim_max_accel
     assert 0.0 < mpc._gap_reclaim_blend < 1.0
+
+  def test_reclaim_uses_base_planner_max_accel_when_vibe_accel_is_disabled(self):
+    _configure_vibe_accel(enabled=False)
+    mpc = _make_hyundai_mpc(v_ego=29.0, a_ego=0.0)
+
+    assert mpc._get_gap_reclaim_personality_max_accel(29.0) == pytest.approx(get_max_accel(29.0))
 
   def test_reclaim_room_tapers_when_ego_accel_is_already_built(self, monkeypatch):
     _configure_vibe_accel(enabled=True, personality=0)

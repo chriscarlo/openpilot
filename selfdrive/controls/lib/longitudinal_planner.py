@@ -10,6 +10,7 @@ from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.modeld.constants import ModelConstants
 from openpilot.selfdrive.controls.lib.longcontrol import LongCtrlState
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LongitudinalMpc
+from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import get_low_speed_launch_follow_max_accel
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import T_IDXS as T_IDXS_MPC
 from openpilot.selfdrive.controls.lib.drive_helpers import CONTROL_N, get_accel_from_plan
 from openpilot.selfdrive.car.cruise import V_CRUISE_MAX, V_CRUISE_UNSET
@@ -30,6 +31,7 @@ A_CRUISE_MAX_BP = [0., 10.0, 25., 40.]
 CONTROL_N_T_IDX = ModelConstants.T_IDXS[:CONTROL_N]
 ALLOW_THROTTLE_THRESHOLD = 0.4
 MIN_ALLOW_THROTTLE_SPEED = 2.5
+LEAD_LAUNCH_RELEASE_HOLD_S = 0.10
 
 # Lookup table for turns
 # Allow higher total accel (lateral+longitudinal) at low speeds and taper with speed
@@ -60,11 +62,8 @@ def should_release_stop_for_lead_launch(CP, *, standstill: bool, v_ego: float,
 
   lead_vrel = float(getattr(lead, "vRel", 0.0) or 0.0)
   lead_v = float(getattr(lead, "vLead", v_ego) or v_ego)
-  lead_arel = float(getattr(lead, "aRel", 0.0) or 0.0)
-  lead_a = float(getattr(lead, "aLeadK", 0.0) or 0.0)
   lead_pullaway_speed = max(0.0, lead_vrel, lead_v - float(v_ego))
-  lead_pullaway_accel = max(0.0, lead_arel, lead_a)
-  return bool(lead_pullaway_speed > max(float(getattr(CP, "vEgoStarting", 0.0)), 0.1) or lead_pullaway_accel > 0.2)
+  return bool(lead_pullaway_speed > max(float(getattr(CP, "vEgoStarting", 0.0)), 0.1))
 
 
 def get_coast_accel(pitch):
@@ -101,6 +100,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     self.prev_accel_clip = [ACCEL_MIN, ACCEL_MAX]
     self.output_a_target = 0.0
     self.output_should_stop = False
+    self._lead_launch_release_counter = 0
 
     self.v_desired_trajectory = np.zeros(CONTROL_N)
     self.a_desired_trajectory = np.zeros(CONTROL_N)
@@ -198,6 +198,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
       self.v_desired_filter.x = v_ego
       # Clip aEgo to cruise limits to prevent large accelerations when becoming active
       self.a_desired = np.clip(sm['carState'].aEgo, accel_clip[0], accel_clip[1])
+      self._lead_launch_release_counter = 0
 
     # Prevent divergence, smooth in current v_ego
     self.v_desired_filter.x = max(0.0, self.v_desired_filter.update(v_ego))
@@ -246,15 +247,21 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     action_t =  self.CP.longitudinalActuatorDelay + DT_MDL
     output_a_target_mpc, output_should_stop_mpc = get_accel_from_plan(self.v_desired_trajectory, self.a_desired_trajectory, CONTROL_N_T_IDX,
                                                                       action_t=action_t, vEgoStopping=self.CP.vEgoStopping)
-    if output_should_stop_mpc and should_release_stop_for_lead_launch(
+    lead_launch_release_ready = output_should_stop_mpc and should_release_stop_for_lead_launch(
       self.CP,
       standstill=sm['carState'].standstill,
       v_ego=v_ego,
       a_target=output_a_target_mpc,
       lead_source=str(getattr(self.mpc, "source", "")),
       control_leads=getattr(self.mpc, "control_leads", ()),
-    ):
-      output_should_stop_mpc = False
+    )
+    if lead_launch_release_ready:
+      self._lead_launch_release_counter += 1
+      release_hold_frames = max(1, int(np.ceil(LEAD_LAUNCH_RELEASE_HOLD_S / max(self.dt, 1e-3))))
+      if self._lead_launch_release_counter >= release_hold_frames:
+        output_should_stop_mpc = False
+    else:
+      self._lead_launch_release_counter = 0
 
     output_a_target_e2e = sm['modelV2'].action.desiredAcceleration
     output_should_stop_e2e = sm['modelV2'].action.shouldStop
@@ -281,8 +288,22 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
         not self.output_should_stop):
       output_a_target = max(output_a_target, cutin_settle_floor)
 
+    lead_source = str(getattr(self.mpc, "source", ""))
+    control_leads = getattr(self.mpc, "control_leads", ())
+    if lead_source in ("lead0", "lead1"):
+      lead_idx = 0 if lead_source == "lead0" else 1
+      if lead_idx < len(control_leads):
+        launch_follow_max_accel = get_low_speed_launch_follow_max_accel(
+          v_ego,
+          control_leads[lead_idx],
+          getattr(self.mpc, "current_t_follow", 0.0),
+          float(accel_clip[1]),
+        )
+        accel_clip[1] = max(float(accel_clip[1]), float(launch_follow_max_accel))
+
     for idx in range(2):
       accel_clip[idx] = np.clip(accel_clip[idx], self.prev_accel_clip[idx] - 0.05, self.prev_accel_clip[idx] + 0.05)
+    self._planner_output_accel_limits = (float(accel_clip[0]), float(accel_clip[1]))
     self.output_a_target = np.clip(output_a_target, accel_clip[0], accel_clip[1])
     self.prev_accel_clip = accel_clip
     end_span(total_span)

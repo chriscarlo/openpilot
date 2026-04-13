@@ -105,6 +105,23 @@ GAP_RECLAIM_BLEND_FALL_TAU_S = 1.20
 GAP_RECLAIM_HORIZON_RAMP_TAU_S = 1.00
 GAP_RECLAIM_RELAX_ROOM_FRACTION = 0.85
 GAP_RECLAIM_RELAX_ROOM_MAX_M = 18.0
+LOW_SPEED_LAUNCH_FACTOR_V_EGO_BP = [0.0, 2.0, 6.0, 10.0]
+LOW_SPEED_LAUNCH_FACTOR_V_EGO_V = [1.0, 1.0, 0.60, 0.0]
+LOW_SPEED_LAUNCH_FACTOR_V_LEAD_BP = [0.0, 0.2, 1.0, 3.0, 6.0]
+LOW_SPEED_LAUNCH_FACTOR_V_LEAD_V = [0.0, 0.0, 0.35, 0.80, 1.0]
+LOW_SPEED_LAUNCH_FACTOR_PULLAWAY_BP = [0.0, 0.15, 0.5, 1.5, 3.0]
+LOW_SPEED_LAUNCH_FACTOR_PULLAWAY_V = [0.0, 0.0, 0.25, 0.75, 1.0]
+LOW_SPEED_LAUNCH_FACTOR_GAP_BP = [0.0, 0.5, 2.0, 5.0, 9.0]
+LOW_SPEED_LAUNCH_FACTOR_GAP_V = [0.0, 0.05, 0.25, 0.70, 1.0]
+LOW_SPEED_LAUNCH_GAP_BUFFER_M = 7.0
+LOW_SPEED_LAUNCH_QUEUE_SPEED_EXTRA_MPS = 3.0
+LOW_SPEED_LAUNCH_QUEUE_VLEAD_EXTRA_MPS = 3.0
+LOW_SPEED_LAUNCH_QUEUE_PULLAWAY_EXTRA_MPS = 3.0
+LOW_SPEED_LAUNCH_MAX_ACCEL = 2.4
+# Keep in sync with selfdrive/controls/lib/longitudinal_planner.py:get_max_accel.
+# LongitudinalMpc cannot import that module directly because planner imports MPC.
+GAP_RECLAIM_BASE_MAX_ACCEL_BP = [0.0, 10.0, 25.0, 40.0]
+GAP_RECLAIM_BASE_MAX_ACCEL_V = [1.6, 1.2, 0.8, 0.6]
 CUTIN_SETTLE_MIN_SPEED = 15.0
 CUTIN_SETTLE_DETECT_DREL_MAX = 70.0
 CUTIN_SETTLE_DETECT_PATH_ABS_MIN = 0.8
@@ -533,11 +550,19 @@ def get_gap_reclaim_effective_cap(v_ego, lead, t_follow,
                                   personality_max_accel: float | None = None) -> float:
   tuning = LeadResponseTuningConfig.defaults() if tuning is None else tuning
   comfort_cap = max(float(tuning.gap_reclaim_max_accel), 1e-3)
-  if (lead is None or not getattr(lead, 'status', False) or v_ego < GAP_RECLAIM_MIN_SPEED or
+  low_speed_launch_factor = get_low_speed_launch_follow_factor(v_ego, lead, t_follow)
+  launch_active = low_speed_launch_factor > 0.0
+  if (lead is None or not getattr(lead, 'status', False) or
+      (v_ego < GAP_RECLAIM_MIN_SPEED and not launch_active) or
       personality_max_accel is None):
     return comfort_cap
 
   personality_cap = max(comfort_cap, float(personality_max_accel))
+  if launch_active:
+    personality_cap = max(
+      personality_cap,
+      get_low_speed_launch_follow_max_accel(v_ego, lead, t_follow, comfort_cap),
+    )
   if personality_cap <= comfort_cap:
     return comfort_cap
 
@@ -553,6 +578,8 @@ def get_gap_reclaim_effective_cap(v_ego, lead, t_follow,
   pullaway_blend = float(np.interp(pullaway_speed, GAP_RECLAIM_PERSONALITY_PULLAWAY_BP, GAP_RECLAIM_PERSONALITY_PULLAWAY_V))
   surplus_activation = float(np.interp(headway_surplus, GAP_RECLAIM_PERSONALITY_SURPLUS_BP, [0.0, 0.15, 0.55, 1.0]))
   cap_blend = max(surplus_blend, pullaway_blend * surplus_activation)
+  if v_ego < GAP_RECLAIM_MIN_SPEED:
+    cap_blend = max(cap_blend, low_speed_launch_factor)
   return float(comfort_cap + (personality_cap - comfort_cap) * cap_blend)
 
 
@@ -599,7 +626,9 @@ def get_gap_reclaim_accel_floor(v_ego, lead, t_follow,
                                 tuning: LeadResponseTuningConfig | None = None,
                                 personality_max_accel: float | None = None) -> float:
   tuning = LeadResponseTuningConfig.defaults() if tuning is None else tuning
-  if lead is None or not getattr(lead, 'status', False) or v_ego < GAP_RECLAIM_MIN_SPEED:
+  low_speed_launch_factor = get_low_speed_launch_follow_factor(v_ego, lead, t_follow)
+  launch_active = low_speed_launch_factor > 0.0
+  if lead is None or not getattr(lead, 'status', False) or (v_ego < GAP_RECLAIM_MIN_SPEED and not launch_active):
     return 0.0
 
   v_lead = float(getattr(lead, 'vLead', v_ego) or v_ego)
@@ -630,8 +659,35 @@ def get_gap_reclaim_accel_floor(v_ego, lead, t_follow,
     tuning,
     personality_max_accel=personality_max_accel,
   )
+  if v_ego < GAP_RECLAIM_MIN_SPEED:
+    effective_cap = float(comfort_cap + (effective_cap - comfort_cap) * low_speed_launch_factor)
   floor = intent_fraction * effective_cap
   return float(np.clip(floor, 0.0, effective_cap))
+
+
+def get_low_speed_launch_follow_factor(v_ego, lead, t_follow) -> float:
+  if lead is None or not getattr(lead, 'status', False):
+    return 0.0
+
+  v_ego = float(v_ego)
+  d_rel = float(getattr(lead, 'dRel', 0.0) or 0.0)
+  v_lead = float(getattr(lead, 'vLead', v_ego) or v_ego)
+  v_rel = float(getattr(lead, 'vRel', 0.0) or 0.0)
+  pullaway_speed = max(0.0, v_lead - v_ego, v_rel)
+  if pullaway_speed <= 0.0:
+    return 0.0
+
+  gap_surplus = max(0.0, d_rel - get_headway_follow_distance(v_ego, t_follow))
+  speed_term = float(np.interp(v_ego, LOW_SPEED_LAUNCH_FACTOR_V_EGO_BP, LOW_SPEED_LAUNCH_FACTOR_V_EGO_V))
+  lead_speed_term = float(np.interp(v_lead, LOW_SPEED_LAUNCH_FACTOR_V_LEAD_BP, LOW_SPEED_LAUNCH_FACTOR_V_LEAD_V))
+  pullaway_term = float(np.interp(pullaway_speed, LOW_SPEED_LAUNCH_FACTOR_PULLAWAY_BP, LOW_SPEED_LAUNCH_FACTOR_PULLAWAY_V))
+  gap_term = float(max(0.0, np.interp(gap_surplus, LOW_SPEED_LAUNCH_FACTOR_GAP_BP, LOW_SPEED_LAUNCH_FACTOR_GAP_V)))
+  return float(np.clip(speed_term * lead_speed_term * max(pullaway_term, gap_term), 0.0, 1.0))
+
+
+def get_low_speed_launch_follow_max_accel(v_ego, lead, t_follow, base_max_accel: float) -> float:
+  factor = get_low_speed_launch_follow_factor(v_ego, lead, t_follow)
+  return float(base_max_accel + (LOW_SPEED_LAUNCH_MAX_ACCEL - base_max_accel) * factor)
 
 
 def get_lead_present_cruise_accel_cap(v_ego, lead, t_follow,
@@ -1520,9 +1576,9 @@ class LongitudinalMpc:
 
   def _get_gap_reclaim_personality_max_accel(self, v_ego: float) -> float | None:
     max_accel = self.vibe_controller.get_max_accel(v_ego)
-    if max_accel is None:
-      return None
-    return float(max_accel)
+    if max_accel is not None:
+      return float(max_accel)
+    return float(np.interp(float(v_ego), GAP_RECLAIM_BASE_MAX_ACCEL_BP, GAP_RECLAIM_BASE_MAX_ACCEL_V))
 
   def _apply_hyundai_gap_reclaim(self, raw_lead_obstacle: np.ndarray, filtered_lead_obstacle: np.ndarray,
                                  raw_lead, filtered_lead, raw_metrics: dict[str, float],
@@ -2065,23 +2121,30 @@ class LongitudinalMpc:
     filtered_metrics = self._lead_follow_metrics(float(self.x0[1]), self.current_t_follow, filtered_lead, float(filtered_lead_obstacle[0]))
     raw_filtered_drel_error_m = float(self._hyundai_virtual_lead_last_drel_error_m)
     steady_follow = self._is_hyundai_settled_follow(best_lead, filtered_lead, raw_metrics, filtered_metrics)
+    low_speed_launch_factor = get_low_speed_launch_follow_factor(float(self.x0[1]), filtered_lead, self.current_t_follow)
+    launch_gap_buffer_m = LOW_SPEED_LAUNCH_GAP_BUFFER_M * low_speed_launch_factor
+    raw_gap_surplus_for_release = raw_metrics["gap_surplus"] - launch_gap_buffer_m
+    filtered_gap_surplus_for_release = filtered_metrics["gap_surplus"] - launch_gap_buffer_m
+    queue_speed_cap = HYUNDAI_LOW_SPEED_QUEUE_V_EGO_MAX + LOW_SPEED_LAUNCH_QUEUE_SPEED_EXTRA_MPS * low_speed_launch_factor
+    queue_vlead_cap = HYUNDAI_LOW_SPEED_QUEUE_VLEAD_MAX + LOW_SPEED_LAUNCH_QUEUE_VLEAD_EXTRA_MPS * low_speed_launch_factor
+    queue_pullaway_cap = HYUNDAI_LOW_SPEED_QUEUE_PULLAWAY_MPS_MAX + LOW_SPEED_LAUNCH_QUEUE_PULLAWAY_EXTRA_MPS * low_speed_launch_factor
     low_speed_queue_hold = (
-      float(self.x0[1]) <= HYUNDAI_LOW_SPEED_QUEUE_V_EGO_MAX and
+      float(self.x0[1]) <= queue_speed_cap and
       float(getattr(best_lead, 'dRel', 1e9) or 1e9) <= HYUNDAI_LOW_SPEED_QUEUE_DREL_MAX and
-      float(getattr(best_lead, 'vLead', self.x0[1]) or self.x0[1]) <= HYUNDAI_LOW_SPEED_QUEUE_VLEAD_MAX and
-      raw_metrics["pullaway_speed"] <= HYUNDAI_LOW_SPEED_QUEUE_PULLAWAY_MPS_MAX
+      float(getattr(best_lead, 'vLead', self.x0[1]) or self.x0[1]) <= queue_vlead_cap and
+      raw_metrics["pullaway_speed"] <= queue_pullaway_cap
     )
     raw_requires_owner = (
       low_speed_queue_hold or
-      raw_metrics["gap_surplus"] <= HYUNDAI_VIRTUAL_LEAD_RETAIN_GAP_SURPLUS_M or
+      raw_gap_surplus_for_release <= HYUNDAI_VIRTUAL_LEAD_RETAIN_GAP_SURPLUS_M or
       raw_metrics["obstacle_0"] <= (float(cruise_obstacle[0]) - HYUNDAI_VIRTUAL_LEAD_RAW_OBSTACLE_MARGIN_M)
     )
     release_ready = (
-      filtered_metrics["gap_surplus"] >= HYUNDAI_VIRTUAL_LEAD_RELEASE_GAP_SURPLUS_M and
+      filtered_gap_surplus_for_release >= HYUNDAI_VIRTUAL_LEAD_RELEASE_GAP_SURPLUS_M and
       filtered_metrics["pullaway_speed"] >= HYUNDAI_VIRTUAL_LEAD_RELEASE_PULLAWAY_MPS
     )
     raw_release_ready = (
-      raw_metrics["gap_surplus"] >= HYUNDAI_VIRTUAL_LEAD_RELEASE_RAW_GAP_SURPLUS_M and
+      raw_gap_surplus_for_release >= HYUNDAI_VIRTUAL_LEAD_RELEASE_RAW_GAP_SURPLUS_M and
       raw_metrics["pullaway_speed"] >= HYUNDAI_VIRTUAL_LEAD_RELEASE_RAW_PULLAWAY_MPS
     )
     release_agreement_ok = bool(
@@ -2089,16 +2152,16 @@ class LongitudinalMpc:
       (not steady_follow or raw_filtered_drel_error_m <= HYUNDAI_VIRTUAL_LEAD_RELEASE_AGREEMENT_MAX_DREL_ERR_M)
     )
     immediate_release = (
-      filtered_metrics["gap_surplus"] >= HYUNDAI_VIRTUAL_LEAD_RELEASE_IMMEDIATE_GAP_SURPLUS_M and
+      filtered_gap_surplus_for_release >= HYUNDAI_VIRTUAL_LEAD_RELEASE_IMMEDIATE_GAP_SURPLUS_M and
       filtered_metrics["pullaway_speed"] >= HYUNDAI_VIRTUAL_LEAD_RELEASE_IMMEDIATE_PULLAWAY_MPS
     )
     raw_immediate_release_ready = (
-      raw_metrics["gap_surplus"] >= HYUNDAI_VIRTUAL_LEAD_RELEASE_IMMEDIATE_RAW_GAP_SURPLUS_M and
+      raw_gap_surplus_for_release >= HYUNDAI_VIRTUAL_LEAD_RELEASE_IMMEDIATE_RAW_GAP_SURPLUS_M and
       raw_metrics["pullaway_speed"] >= HYUNDAI_VIRTUAL_LEAD_RELEASE_IMMEDIATE_RAW_PULLAWAY_MPS
     )
     reacquire_lead = (
       raw_requires_owner or
-      filtered_metrics["gap_surplus"] <= HYUNDAI_VIRTUAL_LEAD_REACQUIRE_GAP_SURPLUS_M
+      filtered_gap_surplus_for_release <= HYUNDAI_VIRTUAL_LEAD_REACQUIRE_GAP_SURPLUS_M
     )
     active_mode = self._acc_obstacle_mode
     reason = "filtered_hold"
@@ -2172,8 +2235,15 @@ class LongitudinalMpc:
       "cruise_obstacle": float(cruise_obstacle[0]),
       "raw_gap_surplus_m": float(raw_metrics["gap_surplus"]),
       "filtered_gap_surplus_m": float(filtered_metrics["gap_surplus"]),
+      "launch_gap_buffer_m": float(launch_gap_buffer_m),
+      "raw_gap_surplus_for_release_m": float(raw_gap_surplus_for_release),
+      "filtered_gap_surplus_for_release_m": float(filtered_gap_surplus_for_release),
       "raw_pullaway_mps": float(raw_metrics["pullaway_speed"]),
       "filtered_pullaway_mps": float(filtered_metrics["pullaway_speed"]),
+      "low_speed_launch_factor": float(low_speed_launch_factor),
+      "low_speed_queue_speed_cap_mps": float(queue_speed_cap),
+      "low_speed_queue_vlead_cap_mps": float(queue_vlead_cap),
+      "low_speed_queue_pullaway_cap_mps": float(queue_pullaway_cap),
       "raw_filtered_drel_error_m": float(raw_filtered_drel_error_m),
       "steady_follow": bool(steady_follow),
       "filtered_release_ready": bool(release_ready),

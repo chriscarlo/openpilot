@@ -111,6 +111,29 @@ def _build_stoplight_launch_probe(*, dt_s: float = DT_MDL, duration_s: float = 8
   return initial_speed_mps, initial_accel_mps2, steps
 
 
+def _build_stopped_lead_noise_probe(*, dt_s: float = DT_MDL, duration_s: float = 12.0) -> tuple[float, float, list[StepInput]]:
+  initial_speed_mps = 0.0
+  initial_accel_mps2 = 0.0
+  steps: list[StepInput] = []
+  spike_indices = {int(round(t / dt_s)) for t in (2.0, 5.0, 8.0, 10.0)}
+  for idx in range(int(round(duration_s / dt_s))):
+    a_lead_k_mps2 = 0.8 if idx in spike_indices else 0.0
+    steps.append(StepInput(
+      t_s=idx * dt_s,
+      cruise_speed_mps=15.0,
+      lead_one=LeadDirective(
+        status=True,
+        v_lead_mps=0.0,
+        a_lead_k_mps2=a_lead_k_mps2,
+        model_prob_target=1.0,
+        d_rel_override_m=6.0 if idx == 0 else None,
+        acquisition_reset=idx == 0,
+      ),
+      note="stopped lead with repeated accel-estimate spikes",
+    ))
+  return initial_speed_mps, initial_accel_mps2, steps
+
+
 def _count_sign_reversals(rows: list[dict], field: str, *, epsilon: float = 0.05) -> int:
   previous_sign = 0
   reversals = 0
@@ -369,11 +392,33 @@ def test_stoplight_launch_releases_planner_stop_as_lead_pulls_away() -> None:
 
   lead_moving_row = next(row for row in result.trace if row["active_lead_speed_mps"] > 0.1)
   release_row = next(row for row in result.trace if not row["planner_should_stop"])
+  prerelease_rows = [row for row in result.trace if row["t_s"] >= release_row["t_s"] and row["t_s"] <= 6.0]
+  rollout_rows = [row for row in result.trace if row["t_s"] <= 6.0]
 
   assert release_row["planner_source"] == "lead0"
   assert release_row["planner_accel_mps2"] > 0.0
   assert release_row["v_ego_true_mps"] < 0.05
-  assert release_row["t_s"] - lead_moving_row["t_s"] <= (DT_MDL * 2.0)
+  assert release_row["t_s"] - lead_moving_row["t_s"] <= 0.15
+  assert all(row["planner_source"] == "lead0" for row in prerelease_rows)
+  assert max(row["planner_gap_reclaim_floor_mps2"] for row in rollout_rows) > 1.0
+  assert max(row["planner_accel_mps2"] for row in rollout_rows) > 1.8
+
+
+def test_stopped_lead_noise_does_not_release_planner_stop() -> None:
+  vehicle = resolve_ev6_vehicle_config(topology="lka", controller_mode="shaped")
+  initial_speed_mps, initial_accel_mps2, steps = _build_stopped_lead_noise_probe()
+  result = run_harness(
+    vehicle_config=vehicle,
+    scenario_name="stopped_lead_noise_probe",
+    steps=steps,
+    initial_speed_mps=initial_speed_mps,
+    initial_accel_mps2=initial_accel_mps2,
+    noise_profile="off",
+    seed=1,
+  )
+
+  assert all(row["planner_should_stop"] for row in result.trace)
+  assert all(row["v_ego_true_mps"] < 0.05 for row in result.trace)
 
 
 def test_cutin_lead_acquisition_smoothing() -> None:

@@ -31,6 +31,15 @@ def test_stop_release_for_pulling_away_lead_requires_positive_pullaway_signal() 
     lead_source="lead0",
     control_leads=[stationary_lead, None],
   )
+  noisy_stationary_lead = SimpleNamespace(status=True, vRel=0.0, vLead=0.0, aRel=0.6, aLeadK=0.6)
+  assert not should_release_stop_for_lead_launch(
+    CP,
+    standstill=True,
+    v_ego=0.0,
+    a_target=0.15,
+    lead_source="lead0",
+    control_leads=[noisy_stationary_lead, None],
+  )
 
 
 def test_stop_release_for_pulling_away_lead_requires_standstill_and_active_lead() -> None:
