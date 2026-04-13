@@ -180,8 +180,13 @@ protected:
   QImage weather_overlay_snow_image_;
   bool weather_overlay_has_rain_image_ = false;
   bool weather_overlay_has_snow_image_ = false;
-  // Ego heading (radians, NED-frame yaw) used to rotate the weather overlay
-  // to a heading-up view. Falls back to 0 (north-up) when not valid.
-  float weather_overlay_heading_rad_ = 0.0f;
-  bool weather_overlay_heading_valid_ = false;
+  // Ego compass bearing (radians, 0 = true north, + = clockwise toward east)
+  // used to rotate the weather overlay to a heading-up view. Sourced from
+  // gpsLocation[External].bearingDeg — the GPS receiver is the only daemon
+  // that produces a true absolute heading. Cached across momentary drop-outs
+  // (stops, low-accuracy spikes); resets to 0 (north-up) only when no fix
+  // has ever been seen.
+  float weather_overlay_bearing_rad_ = 0.0f;
+  bool weather_overlay_bearing_valid_ = false;
+  double weather_overlay_bearing_last_good_monotonic_s_ = 0.0;
 };

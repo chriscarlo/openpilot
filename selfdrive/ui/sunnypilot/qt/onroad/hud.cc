@@ -217,24 +217,57 @@ void HudRendererSP::updateState(const UIState &s) {
     refreshVTSCCoPilotTuning();
   }
 
-  // Update cached ego heading from livePose (20 Hz) for heading-up overlay rotation.
-  // livePose.orientationNED.z is euler yaw in radians, NED convention:
-  // 0 = facing north, positive = rotate clockwise (toward east).
-  if (s.sm && s.sm->valid("livePose")) {
-    try {
-      const auto pose = (*s.sm)["livePose"].getLivePose();
-      const auto &ori = pose.getOrientationNED();
-      if (ori.getValid() && pose.getInputsOK()) {
-        weather_overlay_heading_rad_ = ori.getZ();
-        weather_overlay_heading_valid_ = true;
-      } else {
-        weather_overlay_heading_valid_ = false;
+  // Update cached ego compass bearing from the GPS receiver for heading-up
+  // overlay rotation. IMPORTANT: do not use livePose.orientationNED.z here —
+  // locationd's pose_kf has no absolute-yaw observation (no magnetometer and
+  // no GPS-bearing observation), so its yaw integrates gyro from an arbitrary
+  // zero and is *not* a compass heading. gpsLocation[External].bearingDeg is
+  // the only source of a real compass bearing on the device.
+  //
+  // External ublox publishes at 10 Hz; internal qcomgps at 1 Hz. We accept
+  // whichever has a recent valid fix, preferring the external source for
+  // smoother rotation. We cache the last good bearing across short drop-outs
+  // (stops, bearing-accuracy spikes, low speed) so the map doesn't snap back
+  // to north-up mid-drive.
+  const double bearing_cache_hold_s = 30.0;    // Keep last bearing for ~30 s of signal loss.
+  const float bearing_accuracy_max_deg = 30.0f;  // Reject bearings worse than this 1-sigma.
+  auto try_consume_gps_bearing = [&](cereal::GpsLocationData::Reader gps) -> bool {
+    if (!gps.getHasFix()) return false;
+    const float bearing_deg = gps.getBearingDeg();
+    if (!std::isfinite(bearing_deg) || bearing_deg < 0.0f || bearing_deg > 360.0f) return false;
+    const float bearing_acc = gps.getBearingAccuracyDeg();
+    // Some receivers don't populate accuracy (leave it 0 / NaN); only reject
+    // when we have a finite value that's demonstrably bad.
+    if (std::isfinite(bearing_acc) && bearing_acc > bearing_accuracy_max_deg) return false;
+    weather_overlay_bearing_rad_ = static_cast<float>(bearing_deg * M_PI / 180.0);
+    weather_overlay_bearing_valid_ = true;
+    weather_overlay_bearing_last_good_monotonic_s_ =
+      std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    return true;
+  };
+  if (s.sm) {
+    bool fresh = false;
+    // Prefer external ublox (10 Hz) for smoother rotation; fall back to the
+    // internal qcomgps receiver (1 Hz).
+    if (!fresh && s.sm->valid("gpsLocationExternal")) {
+      try {
+        fresh = try_consume_gps_bearing((*s.sm)["gpsLocationExternal"].getGpsLocationExternal());
+      } catch (const std::exception &) {}
+    }
+    if (!fresh && s.sm->valid("gpsLocation")) {
+      try {
+        fresh = try_consume_gps_bearing((*s.sm)["gpsLocation"].getGpsLocation());
+      } catch (const std::exception &) {}
+    }
+    if (!fresh && weather_overlay_bearing_valid_) {
+      const double now_s =
+        std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+      if ((now_s - weather_overlay_bearing_last_good_monotonic_s_) > bearing_cache_hold_s) {
+        weather_overlay_bearing_valid_ = false;
       }
-    } catch (const std::exception &) {
-      weather_overlay_heading_valid_ = false;
     }
   } else {
-    weather_overlay_heading_valid_ = false;
+    weather_overlay_bearing_valid_ = false;
   }
 
   const bool overlay_msg_recent = s.sm && s.sm->valid("weatherOverlaySP") && s.sm->rcv_frame("weatherOverlaySP") > 0 &&
@@ -509,10 +542,11 @@ void HudRendererSP::drawWeatherOverlay(QPainter &p, const QRect &surface_rect) {
   );
 
   // Heading-up: rotate the north-up precipitation image about the car anchor
-  // so the ego's current heading points "up" on screen. When heading is not
-  // valid (e.g. locationd not ready) we fall back to north-up (0 rotation).
-  const double heading_rad = weather_overlay_heading_valid_
-    ? static_cast<double>(weather_overlay_heading_rad_)
+  // so the ego's current compass bearing points "up" on screen. Bearing is
+  // sourced from the GPS receiver (see updateState); falls back to north-up
+  // (0 rotation) only when no fix has ever been seen or the cache expired.
+  const double heading_rad = weather_overlay_bearing_valid_
+    ? static_cast<double>(weather_overlay_bearing_rad_)
     : 0.0;
   const double heading_deg = heading_rad * 180.0 / M_PI;
   // Draw the precomposited square map into a cover square centered on the car

@@ -21,8 +21,12 @@ UIStateSP::UIStateSP(QObject *parent) : UIState(parent) {
     "modelManagerSP", "selfdriveStateSP", "longitudinalPlanSP", "backupManagerSP", "carControl", "carOutput", "liveMapDataSP",
     "rtiStateSP",  // RTI (Realtime Traffic Intelligence) state with pre-computed threat display data
     "weatherOverlaySP",  // Heading-up precipitation wash for the SP onroad HUD (rendered north-up, rotated at draw time)
-    "livePose",  // Ego orientation (for heading-up weather overlay rotation)
-    // GPS subscriptions removed - bearing calculations now handled by rtid
+    // GPS subscriptions: weather overlay rotates the north-up radar PNG to the
+    // ego compass heading, which is only sourced reliably from the GPS receiver.
+    // livePose.orientationNED.z is *not* a compass heading — locationd's pose_kf
+    // has no absolute-yaw observation, so its yaw drifts from an arbitrary zero.
+    "gpsLocation",
+    "gpsLocationExternal",
   });
 
   // update timer
