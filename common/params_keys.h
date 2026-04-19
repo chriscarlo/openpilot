@@ -518,6 +518,8 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"MapWindingSummary", {CLEAR_ON_ONROAD_TRANSITION, JSON}},
     {"MapTargetLatA", {CLEAR_ON_ONROAD_TRANSITION, STRING}},
     {"MapTargetVelocities", {CLEAR_ON_ONROAD_TRANSITION, STRING}},
+    {"MapPreCurveSpeeds", {CLEAR_ON_ONROAD_TRANSITION, STRING}},
+    {"MapTilesSigmoidHash", {CLEAR_ON_ONROAD_TRANSITION, STRING}},
     {"NextMapAdvisoryLimit", {CLEAR_ON_ONROAD_TRANSITION, STRING}},
     {"NextMapHazard", {CLEAR_ON_ONROAD_TRANSITION, STRING}},
     {"NextMapSpeedLimit", {CLEAR_ON_ONROAD_TRANSITION, JSON}},

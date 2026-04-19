@@ -37,15 +37,17 @@ class RequestsStub:
 
 
 def test_severity_from_mm_per_hr_matches_controller_anchors():
-  # WeatherController PRECIP anchors: LIGHT=0.5, MODERATE=2.5, HEAVY=7.5 mm/hr.
+  # Thresholds match WeatherController's PRECIP_LIGHT / MODERATE / HEAVY,
+  # which are pinned to RainViewer scheme 2 palette breaks (dBZ 15 / 35 / 45)
+  # via Marshall-Palmer — i.e. 0.32 / 5.62 / 23.67 mm/hr.
   assert weatherd.severity_from_mm_per_hr(0.0) == "none"
-  assert weatherd.severity_from_mm_per_hr(0.3) == "none"
-  assert weatherd.severity_from_mm_per_hr(0.5) == "light"
-  assert weatherd.severity_from_mm_per_hr(1.5) == "light"
-  assert weatherd.severity_from_mm_per_hr(2.5) == "moderate"
-  assert weatherd.severity_from_mm_per_hr(5.0) == "moderate"
-  assert weatherd.severity_from_mm_per_hr(7.5) == "heavy"
-  assert weatherd.severity_from_mm_per_hr(20.0) == "heavy"
+  assert weatherd.severity_from_mm_per_hr(0.31) == "none"
+  assert weatherd.severity_from_mm_per_hr(0.32) == "light"
+  assert weatherd.severity_from_mm_per_hr(3.0) == "light"
+  assert weatherd.severity_from_mm_per_hr(5.62) == "moderate"
+  assert weatherd.severity_from_mm_per_hr(15.0) == "moderate"
+  assert weatherd.severity_from_mm_per_hr(23.67) == "heavy"
+  assert weatherd.severity_from_mm_per_hr(100.0) == "heavy"
 
 
 def test_haversine_km_identity_zero():

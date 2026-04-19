@@ -33,27 +33,37 @@ WEATHER_ACCEL_RATE = 2.5
 # How old weather data can be before we ignore it (seconds)
 MAX_DATA_AGE_S = 600  # 10 minutes
 
-# Precipitation intensity anchor points (mm/hour). These are placed deeper
-# into each meteorological rain category than the literal thresholds so that
-# drizzle doesn't instantly jump to the full "light rain" reduction:
+# Precipitation intensity anchor points (mm/hour). These are pinned to the
+# palette discontinuities of the RainViewer "Universal Blue" color scheme
+# (scheme 2) used by weather_overlayd so the speed reduction kicks in the
+# moment the driver sees a new color band under the car:
 #
-#   meteorological "light"   : 0.5 – 2.5 mm/hr  → LIGHT anchor placed at 1.5
-#   meteorological "moderate": 2.5 – 7.6 mm/hr  → MODERATE anchor placed at 5.0
-#   meteorological "heavy"   : > 7.6 mm/hr      → HEAVY anchor placed at 10.0
+#   dBZ 15 → cyan appears (first visible precip on the overlay)
+#   dBZ 35 → yellow appears (blue → yellow palette break)
+#   dBZ 45 → red appears   (yellow → red palette break)
+#
+# Converted to mm/hr via the Marshall-Palmer Z-R relation (Z = 200·R^1.6):
+#   R = (Z/200)^(1/1.6), Z = 10^(dBZ/10)  →  R ≈ 0.0365 · 10^(0.0625·dBZ)
+#
+# RainViewer does not publish which Z-R relation they use, so Marshall-Palmer
+# is an assumption (it's the mid-latitude stratiform default). If the overlay
+# tile palette or provider ever changes, recompute these anchors from the new
+# palette's dBZ breaks.
 #
 # Between anchors the reduction is a cubic smoothstep (3t^2 - 2t^3) of the
 # two adjacent user-configured reductions. Smoothstep has f'(0)=f'(1)=0,
 # which removes the slope discontinuity the old linear interpolation had at
 # each knot.
 PRECIP_NONE = 0.0
-PRECIP_LIGHT = 1.5
-PRECIP_MODERATE = 5.0
-PRECIP_HEAVY = 10.0
+PRECIP_LIGHT = 0.32     # dBZ 15 — cyan
+PRECIP_MODERATE = 5.62  # dBZ 35 — yellow
+PRECIP_HEAVY = 23.67    # dBZ 45 — red
 
-# Minimum precipitation to activate. Below this threshold the smoothstep
-# curve would produce a sub-0.1 mph reduction that isn't worth a control
-# cycle — reset the controller instead so other constraints take over.
-MIN_PRECIP_MM_PER_HR = 0.1
+# Minimum precipitation to activate. Matches PRECIP_LIGHT so the controller
+# only engages once the overlay actually shows a visible color band under the
+# car — below this the RainViewer tile is effectively transparent, and slowing
+# down while the driver sees "no rain" on the HUD breaks alignment.
+MIN_PRECIP_MM_PER_HR = PRECIP_LIGHT
 
 
 def _lerp(a: float, b: float, t: float) -> float:

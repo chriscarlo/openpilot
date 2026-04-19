@@ -49,12 +49,14 @@ STALE_TIMEOUT_S = 900            # clear state after 15 min without a successful
 LOOP_HZ = 0.2                    # 1 iteration per 5 seconds (light main loop)
 HTTP_TIMEOUT_S = 10
 
-# Severity thresholds (mm/hr). These match the old RainViewer-sourced
-# classification so the downstream WeatherController continues to interpret
-# the `severity` field identically.
-SEVERITY_LIGHT_MM = 0.5
-SEVERITY_MODERATE_MM = 2.5
-SEVERITY_HEAVY_MM = 7.5
+# Severity thresholds (mm/hr). Pinned to the palette discontinuities of the
+# RainViewer Universal Blue scheme (dBZ 15 / 35 / 45) converted via Marshall-
+# Palmer Z = 200·R^1.6, matching WeatherController.PRECIP_LIGHT/MODERATE/HEAVY.
+# The severity label for a given mm/hr therefore corresponds to the color band
+# the same mm/hr would paint onto the HUD overlay.
+SEVERITY_LIGHT_MM = 0.32     # dBZ 15 — cyan appears
+SEVERITY_MODERATE_MM = 5.62  # dBZ 35 — yellow appears
+SEVERITY_HEAVY_MM = 23.67    # dBZ 45 — red appears
 
 
 def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:

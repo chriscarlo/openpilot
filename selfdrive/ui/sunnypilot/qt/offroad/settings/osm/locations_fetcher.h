@@ -53,11 +53,11 @@ public:
 
   inline std::vector<std::tuple<QString, QString, QString, QString> >
   getOsmLocations(const std::tuple<QString, QString> &customLocation = defaultLocation) const {
-    return getLocationsFromURL( "https://raw.githubusercontent.com/pfeiferj/openpilot-mapd/main/nation_bounding_boxes.json", customLocation);
+    return getLocationsFromURL( "https://raw.githubusercontent.com/chriscarlo/mapd/main/nation_bounding_boxes.json", customLocation);
   }
 
   inline std::vector<std::tuple<QString, QString, QString, QString> >
   getUsStatesLocations(const std::tuple<QString, QString> &customLocation = defaultLocation) const {
-    return getLocationsFromURL( "https://raw.githubusercontent.com/pfeiferj/openpilot-mapd/main/us_states_bounding_boxes.json", customLocation);
+    return getLocationsFromURL( "https://raw.githubusercontent.com/chriscarlo/mapd/main/us_states_bounding_boxes.json", customLocation);
   }
 };

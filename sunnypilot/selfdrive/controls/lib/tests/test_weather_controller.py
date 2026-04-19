@@ -196,13 +196,15 @@ def test_interpolate_reduction_zero_below_none_anchor():
   assert _reduce(-0.5) == 0.0
 
 
-def test_drizzle_produces_much_smaller_reduction_than_red_light():
-  # 0.3 mm/hr is classical drizzle. The new curve should give much less
-  # than the full red_light value (contrast with the old linear code,
-  # where 0.3 mm/hr → 3.0 mph once the LIGHT anchor was at 0.5 mm/hr).
-  drizzle = _reduce(0.3)
-  assert drizzle > 0.0
-  assert drizzle < RED_LIGHT * 0.3, f"drizzle too aggressive: {drizzle}"
+def test_sub_visible_precipitation_reduction_is_small_fraction_of_red_light():
+  # The LIGHT anchor is pinned to dBZ 15 (~0.32 mm/hr), which is the point at
+  # which RainViewer's scheme 2 palette first paints a visible cyan. A value
+  # well below that (dBZ < ~8) is effectively invisible on the overlay, so
+  # the smoothstep segment between 0 and LIGHT should produce a small
+  # fraction of red_light rather than jumping straight to the full reduction.
+  sub_visible = _reduce(0.1)
+  assert sub_visible > 0.0
+  assert sub_visible < RED_LIGHT * 0.3, f"sub-visible reduction too aggressive: {sub_visible}"
 
 
 def test_interpolate_reduction_monotonic_across_spectrum():
@@ -216,8 +218,11 @@ def test_smoothstep_c1_continuity_at_anchor_knots():
   # A numerical derivative on both sides of each anchor should match
   # closely — smoothstep has f'(0)=f'(1)=0, so the curve's slope approaches
   # zero from both sides at each knot. We assert the slopes match to within
-  # a small tolerance (they're both near zero).
-  eps = 1e-4
+  # a small tolerance (they're both near zero). The eps must be small
+  # enough that it covers only a tiny fraction of the narrowest segment
+  # (PRECIP_NONE → PRECIP_LIGHT), otherwise the chord slope picks up the
+  # curve's nonlinearity and the check becomes noisy.
+  eps = 1e-6
   for anchor in (weather_mod.PRECIP_LIGHT, weather_mod.PRECIP_MODERATE, weather_mod.PRECIP_HEAVY):
     left = (_reduce(anchor) - _reduce(anchor - eps)) / eps
     right = (_reduce(anchor + eps) - _reduce(anchor)) / eps

@@ -31,7 +31,7 @@ def test_target_version_env_override_wins(monkeypatch):
 def test_target_binary_url_defaults(monkeypatch):
   monkeypatch.delenv("SP_MAPD_BINARY_URL", raising=False)
   assert mapd_installer.get_target_binary_url("v1.2.3", DummyParams({})) == \
-    "https://github.com/pfeiferj/openpilot-mapd/releases/download/v1.2.3/mapd"
+    "https://github.com/chriscarlo/mapd/releases/download/v1.2.3/mapd"
 
 
 def test_target_binary_url_param_override_supports_version_template(monkeypatch):

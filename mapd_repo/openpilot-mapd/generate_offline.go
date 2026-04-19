@@ -118,8 +118,8 @@ func GenerateAreas() []Area {
 	return areas
 }
 
-func GenerateOffline(minGenLat int, minGenLon int, maxGenLat int, maxGenLon int, generateEmptyFiles bool) {
-	log.Info().Msg("Generating Offline Map")
+func GenerateOffline(minGenLat int, minGenLon int, maxGenLat int, maxGenLon int, generateEmptyFiles bool, sigCfg SigmoidCfg) {
+	log.Info().Str("sigmoid_hash", sigCfg.Hash()).Msg("Generating Offline Map")
 	EnsureOfflineMapsDirectories()
 	file, err := os.Open("./map.osm.pbf")
 	check(errors.Wrap(err, "could not open map pbf file"))
@@ -243,6 +243,8 @@ func GenerateOffline(minGenLat int, minGenLon int, maxGenLat int, maxGenLon int,
 		rootOffline.SetMaxLat(area.MaxLat)
 		rootOffline.SetMaxLon(area.MaxLon)
 		rootOffline.SetOverlap(OVERLAP_BOX_DEGREES)
+		rootOffline.SetSchemaVersion(1)
+		check(errors.Wrap(rootOffline.SetSigmoidHash(sigCfg.Hash()), "could not set sigmoid hash"))
 		for i, way := range area.Ways {
 			w := ways.At(i)
 			w.SetMinLat(way.MinLat)
@@ -273,6 +275,33 @@ func GenerateOffline(minGenLat int, minGenLon int, maxGenLat int, maxGenLon int,
 				n := nodes.At(j)
 				n.SetLatitude(node.Latitude)
 				n.SetLongitude(node.Longitude)
+			}
+
+			// Bake per-node safe speeds against the live sigmoid. Endpoints
+			// (j=0 and j=len-1) get MaxSpeedDefault since 3-point curvature
+			// is undefined; interior nodes use the same per-triplet curvature
+			// formula the on-device runtime uses (see math.go:GetCurvature),
+			// then map κ → m/s via the sigmoid.
+			//
+			// Note: live runtime curvature smoothing for merges/splits in
+			// math.go:140-159 is intentionally NOT replayed here — it is
+			// context-dependent on adjacent ways and therefore can only be
+			// computed at runtime. The runtime falls back to the live sigmoid
+			// when baked speeds disagree (see vision_turn_controller.py).
+			safeSpeeds, err := w.NewSafeSpeeds(int32(len(way.Nodes)))
+			check(errors.Wrap(err, "could not create way safe speeds"))
+			for j := 0; j < len(way.Nodes); j++ {
+				var k float64
+				if j == 0 || j == len(way.Nodes)-1 {
+					k = 0
+				} else {
+					a := way.Nodes[j-1]
+					b := way.Nodes[j]
+					c := way.Nodes[j+1]
+					curvature, _, _ := GetCurvature(a.Latitude, a.Longitude, b.Latitude, b.Longitude, c.Latitude, c.Longitude)
+					k = math.Abs(curvature)
+				}
+				safeSpeeds.Set(j, CurvatureToSpeed(k, sigCfg))
 			}
 		}
 

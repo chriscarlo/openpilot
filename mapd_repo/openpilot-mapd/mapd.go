@@ -170,6 +170,34 @@ func loop(state *State) {
 	err = PutParam(MAP_TARGET_VELOCITIES, data)
 	logwe(errors.Wrap(err, "could not write curvatures"))
 
+	// -----------------  Sigmoid-baked speeds (schema v1+) ---------------
+	// Gate on the loaded tile's schemaVersion. Pre-bake tiles emit empty,
+	// which the openpilot-side fallback path detects (length 0 → live calc).
+	if offline.SchemaVersion() >= 1 {
+		bakedSpeeds, bakedErr := GetStateBakedSpeeds(state)
+		logde(errors.Wrap(bakedErr, "could not get baked speeds from current state"))
+		if bakedSpeeds != nil {
+			data, err = json.Marshal(bakedSpeeds)
+			logde(errors.Wrap(err, "could not marshal baked speeds"))
+			err = PutParam(MAP_PRE_CURVE_SPEEDS, data)
+			logwe(errors.Wrap(err, "could not write baked speeds"))
+
+			tileHash, hashErr := offline.SigmoidHash()
+			if hashErr == nil {
+				err = PutParam(MAP_TILES_SIGMOID_HASH, []byte(tileHash))
+				logwe(errors.Wrap(err, "could not write tile sigmoid hash"))
+			}
+		} else {
+			// Mixed schema (current way v1, next way v0) → clear so the
+			// fallback path can engage cleanly without stale data.
+			_ = PutParam(MAP_PRE_CURVE_SPEEDS, []byte{'[', ']'})
+			_ = PutParam(MAP_TILES_SIGMOID_HASH, []byte{})
+		}
+	} else {
+		_ = PutParam(MAP_PRE_CURVE_SPEEDS, []byte{'[', ']'})
+		_ = PutParam(MAP_TILES_SIGMOID_HASH, []byte{})
+	}
+
 	routeWinding := ComputeRouteWindingSummary(state.CurrentWay, state.NextWays)
 	data, err = json.Marshal(routeWinding)
 	logde(errors.Wrap(err, "could not marshal winding road summary"))
@@ -320,9 +348,27 @@ func main() {
 	maxGenLatPtr := flag.Int("maxlat", -90, "the maximum latitude to generate")
 	maxGenLonPtr := flag.Int("maxlon", -180, "the maximum longitude to generate")
 	generateEmptyFiles := flag.Bool("generate-empty-files", false, "Includes empty files when generating map")
+	defSig := DefaultSigmoidCfg()
+	physA := flag.Float64("phys-a", defSig.A, "VTSC sigmoid amplitude (PHYSICS_A in vision_turn_controller.py)")
+	physB := flag.Float64("phys-b", defSig.B, "VTSC sigmoid steepness (PHYSICS_B)")
+	physC := flag.Float64("phys-c", defSig.C, "VTSC sigmoid center (PHYSICS_C)")
+	physD := flag.Float64("phys-d", defSig.D, "VTSC sigmoid baseline (PHYSICS_D)")
+	physMin := flag.Float64("phys-min-lat", defSig.MinLat, "PHYSICS_MIN_LAT_ACCEL")
+	physMax := flag.Float64("phys-max-lat", defSig.MaxLat, "PHYSICS_MAX_LAT_ACCEL")
+	maxSpeedDefault := flag.Float64("max-speed-default", defSig.MaxSpeedDefault, "MAX_SPEED_DEFAULT in m/s for curvature_to_speed")
 	flag.Parse()
 	if *generatePtr {
-		GenerateOffline(*minGenLatPtr, *minGenLonPtr, *maxGenLatPtr, *maxGenLonPtr, *generateEmptyFiles)
+		sigCfg := SigmoidCfg{
+			A:               *physA,
+			B:               *physB,
+			C:               *physC,
+			D:               *physD,
+			MinLat:          *physMin,
+			MaxLat:          *physMax,
+			MaxSpeedDefault: *maxSpeedDefault,
+		}
+		log.Info().Str("sigmoid_hash", sigCfg.Hash()).Msg("baking sigmoid into tiles")
+		GenerateOffline(*minGenLatPtr, *minGenLonPtr, *maxGenLatPtr, *maxGenLonPtr, *generateEmptyFiles, sigCfg)
 		return
 	}
 	EnsureParamDirectories()

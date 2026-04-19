@@ -190,6 +190,97 @@ func GetTargetVelocities(curvatures []Curvature) []Velocity {
 	return velocities
 }
 
+// GetStateBakedSpeeds walks the same node sequence as GetStateCurvatures and
+// returns per-output-point speeds taken straight from the tile's per-node
+// safeSpeeds list. Output[i] corresponds to the third node of triplet
+// (i, i+1, i+2) so it aligns with GetStateCurvatures' Latitude/Longitude.
+//
+// Returns nil + nil error when any way in the current state predates schema
+// v1 (no baked speeds). Caller treats nil as "fall back to live computation".
+func GetStateBakedSpeeds(state *State) ([]Velocity, error) {
+	currentSpeeds, err := state.CurrentWay.Way.SafeSpeeds()
+	if err != nil || currentSpeeds.Len() == 0 {
+		return nil, nil
+	}
+	allWays := []Way{state.CurrentWay.Way}
+	allNodes := []capnp.StructList[Coordinates]{}
+	allSafeSpeeds := []capnp.Float64List{currentSpeeds}
+	allNodesDirection := []bool{state.CurrentWay.OnWay.IsForward}
+	currentNodes, err := state.CurrentWay.Way.Nodes()
+	if err != nil {
+		return nil, errors.Wrap(err, "could not read current way nodes for baked speeds")
+	}
+	allNodes = append(allNodes, currentNodes)
+	numPoints := currentNodes.Len()
+	for _, nextWay := range state.NextWays {
+		nwNodes, err := nextWay.Way.Nodes()
+		if err != nil {
+			continue
+		}
+		nwSpeeds, err := nextWay.Way.SafeSpeeds()
+		if err != nil || nwSpeeds.Len() != nwNodes.Len() {
+			// Mixed-schema (next way is legacy); abandon baked path and let
+			// the caller fall back to live sigmoid for the whole sequence.
+			return nil, nil
+		}
+		if nwNodes.Len() > 0 {
+			numPoints += nwNodes.Len() - 1
+		}
+		allWays = append(allWays, nextWay.Way)
+		allNodes = append(allNodes, nwNodes)
+		allSafeSpeeds = append(allSafeSpeeds, nwSpeeds)
+		allNodesDirection = append(allNodesDirection, nextWay.IsForward)
+	}
+
+	speeds := make([]float64, numPoints)
+	xPoints := make([]float64, numPoints)
+	yPoints := make([]float64, numPoints)
+	allNodesIdx := 0
+	nodesIdx := 0
+	for i := 0; i < numPoints; i++ {
+		var index int
+		forward := allNodesDirection[allNodesIdx]
+		if forward {
+			index = nodesIdx
+			if allNodesIdx > 0 {
+				index += 1
+			}
+		} else {
+			index = allNodes[allNodesIdx].Len() - nodesIdx - 1
+			if allNodesIdx > 0 {
+				index -= 1
+			}
+		}
+		node := allNodes[allNodesIdx].At(index)
+		xPoints[i] = node.Latitude()
+		yPoints[i] = node.Longitude()
+		// SafeSpeeds is parallel to Nodes; same index regardless of direction.
+		speeds[i] = allSafeSpeeds[allNodesIdx].At(index)
+
+		nodesIdx += 1
+		if nodesIdx == allNodes[allNodesIdx].Len() || (nodesIdx == allNodes[allNodesIdx].Len()-1 && allNodesIdx > 0) {
+			allNodesIdx += 1
+			nodesIdx = 0
+		}
+	}
+
+	// Output length matches GetStateCurvatures, which is N-4 after the
+	// GetCurvatures (N-2) → GetAverageCurvatures (-2 more) chain. Each output
+	// is anchored at xPoints[i+2] so the lat/lon/speed line up exactly with
+	// the corresponding entry in the published MapCurvatures list.
+	if numPoints < 5 {
+		return []Velocity{}, nil
+	}
+	out := make([]Velocity, numPoints-4)
+	for i := 0; i < numPoints-4; i++ {
+		out[i].Latitude = xPoints[i+2]
+		out[i].Longitude = yPoints[i+2]
+		out[i].Velocity = speeds[i+2]
+	}
+	_ = allWays
+	return out, nil
+}
+
 func GetAverageCurvatures(curvatures []float64, arc_lengths []float64) ([]float64, error) {
 	if len(curvatures) < 3 {
 		return []float64{}, errors.New("not enough curvatures to average")

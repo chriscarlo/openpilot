@@ -42,6 +42,8 @@ var (
 	MAPD_PRETTY_LOG            = ParamPath("MapdPrettyLog", true)
 	MAPD_PRETTY_LOG_PERSIST    = ParamPath("MapdPrettyLog", false)
 	MAP_WINDING_SUMMARY        = ParamPath("MapWindingSummary", true)
+	MAP_PRE_CURVE_SPEEDS       = ParamPath("MapPreCurveSpeeds", true)
+	MAP_TILES_SIGMOID_HASH     = ParamPath("MapTilesSigmoidHash", true)
 )
 
 // exists returns whether the given file or directory exists
@@ -92,6 +94,8 @@ func ResetParams() {
 	_ = PutParam(MAP_CURVATURES, empty_array)
 	_ = PutParam(MAP_TARGET_VELOCITIES, empty_array)
 	_ = PutParam(MAP_WINDING_SUMMARY, empty_object)
+	_ = PutParam(MAP_PRE_CURVE_SPEEDS, empty_array)
+	_ = PutParam(MAP_TILES_SIGMOID_HASH, empty_data)
 }
 
 func IsString(data []byte) bool {

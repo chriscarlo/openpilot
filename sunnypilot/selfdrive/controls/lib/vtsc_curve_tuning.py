@@ -1,9 +1,5 @@
-# Auto-generated values live here for VTSC curvature→speed tuning.
-#
-# Workflow:
-# - Run `python3 tools/vtsc/curve_tuner.py`
-# - Tweak the curve visually (baseline vs tuned)
-# - Click "Apply" to write updated control points here
+# Optional multiplicative speed-scaling curve layered on top of the VTSC sigmoid.
+# Edited from the interactive tuner at `tools/vtsc_tuner/` (Rust/egui).
 #
 # This file is intentionally lightweight so it can be imported without pulling in any
 # other VTSC dependencies.

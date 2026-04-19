@@ -43,7 +43,7 @@ GPS/pose → mapd (compiled) → Params: MapTargetVelocities/MapAdvisoryLimit �
 ## Vendor Strategy (No Submodules)
 - Source of truth: https://github.com/pfeiferj/openpilot-mapd (pin a known-good commit).
 - Vendor location in this repo: `mapd_repo/openpilot-mapd/` (follows `*_repo/` convention).
-- Binary install location on device (already wired): `third_party/mapd_pfeiferj/mapd`.
+- Binary install location on device (already wired): `third_party/mapd/mapd`.
 - Keep upstream LICENSE and version note in `mapd_repo/openpilot-mapd/`.
 - Do not modify `.gitmodules`; fix imports/includes locally if needed.
 
@@ -109,7 +109,7 @@ Embedded Defaults vs. Runtime Overrides
   - Parse once at startup; clamp to safe ranges; log applied values.
 
 ## Packaging & Wiring
-- Binary install path (already expected by manager): `third_party/mapd_pfeiferj/mapd`.
+- Binary install path (already expected by manager): `third_party/mapd/mapd`.
 - Process config (already present): `system/manager/process_config.py` spawns `mapd` via `MAPD_PATH`.
 - `Paths.mapd_root()` points to `/data/media/0/osm`; keep tiles and cache there.
 - Update `MapdVersion` Param on startup to track our build/version.
@@ -163,7 +163,7 @@ Embedded Defaults vs. Runtime Overrides
 2. Port VTSC physics to Go (`math.go`): sigmoid + `v = sqrt(a/k)`; add tests.
 3. Replace mapd `GetTargetVelocities` path with VTSC physics; clamp and decimate outputs.
 4. Keep existing Params keys; add `MapAdvisoryLimit` scalar (min v on current way beyond startDistance).
-5. Build static linux/arm64 binary; install to `third_party/mapd_pfeiferj/mapd`; set `MapdVersion`.
+5. Build static linux/arm64 binary; install to `third_party/mapd/mapd`; set `MapdVersion`.
 6. Add `MTSCLiteMode` flag; implement MTSC-lite scalar publish; disable debug vectors by default.
 7. Validate onroad; monitor CPU/logcat; confirm no alerts/backpressure; compare reference routes.
 8. Document tunables (Params) and finalize operator instructions.

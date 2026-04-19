@@ -22,8 +22,8 @@ from openpilot.system.version import is_prebuilt
 from openpilot.sunnypilot.mapd import MAPD_PATH, MAPD_BIN_DIR
 import openpilot.system.sentry as sentry
 
-DEFAULT_VERSION = 'v1.10.0'
-DEFAULT_BINARY_URL_TEMPLATE = "https://github.com/pfeiferj/openpilot-mapd/releases/download/{version}/mapd"
+DEFAULT_VERSION = 'chauffeur-bake-v1'
+DEFAULT_BINARY_URL_TEMPLATE = "https://github.com/chriscarlo/mapd/releases/download/{version}/mapd"
 VERSION = DEFAULT_VERSION
 
 

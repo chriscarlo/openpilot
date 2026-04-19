@@ -3,6 +3,7 @@ import time
 import math
 import json
 import os
+import hashlib
 from dataclasses import dataclass
 from enum import IntEnum
 
@@ -887,6 +888,20 @@ HIDDEN_TURN_PHASE_S = 2.0      # only within first ~2 s of occlusion
 HIDDEN_TURN_HEADING_WIN_S = 1.2
 HIDDEN_TURN_VIS_HEADING_MAX_RAD = math.radians(6.0)  # ~6°, "straight enough"
 
+def _compute_runtime_sigmoid_hash() -> str:
+  """Stable 12-hex digest of the current runtime sigmoid tuple. Mirrors
+  SigmoidCfg.Hash() in mapd_repo/openpilot-mapd/sigmoid.go exactly so the
+  on-device hash can be compared to the tile's baked sigmoidHash. Recomputed
+  on every call (cheap; PHYSICS_* may be live-tuned at runtime, in which
+  case we want the new hash so tiles fall back to the live path)."""
+  canon = "%.6f|%.6f|%.6f|%.6f|%.4f|%.4f|%.2f" % (
+    float(PHYSICS_A), float(PHYSICS_B), float(PHYSICS_C), float(PHYSICS_D),
+    float(PHYSICS_MIN_LAT_ACCEL), float(PHYSICS_MAX_LAT_ACCEL),
+    float(MAX_SPEED_DEFAULT),
+  )
+  return hashlib.sha256(canon.encode("utf-8")).hexdigest()[:12]
+
+
 def _physics_based_lateral_acceleration(curvature: float, *, low_speed_sigmoid_scale: float = 1.0) -> float:
     """
     Continuous sigmoid-based lateral acceleration function (scipy optimized)
@@ -1249,6 +1264,13 @@ class VisionTurnController:
     self._map_curv_cache_raw = None
     self._map_curv_cache = []
     self._map_curv_last_ts = 0.0
+    # Sigmoid-baked per-curvature speeds from mapd (schema v1+ tiles).
+    # Cached at the same 5 Hz as MapCurvatures; nil/empty list means
+    # "fall back to live curvature_to_speed". Hash compared per-tick.
+    self._map_pre_curve_speeds_cache_raw = None
+    self._map_pre_curve_speeds_cache: list[float] = []
+    self._map_pre_curve_speeds_last_ts = 0.0
+    self._map_tiles_sigmoid_hash = ""
     self._map_strategy_mode = DEFAULT_MAP_STRATEGY
     self._map_strategy_state = MapStrategyState()
     self._turn_visible_sticky = False
@@ -4631,6 +4653,92 @@ class VisionTurnController:
       self._map_curv_last_ts = now
       return []
 
+  def _load_map_pre_curve_speeds(self) -> list[float] | None:
+    """Return list of baked safe speeds (m/s) parallel to MapCurvatures.
+
+    Returns None when:
+      - mapd hasn't published any baked speeds yet (legacy mapd binary, or
+        legacy tiles with schemaVersion=0, or fresh boot before tile load);
+      - the tile's sigmoidHash differs from the runtime sigmoid hash (the
+        sigmoid was edited in the tuner but tiles weren't rebuilt — caller
+        must fall back to live curvature_to_speed for correctness).
+
+    Caller treats None as "use live sigmoid for this batch". Length-mismatch
+    against the curvatures list is the caller's responsibility.
+    """
+    now = time.time()
+    if (now - self._map_pre_curve_speeds_last_ts) < 0.2 and self._map_pre_curve_speeds_cache:
+      # Cache is recent. Re-check hash on every call so a tuner edit that
+      # changes PHYSICS_* takes effect immediately even within the cache TTL.
+      if self._map_tiles_sigmoid_hash and self._map_tiles_sigmoid_hash == _compute_runtime_sigmoid_hash():
+        return self._map_pre_curve_speeds_cache
+      return None
+    try:
+      raw_hash = self._mem_params.get('MapTilesSigmoidHash') or self._params.get('MapTilesSigmoidHash')
+      tile_hash = ""
+      if raw_hash:
+        tile_hash = raw_hash if isinstance(raw_hash, str) else raw_hash.decode('utf-8')
+      tile_hash = tile_hash.strip()
+      self._map_tiles_sigmoid_hash = tile_hash
+
+      raw = self._mem_params.get('MapPreCurveSpeeds') or self._params.get('MapPreCurveSpeeds')
+      if not raw:
+        self._map_pre_curve_speeds_cache = []
+        self._map_pre_curve_speeds_last_ts = now
+        return None
+      s = raw if isinstance(raw, str) else raw.decode('utf-8')
+      if s == self._map_pre_curve_speeds_cache_raw and self._map_pre_curve_speeds_cache:
+        self._map_pre_curve_speeds_last_ts = now
+        if tile_hash and tile_hash == _compute_runtime_sigmoid_hash():
+          return self._map_pre_curve_speeds_cache
+        return None
+      arr = json.loads(s)
+      speeds: list[float] = []
+      for it in arr:
+        try:
+          speeds.append(float(it.get('velocity', 0.0)))
+        except Exception:
+          speeds.append(0.0)
+      self._map_pre_curve_speeds_cache_raw = s
+      self._map_pre_curve_speeds_cache = speeds
+      self._map_pre_curve_speeds_last_ts = now
+      if not speeds:
+        return None
+      if tile_hash and tile_hash == _compute_runtime_sigmoid_hash():
+        return speeds
+      # Hash mismatch — log once per change so the user sees stale tiles.
+      if not getattr(self, '_logged_sigmoid_hash_mismatch', False) or self._last_logged_tile_hash != tile_hash:
+        cloudlog.info(
+          f"vtsc: tile sigmoid hash {tile_hash!r} != runtime {_compute_runtime_sigmoid_hash()!r}; "
+          "falling back to live curvature_to_speed (rebuild tiles to re-engage baked speeds)"
+        )
+        self._logged_sigmoid_hash_mismatch = True
+        self._last_logged_tile_hash = tile_hash
+      return None
+    except Exception:
+      self._map_pre_curve_speeds_cache = []
+      self._map_pre_curve_speeds_last_ts = now
+      return None
+
+  def _baked_vsafe_with_runtime_multipliers(self, baked_v_mps: float, kappa: float) -> float:
+    """Apply the live runtime multipliers (low-speed bias, SPEED_INCREASE_FACTOR,
+    Q-curve) on top of a baked physics speed. Mirrors the post-sigmoid section of
+    `curvature_to_speed` (vision_turn_controller.py:961-980) so baked tiles get
+    the same Q-curve + bias treatment as the live path. Skipped: low-speed
+    calibration scale — that's already captured in the bake at scale=1.0; if a
+    runtime calibration is non-trivially different, the entire baked path is
+    short-circuited at the call site."""
+    base_speed_mps = max(0.0, float(baked_v_mps))
+    base_speed_mph = base_speed_mps * CV.MS_TO_MPH
+    if LOW_SPEED_BIAS_MPH != 0.0 and base_speed_mph < LOW_SPEED_BIAS_END_MPH:
+      taper = 1.0 - (base_speed_mph / max(LOW_SPEED_BIAS_END_MPH, 1e-3))
+      base_speed_mph = base_speed_mph + LOW_SPEED_BIAS_MPH * max(0.0, min(1.0, taper))
+      base_speed_mps = max(0.0, base_speed_mph * CV.MPH_TO_MS)
+    target_speed_mps = base_speed_mps * SPEED_INCREASE_FACTOR
+    target_speed_mps = clip(target_speed_mps, 0.0, MAX_SPEED_DEFAULT)
+    q = _q_curve_multiplier(kappa)
+    return clip(target_speed_mps * q, 0.0, MAX_SPEED_DEFAULT)
+
   def _clear_curve_preview(self, *, reset_visible_mainline_counterevidence: bool = True) -> None:
     self._curve_preview_valid = False
     self._curve_preview_distance_m = 0.0
@@ -5530,8 +5638,31 @@ class VisionTurnController:
     k_list = k_list[:cut]
     abs_indices = list(range(i0 + 1, len(pts)))[:cut]
 
-    # Compute vsafe from curvature
-    vsafe = [ self._curve_speed(k) for k in k_list ]
+    # Compute vsafe from curvature. Prefer the per-node speeds baked into
+    # mapd tiles (schema v1+) when their sigmoidHash matches our runtime
+    # sigmoid; fall back per-batch otherwise. Live-tuned PHYSICS_* changes
+    # the runtime hash, which forces fallback automatically.
+    baked = self._load_map_pre_curve_speeds()
+    if baked is not None and len(baked) == len(k_list):
+      try:
+        # Skip baked path when low-speed calibration is non-trivially active —
+        # the bake captures scale=1.0 and the calibration only matters at
+        # sub-40 mph speeds where the live path is the source of truth.
+        max_scale_dev = 0.0
+        for k_check in k_list:
+          dev = abs(self._low_speed_calibration_scale(k_check) - 1.0)
+          if dev > max_scale_dev:
+            max_scale_dev = dev
+            if dev > 1e-3:
+              break
+        if max_scale_dev <= 1e-3:
+          vsafe = [ self._baked_vsafe_with_runtime_multipliers(b, k) for b, k in zip(baked, k_list) ]
+        else:
+          vsafe = [ self._curve_speed(k) for k in k_list ]
+      except Exception:
+        vsafe = [ self._curve_speed(k) for k in k_list ]
+    else:
+      vsafe = [ self._curve_speed(k) for k in k_list ]
     self._set_winding_road_context(classify_winding_road_context(
       s_list=s_list,
       vsafe_list=vsafe,
