@@ -815,12 +815,12 @@ SPEED_INCREASE_FACTOR = 1.0  # Global multiplier on target speeds (overridden by
 # Physics sigmoid tunables (overridden by params)
 # Keep the sub-50 mph portion close to the existing curve while lifting the high-speed sweeper
 # shoulder around k≈0.0046 1/m into the upper-60s/low-70s mph band.
-PHYSICS_A = -3.260000
-PHYSICS_B = -6270.000000
-PHYSICS_C = 0.005010
-PHYSICS_D = 5.607000
-PHYSICS_MIN_LAT_ACCEL = 1.8
-PHYSICS_MAX_LAT_ACCEL = 4.478
+PHYSICS_A = -2.131000
+PHYSICS_B = -3711.732522
+PHYSICS_C = 0.006547
+PHYSICS_D = 4.478000
+PHYSICS_MIN_LAT_ACCEL = 2.3470
+PHYSICS_MAX_LAT_ACCEL = 4.4780
 
 # Low-speed bias (applied as +Δ mph under a taper)
 LOW_SPEED_BIAS_MPH = 5.0         # +speed boost at tight curves (tapers to 0 by END_MPH)
