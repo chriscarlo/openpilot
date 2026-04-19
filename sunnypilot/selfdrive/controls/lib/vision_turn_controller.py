@@ -816,8 +816,8 @@ SPEED_INCREASE_FACTOR = 1.0  # Global multiplier on target speeds (overridden by
 # Keep the sub-50 mph portion close to the existing curve while lifting the high-speed sweeper
 # shoulder around k≈0.0046 1/m into the upper-60s/low-70s mph band.
 PHYSICS_A = -2.131000
-PHYSICS_B = -3711.732522
-PHYSICS_C = 0.006547
+PHYSICS_B = -2480.005805
+PHYSICS_C = 0.007856
 PHYSICS_D = 4.478000
 PHYSICS_MIN_LAT_ACCEL = 2.3470
 PHYSICS_MAX_LAT_ACCEL = 4.4780
