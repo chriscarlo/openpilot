@@ -32,7 +32,6 @@ description: Edit, debug, troubleshoot, iterate, and polish the Sunnypilot VTSC 
 
 - Confirm `VTSCRallyCoPilotHUDEnabled` is enabled.
 - Confirm the producer is publishing: `curvePreviewValid` true and `curvePreviewTiles` non-empty.
-- If `curvePreviewValid` is stuck at `False` and the monitor script shows no `longitudinalPlanSP` updates at all, suspect `LongitudinalPlanner.update()` is throwing before `publish()` — grep `/data/log/*` for `AttributeError`, `UnknownKeyName`, or `TypeError` from `longitudinal_planner.py` / `long_mpc.py`. A single exception in `update()` silently kills the whole VTSC publish path. Recent example: `_StabilizedLead` duck-type with `__slots__` missing a LeadData field raised `AttributeError` every MPC frame.
 - Confirm HUD gating is passing: `curveMaxCurvature` is above `KAPPA_SHOW_MIN`/`KAPPA_HOLD_MIN` in `hud.cc`.
 - Confirm fade-in isn’t stuck: `vtsc_copilot_alpha_` rises above `0.01`.
 - Keep speed text readable: draw the speed last (after curve strokes/glow) so it always sits on top.
