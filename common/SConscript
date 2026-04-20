@@ -1,7 +1,15 @@
 Import('env', 'envCython', 'arch')
 
+# params.cc embeds the full params_keys.h static initializer (hundreds of
+# brace-init entries); clang's RSS at -O2 is ~2.9 GB, which overshoots
+# tici's LMK ceiling and gets SIGKILL'd. Compile this one TU at -O0 — it's
+# cold code (registry init / hash lookup), no hot-path cost.
+params_env = env.Clone()
+params_env.Append(CCFLAGS=['-O0'])
+params_obj = params_env.Object('params.cc')
+
 common_libs = [
-  'params.cc',
+  params_obj,
   'swaglog.cc',
   'util.cc',
   'watchdog.cc',
