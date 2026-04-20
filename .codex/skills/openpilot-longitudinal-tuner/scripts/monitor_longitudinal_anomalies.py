@@ -157,6 +157,39 @@ def _lead_text(lead: Any, v_ego: float) -> str:
     return "?"
 
 
+def _lead_lateral_snapshot(lead: Any) -> dict[str, Any]:
+  snap: dict[str, Any] = {"status": False}
+  try:
+    snap["status"] = bool(getattr(lead, "status", False))
+    if not snap["status"]:
+      return snap
+    for field in ("dRel", "yRel", "dPath", "vLat", "vRel", "vLead", "aLeadK"):
+      try:
+        val = float(getattr(lead, field, 0.0) or 0.0)
+        snap[field] = val if math.isfinite(val) else None
+      except Exception:
+        snap[field] = None
+  except Exception:
+    pass
+  return snap
+
+
+def _lateral_text(snap: dict[str, Any]) -> str:
+  if not snap.get("status"):
+    return "y=-/dP=-/vL=-"
+  y = snap.get("yRel")
+  dp = snap.get("dPath")
+  vl = snap.get("vLat")
+  def _f(v: Any) -> str:
+    if v is None:
+      return "?"
+    try:
+      return f"{float(v):+.2f}"
+    except Exception:
+      return "?"
+  return f"y={_f(y)}/dP={_f(dp)}/vL={_f(vl)}"
+
+
 def _mode_text(sd: Any, lpsp: Any) -> str:
   try:
     dec = lpsp.dec
@@ -215,6 +248,11 @@ def main() -> int:
   parser.add_argument("--all-gears", action="store_true", help="do not auto-pause offroad or outside a forward gear")
   parser.add_argument("--jsonl-out", type=str, default="", help="optional JSONL output path")
   parser.add_argument("--show-live-tune", action="store_true", help="print effective live lead-tune values at startup")
+  parser.add_argument("--show-lateral", action="store_true",
+                      help="print per-row lead yRel/dPath/vLat for adjacent-lead diagnosis")
+  parser.add_argument("--enable-lead-role-log", action="store_true",
+                      help="turn on VTSC.Expert.AdjLeadDebugLogEnabled for this session so classifier "
+                           "decisions stream to cloudlog as LEADROLEDBG entries")
   args = parser.parse_args()
 
   period = 1.0 / max(1.0, float(args.hz))
@@ -240,8 +278,23 @@ def main() -> int:
   )
   if args.show_live_tune:
     print(f"live_tune {format_lead_response_tune_summary(read_lead_response_tuning_config(params))}")
+
+  lead_role_log_toggled = False
+  if args.enable_lead_role_log:
+    try:
+      params.put_bool("VTSC.Expert.AdjLeadDebugLogEnabled", True)
+      lead_role_log_toggled = True
+      print("LEADROLEDBG cloudlog streaming enabled (VTSC.Expert.AdjLeadDebugLogEnabled=1)")
+      print("  tail with: tail -F /data/log/cloudlog | grep LEADROLEDBG")
+    except Exception as e:
+      print(f"warn: could not enable AdjLeadDebugLogEnabled: {e}")
+
   print("watching longitudinal anomalies: Ctrl-C to stop")
-  print("t v aE lp cc can mdl src mode cap lead notes")
+  header_cols = "t v aE lp cc can mdl src mode cap lead"
+  if args.show_lateral:
+    header_cols += " latL0 latL1"
+  header_cols += " notes"
+  print(header_cols)
 
   jsonl_file = None
   if args.jsonl_out:
@@ -336,7 +389,11 @@ def main() -> int:
 
       mode = _mode_text(sd, lpsp)
       cap_label, cap_speed = _cap_text(lpsp, rti)
-      lead_text = _lead_text(getattr(rs, "leadOne", object()), v_ego)
+      lead_one = getattr(rs, "leadOne", object())
+      lead_two = getattr(rs, "leadTwo", object())
+      lead_text = _lead_text(lead_one, v_ego)
+      lead0_lat = _lead_lateral_snapshot(lead_one)
+      lead1_lat = _lead_lateral_snapshot(lead_two)
 
       blendish = mode == "blended" or bool(getattr(sd, "experimentalMode", False))
 
@@ -403,6 +460,8 @@ def main() -> int:
         "mode": mode,
         "cap": cap_label,
         "lead": lead_text,
+        "lead0Lat": lead0_lat,
+        "lead1Lat": lead1_lat,
         "longControlState": long_state,
         "allowThrottle": allow_throttle,
         "shouldStop": should_stop,
@@ -426,14 +485,23 @@ def main() -> int:
         f"{prefix} {time.strftime('%H:%M:%S')} "
         f"v={_fmt(v_ego, 1)} aE={_fmt(a_ego, 2)} lp={_fmt(plan_a_target, 2)} "
         f"cc={_fmt(cc_accel, 2)} can={_fmt(can_accel, 2)} mdl={_fmt(model_accel, 2)} "
-        f"src={plan_source} mode={mode} cap={cap_label} lead={lead_text} notes={note_text}"
+        f"src={plan_source} mode={mode} cap={cap_label} lead={lead_text}"
       )
+      if args.show_lateral:
+        line += f" latL0={_lateral_text(lead0_lat)} latL1={_lateral_text(lead1_lat)}"
+      line += f" notes={note_text}"
       print(line)
   except KeyboardInterrupt:
     return 0
   finally:
     if jsonl_file is not None:
       jsonl_file.close()
+    if lead_role_log_toggled:
+      try:
+        params.put_bool("VTSC.Expert.AdjLeadDebugLogEnabled", False)
+        print("LEADROLEDBG cloudlog streaming restored (disabled)")
+      except Exception:
+        pass
 
 
 if __name__ == "__main__":

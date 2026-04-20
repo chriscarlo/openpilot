@@ -91,6 +91,14 @@ cd /data/openpilot
   settings. On this path the primary failure mode is often duplicate model
   hypotheses for one physical car plus noisy model kinematics causing ACC
   ownership to bounce between lead-follow and cruise.
+- Source flickers rapidly between `cruise` and `lead` at the edge of lead
+  acquisition (subjectively feels like rapid brake-taps on an EV):
+  this is the source-stability layer, not the reclaim / cut-in / or older
+  Hyundai hysteresis paths. Tune the stability-layer knobs on-device
+  (`LeadProbEnter/Exit`, `LeadSourceAcquireFrames/ReleaseFrames`,
+  `PhantomLeadHoldS`, `FlutterClampJerkMps3`) before changing MPC or vibe
+  settings. Read `references/live_lead_tuning.md` -> Source Stability Layer
+  for the layered attack model and recommended enable order.
 - Hyundai follow overshoots, then coasts or lightly slows too long while
   `source` stays on the lead:
   inspect `gap_reclaim_obstacle_push_m`,
@@ -143,6 +151,11 @@ pytest selfdrive/controls/tests/test_following_distance.py -q
 pytest selfdrive/controls/tests/test_longitudinal_live_tune.py -q
 ```
 
+- Source-stability filter and handoff jerk limits:
+```bash
+pytest selfdrive/controls/tests/test_lead_stability_filter.py selfdrive/controls/tests/test_cruise_reacquire_jerk_limit.py -q
+```
+
 - Hyundai longitudinal tuning overlay:
 ```bash
 pytest opendbc/sunnypilot/car/hyundai/tests/test_tuning_controller.py -q
@@ -162,7 +175,8 @@ pytest selfdrive/controls/lib/tests/test_lead_role_classifier.py -q
 - Read `references/live_monitoring.md` for the watcher field guide and alert
   meanings.
 - Read `references/live_lead_tuning.md` for the runtime ACC lead-response tune,
-  helper script, and no-restart workflow.
+  the source-stability layer (Schmitt, dwell, phantom, flutter clamp,
+  cruise-reacquire jerk), helper script, and no-restart workflow.
 - Read `docs/chauffeur/live_tunable_params.md` for the complete catalog of
   live-tunable `Longitudinal.LiveTune.*` params with defaults, ranges, and SSH
   usage examples.

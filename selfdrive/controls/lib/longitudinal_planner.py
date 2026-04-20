@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import math
+from collections import deque
 import numpy as np
 from openpilot.common.params import Params
 import cereal.messaging as messaging
@@ -101,6 +102,13 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     self.output_a_target = 0.0
     self.output_should_stop = False
     self._lead_launch_release_counter = 0
+    self._prev_mpc_source: str = ""
+    self._cruise_pos_jerk_frames_left: int = 0
+    self._cruise_pos_jerk_prev_a: float = 0.0
+    self._flutter_prev_source: str = ""
+    self._source_transition_frames: deque = deque()
+    self._flutter_clamp_prev_a: float = 0.0
+    self._flutter_mode_active: bool = False
 
     self.v_desired_trajectory = np.zeros(CONTROL_N)
     self.a_desired_trajectory = np.zeros(CONTROL_N)
@@ -306,7 +314,98 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     self._planner_output_accel_limits = (float(accel_clip[0]), float(accel_clip[1]))
     self.output_a_target = np.clip(output_a_target, accel_clip[0], accel_clip[1])
     self.prev_accel_clip = accel_clip
+
+    model_accel_for_flutter = float(sm['modelV2'].action.desiredAcceleration) if hasattr(sm['modelV2'], 'action') else 0.0
+    self._apply_cruise_reacquire_jerk_limit(lead_source)
+    self._apply_flutter_mode_clamp(lead_source, model_accel_for_flutter)
+
     end_span(total_span)
+
+  def _apply_cruise_reacquire_jerk_limit(self, lead_source: str) -> None:
+    # When the MPC's selected source transitions from lead-follow to cruise, the
+    # planner's output accel can jump sharply as it seeks the set speed. Clamp the
+    # upward slew for a short window so the transition feels less abrupt. Braking
+    # and lead-follow acceleration are unaffected. Window ends early if output
+    # reaches the cruise accel cap, so steady-state cruise is never constrained.
+    tune_cfg = getattr(self.mpc, "_live_tune_cfg", None)
+    jerk_limit = float(getattr(tune_cfg, "cruise_reacquire_pos_jerk_limit", 0.0) or 0.0)
+    window_s = float(getattr(tune_cfg, "cruise_reacquire_jerk_window_s", 0.0) or 0.0)
+
+    source_is_lead = lead_source in ("lead0", "lead1")
+    dt = float(max(self.dt, 1e-3))
+
+    if (self._prev_mpc_source in ("lead0", "lead1") and not source_is_lead and
+        jerk_limit > 0.0 and window_s > 0.0):
+      self._cruise_pos_jerk_frames_left = int(math.ceil(window_s / dt))
+      # _cruise_pos_jerk_prev_a carries the prior frame's clipped output_a_target,
+      # so we intentionally do not overwrite it here — it is our slew anchor.
+
+    if source_is_lead:
+      self._cruise_pos_jerk_frames_left = 0
+
+    if self._cruise_pos_jerk_frames_left > 0 and jerk_limit > 0.0:
+      slew_ceiling = self._cruise_pos_jerk_prev_a + jerk_limit * dt
+      if self.output_a_target > slew_ceiling:
+        self.output_a_target = slew_ceiling
+      self._cruise_pos_jerk_frames_left -= 1
+      if self.output_a_target >= float(self._planner_output_accel_limits[1]) - 1e-3:
+        self._cruise_pos_jerk_frames_left = 0
+
+    self._cruise_pos_jerk_prev_a = float(self.output_a_target)
+    self._prev_mpc_source = lead_source
+
+  def _apply_flutter_mode_clamp(self, lead_source: str, model_accel: float) -> None:
+    # Bidirectional jerk clamp when the MPC source is flip-flopping at the
+    # edge of lead acquisition. Counts source transitions in a rolling window;
+    # when count >= N, both + and - slew are clamped. Clamp is bypassed on
+    # strong modelAccel disagreement so hard braking is never delayed.
+    tune_cfg = getattr(self.mpc, "_live_tune_cfg", None)
+    n_trans_threshold = int(max(1, round(float(getattr(tune_cfg, "flutter_detect_transitions", 2.0) or 2.0))))
+    window_s = float(getattr(tune_cfg, "flutter_detect_window_s", 1.0) or 1.0)
+    jerk_cap = float(getattr(tune_cfg, "flutter_clamp_jerk_mps3", 0.0) or 0.0)
+    bypass_decel = float(getattr(tune_cfg, "flutter_clamp_bypass_decel_mps2", 1.5) or 1.5)
+
+    if jerk_cap <= 0.0 or window_s <= 0.0:
+      self._source_transition_frames.clear()
+      self._flutter_mode_active = False
+      self._flutter_clamp_prev_a = float(self.output_a_target)
+      return
+
+    now_s = float(self.dt) * 0.0  # per-frame pseudo-time; use frame count / 1/dt
+    # We don't have a wall clock here — use dt-based virtual time tracked via len
+    max_frames = max(1, int(math.ceil(window_s / max(self.dt, 1e-3))))
+
+    # Record transitions only when both old and new sources are real (skip the
+    # init-empty-string -> first-source "transition" that would otherwise fire
+    # on the very first frame).
+    if self._flutter_prev_source and self._flutter_prev_source != lead_source:
+      self._source_transition_frames.append(max_frames)
+    self._flutter_prev_source = lead_source
+
+    # Decay counters by 1 each call; drop expired.
+    self._source_transition_frames = deque(
+      [count - 1 for count in self._source_transition_frames if count - 1 > 0]
+    )
+
+    transitions_in_window = len(self._source_transition_frames)
+    want_flutter_mode = transitions_in_window >= n_trans_threshold
+    if want_flutter_mode:
+      self._flutter_mode_active = True
+    elif transitions_in_window == 0:
+      self._flutter_mode_active = False
+
+    if self._flutter_mode_active and jerk_cap > 0.0:
+      # Bypass if the model strongly wants to brake — we should not delay real braking.
+      if not (bypass_decel > 0.0 and model_accel < -abs(bypass_decel)):
+        dt = float(max(self.dt, 1e-3))
+        max_step = jerk_cap * dt
+        delta = self.output_a_target - self._flutter_clamp_prev_a
+        if delta > max_step:
+          self.output_a_target = self._flutter_clamp_prev_a + max_step
+        elif delta < -max_step:
+          self.output_a_target = self._flutter_clamp_prev_a - max_step
+
+    self._flutter_clamp_prev_a = float(self.output_a_target)
 
   def publish(self, sm, pm):
     plan_send = messaging.new_message('longitudinalPlan')

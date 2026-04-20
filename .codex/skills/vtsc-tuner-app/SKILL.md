@@ -48,7 +48,8 @@ Release rebuilds are ~7–9 s incrementally; full builds ~30 s.
 | `knob.rs` | Rotary knob widget; vertical-drag, scroll, shift=fine, dbl-click-reset; optional editable text |
 | `params.rs` | `PlainKnobs` (tight/straight accel, transition mph, sharpness) ↔ `SigmoidParams` (A,B,C,D,MIN,MAX) |
 | `sigmoid.rs` | Raw math: `SigmoidParams::eval`, `sample_curve`, `Band` + `apply_prepared_bands`, `bands_as_q_curve_points` |
-| `apply.rs` | Background-thread apply chain: tune JSON → source patch → git → ssh tici |
+| `apply.rs` | Background-thread apply chain: tune JSON → source patch → git → ssh tici → local bake → rsync |
+| `mapd_config.rs` | `MapdConfig { pbf_path, mapd_repo_path, mapd_binary_path?, regions_override? }`; loaded from `~/.config/vtsc_tuner/mapd.json`; step 7 of RebuildTilesAndReboot |
 | `io.rs` | Tune JSON (schema v1) save/load, `DeviceProfile` ssh target enum, `plan_push` |
 | `theme.rs` | Dark palette, `pixels_per_point` scale, egui `Visuals` install |
 
@@ -65,14 +66,17 @@ All public symbols are minimal — internal helpers are private.
 
 ## Apply chain contract (`apply.rs`)
 
-Four actions, each is a superset of the previous:
+Five actions, each is a superset of the previous:
 
-| Action | Writes tune JSON | Patches source | git commit | git push | ssh tici pull+reboot |
-|---|---|---|---|---|---|
-| Local | ✓ | ✓ | – | – | – |
-| Commit | ✓ | ✓ | ✓ | – | – |
-| Push | ✓ | ✓ | ✓ | ✓ | – |
-| PullOnTici | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Action | Tune JSON | Patch src | git commit | git push | ssh pull+reboot | local bake + rsync + final reboot |
+|---|---|---|---|---|---|---|
+| Local | ✓ | ✓ | – | – | – | – |
+| Commit | ✓ | ✓ | ✓ | – | – | – |
+| Push | ✓ | ✓ | ✓ | ✓ | – | – |
+| PullOnTici | ✓ | ✓ | ✓ | ✓ | ✓ | – |
+| RebuildTilesAndReboot | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+
+`RebuildTilesAndReboot` is the full end-to-end: after the tici reboots with new Python, it validates `~/.config/vtsc_tuner/mapd.json`, discovers cached regions via ssh, does a `df` pre-flight, skips step 10 (`earthly +build`) if `mapd_binary_path` exists, bakes each region locally with the live `--phys-*` args, rsyncs per region, then triggers a second reboot so mapd reloads tiles. Cancellation is honoured at region boundaries via `Arc<AtomicBool>`.
 
 - Tune JSON default path: `~/.config/vtsc_tuner/current.tune.json` (via `dirs::config_dir`).
 - Source patch targets:
@@ -91,10 +95,13 @@ Profiles must exist in `~/.ssh/config`:
 - `commaCar` — car hotspot (192.168.0.229)
 - `commaAdb` — USB via adb port-forward (127.0.0.1:2222)
 
-Remote command: `cd /data/openpilot && git pull`, then a fire-and-forget `sudo reboot`. Note that the device tracks `chauffeur-dev4`; if the dev branch differs, the tici's `git pull` won't pick up the just-pushed change. Leave this as a user-facing caveat — don't try to auto-rebase / checkout on the device.
+Remote command: `cd /data/openpilot && git pull`, then a fire-and-forget `sudo reboot`. **As of 2026-04-19 the user's tici tracks `chauffeur-exp01`** (same as the dev machine), so the pull picks up commits without further setup. Previous skill versions said `chauffeur-dev4` — that claim is stale and should not be perpetuated. If you see a branch-mismatch symptom, verify with `ssh commaCar 'cd /data/openpilot && git branch --show-current'` rather than trusting docs.
 
 ## Landmines (things that will bite you)
 
+- **PBF must be pre-prepped with `osmium add-locations-to-ways` before `mapd --generate` produces real tiles.** Raw geofabrik extracts (`california-latest.osm.pbf`) only store node IDs on way refs — the osmpbf scanner reads way nodes with `Lat/Lon == 0`, every bbox check fails, and generate writes 26+ tiles each 55–57 bytes with zero ways. VTSC then takes the fallback path because `Way.safeSpeeds` is absent. Symptoms: `--generate` exits cleanly, logs say "Done Generating Offline Map" with zero "Writing Area" entries (or many but each output file ≤57 bytes). Fix: run `mapd_repo/openpilot-mapd/scripts/{filter_planet,add_locations}.sh` or equivalent, save the output as `ca_ready.osm.pbf`, and point `~/.config/vtsc_tuner/mapd.json` `pbf_path` at that — NOT the raw geofabrik file. Use `--platform=linux/amd64` on the docker invocation (without it WSL may run osmium under qemu, 7+ min instead of <1 min).
+- **`mapd_installer.py` bumps `MapdVersion` even when the download silently fails.** `_download_file` swallows `requests.exceptions.RequestException` after `num_retries=5` and returns without raising; `download()` unconditionally calls `update_installed_version` right after. A network blip on boot leaves the device with `MapdVersion=<new>` but no binary at `third_party/mapd/mapd`. Symptom: version param says new, but `pgrep -f third_party/mapd/mapd` shows only `mapd_manager` (the Python supervisor), not the Go binary. Recovery: scp the arm64 binary from `mapd_repo/openpilot-mapd/build/mapd` to `/data/openpilot/third_party/mapd/mapd`, `chmod +x`, reboot. Proper fix not yet shipped — either raise on terminal failure in `_download_file` or gate `update_installed_version` on `os.path.exists(MAPD_PATH)`.
+- **Cross-compile the device binary, do not qemu-build it.** `earthly +build-release` or `docker run --platform=linux/arm64 … go build` both emulate arm64 via qemu — 20+ min on a 1.3 GB PBF. Native amd64 Docker with `GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -ldflags="-extldflags=-static -s -w"` produces the exact same binary in ~1 min. Verify with `/usr/bin/file build/mapd` → "ELF 64-bit LSB executable, ARM aarch64 … statically linked, stripped" and grep the binary strings for `sigmoid_hash` / `phys-min-lat` / `winding` to confirm new code was included.
 - **WSLg wayland crashes on corner-resize.** Winit's calloop event loop closes with `Io error: Broken pipe` three times then `WinitEventLoop(ExitFailure(1))`. Fixed by forcing X11 via `EventLoopBuilderExtX11::with_x11()` in `main.rs`. Don't remove.
 - **Detached launch from Claude Code's Bash tool (`run_in_background: true` or certain `pkill`-prefaced scripts) breaks the display connection.** Foreground works, `nohup … & disown` after a non-destructive prelude works, `run_in_background` doesn't. Exit code 144 is the telltale.
 - **Parametric (v, a) plot can fold back on itself** when a band's local slope exceeds `a/κ`. Monotonic-v post-process in `plot.rs` is the accepted workaround.

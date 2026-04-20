@@ -2,6 +2,35 @@
 
 Reverse-chronological. Add a new dated section for every substantive change.
 
+## 2026-04-19 — first real end-to-end deploy + chriscarlo/mapd binary distribution + PBF prep landmine
+
+First real-world `RebuildTilesAndReboot`-equivalent flow on a tici. Done by hand (the user wanted me to drive it via SSH while they sat in the car), but every step matches what the in-app action will do once they invoke it. Final state: tici was on `chauffeur-exp01` at `9fb963f`, mapd binary at `third_party/mapd/mapd` (sha256 `d4d49746...`), all 36 cached regions (32–44°N × -126 to -114°W) carry sigmoid-baked tiles with `MapTilesSigmoidHash=f9d38ab3357c`, `MapPreCurveSpeeds` populated with 3.7 KB of baked velocities, hash matches the runtime → VTSC consumes the baked path (no fallback).
+
+### What changed in the openpilot tree (commit 9fb963f, atomic)
+- Tier 1 (bbox JSON URLs): `selfdrive/ui/sunnypilot/qt/offroad/settings/osm/locations_fetcher.h:56,61` now fetch from `raw.githubusercontent.com/chriscarlo/mapd/main/{nation,us_states}_bounding_boxes.json`.
+- Tier 2 (binary distribution): `sunnypilot/mapd/mapd_installer.py:25-26` `DEFAULT_VERSION = 'chauffeur-bake-v1'`, `DEFAULT_BINARY_URL_TEMPLATE = 'https://github.com/chriscarlo/mapd/releases/download/{version}/mapd'`. Test fixture URL in `sunnypilot/mapd/tests/test_mapd_installer.py:34` updated to match.
+- Cosmetic: `third_party/mapd_pfeiferj/` → `third_party/mapd/`; `MAPD_BIN_DIR` constant in `sunnypilot/mapd/__init__.py:4`. `mapd_repo/openpilot-mapd/Earthfile:86` docker push target → `chriscarlo/openpilot-mapd:latest`. `tools/vtsc_tuner/src/mapd_config.rs:34` doc comment path updated.
+- Doc sweep: `docs/chauffeur/vtsc/osmIntegration/README.md`, `docs/chauffeur/MTSC_VTSC_MAPD_ROADMAP_2025-08-31.md`, `.codex/skills/vtsc-rally-copilot-hud/SKILL.md` references switched to chriscarlo and `chauffeur-bake-v1`.
+
+### What changed off-tree
+- `chriscarlo/mapd` `main` (commit `29eb2e8`) — synced from vendored `mapd_repo/openpilot-mapd/` so the public source matches the binary release. The standalone repo was 4 months stale before this.
+- `chriscarlo/mapd` release `chauffeur-bake-v1` — arm64 ELF, 9.37 MB, statically linked, stripped, sha256 `d4d49746...`. Built via native amd64 + GOOS cross-compile (NOT qemu): `docker run --rm --platform=linux/amd64 -v $PWD:/work -w /work golang:1.24-alpine3.21 sh -c 'go mod download && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -ldflags="-extldflags=-static -s -w" -o build/mapd .'` — ~1 min vs 20+ min for qemu.
+
+### Two real bugs hit during the deploy
+- **`mapd_installer.py` silent download failure.** First on-device boot post-pull: installer flipped `MapdVersion=chauffeur-bake-v1` but the binary file never landed at `third_party/mapd/mapd`. Root cause: `download()` at line 64-68 calls `update_installed_version` unconditionally after `_download_file`, and `_download_file` swallows all `requests.exceptions.RequestException` after retries. A network blip on boot leaves version-set-but-no-binary. Recovery used: `scp mapd_repo/openpilot-mapd/build/mapd commaCar:/data/openpilot/third_party/mapd/mapd && chmod +x && reboot`. Proper fix not yet shipped.
+- **PBF prep is mandatory.** First `mapd --generate` against geofabrik's `california-latest.osm.pbf` ran 47 s, logged "Done Generating Offline Map" with zero "Writing Area" entries, wrote 26 tile files each 55–57 bytes (just header, zero ways). Root cause: geofabrik PBFs only carry node IDs on way refs; the osmpbf scanner reads way nodes with `Lat/Lon == 0`; `allMin/Max` get pinned to (0,0,0,0); `Overlapping(allMin..allMax, area..)` returns false; the `if !haveWays && !generateEmptyFiles { continue }` skip fires for every area. Fix: pre-process via `osmium tags-filter` (highway tags only) → `osmium add-locations-to-ways` → output as `ca_ready.osm.pbf`. Result: 13–35 s scan, 1638 real tiles, 483 MB total. Use `--platform=linux/amd64` on the docker invocation — without it WSL ran osmium under qemu (7+ minutes for filter + 2 min for add-locations).
+
+### Updates to user config + memory
+- `~/.config/vtsc_tuner/mapd.json` written: `pbf_path` → `ca_ready.osm.pbf` (NOT raw geofabrik), `mapd_binary_path` → `build/mapd_amd64` (cross-compile output, used by step 11+'s --generate). Step 10 sees this and skips the `earthly +build` it would otherwise try to run.
+- New persistent memories saved for future agents: `feedback_branch_hook_heredoc.md` (the `git pull X Y` regex false-positive in commit messages, use `git commit -F file`), `feedback_mapd_installer_silent_failure.md`, `reference_pbf_prep_for_mapd_generate.md`, `reference_mapd_distribution.md`, `project_tici_tracks_exp01.md`.
+
+### Stale claims in this changelog (now corrected)
+- The 2026-04-18 entry below says "Distribution is local-only via SSH — no public CDN." That is no longer true — `chauffeur-bake-v1` is a public GitHub release. Keep that sentence as historical context but don't rely on it.
+- The 2026-04-18 entry's mention of `/projects/mapd` as "publish destination only" still stands, but as of today it's been synced from vendored. Future tuner releases need to repeat that sync (or just `cp -a mapd_repo/openpilot-mapd/. /projects/mapd/` excluding `.git`) before cutting a new release tag.
+
+### Real-world timing (single tici, WSL dev box, car-hotspot SSH ~5 MB/s)
+PBF prep (one-time per geofabrik refresh): ~1 min on amd64 docker; 7+ min if you forget `--platform=linux/amd64`. Per-deploy: ssh pull + reboot ~75 s; bake all 36 regions ~35 s; rsync 448 MB ~82 s; final reboot ~75 s. Total wall-clock for a tune iteration ~4.5 min.
+
 ## 2026-04-18 — RebuildTilesAndReboot action + sigmoid-baked map tiles
 
 - New `Action::RebuildTilesAndReboot` variant added to `apply.rs:17-31` (a superset of `PullOnTici`). Two-reboot chain: step 6 reboots after `git pull` so the device's openpilot Python lands first; then steps 7-999 generate sigmoid-baked tiles locally, rsync them per region, and final reboot.
@@ -17,11 +46,12 @@ Reverse-chronological. Add a new dated section for every substantive change.
   - `common/params_keys.h`: registered `MapPreCurveSpeeds` + `MapTilesSigmoidHash` (both CLEAR_ON_ONROAD_TRANSITION, STRING).
   - `vision_turn_controller.py`: added module-level `_compute_runtime_sigmoid_hash` + instance methods `_load_map_pre_curve_speeds` and `_baked_vsafe_with_runtime_multipliers`. Replaced line 5534 with hash-checked baked-vs-live fallback; live-tuned PHYSICS_* changes the runtime hash and auto-engages fallback. Low-speed calibration scale != 1.0 also forces fallback for the whole batch.
 - Tests: 4 new Go tests (`TestSigmoidMatchesPython` validates Go matches Python within 1e-9 against 11 precomputed κ samples + `f9d38ab3357c` reference hash; `TestSigmoidHashStableAcrossTrivialChanges`; `TestOldReaderNewTile` round-trips a v1 tile w/ baked + legacy ways; `TestLegacyTileReadsSchemaVersionZero` validates Cap'n Proto reads unset primitives as 0). 3 new Rust `mapd_config` unit tests. All pass. Pre-existing `TestVector`/`TestBearing` cupaloy snapshot mismatches are unrelated FP noise from a different platform/Go version.
-- Landmines added to watch:
-  - `/projects/mapd` is a publish destination, NOT the source of truth — edits live in `mapd_repo/openpilot-mapd/`. The user owns chriscarlo/mapd; if they want to publish a release tag, they need to port edits manually (e.g., `cp` + their `push_to_github.sh`).
-  - Distribution is local-only via SSH — no public CDN. Tiles uploaded by Pfeifer at `https://map-data.pfeifer.dev` ignore the new schema fields (they're sigmoid-agnostic v0). `MapdTileBaseUrl` could repoint at a self-hosted bucket later if multi-device distribution is needed.
+- Landmines added to watch (see 2026-04-19 entry for updates):
+  - `/projects/mapd` is a publish destination, NOT the source of truth — edits live in `mapd_repo/openpilot-mapd/`. The user owns chriscarlo/mapd; to publish a release tag, sync vendored → standalone first (`rsync -av --exclude=.git --exclude=README.md --exclude=CLAUDE.md mapd_repo/openpilot-mapd/ /projects/mapd/` preserves the standalone's customizations). As of 2026-04-19 the two are in sync at commit `29eb2e8` on chriscarlo/mapd main.
+  - Device binary distribution is via GitHub releases (`chriscarlo/mapd` releases, tag `chauffeur-bake-v1` as of 2026-04-19) — not local-only SSH as originally scoped. The installer-side URL lives in `sunnypilot/mapd/mapd_installer.py:25-26`.
+  - Tile transport to the tici is still local-only via rsync over SSH inside `RebuildTilesAndReboot`. `MapdTileBaseUrl` override still exists as an escape hatch if multi-device distribution becomes a goal.
   - Cap'n Proto Go bindings regenerate via `earthly +compile-capnp` (Earthfile:69-73). Locally accomplished without earthly via `PATH=$HOME/go/bin:$PATH capnp compile -I /tmp/go-capnp-std/std -ogo offline.capnp` (after curl-tarball clone of go-capnp std files; `git clone` is blocked by the openpilot branch-protection hook).
-  - Docker is required to build the Go binary locally if the user has no Go toolchain. Earthfile target `+build` uses `golang:1.24-alpine3.21`.
+  - Cross-compile the device binary via native amd64 Docker + `GOOS=linux GOARCH=arm64`, NOT `--platform=linux/arm64` qemu emulation (see 2026-04-19 entry for the 20× speed delta and verification steps).
 
 ## 2026-04-18 — wider Q range + denser Q_CURVE_POINTS export
 

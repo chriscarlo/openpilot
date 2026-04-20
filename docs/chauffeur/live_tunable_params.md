@@ -52,6 +52,46 @@ All params are read at runtime via `Longitudinal.LiveTune.*` keys. Changes take 
 | `DRelFilterInnovationGateM` | 30.0 | 5.0–60.0 | Snap to raw when prediction error exceeds this |
 | `DRelFilterClosingGateM` | 20.0 | 5.0–40.0 | Snap to raw when lead appears this much closer than predicted |
 
+## Cruise Reacquire Jerk Limit
+
+Softens the upward accel slew after the MPC source transitions from lead-follow to cruise (lead lost / classifier dropout). Only clips positive excursion — braking and steady lead-follow are unaffected. Window auto-ends when output_a_target reaches the cruise accel cap.
+
+| Param Key | Default | Range | Description |
+|---|---|---|---|
+| `CruiseReacquirePosJerkLimit` | 0.6 | 0.0–5.0 | Max upward jerk (m/s^3) on planner output during cruise after a lead drops. 0 disables |
+| `CruiseReacquireJerkWindowS` | 1.5 | 0.0–3.0 | Duration (s) the jerk limit is enforced after a lead → cruise transition. 0 disables |
+
+## Lead Prob Schmitt Trigger (radard)
+
+Asymmetric hysteresis on vision-model lead prob in radard. Per-slot latch: a slot must cross `Enter` to latch on, and fall below `Exit` to release. Defaults create a 0.25-wide hysteresis band around the old 0.5 threshold.
+
+| Param Key | Default | Range | Description |
+|---|---|---|---|
+| `LeadProbEnter` | 0.6 | 0.0–1.0 | Prob required to latch a slot on. Raise to reject flicker |
+| `LeadProbExit` | 0.35 | 0.0–1.0 | Prob below which a latched slot releases. Lower than enter = hysteresis |
+
+## Lead Source Dwell + Phantom Hold (MPC)
+
+Acquire/release dwell on lead `status` at the MPC boundary, plus velocity-extrapolated phantom hold for lead data continuity through brief dropouts. Set `PhantomLeadHoldS=0` to disable phantom. Set both dwell frame counts to 1 to disable dwell.
+
+| Param Key | Default | Range | Description |
+|---|---|---|---|
+| `LeadSourceAcquireFrames` | 1 | 1–20 | Consecutive valid-lead frames required before MPC accepts the lead. Default 1 = no dwell; raise on-device to engage |
+| `LeadSourceReleaseFrames` | 1 | 1–40 | Consecutive invalid-lead frames required before MPC releases a latched lead (ignored while phantom hold is active). Default 1 = no dwell; raise on-device to engage |
+| `PhantomLeadHoldS` | 0.0 | 0.0–1.5 | Duration (s) the last-known lead is extrapolated after status goes False. 0 disables phantom (default off); raise on-device to engage |
+| `PhantomLeadStableFrames` | 5 | 1–40 | Consecutive stable frames required before a dropped lead is eligible for phantom |
+
+## Flutter Mode Clamp (bidirectional jerk)
+
+When the MPC source flip-flops at the edge of lead acquisition (brake-tap sensation), enter flutter mode and clamp `output_a_target` slew in BOTH directions for comfort. Bypassed on strong modelAccel braking so real decel is not delayed.
+
+| Param Key | Default | Range | Description |
+|---|---|---|---|
+| `FlutterDetectTransitions` | 2 | 1–10 | Source transitions within the window that trigger flutter mode |
+| `FlutterDetectWindowS` | 1.0 | 0.1–5.0 | Rolling-window length for flutter detection |
+| `FlutterClampJerkMps3` | 0.8 | 0.0–5.0 | Bidirectional jerk cap (m/s^3) during flutter mode. 0 disables |
+| `FlutterClampBypassDecelMps2` | 1.5 | 0.0–5.0 | If modelAccel < -this, clamp is bypassed |
+
 ## Setting Params from SSH
 
 ```bash

@@ -25,6 +25,20 @@
 .venv/bin/python .codex/skills/openpilot-longitudinal-tuner/scripts/monitor_longitudinal_anomalies.py --jsonl-out .cache/longitudinal_watch.jsonl
 ```
 
+- Diagnose adjacent-lead / path-relative classification (adds per-row
+  `yRel`, `dPath`, `vLat` for both leads to the stdout line):
+```bash
+.venv/bin/python .codex/skills/openpilot-longitudinal-tuner/scripts/monitor_longitudinal_anomalies.py --hz 10 --show-lateral
+```
+
+- Enable classifier cloudlog emission for a session (sets
+  `VTSC.Expert.AdjLeadDebugLogEnabled=1`, restores on exit):
+```bash
+.venv/bin/python .codex/skills/openpilot-longitudinal-tuner/scripts/monitor_longitudinal_anomalies.py --hz 10 --duration 60 --enable-lead-role-log
+```
+  Then tail the cloudlog on-device with
+  `tail -F /data/log/cloudlog | grep LEADROLEDBG`.
+
 - On tici, use the device venv explicitly:
 ```bash
 cd /data/openpilot
@@ -48,6 +62,12 @@ cd /data/openpilot
   VTSC, SLC, and RTI
 - Lead presence:
   `radarState.leadOne`
+- Lead lateral (written to JSONL always under `lead0Lat` / `lead1Lat`;
+  shown in stdout with `--show-lateral`):
+  `radarState.leadOne.{yRel, dPath, vLat, vRel, vLead, aLeadK}` and the
+  same for `leadTwo`. Use these to distinguish source flicker driven by
+  `prob` edge cases from flicker driven by lateral-classification
+  ambiguity (in-lane leads measuring as adjacent or vice versa).
 
 ## Important Limitation
 
@@ -55,6 +75,15 @@ cd /data/openpilot
   Hyundai `LEADROLEDBG` internals by itself. Use the watcher to prove whether
   the car is in `cruise`, `lead0`, `lead1`, or a cap-limited regime first,
   then inspect `LEADROLEDBG` if the root cause still appears Hyundai-specific.
+- `LEADROLEDBG` is off by default. `--enable-lead-role-log` toggles it on
+  for the current session only and restores on clean exit. If the monitor
+  is killed hard, the flag stays set — disable it manually via
+  `/usr/local/venv/bin/python3 -c "from openpilot.common.params import Params; Params().put_bool('VTSC.Expert.AdjLeadDebugLogEnabled', False)"`.
+- When the source-stability layer is active, `LEADROLEDBG` entries also
+  include a top-level `lead_stability` dict with per-slot `latched`,
+  `valid_streak`, `invalid_streak`, `latched_valid_streak`,
+  `phantom_age_s`, and `out_status`. That is where to look when the
+  stabilized lead status differs from the raw vision lead.
 - Weather-aware slowdown is internal-only to the planner. The watcher cannot
   attribute weather caps from published buses alone.
 - `longitudinalPlanSP` does not include RTI state. The watcher reads RTI from

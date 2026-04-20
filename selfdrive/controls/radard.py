@@ -236,11 +236,25 @@ def add_path_relative_lead_metrics(lead_dict: dict[str, Any], model_msg: capnp._
   return lead_dict
 
 
+def _is_lead_prob_accepted(lead_prob: float, prev_latched: bool,
+                           prob_enter: float, prob_exit: float) -> bool:
+  """Asymmetric Schmitt trigger on vision lead prob. Previous latch state decides
+  whether the current prob clears the enter or the exit threshold. Defaults to
+  the classic `prob > 0.5` behavior when both thresholds collapse to 0.5."""
+  if not math.isfinite(lead_prob):
+    return False
+  lower = min(prob_enter, prob_exit)
+  upper = max(prob_enter, prob_exit)
+  return lead_prob > (lower if prev_latched else upper)
+
+
 def get_lead(v_ego: float, ready: bool, tracks: dict[int, Track], lead_msg: capnp._DynamicStructReader,
              model_v_ego: float, CP: structs.CarParams, CP_SP: structs.CarParamsSP, model_msg: capnp._DynamicStructReader,
-             low_speed_override: bool = True) -> dict[str, Any]:
+             low_speed_override: bool = True, prev_latched: bool = False,
+             prob_enter: float = 0.5, prob_exit: float = 0.5) -> tuple[dict[str, Any], bool]:
   # Determine leads, this is where the essential logic happens
-  if len(tracks) > 0 and ready and lead_msg.prob > .5:
+  prob_accepted = _is_lead_prob_accepted(float(lead_msg.prob), prev_latched, prob_enter, prob_exit)
+  if len(tracks) > 0 and ready and prob_accepted:
     track = match_vision_to_track(v_ego, lead_msg, tracks)
   else:
     track = None
@@ -249,7 +263,7 @@ def get_lead(v_ego: float, ready: bool, tracks: dict[int, Track], lead_msg: capn
   if track is not None:
     lead_dict = track.get_RadarState(lead_msg.prob)
     lead_dict = get_custom_yrel(CP, CP_SP, lead_dict, lead_msg)
-  elif (track is None) and ready and (lead_msg.prob > .5):
+  elif (track is None) and ready and prob_accepted:
     lead_dict = get_RadarState_from_vision(lead_msg, v_ego, model_v_ego)
 
   if low_speed_override:
@@ -264,7 +278,8 @@ def get_lead(v_ego: float, ready: bool, tracks: dict[int, Track], lead_msg: capn
   if lead_dict.get("status", False):
     lead_dict = add_path_relative_lead_metrics(lead_dict, model_msg, lead_msg if ready else None)
 
-  return lead_dict
+  new_latched = bool(lead_dict.get("status", False))
+  return lead_dict, new_latched
 
 
 def get_custom_yrel(CP: structs.CarParams, CP_SP: structs.CarParamsSP, lead_dict: dict[str, Any],
@@ -277,6 +292,8 @@ def get_custom_yrel(CP: structs.CarParams, CP_SP: structs.CarParamsSP, lead_dict
 
 
 class RadarD:
+  LEAD_PROB_REFRESH_S = 1.0
+
   def __init__(self, CP: structs.CarParams, CP_SP: structs.CarParams, delay: float = 0.0):
     self.CP = CP
     self.CP_SP = CP_SP
@@ -294,6 +311,12 @@ class RadarD:
     self.radar_state_valid = False
 
     self.ready = False
+
+    self._lead_latched = [False, False]
+    self._params = Params()
+    self._lead_prob_enter = 0.5
+    self._lead_prob_exit = 0.5
+    self._last_prob_refresh_t = 0.0
 
   def update(self, sm: messaging.SubMaster, rr: car.RadarData):
     self.ready = sm.seen['modelV2']
@@ -334,12 +357,37 @@ class RadarD:
       model_v_ego = sm['modelV2'].velocity.x[0]
     else:
       model_v_ego = self.v_ego
+    self._maybe_refresh_lead_prob_thresholds()
+
     leads_v3 = sm['modelV2'].leadsV3
     if len(leads_v3) > 1:
-      self.radar_state.leadOne = get_lead(self.v_ego, self.ready, self.tracks, leads_v3[0], model_v_ego, self.CP, self.CP_SP, sm['modelV2'],
-                                          low_speed_override=True)
-      self.radar_state.leadTwo = get_lead(self.v_ego, self.ready, self.tracks, leads_v3[1], model_v_ego, self.CP, self.CP_SP, sm['modelV2'],
-                                          low_speed_override=False)
+      lead_one, latched_one = get_lead(self.v_ego, self.ready, self.tracks, leads_v3[0], model_v_ego,
+                                       self.CP, self.CP_SP, sm['modelV2'], low_speed_override=True,
+                                       prev_latched=self._lead_latched[0],
+                                       prob_enter=self._lead_prob_enter, prob_exit=self._lead_prob_exit)
+      lead_two, latched_two = get_lead(self.v_ego, self.ready, self.tracks, leads_v3[1], model_v_ego,
+                                       self.CP, self.CP_SP, sm['modelV2'], low_speed_override=False,
+                                       prev_latched=self._lead_latched[1],
+                                       prob_enter=self._lead_prob_enter, prob_exit=self._lead_prob_exit)
+      self.radar_state.leadOne = lead_one
+      self.radar_state.leadTwo = lead_two
+      self._lead_latched = [latched_one, latched_two]
+
+  def _maybe_refresh_lead_prob_thresholds(self) -> None:
+    if (self.current_time - self._last_prob_refresh_t) < self.LEAD_PROB_REFRESH_S:
+      return
+    self._last_prob_refresh_t = self.current_time
+    def _read(key: str, default: float) -> float:
+      try:
+        raw = self._params.get(key)
+        if raw is None:
+          return float(default)
+        val = float(raw)
+        return val if math.isfinite(val) else float(default)
+      except Exception:
+        return float(default)
+    self._lead_prob_enter = max(0.0, min(1.0, _read("Longitudinal.LiveTune.LeadProbEnter", 0.6)))
+    self._lead_prob_exit = max(0.0, min(1.0, _read("Longitudinal.LiveTune.LeadProbExit", 0.35)))
 
   def publish(self, pm: messaging.PubMaster):
     assert self.radar_state is not None

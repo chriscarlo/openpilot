@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
+from __future__ import annotations
+
 import copy
 import json
 import math
 import os
 import time
+from typing import Any
 import numpy as np
 from cereal import log
 from opendbc.car.interfaces import ACCEL_MIN, ACCEL_MAX
@@ -220,6 +223,70 @@ DREL_FILTER_INNOVATION_DEADBAND_M = 0.35
 DREL_FILTER_OPEN_SLEW_MAX_MPS = 1.25
 DREL_FILTER_SNAP_HOLD_FRAMES = 4
 DREL_FILTER_ALPHA_FAST = 0.5
+
+
+class _StabilizedLead:
+  """Mutable duck-type of cereal.RadarState.LeadData.Reader. Mirrors the subset
+  of attributes MPC callers read, so downstream code is oblivious to whether
+  it's looking at a raw capnp reader or a phantom-extrapolated snapshot."""
+  __slots__ = ('status', 'dRel', 'yRel', 'vRel', 'vLead', 'aLeadK', 'modelProb',
+               'dPath', 'vLat', 'aLeadTau', 'aRel')
+
+  def __init__(self, status=False, dRel=0.0, yRel=0.0, vRel=0.0, vLead=0.0,
+               aLeadK=0.0, modelProb=0.0, dPath=0.0, vLat=0.0, aLeadTau=0.0,
+               aRel=0.0):
+    self.status = bool(status)
+    self.dRel = float(dRel)
+    self.yRel = float(yRel)
+    self.vRel = float(vRel)
+    self.vLead = float(vLead)
+    self.aLeadK = float(aLeadK)
+    self.modelProb = float(modelProb)
+    self.dPath = float(dPath)
+    self.vLat = float(vLat)
+    self.aLeadTau = float(aLeadTau)
+    self.aRel = float(aRel)
+
+  @staticmethod
+  def _safe_attr(src: Any, name: str, default: float = 0.0) -> float:
+    try:
+      val = getattr(src, name, default)
+      val = float(val) if val is not None else float(default)
+      return val if math.isfinite(val) else float(default)
+    except Exception:
+      return float(default)
+
+  @classmethod
+  def from_reader(cls, rd: Any) -> _StabilizedLead:
+    if rd is None:
+      return cls(status=False)
+    return cls(
+      status=bool(getattr(rd, 'status', False)),
+      dRel=cls._safe_attr(rd, 'dRel'),
+      yRel=cls._safe_attr(rd, 'yRel'),
+      vRel=cls._safe_attr(rd, 'vRel'),
+      vLead=cls._safe_attr(rd, 'vLead'),
+      aLeadK=cls._safe_attr(rd, 'aLeadK'),
+      modelProb=cls._safe_attr(rd, 'modelProb'),
+      dPath=cls._safe_attr(rd, 'dPath'),
+      vLat=cls._safe_attr(rd, 'vLat'),
+      aLeadTau=cls._safe_attr(rd, 'aLeadTau'),
+      aRel=cls._safe_attr(rd, 'aRel'),
+    )
+
+
+class _LeadStabilityState:
+  """Per-slot state for the acquire/release dwell + phantom extrapolation filter."""
+  __slots__ = ('latched', 'valid_streak', 'invalid_streak',
+               'latched_valid_streak', 'last_valid', 'last_valid_t')
+
+  def __init__(self):
+    self.latched = False
+    self.valid_streak = 0
+    self.invalid_streak = 0
+    self.latched_valid_streak = 0
+    self.last_valid: _StabilizedLead | None = None
+    self.last_valid_t: float | None = None
 
 
 class LeadDistanceFilter:
@@ -913,6 +980,7 @@ def gen_long_ocp():
 
 class LongitudinalMpc:
   LIVE_TUNE_REFRESH_DT_S = 0.50
+  LEAD_STABILIZER_PHANTOM_YREL_KILL_M = 1.75
 
   def __init__(self, mode='acc', dt=DT_MDL, CP=None):
     self.mode = mode
@@ -933,6 +1001,8 @@ class LongitudinalMpc:
     self.lead_role_classifier = LeadRoleClassifier()
     self.lead_role_debug = {}
     self.last_lead_role_log_t = 0.0
+    self._lead_stability_state = [_LeadStabilityState(), _LeadStabilityState()]
+    self.lead_stability_debug: dict[str, Any] = {}
 
   def reset(self):
     # self.solver = AcadosOcpSolverCython(MODEL_NAME, ACADOS_SOLVER_TYPE, N)
@@ -1877,6 +1947,96 @@ class LongitudinalMpc:
       roles.get("lead1") == LeadRoleClassifier.CENTER_CONTROL
     )
 
+  def _stabilize_raw_leads(self, raw_lead0: Any, raw_lead1: Any, now: float) -> tuple[_StabilizedLead, _StabilizedLead]:
+    """Apply acquire/release dwell + phantom extrapolation to each raw lead.
+    Returns duck-typed _StabilizedLead objects that downstream MPC code treats
+    as if they were capnp readers. Defaults leave behavior unchanged
+    (acquire_frames=1, release_frames=1, phantom_hold_s=0 collapses to raw passthrough)."""
+    cfg = self._live_tune_cfg
+    acquire_frames = int(max(1, round(float(getattr(cfg, 'lead_source_acquire_frames', 1.0) or 1.0))))
+    release_frames = int(max(1, round(float(getattr(cfg, 'lead_source_release_frames', 1.0) or 1.0))))
+    phantom_hold_s = float(max(0.0, float(getattr(cfg, 'phantom_lead_hold_s', 0.0) or 0.0)))
+    stable_frames = int(max(1, round(float(getattr(cfg, 'phantom_lead_stable_frames', 1.0) or 1.0))))
+
+    outs: list[_StabilizedLead] = []
+    for slot, raw in enumerate((raw_lead0, raw_lead1)):
+      state = self._lead_stability_state[slot]
+      raw_valid = bool(getattr(raw, 'status', False)) if raw is not None else False
+
+      if raw_valid:
+        state.valid_streak += 1
+        state.invalid_streak = 0
+        if state.latched:
+          state.latched_valid_streak += 1
+        state.last_valid = _StabilizedLead.from_reader(raw)
+        state.last_valid_t = now
+      else:
+        state.invalid_streak += 1
+        state.valid_streak = 0
+
+      if state.latched:
+        if state.invalid_streak >= release_frames and not (phantom_hold_s > 0.0):
+          state.latched = False
+          state.latched_valid_streak = 0
+      else:
+        if state.valid_streak >= acquire_frames:
+          state.latched = True
+          state.latched_valid_streak = state.valid_streak
+
+      if state.latched and raw_valid:
+        outs.append(_StabilizedLead.from_reader(raw))
+        continue
+
+      if (state.latched and not raw_valid and state.last_valid is not None
+          and state.last_valid_t is not None and phantom_hold_s > 0.0):
+        age = max(0.0, now - state.last_valid_t)
+        if age > phantom_hold_s or state.latched_valid_streak < stable_frames:
+          state.latched = False
+          state.latched_valid_streak = 0
+          outs.append(_StabilizedLead(status=False))
+          continue
+        # Kill phantom if a DIFFERENT candidate appears in the other slot at a
+        # materially different yRel — suggests our lead left and a new car came in.
+        other_idx = 1 - slot
+        other = (raw_lead0, raw_lead1)[other_idx]
+        if other is not None and bool(getattr(other, 'status', False)):
+          other_y = _StabilizedLead._safe_attr(other, 'yRel')
+          if abs(other_y - state.last_valid.yRel) > self.LEAD_STABILIZER_PHANTOM_YREL_KILL_M:
+            state.latched = False
+            state.latched_valid_streak = 0
+            outs.append(_StabilizedLead(status=False))
+            continue
+        phantom = _StabilizedLead(
+          status=True,
+          dRel=max(1.0, state.last_valid.dRel + state.last_valid.vRel * age),
+          yRel=state.last_valid.yRel,
+          vRel=state.last_valid.vRel,
+          vLead=state.last_valid.vLead,
+          aLeadK=state.last_valid.aLeadK * max(0.0, 1.0 - age / max(phantom_hold_s, 1e-3)),
+          modelProb=state.last_valid.modelProb * max(0.0, 1.0 - age / max(phantom_hold_s, 1e-3)),
+          dPath=state.last_valid.dPath,
+          vLat=state.last_valid.vLat,
+          aLeadTau=state.last_valid.aLeadTau,
+          aRel=state.last_valid.aRel,
+        )
+        outs.append(phantom)
+        continue
+
+      outs.append(_StabilizedLead(status=False))
+
+    self.lead_stability_debug = {
+      f"slot{slot}": {
+        "latched": bool(state.latched),
+        "valid_streak": int(state.valid_streak),
+        "invalid_streak": int(state.invalid_streak),
+        "latched_valid_streak": int(state.latched_valid_streak),
+        "phantom_age_s": (float(now - state.last_valid_t) if state.last_valid_t is not None else None),
+        "out_status": bool(outs[slot].status),
+      }
+      for slot, state in enumerate(self._lead_stability_state)
+    }
+    return outs[0], outs[1]
+
   def _stabilize_control_leads(self, raw_lead0, raw_lead1,
                                control_lead0: ControlLead,
                                control_lead1: ControlLead,
@@ -2487,18 +2647,22 @@ class LongitudinalMpc:
       t_follow = get_T_FOLLOW(personality)
     self.current_t_follow = float(t_follow)
 
-    raw_control_lead0, raw_control_lead1, lead_role_debug = self.lead_role_classifier.classify(
-      v_ego, radarstate.leadOne, radarstate.leadTwo, now=now,
-    )
-    self.control_leads, lead_role_debug = self._stabilize_control_leads(
-      radarstate.leadOne, radarstate.leadTwo, raw_control_lead0, raw_control_lead1, lead_role_debug,
-    )
-    # Snapshot raw radar leads so _maybe_hold_hyundai_classifier_demotion can
-    # corroborate against fresh sensor data without plumbing radarstate deeper.
-    self._last_raw_radar_leads = (
+    stabilized_lead0, stabilized_lead1 = self._stabilize_raw_leads(
       getattr(radarstate, 'leadOne', None),
       getattr(radarstate, 'leadTwo', None),
+      now,
     )
+
+    raw_control_lead0, raw_control_lead1, lead_role_debug = self.lead_role_classifier.classify(
+      v_ego, stabilized_lead0, stabilized_lead1, now=now,
+    )
+    self.control_leads, lead_role_debug = self._stabilize_control_leads(
+      stabilized_lead0, stabilized_lead1, raw_control_lead0, raw_control_lead1, lead_role_debug,
+    )
+    # Snapshot stabilized leads so _maybe_hold_hyundai_classifier_demotion can
+    # corroborate against the same view the rest of update() uses. Keeps
+    # dwell/phantom decisions internally consistent across update().
+    self._last_raw_radar_leads = (stabilized_lead0, stabilized_lead1)
     control_lead0, control_lead1 = self.control_leads
     self.lead_role_debug = lead_role_debug
     self.status = control_lead0.status or control_lead1.status
@@ -2540,7 +2704,7 @@ class LongitudinalMpc:
       "lead1": lead_1_preview_debug,
     }
     adjacent_awareness_preview_obstacle, adjacent_awareness_preview_debug = self._compute_adjacent_awareness_preview_obstacle(
-      {"lead0": radarstate.leadOne, "lead1": radarstate.leadTwo},
+      {"lead0": stabilized_lead0, "lead1": stabilized_lead1},
       lead_role_debug,
       float(v_ego),
       t_follow,
@@ -2819,6 +2983,7 @@ class LongitudinalMpc:
           "raw_duplicate_model": lead_role_debug.get("raw_duplicate_model", {}),
           "raw": lead_role_debug.get("raw", {}),
           "awareness": lead_role_debug.get("awareness", []),
+          "lead_stability": self.lead_stability_debug,
         }
         cloudlog.info(f"LEADROLEDBG {json.dumps(dbg_payload, separators=(',', ':'), sort_keys=True)}")
 

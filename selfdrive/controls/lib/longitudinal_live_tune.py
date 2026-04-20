@@ -208,6 +208,126 @@ LEAD_RESPONSE_TUNE_SPECS = (
     maximum=40.0,
     description="Closing gate: snap to raw when lead appears this much closer than predicted (meters).",
   ),
+  LeadResponseTuneSpec(
+    attr="cruise_reacquire_pos_jerk_limit",
+    key="Longitudinal.LiveTune.CruiseReacquirePosJerkLimit",
+    cli_name="cruise-reacquire-pos-jerk-limit",
+    label="cruise_reacquire_pos_jerk_limit",
+    default=0.6,
+    minimum=0.0,
+    maximum=5.0,
+    description="Max upward jerk (m/s^3) on planner output during cruise after a lead drops. 0 disables.",
+  ),
+  LeadResponseTuneSpec(
+    attr="cruise_reacquire_jerk_window_s",
+    key="Longitudinal.LiveTune.CruiseReacquireJerkWindowS",
+    cli_name="cruise-reacquire-jerk-window-s",
+    label="cruise_reacquire_jerk_window_s",
+    default=1.5,
+    minimum=0.0,
+    maximum=3.0,
+    description="Duration (s) the cruise_reacquire_pos_jerk_limit is enforced after a lead drops. 0 disables.",
+  ),
+  LeadResponseTuneSpec(
+    attr="lead_prob_enter",
+    key="Longitudinal.LiveTune.LeadProbEnter",
+    cli_name="lead-prob-enter",
+    label="lead_prob_enter",
+    default=0.6,
+    minimum=0.0,
+    maximum=1.0,
+    description="vision lead prob required to latch a slot on (Schmitt trigger). Raise to reject flicker.",
+  ),
+  LeadResponseTuneSpec(
+    attr="lead_prob_exit",
+    key="Longitudinal.LiveTune.LeadProbExit",
+    cli_name="lead-prob-exit",
+    label="lead_prob_exit",
+    default=0.35,
+    minimum=0.0,
+    maximum=1.0,
+    description="vision lead prob below which a latched slot releases. Lower than enter = hysteresis band.",
+  ),
+  LeadResponseTuneSpec(
+    attr="lead_source_acquire_frames",
+    key="Longitudinal.LiveTune.LeadSourceAcquireFrames",
+    cli_name="lead-source-acquire-frames",
+    label="lead_source_acquire_frames",
+    default=1.0,
+    minimum=1.0,
+    maximum=20.0,
+    description="Consecutive valid-lead frames required at the MPC before switching source FROM cruise TO lead. 1 = no dwell.",
+  ),
+  LeadResponseTuneSpec(
+    attr="lead_source_release_frames",
+    key="Longitudinal.LiveTune.LeadSourceReleaseFrames",
+    cli_name="lead-source-release-frames",
+    label="lead_source_release_frames",
+    default=1.0,
+    minimum=1.0,
+    maximum=40.0,
+    description="Consecutive invalid-lead frames required at the MPC before switching source FROM lead TO cruise. 1 = no dwell.",
+  ),
+  LeadResponseTuneSpec(
+    attr="phantom_lead_hold_s",
+    key="Longitudinal.LiveTune.PhantomLeadHoldS",
+    cli_name="phantom-lead-hold-s",
+    label="phantom_lead_hold_s",
+    default=0.0,
+    minimum=0.0,
+    maximum=1.5,
+    description="Duration (s) the last-known lead is extrapolated after status goes False. 0 disables (default off).",
+  ),
+  LeadResponseTuneSpec(
+    attr="phantom_lead_stable_frames",
+    key="Longitudinal.LiveTune.PhantomLeadStableFrames",
+    cli_name="phantom-lead-stable-frames",
+    label="phantom_lead_stable_frames",
+    default=5.0,
+    minimum=1.0,
+    maximum=40.0,
+    description="Consecutive stable frames required before a dropped lead is eligible for phantom hold.",
+  ),
+  LeadResponseTuneSpec(
+    attr="flutter_detect_transitions",
+    key="Longitudinal.LiveTune.FlutterDetectTransitions",
+    cli_name="flutter-detect-transitions",
+    label="flutter_detect_transitions",
+    default=2.0,
+    minimum=1.0,
+    maximum=10.0,
+    description="Source-transition count within FlutterDetectWindowS that triggers bidirectional jerk clamp.",
+  ),
+  LeadResponseTuneSpec(
+    attr="flutter_detect_window_s",
+    key="Longitudinal.LiveTune.FlutterDetectWindowS",
+    cli_name="flutter-detect-window-s",
+    label="flutter_detect_window_s",
+    default=1.0,
+    minimum=0.1,
+    maximum=5.0,
+    description="Rolling window length (s) for flutter-detection transition count.",
+  ),
+  LeadResponseTuneSpec(
+    attr="flutter_clamp_jerk_mps3",
+    key="Longitudinal.LiveTune.FlutterClampJerkMps3",
+    cli_name="flutter-clamp-jerk-mps3",
+    label="flutter_clamp_jerk_mps3",
+    default=0.8,
+    minimum=0.0,
+    maximum=5.0,
+    description="Bidirectional jerk cap (m/s^3) applied to planner output while flutter mode is active. 0 disables.",
+  ),
+  LeadResponseTuneSpec(
+    attr="flutter_clamp_bypass_decel_mps2",
+    key="Longitudinal.LiveTune.FlutterClampBypassDecelMps2",
+    cli_name="flutter-clamp-bypass-decel-mps2",
+    label="flutter_clamp_bypass_decel_mps2",
+    default=1.5,
+    minimum=0.0,
+    maximum=5.0,
+    description="If modelAccel < -this, flutter clamp is bypassed so hard braking is not delayed.",
+  ),
 )
 
 LEAD_RESPONSE_TUNE_SPECS_BY_ATTR = {spec.attr: spec for spec in LEAD_RESPONSE_TUNE_SPECS}
@@ -232,6 +352,18 @@ class LeadResponseTuningConfig:
   drel_filter_open_slew_max_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["drel_filter_open_slew_max_mps"].default
   drel_filter_innovation_gate_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["drel_filter_innovation_gate_m"].default
   drel_filter_closing_gate_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["drel_filter_closing_gate_m"].default
+  cruise_reacquire_pos_jerk_limit: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cruise_reacquire_pos_jerk_limit"].default
+  cruise_reacquire_jerk_window_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cruise_reacquire_jerk_window_s"].default
+  lead_prob_enter: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_prob_enter"].default
+  lead_prob_exit: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_prob_exit"].default
+  lead_source_acquire_frames: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_source_acquire_frames"].default
+  lead_source_release_frames: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_source_release_frames"].default
+  phantom_lead_hold_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["phantom_lead_hold_s"].default
+  phantom_lead_stable_frames: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["phantom_lead_stable_frames"].default
+  flutter_detect_transitions: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["flutter_detect_transitions"].default
+  flutter_detect_window_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["flutter_detect_window_s"].default
+  flutter_clamp_jerk_mps3: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["flutter_clamp_jerk_mps3"].default
+  flutter_clamp_bypass_decel_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["flutter_clamp_bypass_decel_mps2"].default
 
   @classmethod
   def defaults(cls) -> LeadResponseTuningConfig:
