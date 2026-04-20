@@ -226,32 +226,26 @@ DREL_FILTER_ALPHA_FAST = 0.5
 
 
 class _StabilizedLead:
-  """Mutable duck-type of cereal.RadarState.LeadData.Reader. Must carry the
-  full attribute surface that downstream MPC code reads — missing a field
-  triggers AttributeError under __slots__ and crashes update()."""
-  __slots__ = ('status', 'dRel', 'yRel', 'vRel', 'vLead', 'vLeadK', 'aLeadK',
-               'modelProb', 'dPath', 'vLat', 'aLeadTau', 'aRel',
-               'fcw', 'radar', 'radarTrackId')
+  """Mutable duck-type of cereal.RadarState.LeadData.Reader. Mirrors the subset
+  of attributes MPC callers read, so downstream code is oblivious to whether
+  it's looking at a raw capnp reader or a phantom-extrapolated snapshot."""
+  __slots__ = ('status', 'dRel', 'yRel', 'vRel', 'vLead', 'aLeadK', 'modelProb',
+               'dPath', 'vLat', 'aLeadTau', 'aRel')
 
   def __init__(self, status=False, dRel=0.0, yRel=0.0, vRel=0.0, vLead=0.0,
-               vLeadK=0.0, aLeadK=0.0, modelProb=0.0, dPath=0.0, vLat=0.0,
-               aLeadTau=0.0, aRel=0.0, fcw=False, radar=False,
-               radarTrackId=-1):
+               aLeadK=0.0, modelProb=0.0, dPath=0.0, vLat=0.0, aLeadTau=0.0,
+               aRel=0.0):
     self.status = bool(status)
     self.dRel = float(dRel)
     self.yRel = float(yRel)
     self.vRel = float(vRel)
     self.vLead = float(vLead)
-    self.vLeadK = float(vLeadK)
     self.aLeadK = float(aLeadK)
     self.modelProb = float(modelProb)
     self.dPath = float(dPath)
     self.vLat = float(vLat)
     self.aLeadTau = float(aLeadTau)
     self.aRel = float(aRel)
-    self.fcw = bool(fcw)
-    self.radar = bool(radar)
-    self.radarTrackId = int(radarTrackId)
 
   @staticmethod
   def _safe_attr(src: Any, name: str, default: float = 0.0) -> float:
@@ -266,26 +260,18 @@ class _StabilizedLead:
   def from_reader(cls, rd: Any) -> _StabilizedLead:
     if rd is None:
       return cls(status=False)
-    try:
-      track_id = int(getattr(rd, 'radarTrackId', -1))
-    except Exception:
-      track_id = -1
     return cls(
       status=bool(getattr(rd, 'status', False)),
       dRel=cls._safe_attr(rd, 'dRel'),
       yRel=cls._safe_attr(rd, 'yRel'),
       vRel=cls._safe_attr(rd, 'vRel'),
       vLead=cls._safe_attr(rd, 'vLead'),
-      vLeadK=cls._safe_attr(rd, 'vLeadK'),
       aLeadK=cls._safe_attr(rd, 'aLeadK'),
       modelProb=cls._safe_attr(rd, 'modelProb'),
       dPath=cls._safe_attr(rd, 'dPath'),
       vLat=cls._safe_attr(rd, 'vLat'),
       aLeadTau=cls._safe_attr(rd, 'aLeadTau'),
       aRel=cls._safe_attr(rd, 'aRel'),
-      fcw=bool(getattr(rd, 'fcw', False)),
-      radar=bool(getattr(rd, 'radar', False)),
-      radarTrackId=track_id,
     )
 
 
@@ -2032,10 +2018,6 @@ class LongitudinalMpc:
           vLat=state.last_valid.vLat,
           aLeadTau=state.last_valid.aLeadTau,
           aRel=state.last_valid.aRel,
-          vLeadK=state.last_valid.vLeadK,
-          fcw=state.last_valid.fcw,
-          radar=state.last_valid.radar,
-          radarTrackId=state.last_valid.radarTrackId,
         )
         outs.append(phantom)
         continue
