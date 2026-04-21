@@ -98,7 +98,14 @@ type DownloadLocationDetail struct {
 
 var progress DownloadProgress
 
-const DEFAULT_TILE_BASE_URL = "https://map-data.pfeifer.dev"
+// DEFAULT_TILE_BASE_URL is intentionally empty: chauffeur produces its
+// tile tarballs locally (via `mapd --generate` against a Geofabrik PBF)
+// and scp's the extracted offline tree to the device. There is no
+// chriscarlo-owned tile CDN yet, so having a default URL here would mean
+// any misconfigured OSMDownloadLocations request silently hits a
+// third-party CDN. Require MapdTileBaseUrl or MAPD_TILE_BASE_URL to be
+// set explicitly before any tile download is attempted.
+const DEFAULT_TILE_BASE_URL = ""
 
 func readOptionalParam(path string) string {
 	data, err := GetParam(path)
@@ -123,7 +130,11 @@ func configuredTileBaseURL() string {
 }
 
 func tileArchiveURL(filename string) string {
-	return fmt.Sprintf("%s/%s", configuredTileBaseURL(), strings.TrimLeft(filename, "/"))
+	base := configuredTileBaseURL()
+	if base == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s/%s", base, strings.TrimLeft(filename, "/"))
 }
 
 func AddLocationDetailsToProgress(locationNames []string, locationType string) {
@@ -220,6 +231,11 @@ func adjustedBounds(bounds Bounds) (int, int, int, int) {
 
 func DownloadBounds(bounds Bounds, locationName string) (err error) {
 	log.Info().Msgf("Downloading Bounds: %f, %f, %f, %f\n", bounds.MinLat, bounds.MinLon, bounds.MaxLat, bounds.MaxLon)
+
+	if configuredTileBaseURL() == "" {
+		log.Warn().Msgf("skipping tile download for %q: no MapdTileBaseUrl / MAPD_TILE_BASE_URL configured. scp extracted tiles into %s to populate offline data.", locationName, filepath.Join(GetBaseOpPath(), "offline"))
+		return nil
+	}
 
 	// clip given bounds to file areas
 	minLat, minLon, maxLat, maxLon := adjustedBounds(bounds)

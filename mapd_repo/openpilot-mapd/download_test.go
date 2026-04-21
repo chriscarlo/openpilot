@@ -25,12 +25,26 @@ func withTempParamPaths(t *testing.T) {
 	})
 }
 
-func TestConfiguredTileBaseURLDefaults(t *testing.T) {
+func TestConfiguredTileBaseURLDefaultsToEmpty(t *testing.T) {
 	withTempParamPaths(t)
 	t.Setenv("MAPD_TILE_BASE_URL", "")
 
-	if got := configuredTileBaseURL(); got != DEFAULT_TILE_BASE_URL {
-		t.Fatalf("expected default tile base URL %q, got %q", DEFAULT_TILE_BASE_URL, got)
+	// Chauffeur has no tile CDN; with nothing configured, tile download must
+	// be disabled rather than silently falling back to a third-party host.
+	if got := configuredTileBaseURL(); got != "" {
+		t.Fatalf("expected empty default tile base URL, got %q", got)
+	}
+	if DEFAULT_TILE_BASE_URL != "" {
+		t.Fatalf("DEFAULT_TILE_BASE_URL must stay empty; got %q", DEFAULT_TILE_BASE_URL)
+	}
+}
+
+func TestTileArchiveURLIsEmptyWhenNoBaseConfigured(t *testing.T) {
+	withTempParamPaths(t)
+	t.Setenv("MAPD_TILE_BASE_URL", "")
+
+	if got := tileArchiveURL("/offline/38/-122.tar.gz"); got != "" {
+		t.Fatalf("expected empty tile URL when no base configured, got %q", got)
 	}
 }
 
@@ -93,7 +107,7 @@ func TestConfiguredTileBaseURLIgnoresMissingParamFiles(t *testing.T) {
 	_ = os.Remove(ParamPath("MapdTileBaseUrl", true))
 	_ = os.Remove(ParamPath("MapdTileBaseUrl", false))
 
-	if got := configuredTileBaseURL(); got != DEFAULT_TILE_BASE_URL {
-		t.Fatalf("expected default tile base URL after missing params, got %q", got)
+	if got := configuredTileBaseURL(); got != "" {
+		t.Fatalf("expected empty tile base URL after missing params, got %q", got)
 	}
 }

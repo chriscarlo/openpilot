@@ -1,13 +1,17 @@
-# Openpilot mapd
-Provides openpilot with data from mapd
+# Openpilot mapd (chriscarlo fork)
+Provides openpilot with map data. Fork of [pfeiferj/openpilot-mapd](https://github.com/pfeiferj/openpilot-mapd)
+that adds sigmoid-baked per-node safe speeds (schema v1) for VTSC rally
+co-pilot. Release binaries live on
+[chriscarlo/mapd](https://github.com/chriscarlo/mapd/releases).
 
 ## Using
 ### Integrating With Openpilot
-Each release will have a pre-compiled static binary attached for use with
-openpilot on a comma device. Without any additional code the binary will not run
-or change openpilot behavior. A reference implementation for managing downloads
-of the binary and using data output from this daemon is located in
-[pfeifer-openpilot-patches](https://github.com/pfeiferj/openpilot/tree/pfeifer-openpilot-patches/mapd).
+Each release has a pre-compiled static arm64 binary attached for use with
+openpilot on a comma device. The consumer for this fork is
+[chriscarlo/chauffeur](https://github.com/chriscarlo/chauffeur), specifically
+`sunnypilot/mapd/mapd_installer.py` (downloads the binary) and
+`sunnypilot/selfdrive/controls/lib/vision_turn_controller.py` (consumes
+`MapCurvatures` + `MapPreCurveSpeeds` params).
 
 ### mapd inputs
 Inputs are described in [docs/inputs.md](./docs/inputs.md).

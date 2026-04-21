@@ -48,12 +48,15 @@ latitude, longitude, and bearing are all in degrees.
 Maps can be downloaded in one of two ways, by arbitrary bounding box or by
 pre-defined locations.
 
-#### Override Tile Host
-By default mapd downloads offline archives from `https://map-data.pfeifer.dev`.
-For a forked deployment you can override the base URL by setting the persistent
-or memory `MapdTileBaseUrl` param. The value should be the host prefix that
-serves files in the existing layout:
-`offline/<lat>/<lon>.tar.gz`.
+#### Configure Tile Host
+mapd does not ship with a default tile CDN. If you want mapd to fetch
+offline tile archives at runtime, set the persistent or memory
+`MapdTileBaseUrl` param (or `MAPD_TILE_BASE_URL` env var) to the host
+prefix that serves files in the layout `offline/<lat>/<lon>.tar.gz`.
+
+For chauffeur deployments, tiles are produced locally via `mapd --generate`
+against a Geofabrik PBF and then rsync/scp'd into the device's offline
+directory directly, so this param is normally left unset.
 
 For example:
 ```text

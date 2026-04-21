@@ -12,15 +12,31 @@ import time
 import traceback
 import requests
 from pathlib import Path
+from typing import Callable, Protocol
 from urllib.request import urlopen
 
 from cereal import messaging
 from openpilot.common.params import Params
+from openpilot.common.swaglog import cloudlog
 from openpilot.system.hardware.hw import Paths
 from openpilot.common.spinner import Spinner
 from openpilot.system.version import is_prebuilt
 from openpilot.sunnypilot.mapd import MAPD_PATH, MAPD_BIN_DIR
 import openpilot.system.sentry as sentry
+
+
+class _StatusReporter(Protocol):
+  def update(self, msg: str) -> None: ...
+  def close(self) -> None: ...
+
+
+class _CloudlogStatusReporter:
+  """Daemon-friendly stand-in for Spinner. Writes status to cloudlog so the
+  install flow can run from mapd_manager without a UI spinner attached."""
+  def update(self, msg: str) -> None:
+    cloudlog.info(f"mapd_installer: {msg}")
+  def close(self) -> None:
+    pass
 
 DEFAULT_VERSION = 'chauffeur-bake-v1'
 DEFAULT_BINARY_URL_TEMPLATE = "https://github.com/chriscarlo/mapd/releases/download/{version}/mapd"
@@ -57,7 +73,7 @@ def update_installed_version(version: str, params: Params = None) -> None:
 
 
 class MapdInstallManager:
-  def __init__(self, spinner_ref: Spinner):
+  def __init__(self, spinner_ref: _StatusReporter):
     self._spinner = spinner_ref
     self._params = Params()
 
@@ -65,7 +81,31 @@ class MapdInstallManager:
     self.ensure_directories_exist()
     target_version = get_target_version(self._params)
     self._download_file(get_target_binary_url(target_version, self._params))
+    # Only commit MapdVersion AFTER the download has fully succeeded and the
+    # binary on disk passes integrity checks. Otherwise a silent download
+    # failure (network, 404, truncated tarball) would leave
+    # MapdVersion=<target> with no binary, and download_needed() would
+    # return False forever — the exact state that silently kills MapCurvatures
+    # and takes the VTSC HUD with it.
+    self._verify_installed_binary(MAPD_PATH)
     update_installed_version(target_version, self._params)
+
+  @staticmethod
+  def _verify_installed_binary(path: str) -> None:
+    """Raise if the file at `path` isn't a plausible executable mapd binary."""
+    if not os.path.exists(path):
+      raise FileNotFoundError(f"mapd binary not found at {path} after download")
+    st = os.stat(path)
+    # Static arm64 mapd is ~9 MB; anything under 1 MB is a truncated or
+    # HTML error page written in place of the binary.
+    if st.st_size < 1_000_000:
+      raise OSError(f"mapd binary at {path} is too small ({st.st_size} bytes); likely a truncated or HTML error response")
+    if not (st.st_mode & stat.S_IEXEC):
+      raise OSError(f"mapd binary at {path} is not executable")
+    with open(path, 'rb') as fp:
+      magic = fp.read(4)
+    if magic != b'\x7fELF':
+      raise OSError(f"mapd binary at {path} is not an ELF executable (magic={magic!r})")
 
   def check_and_download(self) -> None:
     if self.download_needed():
@@ -93,6 +133,7 @@ class MapdInstallManager:
   def _download_file(self, url: str, num_retries=5) -> None:
     temp_file = Path(MAPD_PATH + ".tmp")
     download_timeout = 60
+    last_exception: Exception | None = None
     for cnt in range(num_retries):
       try:
         response = requests.get(url, stream=True, timeout=download_timeout)
@@ -101,17 +142,20 @@ class MapdInstallManager:
         # No exceptions encountered. Safe to replace original file.
         temp_file.replace(MAPD_PATH)
         return
-      except requests.exceptions.ReadTimeout:
+      except requests.exceptions.ReadTimeout as e:
+        last_exception = e
         self._spinner.update(f"ReadTimeout caught. Timeout is [{download_timeout}]. Retrying download... [{cnt}]")
         time.sleep(0.5)
       except requests.exceptions.RequestException as e:
+        last_exception = e
         self._spinner.update(f"RequestException caught: {e}. Retrying download... [{cnt}]")
         time.sleep(0.5)
 
     # Delete temp file if the process was not successful.
     if temp_file.exists():
       temp_file.unlink()
-    logging.error("Failed to download file after all retries")
+    logging.error("Failed to download mapd binary from %s after %d retries", url, num_retries)
+    raise RuntimeError(f"mapd binary download from {url} failed after {num_retries} retries") from last_exception
 
   def get_installed_version(self) -> str:
     return _clean_override(self._params.get("MapdVersion"))
@@ -167,6 +211,72 @@ class MapdInstallManager:
       sentry.capture_exception()
 
 
+def ensure_mapd_installed(params: Params | None = None,
+                          reporter: _StatusReporter | None = None) -> bool:
+  """Idempotent mapd-binary install with integrity verification, safe to call
+  from a long-running daemon. Returns True if the binary is present and valid
+  after this call, False otherwise. Does NOT block forever on network failure
+  — single best-effort pass, retries happen on subsequent invocations.
+
+  Contract (why this exists as a standalone entry point):
+    - The __main__ block of this file is not wired into the normal boot flow;
+      `mapd_manager` is the daemon that actually runs every boot. If it used
+      to stamp MapdVersion without downloading (historical sunnypilot
+      inheritance), the device could end up with version-set-but-no-binary
+      and the native mapd process would crash-loop silently.
+    - This function is the single source of truth for "get mapd onto disk";
+      it is safe to call unconditionally on every boot.
+  """
+  params = params or Params()
+  reporter = reporter or _CloudlogStatusReporter()
+  manager = MapdInstallManager(reporter)
+  manager.ensure_directories_exist()
+
+  try:
+    manager._verify_installed_binary(MAPD_PATH)
+    # Binary present and valid; make sure MapdVersion matches reality so
+    # downstream consumers (UI version display, etc.) stay truthful.
+    update_installed_version(get_target_version(params), params)
+    return True
+  except (FileNotFoundError, OSError):
+    pass  # Fall through to download path.
+
+  if is_prebuilt():
+    # Prebuilt images are supposed to ship with the binary. If it's missing
+    # at this point, bailing out is correct — we do NOT silently fall back to
+    # downloading because the prebuilt integrity check already failed and we
+    # shouldn't mask that by network-fetching over the top.
+    reporter.update(f"Prebuilt mapd binary invalid or missing at {MAPD_PATH}; not downloading.")
+    return False
+
+  # deviceState may not be available super-early in boot; tolerate the SubMaster
+  # attempt and fall back to "not metered".
+  try:
+    sm = messaging.SubMaster(['deviceState'])
+    sm.update(0)
+    metered = bool(sm['deviceState'].networkMetered)
+  except Exception:
+    metered = False
+  if metered:
+    reporter.update("Skipping mapd install: network is metered.")
+    return False
+
+  try:
+    target_version = get_target_version(params)
+    binary_url = get_target_binary_url(target_version, params)
+    reporter.update(f"Downloading mapd [{manager.get_installed_version()}] => [{target_version}] from [{binary_url}].")
+    manager.download()
+    return True
+  except Exception as e:
+    reporter.update(f"mapd install failed: {e}. Will retry on next boot.")
+    try:
+      sentry.init(sentry.SentryProject.SELFDRIVE)
+      sentry.capture_exception()
+    except Exception:
+      pass
+    return False
+
+
 if __name__ == "__main__":
   spinner = Spinner()
   install_manager = MapdInstallManager(spinner)
@@ -175,7 +285,18 @@ if __name__ == "__main__":
     target_version = get_target_version()
     debug_msg = f"[DEBUG] This is prebuilt, no mapd install required. VERSION: [{target_version}], Param [{install_manager.get_installed_version()}]"
     spinner.update(debug_msg)
-    update_installed_version(target_version)
+    # Refuse to stamp MapdVersion if the prebuilt image doesn't actually carry a
+    # valid mapd binary. Silent success here would leave runtime with no binary
+    # and no retry path (download_needed() would return False forever).
+    try:
+      install_manager._verify_installed_binary(MAPD_PATH)
+      update_installed_version(target_version)
+    except (FileNotFoundError, OSError) as e:
+      for i in range(6):
+        spinner.update(f"Prebuilt mapd binary invalid: {e}. Rebuild or scp binary to {MAPD_PATH}. Boot continues in {5 - i}s...")
+        time.sleep(1)
+      sentry.init(sentry.SentryProject.SELFDRIVE)
+      sentry.capture_exception()
   else:
     spinner.update(f"Checking if mapd is installed and valid. Prebuilt [{is_prebuilt()}]")
     install_manager.non_prebuilt_install()

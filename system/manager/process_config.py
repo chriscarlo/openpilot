@@ -90,7 +90,12 @@ def is_stock_model(started, params, CP: car.CarParams) -> bool:
   return bool(get_active_model_runner(params, not started) == custom.ModelManagerSP.Runner.stock)
 
 def mapd_ready(started: bool, params: Params, CP: car.CarParams) -> bool:
-  return bool(os.path.exists(Paths.mapd_root()))
+  # The native mapd process is launched via `bash -c "$MAPD_PATH > /dev/null 2>&1"`,
+  # which silently fails in a restart loop if the binary is missing (no stderr is
+  # ever seen by the user). Gate the launch on actual binary existence so
+  # mapd_manager's install-on-boot retry can run without the native process
+  # thrashing in the background.
+  return os.path.exists(Paths.mapd_root()) and os.path.isfile(MAPD_PATH) and os.access(MAPD_PATH, os.X_OK)
 
 def rti_enabled(started: bool, params: Params, CP: car.CarParams) -> bool:
   """Check if RTI (Realtime Traffic Intelligence) is enabled."""

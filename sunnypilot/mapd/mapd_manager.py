@@ -19,7 +19,7 @@ from openpilot.selfdrive.selfdrived.alertmanager import set_offroad_alert
 from openpilot.sunnypilot.mapd.live_map_data.osm_map_data import OsmMapData
 from openpilot.system.hardware.hw import Paths
 from openpilot.sunnypilot.mapd import MAPD_PATH
-from openpilot.sunnypilot.mapd.mapd_installer import get_target_version, update_installed_version
+from openpilot.sunnypilot.mapd.mapd_installer import ensure_mapd_installed
 
 # PFEIFER - MAPD {{
 params = Params()
@@ -139,7 +139,12 @@ def get_osm_offroad_alerts(live_map_sp: OsmMapData, osm_local_enabled: bool) -> 
 
 
 def main_thread():
-  update_installed_version(get_target_version(params), params)
+  # Make sure the mapd binary is on disk and valid before declaring the
+  # install up-to-date. Replaces a long-standing bug where MapdVersion got
+  # stamped unconditionally on every boot, masking a missing/invalid binary
+  # (the native mapd process then crash-looped silently because its bash
+  # launcher redirects stderr to /dev/null).
+  ensure_mapd_installed(params)
   config_realtime_process([0, 1, 2, 3], 5)
 
   rk = Ratekeeper(1, print_delay_threshold=None)
