@@ -2,44 +2,51 @@
 
 ## Watcher Script
 
-- From the dev box, prefer the repo venv:
+**Critical:** the watcher subscribes to cereal on the tici. There is no
+cereal bridge on the dev box here, so dev-box invocations produce no output.
+Always run via SSH to the tici, and always pass `python3 -u` (without `-u`,
+Python buffers stdout over the non-TTY SSH pipe and the file stays empty).
+
+Default SSH profile for live monitoring is `commaCar` — use it first, fall
+back to `commaHome` / `commaAdb` only if the user says so.
+
+- Standard live monitor (use this when asked to "live monitor"):
 ```bash
-.venv/bin/python .codex/skills/openpilot-longitudinal-tuner/scripts/monitor_longitudinal_anomalies.py --hz 5
+ssh commaCar 'cd /data/openpilot && /usr/local/venv/bin/python3 -u .codex/skills/openpilot-longitudinal-tuner/scripts/monitor_longitudinal_anomalies.py --hz 5 --show-live-tune'
 ```
 
-- For a bounded live sample while the user is driving:
+- Bounded live sample while the user is driving:
 ```bash
-.venv/bin/python .codex/skills/openpilot-longitudinal-tuner/scripts/monitor_longitudinal_anomalies.py --hz 5 --duration 10 --show-live-tune
+ssh commaCar 'cd /data/openpilot && /usr/local/venv/bin/python3 -u .codex/skills/openpilot-longitudinal-tuner/scripts/monitor_longitudinal_anomalies.py --hz 5 --duration 10 --show-live-tune'
 ```
 
 - Alert-only mode:
 ```bash
-.venv/bin/python .codex/skills/openpilot-longitudinal-tuner/scripts/monitor_longitudinal_anomalies.py --hz 5 --only-alerts
-```
-- Include the current live lead-response tune in the startup header:
-```bash
-.venv/bin/python .codex/skills/openpilot-longitudinal-tuner/scripts/monitor_longitudinal_anomalies.py --hz 5 --show-live-tune
-```
-- Save rendered samples:
-```bash
-.venv/bin/python .codex/skills/openpilot-longitudinal-tuner/scripts/monitor_longitudinal_anomalies.py --jsonl-out .cache/longitudinal_watch.jsonl
+ssh commaCar 'cd /data/openpilot && /usr/local/venv/bin/python3 -u .codex/skills/openpilot-longitudinal-tuner/scripts/monitor_longitudinal_anomalies.py --hz 5 --only-alerts'
 ```
 
-- Diagnose adjacent-lead / path-relative classification (adds per-row
-  `yRel`, `dPath`, `vLat` for both leads to the stdout line):
+- Save rendered samples on-device (pull back with `scp` afterwards):
 ```bash
-.venv/bin/python .codex/skills/openpilot-longitudinal-tuner/scripts/monitor_longitudinal_anomalies.py --hz 10 --show-lateral
+ssh commaCar 'cd /data/openpilot && /usr/local/venv/bin/python3 -u .codex/skills/openpilot-longitudinal-tuner/scripts/monitor_longitudinal_anomalies.py --jsonl-out /data/media/0/realdata/longitudinal_watch.jsonl'
 ```
 
-- Enable classifier cloudlog emission for a session (sets
-  `VTSC.Expert.AdjLeadDebugLogEnabled=1`, restores on exit):
+- Diagnose adjacent-lead / path-relative classification:
 ```bash
-.venv/bin/python .codex/skills/openpilot-longitudinal-tuner/scripts/monitor_longitudinal_anomalies.py --hz 10 --duration 60 --enable-lead-role-log
+ssh commaCar 'cd /data/openpilot && /usr/local/venv/bin/python3 -u .codex/skills/openpilot-longitudinal-tuner/scripts/monitor_longitudinal_anomalies.py --hz 10 --show-lateral'
 ```
-  Then tail the cloudlog on-device with
-  `tail -F /data/log/cloudlog | grep LEADROLEDBG`.
 
-- On tici, use the device venv explicitly:
+- Enable classifier cloudlog emission for a bounded session (toggles
+  `VTSC.Expert.AdjLeadDebugLogEnabled=1`, restores on clean exit — use
+  `--duration` so it exits cleanly):
+```bash
+ssh commaCar 'cd /data/openpilot && /usr/local/venv/bin/python3 -u .codex/skills/openpilot-longitudinal-tuner/scripts/monitor_longitudinal_anomalies.py --hz 10 --duration 60 --enable-lead-role-log'
+```
+  Then tail the cloudlog on-device in another session:
+```bash
+ssh commaCar 'tail -F /data/log/cloudlog | grep LEADROLEDBG'
+```
+
+- When running interactively on-device (rare — usually SSH is enough):
 ```bash
 cd /data/openpilot
 /usr/local/venv/bin/python3 .codex/skills/openpilot-longitudinal-tuner/scripts/monitor_longitudinal_anomalies.py --hz 5 --duration 10 --only-alerts

@@ -19,9 +19,18 @@ description: >
 - Split the problem by layer before tuning anything:
   planner target generation, `LongControl`, brand `CarController`, and actual
   vehicle response are different failure surfaces.
-- On the dev machine, prefer `.venv/bin/python` for the watcher and helper
-  scripts. Repo-root `python3` can miss `capnp` and other openpilot runtime
-  deps. On tici, use `/usr/local/venv/bin/python3`.
+- **The watcher only produces data on the tici.** There is no cereal bridge
+  on the dev box — `.venv/bin/python .../monitor_longitudinal_anomalies.py`
+  will sit silent forever and look like "no messages." Always run the live
+  monitor on-device via `ssh commaCar ...`. Dev-box invocation is for static
+  analysis/help only.
+- **Always pass `python3 -u` over SSH.** Without `-u`, stdout is block-buffered
+  because SSH without a TTY is a pipe, and the output file stays empty even
+  while the watcher is running fine. This silent-fail costs entire driving
+  windows — make `-u` non-optional.
+- On the dev machine, `.venv/bin/python` is only correct for scripts that do
+  not need live cereal data (static imports, help, parsing). Repo-root
+  `python3` can miss `capnp`. On tici, use `/usr/local/venv/bin/python3`.
 - While the user is actively driving, prefer bounded captures with
   `--duration ...` or short one-off probes. Open-ended SSH tails are easy to
   leave hanging and are rarely the fastest way to isolate a longitudinal bug.
@@ -34,27 +43,47 @@ description: >
 
 ## Quick Start
 
-- For a quick bounded live sample from the dev box:
+### "Live monitor" = run this, right now, no questions
+
+When the user says "live monitor the longitudinal tuner" (or any variant —
+"start the monitor", "watch the longitudinal telemetry"), do this
+**immediately**. Do not probe SSH profiles, do not try the dev box, do not ask
+for confirmation.
+
 ```bash
-.venv/bin/python .codex/skills/openpilot-longitudinal-tuner/scripts/monitor_longitudinal_anomalies.py --hz 5 --duration 10 --show-live-tune
+ssh commaCar 'cd /data/openpilot && /usr/local/venv/bin/python3 -u .codex/skills/openpilot-longitudinal-tuner/scripts/monitor_longitudinal_anomalies.py --hz 5 --show-live-tune'
 ```
 
-- For a longer interactive watch while parked or when the user explicitly wants
-  continuous monitoring:
+Run it with `run_in_background: true` so output streams to a task file you can
+tail on demand. The two non-obvious must-haves:
+
+- **`commaCar` is the default.** The tici is normally on the car hotspot when
+  the user asks to monitor. `commaHome` and `commaAdb` are fallbacks — do not
+  probe them first. If `commaCar` fails, *then* ask the user which network.
+- **`python3 -u` is mandatory over SSH.** Without `-u`, Python line-buffers
+  to a pipe (no TTY) and the output file stays empty indefinitely. This looks
+  identical to "no data flowing" and wastes a driving session debugging it.
+- **Dev-box invocations (`.venv/bin/python ...`) produce no data** on this
+  workstation — there is no cereal bridge from the tici. Ignore any older
+  Quick Start bullet suggesting otherwise.
+
+### Bounded probe (5-10s) to verify the pipeline before a long watch
+
 ```bash
-.venv/bin/python .codex/skills/openpilot-longitudinal-tuner/scripts/monitor_longitudinal_anomalies.py --hz 5
+ssh commaCar 'cd /data/openpilot && /usr/local/venv/bin/python3 -u .codex/skills/openpilot-longitudinal-tuner/scripts/monitor_longitudinal_anomalies.py --hz 5 --duration 5 --show-live-tune'
 ```
 
-- If you are iterating on the live lead-response knobs, print the effective tune
-  first:
+### Alert-only mode (quieter, long drives)
+
 ```bash
-.venv/bin/python .codex/skills/openpilot-longitudinal-tuner/scripts/live_lead_tune.py show
+ssh commaCar 'cd /data/openpilot && /usr/local/venv/bin/python3 -u .codex/skills/openpilot-longitudinal-tuner/scripts/monitor_longitudinal_anomalies.py --hz 5 --only-alerts --show-live-tune'
 ```
 
-- On-device, use the tici venv explicitly:
+### Iterating on live lead-response knobs — print the effective tune first
+
+On-device (read-only) so the values match what controls is actually using:
 ```bash
-cd /data/openpilot
-/usr/local/venv/bin/python3 .codex/skills/openpilot-longitudinal-tuner/scripts/monitor_longitudinal_anomalies.py --hz 5 --duration 10 --only-alerts --show-live-tune
+ssh commaCar 'cd /data/openpilot && /usr/local/venv/bin/python3 .codex/skills/openpilot-longitudinal-tuner/scripts/live_lead_tune.py show'
 ```
 
 - If the issue is Hyundai CAN FD or EV6 specific, read
