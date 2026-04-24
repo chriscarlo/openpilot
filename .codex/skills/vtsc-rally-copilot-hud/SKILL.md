@@ -31,6 +31,7 @@ description: Edit, debug, troubleshoot, iterate, and polish the Sunnypilot VTSC 
 ## “Why Isn’t It Showing?” Checklist
 
 - Confirm `VTSCRallyCoPilotHUDEnabled` is enabled.
+- If `MapCurvatures` is absent after the `chriscarlo/mapd` migration, verify `third_party/mapd/mapd` is the chauffeur-bake binary, not a stale ignored pfeifer executable: `python3 -c "from openpilot.sunnypilot.mapd.mapd_installer import MapdInstallManager; MapdInstallManager._verify_installed_binary('third_party/mapd/mapd')"`
 - Confirm the producer is publishing: `curvePreviewValid` true and `curvePreviewTiles` non-empty.
 - Confirm HUD gating is passing: `curveMaxCurvature` is above `KAPPA_SHOW_MIN`/`KAPPA_HOLD_MIN` in `hud.cc`.
 - Confirm fade-in isn’t stuck: `vtsc_copilot_alpha_` rises above `0.01`.

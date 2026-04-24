@@ -55,6 +55,7 @@ class TestRoadSegment(unittest.TestCase):
 
         self.road_segment = RoadSegment(
             way_id=12345,
+            name="Test Road",
             road_class=RoadClass.PRIMARY,
             centerline=centerline,
             lanes=lanes,
@@ -283,6 +284,7 @@ class TestRoadGeometryCache(unittest.TestCase):
         # Create mock road segment
         self.mock_segment = RoadSegment(
             way_id=1001,
+            name="Test Road",
             road_class=RoadClass.PRIMARY,
             centerline=[
                 RoadCoordinate(37.4221, -122.0841, 0.0),

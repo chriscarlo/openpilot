@@ -12,7 +12,7 @@ import time
 import traceback
 import requests
 from pathlib import Path
-from typing import Callable, Protocol
+from typing import Protocol
 from urllib.request import urlopen
 
 from cereal import messaging
@@ -41,6 +41,11 @@ class _CloudlogStatusReporter:
 DEFAULT_VERSION = 'chauffeur-bake-v1'
 DEFAULT_BINARY_URL_TEMPLATE = "https://github.com/chriscarlo/mapd/releases/download/{version}/mapd"
 VERSION = DEFAULT_VERSION
+_REQUIRED_MAPD_BINARY_MARKERS = (
+  b"phys-a",
+  b"MapPreCurveSpeeds",
+  b"MapTilesSigmoidHash",
+)
 
 
 def _clean_override(raw_value: str | bytes | None) -> str:
@@ -73,9 +78,9 @@ def update_installed_version(version: str, params: Params = None) -> None:
 
 
 class MapdInstallManager:
-  def __init__(self, spinner_ref: _StatusReporter):
+  def __init__(self, spinner_ref: _StatusReporter, params: Params | None = None):
     self._spinner = spinner_ref
-    self._params = Params()
+    self._params = params or Params()
 
   def download(self) -> None:
     self.ensure_directories_exist()
@@ -92,7 +97,7 @@ class MapdInstallManager:
 
   @staticmethod
   def _verify_installed_binary(path: str) -> None:
-    """Raise if the file at `path` isn't a plausible executable mapd binary."""
+    """Raise if the file at `path` isn't the expected chauffeur mapd binary."""
     if not os.path.exists(path):
       raise FileNotFoundError(f"mapd binary not found at {path} after download")
     st = os.stat(path)
@@ -103,16 +108,24 @@ class MapdInstallManager:
     if not (st.st_mode & stat.S_IEXEC):
       raise OSError(f"mapd binary at {path} is not executable")
     with open(path, 'rb') as fp:
-      magic = fp.read(4)
+      content = fp.read()
+    magic = content[:4]
     if magic != b'\x7fELF':
       raise OSError(f"mapd binary at {path} is not an ELF executable (magic={magic!r})")
+    missing_markers = [marker.decode('utf-8') for marker in _REQUIRED_MAPD_BINARY_MARKERS if marker not in content]
+    if missing_markers:
+      raise OSError(f"mapd binary at {path} is not the chauffeur-bake mapd build; missing markers: {', '.join(missing_markers)}")
 
   def check_and_download(self) -> None:
     if self.download_needed():
       self.download()
 
   def download_needed(self) -> bool:
-    return not os.path.exists(MAPD_PATH) or self.get_installed_version() != get_target_version(self._params)
+    try:
+      self._verify_installed_binary(MAPD_PATH)
+    except (FileNotFoundError, OSError):
+      return True
+    return self.get_installed_version() != get_target_version(self._params)
 
   @staticmethod
   def ensure_directories_exist() -> None:
@@ -229,25 +242,18 @@ def ensure_mapd_installed(params: Params | None = None,
   """
   params = params or Params()
   reporter = reporter or _CloudlogStatusReporter()
-  manager = MapdInstallManager(reporter)
+  manager = MapdInstallManager(reporter, params)
   manager.ensure_directories_exist()
+  target_version = get_target_version(params)
+  installed_version = _clean_override(params.get("MapdVersion"))
 
   try:
     manager._verify_installed_binary(MAPD_PATH)
-    # Binary present and valid; make sure MapdVersion matches reality so
-    # downstream consumers (UI version display, etc.) stay truthful.
-    update_installed_version(get_target_version(params), params)
-    return True
+    if installed_version == target_version:
+      return True
+    reporter.update(f"Installed mapd version [{installed_version or 'unset'}] != target [{target_version}]; downloading.")
   except (FileNotFoundError, OSError):
     pass  # Fall through to download path.
-
-  if is_prebuilt():
-    # Prebuilt images are supposed to ship with the binary. If it's missing
-    # at this point, bailing out is correct — we do NOT silently fall back to
-    # downloading because the prebuilt integrity check already failed and we
-    # shouldn't mask that by network-fetching over the top.
-    reporter.update(f"Prebuilt mapd binary invalid or missing at {MAPD_PATH}; not downloading.")
-    return False
 
   # deviceState may not be available super-early in boot; tolerate the SubMaster
   # attempt and fall back to "not metered".
@@ -262,7 +268,6 @@ def ensure_mapd_installed(params: Params | None = None,
     return False
 
   try:
-    target_version = get_target_version(params)
     binary_url = get_target_binary_url(target_version, params)
     reporter.update(f"Downloading mapd [{manager.get_installed_version()}] => [{target_version}] from [{binary_url}].")
     manager.download()
@@ -279,24 +284,5 @@ def ensure_mapd_installed(params: Params | None = None,
 
 if __name__ == "__main__":
   spinner = Spinner()
-  install_manager = MapdInstallManager(spinner)
-  install_manager.ensure_directories_exist()
-  if is_prebuilt():
-    target_version = get_target_version()
-    debug_msg = f"[DEBUG] This is prebuilt, no mapd install required. VERSION: [{target_version}], Param [{install_manager.get_installed_version()}]"
-    spinner.update(debug_msg)
-    # Refuse to stamp MapdVersion if the prebuilt image doesn't actually carry a
-    # valid mapd binary. Silent success here would leave runtime with no binary
-    # and no retry path (download_needed() would return False forever).
-    try:
-      install_manager._verify_installed_binary(MAPD_PATH)
-      update_installed_version(target_version)
-    except (FileNotFoundError, OSError) as e:
-      for i in range(6):
-        spinner.update(f"Prebuilt mapd binary invalid: {e}. Rebuild or scp binary to {MAPD_PATH}. Boot continues in {5 - i}s...")
-        time.sleep(1)
-      sentry.init(sentry.SentryProject.SELFDRIVE)
-      sentry.capture_exception()
-  else:
-    spinner.update(f"Checking if mapd is installed and valid. Prebuilt [{is_prebuilt()}]")
-    install_manager.non_prebuilt_install()
+  spinner.update(f"Checking if mapd is installed and valid. Prebuilt [{is_prebuilt()}]")
+  ensure_mapd_installed(reporter=spinner)

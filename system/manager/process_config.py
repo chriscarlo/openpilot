@@ -8,7 +8,8 @@ from openpilot.system.hardware import PC, TICI
 from openpilot.system.manager.process import PythonProcess, NativeProcess, DaemonProcess
 from openpilot.system.hardware.hw import Paths
 
-from openpilot.sunnypilot.mapd.mapd_manager import MAPD_PATH
+from openpilot.sunnypilot.mapd import MAPD_PATH
+from openpilot.sunnypilot.mapd.mapd_installer import MapdInstallManager
 
 from sunnypilot.models.helpers import get_active_model_runner
 from sunnypilot.sunnylink.utils import sunnylink_need_register, sunnylink_ready, use_sunnylink_uploader
@@ -91,11 +92,16 @@ def is_stock_model(started, params, CP: car.CarParams) -> bool:
 
 def mapd_ready(started: bool, params: Params, CP: car.CarParams) -> bool:
   # The native mapd process is launched via `bash -c "$MAPD_PATH > /dev/null 2>&1"`,
-  # which silently fails in a restart loop if the binary is missing (no stderr is
-  # ever seen by the user). Gate the launch on actual binary existence so
-  # mapd_manager's install-on-boot retry can run without the native process
-  # thrashing in the background.
-  return os.path.exists(Paths.mapd_root()) and os.path.isfile(MAPD_PATH) and os.access(MAPD_PATH, os.X_OK)
+  # which hides missing/invalid binary errors. Gate launch on the same binary
+  # verifier mapd_manager uses so a stale ignored pfeifer binary does not start
+  # before mapd_manager replaces it with the chauffeur-bake release.
+  if not os.path.exists(Paths.mapd_root()):
+    return False
+  try:
+    MapdInstallManager._verify_installed_binary(MAPD_PATH)
+  except (FileNotFoundError, OSError):
+    return False
+  return True
 
 def rti_enabled(started: bool, params: Params, CP: car.CarParams) -> bool:
   """Check if RTI (Realtime Traffic Intelligence) is enabled."""
