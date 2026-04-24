@@ -108,6 +108,53 @@ GAP_RECLAIM_BLEND_FALL_TAU_S = 1.20
 GAP_RECLAIM_HORIZON_RAMP_TAU_S = 1.00
 GAP_RECLAIM_RELAX_ROOM_FRACTION = 0.85
 GAP_RECLAIM_RELAX_ROOM_MAX_M = 18.0
+LEAD_KEEPUP_MIN_SPEED = 4.0
+LEAD_KEEPUP_SOFT_PULLAWAY_BP = [0.0, 0.12, 0.45, 1.0]
+LEAD_KEEPUP_SOFT_PULLAWAY_V = [0.0, 0.00, 0.020, 0.040]
+LEAD_KEEPUP_CAP_PULLAWAY_BP = [0.0, 0.45, 1.0, 1.6, 2.5]
+LEAD_KEEPUP_CAP_PULLAWAY_V = [0.0, 0.00, 0.18, 0.55, 1.00]
+LEAD_KEEPUP_CAP_GAP_SURPLUS_BP = [0.0, 0.6, 1.5, 3.0, 6.0]
+LEAD_KEEPUP_CAP_GAP_SURPLUS_V = [0.0, 0.04, 0.16, 0.45, 1.00]
+LEAD_KEEPUP_ACCEL_GATE_PULLAWAY_BP = [0.0, 0.45, 1.0, 1.5]
+LEAD_KEEPUP_ACCEL_GATE_PULLAWAY_V = [0.0, 0.00, 0.65, 1.00]
+LEAD_KEEPUP_ACCEL_GATE_GAP_BP = [0.0, 1.0, 3.0, 6.0]
+LEAD_KEEPUP_ACCEL_GATE_GAP_V = [0.0, 0.15, 0.65, 1.00]
+LEAD_KEEPUP_ACCEL_OVERSHOOT = 1.05
+LEAD_KEEPUP_TOO_CLOSE_MARGIN_M = 0.75
+LEAD_KEEPUP_CLOSING_BLOCK_MPS = 0.10
+LEAD_KEEPUP_LEAD_DECEL_BLOCK_MPS2 = -0.25
+LEAD_SLOWDOWN_MIN_SPEED = 2.0
+LEAD_SLOWDOWN_MIN_CLOSING_MPS = 0.10
+LEAD_SLOWDOWN_MIN_LEAD_DECEL_MPS2 = 0.15
+LEAD_SLOWDOWN_HORIZON_S = 1.25
+LEAD_SLOWDOWN_SOFT_ACCEL_CAP = 0.08
+LEAD_SLOWDOWN_ONSET_CLOSING_BP = [0.10, 0.25, 0.80]
+LEAD_SLOWDOWN_ONSET_CLOSING_V = [0.0, 0.20, 1.0]
+LEAD_SLOWDOWN_ONSET_DECEL_BP = [0.15, 0.50, 1.50]
+LEAD_SLOWDOWN_ONSET_DECEL_V = [0.0, 0.15, 1.0]
+LEAD_SLOWDOWN_HEADWAY_DEFICIT_BP = [0.0, 0.5, 2.0, 5.0]
+LEAD_SLOWDOWN_HEADWAY_DEFICIT_V = [0.0, 0.12, 0.55, 1.0]
+LEAD_SLOWDOWN_DANGER_DEFICIT_BP = [0.0, 0.3, 2.5]
+LEAD_SLOWDOWN_DANGER_DEFICIT_V = [0.0, 0.55, 1.0]
+LEAD_SLOWDOWN_TTC_HEADWAY_BP = [0.7, 1.5, 3.0, 6.0]
+LEAD_SLOWDOWN_TTC_HEADWAY_V = [1.0, 0.75, 0.30, 0.0]
+LEAD_SLOWDOWN_TTC_DANGER_BP = [0.4, 1.0, 2.0, 4.0]
+LEAD_SLOWDOWN_TTC_DANGER_V = [1.0, 0.80, 0.35, 0.0]
+LEAD_SLOWDOWN_TTC_COLLISION_BP = [0.8, 1.5, 3.0, 5.0]
+LEAD_SLOWDOWN_TTC_COLLISION_V = [1.0, 0.70, 0.20, 0.0]
+LEAD_SLOWDOWN_GAP_GATE_BP = [-2.0, 0.0, 3.0, 8.0]
+LEAD_SLOWDOWN_GAP_GATE_V = [1.0, 1.0, 0.50, 0.0]
+LEAD_SLOWDOWN_CLOSING_MATCH_BP = [0.0, 0.5, 1.5]
+LEAD_SLOWDOWN_CLOSING_MATCH_V = [0.0, 0.35, 1.0]
+LEAD_SLOWDOWN_DANGER_MOTION_CLOSING_BP = [0.30, 1.0, 3.0]
+LEAD_SLOWDOWN_DANGER_MOTION_CLOSING_V = [0.0, 0.35, 1.0]
+LEAD_SLOWDOWN_DANGER_MOTION_DECEL_BP = [0.50, 1.5, 4.0]
+LEAD_SLOWDOWN_DANGER_MOTION_DECEL_V = [0.0, 0.35, 1.0]
+LEAD_SLOWDOWN_HARD_BRAKE_DECEL_BP = [3.0, 5.0, 6.0]
+LEAD_SLOWDOWN_HARD_BRAKE_DECEL_V = [0.0, 0.50, 1.0]
+LEAD_SLOWDOWN_LEAD_DECEL_OVERSHOOT = 1.05
+LEAD_SLOWDOWN_COMFORT_DECEL_CAP = 1.0
+LEAD_SLOWDOWN_MIN_DECEL_OUTPUT = 0.03
 LOW_SPEED_LAUNCH_FACTOR_V_EGO_BP = [0.0, 2.0, 6.0, 10.0]
 LOW_SPEED_LAUNCH_FACTOR_V_EGO_V = [1.0, 1.0, 0.60, 0.0]
 LOW_SPEED_LAUNCH_FACTOR_V_LEAD_BP = [0.0, 0.2, 1.0, 3.0, 6.0]
@@ -148,8 +195,8 @@ HYUNDAI_VIRTUAL_LEAD_RETAIN_GAP_SURPLUS_M = 2.5
 HYUNDAI_VIRTUAL_LEAD_REACQUIRE_GAP_SURPLUS_M = 3.0
 HYUNDAI_VIRTUAL_LEAD_RELEASE_GAP_SURPLUS_M = 4.0
 HYUNDAI_VIRTUAL_LEAD_RELEASE_PULLAWAY_MPS = 0.35
-HYUNDAI_VIRTUAL_LEAD_RELEASE_DWELL_S = 1.00
-HYUNDAI_VIRTUAL_LEAD_RELEASE_IMMEDIATE_GAP_SURPLUS_M = 7.0
+HYUNDAI_VIRTUAL_LEAD_RELEASE_DWELL_S = 1.30
+HYUNDAI_VIRTUAL_LEAD_RELEASE_IMMEDIATE_GAP_SURPLUS_M = 9.0
 HYUNDAI_VIRTUAL_LEAD_RELEASE_IMMEDIATE_PULLAWAY_MPS = 1.00
 HYUNDAI_VIRTUAL_LEAD_RELEASE_RAW_GAP_SURPLUS_M = 2.5
 HYUNDAI_VIRTUAL_LEAD_RELEASE_RAW_PULLAWAY_MPS = 0.15
@@ -308,6 +355,7 @@ class LeadDistanceFilter:
       "deadband_applied": False,
       "open_slew_clamped": False,
       "snap_to_raw": False,
+      "opening_vrel_suppressed": False,
     }
 
   @property
@@ -330,13 +378,20 @@ class LeadDistanceFilter:
         "deadband_applied": False,
         "open_slew_clamped": False,
         "snap_to_raw": True,
+        "opening_vrel_suppressed": False,
       }
       return raw_drel
 
     prev_filtered = float(self._filtered)
     predicted_vrel = float(raw_vrel)
+    opening_vrel_suppressed = False
     if predicted_vrel > 0.0:
-      predicted_vrel = min(predicted_vrel, max(0.0, float(open_slew_max_mps)))
+      opening_evidence_m = float(raw_drel) - prev_filtered
+      if opening_evidence_m <= DREL_FILTER_INNOVATION_DEADBAND_M:
+        predicted_vrel = 0.0
+        opening_vrel_suppressed = True
+      else:
+        predicted_vrel = min(predicted_vrel, max(0.0, float(open_slew_max_mps)))
 
     d_pred = prev_filtered + predicted_vrel * dt_s
     innov_raw = raw_drel - d_pred
@@ -375,6 +430,7 @@ class LeadDistanceFilter:
       "deadband_applied": bool(deadband_applied),
       "open_slew_clamped": bool(open_slew_clamped),
       "snap_to_raw": bool(snapped),
+      "opening_vrel_suppressed": bool(opening_vrel_suppressed),
     }
 
     return self._filtered
@@ -689,6 +745,13 @@ def get_gap_reclaim_projection_scale(v_ego, lead, t_follow, ego_accel: float = 0
   return float(np.clip(1.0 - accel_activation * (1.0 - projection_scale), 0.0, 1.0))
 
 
+def _lead_float(lead, attr: str, default: float) -> float:
+  value = getattr(lead, attr, default)
+  if value is None:
+    return float(default)
+  return float(value)
+
+
 def get_gap_reclaim_accel_floor(v_ego, lead, t_follow,
                                 tuning: LeadResponseTuningConfig | None = None,
                                 personality_max_accel: float | None = None) -> float:
@@ -698,7 +761,7 @@ def get_gap_reclaim_accel_floor(v_ego, lead, t_follow,
   if lead is None or not getattr(lead, 'status', False) or (v_ego < GAP_RECLAIM_MIN_SPEED and not launch_active):
     return 0.0
 
-  v_lead = float(getattr(lead, 'vLead', v_ego) or v_ego)
+  v_lead = _lead_float(lead, 'vLead', float(v_ego))
   if v_lead < float(v_ego) - 0.3:
     return 0.0
 
@@ -730,6 +793,162 @@ def get_gap_reclaim_accel_floor(v_ego, lead, t_follow,
     effective_cap = float(comfort_cap + (effective_cap - comfort_cap) * low_speed_launch_factor)
   floor = intent_fraction * effective_cap
   return float(np.clip(floor, 0.0, effective_cap))
+
+
+def get_lead_keepup_accel_floor(v_ego, lead, t_follow,
+                                tuning: LeadResponseTuningConfig | None = None,
+                                personality_max_accel: float | None = None) -> float:
+  tuning = LeadResponseTuningConfig.defaults() if tuning is None else tuning
+  v_ego = float(v_ego)
+  if lead is None or not getattr(lead, 'status', False) or v_ego < LEAD_KEEPUP_MIN_SPEED:
+    return 0.0
+
+  v_lead = _lead_float(lead, 'vLead', v_ego)
+  v_rel = _lead_float(lead, 'vRel', v_lead - v_ego)
+  lead_accel = float(getattr(lead, 'aLeadK', 0.0) or 0.0)
+  d_rel = float(getattr(lead, 'dRel', 0.0) or 0.0)
+  gap_surplus = d_rel - get_headway_follow_distance(v_ego, t_follow)
+  closing_speed = max(0.0, v_ego - v_lead, -v_rel)
+  pullaway_speed = max(0.0, v_lead - v_ego, v_rel)
+
+  if gap_surplus < -LEAD_KEEPUP_TOO_CLOSE_MARGIN_M:
+    return 0.0
+  if closing_speed > LEAD_KEEPUP_CLOSING_BLOCK_MPS:
+    return 0.0
+  if lead_accel < LEAD_KEEPUP_LEAD_DECEL_BLOCK_MPS2:
+    return 0.0
+
+  gap_active = max(0.0, gap_surplus - float(tuning.lead_keepup_gap_min_m))
+  if pullaway_speed <= LEAD_KEEPUP_SOFT_PULLAWAY_BP[1] and gap_active <= 0.0:
+    return 0.0
+
+  cap = max(float(tuning.lead_keepup_max_accel), 0.0)
+  if personality_max_accel is not None:
+    cap = min(cap, max(0.0, float(personality_max_accel)))
+  if gap_surplus < 0.0:
+    cap *= float(np.clip((gap_surplus + LEAD_KEEPUP_TOO_CLOSE_MARGIN_M) / LEAD_KEEPUP_TOO_CLOSE_MARGIN_M, 0.0, 1.0))
+
+  soft_floor = float(np.interp(pullaway_speed, LEAD_KEEPUP_SOFT_PULLAWAY_BP, LEAD_KEEPUP_SOFT_PULLAWAY_V))
+  pullaway_cap_scale = float(np.interp(pullaway_speed, LEAD_KEEPUP_CAP_PULLAWAY_BP, LEAD_KEEPUP_CAP_PULLAWAY_V))
+  gap_cap_scale = float(np.interp(gap_active, LEAD_KEEPUP_CAP_GAP_SURPLUS_BP, LEAD_KEEPUP_CAP_GAP_SURPLUS_V))
+  speed_floor = cap * max(pullaway_cap_scale, gap_cap_scale)
+
+  pullaway_accel_gate = float(np.interp(pullaway_speed, LEAD_KEEPUP_ACCEL_GATE_PULLAWAY_BP, LEAD_KEEPUP_ACCEL_GATE_PULLAWAY_V))
+  gap_accel_gate = float(np.interp(gap_active, LEAD_KEEPUP_ACCEL_GATE_GAP_BP, LEAD_KEEPUP_ACCEL_GATE_GAP_V))
+  accel_gate = max(pullaway_accel_gate, gap_accel_gate)
+  accel_floor = min(cap, max(0.0, lead_accel) * LEAD_KEEPUP_ACCEL_OVERSHOOT) * accel_gate
+
+  intent = max(soft_floor, speed_floor, accel_floor) * float(tuning.lead_keepup_strength)
+  return float(np.clip(intent, 0.0, cap))
+
+
+def get_lead_slowdown_accel_ceiling(v_ego, lead, t_follow,
+                                    tuning: LeadResponseTuningConfig | None = None,
+                                    min_accel: float = ACCEL_MIN,
+                                    max_accel: float = ACCEL_MAX) -> float | None:
+  tuning = LeadResponseTuningConfig.defaults() if tuning is None else tuning
+  v_ego = float(v_ego)
+  if lead is None or not getattr(lead, 'status', False) or v_ego < LEAD_SLOWDOWN_MIN_SPEED:
+    return None
+
+  max_decel = min(abs(float(min_accel)), max(0.0, float(tuning.lead_slowdown_max_decel)))
+  if max_decel <= 0.0:
+    return None
+
+  v_lead_raw = _lead_float(lead, 'vLead', v_ego)
+  v_lead = max(0.0, v_lead_raw)
+  v_rel = _lead_float(lead, 'vRel', v_lead_raw - v_ego)
+  closing_speed = max(0.0, v_ego - v_lead, -v_rel)
+  pullaway_speed = max(0.0, v_lead - v_ego, v_rel)
+  lead_decel = max(0.0, -float(getattr(lead, 'aLeadK', 0.0) or 0.0))
+  if closing_speed < LEAD_SLOWDOWN_MIN_CLOSING_MPS and lead_decel < LEAD_SLOWDOWN_MIN_LEAD_DECEL_MPS2:
+    return None
+
+  d_rel = float(getattr(lead, 'dRel', 0.0) or 0.0)
+  headway_gap = get_headway_follow_distance(v_ego, t_follow)
+  danger_gap = LEAD_DANGER_FACTOR * headway_gap
+  gap_surplus = d_rel - headway_gap
+  danger_surplus = d_rel - danger_gap
+  if pullaway_speed > 0.5 and closing_speed <= LEAD_SLOWDOWN_MIN_CLOSING_MPS:
+    return LEAD_SLOWDOWN_SOFT_ACCEL_CAP if gap_surplus < 0.0 else None
+
+  horizon_s = LEAD_SLOWDOWN_HORIZON_S
+  projected_gap = max(0.0, d_rel - closing_speed * horizon_s - 0.5 * lead_decel * (horizon_s ** 2))
+  projected_headway_deficit = max(0.0, headway_gap - projected_gap)
+  projected_danger_deficit = max(0.0, danger_gap - projected_gap)
+  if pullaway_speed > 0.5 and gap_surplus > 0.0 and projected_headway_deficit <= 0.0:
+    return None
+
+  if closing_speed > 0.0:
+    if gap_surplus > 0.0:
+      ttc_headway = gap_surplus / max(closing_speed, 1e-3)
+    else:
+      ttc_headway = 0.0
+    if danger_surplus > 0.0:
+      ttc_danger = danger_surplus / max(closing_speed, 1e-3)
+    else:
+      ttc_danger = 0.0
+    ttc_collision = d_rel / max(closing_speed, 1e-3)
+  else:
+    ttc_headway = 1e6
+    ttc_danger = 1e6
+    ttc_collision = 1e6
+
+  gap_gate = float(np.interp(gap_surplus, LEAD_SLOWDOWN_GAP_GATE_BP, LEAD_SLOWDOWN_GAP_GATE_V))
+  headway_deficit_gate = float(np.interp(projected_headway_deficit, LEAD_SLOWDOWN_HEADWAY_DEFICIT_BP, LEAD_SLOWDOWN_HEADWAY_DEFICIT_V))
+  closing_match_gate = float(np.interp(closing_speed, LEAD_SLOWDOWN_CLOSING_MATCH_BP, LEAD_SLOWDOWN_CLOSING_MATCH_V))
+  lead_match_gate = max(gap_gate * closing_match_gate, headway_deficit_gate)
+  if gap_surplus <= 0.0:
+    lead_match_gate = 1.0
+  lead_match_decel = lead_decel * LEAD_SLOWDOWN_LEAD_DECEL_OVERSHOOT * lead_match_gate
+
+  if closing_speed > 0.0:
+    headway_required_gap = gap_surplus if gap_surplus > 0.0 else max(d_rel, 1.0)
+    headway_required_decel = (closing_speed ** 2) / (2.0 * max(headway_required_gap, 0.5))
+  else:
+    headway_required_decel = 0.0
+  ttc_headway_gate = float(np.interp(ttc_headway, LEAD_SLOWDOWN_TTC_HEADWAY_BP, LEAD_SLOWDOWN_TTC_HEADWAY_V))
+  closing_decel = headway_required_decel * max(headway_deficit_gate, ttc_headway_gate)
+
+  danger_required_decel = 0.0
+  if closing_speed > 0.0 or lead_decel > 0.0:
+    danger_required_gap = danger_surplus if danger_surplus > 0.0 else max(d_rel - CRASH_DISTANCE, 1.0)
+    danger_required_decel = (closing_speed ** 2) / (2.0 * max(danger_required_gap, 0.3)) + lead_decel * LEAD_SLOWDOWN_LEAD_DECEL_OVERSHOOT
+  danger_deficit_gate = float(np.interp(projected_danger_deficit, LEAD_SLOWDOWN_DANGER_DEFICIT_BP, LEAD_SLOWDOWN_DANGER_DEFICIT_V))
+  ttc_danger_gate = float(np.interp(ttc_danger, LEAD_SLOWDOWN_TTC_DANGER_BP, LEAD_SLOWDOWN_TTC_DANGER_V))
+  ttc_collision_gate = float(np.interp(ttc_collision, LEAD_SLOWDOWN_TTC_COLLISION_BP, LEAD_SLOWDOWN_TTC_COLLISION_V))
+  hard_brake_gate = float(np.interp(lead_decel, LEAD_SLOWDOWN_HARD_BRAKE_DECEL_BP, LEAD_SLOWDOWN_HARD_BRAKE_DECEL_V))
+  danger_motion_gate = max(
+    float(np.interp(closing_speed, LEAD_SLOWDOWN_DANGER_MOTION_CLOSING_BP, LEAD_SLOWDOWN_DANGER_MOTION_CLOSING_V)),
+    float(np.interp(lead_decel, LEAD_SLOWDOWN_DANGER_MOTION_DECEL_BP, LEAD_SLOWDOWN_DANGER_MOTION_DECEL_V)),
+  )
+  danger_gate = max(
+    ttc_collision_gate,
+    max(danger_deficit_gate, ttc_danger_gate) * danger_motion_gate * hard_brake_gate,
+  )
+  danger_decel = danger_required_decel * danger_gate
+
+  proximity_gate = max(gap_gate, headway_deficit_gate, ttc_headway_gate)
+  onset = max(
+    float(np.interp(closing_speed, LEAD_SLOWDOWN_ONSET_CLOSING_BP, LEAD_SLOWDOWN_ONSET_CLOSING_V)) * proximity_gate,
+    float(np.interp(lead_decel, LEAD_SLOWDOWN_ONSET_DECEL_BP, LEAD_SLOWDOWN_ONSET_DECEL_V)) * max(0.20, lead_match_gate),
+    headway_deficit_gate,
+  )
+  positive_accel_ceiling = float(np.interp(
+    np.clip(onset, 0.0, 1.0),
+    [0.0, 0.20, 1.0],
+    [float(max_accel), LEAD_SLOWDOWN_SOFT_ACCEL_CAP, LEAD_SLOWDOWN_SOFT_ACCEL_CAP],
+  ))
+
+  strength = max(0.0, float(tuning.lead_slowdown_strength))
+  comfort_decel = min(LEAD_SLOWDOWN_COMFORT_DECEL_CAP, max(lead_match_decel, closing_decel) * strength)
+  decel_mag = min(max_decel, max(comfort_decel, danger_decel))
+  if decel_mag < LEAD_SLOWDOWN_MIN_DECEL_OUTPUT:
+    if positive_accel_ceiling >= float(max_accel) - 1e-3:
+      return None
+    return float(positive_accel_ceiling)
+
+  return float(np.clip(min(positive_accel_ceiling, -decel_mag), -max_decel, float(max_accel)))
 
 
 def get_low_speed_launch_follow_factor(v_ego, lead, t_follow) -> float:
@@ -1040,6 +1259,8 @@ class LongitudinalMpc:
     self.lead_handoff_danger_factor = float(LEAD_DANGER_FACTOR)
     self.lead_handoff_danger_debug = {"active": False, "danger_factor": float(LEAD_DANGER_FACTOR)}
     self.gap_reclaim_accel_floor = 0.0
+    self.lead_keepup_accel_floor = 0.0
+    self.lead_slowdown_accel_ceiling = None
     self.gap_reclaim_obstacle_push = 0.0
     self.gap_reclaim_stabilization_push = 0.0
     self.gap_reclaim_projection_scale = 1.0
@@ -1654,6 +1875,7 @@ class LongitudinalMpc:
                                  raw_lead, filtered_lead, raw_metrics: dict[str, float],
                                  settled_follow: bool, now: float) -> tuple[np.ndarray, bool]:
     self.gap_reclaim_accel_floor = 0.0
+    self.lead_keepup_accel_floor = 0.0
     self.gap_reclaim_obstacle_push = 0.0
     self.gap_reclaim_stabilization_push = 0.0
     self.gap_reclaim_projection_scale = 1.0
@@ -1666,6 +1888,8 @@ class LongitudinalMpc:
       self._gap_reclaim_blend = 0.0
       self._gap_reclaim_last_t = now
       self.gap_reclaim_effective_cap = 0.0
+      self.lead_keepup_accel_floor = 0.0
+      self.lead_slowdown_accel_ceiling = None
       return np.minimum(raw_lead_obstacle, filtered_lead_obstacle), False
 
     reclaim_lead = self._update_hyundai_reclaim_lead(now, raw_lead, filtered_lead, settled_follow=settled_follow)
@@ -1692,9 +1916,44 @@ class LongitudinalMpc:
       self._live_tune_cfg,
       personality_max_accel=personality_max_accel,
     )
+    keepup_intent = max(
+      get_lead_keepup_accel_floor(
+        float(self.x0[1]),
+        raw_lead,
+        self.current_t_follow,
+        self._live_tune_cfg,
+        personality_max_accel=personality_max_accel,
+      ),
+      get_lead_keepup_accel_floor(
+        float(self.x0[1]),
+        reclaim_lead,
+        self.current_t_follow,
+        self._live_tune_cfg,
+        personality_max_accel=personality_max_accel,
+      ),
+    )
     self.gap_reclaim_accel_floor = float(reclaim_intent)
-    max_intent = max(float(self.gap_reclaim_effective_cap), 1e-3)
-    target_blend = reclaim_intent / max_intent if max_intent > 0.0 else 0.0
+    self.lead_keepup_accel_floor = float(keepup_intent)
+    slowdown_ceilings = [
+      get_lead_slowdown_accel_ceiling(
+        float(self.x0[1]),
+        lead,
+        self.current_t_follow,
+        self._live_tune_cfg,
+        min_accel=ACCEL_MIN,
+        max_accel=ACCEL_MAX,
+      )
+      for lead in (raw_lead, filtered_lead)
+    ]
+    active_slowdown_ceilings = [float(ceiling) for ceiling in slowdown_ceilings if ceiling is not None]
+    self.lead_slowdown_accel_ceiling = min(active_slowdown_ceilings) if active_slowdown_ceilings else None
+    max_intent = max(
+      float(self.gap_reclaim_effective_cap),
+      float(self._live_tune_cfg.lead_keepup_max_accel),
+      1e-3,
+    )
+    combined_intent = max(reclaim_intent, keepup_intent)
+    target_blend = combined_intent / max_intent if max_intent > 0.0 else 0.0
     blend = self._update_gap_reclaim_blend(target_blend, now)
     obstacle_delta = np.maximum(raw_lead_obstacle - filtered_lead_obstacle, 0.0)
     horizon_ramp = 1.0 - np.exp(-T_IDXS / GAP_RECLAIM_HORIZON_RAMP_TAU_S)
@@ -1708,9 +1967,14 @@ class LongitudinalMpc:
       stabilization_push = np.zeros_like(stabilization_push)
 
     gap_surplus = max(0.0, float(reclaim_lead.dRel) - get_headway_follow_distance(float(self.x0[1]), self.current_t_follow))
+    raw_gap_surplus = max(0.0, float(raw_metrics["gap_surplus"]))
+    room_gap_surplus = max(gap_surplus, raw_gap_surplus if keepup_intent > 0.0 else 0.0)
+    room_gap_min_m = float(self._live_tune_cfg.gap_reclaim_gap_min_m)
+    if keepup_intent > 0.0:
+      room_gap_min_m = min(room_gap_min_m, float(self._live_tune_cfg.lead_keepup_gap_min_m))
     reclaim_room_max = min(
       GAP_RECLAIM_RELAX_ROOM_MAX_M,
-      max(0.0, gap_surplus - float(self._live_tune_cfg.gap_reclaim_gap_min_m)) * GAP_RECLAIM_RELAX_ROOM_FRACTION,
+      max(0.0, room_gap_surplus - room_gap_min_m) * GAP_RECLAIM_RELAX_ROOM_FRACTION,
     )
     effective_reclaim_intent = max_intent * blend
     base_reclaim_room = np.minimum(0.5 * effective_reclaim_intent * np.square(T_IDXS), reclaim_room_max * horizon_ramp)
@@ -2172,6 +2436,8 @@ class LongitudinalMpc:
 
       held_lead = self._update_hyundai_virtual_lead(now, None, None)
       self.gap_reclaim_accel_floor = 0.0
+      self.lead_keepup_accel_floor = 0.0
+      self.lead_slowdown_accel_ceiling = None
       self.gap_reclaim_obstacle_push = 0.0
       self.gap_reclaim_projection_scale = 1.0
       self.gap_reclaim_personality_max_accel = 0.0
@@ -2267,6 +2533,13 @@ class LongitudinalMpc:
       self._acc_obstacle_mode = 'cruise'
       self._reset_acc_obstacle_candidate()
       self.source = 'cruise'
+      self.gap_reclaim_accel_floor = 0.0
+      self.lead_keepup_accel_floor = 0.0
+      self.lead_slowdown_accel_ceiling = None
+      self.gap_reclaim_obstacle_push = 0.0
+      self.gap_reclaim_stabilization_push = 0.0
+      self.gap_reclaim_effective_cap = 0.0
+      self._raw_reclaim_safety_override_active = False
       self.acc_source_debug = {
         "active_mode": "cruise",
         "best_lead_source": None,
@@ -2381,6 +2654,9 @@ class LongitudinalMpc:
     else:
       self._acc_obstacle_mode = 'cruise'
       self.source = 'cruise'
+      self.gap_reclaim_accel_floor = 0.0
+      self.lead_keepup_accel_floor = 0.0
+      self.lead_slowdown_accel_ceiling = None
       self.gap_reclaim_obstacle_push = 0.0
       self.gap_reclaim_stabilization_push = 0.0
       self.gap_reclaim_effective_cap = 0.0
@@ -2411,6 +2687,8 @@ class LongitudinalMpc:
       "release_agreement_ok": bool(release_agreement_ok),
       "low_speed_queue_hold": bool(low_speed_queue_hold),
       "gap_reclaim_blend": float(self._gap_reclaim_blend),
+      "lead_keepup_accel_floor": float(self.lead_keepup_accel_floor),
+      "lead_slowdown_accel_ceiling": None if self.lead_slowdown_accel_ceiling is None else float(self.lead_slowdown_accel_ceiling),
       "gap_reclaim_obstacle_push_m": float(self.gap_reclaim_obstacle_push),
       "stabilization_push_m": float(self.gap_reclaim_stabilization_push),
       "stabilization_push_suppressed": bool(stabilization_push_suppressed),
@@ -2537,20 +2815,13 @@ class LongitudinalMpc:
       return 0.0
 
     v_ego = float(self.x0[1])
-    if float(self.last_v_cruise_clipped[1]) <= v_ego + 0.05:
+    if float(np.max(self.last_v_cruise_clipped)) <= v_ego + 0.05:
       return 0.0
 
     if self._hyundai_ai_lead_stability_enabled:
       if self.source not in ('lead0', 'lead1') or self._hyundai_reclaim_lead is None:
         return 0.0
-      personality_max_accel = self._get_gap_reclaim_personality_max_accel(v_ego)
-      return float(get_gap_reclaim_accel_floor(
-        v_ego,
-        self._hyundai_reclaim_lead,
-        self.current_t_follow,
-        self._live_tune_cfg,
-        personality_max_accel=personality_max_accel,
-      ))
+      return float(self.gap_reclaim_accel_floor)
 
     personality_max_accel = self._get_gap_reclaim_personality_max_accel(v_ego)
     return float(max(
@@ -2563,6 +2834,55 @@ class LongitudinalMpc:
       )
       for lead in self.control_leads
     ))
+
+  def get_lead_keepup_floor(self) -> float:
+    if self.mode != 'acc' or self.last_v_cruise_clipped is None or len(self.last_v_cruise_clipped) < 2:
+      return 0.0
+
+    v_ego = float(self.x0[1])
+    if float(np.max(self.last_v_cruise_clipped)) <= v_ego + 0.05:
+      return 0.0
+
+    if self._hyundai_ai_lead_stability_enabled:
+      if self.source not in ('lead0', 'lead1'):
+        return 0.0
+      return float(self.lead_keepup_accel_floor)
+
+    personality_max_accel = self._get_gap_reclaim_personality_max_accel(v_ego)
+    return float(max(
+      get_lead_keepup_accel_floor(
+        v_ego,
+        lead,
+        self.current_t_follow,
+        self._live_tune_cfg,
+        personality_max_accel=personality_max_accel,
+      )
+      for lead in self.control_leads
+    ))
+
+  def get_lead_slowdown_ceiling(self) -> float | None:
+    if self.mode != 'acc':
+      return None
+
+    v_ego = float(self.x0[1])
+    if self._hyundai_ai_lead_stability_enabled:
+      if self.source not in ('lead0', 'lead1'):
+        return None
+      return self.lead_slowdown_accel_ceiling
+
+    ceilings = [
+      get_lead_slowdown_accel_ceiling(
+        v_ego,
+        lead,
+        self.current_t_follow,
+        self._live_tune_cfg,
+        min_accel=ACCEL_MIN,
+        max_accel=ACCEL_MAX,
+      )
+      for lead in self.control_leads
+    ]
+    active_ceilings = [float(ceiling) for ceiling in ceilings if ceiling is not None]
+    return min(active_ceilings) if active_ceilings else None
 
   def get_cutin_settle_floor(self, now: float) -> float:
     self.cutin_settle_active = False
@@ -2848,6 +3168,8 @@ class LongitudinalMpc:
         self.acc_source_debug["adjacent_awareness_preview_slot"] = self.adjacent_awareness_preview_debug.get("slot")
 
       self.gap_reclaim_accel_floor = self.get_gap_reclaim_floor()
+      self.lead_keepup_accel_floor = self.get_lead_keepup_floor()
+      self.lead_slowdown_accel_ceiling = self.get_lead_slowdown_ceiling()
       self.cutin_settle_accel_floor = self.get_cutin_settle_floor(now)
       self.params[:,5] = LEAD_DANGER_FACTOR
 
@@ -2880,6 +3202,8 @@ class LongitudinalMpc:
         "used_hysteresis": False,
       }
       self.gap_reclaim_accel_floor = 0.0
+      self.lead_keepup_accel_floor = 0.0
+      self.lead_slowdown_accel_ceiling = None
       self.gap_reclaim_obstacle_push = 0.0
       self.gap_reclaim_stabilization_push = 0.0
       self.gap_reclaim_projection_scale = 1.0

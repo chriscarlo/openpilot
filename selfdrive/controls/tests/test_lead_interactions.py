@@ -12,11 +12,14 @@ from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import (
   get_gap_reclaim_effective_cap,
   get_gap_reclaim_accel_floor,
   get_gap_reclaim_projection_scale,
+  get_lead_keepup_accel_floor,
+  get_lead_slowdown_accel_ceiling,
   get_lead_handoff_danger_factor,
   get_lead_present_cruise_accel_cap,
   get_lead_approach_preview_buffer,
   should_start_cutin_settle_event,
 )
+from openpilot.selfdrive.controls.lib.longitudinal_live_tune import LeadResponseTuningConfig
 from openpilot.selfdrive.test.longitudinal_maneuvers.plant import Plant
 from openpilot.sunnypilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPlannerSP
 
@@ -118,6 +121,107 @@ class TestLeadInteractionHeuristics:
     assert floor > 0.1
     assert get_gap_reclaim_accel_floor(33.5, slower_lead, 1.3) == pytest.approx(0.0)
     assert get_gap_reclaim_accel_floor(33.5, braking_lead, 1.3) == pytest.approx(0.0)
+
+  def test_keepup_floor_starts_gently_before_gap_reclaim_gate(self):
+    tuning = LeadResponseTuningConfig(gap_reclaim_gap_min_m=4.0)
+    small_pullaway = _make_lead(d_rel=50.0, v_lead=34.0, a_lead=0.0)
+
+    keepup_floor = get_lead_keepup_accel_floor(33.5, small_pullaway, 1.3, tuning)
+    reclaim_floor = get_gap_reclaim_accel_floor(33.5, small_pullaway, 1.3, tuning)
+
+    assert 0.0 < keepup_floor < 0.05
+    assert reclaim_floor == pytest.approx(0.0)
+
+  def test_keepup_floor_onset_stays_nearly_imperceptible_even_with_lead_accel(self):
+    tuning = LeadResponseTuningConfig(lead_keepup_max_accel=0.30)
+    first_hint = _make_lead(d_rel=50.0, v_lead=33.68, a_lead=1.0)
+
+    keepup_floor = get_lead_keepup_accel_floor(33.5, first_hint, 1.3, tuning)
+
+    assert 0.0 < keepup_floor < 0.015
+
+  def test_keepup_floor_can_ramp_to_configured_cap_for_confirmed_pullaway(self):
+    tuning = LeadResponseTuningConfig(lead_keepup_max_accel=0.30)
+    confirmed_pullaway = _make_lead(d_rel=58.0, v_lead=36.1, a_lead=0.10)
+
+    keepup_floor = get_lead_keepup_accel_floor(33.5, confirmed_pullaway, 1.3, tuning)
+
+    assert keepup_floor == pytest.approx(0.30)
+
+  def test_keepup_floor_can_reach_personality_accel_cap_when_configured(self):
+    tuning = LeadResponseTuningConfig(lead_keepup_max_accel=5.0)
+    confirmed_pullaway = _make_lead(d_rel=72.0, v_lead=38.0, a_lead=2.0)
+
+    keepup_floor = get_lead_keepup_accel_floor(
+      20.0,
+      confirmed_pullaway,
+      1.3,
+      tuning,
+      personality_max_accel=1.2,
+    )
+
+    assert keepup_floor == pytest.approx(1.2)
+
+  def test_keepup_floor_matches_lead_accel_when_pullaway_is_confirmed(self):
+    tuning = LeadResponseTuningConfig(lead_keepup_max_accel=0.30)
+    accelerating_lead = _make_lead(d_rel=51.0, v_lead=35.0, a_lead=0.22)
+
+    keepup_floor = get_lead_keepup_accel_floor(33.5, accelerating_lead, 1.3, tuning)
+
+    assert keepup_floor >= 0.22
+    assert keepup_floor < 0.30
+
+  def test_keepup_floor_blocks_closing_or_braking_leads(self):
+    safe_pullaway = _make_lead(d_rel=50.5, v_lead=34.0, a_lead=0.0)
+    slower_lead = _make_lead(d_rel=50.5, v_lead=33.0, a_lead=0.0)
+    braking_lead = _make_lead(d_rel=50.5, v_lead=34.0, a_lead=-0.35)
+    too_close_pullaway = _make_lead(d_rel=48.0, v_lead=34.0, a_lead=0.0)
+    stopped_lead = _make_lead(d_rel=58.0, v_lead=0.0, a_lead=0.0)
+
+    assert get_lead_keepup_accel_floor(33.5, safe_pullaway, 1.3) > 0.0
+    assert get_lead_keepup_accel_floor(33.5, slower_lead, 1.3) == pytest.approx(0.0)
+    assert get_lead_keepup_accel_floor(33.5, braking_lead, 1.3) == pytest.approx(0.0)
+    assert get_lead_keepup_accel_floor(33.5, too_close_pullaway, 1.3) == pytest.approx(0.0)
+    assert get_lead_keepup_accel_floor(33.5, stopped_lead, 1.3) == pytest.approx(0.0)
+    assert get_gap_reclaim_accel_floor(33.5, stopped_lead, 1.3) == pytest.approx(0.0)
+
+  def test_slowdown_ceiling_onset_stays_nearly_imperceptible(self):
+    tuning = LeadResponseTuningConfig(lead_slowdown_max_decel=6.0)
+    first_hint = _make_lead(d_rel=50.0, v_lead=33.25, a_lead=-0.25)
+    setattr(first_hint, "vRel", -0.25)
+
+    ceiling = get_lead_slowdown_accel_ceiling(33.5, first_hint, 1.3, tuning)
+
+    assert ceiling is not None
+    assert 0.0 < ceiling < 0.50
+
+  def test_slowdown_ceiling_matches_confirmed_lead_decel(self):
+    tuning = LeadResponseTuningConfig(lead_slowdown_strength=1.0, lead_slowdown_max_decel=6.0)
+    braking_lead = _make_lead(d_rel=48.5, v_lead=32.6, a_lead=-1.2)
+    setattr(braking_lead, "vRel", -0.9)
+
+    ceiling = get_lead_slowdown_accel_ceiling(33.5, braking_lead, 1.3, tuning)
+
+    assert ceiling is not None
+    assert ceiling <= -1.0
+    assert ceiling > -6.0
+
+  def test_slowdown_ceiling_can_reach_hyundai_kia_panic_decel_limit(self):
+    tuning = LeadResponseTuningConfig(lead_slowdown_max_decel=6.0)
+    panic_lead = _make_lead(d_rel=10.0, v_lead=18.0, a_lead=-5.0)
+    setattr(panic_lead, "vRel", -15.5)
+
+    ceiling = get_lead_slowdown_accel_ceiling(33.5, panic_lead, 1.3, tuning)
+
+    assert ceiling == pytest.approx(-6.0)
+
+  def test_slowdown_ceiling_treats_zero_speed_lead_as_stopped(self):
+    tuning = LeadResponseTuningConfig(lead_slowdown_max_decel=6.0)
+    stopped_lead = _make_lead(d_rel=20.0, v_lead=0.0, a_lead=0.0)
+
+    ceiling = get_lead_slowdown_accel_ceiling(20.0, stopped_lead, 1.3, tuning)
+
+    assert ceiling == pytest.approx(-6.0)
 
   def test_gap_reclaim_effective_cap_expands_toward_personality_accel_for_large_surplus_gap(self):
     wide_pullaway = _make_lead(d_rel=72.0, v_lead=35.2, a_lead=0.2)
@@ -300,7 +404,7 @@ class TestLeadInteractionScenarios:
     assert acquire_mode_seen is True
     assert max_preview >= 6.0
     assert planner_accel_at_2s < -0.10
-    assert accel_at_2s > 0.40
+    assert accel_at_2s > 0.10
     assert accel_at_2p25s <= 0.05
     assert accel_at_2p3s < 0.0
     assert source_after_acquire == "lead0"

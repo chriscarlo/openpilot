@@ -285,6 +285,11 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
       self.output_should_stop = True
 
     gap_reclaim_floor = float(getattr(self.mpc, 'gap_reclaim_accel_floor', 0.0) or 0.0)
+    lead_keepup_floor = float(getattr(self.mpc, 'lead_keepup_accel_floor', 0.0) or 0.0)
+    if (lead_keepup_floor > 0.0 and
+        not self.output_should_stop and
+        output_a_target >= -0.12):
+      output_a_target = max(output_a_target, lead_keepup_floor)
     if (gap_reclaim_floor > 0.0 and
         not bool(getattr(self.mpc, 'use_upstream_gap_reclaim', False)) and
         not self.output_should_stop and
@@ -295,6 +300,10 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     if (bool(getattr(self.mpc, 'cutin_settle_active', False)) and
         not self.output_should_stop):
       output_a_target = max(output_a_target, cutin_settle_floor)
+
+    lead_slowdown_ceiling = getattr(self.mpc, 'lead_slowdown_accel_ceiling', None)
+    if lead_slowdown_ceiling is not None:
+      output_a_target = min(output_a_target, float(lead_slowdown_ceiling))
 
     lead_source = str(getattr(self.mpc, "source", ""))
     control_leads = getattr(self.mpc, "control_leads", ())
@@ -396,7 +405,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
 
     if self._flutter_mode_active and jerk_cap > 0.0:
       # Bypass if the model strongly wants to brake — we should not delay real braking.
-      if not (bypass_decel > 0.0 and model_accel < -abs(bypass_decel)):
+      if not (bypass_decel > 0.0 and (model_accel < -abs(bypass_decel) or self.output_a_target < -abs(bypass_decel))):
         dt = float(max(self.dt, 1e-3))
         max_step = jerk_cap * dt
         delta = self.output_a_target - self._flutter_clamp_prev_a

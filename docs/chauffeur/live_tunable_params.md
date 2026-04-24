@@ -18,6 +18,25 @@ All params are read at runtime via `Longitudinal.LiveTune.*` keys. Changes take 
 | `GapReclaimGapMinM` | 0.0 | 0.0–10.0 | Minimum extra gap before reclaim activates |
 | `GapReclaimMaxAccel` | 0.24 | 0.0–0.75 | Cap on positive accel floor for gap closing |
 
+## Lead Keep-Up
+
+Tiny immediate accel floor for a followed lead that starts pulling away. This is deliberately separate from Gap Reclaim: keep-up can start before a large gap exists, while reclaim remains the stronger response once the gap is clearly real.
+
+| Param Key | Default | Range | Description |
+|---|---|---|---|
+| `LeadKeepUpStrength` | 1.0 | 0.0–2.0 | Scale for the immediate keep-up floor. The first hint stays tiny; confirmed pull-aways can climb to `LeadKeepUpMaxAccel` |
+| `LeadKeepUpGapMinM` | 0.40 | 0.0–5.0 | Extra gap above nominal headway before distance-based keep-up starts |
+| `LeadKeepUpMaxAccel` | 0.08 | 0.0–5.0 | Cap on keep-up floor before planner/personality accel limits. Leave the default tiny for EV comfort |
+
+## Lead Slowdown
+
+Accel ceiling for a followed slower/braking lead. The first hint only trims positive accel; confirmed closing, lead braking, or short TTC can request the full negative accel envelope.
+
+| Param Key | Default | Range | Description |
+|---|---|---|---|
+| `LeadSlowdownStrength` | 0.5 | 0.0–2.0 | Scale for the normal slowdown ceiling; panic/short-TTC authority is not reduced by this |
+| `LeadSlowdownMaxDecel` | 6.0 | 0.0–6.0 | Maximum braking magnitude the slowdown ceiling may request before vehicle/controller limits apply |
+
 ## Lead Preview
 
 | Param Key | Default | Range | Description |
@@ -32,7 +51,7 @@ All params are read at runtime via `Longitudinal.LiveTune.*` keys. Changes take 
 | Param Key | Default | Range | Description |
 |---|---|---|---|
 | `CutInSettleDurationS` | 7.0 | 0.0–12.0 | Grace window length after cut-in detection |
-| `CutInSettleMaxDecel` | 0.30 | 0.0–0.80 | Max braking magnitude during grace window |
+| `CutInSettleMaxDecel` | 0.15 | 0.0–0.80 | Max braking magnitude during grace window |
 | `CutInSettleMaxClosingSpeedMps` | 2.5 | 0.5–6.0 | Max ego-lead closing speed to qualify for grace |
 | `CutInSettleAccelBiasMps2` | 0.20 | 0.0–0.30 | Positive accel offset to counteract EV regen during settle |
 

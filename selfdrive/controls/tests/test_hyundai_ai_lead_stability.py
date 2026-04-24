@@ -222,6 +222,59 @@ class TestHyundaiAiLeadStability:
     assert mpc.acc_source_debug["stabilization_push_m"] == pytest.approx(0.0)
     assert mpc.acc_source_debug["raw_reclaim_safety_override"] is False
 
+  def test_keepup_floor_engages_before_large_gap_reclaim_threshold(self, monkeypatch):
+    monkeypatch.setattr(
+      "openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc.time.monotonic",
+      _MonotonicStub(step=0.2),
+    )
+    params = Params()
+    saved_gap_min = params.get("Longitudinal.LiveTune.GapReclaimGapMinM")
+    try:
+      params.put("Longitudinal.LiveTune.GapReclaimGapMinM", 4.0)
+      mpc = _make_hyundai_mpc(v_ego=33.5, a_ego=0.0)
+
+      for _ in range(2):
+        _run_update(
+          mpc,
+          _make_lead(d_rel=43.7, y_rel=0.04, d_path=0.04, v_lat=0.10, v_rel=0.0, v_lead=33.5, a_lead=0.0, model_prob=0.97),
+          _make_lead(status=False),
+          v_cruise=40.0,
+        )
+      _run_update(
+        mpc,
+        _make_lead(d_rel=44.2, y_rel=0.04, d_path=0.04, v_lat=0.10, v_rel=0.45, v_lead=33.95, a_lead=0.0, model_prob=0.97),
+        _make_lead(status=False),
+        v_cruise=40.0,
+      )
+
+      assert mpc.source == "lead0"
+      assert mpc.gap_reclaim_accel_floor == pytest.approx(0.0)
+      assert 0.0 < mpc.lead_keepup_accel_floor < 0.05
+      assert mpc.acc_source_debug["lead_keepup_accel_floor"] == pytest.approx(mpc.lead_keepup_accel_floor)
+    finally:
+      if saved_gap_min is None:
+        params.remove("Longitudinal.LiveTune.GapReclaimGapMinM")
+      else:
+        params.put("Longitudinal.LiveTune.GapReclaimGapMinM", saved_gap_min)
+
+  def test_slowdown_ceiling_reaches_full_decel_for_close_braking_lead(self, monkeypatch):
+    monkeypatch.setattr(
+      "openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc.time.monotonic",
+      _MonotonicStub(step=0.2),
+    )
+    mpc = _make_hyundai_mpc(v_ego=33.5, a_ego=0.0)
+
+    _run_update(
+      mpc,
+      _make_lead(d_rel=10.0, y_rel=0.04, d_path=0.04, v_rel=-15.5, v_lead=18.0, a_lead=-5.0, model_prob=0.98),
+      _make_lead(status=False),
+      v_cruise=40.0,
+    )
+
+    assert mpc.source == "lead0"
+    assert mpc.lead_slowdown_accel_ceiling == pytest.approx(-6.0)
+    assert mpc.acc_source_debug["lead_slowdown_accel_ceiling"] == pytest.approx(-6.0)
+
   def test_brief_total_lead_dropout_holds_stable_virtual_lead_before_releasing(self):
     mpc = _make_hyundai_mpc(time_fn=_MonotonicStub(step=0.2))
 

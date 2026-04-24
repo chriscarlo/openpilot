@@ -240,7 +240,7 @@ def run_harness(*,
 
   long_control = LongControl(vehicle_config.cp)
   hyundai_controller = None
-  if vehicle_config.cp.brand == "hyundai":
+  if vehicle_config.cp.brand == "hyundai" and vehicle_config.resolved_controller_mode == "shaped":
     from opendbc.sunnypilot.car.hyundai.longitudinal.controller import LongitudinalController
     hyundai_controller = LongitudinalController(vehicle_config.cp, vehicle_config.cp_sp)
 

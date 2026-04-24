@@ -107,6 +107,56 @@ LEAD_RESPONSE_TUNE_SPECS = (
     description="Cap on the positive accel floor used to close a safe extra gap.",
   ),
   LeadResponseTuneSpec(
+    attr="lead_keepup_strength",
+    key="Longitudinal.LiveTune.LeadKeepUpStrength",
+    cli_name="lead-keepup-strength",
+    label="keepup_strength",
+    default=1.0,
+    minimum=0.0,
+    maximum=2.0,
+    description="Scale for the keep-up accel floor: tiny at first, then able to climb to its cap as pull-away is confirmed.",
+  ),
+  LeadResponseTuneSpec(
+    attr="lead_keepup_gap_min_m",
+    key="Longitudinal.LiveTune.LeadKeepUpGapMinM",
+    cli_name="lead-keepup-gap-min-m",
+    label="keepup_gap_min_m",
+    default=0.40,
+    minimum=0.0,
+    maximum=5.0,
+    description="Extra gap above nominal headway before keep-up distance bias starts; pull-away speed can still start it softly.",
+  ),
+  LeadResponseTuneSpec(
+    attr="lead_keepup_max_accel",
+    key="Longitudinal.LiveTune.LeadKeepUpMaxAccel",
+    cli_name="lead-keepup-max-accel",
+    label="keepup_max_accel",
+    default=0.08,
+    minimum=0.0,
+    maximum=5.0,
+    description="Cap on the keep-up accel floor. Planner/personality accel limits still apply, so leave the default tiny for EV comfort.",
+  ),
+  LeadResponseTuneSpec(
+    attr="lead_slowdown_strength",
+    key="Longitudinal.LiveTune.LeadSlowdownStrength",
+    cli_name="lead-slowdown-strength",
+    label="slowdown_strength",
+    default=0.5,
+    minimum=0.0,
+    maximum=2.0,
+    description="Scale for the slower/braking-lead accel ceiling: soft at onset, full authority for confirmed stop threats.",
+  ),
+  LeadResponseTuneSpec(
+    attr="lead_slowdown_max_decel",
+    key="Longitudinal.LiveTune.LeadSlowdownMaxDecel",
+    cli_name="lead-slowdown-max-decel",
+    label="slowdown_max_decel",
+    default=6.0,
+    minimum=0.0,
+    maximum=6.0,
+    description="Maximum braking magnitude the slower/braking-lead ceiling may request before vehicle/controller limits apply.",
+  ),
+  LeadResponseTuneSpec(
     attr="cutin_settle_duration_s",
     key="Longitudinal.LiveTune.CutInSettleDurationS",
     cli_name="cutin-settle-duration-s",
@@ -121,7 +171,7 @@ LEAD_RESPONSE_TUNE_SPECS = (
     key="Longitudinal.LiveTune.CutInSettleMaxDecel",
     cli_name="cutin-settle-max-decel",
     label="cutin_settle_max_decel",
-    default=0.30,
+    default=0.15,
     minimum=0.0,
     maximum=0.80,
     description="Maximum braking magnitude allowed during the cut-in grace window after it ramps in.",
@@ -342,6 +392,11 @@ class LeadResponseTuningConfig:
   gap_reclaim_strength: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["gap_reclaim_strength"].default
   gap_reclaim_gap_min_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["gap_reclaim_gap_min_m"].default
   gap_reclaim_max_accel: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["gap_reclaim_max_accel"].default
+  lead_keepup_strength: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_keepup_strength"].default
+  lead_keepup_gap_min_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_keepup_gap_min_m"].default
+  lead_keepup_max_accel: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_keepup_max_accel"].default
+  lead_slowdown_strength: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_slowdown_strength"].default
+  lead_slowdown_max_decel: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_slowdown_max_decel"].default
   cutin_settle_duration_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cutin_settle_duration_s"].default
   cutin_settle_max_decel: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cutin_settle_max_decel"].default
   cutin_settle_max_closing_speed_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cutin_settle_max_closing_speed_mps"].default

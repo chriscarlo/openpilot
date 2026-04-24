@@ -51,6 +51,15 @@ def test_object_hazard_controller_ignores_invalid_or_inactive_state():
   assert controller.speed_recommendation == V_CRUISE_UNSET
 
 
+def test_object_hazard_controller_ignores_plain_dict_harness_sm():
+  controller = ObjectHazardController()
+  controller.update({}, 20.0, 0.0, 25.0)
+
+  assert controller.enabled is False
+  assert controller.is_active is False
+  assert controller.speed_recommendation == V_CRUISE_UNSET
+
+
 def test_object_hazard_controller_ignores_stale_or_dead_messages():
   controller = ObjectHazardController()
   state = SimpleNamespace(

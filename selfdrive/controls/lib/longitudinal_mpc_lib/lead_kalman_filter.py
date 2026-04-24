@@ -89,10 +89,12 @@ class LeadKalmanFilter:
       "kalman_gain": 0.0,
       "innovation_m": 0.0,
       "innovation_std": 0.0,
+      "vrel_input_mps": 0.0,
       "gated": False,
       "closing_snap": False,
       "open_slew_clamped": False,
       "deadband_applied": False,
+      "opening_vrel_suppressed": False,
     }
 
   @property
@@ -119,8 +121,9 @@ class LeadKalmanFilter:
       self._initialised = True
       self.last_debug = {
         "kalman_gain": 1.0, "innovation_m": 0.0, "innovation_std": 0.0,
-        "gated": False, "closing_snap": False, "open_slew_clamped": False,
-        "deadband_applied": False,
+        "vrel_input_mps": 0.0, "gated": False, "closing_snap": False,
+        "open_slew_clamped": False, "deadband_applied": False,
+        "opening_vrel_suppressed": False,
       }
       return self._x
 
@@ -128,8 +131,17 @@ class LeadKalmanFilter:
 
     # ---- PREDICT ---------------------------------------------------------
     v_input = float(raw_vrel)
+    opening_vrel_suppressed = False
     if v_input > 0.0:
-      v_input = min(v_input, slew_max)
+      opening_evidence_m = float(raw_drel) - prev_x
+      if opening_evidence_m <= self._deadband_m:
+        # Positive vRel by itself is not enough evidence to move dRel open.
+        # Model vRel noise otherwise integrates straight through prediction
+        # even when the measured distance is flat.
+        v_input = 0.0
+        opening_vrel_suppressed = True
+      else:
+        v_input = min(v_input, slew_max)
     x_pred = self._x + v_input * dt_s
     p_pred = self._p + self._q * dt_s
 
@@ -212,10 +224,12 @@ class LeadKalmanFilter:
       "kalman_gain": float(k),
       "innovation_m": float(innov_raw),
       "innovation_std": float(innov_std),
+      "vrel_input_mps": float(v_input),
       "gated": bool(gated),
       "closing_snap": bool(closing_snap),
       "open_slew_clamped": bool(open_slew_clamped),
       "deadband_applied": bool(deadband_applied),
+      "opening_vrel_suppressed": bool(opening_vrel_suppressed),
     }
     return self._x
 

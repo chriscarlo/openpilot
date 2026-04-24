@@ -33,6 +33,8 @@ def should_stop_for_hazard(distance_m: float, recommended_speed_mps: float) -> b
 
 
 def get_fresh_object_hazard_state(sm):
+  if not all(hasattr(sm, attr) for attr in ("valid", "alive", "recv_time")):
+    return None
   if not sm.valid.get("objectHazardStateSP", False):
     return None
   if not sm.alive.get("objectHazardStateSP", False):
