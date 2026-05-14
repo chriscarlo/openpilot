@@ -129,6 +129,19 @@ class TestRadardModelLeadFilter:
     assert float(adopted["dRel"]) < 22.5
     assert float(adopted["vRel"]) < -3.0
 
+  def test_same_speed_distance_only_close_dip_is_not_fast_adopted(self):
+    tracker = ModelLeadTracker(params=_NoParams())
+    for frame in range(20):
+      _tracked_lead(tracker, now=frame * 0.05, d_rel=42.0, v_lead=29.0)
+
+    dipped = None
+    for frame in range(20, 24):
+      dipped = _tracked_lead(tracker, now=frame * 0.05, d_rel=14.0, v_lead=29.0)
+
+    assert dipped is not None
+    assert float(dipped["dRel"]) > 41.5
+    assert int(dipped["radarTrackId"]) <= -1001
+
   def test_synthetic_model_track_id_survives_slot_reorder_and_duplicate_hypotheses(self):
     tracker = ModelLeadTracker(params=_NoParams())
     model_msg = _model_path()

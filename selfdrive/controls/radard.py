@@ -45,7 +45,9 @@ MODEL_LEAD_DUPLICATE_VREL_GATE_MPS = 2.0
 MODEL_LEAD_DUPLICATE_DREL_GATE_M = 35.0
 MODEL_LEAD_DUPLICATE_CLOSER_KEEP_SEPARATE_M = 12.0
 MODEL_LEAD_DUPLICATE_CLOSING_KEEP_SEPARATE_MPS = 2.5
+MODEL_LEAD_SAME_SLOT_RECOVER_DREL_GATE_M = 80.0
 MODEL_LEAD_CLOSE_INNOVATION_M = 2.5
+MODEL_LEAD_CLOSE_CONFIRM_FRAMES = 3
 MODEL_LEAD_FAST_CLOSE_TAU_S = 0.12
 MODEL_LEAD_NOISE_CLOSE_SLEW_MPS = 1.0
 MODEL_LEAD_VREL_TAU_S = 0.40
@@ -133,7 +135,6 @@ class ModelLeadTrack:
       self.closer_confirm_frames = max(0, self.closer_confirm_frames - 1)
 
     return bool(
-      very_close or
       low_ttc or
       strong_closing or
       (cutin_like and self.closer_confirm_frames >= 1)
@@ -302,7 +303,33 @@ class ModelLeadTracker:
         continue
       if best is None or score < best[0]:
         best = (score, track)
-    return None if best is None else best[1]
+    if best is not None:
+      return best[1]
+
+    raw_drel = _finite_float(lead_dict.get("dRel"))
+    raw_dpath = _finite_float(lead_dict.get("dPath", lead_dict.get("yRel")))
+    raw_yrel = _finite_float(lead_dict.get("yRel"))
+    raw_vrel = _finite_float(lead_dict.get("vRel"))
+    same_slot_best: tuple[float, ModelLeadTrack] | None = None
+    for track in self._tracks.values():
+      if track.last_slot != int(lead_slot):
+        continue
+      pred_drel = track.predict_drel(now)
+      drel_err = abs(pred_drel - raw_drel)
+      path_err = abs(track.dPath - raw_dpath)
+      y_err = abs(track.yRel - raw_yrel)
+      vrel_err = abs(track.vRel - raw_vrel)
+      if (
+        drel_err > MODEL_LEAD_SAME_SLOT_RECOVER_DREL_GATE_M or
+        path_err > MODEL_LEAD_ASSOC_Y_GATE_M or
+        y_err > MODEL_LEAD_ASSOC_Y_GATE_M or
+        vrel_err > MODEL_LEAD_ASSOC_VREL_GATE_MPS
+      ):
+        continue
+      score = drel_err + 4.0 * path_err + 4.0 * y_err + vrel_err
+      if same_slot_best is None or score < same_slot_best[0]:
+        same_slot_best = (score, track)
+    return None if same_slot_best is None else same_slot_best[1]
 
   def update_from_vision(self, lead_dict: dict[str, Any], *, now: float | None, v_ego: float,
                          lead_slot: int = 0) -> dict[str, Any]:

@@ -73,3 +73,23 @@
 - Increasing close-side dRel slew did not improve the decel probe and increased steady-noise dRel movement, so it was left unchanged.
 - Verification passed after the tuning edits: focused longitudinal/radard suite -> 62 passed, 3 skipped.
 - Full-MPC smoke at `source-noise-std-m=10` passed with LongMPC-filtered 3 s p95 range `3.11 m`.
+
+# EV6 No-Radar AI Lead Windows Pre-Merge Gate
+
+- [x] Run broad Windows longitudinal regression suite.
+- [x] Run Hyundai controller-side Windows tests.
+- [x] Stress simulator at `source-noise-std-m=12`.
+- [x] Fix distance-only close-dip fast-adopt edge case found by `std=12`.
+- [x] Re-run final Windows regression and simulator checks.
+
+## Review
+
+- Broad Windows longitudinal suite passed before the final edge-case patch: 65 passed, 25 skipped.
+- Hyundai controller-side suite passed: 18 passed.
+- Initial `std=12` simulator stress exposed pure distance-noise close dips causing `drel_jump_closer` resets and large filtered range.
+- Fast-close admission now requires low TTC, strong closing speed, or cut-in lateral support; distance-only same-speed close dips are rate-limited instead.
+- After the gate change, `std=12` single-lead stress: raw range `64.27 m`, radard 3 s p95 `3.17 m`, LongMPC-filtered 3 s p95 `2.87 m`, only init reset.
+- After the gate change, `std=12` duplicate stress: raw range `56.43 m`, radard 3 s p95 `2.99 m`, LongMPC-filtered 3 s p95 `2.83 m`, only init reset.
+- Final broad Windows longitudinal suite passed: 66 passed, 25 skipped.
+- Final Hyundai controller-side suite passed: 18 passed.
+- Final `std=12` full-MPC smoke passed: LongMPC-filtered 3 s p95 range `0.68 m`, only init reset.
