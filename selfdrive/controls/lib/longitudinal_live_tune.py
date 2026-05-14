@@ -196,6 +196,46 @@ LEAD_RESPONSE_TUNE_SPECS = (
     maximum=40.0,
     description="Closing gate: snap to raw when lead appears this much closer than predicted (meters).",
   ),
+  LeadResponseTuneSpec(
+    attr="model_lead_filter_tau_s",
+    key="Longitudinal.LiveTune.ModelLeadFilterTauS",
+    cli_name="model-lead-filter-tau",
+    label="model_lead_tau",
+    default=2.80,
+    minimum=0.20,
+    maximum=8.0,
+    description="Source-side model-only lead dRel filter time constant in radard. Higher = more source-noise rejection.",
+  ),
+  LeadResponseTuneSpec(
+    attr="model_lead_filter_open_slew_max_mps",
+    key="Longitudinal.LiveTune.ModelLeadFilterOpenSlewMaxMps",
+    cli_name="model-lead-open-slew-max-mps",
+    label="model_lead_open_slew",
+    default=1.20,
+    minimum=0.10,
+    maximum=6.0,
+    description="Max source-side opening dRel motion admitted per second before model velocity support.",
+  ),
+  LeadResponseTuneSpec(
+    attr="model_lead_filter_safe_ttc_s",
+    key="Longitudinal.LiveTune.ModelLeadFilterSafeTtcS",
+    cli_name="model-lead-safe-ttc",
+    label="model_lead_safe_ttc",
+    default=4.00,
+    minimum=1.0,
+    maximum=10.0,
+    description="Low-TTC threshold that lets source-side model-lead filtering fast-adopt a closer measurement.",
+  ),
+  LeadResponseTuneSpec(
+    attr="model_lead_filter_assoc_drel_m",
+    key="Longitudinal.LiveTune.ModelLeadFilterAssocDRelM",
+    cli_name="model-lead-assoc-drel",
+    label="model_lead_assoc_drel",
+    default=12.0,
+    minimum=3.0,
+    maximum=35.0,
+    description="Max dRel difference for associating model-only leads to a stable synthetic radard track.",
+  ),
 )
 
 LEAD_RESPONSE_TUNE_SPECS_BY_ATTR = {spec.attr: spec for spec in LEAD_RESPONSE_TUNE_SPECS}
@@ -219,6 +259,10 @@ class LeadResponseTuningConfig:
   drel_filter_open_slew_max_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["drel_filter_open_slew_max_mps"].default
   drel_filter_innovation_gate_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["drel_filter_innovation_gate_m"].default
   drel_filter_closing_gate_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["drel_filter_closing_gate_m"].default
+  model_lead_filter_tau_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_filter_tau_s"].default
+  model_lead_filter_open_slew_max_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_filter_open_slew_max_mps"].default
+  model_lead_filter_safe_ttc_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_filter_safe_ttc_s"].default
+  model_lead_filter_assoc_drel_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_filter_assoc_drel_m"].default
 
   @classmethod
   def defaults(cls) -> LeadResponseTuningConfig:

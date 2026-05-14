@@ -2,6 +2,7 @@
 import math
 import numpy as np
 from collections import deque
+from dataclasses import dataclass
 from typing import Any
 
 import capnp
@@ -11,6 +12,10 @@ from openpilot.common.params import Params
 from openpilot.common.realtime import DT_MDL, Priority, config_realtime_process
 from openpilot.common.swaglog import cloudlog
 from openpilot.common.simple_kalman import KF1D
+from openpilot.selfdrive.controls.lib.longitudinal_live_tune import (
+  LeadResponseTuningConfig,
+  read_lead_response_tuning_config,
+)
 
 from opendbc.car import structs
 from opendbc.car.hyundai.values import HyundaiFlags
@@ -28,6 +33,278 @@ V_EGO_STATIONARY = 4.   # no stationary object flag below this speed
 
 RADAR_TO_CENTER = 2.7   # (deprecated) RADAR is ~ 2.7m ahead from center of car
 RADAR_TO_CAMERA = 1.52  # RADAR is ~ 1.5m ahead from center of mesh frame
+
+MODEL_LEAD_TRACK_ID_START = -1001
+MODEL_LEAD_TRACK_MAX_MISSES = 6
+MODEL_LEAD_TRACK_MAX_COUNT = 4
+MODEL_LEAD_PARAM_REFRESH_DT_S = 1.0
+MODEL_LEAD_ASSOC_Y_GATE_M = 3.0
+MODEL_LEAD_ASSOC_VREL_GATE_MPS = 8.0
+MODEL_LEAD_CLOSE_INNOVATION_M = 2.5
+MODEL_LEAD_FAST_CLOSE_TAU_S = 0.12
+MODEL_LEAD_NOISE_CLOSE_SLEW_MPS = 1.0
+MODEL_LEAD_VREL_TAU_S = 0.55
+MODEL_LEAD_FAST_VREL_TAU_S = 0.20
+MODEL_LEAD_LAT_TAU_S = 0.45
+MODEL_LEAD_ACCEL_TAU_S = 0.60
+MODEL_LEAD_PROB_TAU_S = 0.80
+MODEL_LEAD_CENTER_PATH_GATE_M = 2.6
+MODEL_LEAD_CUTIN_VLAT_MPS = 0.7
+
+
+def _finite_float(value: Any, default: float = 0.0) -> float:
+  try:
+    ret = float(value)
+    return ret if math.isfinite(ret) else float(default)
+  except Exception:
+    return float(default)
+
+
+def _ema_alpha(dt_s: float, tau_s: float) -> float:
+  if tau_s <= 1e-3:
+    return 1.0
+  return float(1.0 - math.exp(-max(0.0, dt_s) / max(1e-3, tau_s)))
+
+
+@dataclass
+class ModelLeadTrack:
+  identifier: int
+  dRel: float
+  yRel: float
+  vRel: float
+  vLead: float
+  vLeadK: float
+  aLeadK: float
+  aLeadTau: float
+  modelProb: float
+  dPath: float
+  vLat: float
+  last_t: float
+  age: int = 1
+  missed: int = 0
+  closer_confirm_frames: int = 0
+  last_slot: int = -1
+
+  @classmethod
+  def from_lead_dict(cls, identifier: int, lead_dict: dict[str, Any], now: float, lead_slot: int) -> "ModelLeadTrack":
+    return cls(
+      identifier=identifier,
+      dRel=_finite_float(lead_dict.get("dRel")),
+      yRel=_finite_float(lead_dict.get("yRel")),
+      vRel=_finite_float(lead_dict.get("vRel")),
+      vLead=_finite_float(lead_dict.get("vLead")),
+      vLeadK=_finite_float(lead_dict.get("vLeadK", lead_dict.get("vLead"))),
+      aLeadK=_finite_float(lead_dict.get("aLeadK")),
+      aLeadTau=_finite_float(lead_dict.get("aLeadTau"), 0.3),
+      modelProb=_finite_float(lead_dict.get("modelProb")),
+      dPath=_finite_float(lead_dict.get("dPath", lead_dict.get("yRel"))),
+      vLat=_finite_float(lead_dict.get("vLat")),
+      last_t=float(now),
+      last_slot=int(lead_slot),
+    )
+
+  def predict_drel(self, now: float) -> float:
+    dt_s = float(np.clip(float(now) - self.last_t, 0.0, 1.0))
+    return float(max(0.0, self.dRel + self.vRel * dt_s))
+
+  def _fast_closing_supported(self, raw_drel: float, raw_vrel: float, raw_dpath: float,
+                              raw_vlat: float, innovation_m: float, v_ego: float,
+                              cfg: LeadResponseTuningConfig) -> bool:
+    if innovation_m >= -MODEL_LEAD_CLOSE_INNOVATION_M:
+      self.closer_confirm_frames = max(0, self.closer_confirm_frames - 1)
+      return False
+
+    centered = abs(raw_dpath) <= MODEL_LEAD_CENTER_PATH_GATE_M
+    cutin_like = abs(raw_dpath) <= 3.5 and abs(raw_vlat) >= MODEL_LEAD_CUTIN_VLAT_MPS
+    closing_speed = max(0.0, -raw_vrel)
+    ttc_s = raw_drel / max(closing_speed, 0.1)
+    very_close = raw_drel <= max(10.0, float(v_ego) * 0.55)
+    low_ttc = closing_speed > 0.5 and ttc_s <= float(cfg.model_lead_filter_safe_ttc_s)
+    strong_closing = closing_speed >= 2.5
+
+    if centered or cutin_like or low_ttc or strong_closing or very_close:
+      self.closer_confirm_frames += 1
+    else:
+      self.closer_confirm_frames = max(0, self.closer_confirm_frames - 1)
+
+    return bool(
+      very_close or
+      low_ttc or
+      strong_closing or
+      (cutin_like and self.closer_confirm_frames >= 1)
+    )
+
+  def update(self, lead_dict: dict[str, Any], now: float, v_ego: float,
+             cfg: LeadResponseTuningConfig, lead_slot: int) -> dict[str, Any]:
+    raw_drel = max(0.0, _finite_float(lead_dict.get("dRel"), self.dRel))
+    raw_yrel = _finite_float(lead_dict.get("yRel"), self.yRel)
+    raw_vrel = _finite_float(lead_dict.get("vRel"), self.vRel)
+    raw_alead = _finite_float(lead_dict.get("aLeadK"), self.aLeadK)
+    raw_prob = _finite_float(lead_dict.get("modelProb"), self.modelProb)
+    raw_dpath = _finite_float(lead_dict.get("dPath", raw_yrel), raw_yrel)
+    raw_vlat = _finite_float(lead_dict.get("vLat"), self.vLat)
+
+    dt_s = float(np.clip(float(now) - self.last_t, 0.0, 0.25))
+    predicted_drel = self.predict_drel(now)
+    innovation_m = raw_drel - predicted_drel
+    fast_closing = self._fast_closing_supported(raw_drel, raw_vrel, raw_dpath, raw_vlat, innovation_m, v_ego, cfg)
+
+    if fast_closing:
+      drel_alpha = max(0.65, _ema_alpha(dt_s, MODEL_LEAD_FAST_CLOSE_TAU_S))
+      next_drel = predicted_drel + drel_alpha * innovation_m
+    else:
+      close_slew_mps = MODEL_LEAD_NOISE_CLOSE_SLEW_MPS + max(0.0, -raw_vrel) * 0.4
+      open_slew_mps = float(cfg.model_lead_filter_open_slew_max_mps) + max(0.0, raw_vrel)
+      tau_s = float(cfg.model_lead_filter_tau_s) * (1.6 if innovation_m < 0.0 else 1.0)
+      drel_alpha = _ema_alpha(dt_s, tau_s)
+      target_drel = predicted_drel + drel_alpha * innovation_m
+      step_m = float(np.clip(
+        target_drel - predicted_drel,
+        -max(0.0, close_slew_mps) * dt_s,
+        max(0.0, open_slew_mps) * dt_s,
+      ))
+      next_drel = predicted_drel + step_m
+
+    vrel_tau_s = MODEL_LEAD_FAST_VREL_TAU_S if fast_closing else MODEL_LEAD_VREL_TAU_S
+    vrel_alpha = _ema_alpha(dt_s, vrel_tau_s)
+    lat_alpha = _ema_alpha(dt_s, MODEL_LEAD_LAT_TAU_S)
+    accel_alpha = _ema_alpha(dt_s, MODEL_LEAD_ACCEL_TAU_S)
+    prob_alpha = _ema_alpha(dt_s, MODEL_LEAD_PROB_TAU_S)
+
+    self.dRel = float(max(0.0, next_drel))
+    self.yRel = float(self.yRel + lat_alpha * (raw_yrel - self.yRel))
+    self.dPath = float(self.dPath + lat_alpha * (raw_dpath - self.dPath))
+    self.vLat = float(self.vLat + lat_alpha * (raw_vlat - self.vLat))
+    self.vRel = float(self.vRel + vrel_alpha * (raw_vrel - self.vRel))
+    self.vLead = float(v_ego + self.vRel)
+    self.vLeadK = self.vLead
+    self.aLeadK = float(self.aLeadK + accel_alpha * (raw_alead - self.aLeadK))
+    self.aLeadTau = 0.3
+    self.modelProb = float(self.modelProb + prob_alpha * (raw_prob - self.modelProb))
+    self.last_t = float(now)
+    self.last_slot = int(lead_slot)
+    self.age += 1
+    self.missed = 0
+    return self.get_RadarState()
+
+  def get_RadarState(self) -> dict[str, Any]:
+    return {
+      "dRel": float(self.dRel),
+      "yRel": float(self.yRel),
+      "vRel": float(self.vRel),
+      "vLead": float(self.vLead),
+      "vLeadK": float(self.vLeadK),
+      "aLeadK": float(self.aLeadK),
+      "aLeadTau": float(self.aLeadTau),
+      "fcw": False,
+      "modelProb": float(self.modelProb),
+      "status": True,
+      "radar": False,
+      "radarTrackId": int(self.identifier),
+      "dPath": float(self.dPath),
+      "vLat": float(self.vLat),
+    }
+
+
+class ModelLeadTracker:
+  def __init__(self, params: Params | None = None):
+    self.params = params if params is not None else Params()
+    self._cfg = LeadResponseTuningConfig.defaults()
+    self._last_param_refresh_t = -1e9
+    self._tracks: dict[int, ModelLeadTrack] = {}
+    self._updated_track_ids: set[int] = set()
+    self._next_identifier = MODEL_LEAD_TRACK_ID_START
+    self._frame_active = False
+
+  @property
+  def tracks(self) -> dict[int, ModelLeadTrack]:
+    return self._tracks
+
+  def begin_frame(self, now: float) -> None:
+    now = float(now)
+    self._refresh_config(now)
+    self._updated_track_ids.clear()
+    self._frame_active = True
+
+  def end_frame(self) -> None:
+    if not self._frame_active:
+      return
+    for identifier, track in list(self._tracks.items()):
+      if identifier not in self._updated_track_ids:
+        track.missed += 1
+      if track.missed > MODEL_LEAD_TRACK_MAX_MISSES:
+        self._tracks.pop(identifier, None)
+    self._frame_active = False
+
+  def _refresh_config(self, now: float) -> None:
+    if (float(now) - self._last_param_refresh_t) < MODEL_LEAD_PARAM_REFRESH_DT_S:
+      return
+    try:
+      self._cfg = read_lead_response_tuning_config(self.params)
+    except Exception:
+      self._cfg = LeadResponseTuningConfig.defaults()
+    self._last_param_refresh_t = float(now)
+
+  def _new_identifier(self) -> int:
+    identifier = self._next_identifier
+    self._next_identifier -= 1
+    return identifier
+
+  def _association_score(self, track: ModelLeadTrack, lead_dict: dict[str, Any], now: float, lead_slot: int) -> float | None:
+    raw_drel = _finite_float(lead_dict.get("dRel"))
+    raw_dpath = _finite_float(lead_dict.get("dPath", lead_dict.get("yRel")))
+    raw_yrel = _finite_float(lead_dict.get("yRel"))
+    raw_vrel = _finite_float(lead_dict.get("vRel"))
+    pred_drel = track.predict_drel(now)
+    same_slot_gate = 35.0 if track.last_slot == int(lead_slot) else float(self._cfg.model_lead_filter_assoc_drel_m)
+    drel_gate = max(same_slot_gate, 0.18 * max(pred_drel, raw_drel, 1.0))
+    drel_err = abs(pred_drel - raw_drel)
+    path_err = abs(track.dPath - raw_dpath)
+    y_err = abs(track.yRel - raw_yrel)
+    vrel_err = abs(track.vRel - raw_vrel)
+
+    if drel_err > drel_gate or path_err > MODEL_LEAD_ASSOC_Y_GATE_M or y_err > MODEL_LEAD_ASSOC_Y_GATE_M:
+      return None
+    if vrel_err > MODEL_LEAD_ASSOC_VREL_GATE_MPS:
+      return None
+    updated_penalty = 0.25 if track.identifier in self._updated_track_ids else 0.0
+    return float(
+      drel_err / max(drel_gate, 1e-3) +
+      path_err / MODEL_LEAD_ASSOC_Y_GATE_M +
+      y_err / MODEL_LEAD_ASSOC_Y_GATE_M +
+      vrel_err / MODEL_LEAD_ASSOC_VREL_GATE_MPS +
+      updated_penalty
+    )
+
+  def _match_track(self, lead_dict: dict[str, Any], now: float, lead_slot: int) -> ModelLeadTrack | None:
+    best: tuple[float, ModelLeadTrack] | None = None
+    for track in self._tracks.values():
+      score = self._association_score(track, lead_dict, now, lead_slot)
+      if score is None:
+        continue
+      if best is None or score < best[0]:
+        best = (score, track)
+    return None if best is None else best[1]
+
+  def update_from_vision(self, lead_dict: dict[str, Any], *, now: float | None, v_ego: float,
+                         lead_slot: int = 0) -> dict[str, Any]:
+    now = 0.0 if now is None else float(now)
+    if not self._frame_active:
+      self._refresh_config(now)
+
+    track = self._match_track(lead_dict, now, lead_slot)
+    if track is None:
+      track = ModelLeadTrack.from_lead_dict(self._new_identifier(), lead_dict, now, lead_slot)
+      self._tracks[track.identifier] = track
+      while len(self._tracks) > MODEL_LEAD_TRACK_MAX_COUNT:
+        stale_identifier = max(self._tracks.values(), key=lambda t: (t.missed, -t.age)).identifier
+        self._tracks.pop(stale_identifier, None)
+
+    if track.identifier in self._updated_track_ids:
+      return track.get_RadarState()
+
+    self._updated_track_ids.add(track.identifier)
+    return track.update(lead_dict, now, v_ego, self._cfg, lead_slot)
 
 
 class KalmanParams:
@@ -238,7 +515,8 @@ def add_path_relative_lead_metrics(lead_dict: dict[str, Any], model_msg: capnp._
 
 def get_lead(v_ego: float, ready: bool, tracks: dict[int, Track], lead_msg: capnp._DynamicStructReader,
              model_v_ego: float, CP: structs.CarParams, CP_SP: structs.CarParamsSP, model_msg: capnp._DynamicStructReader,
-             low_speed_override: bool = True) -> dict[str, Any]:
+             low_speed_override: bool = True, model_lead_tracker: ModelLeadTracker | None = None,
+             lead_slot: int = 0, now: float | None = None) -> dict[str, Any]:
   # Determine leads, this is where the essential logic happens
   if len(tracks) > 0 and ready and lead_msg.prob > .5:
     track = match_vision_to_track(v_ego, lead_msg, tracks)
@@ -251,6 +529,9 @@ def get_lead(v_ego: float, ready: bool, tracks: dict[int, Track], lead_msg: capn
     lead_dict = get_custom_yrel(CP, CP_SP, lead_dict, lead_msg)
   elif (track is None) and ready and (lead_msg.prob > .5):
     lead_dict = get_RadarState_from_vision(lead_msg, v_ego, model_v_ego)
+    if model_lead_tracker is not None:
+      lead_dict = add_path_relative_lead_metrics(lead_dict, model_msg, lead_msg)
+      lead_dict = model_lead_tracker.update_from_vision(lead_dict, now=now, v_ego=v_ego, lead_slot=lead_slot)
 
   if low_speed_override:
     low_speed_tracks = [c for c in tracks.values() if c.potential_low_speed_lead(v_ego)]
@@ -285,6 +566,7 @@ class RadarD:
 
     self.tracks: dict[int, Track] = {}
     self.kalman_params = KalmanParams(DT_MDL)
+    self.model_lead_tracker = ModelLeadTracker()
 
     self.v_ego = 0.0
     self.v_ego_hist = deque([0.0], maxlen=int(round(delay / DT_MDL))+1)
@@ -336,10 +618,14 @@ class RadarD:
       model_v_ego = self.v_ego
     leads_v3 = sm['modelV2'].leadsV3
     if len(leads_v3) > 1:
+      self.model_lead_tracker.begin_frame(self.current_time)
       self.radar_state.leadOne = get_lead(self.v_ego, self.ready, self.tracks, leads_v3[0], model_v_ego, self.CP, self.CP_SP, sm['modelV2'],
-                                          low_speed_override=True)
+                                          low_speed_override=True, model_lead_tracker=self.model_lead_tracker,
+                                          lead_slot=0, now=self.current_time)
       self.radar_state.leadTwo = get_lead(self.v_ego, self.ready, self.tracks, leads_v3[1], model_v_ego, self.CP, self.CP_SP, sm['modelV2'],
-                                          low_speed_override=False)
+                                          low_speed_override=False, model_lead_tracker=self.model_lead_tracker,
+                                          lead_slot=1, now=self.current_time)
+      self.model_lead_tracker.end_frame()
 
   def publish(self, pm: messaging.PubMaster):
     assert self.radar_state is not None

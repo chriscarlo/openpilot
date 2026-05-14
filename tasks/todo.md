@@ -32,11 +32,25 @@
 
 # EV6 No-Radar AI Lead dRel Remediation
 
-- [ ] Map current `radard.py`, LongMPC, live-tune, and noise-harness behavior.
-- [ ] Add source-side model-lead tracking/filtering before no-radar `radarState` publication.
-- [ ] Preserve stable negative synthetic model lead ids across `leadsV3` slot churn.
-- [ ] Keep LongMPC virtual-lead filtering from resetting when the same synthetic model track changes slot.
-- [ ] Add live-tunable critical model-lead filter/association knobs and document them.
-- [ ] Extend tests and the simulation harness for steady noise, duplicate hypotheses, opening jumps, and closer safety events.
-- [ ] Tune defaults with harness sweeps until steady-follow noise improves while closer hazards still adopt quickly.
-- [ ] Run focused regression tests and review the final diff for intended source/test/docs only.
+- [x] Map current `radard.py`, LongMPC, live-tune, and noise-harness behavior.
+- [x] Add source-side model-lead tracking/filtering before no-radar `radarState` publication.
+- [x] Preserve stable negative synthetic model lead ids across `leadsV3` slot churn.
+- [x] Keep LongMPC virtual-lead filtering from resetting when the same synthetic model track changes slot.
+- [x] Add live-tunable critical model-lead filter/association knobs and document them.
+- [x] Extend tests and the simulation harness for steady noise, duplicate hypotheses, opening jumps, and closer safety events.
+- [x] Tune defaults with harness sweeps until steady-follow noise improves while closer hazards still adopt quickly.
+- [x] Run focused regression tests and review the final diff for intended source/test/docs only.
+
+## Review
+
+- Added `ModelLeadTracker` in `selfdrive/controls/radard.py` for model-only no-radar leads. Real radar `Track` behavior is unchanged.
+- The tracker emits stable negative synthetic `radarTrackId` values and filters dRel before `radarState.leadOne/leadTwo` reaches planner/MPC.
+- LongMPC now preserves the Hyundai virtual-lead filter state when `lead0`/`lead1` changes but the synthetic model track id is the same.
+- Added live-tunable `Longitudinal.LiveTune.ModelLeadFilter*` params and documented them in `docs/chauffeur/live_tunable_params.md`.
+- Updated `.codex/skills/openpilot-longitudinal-tuner/scripts/simulate_ai_lead_noise.py` to report raw source, radard-tracked, and LongMPC-filtered dRel; `--disable-model-lead-tracker` compares the old raw path.
+- Single-lead baseline, old path: raw p95 `10.93 m`, radard 3 s rolling p95 `21.19 m`, LongMPC-filtered 3 s rolling p95 `10.25 m`.
+- Single-lead baseline, tracker enabled: raw p95 `10.93 m`, radard 3 s rolling p95 `2.95 m`, LongMPC-filtered 3 s rolling p95 `2.94 m`.
+- Duplicate baseline, old path: `53` `source_switch` resets in 30 s, LongMPC-filtered 3 s rolling p95 `13.43 m`.
+- Duplicate baseline, tracker enabled: only init reset, LongMPC-filtered 3 s rolling p95 `2.55 m`.
+- Verification passed: `python -m pytest -q selfdrive/controls/tests/test_radard_model_lead_filter.py selfdrive/controls/tests/test_radard_path_metrics.py selfdrive/controls/tests/test_hyundai_ai_lead_stability.py selfdrive/controls/tests/test_lead_interactions.py selfdrive/controls/tests/test_longitudinal_live_tune.py selfdrive/controls/lib/tests/test_lead_role_classifier.py` -> 61 passed, 3 skipped.
+- Full-MPC smoke passed: `python .codex/skills/openpilot-longitudinal-tuner/scripts/simulate_ai_lead_noise.py --duration-s 5 --seed 7 --source-noise-std-m 5 --spike-prob-per-s 0 --white-noise-std-m 0.25 --full-mpc`.

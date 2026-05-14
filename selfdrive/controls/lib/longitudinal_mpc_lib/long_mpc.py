@@ -1104,13 +1104,25 @@ class LongitudinalMpc:
       "reset_reason": reason,
     }
 
+  @staticmethod
+  def _synthetic_model_track_id(lead) -> int | None:
+    try:
+      track_id = int(getattr(lead, 'radarTrackId', -1) or -1)
+      radar = bool(getattr(lead, 'radar', False))
+    except Exception:
+      return None
+    return track_id if (not radar and track_id <= -1001) else None
+
   def _should_reset_hyundai_virtual_lead(self, lead_source: str, lead) -> tuple[bool, str | None]:
     if lead is None or not getattr(lead, 'status', False):
       return True, "no_control_lead"
     if self._hyundai_virtual_lead is None or self._hyundai_virtual_lead_source is None:
       return True, "init"
     if lead_source != self._hyundai_virtual_lead_source:
-      return True, "source_switch"
+      prev_model_track_id = self._synthetic_model_track_id(self._hyundai_virtual_lead)
+      new_model_track_id = self._synthetic_model_track_id(lead)
+      if prev_model_track_id is None or prev_model_track_id != new_model_track_id:
+        return True, "source_switch"
     raw_drel = float(getattr(lead, 'dRel', 0.0) or 0.0)
     filtered_drel = float(self._hyundai_virtual_lead.dRel)
     drel_delta = raw_drel - filtered_drel

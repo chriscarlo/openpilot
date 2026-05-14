@@ -42,7 +42,7 @@ REPO_ROOT = _ensure_repo_on_path()
 from cereal import log  # noqa: E402
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib import long_mpc as long_mpc_module  # noqa: E402
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LongitudinalMpc, N  # noqa: E402
-from openpilot.selfdrive.controls.radard import RADAR_TO_CAMERA, get_lead  # noqa: E402
+from openpilot.selfdrive.controls.radard import RADAR_TO_CAMERA, ModelLeadTracker, get_lead  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -68,6 +68,9 @@ class Sample:
   true_gap_m: float
   source_noise_m: float
   raw_drel_m: float
+  radard_drel_m: float
+  radard_error_m: float
+  radar_track_id: int
   filtered_drel_m: float
   filtered_error_m: float
   mpc_source: str
@@ -248,6 +251,10 @@ def _pct(values: list[float], percentile: float) -> float:
 
 def summarize(samples: list[Sample], *, hz: float) -> dict[str, Any]:
   raw_errors = [s.raw_drel_m - s.true_gap_m for s in samples if math.isfinite(s.raw_drel_m)]
+  radard_errors = [s.radard_error_m for s in samples if math.isfinite(s.radard_error_m)]
+  radard_values = [s.radard_drel_m for s in samples if math.isfinite(s.radard_drel_m)]
+  radard_steps = [abs(radard_values[i] - radard_values[i - 1]) for i in range(1, len(radard_values))]
+  radard_rolling_3s = _rolling_ranges(radard_values, int(round(max(1.0, hz * 3.0))))
   filtered_errors = [s.filtered_error_m for s in samples if math.isfinite(s.filtered_error_m)]
   filtered_values = [s.filtered_drel_m for s in samples if math.isfinite(s.filtered_drel_m)]
   filtered_steps = [abs(filtered_values[i] - filtered_values[i - 1]) for i in range(1, len(filtered_values))]
@@ -262,6 +269,14 @@ def summarize(samples: list[Sample], *, hz: float) -> dict[str, Any]:
     "raw_error_abs_p50_m": _pct([abs(v) for v in raw_errors], 50),
     "raw_error_abs_p95_m": _pct([abs(v) for v in raw_errors], 95),
     "raw_error_range_m": (max(raw_errors) - min(raw_errors)) if raw_errors else float("nan"),
+    "radard_error_abs_p50_m": _pct([abs(v) for v in radard_errors], 50),
+    "radard_error_abs_p95_m": _pct([abs(v) for v in radard_errors], 95),
+    "radard_error_range_m": (max(radard_errors) - min(radard_errors)) if radard_errors else float("nan"),
+    "radard_drel_range_m": (max(radard_values) - min(radard_values)) if radard_values else float("nan"),
+    "radard_rolling_3s_range_p95_m": _pct(radard_rolling_3s, 95),
+    "radard_rolling_3s_range_max_m": max(radard_rolling_3s) if radard_rolling_3s else float("nan"),
+    "radard_step_abs_p95_m": _pct(radard_steps, 95),
+    "radard_step_abs_max_m": max(radard_steps) if radard_steps else float("nan"),
     "filtered_error_abs_p50_m": _pct([abs(v) for v in filtered_errors], 50),
     "filtered_error_abs_p95_m": _pct([abs(v) for v in filtered_errors], 95),
     "filtered_error_range_m": (max(filtered_errors) - min(filtered_errors)) if filtered_errors else float("nan"),
@@ -289,6 +304,7 @@ def run_simulation(args: argparse.Namespace, cfg: NoiseConfig) -> tuple[dict[str
   model_msg = _model_path()
   mpc = LongitudinalMpc(CP=cp)
   mpc.mode = "acc"
+  model_lead_tracker = None if bool(args.disable_model_lead_tracker) else ModelLeadTracker()
 
   dt_s = 1.0 / max(1.0, float(args.hz))
   frames = max(1, int(round(float(args.duration_s) / dt_s)))
@@ -313,6 +329,8 @@ def run_simulation(args: argparse.Namespace, cfg: NoiseConfig) -> tuple[dict[str
       raw_drel = max(float(args.min_drel), true_gap + source_noise)
       primary_prob = float(args.model_prob) if primary_noise.visible(dt_s) else 0.0
       lead0_msg = _model_lead(drel_m=raw_drel, v_ego_mps=v_ego, v_lead_mps=v_lead, prob=primary_prob)
+      if model_lead_tracker is not None:
+        model_lead_tracker.begin_frame(clock.t)
       lead0 = _lead_namespace(get_lead(
         v_ego,
         primary_prob > 0.5,
@@ -323,6 +341,9 @@ def run_simulation(args: argparse.Namespace, cfg: NoiseConfig) -> tuple[dict[str
         cp_sp,
         model_msg,
         low_speed_override=False,
+        model_lead_tracker=model_lead_tracker,
+        lead_slot=0,
+        now=clock.t,
       ))
 
       if cfg.duplicate:
@@ -346,9 +367,14 @@ def run_simulation(args: argparse.Namespace, cfg: NoiseConfig) -> tuple[dict[str
           cp_sp,
           model_msg,
           low_speed_override=False,
+          model_lead_tracker=model_lead_tracker,
+          lead_slot=1,
+          now=clock.t,
         ))
       else:
         lead1 = _inactive_lead()
+      if model_lead_tracker is not None:
+        model_lead_tracker.end_frame()
 
       radarstate = SimpleNamespace(leadOne=lead0, leadTwo=lead1)
       if bool(args.full_mpc):
@@ -372,7 +398,10 @@ def run_simulation(args: argparse.Namespace, cfg: NoiseConfig) -> tuple[dict[str
         t=clock.t,
         true_gap_m=float(true_gap),
         source_noise_m=float(source_noise),
-        raw_drel_m=float(lead0.dRel) if bool(lead0.status) else float("nan"),
+        raw_drel_m=float(raw_drel) if bool(lead0.status) else float("nan"),
+        radard_drel_m=float(lead0.dRel) if bool(lead0.status) else float("nan"),
+        radard_error_m=float(lead0.dRel) - float(true_gap) if bool(lead0.status) else float("nan"),
+        radar_track_id=int(lead0.radarTrackId) if bool(lead0.status) else -1,
         filtered_drel_m=filtered_drel,
         filtered_error_m=filtered_drel - float(true_gap) if math.isfinite(filtered_drel) else float("nan"),
         mpc_source=str(mpc.source),
@@ -398,6 +427,7 @@ def run_simulation(args: argparse.Namespace, cfg: NoiseConfig) -> tuple[dict[str
   summary["noise_config"] = asdict(cfg)
   summary["closed_loop"] = bool(args.closed_loop)
   summary["full_mpc"] = bool(args.full_mpc)
+  summary["model_lead_tracker_enabled"] = not bool(args.disable_model_lead_tracker)
   summary["live_tune"] = mpc._live_tune_cfg.as_dict()
   return summary, samples
 
@@ -453,6 +483,7 @@ def run_sweep(args: argparse.Namespace) -> int:
         "source_std_m": source_std,
         "seed": int(args.seed),
         "filtered_error_abs_p95_m": summary["filtered_error_abs_p95_m"],
+        "radard_rolling_3s_range_p95_m": summary["radard_rolling_3s_range_p95_m"],
         "filtered_rolling_3s_range_p95_m": summary["filtered_rolling_3s_range_p95_m"],
         "filtered_rolling_3s_range_max_m": summary["filtered_rolling_3s_range_max_m"],
         "filtered_step_abs_max_m": summary["filtered_step_abs_max_m"],
@@ -462,11 +493,12 @@ def run_sweep(args: argparse.Namespace) -> int:
         "in_target_band": float(args.target_min_m) <= metric <= float(args.target_max_m),
       })
 
-  print("source_std seed filt_abs_p95 roll3s_p95 roll3s_max step_max snap clamp target")
+  print("source_std seed filt_abs_p95 radard_roll3s_p95 roll3s_p95 roll3s_max step_max snap clamp target")
   for row in rows:
     print(
       f"{row['source_std_m']:9.2f} {row['seed']:4d} "
-      f"{row['filtered_error_abs_p95_m']:12.2f} {row['filtered_rolling_3s_range_p95_m']:10.2f} "
+      f"{row['filtered_error_abs_p95_m']:12.2f} {row['radard_rolling_3s_range_p95_m']:18.2f} "
+      f"{row['filtered_rolling_3s_range_p95_m']:10.2f} "
       f"{row['filtered_rolling_3s_range_max_m']:10.2f} {row['filtered_step_abs_max_m']:8.2f} "
       f"{row['snap_to_raw_count']:4d} {row['open_slew_clamped_count']:5d} {str(row['in_target_band']):>6s}"
     )
@@ -493,12 +525,18 @@ def print_summary(summary: dict[str, Any], samples: list[Sample], args: argparse
   print(
     f"frames={summary['frames']} duration={summary['duration_s']:.2f}s seed={summary['seed']} "
     f"source_std={summary['noise_config']['source_std_m']:.2f}m duplicate={summary['noise_config']['duplicate']} "
-    f"full_mpc={summary['full_mpc']}"
+    f"tracker={summary['model_lead_tracker_enabled']} full_mpc={summary['full_mpc']}"
   )
   print(
     f"raw_abs_p95={summary['raw_error_abs_p95_m']:.2f}m raw_range={summary['raw_error_range_m']:.2f}m "
+    f"radard_abs_p95={summary['radard_error_abs_p95_m']:.2f}m radard_range={summary['radard_error_range_m']:.2f}m "
     f"filtered_abs_p95={summary['filtered_error_abs_p95_m']:.2f}m "
     f"filtered_range={summary['filtered_error_range_m']:.2f}m"
+  )
+  print(
+    f"radard_roll3s_p95={summary['radard_rolling_3s_range_p95_m']:.2f}m "
+    f"radard_roll3s_max={summary['radard_rolling_3s_range_max_m']:.2f}m "
+    f"radard_step_p95={summary['radard_step_abs_p95_m']:.2f}m radard_step_max={summary['radard_step_abs_max_m']:.2f}m"
   )
   print(
     f"filtered_roll3s_p95={summary['filtered_rolling_3s_range_p95_m']:.2f}m "
@@ -511,18 +549,19 @@ def print_summary(summary: dict[str, Any], samples: list[Sample], args: argparse
   )
   print(
     "note: EV6/no-radar model leads bypass radard Track Kalman filtering; "
-    "this measures source model dRel -> radard vision lead -> Hyundai virtual lead filtering. "
+    "this measures source model dRel -> radard model-lead tracker -> Hyundai virtual lead filtering. "
     "Use --full-mpc for slower solver-backed accel output."
   )
 
   if args.print_samples:
     stride = max(1, int(round(float(args.hz) * float(args.sample_period_s))))
-    print("frame time true raw filtered filt_err source reset snap clamp reason")
+    print("frame time true raw radard filtered filt_err track source reset snap clamp reason")
     for sample in samples[::stride]:
       print(
         f"{sample.frame:5d} {sample.t:6.2f} {sample.true_gap_m:6.2f} "
-        f"{sample.raw_drel_m:6.2f} {sample.filtered_drel_m:8.2f} {sample.filtered_error_m:8.2f} "
-        f"{sample.mpc_source:6s} {str(sample.reset_reason):>14s} "
+        f"{sample.raw_drel_m:6.2f} {sample.radard_drel_m:7.2f} "
+        f"{sample.filtered_drel_m:8.2f} {sample.filtered_error_m:8.2f} "
+        f"{sample.radar_track_id:5d} {sample.mpc_source:6s} {str(sample.reset_reason):>14s} "
         f"{str(sample.snap_to_raw):>5s} {str(sample.open_slew_clamped):>5s} {sample.acc_reason}"
       )
 
@@ -555,6 +594,7 @@ def build_parser() -> argparse.ArgumentParser:
   parser.add_argument("--duplicate-y-offset-m", type=float, default=0.08)
   parser.add_argument("--closed-loop", action="store_true")
   parser.add_argument("--full-mpc", action="store_true", help="run the full LongitudinalMpc solver path; slow on Windows")
+  parser.add_argument("--disable-model-lead-tracker", action="store_true", help="use the old raw model-lead radard path")
   parser.add_argument("--min-accel", type=float, default=-2.0)
   parser.add_argument("--max-accel", type=float, default=1.0)
   parser.add_argument("--print-samples", action="store_true")

@@ -55,6 +55,8 @@ description: >
 ```bash
 .venv/bin/python .codex/skills/openpilot-longitudinal-tuner/scripts/simulate_ai_lead_noise.py --duration-s 60 --source-noise-std-m 5 --spike-prob-per-s 0 --white-noise-std-m 0.25
 ```
+  Add `--disable-model-lead-tracker` to compare against the old raw model-lead
+  radard path.
 
 - On-device, use the tici venv explicitly:
 ```bash
