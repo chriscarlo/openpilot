@@ -236,6 +236,26 @@ LEAD_RESPONSE_TUNE_SPECS = (
     maximum=35.0,
     description="Max dRel difference for associating model-only leads to a stable synthetic radard track.",
   ),
+  LeadResponseTuneSpec(
+    attr="model_lead_filter_vrel_tau_s",
+    key="Longitudinal.LiveTune.ModelLeadFilterVRelTauS",
+    cli_name="model-lead-vrel-tau",
+    label="model_lead_vrel_tau",
+    default=0.40,
+    minimum=0.10,
+    maximum=2.0,
+    description="Source-side model-only lead relative-velocity filter tau in radard. Lower = faster accel/decel recognition.",
+  ),
+  LeadResponseTuneSpec(
+    attr="model_lead_filter_fast_vrel_tau_s",
+    key="Longitudinal.LiveTune.ModelLeadFilterFastVRelTauS",
+    cli_name="model-lead-fast-vrel-tau",
+    label="model_lead_fast_vrel_tau",
+    default=0.16,
+    minimum=0.05,
+    maximum=1.0,
+    description="Relative-velocity filter tau used when model-lead gating admits a low-TTC or strongly closing event.",
+  ),
 )
 
 LEAD_RESPONSE_TUNE_SPECS_BY_ATTR = {spec.attr: spec for spec in LEAD_RESPONSE_TUNE_SPECS}
@@ -263,6 +283,8 @@ class LeadResponseTuningConfig:
   model_lead_filter_open_slew_max_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_filter_open_slew_max_mps"].default
   model_lead_filter_safe_ttc_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_filter_safe_ttc_s"].default
   model_lead_filter_assoc_drel_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_filter_assoc_drel_m"].default
+  model_lead_filter_vrel_tau_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_filter_vrel_tau_s"].default
+  model_lead_filter_fast_vrel_tau_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_filter_fast_vrel_tau_s"].default
 
   @classmethod
   def defaults(cls) -> LeadResponseTuningConfig:

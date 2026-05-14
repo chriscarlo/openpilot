@@ -93,3 +93,19 @@
 - Final broad Windows longitudinal suite passed: 66 passed, 25 skipped.
 - Final Hyundai controller-side suite passed: 18 passed.
 - Final `std=12` full-MPC smoke passed: LongMPC-filtered 3 s p95 range `0.68 m`, only init reset.
+
+# EV6 No-Radar AI Lead Param Audit
+
+- [x] Confirm Windows params fallback reads `common/params_keys.h`.
+- [x] Add live params for model-lead vRel smoothing values tuned for accel/decel latency.
+- [x] Leave structural tracker gates as code constants.
+- [x] Remove unused close-confirm constant after distance-only fast-admit hardening.
+- [x] Run focused params/radard verification and push.
+
+## Review
+
+- Added `Longitudinal.LiveTune.ModelLeadFilterVRelTauS` default `0.40`.
+- Added `Longitudinal.LiveTune.ModelLeadFilterFastVRelTauS` default `0.16`.
+- Did not expose `MODEL_LEAD_SAME_SLOT_RECOVER_DREL_GATE_M`; it is an identity-recovery guard, not a roadside behavior knob.
+- Focused verification passed: live-tune default/spec checks plus radard model-lead filter tests -> 9 passed.
+- `std=12` simulator smoke passed with radard 3 s p95 `3.08 m` and LongMPC-filtered 3 s p95 `2.19 m`.

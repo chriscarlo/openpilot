@@ -379,6 +379,8 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"Longitudinal.LiveTune.ModelLeadFilterOpenSlewMaxMps", {PERSISTENT | BACKUP, FLOAT, "1.20"}},
     {"Longitudinal.LiveTune.ModelLeadFilterSafeTtcS", {PERSISTENT | BACKUP, FLOAT, "4.00"}},
     {"Longitudinal.LiveTune.ModelLeadFilterAssocDRelM", {PERSISTENT | BACKUP, FLOAT, "12.0"}},
+    {"Longitudinal.LiveTune.ModelLeadFilterVRelTauS", {PERSISTENT | BACKUP, FLOAT, "0.40"}},
+    {"Longitudinal.LiveTune.ModelLeadFilterFastVRelTauS", {PERSISTENT | BACKUP, FLOAT, "0.16"}},
     {"Longitudinal.LiveTune.ObstacleCost", {PERSISTENT | BACKUP, FLOAT, "4.0"}},
     {"Longitudinal.LiveTune.AccelChangeCost", {PERSISTENT | BACKUP, FLOAT, "200.0"}},
     {"Longitudinal.LiveTune.AccelCost", {PERSISTENT | BACKUP, FLOAT, "0.0"}},

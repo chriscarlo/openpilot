@@ -47,7 +47,6 @@ MODEL_LEAD_DUPLICATE_CLOSER_KEEP_SEPARATE_M = 12.0
 MODEL_LEAD_DUPLICATE_CLOSING_KEEP_SEPARATE_MPS = 2.5
 MODEL_LEAD_SAME_SLOT_RECOVER_DREL_GATE_M = 80.0
 MODEL_LEAD_CLOSE_INNOVATION_M = 2.5
-MODEL_LEAD_CLOSE_CONFIRM_FRAMES = 3
 MODEL_LEAD_FAST_CLOSE_TAU_S = 0.12
 MODEL_LEAD_NOISE_CLOSE_SLEW_MPS = 1.0
 MODEL_LEAD_VREL_TAU_S = 0.40
@@ -171,7 +170,10 @@ class ModelLeadTrack:
       ))
       next_drel = predicted_drel + step_m
 
-    vrel_tau_s = MODEL_LEAD_FAST_VREL_TAU_S if fast_closing else MODEL_LEAD_VREL_TAU_S
+    vrel_tau_s = (
+      float(cfg.model_lead_filter_fast_vrel_tau_s) if fast_closing
+      else float(cfg.model_lead_filter_vrel_tau_s)
+    )
     vrel_alpha = _ema_alpha(dt_s, vrel_tau_s)
     lat_alpha = _ema_alpha(dt_s, MODEL_LEAD_LAT_TAU_S)
     accel_alpha = _ema_alpha(dt_s, MODEL_LEAD_ACCEL_TAU_S)
