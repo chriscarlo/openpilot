@@ -40,11 +40,16 @@ MODEL_LEAD_TRACK_MAX_COUNT = 4
 MODEL_LEAD_PARAM_REFRESH_DT_S = 1.0
 MODEL_LEAD_ASSOC_Y_GATE_M = 3.0
 MODEL_LEAD_ASSOC_VREL_GATE_MPS = 8.0
+MODEL_LEAD_DUPLICATE_PATH_GATE_M = 0.8
+MODEL_LEAD_DUPLICATE_VREL_GATE_MPS = 2.0
+MODEL_LEAD_DUPLICATE_DREL_GATE_M = 35.0
+MODEL_LEAD_DUPLICATE_CLOSER_KEEP_SEPARATE_M = 12.0
+MODEL_LEAD_DUPLICATE_CLOSING_KEEP_SEPARATE_MPS = 2.5
 MODEL_LEAD_CLOSE_INNOVATION_M = 2.5
 MODEL_LEAD_FAST_CLOSE_TAU_S = 0.12
 MODEL_LEAD_NOISE_CLOSE_SLEW_MPS = 1.0
-MODEL_LEAD_VREL_TAU_S = 0.55
-MODEL_LEAD_FAST_VREL_TAU_S = 0.20
+MODEL_LEAD_VREL_TAU_S = 0.40
+MODEL_LEAD_FAST_VREL_TAU_S = 0.16
 MODEL_LEAD_LAT_TAU_S = 0.45
 MODEL_LEAD_ACCEL_TAU_S = 0.60
 MODEL_LEAD_PROB_TAU_S = 0.80
@@ -262,6 +267,19 @@ class ModelLeadTracker:
     path_err = abs(track.dPath - raw_dpath)
     y_err = abs(track.yRel - raw_yrel)
     vrel_err = abs(track.vRel - raw_vrel)
+    same_frame_duplicate = (
+      track.identifier in self._updated_track_ids and
+      track.last_slot != int(lead_slot) and
+      path_err <= MODEL_LEAD_DUPLICATE_PATH_GATE_M and
+      y_err <= MODEL_LEAD_DUPLICATE_PATH_GATE_M and
+      vrel_err <= MODEL_LEAD_DUPLICATE_VREL_GATE_MPS
+    )
+    closer_safety_candidate = (
+      raw_drel < (pred_drel - MODEL_LEAD_DUPLICATE_CLOSER_KEEP_SEPARATE_M) and
+      raw_vrel < -MODEL_LEAD_DUPLICATE_CLOSING_KEEP_SEPARATE_MPS
+    )
+    if same_frame_duplicate and not closer_safety_candidate:
+      drel_gate = max(drel_gate, MODEL_LEAD_DUPLICATE_DREL_GATE_M)
 
     if drel_err > drel_gate or path_err > MODEL_LEAD_ASSOC_Y_GATE_M or y_err > MODEL_LEAD_ASSOC_Y_GATE_M:
       return None

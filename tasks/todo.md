@@ -54,3 +54,22 @@
 - Duplicate baseline, tracker enabled: only init reset, LongMPC-filtered 3 s rolling p95 `2.55 m`.
 - Verification passed: `python -m pytest -q selfdrive/controls/tests/test_radard_model_lead_filter.py selfdrive/controls/tests/test_radard_path_metrics.py selfdrive/controls/tests/test_hyundai_ai_lead_stability.py selfdrive/controls/tests/test_lead_interactions.py selfdrive/controls/tests/test_longitudinal_live_tune.py selfdrive/controls/lib/tests/test_lead_role_classifier.py` -> 61 passed, 3 skipped.
 - Full-MPC smoke passed: `python .codex/skills/openpilot-longitudinal-tuner/scripts/simulate_ai_lead_noise.py --duration-s 5 --seed 7 --source-noise-std-m 5 --spike-prob-per-s 0 --white-noise-std-m 0.25 --full-mpc`.
+
+# EV6 No-Radar AI Lead Higher-Noise Tuning
+
+- [x] Re-run steady-follow source-noise simulation at higher `std=8` and `std=10`.
+- [x] Stress duplicate model hypotheses at `std=10`.
+- [x] Probe accel/decel latency separately from steady noise.
+- [x] Tighten duplicate-collapse behavior for same-frame model hypotheses.
+- [x] Reduce model-lead vRel smoothing latency without increasing dRel admission.
+- [x] Re-run focused regression tests and commit tuning pass.
+
+## Review
+
+- At `source-noise-std-m=8`, raw source range was `44.34 m`; tracked radard 3 s p95 range was `3.25 m`, LongMPC-filtered 3 s p95 range was `2.79 m`.
+- At `source-noise-std-m=10`, raw source range was `55.43 m`; tracked radard 3 s p95 range was `3.29 m`, LongMPC-filtered 3 s p95 range was `2.89 m`.
+- The first `std=10` duplicate run exposed separate synthetic track creation and 19 `source_switch` resets; same-frame duplicate collapse now keeps that run to only init reset, with LongMPC-filtered 3 s p95 range `2.48 m`.
+- Decel/accel probe: lowering model-lead vRel tau from `0.55 s` to `0.40 s` reduced decel overestimate from about `2.17 m` to `1.80 m` and 1 s decel overestimate from `0.72 m` to `0.63 m`, with no meaningful dRel noise increase in the probe.
+- Increasing close-side dRel slew did not improve the decel probe and increased steady-noise dRel movement, so it was left unchanged.
+- Verification passed after the tuning edits: focused longitudinal/radard suite -> 62 passed, 3 skipped.
+- Full-MPC smoke at `source-noise-std-m=10` passed with LongMPC-filtered 3 s p95 range `3.11 m`.

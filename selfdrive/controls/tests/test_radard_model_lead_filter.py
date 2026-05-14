@@ -147,6 +147,20 @@ class TestRadardModelLeadFilter:
 
     assert int(slot1_only["radarTrackId"]) == track_id
 
+  def test_same_frame_duplicate_hypothesis_collapses_even_with_large_drel_noise(self):
+    tracker = ModelLeadTracker(params=_NoParams())
+    model_msg = _model_path()
+
+    tracker.begin_frame(0.0)
+    lead0 = get_lead(29.0, True, {}, _model_lead(d_rel=42.0), 29.0, _cp(), _cp_sp(), model_msg,
+                     low_speed_override=False, model_lead_tracker=tracker, lead_slot=0, now=0.0)
+    lead1 = get_lead(29.0, True, {}, _model_lead(d_rel=61.0, y_rel=0.05), 29.0, _cp(), _cp_sp(), model_msg,
+                     low_speed_override=False, model_lead_tracker=tracker, lead_slot=1, now=0.0)
+    tracker.end_frame()
+
+    assert int(lead1["radarTrackId"]) == int(lead0["radarTrackId"])
+    assert float(lead1["dRel"]) == pytest.approx(float(lead0["dRel"]))
+
   def test_real_radar_track_still_copies_raw_drel(self):
     track = Track(12, 29.0, KalmanParams(0.05))
 
