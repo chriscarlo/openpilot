@@ -2,6 +2,7 @@
 import copy
 import json
 import os
+import platform
 import time
 import numpy as np
 from cereal import log
@@ -28,12 +29,13 @@ from openpilot.selfdrive.controls.lib.longitudinal_response_model import (
 
 from openpilot.sunnypilot.selfdrive.controls.lib.vibe_personality.vibe_personality import VibePersonalityController
 
-if __name__ == '__main__':  # generating code
-  from openpilot.third_party.acados.acados_template import AcadosModel, AcadosOcp, AcadosOcpSolver
-else:
-  from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.c_generated_code.acados_ocp_solver_pyx import AcadosOcpSolverCython
-
-from casadi import SX, vertcat
+if __name__ != '__main__':
+  try:
+    from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.c_generated_code.acados_ocp_solver_pyx import AcadosOcpSolverCython
+  except ModuleNotFoundError:
+    if platform.system() != "Windows":
+      raise
+    from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.windows_acados_stub import AcadosOcpSolverCython
 
 MODEL_NAME = 'long'
 LONG_MPC_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -604,6 +606,9 @@ def get_cutin_settle_accel_floor(v_ego, lead, t_follow, age_s,
 
 
 def gen_long_model():
+  from casadi import SX, vertcat
+  from openpilot.third_party.acados.acados_template import AcadosModel
+
   model = AcadosModel()
   model.name = MODEL_NAME
 
@@ -640,6 +645,8 @@ def gen_long_model():
 
 
 def gen_long_ocp():
+  from openpilot.third_party.acados.acados_template import AcadosOcp
+
   ocp = AcadosOcp()
   ocp.model = gen_long_model()
 
@@ -2271,6 +2278,8 @@ class LongitudinalMpc:
 
 
 if __name__ == "__main__":
+  from openpilot.third_party.acados.acados_template import AcadosOcpSolver
+
   ocp = gen_long_ocp()
   AcadosOcpSolver.generate(ocp, json_file=JSON_FILE)
   # AcadosOcpSolver.build(ocp.code_export_directory, with_cython=True)

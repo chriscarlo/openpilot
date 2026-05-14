@@ -51,6 +51,11 @@ description: >
 .venv/bin/python .codex/skills/openpilot-longitudinal-tuner/scripts/live_lead_tune.py show
 ```
 
+- To baseline no-radar AI/model lead `dRel` noise before changing tune values:
+```bash
+.venv/bin/python .codex/skills/openpilot-longitudinal-tuner/scripts/simulate_ai_lead_noise.py --duration-s 60 --source-noise-std-m 5 --spike-prob-per-s 0 --white-noise-std-m 0.25
+```
+
 - On-device, use the tici venv explicitly:
 ```bash
 cd /data/openpilot

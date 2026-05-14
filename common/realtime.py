@@ -4,7 +4,11 @@ import os
 import sys
 import time
 
-from setproctitle import getproctitle
+try:
+  from setproctitle import getproctitle
+except ModuleNotFoundError:
+  def getproctitle():
+    return os.path.basename(sys.argv[0] or "python")
 
 from openpilot.common.util import MovingAverage
 from openpilot.system.hardware import PC

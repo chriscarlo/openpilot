@@ -1,5 +1,6 @@
 import os
 import platform
+import tempfile
 from pathlib import Path
 
 from openpilot.system.hardware import PC
@@ -60,6 +61,8 @@ class Paths:
 
   @staticmethod
   def shm_path() -> str:
+    if platform.system() == "Windows":
+      return str(Path(tempfile.gettempdir()) / "openpilot_shm")
     if PC and platform.system() == "Darwin":
       return "/tmp"  # This is not really shared memory on macOS, but it's the closest we can get
     return "/dev/shm"

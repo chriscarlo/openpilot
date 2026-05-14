@@ -40,17 +40,19 @@ class OpenpilotPrefix:
     return False
 
   def create_dirs(self):
-    try:
-      os.mkdir(self.msgq_path)
-    except FileExistsError:
-      pass
+    os.makedirs(self.msgq_path, exist_ok=True)
     os.makedirs(Paths.log_root(), exist_ok=True)
 
   def clean_dirs(self):
-    symlink_path = Params().get_param_path()
-    if os.path.exists(symlink_path):
-      shutil.rmtree(os.path.realpath(symlink_path), ignore_errors=True)
-      os.remove(symlink_path)
+    params_path = Params().get_param_path()
+    if os.path.exists(params_path):
+      if os.path.islink(params_path):
+        shutil.rmtree(os.path.realpath(params_path), ignore_errors=True)
+        os.remove(params_path)
+      elif os.path.isdir(params_path):
+        shutil.rmtree(params_path, ignore_errors=True)
+      else:
+        os.remove(params_path)
     shutil.rmtree(self.msgq_path, ignore_errors=True)
     if PC:
       shutil.rmtree(Paths.log_root(), ignore_errors=True)

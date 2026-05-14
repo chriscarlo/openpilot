@@ -1,8 +1,14 @@
 import itertools
+import sys
 from parameterized import parameterized_class
+
+import pytest
 
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import STOP_DISTANCE
 from openpilot.selfdrive.test.longitudinal_maneuvers.maneuver import Maneuver
+
+
+pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="full longitudinal maneuver simulation requires the native acados solver")
 
 
 # TODO: make new FCW tests

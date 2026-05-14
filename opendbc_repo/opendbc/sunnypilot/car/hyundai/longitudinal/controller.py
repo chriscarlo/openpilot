@@ -325,7 +325,7 @@ class LongitudinalController:
 
     self.comfort_band_upper = 0.0
     self.comfort_band_lower = 0.0
-    accel = CarControllerParams.ACCEL_MIN
+    accel = max(CarControllerParams.ACCEL_MIN, self.car_config.accel_min)
     self.desired_accel = accel
     self.actual_accel = accel
     self.accel_last = self.actual_accel
