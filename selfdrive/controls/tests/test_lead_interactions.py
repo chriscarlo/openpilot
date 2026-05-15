@@ -225,6 +225,16 @@ class TestLeadInteractionHeuristics:
 
     assert ceiling == pytest.approx(-6.0)
 
+  def test_slowdown_ceiling_applies_below_two_mps_for_close_closing_lead(self):
+    tuning = LeadResponseTuningConfig(lead_slowdown_strength=0.5, lead_slowdown_max_decel=6.0)
+    close_closing_lead = _make_lead(d_rel=8.6, v_lead=0.9, a_lead=0.0)
+    setattr(close_closing_lead, "vRel", -0.92)
+
+    ceiling = get_lead_slowdown_accel_ceiling(1.82, close_closing_lead, 1.3, tuning)
+
+    assert ceiling is not None
+    assert ceiling < 0.0
+
   def test_gap_reclaim_effective_cap_expands_toward_personality_accel_for_large_surplus_gap(self):
     wide_pullaway = _make_lead(d_rel=72.0, v_lead=35.2, a_lead=0.2)
 

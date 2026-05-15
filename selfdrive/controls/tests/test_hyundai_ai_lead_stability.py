@@ -303,6 +303,26 @@ class TestHyundaiAiLeadStability:
     assert mpc.lead_slowdown_accel_ceiling == pytest.approx(-6.0)
     assert mpc.acc_source_debug["lead_slowdown_accel_ceiling"] == pytest.approx(-6.0)
 
+  def test_slowdown_ceiling_release_is_rate_limited_while_close_and_closing(self):
+    mpc = _make_hyundai_mpc(v_ego=28.0, a_ego=0.0)
+    mpc._lead_slowdown_accel_ceiling_last = -1.0
+    mpc._lead_slowdown_accel_ceiling_last_t = 100.0
+    raw_metrics = {"gap_surplus": -0.29, "closing_speed": 2.2, "pullaway_speed": 0.0}
+    filtered_metrics = {"gap_surplus": -0.38, "closing_speed": 2.1, "pullaway_speed": 0.0}
+
+    limited = mpc._limit_lead_slowdown_ceiling_release(-0.05, raw_metrics, filtered_metrics, 100.2)
+
+    assert limited < -0.85
+
+  def test_lead_to_cruise_transition_cap_ramps_for_three_seconds(self):
+    mpc = _make_hyundai_mpc(v_ego=23.6, a_ego=0.0)
+    mpc.source = "cruise"
+    mpc._lead_to_cruise_transition_t = 100.0
+
+    assert mpc._get_lead_to_cruise_transition_accel_cap(100.0, 23.6, 1.6) <= 0.30
+    assert mpc._get_lead_to_cruise_transition_accel_cap(102.0, 23.6, 1.6) < 1.20
+    assert mpc._get_lead_to_cruise_transition_accel_cap(103.0, 23.6, 1.6) is None
+
   def test_brief_total_lead_dropout_holds_stable_virtual_lead_before_releasing(self):
     mpc = _make_hyundai_mpc(time_fn=_MonotonicStub(step=0.2))
 
@@ -510,7 +530,7 @@ class TestHyundaiAiLeadStability:
     first_cap = float(mpc.acc_source_debug["source_transition_accel_cap"])
     assert mpc.source == "cruise"
     assert mpc.acc_source_debug["source_transition_active"] is True
-    assert 0.44 <= first_cap <= 0.60
+    assert 0.20 <= first_cap <= 0.35
     assert mpc.last_cruise_response_model is not None
     assert mpc.last_cruise_response_model.max_accel_mps2 == pytest.approx(first_cap)
 

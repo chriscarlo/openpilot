@@ -109,3 +109,19 @@
 - Did not expose `MODEL_LEAD_SAME_SLOT_RECOVER_DREL_GATE_M`; it is an identity-recovery guard, not a roadside behavior knob.
 - Focused verification passed: live-tune default/spec checks plus radard model-lead filter tests -> 9 passed.
 - `std=12` simulator smoke passed with radard 3 s p95 `3.08 m` and LongMPC-filtered 3 s p95 `2.19 m`.
+
+# EV6 No-Radar Freeway Brake-Tap / Low-Speed Launch Follow-up
+
+- [x] Patch lead slowdown ceiling release so close/closing lead braking does not pulse between hard and soft every frame.
+- [x] Extend lead-to-cruise transition accel cap so cruise does not surge immediately after lead release.
+- [x] Require a real standstill gap before lead-launch stop release can command starting accel.
+- [x] Add regression tests from captured freeway and stop/go trace shapes.
+- [ ] Run focused tests, commit, push, pull to tici, build/reboot.
+
+## Review
+
+- Lowered the lead slowdown speed gate so close/closing low-speed leads still get an accel ceiling below 2 m/s.
+- Added release-rate limiting for `lead_slowdown_accel_ceiling` while a lead is still close or closing, so braking can deepen immediately but relaxes gradually.
+- Extended the Hyundai lead-to-cruise accel transition from 1.0 s to 3.0 s and lowered its initial cap from 0.45 to 0.25 m/s^2.
+- Required at least 5.0 m dRel before standstill lead-launch release can leave `shouldStop` and enter full starting accel.
+- Focused verification passed: `python -m pytest -q selfdrive/controls/tests/test_longitudinal_planner_stop_release.py selfdrive/controls/tests/test_lead_interactions.py selfdrive/controls/tests/test_hyundai_ai_lead_stability.py` -> 71 passed, 3 skipped.

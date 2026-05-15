@@ -125,7 +125,7 @@ LEAD_KEEPUP_ACCEL_OVERSHOOT = 1.05
 LEAD_KEEPUP_TOO_CLOSE_MARGIN_M = 0.75
 LEAD_KEEPUP_CLOSING_BLOCK_MPS = 0.10
 LEAD_KEEPUP_LEAD_DECEL_BLOCK_MPS2 = -0.25
-LEAD_SLOWDOWN_MIN_SPEED = 2.0
+LEAD_SLOWDOWN_MIN_SPEED = 0.0
 LEAD_SLOWDOWN_MIN_CLOSING_MPS = 0.10
 LEAD_SLOWDOWN_MIN_LEAD_DECEL_MPS2 = 0.15
 LEAD_SLOWDOWN_HORIZON_S = 1.25
@@ -157,6 +157,10 @@ LEAD_SLOWDOWN_HARD_BRAKE_DECEL_V = [0.0, 0.50, 1.0]
 LEAD_SLOWDOWN_LEAD_DECEL_OVERSHOOT = 1.05
 LEAD_SLOWDOWN_COMFORT_DECEL_CAP = 1.0
 LEAD_SLOWDOWN_MIN_DECEL_OUTPUT = 0.03
+LEAD_SLOWDOWN_CEILING_RELEASE_RATE_MPS3 = 0.45
+LEAD_SLOWDOWN_CEILING_HOLD_GAP_SURPLUS_M = 1.5
+LEAD_SLOWDOWN_CEILING_HOLD_CLOSING_MPS = 0.25
+LEAD_SLOWDOWN_CEILING_HOLD_PULLAWAY_RELEASE_MPS = 0.8
 LOW_SPEED_LAUNCH_FACTOR_V_EGO_BP = [0.0, 2.0, 6.0, 10.0]
 LOW_SPEED_LAUNCH_FACTOR_V_EGO_V = [1.0, 1.0, 0.60, 0.0]
 LOW_SPEED_LAUNCH_FACTOR_V_LEAD_BP = [0.0, 0.2, 1.0, 3.0, 6.0]
@@ -241,8 +245,8 @@ HYUNDAI_RECLAIM_RAW_SAFETY_MARGIN_M = 1.75
 HYUNDAI_RECLAIM_RAW_SAFETY_CLOSING_MPS = 0.60
 HYUNDAI_RECLAIM_RAW_SAFETY_DECEL_MPS2 = -0.8
 HYUNDAI_RECLAIM_RAW_SAFETY_DECEL_CLOSING_MPS = 0.25
-HYUNDAI_LEAD_TO_CRUISE_TRANSITION_RAMP_S = 1.0
-HYUNDAI_LEAD_TO_CRUISE_TRANSITION_MIN_ACCEL = 0.45
+HYUNDAI_LEAD_TO_CRUISE_TRANSITION_RAMP_S = 3.0
+HYUNDAI_LEAD_TO_CRUISE_TRANSITION_MIN_ACCEL = 0.25
 # Close-range lead safety memory: if a lead was seen within this distance
 # in the last N seconds, cap cruise accel even if the source flickers to cruise.
 CLOSE_LEAD_MEMORY_DREL_M = 25.0       # leads within this distance are remembered
@@ -1278,6 +1282,8 @@ class LongitudinalMpc:
     self.gap_reclaim_accel_floor = 0.0
     self.lead_keepup_accel_floor = 0.0
     self.lead_slowdown_accel_ceiling = None
+    self._lead_slowdown_accel_ceiling_last = None
+    self._lead_slowdown_accel_ceiling_last_t = None
     self.gap_reclaim_obstacle_push = 0.0
     self.gap_reclaim_stabilization_push = 0.0
     self.gap_reclaim_projection_scale = 1.0
@@ -1819,6 +1825,45 @@ class LongitudinalMpc:
     progress = float(np.clip(elapsed_s / HYUNDAI_LEAD_TO_CRUISE_TRANSITION_RAMP_S, 0.0, 1.0))
     return float(start_cap + (target_cap - start_cap) * progress)
 
+  def _reset_lead_slowdown_ceiling_release_limit(self) -> None:
+    self._lead_slowdown_accel_ceiling_last = None
+    self._lead_slowdown_accel_ceiling_last_t = None
+
+  def _limit_lead_slowdown_ceiling_release(self, ceiling: float | None,
+                                           raw_metrics: dict[str, float],
+                                           filtered_metrics: dict[str, float],
+                                           now: float) -> float | None:
+    min_gap_surplus = min(float(raw_metrics["gap_surplus"]), float(filtered_metrics["gap_surplus"]))
+    max_closing_speed = max(float(raw_metrics["closing_speed"]), float(filtered_metrics["closing_speed"]))
+    max_pullaway_speed = max(float(raw_metrics["pullaway_speed"]), float(filtered_metrics["pullaway_speed"]))
+    hold_needed = (
+      max_closing_speed >= LEAD_SLOWDOWN_CEILING_HOLD_CLOSING_MPS or
+      min_gap_surplus <= LEAD_SLOWDOWN_CEILING_HOLD_GAP_SURPLUS_M
+    )
+    if max_pullaway_speed >= LEAD_SLOWDOWN_CEILING_HOLD_PULLAWAY_RELEASE_MPS and min_gap_surplus > 0.0:
+      hold_needed = False
+    if not hold_needed:
+      self._lead_slowdown_accel_ceiling_last = ceiling
+      self._lead_slowdown_accel_ceiling_last_t = now
+      return ceiling
+
+    prev_ceiling = self._lead_slowdown_accel_ceiling_last
+    prev_t = self._lead_slowdown_accel_ceiling_last_t
+    if prev_ceiling is None or prev_t is None:
+      self._lead_slowdown_accel_ceiling_last = ceiling
+      self._lead_slowdown_accel_ceiling_last_t = now
+      return ceiling
+
+    target = float(ACCEL_MAX if ceiling is None else ceiling)
+    prev = float(prev_ceiling)
+    if target > prev:
+      dt = max(0.0, float(now) - float(prev_t))
+      target = min(target, prev + LEAD_SLOWDOWN_CEILING_RELEASE_RATE_MPS3 * dt)
+    result = None if target >= ACCEL_MAX - 1e-3 else float(target)
+    self._lead_slowdown_accel_ceiling_last = result
+    self._lead_slowdown_accel_ceiling_last_t = now
+    return result
+
   def _reset_hyundai_virtual_lead(self, reason: str) -> None:
     self._hyundai_virtual_lead = None
     self._hyundai_virtual_lead_source = None
@@ -1919,9 +1964,16 @@ class LongitudinalMpc:
       self.gap_reclaim_effective_cap = 0.0
       self.lead_keepup_accel_floor = 0.0
       self.lead_slowdown_accel_ceiling = None
+      self._reset_lead_slowdown_ceiling_release_limit()
       return np.minimum(raw_lead_obstacle, filtered_lead_obstacle), False
 
     reclaim_lead = self._update_hyundai_reclaim_lead(now, raw_lead, filtered_lead, settled_follow=settled_follow)
+    filtered_metrics = self._lead_follow_metrics(
+      float(self.x0[1]),
+      self.current_t_follow,
+      filtered_lead,
+      float(filtered_lead_obstacle[0]),
+    )
     self.gap_reclaim_projection_scale = get_gap_reclaim_projection_scale(
       float(self.x0[1]),
       reclaim_lead,
@@ -1975,7 +2027,13 @@ class LongitudinalMpc:
       for lead in (raw_lead, filtered_lead)
     ]
     active_slowdown_ceilings = [float(ceiling) for ceiling in slowdown_ceilings if ceiling is not None]
-    self.lead_slowdown_accel_ceiling = min(active_slowdown_ceilings) if active_slowdown_ceilings else None
+    slowdown_ceiling = min(active_slowdown_ceilings) if active_slowdown_ceilings else None
+    self.lead_slowdown_accel_ceiling = self._limit_lead_slowdown_ceiling_release(
+      slowdown_ceiling,
+      raw_metrics,
+      filtered_metrics,
+      now,
+    )
     max_intent = max(
       float(self.gap_reclaim_effective_cap),
       float(self._live_tune_cfg.lead_keepup_max_accel),
@@ -2471,6 +2529,7 @@ class LongitudinalMpc:
       self.gap_reclaim_accel_floor = 0.0
       self.lead_keepup_accel_floor = 0.0
       self.lead_slowdown_accel_ceiling = None
+      self._reset_lead_slowdown_ceiling_release_limit()
       self.gap_reclaim_obstacle_push = 0.0
       self.gap_reclaim_projection_scale = 1.0
       self.gap_reclaim_personality_max_accel = 0.0
@@ -2569,6 +2628,7 @@ class LongitudinalMpc:
       self.gap_reclaim_accel_floor = 0.0
       self.lead_keepup_accel_floor = 0.0
       self.lead_slowdown_accel_ceiling = None
+      self._reset_lead_slowdown_ceiling_release_limit()
       self.gap_reclaim_obstacle_push = 0.0
       self.gap_reclaim_stabilization_push = 0.0
       self.gap_reclaim_effective_cap = 0.0
@@ -2690,6 +2750,7 @@ class LongitudinalMpc:
       self.gap_reclaim_accel_floor = 0.0
       self.lead_keepup_accel_floor = 0.0
       self.lead_slowdown_accel_ceiling = None
+      self._reset_lead_slowdown_ceiling_release_limit()
       self.gap_reclaim_obstacle_push = 0.0
       self.gap_reclaim_stabilization_push = 0.0
       self.gap_reclaim_effective_cap = 0.0
@@ -3237,6 +3298,7 @@ class LongitudinalMpc:
       self.gap_reclaim_accel_floor = 0.0
       self.lead_keepup_accel_floor = 0.0
       self.lead_slowdown_accel_ceiling = None
+      self._reset_lead_slowdown_ceiling_release_limit()
       self.gap_reclaim_obstacle_push = 0.0
       self.gap_reclaim_stabilization_push = 0.0
       self.gap_reclaim_projection_scale = 1.0

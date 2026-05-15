@@ -33,6 +33,7 @@ CONTROL_N_T_IDX = ModelConstants.T_IDXS[:CONTROL_N]
 ALLOW_THROTTLE_THRESHOLD = 0.4
 MIN_ALLOW_THROTTLE_SPEED = 2.5
 LEAD_LAUNCH_RELEASE_HOLD_S = 0.10
+LEAD_LAUNCH_RELEASE_MIN_DREL_M = 5.0
 
 # Lookup table for turns
 # Allow higher total accel (lateral+longitudinal) at low speeds and taper with speed
@@ -63,6 +64,10 @@ def should_release_stop_for_lead_launch(CP, *, standstill: bool, v_ego: float,
 
   lead_vrel = float(getattr(lead, "vRel", 0.0) or 0.0)
   lead_v = float(getattr(lead, "vLead", v_ego) or v_ego)
+  lead_drel = float(getattr(lead, "dRel", 0.0) or 0.0)
+  if lead_drel < LEAD_LAUNCH_RELEASE_MIN_DREL_M:
+    return False
+
   lead_pullaway_speed = max(0.0, lead_vrel, lead_v - float(v_ego))
   return bool(lead_pullaway_speed > max(float(getattr(CP, "vEgoStarting", 0.0)), 0.1))
 
