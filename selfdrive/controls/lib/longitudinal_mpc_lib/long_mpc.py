@@ -1118,6 +1118,7 @@ def gen_long_model():
 
 
 def gen_long_ocp():
+  from casadi import vertcat
   from openpilot.third_party.acados.acados_template import AcadosOcp
 
   ocp = AcadosOcp()
