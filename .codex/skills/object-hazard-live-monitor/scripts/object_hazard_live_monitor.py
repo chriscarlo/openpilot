@@ -14,7 +14,7 @@ REMOTE_PROBE = Path(__file__).with_name("remote_probe.py")
 
 def build_remote_command(remote_repo: str, duration: float, interval: float, top_n: int) -> str:
   return (
-    "set -eu; set -o pipefail; "
+    "set -euo pipefail; "
     f"cd {shlex.quote(remote_repo)}; "
     "source /usr/local/venv/bin/activate; "
     f"python3 - --duration {duration:.3f} --interval {interval:.3f} --top-n {int(top_n)}"

@@ -1,11 +1,10 @@
 from types import SimpleNamespace
+import sys
 
 import pytest
 
 from cereal import log
 from openpilot.common.params import Params
-from opendbc.car.hyundai.values import CAR
-from opendbc.car.hyundai.interface import CarInterface
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import (
   LEAD_DANGER_FACTOR,
   get_cutin_settle_accel_floor,
@@ -44,6 +43,9 @@ def _configure_vibe_follow(headway=1.3):
 
 
 def _make_ev6_hkg_cp():
+  from opendbc.car.hyundai.values import CAR
+  from opendbc.car.hyundai.interface import CarInterface
+
   cp = CarInterface.get_non_essential_params(CAR.KIA_EV6)
   cp.openpilotLongitudinalControl = True
   cp.pcmCruise = False
@@ -364,6 +366,7 @@ class TestLeadInteractionHeuristics:
     assert floor == pytest.approx(0.20)  # pure regen bias, no decel (closing_speed=0)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="plant-backed lead interaction scenarios require the native acados solver")
 class TestLeadInteractionScenarios:
   def test_pullaway_gap_reclaim_nudges_accel_without_large_gap_growth(self):
     rows = _run_pullaway_scenario()

@@ -86,6 +86,21 @@ On-device (read-only) so the values match what controls is actually using:
 ssh commaCar 'cd /data/openpilot && /usr/local/venv/bin/python3 .codex/skills/openpilot-longitudinal-tuner/scripts/live_lead_tune.py show'
 ```
 
+### Baseline no-radar AI/model lead `dRel` noise before changing tune values
+
+```bash
+.venv/bin/python .codex/skills/openpilot-longitudinal-tuner/scripts/simulate_ai_lead_noise.py --duration-s 60 --source-noise-std-m 5 --spike-prob-per-s 0 --white-noise-std-m 0.25
+```
+
+Add `--disable-model-lead-tracker` to compare against the old raw model-lead
+radard path.
+
+### On-device bounded monitor uses the tici venv explicitly
+
+```bash
+ssh commaCar 'cd /data/openpilot && /usr/local/venv/bin/python3 .codex/skills/openpilot-longitudinal-tuner/scripts/monitor_longitudinal_anomalies.py --hz 5 --duration 10 --only-alerts --show-live-tune'
+```
+
 - If the issue is Hyundai CAN FD or EV6 specific, read
   `references/hyundai_canfd_ev6.md` before changing planner code.
 - If the issue is “why did it choose ACC vs e2e / blended,” read

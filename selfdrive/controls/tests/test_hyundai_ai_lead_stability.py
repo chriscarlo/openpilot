@@ -14,7 +14,7 @@ from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import (
 
 
 def _make_lead(*, status=True, d_rel=44.0, y_rel=0.0, d_path=None, v_lat=0.0, v_rel=0.0,
-               v_lead=29.0, a_lead=0.0, model_prob=0.95):
+               v_lead=29.0, a_lead=0.0, model_prob=0.95, radar=False, radar_track_id=-1):
   return SimpleNamespace(
     status=status,
     dRel=d_rel,
@@ -29,8 +29,8 @@ def _make_lead(*, status=True, d_rel=44.0, y_rel=0.0, d_path=None, v_lat=0.0, v_
     fcw=False,
     aLeadTau=1.5,
     modelProb=model_prob,
-    radar=False,
-    radarTrackId=-1,
+    radar=radar,
+    radarTrackId=radar_track_id,
   )
 
 
@@ -89,6 +89,34 @@ def _planner_test_setup():
 
 
 class TestHyundaiAiLeadStability:
+  def test_same_synthetic_model_track_can_switch_slots_without_source_reset(self, monkeypatch):
+    monkeypatch.setattr(
+      "openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc.time.monotonic",
+      _MonotonicStub(step=0.1),
+    )
+    mpc = _make_hyundai_mpc()
+    track_id = -1001
+
+    _run_update(
+      mpc,
+      _make_lead(d_rel=42.0, y_rel=0.03, d_path=0.03, radar_track_id=track_id),
+      _make_lead(status=False),
+    )
+
+    assert mpc.hyundai_virtual_lead_debug["reset_reason"] == "init"
+    assert mpc._hyundai_virtual_lead_source == "lead0"
+
+    _run_update(
+      mpc,
+      _make_lead(status=False),
+      _make_lead(d_rel=42.2, y_rel=0.04, d_path=0.04, radar_track_id=track_id),
+    )
+
+    assert mpc._hyundai_virtual_lead_source == "lead1"
+    assert mpc.hyundai_virtual_lead_debug["reset_reason"] is None
+    assert mpc.hyundai_virtual_lead_debug["identity_changed"] is False
+    assert mpc._hyundai_virtual_lead.radarTrackId == track_id
+
   def test_duplicate_pair_keeps_virtual_winner_stable_across_small_slot_jitter(self, monkeypatch):
     monkeypatch.setattr(
       "openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc.time.monotonic",

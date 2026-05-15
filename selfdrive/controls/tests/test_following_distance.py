@@ -1,11 +1,15 @@
 import pytest
 import itertools
+import sys
 from parameterized import parameterized_class
 
 from cereal import log
 
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import desired_follow_distance, get_T_FOLLOW
 from openpilot.selfdrive.test.longitudinal_maneuvers.maneuver import Maneuver
+
+
+pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="full following-distance simulation requires the native acados solver")
 
 
 def run_following_distance_simulation(v_lead, t_end=100.0, e2e=False, personality=0):

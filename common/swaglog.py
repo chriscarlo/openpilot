@@ -5,7 +5,10 @@ import warnings
 from pathlib import Path
 from logging.handlers import BaseRotatingHandler
 
-import zmq
+try:
+  import zmq
+except ModuleNotFoundError:
+  zmq = None
 
 from openpilot.common.logging_extra import SwagLogger, SwagFormatter, SwagLogFileFormatter
 from openpilot.system.hardware.hw import Paths
@@ -82,6 +85,8 @@ class UnixDomainSocketHandler(logging.Handler):
       self.zctx.term()
 
   def connect(self):
+    if zmq is None:
+      return
     self.zctx = zmq.Context()
     self.sock = self.zctx.socket(zmq.PUSH)
     self.sock.setsockopt(zmq.LINGER, 10)
@@ -89,6 +94,8 @@ class UnixDomainSocketHandler(logging.Handler):
     self.pid = os.getpid()
 
   def emit(self, record):
+    if zmq is None:
+      return
     if os.getpid() != self.pid:
       # TODO suppresses warning about forking proc with zmq socket, fix root cause
       warnings.filterwarnings("ignore", category=ResourceWarning, message="unclosed.*<zmq.*>")

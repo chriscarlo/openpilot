@@ -378,6 +378,66 @@ LEAD_RESPONSE_TUNE_SPECS = (
     maximum=5.0,
     description="If modelAccel < -this, flutter clamp is bypassed so hard braking is not delayed.",
   ),
+  LeadResponseTuneSpec(
+    attr="model_lead_filter_tau_s",
+    key="Longitudinal.LiveTune.ModelLeadFilterTauS",
+    cli_name="model-lead-filter-tau",
+    label="model_lead_tau",
+    default=2.80,
+    minimum=0.20,
+    maximum=8.0,
+    description="Source-side model-only lead dRel filter time constant in radard. Higher = more source-noise rejection.",
+  ),
+  LeadResponseTuneSpec(
+    attr="model_lead_filter_open_slew_max_mps",
+    key="Longitudinal.LiveTune.ModelLeadFilterOpenSlewMaxMps",
+    cli_name="model-lead-open-slew-max-mps",
+    label="model_lead_open_slew",
+    default=1.20,
+    minimum=0.10,
+    maximum=6.0,
+    description="Max source-side opening dRel motion admitted per second before model velocity support.",
+  ),
+  LeadResponseTuneSpec(
+    attr="model_lead_filter_safe_ttc_s",
+    key="Longitudinal.LiveTune.ModelLeadFilterSafeTtcS",
+    cli_name="model-lead-safe-ttc",
+    label="model_lead_safe_ttc",
+    default=4.00,
+    minimum=1.0,
+    maximum=10.0,
+    description="Low-TTC threshold that lets source-side model-lead filtering fast-adopt a closer measurement.",
+  ),
+  LeadResponseTuneSpec(
+    attr="model_lead_filter_assoc_drel_m",
+    key="Longitudinal.LiveTune.ModelLeadFilterAssocDRelM",
+    cli_name="model-lead-assoc-drel",
+    label="model_lead_assoc_drel",
+    default=12.0,
+    minimum=3.0,
+    maximum=35.0,
+    description="Max dRel difference for associating model-only leads to a stable synthetic radard track.",
+  ),
+  LeadResponseTuneSpec(
+    attr="model_lead_filter_vrel_tau_s",
+    key="Longitudinal.LiveTune.ModelLeadFilterVRelTauS",
+    cli_name="model-lead-vrel-tau",
+    label="model_lead_vrel_tau",
+    default=0.40,
+    minimum=0.10,
+    maximum=2.0,
+    description="Source-side model-only lead relative-velocity filter tau in radard. Lower = faster accel/decel recognition.",
+  ),
+  LeadResponseTuneSpec(
+    attr="model_lead_filter_fast_vrel_tau_s",
+    key="Longitudinal.LiveTune.ModelLeadFilterFastVRelTauS",
+    cli_name="model-lead-fast-vrel-tau",
+    label="model_lead_fast_vrel_tau",
+    default=0.16,
+    minimum=0.05,
+    maximum=1.0,
+    description="Relative-velocity filter tau used when model-lead gating admits a low-TTC or strongly closing event.",
+  ),
 )
 
 LEAD_RESPONSE_TUNE_SPECS_BY_ATTR = {spec.attr: spec for spec in LEAD_RESPONSE_TUNE_SPECS}
@@ -419,6 +479,12 @@ class LeadResponseTuningConfig:
   flutter_detect_window_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["flutter_detect_window_s"].default
   flutter_clamp_jerk_mps3: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["flutter_clamp_jerk_mps3"].default
   flutter_clamp_bypass_decel_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["flutter_clamp_bypass_decel_mps2"].default
+  model_lead_filter_tau_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_filter_tau_s"].default
+  model_lead_filter_open_slew_max_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_filter_open_slew_max_mps"].default
+  model_lead_filter_safe_ttc_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_filter_safe_ttc_s"].default
+  model_lead_filter_assoc_drel_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_filter_assoc_drel_m"].default
+  model_lead_filter_vrel_tau_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_filter_vrel_tau_s"].default
+  model_lead_filter_fast_vrel_tau_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_filter_fast_vrel_tau_s"].default
 
   @classmethod
   def defaults(cls) -> LeadResponseTuningConfig:

@@ -5,6 +5,7 @@ import copy
 import json
 import math
 import os
+import platform
 import time
 from typing import Any
 import numpy as np
@@ -33,12 +34,13 @@ from openpilot.selfdrive.controls.lib.longitudinal_response_model import (
 
 from openpilot.sunnypilot.selfdrive.controls.lib.vibe_personality.vibe_personality import VibePersonalityController
 
-if __name__ == '__main__':  # generating code
-  from openpilot.third_party.acados.acados_template import AcadosModel, AcadosOcp, AcadosOcpSolver
-else:
-  from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.c_generated_code.acados_ocp_solver_pyx import AcadosOcpSolverCython
-
-from casadi import SX, vertcat
+if __name__ != '__main__':
+  try:
+    from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.c_generated_code.acados_ocp_solver_pyx import AcadosOcpSolverCython
+  except ModuleNotFoundError:
+    if platform.system() != "Windows":
+      raise
+    from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.windows_acados_stub import AcadosOcpSolverCython
 
 MODEL_NAME = 'long'
 LONG_MPC_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -277,11 +279,12 @@ class _StabilizedLead:
   of attributes MPC callers read, so downstream code is oblivious to whether
   it's looking at a raw capnp reader or a phantom-extrapolated snapshot."""
   __slots__ = ('status', 'dRel', 'yRel', 'vRel', 'vLead', 'aLeadK', 'modelProb',
-               'dPath', 'vLat', 'aLeadTau', 'aRel')
+               'dPath', 'vLat', 'aLeadTau', 'aRel', 'vLeadK', 'fcw', 'radar',
+               'radarTrackId')
 
   def __init__(self, status=False, dRel=0.0, yRel=0.0, vRel=0.0, vLead=0.0,
-               aLeadK=0.0, modelProb=0.0, dPath=0.0, vLat=0.0, aLeadTau=0.0,
-               aRel=0.0):
+                aLeadK=0.0, modelProb=0.0, dPath=0.0, vLat=0.0, aLeadTau=0.0,
+                aRel=0.0, vLeadK=0.0, fcw=False, radar=False, radarTrackId=-1):
     self.status = bool(status)
     self.dRel = float(dRel)
     self.yRel = float(yRel)
@@ -293,6 +296,10 @@ class _StabilizedLead:
     self.vLat = float(vLat)
     self.aLeadTau = float(aLeadTau)
     self.aRel = float(aRel)
+    self.vLeadK = float(vLeadK)
+    self.fcw = bool(fcw)
+    self.radar = bool(radar)
+    self.radarTrackId = int(radarTrackId)
 
   @staticmethod
   def _safe_attr(src: Any, name: str, default: float = 0.0) -> float:
@@ -319,6 +326,10 @@ class _StabilizedLead:
       vLat=cls._safe_attr(rd, 'vLat'),
       aLeadTau=cls._safe_attr(rd, 'aLeadTau'),
       aRel=cls._safe_attr(rd, 'aRel'),
+      vLeadK=cls._safe_attr(rd, 'vLeadK'),
+      fcw=bool(getattr(rd, 'fcw', False)),
+      radar=bool(getattr(rd, 'radar', False)),
+      radarTrackId=int(getattr(rd, 'radarTrackId', -1) or -1),
     )
 
 
@@ -1068,6 +1079,9 @@ def get_cutin_settle_accel_floor(v_ego, lead, t_follow, age_s,
 
 
 def gen_long_model():
+  from casadi import SX, vertcat
+  from openpilot.third_party.acados.acados_template import AcadosModel
+
   model = AcadosModel()
   model.name = MODEL_NAME
 
@@ -1104,6 +1118,8 @@ def gen_long_model():
 
 
 def gen_long_ocp():
+  from openpilot.third_party.acados.acados_template import AcadosOcp
+
   ocp = AcadosOcp()
   ocp.model = gen_long_model()
 
@@ -1820,13 +1836,25 @@ class LongitudinalMpc:
       "reset_reason": reason,
     }
 
+  @staticmethod
+  def _synthetic_model_track_id(lead) -> int | None:
+    try:
+      track_id = int(getattr(lead, 'radarTrackId', -1) or -1)
+      radar = bool(getattr(lead, 'radar', False))
+    except Exception:
+      return None
+    return track_id if (not radar and track_id <= -1001) else None
+
   def _should_reset_hyundai_virtual_lead(self, lead_source: str, lead) -> tuple[bool, str | None]:
     if lead is None or not getattr(lead, 'status', False):
       return True, "no_control_lead"
     if self._hyundai_virtual_lead is None or self._hyundai_virtual_lead_source is None:
       return True, "init"
     if lead_source != self._hyundai_virtual_lead_source:
-      return True, "source_switch"
+      prev_model_track_id = self._synthetic_model_track_id(self._hyundai_virtual_lead)
+      new_model_track_id = self._synthetic_model_track_id(lead)
+      if prev_model_track_id is None or prev_model_track_id != new_model_track_id:
+        return True, "source_switch"
     raw_drel = float(getattr(lead, 'dRel', 0.0) or 0.0)
     filtered_drel = float(self._hyundai_virtual_lead.dRel)
     drel_delta = raw_drel - filtered_drel
@@ -2282,6 +2310,10 @@ class LongitudinalMpc:
           vLat=state.last_valid.vLat,
           aLeadTau=state.last_valid.aLeadTau,
           aRel=state.last_valid.aRel,
+          vLeadK=state.last_valid.vLeadK,
+          fcw=state.last_valid.fcw,
+          radar=state.last_valid.radar,
+          radarTrackId=state.last_valid.radarTrackId,
         )
         outs.append(phantom)
         continue
@@ -3235,10 +3267,15 @@ class LongitudinalMpc:
 
     if self.mode == 'acc':
       self.params[:,2] = active_obstacle
+      speed_constraint_ub = np.full(CONSTR_DIM, 1e4)
+      speed_constraint_ub[0] = max(float(v_cruise), float(v_ego)) + 0.05
     else:
       self.params[:,2] = np.min(x_obstacles, axis=1)
+      speed_constraint_ub = np.full(CONSTR_DIM, 1e4)
     self.params[:,3] = np.copy(self.prev_a)
     self.params[:,4] = t_follow
+    for i in range(N):
+      self.solver.constraints_set(i, "uh", speed_constraint_ub)
 
     self.run()
 
@@ -3357,6 +3394,8 @@ class LongitudinalMpc:
 
 
 if __name__ == "__main__":
+  from openpilot.third_party.acados.acados_template import AcadosOcpSolver
+
   ocp = gen_long_ocp()
   AcadosOcpSolver.generate(ocp, json_file=JSON_FILE)
   # AcadosOcpSolver.build(ocp.code_export_directory, with_cython=True)

@@ -1,11 +1,21 @@
 import contextlib
 import gc
 import os
+import sys
 import pytest
 
 from openpilot.common.prefix import OpenpilotPrefix
-from openpilot.system.manager import manager
 from openpilot.system.hardware import TICI, HARDWARE
+
+if sys.platform == "win32":
+  class _ManagerCleanup:
+    @staticmethod
+    def manager_cleanup():
+      pass
+
+  manager = _ManagerCleanup()
+else:
+  from openpilot.system.manager import manager
 
 # TODO: pytest-cpp doesn't support FAIL, and we need to create test translations in sessionstart
 # pending https://github.com/pytest-dev/pytest-cpp/pull/147
