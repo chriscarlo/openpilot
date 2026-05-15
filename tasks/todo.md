@@ -116,7 +116,7 @@
 - [x] Extend lead-to-cruise transition accel cap so cruise does not surge immediately after lead release.
 - [x] Require a real standstill gap before lead-launch stop release can command starting accel.
 - [x] Add regression tests from captured freeway and stop/go trace shapes.
-- [ ] Run focused tests, commit, push, pull to tici, build/reboot.
+- [x] Run focused tests, commit, push, pull to tici, build/reboot.
 
 ## Review
 
@@ -125,3 +125,4 @@
 - Extended the Hyundai lead-to-cruise accel transition from 1.0 s to 3.0 s and lowered its initial cap from 0.45 to 0.25 m/s^2.
 - Required at least 5.0 m dRel before standstill lead-launch release can leave `shouldStop` and enter full starting accel.
 - Focused verification passed: `python -m pytest -q selfdrive/controls/tests/test_longitudinal_planner_stop_release.py selfdrive/controls/tests/test_lead_interactions.py selfdrive/controls/tests/test_hyundai_ai_lead_stability.py` -> 71 passed, 3 skipped.
+- Deployed to tici at `8ef8f8a`, syntax-checked touched Python files on-device, rebooted, and confirmed `manager.py`, `controlsd`, `plannerd`, and `radard` running.
