@@ -8,6 +8,8 @@ from .config import (
   resolve_ev6_vehicle_config,
 )
 from .inputs import (
+  BASE_SCENARIO_NAMES,
+  CANONICAL_LEAD_PROFILE_NAMES,
   SCENARIO_NAMES,
   SnapshotBundle,
   StepInput,
@@ -15,10 +17,19 @@ from .inputs import (
   load_snapshot_bundle,
   write_snapshot_bundle,
 )
-from .route_extract import extract_ev6_episodes, index_ev6_routes
+def extract_ev6_episodes(*args, **kwargs):
+  from .route_extract import extract_ev6_episodes as _extract_ev6_episodes
+  return _extract_ev6_episodes(*args, **kwargs)
+
+
+def index_ev6_routes(*args, **kwargs):
+  from .route_extract import index_ev6_routes as _index_ev6_routes
+  return _index_ev6_routes(*args, **kwargs)
 
 __all__ = [
   "NOISE_PROFILES",
+  "BASE_SCENARIO_NAMES",
+  "CANONICAL_LEAD_PROFILE_NAMES",
   "NoiseSeeds",
   "ResolvedVehicleConfig",
   "SCENARIO_NAMES",

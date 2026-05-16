@@ -11,7 +11,7 @@ from typing import Any
 from .catalog import open_catalog, record_snapshot_bundle, record_sweep_result
 from .closed_loop import SimulationResult, run_harness
 from .config import FRIENDLY_PARAM_NAMES, NOISE_PROFILES, NoiseSeeds, resolve_ev6_vehicle_config
-from .inputs import SCENARIO_NAMES, build_synthetic_scenario, load_snapshot_bundle
+from .inputs import CANONICAL_LEAD_PROFILE_NAMES, SCENARIO_NAMES, build_synthetic_scenario, load_snapshot_bundle
 
 
 DEFAULT_SCORE_WEIGHTS = {
@@ -39,6 +39,8 @@ def build_parser() -> argparse.ArgumentParser:
   parser.add_argument("--mode", choices=("synthetic-ev6", "snapshot"), default="synthetic-ev6")
   parser.add_argument("--scenario", action="append", choices=SCENARIO_NAMES, default=None)
   parser.add_argument("--all-scenarios", action="store_true")
+  parser.add_argument("--canonical-lead-profiles", action="store_true",
+                      help="run the fixed EV6 lead-profile matrix used for longitudinal tune comparisons")
   parser.add_argument("--snapshot", type=Path, default=None, help="Snapshot bundle directory for --mode snapshot")
   parser.add_argument("--topology", choices=("lka", "lfa"), default="lfa")
   parser.add_argument("--controller-mode", choices=("auto", "passthrough", "shaped"), default="auto")
@@ -63,7 +65,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
   args = build_parser().parse_args(argv)
-  scenarios = _resolve_scenarios(args.scenario, args.all_scenarios)
+  scenarios = _resolve_scenarios(args.scenario, args.all_scenarios, args.canonical_lead_profiles)
   base_overrides = _parse_overrides(args.override)
   grid_overrides = _parse_grid(args.grid)
   score_weights = _parse_score_weights(args.score_weight)
@@ -255,9 +257,11 @@ def write_ranked_csv(ranked_candidates: list[dict[str, Any]], output_path: Path)
       })
 
 
-def _resolve_scenarios(raw_scenarios: list[str] | None, all_scenarios: bool) -> list[str]:
+def _resolve_scenarios(raw_scenarios: list[str] | None, all_scenarios: bool, canonical_lead_profiles: bool = False) -> list[str]:
   if all_scenarios:
     return list(SCENARIO_NAMES)
+  if canonical_lead_profiles:
+    return list(CANONICAL_LEAD_PROFILE_NAMES)
   if raw_scenarios:
     return raw_scenarios
   return ["approach", "pullaway", "handoff", "cutin"]

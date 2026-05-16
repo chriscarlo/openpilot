@@ -5,11 +5,14 @@ import pytest
 
 from cereal import log
 from openpilot.common.params import Params
+from openpilot.selfdrive.controls.lib.longitudinal_live_tune import build_lead_response_tuning_config
 from openpilot.selfdrive.controls.lib.longitudinal_planner import get_max_accel
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import (
   ACCEL_MAX,
   LongitudinalMpc,
   N,
+  get_gap_reclaim_accel_floor,
+  get_lead_keepup_accel_floor,
 )
 
 
@@ -284,6 +287,39 @@ class TestHyundaiAiLeadStability:
         params.remove("Longitudinal.LiveTune.GapReclaimGapMinM")
       else:
         params.put("Longitudinal.LiveTune.GapReclaimGapMinM", saved_gap_min)
+
+  def test_ev6_soft_follow_profile_reduces_goldilocks_pullaway_floors(self):
+    pre_soften_tune = build_lead_response_tuning_config({
+      "gap_reclaim_strength": 0.35,
+      "gap_reclaim_gap_min_m": 4.0,
+      "gap_reclaim_max_accel": 0.10,
+      "lead_keepup_gap_min_m": 0.40,
+      "lead_keepup_max_accel": 0.10,
+    })
+    softened_tune = build_lead_response_tuning_config({
+      "gap_reclaim_strength": 0.35,
+      "gap_reclaim_gap_min_m": 5.0,
+      "gap_reclaim_max_accel": 0.08,
+      "lead_keepup_gap_min_m": 0.80,
+      "lead_keepup_max_accel": 0.06,
+    })
+
+    near_goldilocks_lead = _make_lead(d_rel=47.0, v_rel=0.25, v_lead=29.25)
+    wide_goldilocks_lead = _make_lead(d_rel=54.0, v_rel=0.25, v_lead=29.25)
+
+    pre_near_keepup = get_lead_keepup_accel_floor(29.0, near_goldilocks_lead, 1.3, pre_soften_tune)
+    soft_near_keepup = get_lead_keepup_accel_floor(29.0, near_goldilocks_lead, 1.3, softened_tune)
+    pre_wide_reclaim = get_gap_reclaim_accel_floor(29.0, wide_goldilocks_lead, 1.3, pre_soften_tune)
+    soft_wide_reclaim = get_gap_reclaim_accel_floor(29.0, wide_goldilocks_lead, 1.3, softened_tune)
+    pre_wide_keepup = get_lead_keepup_accel_floor(29.0, wide_goldilocks_lead, 1.3, pre_soften_tune)
+    soft_wide_keepup = get_lead_keepup_accel_floor(29.0, wide_goldilocks_lead, 1.3, softened_tune)
+
+    assert get_gap_reclaim_accel_floor(29.0, near_goldilocks_lead, 1.3, softened_tune) == pytest.approx(0.0)
+    assert soft_near_keepup < 0.005
+    assert soft_wide_reclaim == pytest.approx(0.08)
+    assert soft_wide_reclaim < pre_wide_reclaim
+    assert 0.05 < soft_wide_keepup < 0.06
+    assert soft_wide_keepup < pre_wide_keepup
 
   def test_slowdown_ceiling_reaches_full_decel_for_close_braking_lead(self, monkeypatch):
     monkeypatch.setattr(

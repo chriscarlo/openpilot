@@ -11,14 +11,22 @@ from openpilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPl
 from selfdrive.test.longitudinal_harness.closed_loop import HarnessParams, _bind_planner_params, run_harness
 from selfdrive.test.longitudinal_harness.config import NoiseSeeds, resolve_ev6_vehicle_config
 from selfdrive.test.longitudinal_harness.inputs import (
+  CANONICAL_LEAD_PROFILE_NAMES,
   LeadDirective,
+  SCENARIO_NAMES,
   StepInput,
   build_synthetic_scenario,
   load_snapshot_bundle,
   write_snapshot_bundle,
 )
 from selfdrive.test.longitudinal_harness.metrics import summarize_trace
-from selfdrive.test.longitudinal_harness.sweep import DEFAULT_SCORE_WEIGHTS, SweepCandidate, enumerate_candidates, run_sweep
+from selfdrive.test.longitudinal_harness.sweep import (
+  DEFAULT_SCORE_WEIGHTS,
+  SweepCandidate,
+  _resolve_scenarios,
+  enumerate_candidates,
+  run_sweep,
+)
 
 
 FIXTURE_DIR = Path(__file__).resolve().parents[1] / "testdata" / "ev6_lka_snapshot"
@@ -153,6 +161,46 @@ def test_default_score_weights_include_follow_overshoot() -> None:
   assert DEFAULT_SCORE_WEIGHTS["handoffPrerevealMeanOvershootMps"] == pytest.approx(0.0)
   assert DEFAULT_SCORE_WEIGHTS["handoffPrerevealSpeedLossMps"] == pytest.approx(0.0)
   assert DEFAULT_SCORE_WEIGHTS["handoffPrerevealCruiseFraction"] == pytest.approx(0.0)
+
+
+def test_canonical_lead_profiles_are_first_class_scenarios() -> None:
+  assert len(CANONICAL_LEAD_PROFILE_NAMES) == 10
+  assert set(CANONICAL_LEAD_PROFILE_NAMES).issubset(set(SCENARIO_NAMES))
+
+  for scenario_name in CANONICAL_LEAD_PROFILE_NAMES:
+    initial_speed_mps, _initial_accel_mps2, steps = build_synthetic_scenario(
+      scenario_name,
+      duration_s=8.0,
+      dt_s=DT_MDL,
+    )
+    assert initial_speed_mps >= 0.0
+    assert steps
+    assert any(step.lead_one.status or step.lead_two.status for step in steps)
+
+
+def test_canonical_ttc_profiles_cover_high_and_emergency_ttc() -> None:
+  high_initial_speed, _initial_accel_mps2, high_steps = build_synthetic_scenario(
+    "profile_high_ttc_slowdown",
+    duration_s=8.0,
+    dt_s=DT_MDL,
+  )
+  emergency_initial_speed, _initial_accel_mps2, emergency_steps = build_synthetic_scenario(
+    "profile_emergency_ttc",
+    duration_s=8.0,
+    dt_s=DT_MDL,
+  )
+
+  high_lead = high_steps[0].lead_one
+  emergency_lead = emergency_steps[0].lead_one
+  high_ttc = high_lead.d_rel_override_m / max(high_initial_speed - high_lead.v_lead_mps, 1e-3)
+  emergency_ttc = emergency_lead.d_rel_override_m / max(emergency_initial_speed - emergency_lead.v_lead_mps, 1e-3)
+
+  assert high_ttc > 10.0
+  assert emergency_ttc < 2.0
+
+
+def test_sweep_can_resolve_canonical_lead_profile_matrix() -> None:
+  assert _resolve_scenarios(None, False, True) == list(CANONICAL_LEAD_PROFILE_NAMES)
 
 
 def test_resolve_ev6_controller_modes() -> None:

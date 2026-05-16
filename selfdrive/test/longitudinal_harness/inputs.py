@@ -85,7 +85,7 @@ class SnapshotBundle:
   name: str = ""
 
 
-SCENARIO_NAMES = (
+BASE_SCENARIO_NAMES = (
   "approach",
   "pullaway",
   "pullaway_close",
@@ -102,6 +102,21 @@ SCENARIO_NAMES = (
   "oscillating",
   "accordion_close",
 )
+
+CANONICAL_LEAD_PROFILE_NAMES = (
+  "profile_steady_goldilocks",
+  "profile_gentle_pullaway",
+  "profile_confirmed_pullaway",
+  "profile_high_ttc_slowdown",
+  "profile_emergency_ttc",
+  "profile_stoplight_launch",
+  "profile_varying_speed",
+  "profile_benign_cutin",
+  "profile_dangerous_cutin",
+  "profile_duplicate_dropout",
+)
+
+SCENARIO_NAMES = BASE_SCENARIO_NAMES + CANONICAL_LEAD_PROFILE_NAMES
 
 
 def _scenario_step_count(duration_s: float, dt_s: float) -> int:
@@ -140,6 +155,26 @@ def build_synthetic_scenario(name: str, *, duration_s: float, dt_s: float) -> tu
     return _build_oscillating(duration_s, dt_s)
   if name == "accordion_close":
     return _build_accordion_close(duration_s, dt_s)
+  if name == "profile_steady_goldilocks":
+    return _build_profile_steady_goldilocks(duration_s, dt_s)
+  if name == "profile_gentle_pullaway":
+    return _build_profile_pullaway(duration_s, dt_s, confirmed=False)
+  if name == "profile_confirmed_pullaway":
+    return _build_profile_pullaway(duration_s, dt_s, confirmed=True)
+  if name == "profile_high_ttc_slowdown":
+    return _build_profile_ttc_slowdown(duration_s, dt_s, emergency=False)
+  if name == "profile_emergency_ttc":
+    return _build_profile_ttc_slowdown(duration_s, dt_s, emergency=True)
+  if name == "profile_stoplight_launch":
+    return _build_profile_stoplight_launch(duration_s, dt_s)
+  if name == "profile_varying_speed":
+    return _build_profile_varying_speed(duration_s, dt_s)
+  if name == "profile_benign_cutin":
+    return _build_cutin(duration_s, dt_s, dangerous=False)
+  if name == "profile_dangerous_cutin":
+    return _build_cutin(duration_s, dt_s, dangerous=True)
+  if name == "profile_duplicate_dropout":
+    return _build_profile_duplicate_dropout(duration_s, dt_s)
   raise ValueError(f"unknown synthetic scenario '{name}'")
 
 
@@ -686,5 +721,185 @@ def _build_accordion_close(duration_s: float, dt_s: float) -> tuple[float, float
       cruise_speed_mps=28.0,
       lead_one=lead_one,
       note="close-follow accordion lead",
+    ))
+  return initial_speed, 0.0, timeline
+
+
+def _build_profile_steady_goldilocks(duration_s: float, dt_s: float) -> tuple[float, float, list[StepInput]]:
+  initial_speed = 29.0
+  gap_m = 47.0
+  timeline = []
+  for idx in range(_scenario_step_count(duration_s, dt_s)):
+    lead_one = LeadDirective(
+      status=True,
+      v_lead_mps=29.0,
+      model_prob_target=0.96,
+      d_rel_override_m=gap_m if idx == 0 else None,
+      acquisition_reset=idx == 0,
+    )
+    timeline.append(StepInput(
+      t_s=idx * dt_s,
+      cruise_speed_mps=31.0,
+      lead_one=lead_one,
+      note="canonical steady goldilocks follow",
+    ))
+  return initial_speed, 0.0, timeline
+
+
+def _build_profile_pullaway(duration_s: float, dt_s: float, *, confirmed: bool) -> tuple[float, float, list[StepInput]]:
+  initial_speed = 29.0
+  base_lead_speed = 29.0
+  gap_m = 54.0 if confirmed else 46.0
+  pull_start_t = 1.5 if confirmed else 2.0
+  pull_dur_s = 3.5 if confirmed else 7.0
+  pull_dv = 7.0 if confirmed else 2.0
+  timeline = []
+  for idx in range(_scenario_step_count(duration_s, dt_s)):
+    t_s = idx * dt_s
+    if t_s < pull_start_t:
+      lead_speed = base_lead_speed
+      event = None
+    elif t_s < pull_start_t + pull_dur_s:
+      progress = (t_s - pull_start_t) / pull_dur_s
+      lead_speed = base_lead_speed + pull_dv * progress
+      event = "pullaway_start" if abs(t_s - pull_start_t) < (dt_s * 0.5) else None
+    else:
+      lead_speed = base_lead_speed + pull_dv
+      event = None
+
+    lead_one = LeadDirective(
+      status=True,
+      v_lead_mps=lead_speed,
+      model_prob_target=0.98,
+      d_rel_override_m=gap_m if idx == 0 else None,
+      acquisition_reset=idx == 0,
+    )
+    timeline.append(StepInput(
+      t_s=t_s,
+      cruise_speed_mps=40.0 if confirmed else 33.0,
+      lead_one=lead_one,
+      event=event,
+      note="canonical confirmed pullaway" if confirmed else "canonical gentle pullaway",
+    ))
+  return initial_speed, 0.0, timeline
+
+
+def _build_profile_ttc_slowdown(duration_s: float, dt_s: float, *, emergency: bool) -> tuple[float, float, list[StepInput]]:
+  initial_speed = 31.0
+  lead_speed = 16.0 if emergency else 26.0
+  gap_m = 24.0 if emergency else 70.0
+  timeline = []
+  for idx in range(_scenario_step_count(duration_s, dt_s)):
+    lead_one = LeadDirective(
+      status=True,
+      v_lead_mps=lead_speed,
+      model_prob_target=1.0,
+      d_rel_override_m=gap_m if idx == 0 else None,
+      acquisition_reset=idx == 0,
+    )
+    timeline.append(StepInput(
+      t_s=idx * dt_s,
+      cruise_speed_mps=40.0,
+      lead_one=lead_one,
+      event="emergency_ttc_start" if emergency and idx == 0 else ("high_ttc_start" if idx == 0 else None),
+      note="canonical emergency TTC closing lead" if emergency else "canonical high TTC slower lead",
+    ))
+  return initial_speed, 0.0, timeline
+
+
+def _build_profile_stoplight_launch(duration_s: float, dt_s: float) -> tuple[float, float, list[StepInput]]:
+  initial_speed = 0.0
+  timeline = []
+  for idx in range(_scenario_step_count(duration_s, dt_s)):
+    t_s = idx * dt_s
+    lead_speed = min(5.0, max(0.0, (t_s - 1.0) * 2.5)) if t_s >= 1.0 else 0.0
+    lead_one = LeadDirective(
+      status=True,
+      v_lead_mps=lead_speed,
+      model_prob_target=1.0,
+      d_rel_override_m=6.0 if idx == 0 else None,
+      acquisition_reset=idx == 0,
+    )
+    timeline.append(StepInput(
+      t_s=t_s,
+      cruise_speed_mps=15.0,
+      lead_one=lead_one,
+      event="lead_launch" if abs(t_s - 1.0) < (dt_s * 0.5) else None,
+      note="canonical stopped lead launch",
+    ))
+  return initial_speed, 0.0, timeline
+
+
+def _build_profile_varying_speed(duration_s: float, dt_s: float) -> tuple[float, float, list[StepInput]]:
+  import math
+
+  initial_speed = 28.0
+  base_lead_speed = 28.0
+  gap_m = 44.0
+  timeline = []
+  for idx in range(_scenario_step_count(duration_s, dt_s)):
+    t_s = idx * dt_s
+    lead_speed = base_lead_speed + 2.5 * math.sin((2.0 * math.pi * t_s) / 7.0)
+    lead_one = LeadDirective(
+      status=True,
+      v_lead_mps=lead_speed,
+      model_prob_target=0.98,
+      d_rel_override_m=gap_m if idx == 0 else None,
+      acquisition_reset=idx == 0,
+    )
+    timeline.append(StepInput(
+      t_s=t_s,
+      cruise_speed_mps=34.0,
+      lead_one=lead_one,
+      note="canonical varying-speed lead",
+    ))
+  return initial_speed, 0.0, timeline
+
+
+def _build_profile_duplicate_dropout(duration_s: float, dt_s: float) -> tuple[float, float, list[StepInput]]:
+  initial_speed = 29.0
+  timeline = []
+  dropout_start = 3.0
+  dropout_end = 3.35
+  for idx in range(_scenario_step_count(duration_s, dt_s)):
+    t_s = idx * dt_s
+    if dropout_start <= t_s < dropout_end:
+      timeline.append(StepInput(
+        t_s=t_s,
+        cruise_speed_mps=31.0,
+        event="dropout_start" if abs(t_s - dropout_start) < (dt_s * 0.5) else None,
+        note="canonical duplicate pair dropout",
+      ))
+      continue
+
+    jitter = -0.12 if idx % 2 else 0.08
+    reacquire = abs(t_s - dropout_end) < (dt_s * 0.5)
+    lead_one = LeadDirective(
+      status=True,
+      v_lead_mps=29.0,
+      model_prob_target=0.96,
+      d_rel_override_m=44.8 + jitter if idx == 0 or reacquire else None,
+      y_rel_m=0.04,
+      d_path_m=0.04,
+      v_lat_mps=0.4,
+      acquisition_reset=idx == 0 or reacquire,
+    )
+    lead_two = LeadDirective(
+      status=True,
+      v_lead_mps=29.0,
+      model_prob_target=0.92,
+      d_rel_override_m=44.9 - jitter if idx == 0 or reacquire else None,
+      y_rel_m=0.07,
+      d_path_m=0.07,
+      v_lat_mps=4.0,
+      acquisition_reset=idx == 0 or reacquire,
+    )
+    timeline.append(StepInput(
+      t_s=t_s,
+      cruise_speed_mps=31.0,
+      lead_one=lead_one,
+      lead_two=lead_two,
+      event="reacquire" if reacquire else None,
+      note="canonical duplicate pair with brief dropout",
     ))
   return initial_speed, 0.0, timeline

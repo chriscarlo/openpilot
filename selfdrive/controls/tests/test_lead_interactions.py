@@ -142,6 +142,15 @@ class TestLeadInteractionHeuristics:
 
     assert 0.0 < keepup_floor < 0.015
 
+  def test_keepup_gap_bias_stays_below_ev_tactile_threshold_near_target(self):
+    tuning = LeadResponseTuningConfig(lead_keepup_gap_min_m=0.80, lead_keepup_max_accel=0.06)
+    noisy_goldilocks_lead = _make_lead(d_rel=47.0, v_lead=29.25)
+    noisy_goldilocks_lead.vRel = 0.25
+
+    keepup_floor = get_lead_keepup_accel_floor(29.0, noisy_goldilocks_lead, 1.3, tuning)
+
+    assert 0.0 < keepup_floor < 0.005
+
   def test_keepup_floor_can_ramp_to_configured_cap_for_confirmed_pullaway(self):
     tuning = LeadResponseTuningConfig(lead_keepup_max_accel=0.30)
     confirmed_pullaway = _make_lead(d_rel=58.0, v_lead=36.1, a_lead=0.10)

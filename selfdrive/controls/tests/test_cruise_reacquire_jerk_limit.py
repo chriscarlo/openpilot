@@ -186,6 +186,17 @@ class TestFlutterModeClamp:
     # prev was 0.0 from last call; max_step = 0.8 * 0.05 = 0.04 downward.
     assert stub.output_a_target == pytest.approx(-0.04, abs=1e-6)
 
+  def test_same_source_goldilocks_twitch_is_not_hidden_by_flutter_clamp(self):
+    stub = _make_flutter_stub(jerk_cap=0.8, n_trans=2.0, dt=0.05)
+
+    for commanded_accel in (0.22, -0.18, 0.16, -0.12, 0.10):
+      stub.output_a_target = commanded_accel
+      stub._apply_flutter_mode_clamp("lead0", 0.0)
+      assert stub.output_a_target == pytest.approx(commanded_accel)
+
+    assert stub._flutter_mode_active is False
+    assert len(stub._source_transition_frames) == 0
+
   def test_bypass_on_strong_model_decel(self):
     stub = _make_flutter_stub(jerk_cap=0.8, n_trans=2.0, bypass_decel=1.5, dt=0.05)
     stub._apply_flutter_mode_clamp("lead0", 0.0)

@@ -1,111 +1,41 @@
-# Agent Instructions (Canonical)
+You are an AI coding agent working inside this repository.
+Project scope: This repository work is only concerned with the 2023 CAN-FD HDA2 Kia EV6; for this project, treat it as using Hyundai code and logic.
+Task: Modify the repository’s agent instruction file(s) so they maximize correctness/competence and minimize failure modes from redundant or stale guidance.
 
-Avoid vague AI-isms such as "clean" or "concrete" when describing work; describe the specific property instead.
+What to edit (detect what exists; do not guess):
+- Codex-style: `AGENTS.md` (and `AGENTS.override.md` if present).
+- Claude Code-style: `CLAUDE.md` or `.claude/CLAUDE.md` (plus any `.claude/rules/*.md` if the project uses modular rules).
+- If both ecosystems are present, keep guidance consistent while avoiding duplication. If practical, choose one canonical source of truth and have the other reference it (e.g., Claude can import files).
 
-## Instruction maintenance
-Use `$context-file-librarian` to audit and maintain instruction entrypoints and prevent drift/duplication (this is instruction-file work only; never application code).
+Principles you MUST apply when deciding what stays:
+1) Correctness over convenience: Every line must plausibly affect whether tasks are solved correctly (not just faster).
+2) No “repo encyclopedia”: Remove directory trees, module listings, architecture essays, dependency lists, or general framework primers. If the agent can infer it by reading files/config, it does not belong here.
+3) No stale anchoring: Agents strongly follow what these files say. Any claim that cannot be verified from the repo (or is likely to drift) must be removed or quarantined.
+4) Be specific and verifiable: Replace vague advice (“follow best practices”) with concrete, testable instructions (exact commands/flags/paths) and an explicit verification step.
+5) Keep it short and front-loaded: Use headings + bullet points. Put the highest-impact constraints at the top. If detail is necessary, move it into modular rule files or a skill, not the main entrypoint.
 
-Examples:
-- "Use $context-file-librarian to update AGENTS.md and remove stale/unverifiable bullets."
-- "Run $context-file-librarian and enforce the CLAUDE.md symlink to AGENTS.md."
-- "Audit instruction drift and reduce AGENTS.md bloat with $context-file-librarian."
+Process (do this in-repo, using file inspection, not assumptions):
+A) Inventory: Locate all instruction/memory files relevant to this repo (see “What to edit”).
+B) Read them end-to-end.
+C) For each section/bullet, label it as one of:
+   - KEEP (non-obvious + high impact on correctness + verifiable)
+   - DELETE (overview/redundant/obvious/generic)
+   - REWRITE (keep intent, but make short, specific, and verifiable)
+   - MOVE TO “Needs human confirmation” (might be true but you cannot verify)
+D) Recompose the final instruction file(s) into exactly this structure (tight bullets, minimal prose):
+   - Non-obvious requirements (must follow)
+   - Landmines / gotchas (things that fail silently)
+   - Verification / definition of done
+   - Updating this file (drift policy)
+   - Needs human confirmation (temporary; keep very short)
+E) Drift policy (must be explicit and enforced):
+   - Start small.
+   - Add a bullet ONLY after you observe a real agent/user failure that wasn’t obvious from code/config.
+   - Remove a bullet once the underlying issue is fixed or becomes obvious in code/config.
+F) Output:
+   1) A `git diff` showing the edits.
+   2) A brief changelog: what you removed, what you kept, what you rewrote, and any “needs confirmation” items (including what evidence was missing).
 
-Trigger phrases:
-- "update AGENTS.md"
-- "audit instruction drift"
-- "reduce AGENTS.md bloat"
-- "these repo instructions are stale/wrong"
-- "enforce CLAUDE.md symlink"
-- "add a new landmine/gotcha to agent instructions"
-
-## Non-obvious requirements (must follow)
-- `AGENTS.md` files are the source of truth; any `CLAUDE.md` in this repo should be a symlink to the nearest-scope `AGENTS.md`.
-- Avoid branch/history-changing git commands (`checkout`, `switch`, `merge`, `rebase`) unless the user explicitly requests them.
-- For Sunnypilot Qt UI (`sunnypilot/` and `selfdrive/ui/sunnypilot/`), prefer `*SP` widgets from `selfdrive/ui/sunnypilot/qt/widgets/controls.h`.
-- Offroad settings UI must follow `docs/chauffeur/ui/bsg/offroad/offroad_settings_bsg.md`.
-- Keep raw artifacts untracked under `.cache/` (`.gitignore` includes it); never commit secrets or personal drive logs.
-
-## Landmines / gotchas (things that fail silently)
-- `pytest` runs with strict/parallel defaults (see `pyproject.toml`): `-Werror`, `--strict-markers`, and `-n auto`.
-- Repo-root `pytest` intentionally ignores some subtrees via `pyproject.toml` `addopts --ignore=...` (e.g. `tinygrad_repo/`); confirm your changes are actually exercised by the tests you ran.
-- If you add a new pytest marker, also add it to `pyproject.toml` `[tool.pytest.ini_options].markers` (strict markers are enforced).
-- Claude Code installs a hook that denies branch-changing git commands (`.claude/hooks/block-branch-changes.py`); use `git show origin/<branch>:path` / `git diff <current>..origin/<branch>` when you only need to inspect.
-
-## Needs human confirmation (temporary; keep very short)
-- Any workflow expectations that live outside this repo (device deployment steps, protected branch name(s), etc.).
-
-## Workflow Orchestration
-
-### 1. Plan Mode Default
-- Enter plan mode for ANY non-trivial task (3+ steps or architectural decisions)
-- If something goes sideways, STOP and re-plan immediately
-- Use plan mode for verification steps, not just building
-- Write detailed specs upfront to reduce ambiguity
-
-### 2. Subagent Strategy
-- Use subagents liberally to keep main context window clean
-- Offload research, exploration, and parallel analysis to subagents
-- For complex problems, throw more compute at it via subagents
-- One task per subagent for focused execution
-
-### 3. Self-Improvement Loop
-- After ANY correction from the user: update tasks/lessons.md with the pattern
-- Write rules for yourself that prevent the same mistake
-- Ruthlessly iterate on these lessons until mistake rate drops
-- Review lessons at session start for relevant project
-
-### 4. Verification Before Done
-- Never mark a task complete without proving it works
-- Diff behavior between main and your changes when relevant
-- Ask yourself: "Would a staff engineer approve this?"
-- Run tests, check logs, demonstrate correctness
-
-### 5. Demand Elegance (Balanced)
-- For non-trivial changes: pause and ask "is there a more elegant way?"
-- If a fix feels hacky: "Knowing everything I know now, implement the elegant solution"
-- Skip this for simple, obvious fixes -- don't over-engineer
-- Challenge your own work before presenting it
-
-### 6. Autonomous Bug Fixing
-- When given a bug report: just fix it. Don't ask for hand-holding
-- Point at logs, errors, failing tests -- then resolve them
-- Zero context switching required from the user
-- Go fix failing CI tests without being told how
-
-## Task Management
-
-1. Plan First: Write plan to tasks/todo.md with checkable items
-2. Verify Plan: Check in before starting implementation
-3. Track Progress: Mark items complete as you go
-4. Explain Changes: High-level summary at each step
-5. Document Results: Add review section to tasks/todo.md
-6. Capture Lessons: Update tasks/lessons.md after corrections
-
-### Updating this file (drift policy)
-- Add a bullet only after a real agent/user failure that was not prevented by existing tooling/tests.
-- Prefer concrete, locally verifiable guidance (exact file path, command, or config key).
-- Remove bullets once the underlying footgun is fixed in code/config or becomes obvious from repo defaults.
-
-## Core Principles
-
-- Simplicity First: Make every change as simple as possible. Impact minimal code.
-- No Laziness: Find root causes. No temporary fixes. Senior developer standards.
-- Minimal Impact: Only touch what's necessary. No side effects with new bugs.
-
-## Device access
-- SSH profiles (in `~/.ssh/config`; which one works depends on current network/SSID):
-  - `commaHome` — home Wi-Fi (192.168.1.172)
-  - `commaCar` — car hotspot (192.168.0.229)
-  - `commaAdb` — USB via adb port-forward (127.0.0.1:2222, key `~/.ssh/id_comma_device`)
-- All use user `comma`. `sudo` requires no password (NOPASSWD).
-- Repo on device: `/data/openpilot` (tracks `chauffeur-dev4`).
-- Tici only: the device build venv is `/usr/local/venv`; use `source /usr/local/venv/bin/activate` and `/usr/local/venv/bin/scons` rather than assuming `scons` is on `PATH`.
-- Deploy workflow: `git push` from dev machine, then `ssh <profile> "cd /data/openpilot && git pull && sudo reboot"`.
-
-## Verification / definition of done
-- Run the smallest relevant check for your change:
-  - Python: `pytest <touched_dir_or_test_file>`
-  - Quick suite (skip slow): `pytest -m 'not slow'`
-  - Lint/types: `scripts/lint/lint.sh`
-  - C/C++/Qt/SCons: `scons -j$(nproc)`
-- Confirm `git diff` only contains intended source/docs (no accidental `*.o` or `moc_*.cc` churn).
+Constraints:
+- Do not modify application code in this task—only instruction/memory files.
+- Do not introduce speculative repo “facts.” If you can’t point to repo evidence, don’t assert it.

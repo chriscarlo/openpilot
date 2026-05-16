@@ -6,14 +6,13 @@ from pathlib import Path
 
 from .closed_loop import run_harness
 from .config import FRIENDLY_PARAM_NAMES, NOISE_PROFILES, NoiseSeeds, resolve_ev6_vehicle_config
-from .inputs import build_synthetic_scenario, load_snapshot_bundle
+from .inputs import SCENARIO_NAMES, build_synthetic_scenario, load_snapshot_bundle
 
 
 def build_parser() -> argparse.ArgumentParser:
   parser = argparse.ArgumentParser(description="EV6 CAN FD longitudinal dev harness")
   parser.add_argument("--mode", choices=("synthetic-ev6", "snapshot"), default="synthetic-ev6")
-  parser.add_argument("--scenario", default="approach",
-                      choices=("approach", "pullaway", "cutin", "dangerous_cutin", "handoff", "duplicate_pair", "dropout", "cruise_lead_handoff", "oscillating"))
+  parser.add_argument("--scenario", default="approach", choices=SCENARIO_NAMES)
   parser.add_argument("--snapshot", type=Path, default=None, help="Snapshot bundle directory for --mode snapshot")
   parser.add_argument("--topology", choices=("lka", "lfa"), default="lfa")
   parser.add_argument("--controller-mode", choices=("auto", "passthrough", "shaped"), default="auto")

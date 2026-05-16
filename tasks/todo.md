@@ -1,3 +1,17 @@
+# EV6 Performance Telemetry Architecture
+
+- [x] Survey existing docs and EV6 telemetry code paths.
+- [x] Validate signal availability and timing assumptions against code.
+- [x] Map daemon, cereal, process, logging, UI, and storage architecture.
+- [x] Write architecture document under `docs/chauffeur`.
+- [x] Review references, spelling, and git diff scope.
+
+## Review
+
+- Added `docs/chauffeur/performance_telemetry/ev6_performance_telemetry_architecture.md`.
+- Verified referenced existing source/documentation paths exist.
+- `git diff --check -- docs/chauffeur/performance_telemetry/ev6_performance_telemetry_architecture.md tasks/todo.md` reported no whitespace errors; Windows CRLF normalization warning remains for `tasks/todo.md`.
+
 # Longitudinal Windows Test Usability
 
 - [x] Repair tracked symlinks for the Windows GUI checkout.
