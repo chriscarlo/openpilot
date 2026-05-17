@@ -7,7 +7,7 @@ import cereal.messaging as messaging
 import pytest
 
 from openpilot.common.params import Params
-from openpilot.sunnypilot.objectd.backend import BackendError, SnpeYoloDetector
+from openpilot.sunnypilot.objectd.backend import BackendError, QnnNetRunYoloDetector, SnpeYoloDetector
 from openpilot.sunnypilot.objectd.prepare_yolo11n_assets import build_metadata
 from openpilot.system.manager.process_config import managed_processes, object_hazard_enabled
 
@@ -41,10 +41,11 @@ def test_object_hazard_param_defaults_enabled():
 def test_yolo11n_asset_metadata_matches_backend_contract():
   metadata = build_metadata("0" * 64)
 
+  assert metadata["export_runtime"] == "QNN_DLC"
   assert metadata["input_name"] == "image"
   assert metadata["input_width"] == 640
   assert metadata["input_height"] == 640
-  assert metadata["input_layout"] == "NCHW"
+  assert metadata["input_layout"] == "NHWC"
   assert metadata["prediction_count"] == 8400
   assert metadata["attributes"] == 84
   assert metadata["prediction_layout"] == "attributes_first"
@@ -52,11 +53,25 @@ def test_yolo11n_asset_metadata_matches_backend_contract():
   assert metadata["hazard_labels"] == ["bicycle", "cow", "dog", "horse", "person", "sheep"]
 
 
+def test_yolo11n_asset_metadata_allows_snpe_assets():
+  metadata = build_metadata("0" * 64, export_runtime="SNPE_DLC")
+
+  assert metadata["export_runtime"] == "SNPE_DLC"
+  assert metadata["input_layout"] == "NCHW"
+
+
 def test_snpe_backend_rejects_qnn_assets_before_loading_model():
   SnpeYoloDetector._validate_export_runtime({})
 
   with pytest.raises(BackendError, match="QNN_DLC"):
     SnpeYoloDetector._validate_export_runtime({"export_runtime": "QNN_DLC"})
+
+
+def test_qnn_backend_only_accepts_qnn_dlc_assets():
+  QnnNetRunYoloDetector._validate_export_runtime({"export_runtime": "QNN_DLC"})
+
+  with pytest.raises(BackendError, match="SNPE_DLC"):
+    QnnNetRunYoloDetector._validate_export_runtime({"export_runtime": "SNPE_DLC"})
 
 
 def test_object_hazard_messages_expose_new_schema_fields():

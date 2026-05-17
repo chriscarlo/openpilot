@@ -3,6 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -54,24 +57,18 @@ class NullDetectorBackend:
     return []
 
 
-class SnpeYoloDetector:
-  def __init__(self, runtime_name: str):
-    if SNPEModel is None or Runtime is None or CLContext is None:
-      raise BackendError("SNPE model runner extensions are not available")
+class YoloDetectorBase:
+  def _init_detector_config(self) -> None:
     if cv2 is None:
       raise BackendError("opencv-python-headless is required for objectd preprocessing")
-
-    self.runtime_name = runtime_name.lower()
-    if self.runtime_name not in {"gpu", "dsp"}:
-      raise BackendError(f"unsupported objectd runtime '{runtime_name}'")
 
     self.model_dir = Path(os.getenv("OBJECTD_MODEL_DIR", DEFAULT_MODEL_DIR))
     self.model_path = Path(os.getenv("OBJECTD_MODEL_PATH", self.model_dir / "model.dlc"))
     self.metadata_path = Path(os.getenv("OBJECTD_MODEL_METADATA", self.model_dir / "metadata.json"))
     metadata = self._load_metadata(self.metadata_path)
-    self._validate_export_runtime(metadata)
     self._verify_sha256(self.model_path, metadata.get("model_sha256"))
 
+    self.export_runtime = self._normalize_export_runtime(metadata)
     self.input_name = str(metadata["input_name"])
     self.input_width = int(metadata["input_width"])
     self.input_height = int(metadata["input_height"])
@@ -84,23 +81,23 @@ class SnpeYoloDetector:
     self.iou_threshold = float(metadata.get("iou_threshold", 0.45))
     self.labels = list(metadata.get("labels", COCO_80_LABELS))
     self.hazard_labels = set(metadata.get("hazard_labels", sorted(DEFAULT_HAZARD_LABELS)))
-    # Keep detector assets isolated from the shared SNPE runner assumptions by requiring a
-    # flattened output tensor ([1, N] or [N]) whose length matches prediction_count * attributes.
-    expected_output_size = self.prediction_count * self.attributes
+    self.expected_output_size = self.prediction_count * self.attributes
 
     input_channels = int(metadata.get("input_channels", 3))
     input_size = self.input_width * self.input_height * input_channels
 
-    self.output = np.zeros(expected_output_size, dtype=np.float32)
+    self.output = np.zeros(self.expected_output_size, dtype=np.float32)
     self.input = np.zeros(input_size, dtype=np.float32)
-    self.context = CLContext()
-    runtime = Runtime.GPU if self.runtime_name == "gpu" else Runtime.DSP
-    self.model = SNPEModel(str(self.model_path), self.output, runtime, False, self.context)
-    self.model.addInput(self.input_name, self.input)
-    self.backend_name = f"snpe_{self.runtime_name}"
-    self.ready = True
 
   def infer(self, buf) -> list[Detection]:
+    rgb = self._prepare_input(buf)
+    self._execute_model()
+    return self._decode_predictions(rgb.shape[1], rgb.shape[0])
+
+  def _execute_model(self) -> None:
+    raise NotImplementedError
+
+  def _prepare_input(self, buf) -> np.ndarray:
     rgb = self._visionbuf_to_rgb(buf)
     resized = cv2.resize(rgb, (self.input_width, self.input_height), interpolation=cv2.INTER_LINEAR)
     normalized = resized.astype(np.float32) / 255.0
@@ -110,8 +107,39 @@ class SnpeYoloDetector:
       self.input[:] = normalized.reshape(-1)
     else:
       raise BackendError(f"unsupported input layout '{self.input_layout}'")
-    self.model.execute()
-    return self._decode_predictions(rgb.shape[1], rgb.shape[0])
+    return rgb
+
+  @staticmethod
+  def _normalize_export_runtime(metadata: dict) -> str:
+    return str(metadata.get("export_runtime", "SNPE_DLC")).upper()
+
+  @staticmethod
+  def _load_metadata(path: Path) -> dict:
+    if not path.is_file():
+      raise BackendError(f"objectd metadata not found at {path}")
+    with path.open() as f:
+      metadata = json.load(f)
+    required_keys = {"input_name", "input_width", "input_height", "prediction_count", "attributes"}
+    missing = required_keys - metadata.keys()
+    if missing:
+      raise BackendError(f"objectd metadata missing keys: {sorted(missing)}")
+    return metadata
+
+  @staticmethod
+  def _verify_sha256(path: Path, expected: str | None) -> None:
+    if not path.is_file():
+      raise BackendError(f"objectd model not found at {path}")
+    if not expected:
+      return
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    if digest.lower() != expected.lower():
+      raise BackendError(f"objectd model checksum mismatch for {path}")
+
+  @staticmethod
+  def _visionbuf_to_rgb(buf) -> np.ndarray:
+    frame = np.frombuffer(buf.data, dtype=np.uint8).reshape((-1, buf.stride))
+    yuv = frame[:buf.height + buf.height // 2, :buf.width]
+    return cv2.cvtColor(yuv, cv2.COLOR_YUV2RGB_NV12)
 
   def _decode_predictions(self, source_width: int, source_height: int) -> list[Detection]:
     predictions = self.output.reshape(self.attributes, self.prediction_count)
@@ -195,23 +223,27 @@ class SnpeYoloDetector:
     union = max(area_a + area_b - intersection, 1e-6)
     return intersection / union
 
-  @staticmethod
-  def _visionbuf_to_rgb(buf) -> np.ndarray:
-    frame = np.frombuffer(buf.data, dtype=np.uint8).reshape((-1, buf.stride))
-    yuv = frame[:buf.height + buf.height // 2, :buf.width]
-    return cv2.cvtColor(yuv, cv2.COLOR_YUV2RGB_NV12)
 
-  @staticmethod
-  def _load_metadata(path: Path) -> dict:
-    if not path.is_file():
-      raise BackendError(f"objectd metadata not found at {path}")
-    with path.open() as f:
-      metadata = json.load(f)
-    required_keys = {"input_name", "input_width", "input_height", "prediction_count", "attributes"}
-    missing = required_keys - metadata.keys()
-    if missing:
-      raise BackendError(f"objectd metadata missing keys: {sorted(missing)}")
-    return metadata
+class SnpeYoloDetector(YoloDetectorBase):
+  def __init__(self, runtime_name: str):
+    if SNPEModel is None or Runtime is None or CLContext is None:
+      raise BackendError("SNPE model runner extensions are not available")
+
+    self.runtime_name = runtime_name.lower()
+    if self.runtime_name not in {"gpu", "dsp"}:
+      raise BackendError(f"unsupported objectd runtime '{runtime_name}'")
+
+    self._init_detector_config()
+    self._validate_export_runtime({"export_runtime": self.export_runtime})
+    self.context = CLContext()
+    runtime = Runtime.GPU if self.runtime_name == "gpu" else Runtime.DSP
+    self.model = SNPEModel(str(self.model_path), self.output, runtime, False, self.context)
+    self.model.addInput(self.input_name, self.input)
+    self.backend_name = f"snpe_{self.runtime_name}"
+    self.ready = True
+
+  def _execute_model(self) -> None:
+    self.model.execute()
 
   @staticmethod
   def _validate_export_runtime(metadata: dict) -> None:
@@ -221,15 +253,77 @@ class SnpeYoloDetector:
         f"objectd model export_runtime '{export_runtime}' is not supported by the SNPE backend"
       )
 
+
+class QnnNetRunYoloDetector(YoloDetectorBase):
+  def __init__(self):
+    self._init_detector_config()
+    self._validate_export_runtime({"export_runtime": self.export_runtime})
+    self.qnn_net_run = self._resolve_executable(os.getenv("OBJECTD_QNN_NET_RUN", "qnn-net-run"))
+    self.qnn_backend = os.getenv("OBJECTD_QNN_BACKEND", "libQnnHtp.so")
+    self.qnn_model_dlc_lib = os.getenv("OBJECTD_QNN_MODEL_DLC_LIB", "libQnnModelDlc.so")
+    self.timeout = float(os.getenv("OBJECTD_QNN_TIMEOUT", "5.0"))
+    self._workdir = tempfile.TemporaryDirectory(prefix="objectd-qnn-")
+    self.backend_name = "qnn_net_run"
+    self.ready = True
+
+  def _execute_model(self) -> None:
+    workdir = Path(self._workdir.name)
+    input_path = workdir / "image.raw"
+    input_list_path = workdir / "input_list.txt"
+    output_dir = workdir / "output"
+    if output_dir.exists():
+      shutil.rmtree(output_dir)
+    output_dir.mkdir()
+
+    self.input.astype(np.float32, copy=False).tofile(input_path)
+    input_list_path.write_text(str(input_path) + "\n", encoding="utf-8")
+
+    cmd = [
+      self.qnn_net_run,
+      "--backend", self.qnn_backend,
+      "--model", self.qnn_model_dlc_lib,
+      "--dlc_path", str(self.model_path),
+      "--input_list", str(input_list_path),
+      "--output_dir", str(output_dir),
+    ]
+    try:
+      completed = subprocess.run(cmd, cwd=workdir, capture_output=True, text=True,
+                                 timeout=self.timeout, check=False)
+    except subprocess.TimeoutExpired as err:
+      raise BackendError(f"qnn-net-run timed out after {self.timeout:.1f}s") from err
+
+    if completed.returncode != 0:
+      stderr = completed.stderr.strip() or completed.stdout.strip()
+      raise BackendError(f"qnn-net-run failed with code {completed.returncode}: {stderr[-500:]}")
+
+    self.output[:] = self._read_qnn_output(output_dir)
+
+  def _read_qnn_output(self, output_dir: Path) -> np.ndarray:
+    expected_bytes = self.expected_output_size * np.dtype(np.float32).itemsize
+    raw_outputs = sorted(output_dir.rglob("*.raw"))
+    for raw_output in raw_outputs:
+      if raw_output.stat().st_size == expected_bytes:
+        return np.fromfile(raw_output, dtype=np.float32, count=self.expected_output_size)
+    sizes = {str(path): path.stat().st_size for path in raw_outputs}
+    raise BackendError(f"qnn-net-run did not produce expected {expected_bytes}-byte output; saw {sizes}")
+
   @staticmethod
-  def _verify_sha256(path: Path, expected: str | None) -> None:
-    if not path.is_file():
-      raise BackendError(f"objectd model not found at {path}")
-    if not expected:
-      return
-    digest = hashlib.sha256(path.read_bytes()).hexdigest()
-    if digest.lower() != expected.lower():
-      raise BackendError(f"objectd model checksum mismatch for {path}")
+  def _validate_export_runtime(metadata: dict) -> None:
+    export_runtime = str(metadata.get("export_runtime", "")).upper()
+    if export_runtime != "QNN_DLC":
+      raise BackendError(
+        f"objectd model export_runtime '{export_runtime or 'UNKNOWN'}' is not supported by the qnn_net_run backend"
+      )
+
+  @staticmethod
+  def _resolve_executable(name: str) -> str:
+    path = Path(name)
+    if path.is_file():
+      return str(path)
+    resolved = shutil.which(name)
+    if resolved is not None:
+      return resolved
+    raise BackendError(f"qnn-net-run executable not found at '{name}'")
 
 
 def build_detector_backend():
@@ -240,4 +334,6 @@ def build_detector_backend():
     return SnpeYoloDetector("gpu")
   if backend_name == "snpe_dsp":
     return SnpeYoloDetector("dsp")
+  if backend_name in {"qnn", "qnn_net_run"}:
+    return QnnNetRunYoloDetector()
   raise BackendError(f"unsupported OBJECTD_BACKEND '{backend_name}'")
