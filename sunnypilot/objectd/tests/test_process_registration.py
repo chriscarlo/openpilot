@@ -4,8 +4,10 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import cereal.messaging as messaging
+import pytest
 
 from openpilot.common.params import Params
+from openpilot.sunnypilot.objectd.backend import BackendError, SnpeYoloDetector
 from openpilot.sunnypilot.objectd.prepare_yolo11n_assets import build_metadata
 from openpilot.system.manager.process_config import managed_processes, object_hazard_enabled
 
@@ -48,6 +50,13 @@ def test_yolo11n_asset_metadata_matches_backend_contract():
   assert metadata["prediction_layout"] == "attributes_first"
   assert metadata["has_objectness"] is False
   assert metadata["hazard_labels"] == ["bicycle", "cow", "dog", "horse", "person", "sheep"]
+
+
+def test_snpe_backend_rejects_qnn_assets_before_loading_model():
+  SnpeYoloDetector._validate_export_runtime({})
+
+  with pytest.raises(BackendError, match="QNN_DLC"):
+    SnpeYoloDetector._validate_export_runtime({"export_runtime": "QNN_DLC"})
 
 
 def test_object_hazard_messages_expose_new_schema_fields():

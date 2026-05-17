@@ -10,6 +10,7 @@
 
 - `objectd` only starts when onroad, `CP.notCar` is false, and `ObjectHazardEnabled` is true; the default for `ObjectHazardEnabled` is `"1"` in `common/params_keys.h`.
 - `objectd` defaults to `OBJECTD_BACKEND=snpe_gpu` and expects model assets at `.cache/objectd/yolo11n/model.dlc` plus `.cache/objectd/yolo11n/metadata.json` unless `OBJECTD_MODEL_*` env vars override the paths.
+- Qualcomm AI Hub `QNN_DLC` exports are not SNPE-loadable on the current tici; the SNPE runner reports model format `4.1.0` and loops, so reject QNN metadata before constructing `SNPEModel`.
 - A healthy detector publish is not enough: verify planner wiring from `objectHazardStateSP` through `LongitudinalPlannerSP.object_hazard`, `longitudinalPlanSP.objectHazardControl`, and main `longitudinalPlan.shouldStop`.
 - Windows-only pytest failures from missing native/generated modules are not device evidence; report the exact missing import separately from code-health findings.
 

@@ -69,6 +69,7 @@ class SnpeYoloDetector:
     self.model_path = Path(os.getenv("OBJECTD_MODEL_PATH", self.model_dir / "model.dlc"))
     self.metadata_path = Path(os.getenv("OBJECTD_MODEL_METADATA", self.model_dir / "metadata.json"))
     metadata = self._load_metadata(self.metadata_path)
+    self._validate_export_runtime(metadata)
     self._verify_sha256(self.model_path, metadata.get("model_sha256"))
 
     self.input_name = str(metadata["input_name"])
@@ -211,6 +212,14 @@ class SnpeYoloDetector:
     if missing:
       raise BackendError(f"objectd metadata missing keys: {sorted(missing)}")
     return metadata
+
+  @staticmethod
+  def _validate_export_runtime(metadata: dict) -> None:
+    export_runtime = str(metadata.get("export_runtime", "SNPE_DLC")).upper()
+    if export_runtime.startswith("QNN") or export_runtime == "PRECOMPILED_QNN_ONNX":
+      raise BackendError(
+        f"objectd model export_runtime '{export_runtime}' is not supported by the SNPE backend"
+      )
 
   @staticmethod
   def _verify_sha256(path: Path, expected: str | None) -> None:
