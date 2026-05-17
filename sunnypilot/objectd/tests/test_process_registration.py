@@ -5,6 +5,8 @@ from unittest.mock import Mock
 
 import cereal.messaging as messaging
 
+from openpilot.common.params import Params
+from openpilot.sunnypilot.objectd.prepare_yolo11n_assets import build_metadata
 from openpilot.system.manager.process_config import managed_processes, object_hazard_enabled
 
 
@@ -28,6 +30,24 @@ def test_object_hazard_enabled_requires_onroad_param_and_real_car():
   params.get_bool.return_value = True
   assert object_hazard_enabled(False, params, cp) is False
   assert object_hazard_enabled(True, params, SimpleNamespace(notCar=True)) is False
+
+
+def test_object_hazard_param_defaults_enabled():
+  assert Params().get("ObjectHazardEnabled", return_default=True) is True
+
+
+def test_yolo11n_asset_metadata_matches_backend_contract():
+  metadata = build_metadata("0" * 64)
+
+  assert metadata["input_name"] == "image"
+  assert metadata["input_width"] == 640
+  assert metadata["input_height"] == 640
+  assert metadata["input_layout"] == "NCHW"
+  assert metadata["prediction_count"] == 8400
+  assert metadata["attributes"] == 84
+  assert metadata["prediction_layout"] == "attributes_first"
+  assert metadata["has_objectness"] is False
+  assert metadata["hazard_labels"] == ["bicycle", "cow", "dog", "horse", "person", "sheep"]
 
 
 def test_object_hazard_messages_expose_new_schema_fields():

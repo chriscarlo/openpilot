@@ -614,7 +614,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"RTIAudioAlerts", {PERSISTENT | BACKUP, BOOL}},
     {"RTIManualApiEndpoint", {PERSISTENT | BACKUP, STRING}},
     {"RTIManualApiKey", {PERSISTENT | BACKUP | DONT_LOG, STRING}},
-    {"ObjectHazardEnabled", {PERSISTENT | BACKUP, BOOL, "0"}},
+    {"ObjectHazardEnabled", {PERSISTENT | BACKUP, BOOL, "1"}},
 
     // Weather-Aware Speed Control
     {"WeatherAwareControlEnabled", {PERSISTENT | BACKUP, BOOL, "0"}},

@@ -5,8 +5,6 @@ from typing import Iterable
 
 import numpy as np
 
-from openpilot.common.transformations.camera import DEVICE_CAMERAS, view_frame_from_device_frame
-from openpilot.common.transformations.orientation import rot_from_euler
 from openpilot.sunnypilot.objectd.types import Detection
 
 DEFAULT_CAMERA_HEIGHT_M = 1.22
@@ -50,6 +48,9 @@ class HazardTracker:
 
 
 def build_road_calibration_transform(device_type: str, sensor: str, rpy_calib: Iterable[float]) -> np.ndarray:
+  from openpilot.common.transformations.camera import DEVICE_CAMERAS, view_frame_from_device_frame
+  from openpilot.common.transformations.orientation import rot_from_euler
+
   device_from_calib = rot_from_euler(np.asarray(tuple(rpy_calib), dtype=np.float32))
   intrinsics = DEVICE_CAMERAS[(device_type, sensor)].fcam.intrinsics
   return intrinsics @ view_frame_from_device_frame @ device_from_calib

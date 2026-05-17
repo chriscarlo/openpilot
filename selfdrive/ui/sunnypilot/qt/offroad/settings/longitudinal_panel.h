@@ -74,6 +74,7 @@ private:
   ParamControlSP *vibeFollowPersonalityControl;
   VibeTuningControl *vibeTuningControl = nullptr;
   VibeTuningPanel *vibeTuningScreen = nullptr;
+  ParamControlSP *objectHazardControl = nullptr;
   
   // RTI controls
   RTIControl *rtiControl;

@@ -72,6 +72,13 @@ LongitudinalPanel::LongitudinalPanel(QWidget *parent) : QWidget(parent) {
   slcControl = new SpeedLimitControl(this);
   list->addItem(slcControl);
 
+  objectHazardControl = new ParamControlSP("ObjectHazardEnabled",
+    tr("Object Hazard Detection"),
+    tr("Use the road camera to slow or stop for detected pedestrians, bicycles, and animal hazards in the projected driving path."),
+    "", nullptr, false, false);
+  objectHazardControl->showDescription();
+  list->addItem(objectHazardControl);
+
   // RTI Control
   rtiControl = new RTIControl(this);
   list->addItem(rtiControl);
@@ -225,6 +232,7 @@ void LongitudinalPanel::refresh(bool _offroad) {
   vibeAccelPersonalityControl->refresh();
   vibeFollowPersonalityControl->refresh();
   vibeTuningControl->refresh();
+  objectHazardControl->refresh();
 
   offroad = _offroad;
 }

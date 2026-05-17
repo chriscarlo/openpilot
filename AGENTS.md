@@ -1,41 +1,31 @@
-You are an AI coding agent working inside this repository.
-Project scope: This repository work is only concerned with the 2023 CAN-FD HDA2 Kia EV6; for this project, treat it as using Hyundai code and logic.
-Task: Modify the repository’s agent instruction file(s) so they maximize correctness/competence and minimize failure modes from redundant or stale guidance.
+# Chauffeur Agent Instructions
 
-What to edit (detect what exists; do not guess):
-- Codex-style: `AGENTS.md` (and `AGENTS.override.md` if present).
-- Claude Code-style: `CLAUDE.md` or `.claude/CLAUDE.md` (plus any `.claude/rules/*.md` if the project uses modular rules).
-- If both ecosystems are present, keep guidance consistent while avoiding duplication. If practical, choose one canonical source of truth and have the other reference it (e.g., Claude can import files).
+## Non-obvious requirements (must follow)
 
-Principles you MUST apply when deciding what stays:
-1) Correctness over convenience: Every line must plausibly affect whether tasks are solved correctly (not just faster).
-2) No “repo encyclopedia”: Remove directory trees, module listings, architecture essays, dependency lists, or general framework primers. If the agent can infer it by reading files/config, it does not belong here.
-3) No stale anchoring: Agents strongly follow what these files say. Any claim that cannot be verified from the repo (or is likely to drift) must be removed or quarantined.
-4) Be specific and verifiable: Replace vague advice (“follow best practices”) with concrete, testable instructions (exact commands/flags/paths) and an explicit verification step.
-5) Keep it short and front-loaded: Use headings + bullet points. Put the highest-impact constraints at the top. If detail is necessary, move it into modular rule files or a skill, not the main entrypoint.
+- Project scope is the 2023 CAN-FD HDA2 Kia EV6; treat vehicle behavior as Hyundai code/logic unless the user explicitly expands scope.
+- For object-hazard work, read `.codex/skills/object-hazard-live-monitor/SKILL.md` before changing code or judging live behavior.
+- Keep object-hazard reviews on the actual pipeline: `sunnypilot/objectd/`, `sunnypilot/selfdrive/controls/lib/object_hazard_controller.py`, `sunnypilot/selfdrive/controls/lib/longitudinal_planner.py`, `selfdrive/controls/lib/longitudinal_planner.py`, `selfdrive/controls/plannerd.py`, `system/manager/process_config.py`, `cereal/custom.capnp`, and `cereal/services.py`.
 
-Process (do this in-repo, using file inspection, not assumptions):
-A) Inventory: Locate all instruction/memory files relevant to this repo (see “What to edit”).
-B) Read them end-to-end.
-C) For each section/bullet, label it as one of:
-   - KEEP (non-obvious + high impact on correctness + verifiable)
-   - DELETE (overview/redundant/obvious/generic)
-   - REWRITE (keep intent, but make short, specific, and verifiable)
-   - MOVE TO “Needs human confirmation” (might be true but you cannot verify)
-D) Recompose the final instruction file(s) into exactly this structure (tight bullets, minimal prose):
-   - Non-obvious requirements (must follow)
-   - Landmines / gotchas (things that fail silently)
-   - Verification / definition of done
-   - Updating this file (drift policy)
-   - Needs human confirmation (temporary; keep very short)
-E) Drift policy (must be explicit and enforced):
-   - Start small.
-   - Add a bullet ONLY after you observe a real agent/user failure that wasn’t obvious from code/config.
-   - Remove a bullet once the underlying issue is fixed or becomes obvious in code/config.
-F) Output:
-   1) A `git diff` showing the edits.
-   2) A brief changelog: what you removed, what you kept, what you rewrote, and any “needs confirmation” items (including what evidence was missing).
+## Landmines / gotchas (things that fail silently)
 
-Constraints:
-- Do not modify application code in this task—only instruction/memory files.
-- Do not introduce speculative repo “facts.” If you can’t point to repo evidence, don’t assert it.
+- `objectd` only starts when onroad, `CP.notCar` is false, and `ObjectHazardEnabled` is true; the default for `ObjectHazardEnabled` is `"1"` in `common/params_keys.h`.
+- `objectd` defaults to `OBJECTD_BACKEND=snpe_gpu` and expects model assets at `.cache/objectd/yolo11n/model.dlc` plus `.cache/objectd/yolo11n/metadata.json` unless `OBJECTD_MODEL_*` env vars override the paths.
+- A healthy detector publish is not enough: verify planner wiring from `objectHazardStateSP` through `LongitudinalPlannerSP.object_hazard`, `longitudinalPlanSP.objectHazardControl`, and main `longitudinalPlan.shouldStop`.
+- Windows-only pytest failures from missing native/generated modules are not device evidence; report the exact missing import separately from code-health findings.
+
+## Verification / definition of done
+
+- For instruction-file edits: run `python .agents/skills/context-file-librarian/scripts/audit_context_files.py` and show `git diff -- AGENTS.md CLAUDE.md .claude/CLAUDE.md`.
+- For object-hazard code review without device access: run `python -m compileall -q sunnypilot\objectd sunnypilot\selfdrive\controls\lib\object_hazard_controller.py`.
+- Also run the focused tests when the local environment supports them: `python -m pytest sunnypilot/objectd/tests/test_process_registration.py sunnypilot/objectd/tests/test_path_association.py sunnypilot/selfdrive/controls/lib/tests/test_object_hazard_controller.py sunnypilot/selfdrive/controls/lib/tests/test_object_hazard_pipeline.py`.
+
+## Updating this file (drift policy)
+
+- Start small.
+- Add a bullet only after observing a real agent/user failure that was not obvious from code/config.
+- Remove a bullet once the underlying issue is fixed or becomes obvious in code/config.
+- Keep commands and paths verifiable in this repo; move uncertain deployment facts to "Needs human confirmation".
+
+## Needs human confirmation (temporary; keep very short)
+
+- Before the next tici test, confirm the object-hazard model assets exist on device or that `OBJECTD_MODEL_PATH` and `OBJECTD_MODEL_METADATA` point to valid files; this repo does not track those assets, so re-check the external source or use a saved Qualcomm AI Hub export artifact.
