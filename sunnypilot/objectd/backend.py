@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import zipfile
 from pathlib import Path
 
 import numpy as np
@@ -237,6 +238,7 @@ class SnpeYoloDetector(YoloDetectorBase):
 
     self._init_detector_config()
     self._validate_export_runtime({"export_runtime": self.export_runtime})
+    self._validate_dlc_compatibility(self.model_path)
     self.context = CLContext()
     runtime = Runtime.GPU if self.runtime_name == "gpu" else Runtime.DSP
     self.model = SNPEModel(str(self.model_path), self.output, runtime, False, self.context)
@@ -254,6 +256,27 @@ class SnpeYoloDetector(YoloDetectorBase):
       raise BackendError(
         f"objectd model export_runtime '{export_runtime}' is not supported by the SNPE backend"
       )
+
+  @staticmethod
+  def _validate_dlc_compatibility(model_path: Path) -> None:
+    try:
+      with zipfile.ZipFile(model_path) as dlc:
+        metadata_name = next((name for name in dlc.namelist() if name.startswith("dlc.metadata")), None)
+        if metadata_name is None:
+          return
+        dlc_metadata = json.loads(dlc.read(metadata_name))
+    except (OSError, zipfile.BadZipFile, json.JSONDecodeError) as err:
+      raise BackendError(f"objectd SNPE DLC metadata is unreadable: {err}") from err
+
+    for generation in dlc_metadata.get("dlcGenerationInfo", []):
+      command = generation.get("converterCommand", {})
+      converter_version = str(command.get("converterVersion", ""))
+      major_version = converter_version.split(".", 1)[0]
+      if major_version.isdigit() and int(major_version) >= 2:
+        raise BackendError(
+          "objectd SNPE DLC was produced by QAIRT/SNPE converter "
+          f"{converter_version}, but the bundled tici SNPE runtime is 1.61.x and loops on model format 4.1.0"
+        )
 
 
 class QnnNetRunYoloDetector(YoloDetectorBase):

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import zipfile
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -73,6 +75,33 @@ def test_snpe_backend_rejects_qnn_assets_before_loading_model():
 
   with pytest.raises(BackendError, match="QNN_DLC"):
     SnpeYoloDetector._validate_export_runtime({"export_runtime": "QNN_DLC"})
+
+
+def test_snpe_backend_rejects_qairt_2_dlc_before_loading_model(tmp_path):
+  model_path = tmp_path / "model.dlc"
+  dlc_metadata = {
+    "dlcGenerationInfo": [
+      {"converterCommand": {"converterVersion": "2.42.0.251225135753_193295"}},
+    ],
+  }
+  with zipfile.ZipFile(model_path, "w", compression=zipfile.ZIP_STORED) as dlc:
+    dlc.writestr("dlc.metadata2.1.0", json.dumps(dlc_metadata))
+
+  with pytest.raises(BackendError, match="SNPE runtime is 1.61"):
+    SnpeYoloDetector._validate_dlc_compatibility(model_path)
+
+
+def test_snpe_backend_allows_legacy_converter_dlc(tmp_path):
+  model_path = tmp_path / "model.dlc"
+  dlc_metadata = {
+    "dlcGenerationInfo": [
+      {"converterCommand": {"converterVersion": "1.61.0.3358"}},
+    ],
+  }
+  with zipfile.ZipFile(model_path, "w", compression=zipfile.ZIP_STORED) as dlc:
+    dlc.writestr("dlc.metadata", json.dumps(dlc_metadata))
+
+  SnpeYoloDetector._validate_dlc_compatibility(model_path)
 
 
 def test_qnn_backend_only_accepts_qnn_dlc_assets():
