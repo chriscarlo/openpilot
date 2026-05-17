@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -58,12 +59,12 @@ class NullDetectorBackend:
 
 
 class YoloDetectorBase:
-  def _init_detector_config(self) -> None:
+  def _init_detector_config(self, default_model_name: str = "model.dlc") -> None:
     if cv2 is None:
       raise BackendError("opencv-python-headless is required for objectd preprocessing")
 
     self.model_dir = Path(os.getenv("OBJECTD_MODEL_DIR", DEFAULT_MODEL_DIR))
-    self.model_path = Path(os.getenv("OBJECTD_MODEL_PATH", self.model_dir / "model.dlc"))
+    self.model_path = Path(os.getenv("OBJECTD_MODEL_PATH", self.model_dir / default_model_name))
     self.metadata_path = Path(os.getenv("OBJECTD_MODEL_METADATA", self.model_dir / "metadata.json"))
     metadata = self._load_metadata(self.metadata_path)
     self._verify_sha256(self.model_path, metadata.get("model_sha256"))
@@ -76,6 +77,7 @@ class YoloDetectorBase:
     self.prediction_count = int(metadata["prediction_count"])
     self.attributes = int(metadata["attributes"])
     self.prediction_layout = str(metadata.get("prediction_layout", "attributes_first"))
+    self.output_name = str(metadata.get("output_name", "detector_output"))
     self.has_objectness = bool(metadata.get("has_objectness", False))
     self.confidence_threshold = float(metadata.get("confidence_threshold", 0.25))
     self.iou_threshold = float(metadata.get("iou_threshold", 0.45))
@@ -326,14 +328,108 @@ class QnnNetRunYoloDetector(YoloDetectorBase):
     raise BackendError(f"qnn-net-run executable not found at '{name}'")
 
 
+class OrtQnnYoloDetector(YoloDetectorBase):
+  _EP_REGISTERED = False
+
+  def __init__(self):
+    self._add_qnn_python_path()
+    self._init_detector_config("model.onnx")
+    self._validate_export_runtime({"export_runtime": self.export_runtime})
+    try:
+      import onnxruntime as ort
+      import onnxruntime_qnn as qnn_ep
+    except ModuleNotFoundError as err:
+      raise BackendError(
+        "onnxruntime-qnn dependencies are not available; install them under "
+        f"{self._default_qnn_python_path()}"
+      ) from err
+
+    self.ort = ort
+    self.qnn_ep = qnn_ep
+    self._register_qnn_ep()
+    selected_devices = [device for device in ort.get_ep_devices() if device.ep_name == "QNNExecutionProvider"]
+    if not selected_devices:
+      raise BackendError("QNNExecutionProvider registered but no QNN EP device was discovered")
+
+    options = ort.SessionOptions()
+    options.add_session_config_entry("session.disable_cpu_ep_fallback", "1")
+    provider_options = {"backend_path": qnn_ep.get_qnn_htp_path()}
+    options.add_provider_for_devices(selected_devices, provider_options)
+    self.session = ort.InferenceSession(str(self.model_path), sess_options=options)
+    self.backend_name = "ort_qnn"
+    self.ready = True
+
+  def _execute_model(self) -> None:
+    if self.input_layout == "NHWC":
+      model_input = self.input.reshape(1, self.input_height, self.input_width, -1)
+    elif self.input_layout == "NCHW":
+      model_input = self.input.reshape(1, -1, self.input_height, self.input_width)
+    else:
+      raise BackendError(f"unsupported input layout '{self.input_layout}'")
+    result = self.session.run([self.output_name], {self.input_name: model_input})[0]
+    flat_output = np.asarray(result, dtype=np.float32).reshape(-1)
+    if flat_output.size != self.expected_output_size:
+      raise BackendError(
+        f"ort_qnn output size mismatch: expected {self.expected_output_size}, got {flat_output.size}"
+      )
+    self.output[:] = flat_output
+
+  @classmethod
+  def _register_qnn_ep(cls) -> None:
+    if cls._EP_REGISTERED:
+      return
+    import onnxruntime as ort
+    import onnxruntime_qnn as qnn_ep
+    try:
+      ort.register_execution_provider_library("QNNExecutionProvider", qnn_ep.get_library_path())
+    except Exception as err:
+      if "already registered" not in str(err).lower():
+        raise
+    cls._EP_REGISTERED = True
+
+  @staticmethod
+  def _validate_export_runtime(metadata: dict) -> None:
+    export_runtime = str(metadata.get("export_runtime", "")).upper()
+    if export_runtime != "PRECOMPILED_QNN_ONNX":
+      raise BackendError(
+        f"objectd model export_runtime '{export_runtime or 'UNKNOWN'}' is not supported by the ort_qnn backend"
+      )
+
+  @classmethod
+  def _add_qnn_python_path(cls) -> None:
+    qnn_python_path = Path(os.getenv("OBJECTD_QNN_PYTHONPATH", cls._default_qnn_python_path()))
+    if qnn_python_path.is_dir():
+      sys.path.insert(0, str(qnn_python_path))
+
+  @staticmethod
+  def _default_qnn_python_path() -> Path:
+    return DEFAULT_MODEL_DIR.parents[0] / "python"
+
+
+def _read_default_export_runtime() -> str:
+  model_dir = Path(os.getenv("OBJECTD_MODEL_DIR", DEFAULT_MODEL_DIR))
+  metadata_path = Path(os.getenv("OBJECTD_MODEL_METADATA", model_dir / "metadata.json"))
+  metadata = YoloDetectorBase._load_metadata(metadata_path)
+  return YoloDetectorBase._normalize_export_runtime(metadata)
+
+
 def build_detector_backend():
-  backend_name = os.getenv("OBJECTD_BACKEND", "snpe_gpu").lower()
+  backend_name = os.getenv("OBJECTD_BACKEND", "auto").lower()
+  if backend_name == "auto":
+    export_runtime = _read_default_export_runtime()
+    if export_runtime == "PRECOMPILED_QNN_ONNX":
+      return OrtQnnYoloDetector()
+    if export_runtime == "QNN_DLC":
+      return QnnNetRunYoloDetector()
+    return SnpeYoloDetector("gpu")
   if backend_name == "null":
     return NullDetectorBackend("forced")
   if backend_name == "snpe_gpu":
     return SnpeYoloDetector("gpu")
   if backend_name == "snpe_dsp":
     return SnpeYoloDetector("dsp")
+  if backend_name in {"ort_qnn", "qnn_ort"}:
+    return OrtQnnYoloDetector()
   if backend_name in {"qnn", "qnn_net_run"}:
-    return QnnNetRunYoloDetector()
+    return OrtQnnYoloDetector() if backend_name == "qnn" else QnnNetRunYoloDetector()
   raise BackendError(f"unsupported OBJECTD_BACKEND '{backend_name}'")
