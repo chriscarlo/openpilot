@@ -333,14 +333,7 @@ class QnnNetRunYoloDetector(YoloDetectorBase):
     self._write_qnn_input(input_path)
     input_list_path.write_text(str(input_path) + "\n", encoding="utf-8")
 
-    cmd = [
-      self.qnn_net_run,
-      "--backend", self.qnn_backend,
-      "--model", self.qnn_model_dlc_lib,
-      "--dlc_path", str(self.model_path),
-      "--input_list", str(input_list_path),
-      "--output_dir", str(output_dir),
-    ]
+    cmd = self._build_qnn_command(input_list_path, output_dir)
     try:
       completed = subprocess.run(cmd, cwd=workdir, capture_output=True, text=True,
                                  timeout=self.timeout, check=False)
@@ -352,6 +345,24 @@ class QnnNetRunYoloDetector(YoloDetectorBase):
       raise BackendError(f"qnn-net-run failed with code {completed.returncode}: {stderr[-500:]}")
 
     self.output[:] = self._read_qnn_output(output_dir)
+
+  def _build_qnn_command(self, input_list_path: Path, output_dir: Path) -> list[str]:
+    cmd = [
+      self.qnn_net_run,
+      "--backend", self.qnn_backend,
+      "--model", self.qnn_model_dlc_lib,
+      "--dlc_path", str(self.model_path),
+      "--input_list", str(input_list_path),
+      "--output_dir", str(output_dir),
+    ]
+    if self._numpy_dtype(self.input_dtype, "input") != np.dtype(np.float32):
+      cmd.append("--use_native_input_files")
+    if self._numpy_dtype(self.output_dtype, "output") != np.dtype(np.float32):
+      cmd.append("--use_native_output_files")
+    log_level = os.getenv("OBJECTD_QNN_LOG_LEVEL")
+    if log_level:
+      cmd += ["--log_level", log_level]
+    return cmd
 
   def _write_qnn_input(self, input_path: Path) -> None:
     if self.input_dtype in {"float", "float32"}:

@@ -265,6 +265,36 @@ def test_qnn_backend_dequantizes_uint8_output(tmp_path):
   assert output.tolist() == [0.0, 2.5, 5.0]
 
 
+def test_qnn_backend_uses_native_files_for_quantized_io(tmp_path):
+  detector = QnnNetRunYoloDetector.__new__(QnnNetRunYoloDetector)
+  detector.qnn_net_run = "qnn-net-run"
+  detector.qnn_backend = "libQnnHtp.so"
+  detector.qnn_model_dlc_lib = "libQnnModelDlc.so"
+  detector.model_path = tmp_path / "model.dlc"
+  detector.input_dtype = "uint8"
+  detector.output_dtype = "uint8"
+
+  cmd = detector._build_qnn_command(tmp_path / "input_list.txt", tmp_path / "output")
+
+  assert "--use_native_input_files" in cmd
+  assert "--use_native_output_files" in cmd
+
+
+def test_qnn_backend_omits_native_files_for_float_io(tmp_path):
+  detector = QnnNetRunYoloDetector.__new__(QnnNetRunYoloDetector)
+  detector.qnn_net_run = "qnn-net-run"
+  detector.qnn_backend = "libQnnHtp.so"
+  detector.qnn_model_dlc_lib = "libQnnModelDlc.so"
+  detector.model_path = tmp_path / "model.dlc"
+  detector.input_dtype = "float32"
+  detector.output_dtype = "float32"
+
+  cmd = detector._build_qnn_command(tmp_path / "input_list.txt", tmp_path / "output")
+
+  assert "--use_native_input_files" not in cmd
+  assert "--use_native_output_files" not in cmd
+
+
 def test_ort_qnn_backend_only_accepts_precompiled_qnn_onnx_assets():
   OrtQnnYoloDetector._validate_export_runtime({"export_runtime": "PRECOMPILED_QNN_ONNX"})
 
