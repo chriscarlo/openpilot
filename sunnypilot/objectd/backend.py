@@ -270,13 +270,20 @@ class SnpeYoloDetector(YoloDetectorBase):
 
     for generation in dlc_metadata.get("dlcGenerationInfo", []):
       command = generation.get("converterCommand", {})
-      converter_version = str(command.get("converterVersion", ""))
-      major_version = converter_version.split(".", 1)[0]
-      if major_version.isdigit() and int(major_version) >= 2:
-        raise BackendError(
-          "objectd SNPE DLC was produced by QAIRT/SNPE converter "
-          f"{converter_version}, but the bundled tici SNPE runtime is 1.61.x and loops on model format 4.1.0"
-        )
+      SnpeYoloDetector._reject_unsupported_converter(command)
+    for generation in dlc_metadata.get("dlc-generation-info", []):
+      command = generation.get("converter-command", {})
+      SnpeYoloDetector._reject_unsupported_converter(command)
+
+  @staticmethod
+  def _reject_unsupported_converter(command: dict) -> None:
+    converter_version = str(command.get("converterVersion", command.get("converter-version", "")))
+    major_version = converter_version.split(".", 1)[0]
+    if major_version.isdigit() and int(major_version) >= 2:
+      raise BackendError(
+        "objectd SNPE DLC was produced by QAIRT/SNPE converter "
+        f"{converter_version}, but the bundled tici SNPE runtime is 1.61.x and loops on model format 4.1.0"
+      )
 
 
 class QnnNetRunYoloDetector(YoloDetectorBase):
