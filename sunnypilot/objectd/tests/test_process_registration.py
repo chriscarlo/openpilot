@@ -9,7 +9,13 @@ import cereal.messaging as messaging
 import pytest
 
 from openpilot.common.params import Params
-from openpilot.sunnypilot.objectd.backend import BackendError, OrtQnnYoloDetector, QnnNetRunYoloDetector, SnpeYoloDetector
+from openpilot.sunnypilot.objectd.backend import (
+  BackendError,
+  OrtCpuYoloDetector,
+  OrtQnnYoloDetector,
+  QnnNetRunYoloDetector,
+  SnpeYoloDetector,
+)
 from openpilot.sunnypilot.objectd.prepare_yolo11n_assets import build_metadata
 from openpilot.system.manager.process_config import managed_processes, object_hazard_enabled
 
@@ -43,6 +49,8 @@ def test_object_hazard_param_defaults_enabled():
 def test_yolo11n_asset_metadata_matches_backend_contract():
   metadata = build_metadata("0" * 64)
 
+  assert metadata["source_repo"] == "qualcomm/YOLOv11-Detection"
+  assert metadata["source_checkpoint"] == "YOLO11-N / yolo11n.pt"
   assert metadata["export_runtime"] == "QNN_DLC"
   assert metadata["input_name"] == "image"
   assert metadata["input_width"] == 640
@@ -54,6 +62,51 @@ def test_yolo11n_asset_metadata_matches_backend_contract():
   assert metadata["prediction_layout"] == "attributes_first"
   assert metadata["has_objectness"] is False
   assert metadata["hazard_labels"] == ["bicycle", "cow", "dog", "horse", "person", "sheep"]
+
+
+def test_yolov8n_asset_metadata_preserves_current_decoder_contract():
+  metadata = build_metadata("0" * 64, model_preset="yolov8n")
+
+  assert metadata["source_repo"] == "qualcomm/YOLOv8-Detection"
+  assert metadata["source_checkpoint"] == "YOLOv8-N"
+  assert metadata["export_runtime"] == "QNN_DLC"
+  assert metadata["input_width"] == 640
+  assert metadata["input_height"] == 640
+  assert metadata["output_name"] == "detector_output"
+  assert metadata["prediction_count"] == 8400
+  assert metadata["attributes"] == 84
+  assert metadata["prediction_layout"] == "attributes_first"
+  assert metadata["hazard_labels"] == ["bicycle", "cow", "dog", "horse", "person", "sheep"]
+
+
+def test_asset_metadata_allows_explicit_model_overrides():
+  metadata = build_metadata(
+    "0" * 64,
+    model_preset="yolov8n",
+    source_repo="local/custom-detector",
+    source_checkpoint="custom-mobile-hazard-v1",
+    input_width=320,
+    input_height=320,
+    output_name="boxes",
+    prediction_count=2100,
+    attributes=85,
+    prediction_layout="predictions_first",
+    has_objectness=True,
+    labels=["person", "bicycle", "car"],
+    hazard_labels=["person", "bicycle"],
+  )
+
+  assert metadata["source_repo"] == "local/custom-detector"
+  assert metadata["source_checkpoint"] == "custom-mobile-hazard-v1"
+  assert metadata["input_width"] == 320
+  assert metadata["input_height"] == 320
+  assert metadata["output_name"] == "boxes"
+  assert metadata["prediction_count"] == 2100
+  assert metadata["attributes"] == 85
+  assert metadata["prediction_layout"] == "predictions_first"
+  assert metadata["has_objectness"] is True
+  assert metadata["labels"] == ["person", "bicycle", "car"]
+  assert metadata["hazard_labels"] == ["person", "bicycle"]
 
 
 def test_yolo11n_asset_metadata_allows_snpe_assets():
@@ -70,11 +123,20 @@ def test_yolo11n_asset_metadata_allows_precompiled_qnn_onnx_assets():
   assert metadata["input_layout"] == "NHWC"
 
 
+def test_yolov8n_asset_metadata_allows_plain_onnx_measurement_assets():
+  metadata = build_metadata("0" * 64, model_preset="yolov8n", export_runtime="ONNX")
+
+  assert metadata["export_runtime"] == "ONNX"
+  assert metadata["input_layout"] == "NCHW"
+
+
 def test_snpe_backend_rejects_qnn_assets_before_loading_model():
   SnpeYoloDetector._validate_export_runtime({})
 
   with pytest.raises(BackendError, match="QNN_DLC"):
     SnpeYoloDetector._validate_export_runtime({"export_runtime": "QNN_DLC"})
+  with pytest.raises(BackendError, match="ONNX"):
+    SnpeYoloDetector._validate_export_runtime({"export_runtime": "ONNX"})
 
 
 def test_snpe_backend_rejects_qairt_2_dlc_before_loading_model(tmp_path):
@@ -157,6 +219,18 @@ def test_ort_qnn_backend_only_accepts_precompiled_qnn_onnx_assets():
 
   with pytest.raises(BackendError, match="QNN_DLC"):
     OrtQnnYoloDetector._validate_export_runtime({"export_runtime": "QNN_DLC"})
+
+
+def test_onnx_cpu_backend_is_explicit_measurement_only(monkeypatch):
+  OrtCpuYoloDetector._validate_export_runtime({"export_runtime": "ONNX"})
+
+  with pytest.raises(BackendError, match="QNN_DLC"):
+    OrtCpuYoloDetector._validate_export_runtime({"export_runtime": "QNN_DLC"})
+
+  monkeypatch.delenv("OBJECTD_ALLOW_CPU_INFERENCE", raising=False)
+  assert OrtCpuYoloDetector._allow_cpu_inference() is False
+  monkeypatch.setenv("OBJECTD_ALLOW_CPU_INFERENCE", "1")
+  assert OrtCpuYoloDetector._allow_cpu_inference() is True
 
 
 def test_object_hazard_messages_expose_new_schema_fields():

@@ -252,7 +252,7 @@ class SnpeYoloDetector(YoloDetectorBase):
   @staticmethod
   def _validate_export_runtime(metadata: dict) -> None:
     export_runtime = str(metadata.get("export_runtime", "SNPE_DLC")).upper()
-    if export_runtime.startswith("QNN") or export_runtime == "PRECOMPILED_QNN_ONNX":
+    if export_runtime != "SNPE_DLC":
       raise BackendError(
         f"objectd model export_runtime '{export_runtime}' is not supported by the SNPE backend"
       )
@@ -465,6 +465,65 @@ class OrtQnnYoloDetector(YoloDetectorBase):
     os.environ["ADSP_LIBRARY_PATH"] = ":".join(qnn_paths + existing)
 
 
+class OrtCpuYoloDetector(YoloDetectorBase):
+  def __init__(self):
+    self._init_detector_config("model.onnx")
+    self._validate_export_runtime({"export_runtime": self.export_runtime})
+    if not self._allow_cpu_inference():
+      raise BackendError(
+        "onnx_cpu is measurement-only; set OBJECTD_ALLOW_CPU_INFERENCE=1 to run it explicitly"
+      )
+    self._add_onnx_python_path()
+    try:
+      import onnxruntime as ort
+    except ModuleNotFoundError as err:
+      raise BackendError(
+        "onnxruntime dependencies are not available; install them or set OBJECTD_ONNX_PYTHONPATH"
+      ) from err
+
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = 1
+    options.inter_op_num_threads = 1
+    self.session = ort.InferenceSession(
+      str(self.model_path), sess_options=options, providers=["CPUExecutionProvider"]
+    )
+    self.backend_name = "onnx_cpu:measurement"
+    self.ready = True
+
+  def _execute_model(self) -> None:
+    if self.input_layout == "NHWC":
+      model_input = self.input.reshape(1, self.input_height, self.input_width, -1)
+    elif self.input_layout == "NCHW":
+      model_input = self.input.reshape(1, -1, self.input_height, self.input_width)
+    else:
+      raise BackendError(f"unsupported input layout '{self.input_layout}'")
+    result = self.session.run([self.output_name], {self.input_name: model_input})[0]
+    flat_output = np.asarray(result, dtype=np.float32).reshape(-1)
+    if flat_output.size != self.expected_output_size:
+      raise BackendError(
+        f"onnx_cpu output size mismatch: expected {self.expected_output_size}, got {flat_output.size}"
+      )
+    self.output[:] = flat_output
+
+  @staticmethod
+  def _validate_export_runtime(metadata: dict) -> None:
+    export_runtime = str(metadata.get("export_runtime", "")).upper()
+    if export_runtime != "ONNX":
+      raise BackendError(
+        f"objectd model export_runtime '{export_runtime or 'UNKNOWN'}' is not supported by the onnx_cpu backend"
+      )
+
+  @staticmethod
+  def _allow_cpu_inference() -> bool:
+    return os.getenv("OBJECTD_ALLOW_CPU_INFERENCE", "").strip().lower() in {"1", "true", "yes"}
+
+  @staticmethod
+  def _add_onnx_python_path() -> None:
+    python_path = Path(os.getenv("OBJECTD_ONNX_PYTHONPATH", DEFAULT_MODEL_DIR.parents[0] / "python"))
+    if python_path.is_dir():
+      sys.path.insert(0, str(python_path))
+
+
 def _read_default_export_runtime() -> str:
   model_dir = Path(os.getenv("OBJECTD_MODEL_DIR", DEFAULT_MODEL_DIR))
   metadata_path = Path(os.getenv("OBJECTD_MODEL_METADATA", model_dir / "metadata.json"))
@@ -478,6 +537,8 @@ def build_detector_backend():
     export_runtime = _read_default_export_runtime()
     if export_runtime == "PRECOMPILED_QNN_ONNX":
       return OrtQnnYoloDetector()
+    if export_runtime == "ONNX":
+      return OrtCpuYoloDetector()
     if export_runtime == "QNN_DLC":
       return QnnNetRunYoloDetector()
     return SnpeYoloDetector("gpu")
@@ -489,6 +550,8 @@ def build_detector_backend():
     return SnpeYoloDetector("dsp")
   if backend_name in {"ort_qnn", "qnn_ort"}:
     return OrtQnnYoloDetector()
+  if backend_name in {"onnx_cpu", "ort_cpu"}:
+    return OrtCpuYoloDetector()
   if backend_name in {"qnn", "qnn_net_run"}:
     return OrtQnnYoloDetector() if backend_name == "qnn" else QnnNetRunYoloDetector()
   raise BackendError(f"unsupported OBJECTD_BACKEND '{backend_name}'")
