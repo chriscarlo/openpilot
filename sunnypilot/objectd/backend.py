@@ -346,12 +346,15 @@ class OrtQnnYoloDetector(YoloDetectorBase):
 
     self.ort = ort
     self.qnn_ep = qnn_ep
+    self._set_qnn_adsp_library_path(Path(qnn_ep.get_qnn_htp_path()).parent)
     self._register_qnn_ep()
     selected_devices = [device for device in ort.get_ep_devices() if device.ep_name == "QNNExecutionProvider"]
     if not selected_devices:
       raise BackendError("QNNExecutionProvider registered but no QNN EP device was discovered")
 
     options = ort.SessionOptions()
+    options.intra_op_num_threads = 1
+    options.inter_op_num_threads = 1
     options.add_session_config_entry("session.disable_cpu_ep_fallback", "1")
     provider_options = {"backend_path": qnn_ep.get_qnn_htp_path()}
     options.add_provider_for_devices(selected_devices, provider_options)
@@ -404,6 +407,15 @@ class OrtQnnYoloDetector(YoloDetectorBase):
   @staticmethod
   def _default_qnn_python_path() -> Path:
     return DEFAULT_MODEL_DIR.parents[0] / "python"
+
+  @staticmethod
+  def _set_qnn_adsp_library_path(qnn_lib_dir: Path) -> None:
+    existing = [
+      path for path in os.getenv("ADSP_LIBRARY_PATH", "").split(":")
+      if path and Path(path) != qnn_lib_dir
+    ]
+    qnn_paths = [str(qnn_lib_dir), "/usr/lib/rfsa/adsp", "/dsp"]
+    os.environ["ADSP_LIBRARY_PATH"] = ":".join(qnn_paths + existing)
 
 
 def _read_default_export_runtime() -> str:
