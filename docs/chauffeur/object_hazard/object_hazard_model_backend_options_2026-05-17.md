@@ -45,6 +45,14 @@ Local smoke tests:
 - On `https://ultralytics.com/images/bus.jpg`, the existing hazard-label filter returned four `person` detections and excluded vehicle classes from object-hazard output.
 - Focused object-hazard tests passed: `34 passed`.
 
+Tici cache-only smoke test after commit `1401eaf`:
+
+- Pulled to `/data/openpilot` with the known unrelated dirty `live_waze_police_capture.json` still present.
+- Launch-env compile check passed.
+- Copied only cache assets to `/data/openpilot/.cache/objectd/yolov8n_onnx_install/`.
+- `OBJECTD_BACKEND=onnx_cpu`, `OBJECTD_ALLOW_CPU_INFERENCE=1`, and `OBJECTD_ONNX_PYTHONPATH=/data/openpilot/.cache/objectd/python` initialized the backend.
+- One zero-input ONNX CPU inference took about `1956 ms` on the tici, produced `705600` finite floats, and logged GPU discovery failure from ONNX Runtime.
+
 This proves YOLOv8-N is semantically compatible with the current decoder and hazard-label contract. It does not prove a production tici accelerator path; the remaining blocker is still SNPE 1.61 asset compatibility or a real QNN/TFLite runtime path.
 
 ## Candidate Ranking
