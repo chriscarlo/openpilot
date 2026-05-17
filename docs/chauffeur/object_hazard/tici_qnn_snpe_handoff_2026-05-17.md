@@ -184,6 +184,64 @@ find /usr /data/openpilot /data -maxdepth 6 \
 
 That command returned nothing in this session.
 
+Later cache-only QNN runtime probes did find copied QAIRT runtimes under `.cache/`, but they still were not viable on this tici:
+
+- QAIRT 2.42 `qnn-net-run` with `libQnnHtp.so` initialized far enough to identify the platform, then reported `Detected Snapdragon SOC SDM845` and `Unsupported SnapdragonModel by HTP backend`.
+- QAIRT 2.42 `libQnnGpu.so` failed with `GPU_ERROR_UNSUPPORTED_PLATFORM` / unsupported SOC.
+- QAIRT 2.42 `libQnnCpu.so` also failed backend initialization.
+- Qualcomm AI Hub lists `Google Pixel 3` / `sdm845` devices with `framework:tflite` and `framework:onnx`, but not `framework:qnn`; `SA8295P ADP` exposes QNN but targets `qualcomm-sa8295p`, not this tici.
+
+Conclusion: do not spend more time trying to run `QNN_DLC` assets through the current tici QNN runtime stack. The mismatch is the backend/runtime platform, not the objectd decoder metadata.
+
+## Tinygrad ONNX Path
+
+The viable accelerator-backed path found after the QNN failures is tinygrad on the tici QCOM backend.
+
+Implementation commit:
+
+```text
+200e8de70 Add tinygrad ONNX object hazard backend
+```
+
+What changed:
+
+- Added `OBJECTD_BACKEND=tinygrad_onnx` / `tinygrad` support in `sunnypilot/objectd/backend.py`.
+- Plain `ONNX` metadata now auto-selects tinygrad instead of CPU fallback.
+- CPU ONNX remains measurement-only behind `OBJECTD_ALLOW_CPU_INFERENCE=1`.
+- The backend wraps the tinygrad `OnnxRunner` in `TinyJit`; first runs capture/compile, later runs execute much faster.
+
+Cache-only YOLOv8n ONNX assets tested on tici:
+
+```text
+/data/openpilot/.cache/objectd/yolov8n_tinygrad_160_install
+/data/openpilot/.cache/objectd/yolov8n_tinygrad_224_install
+/data/openpilot/.cache/objectd/yolov8n_tinygrad_256_install
+/data/openpilot/.cache/objectd/yolov8n_tinygrad_320_install
+```
+
+These assets were exported locally from `yolov8n.pt` with Ultralytics ONNX opset 12 and raw output:
+
+```text
+160: output0 [1,84,525]
+224: output0 [1,84,1029]
+256: output0 [1,84,1344]
+320: output0 [1,84,2100]
+```
+
+Key tici measurements:
+
+- Eager tinygrad ONNX was not viable: warmed runs stayed around 6.9-7.5 seconds.
+- TinyJit made the path viable after capture.
+- `OBJECTD_BACKEND=tinygrad_onnx`, 256x256 YOLOv8n, direct `_execute_model()` with changing inputs:
+  - run 1: about 56.3 s
+  - run 2: about 7.5 s
+  - run 3: about 320 ms
+  - run 4/5: about 108 ms
+- Warmed `infer()` on a fake NV12 frame with the 256x256 asset:
+  - about 113-125 ms including NV12 conversion, resize, QCOM tensor upload, model execution, output readback, and decode.
+
+This is not done until live `objectd` cadence/resource impact is measured with the live monitor, but it is the first general non-car hazard model/backend combination that actually runs on the tici accelerator path.
+
 ## Commands Already Verified
 
 Local:
@@ -227,12 +285,20 @@ Preferred path A: produce a SNPE-compatible DLC.
 - If a SNPE-compatible DLC is produced, update metadata so `export_runtime` is `SNPE_DLC` or omit the field. Do not use `prepare_yolo11n_assets.py` unchanged, because it currently writes `export_runtime: QNN_DLC` and the backend will reject it.
 - Add `--export-runtime` or similar to `prepare_yolo11n_assets.py` if using it for SNPE assets.
 
-Path B: implement a real QNN backend.
+Path B: harden tinygrad ONNX.
 
-- Current QNN DLC asset is probably appropriate for QNN, not SNPE.
-- The tici currently appears to lack a QNN runtime stack that can initialize for this workload; QAIRT 2.x cache-only runtime probes did not produce a working GPU/DSP path.
-- A QNN path means adding/installing runtime support and writing a backend that does not use `SNPEModel`.
-- Do not silently add CPU inference fallback; if a CPU/ONNX/tinygrad fallback is explored, gate it explicitly and measure load.
+- Current evidence says this is the most viable path without a SNPE 1.61 converter.
+- Use `OBJECTD_BACKEND=tinygrad_onnx` with a smaller YOLOv8n ONNX asset, probably 256x256 first.
+- Measure onroad/offroad resource impact after JIT capture with the object-hazard live monitor.
+- Consider a startup/warmup policy because the first TinyJit capture runs are slow.
+- Keep CPU ONNX gated as measurement-only.
+
+Path C: implement a real QNN backend.
+
+- Current QNN DLC assets are probably appropriate for newer QNN targets, not this SDM845 tici runtime.
+- QAIRT 2.42 cache-only HTP/GPU/CPU runtime probes failed backend initialization on this tici.
+- Revisit only if a QNN runtime known to support this exact tici platform becomes available.
+- Do not silently add CPU inference fallback; if a CPU/ONNX fallback is explored, gate it explicitly and measure load.
 
 Avoid:
 
