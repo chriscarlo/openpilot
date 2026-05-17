@@ -282,7 +282,7 @@ class SnpeYoloDetector(YoloDetectorBase):
     if major_version.isdigit() and int(major_version) >= 2:
       raise BackendError(
         "objectd SNPE DLC was produced by QAIRT/SNPE converter "
-        f"{converter_version}, but the bundled tici SNPE runtime is 1.61.x and loops on model format 4.1.0"
+        f"{converter_version}, but the bundled tici SNPE runtime is 1.61.x and loops on model format 4.x"
       )
 
 

@@ -105,6 +105,20 @@ def test_snpe_backend_rejects_qairt_2_legacy_metadata_schema(tmp_path):
     SnpeYoloDetector._validate_dlc_compatibility(model_path)
 
 
+def test_snpe_backend_rejects_public_qairt_2_22_dlc(tmp_path):
+  model_path = tmp_path / "model.dlc"
+  dlc_metadata = {
+    "dlc-generation-info": [
+      {"converter-command": {"converter-version": "2.22.6.240515"}},
+    ],
+  }
+  with zipfile.ZipFile(model_path, "w", compression=zipfile.ZIP_STORED) as dlc:
+    dlc.writestr("dlc.metadata", json.dumps(dlc_metadata))
+
+  with pytest.raises(BackendError, match="model format 4.x"):
+    SnpeYoloDetector._validate_dlc_compatibility(model_path)
+
+
 def test_snpe_backend_allows_legacy_converter_dlc(tmp_path):
   model_path = tmp_path / "model.dlc"
   dlc_metadata = {

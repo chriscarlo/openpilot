@@ -13,8 +13,13 @@ Current state: the object-hazard pipeline code is present, default-enabled, and 
 - Pushed commits from this work:
   - `a39481015` - `Prepare object hazard assets for device bringup`
   - `e0a486215` - `Guard objectd against QNN DLC assets`
+  - `a601c772c` - `Add QNN object hazard backend path`
+  - `4ab0b2871` - `Run object hazard with ONNX Runtime QNN`
+  - `b2bf0daf0` - `Point ORT QNN at bundled HTP libraries`
+  - `35ec38561` - `Guard SNPE backend against QAIRT 2 DLCs`
+  - `28978843d` - `Reject legacy QAIRT 2 DLC metadata`
 - Tici repo: `/data/openpilot`
-- Tici head after pull: `e0a4862`
+- Tici head after pull: `2897884`
 - Tici had one pre-existing dirty file after pull: `live_waze_police_capture.json`
 - Important workflow rule from user: commit and push from laptop, then pull to tici. Do not leave tracked manual edits on the tici.
 
@@ -141,6 +146,15 @@ error_code=312; error_message=Undefined error
 
 Both `OBJECTD_BACKEND=snpe_gpu` and `OBJECTD_BACKEND=snpe_dsp` timed out after 20 seconds with the same SNPE format loop.
 
+Follow-up converter/runtime checks:
+
+- The tici bundled SNPE runtime is `1.61.0.3358`.
+- Official public QAIRT `v2.42.0`, `v2.33.0`, and `v2.22.6.240515` converters all produced DLCs that loop on the bundled SNPE runtime.
+- QAIRT `v2.42.0` / `v2.33.0` DLCs report SNPE model format `4.1.0`; QAIRT `v2.22.6.240515` reports model format `4.0.0`.
+- QAIRT `v2.22.6.240515` target `snpe-platform-validator --runtime gpu` passes the simple GPU validator on the tici, but `snpe-net-run --use_gpu` on the YOLO DLC fails with `QNN_COMMON_ERROR_PLATFORM_NOT_SUPPORTED` and model validation error `No backend could validate Op=/model/0/conv/Conv Type=Conv2d`.
+- The existing `snpemodel_pyx.so` cannot be rebound to QAIRT 2.x `libSNPE.so`; import fails with `undefined symbol: _ZNK3zdl8DlSystem21UserBufferEncodingTfN14getElementSizeEv`.
+- QAIRT 2.x QNN GPU platform validation crashes, and QNN DSP validation finds libraries but fails loading the DSP calculator stub with `undefined symbol: remote_session_control`.
+
 The code now rejects `export_runtime: QNN_DLC` metadata before constructing `SNPEModel`, so `objectd` fails safe instead of hanging:
 
 ```text
@@ -206,16 +220,17 @@ Tici compileall passed.
 
 Preferred path A: produce a SNPE-compatible DLC.
 
-- The current repo backend is SNPE-only: `sunnypilot/objectd/backend.py` uses `SNPEModel`.
+- The current default viable backend is still SNPE: `sunnypilot/objectd/backend.py` uses `SNPEModel` for `snpe_gpu` / `snpe_dsp`, with experimental QNN paths guarded by asset/runtime metadata.
 - The repo includes SNPE runtime libraries under `third_party/snpe`, but no converter tools were found.
 - Need a DLC whose model format is supported by the bundled tici SNPE runtime.
+- Public QAIRT 2.x converters are not sufficient; use an official SNPE 1.61-era converter package if available through Qualcomm Software Center / QPM or another licensed Qualcomm channel.
 - If a SNPE-compatible DLC is produced, update metadata so `export_runtime` is `SNPE_DLC` or omit the field. Do not use `prepare_yolo11n_assets.py` unchanged, because it currently writes `export_runtime: QNN_DLC` and the backend will reject it.
 - Add `--export-runtime` or similar to `prepare_yolo11n_assets.py` if using it for SNPE assets.
 
 Path B: implement a real QNN backend.
 
 - Current QNN DLC asset is probably appropriate for QNN, not SNPE.
-- The tici currently appears to lack QNN runtime libraries/tools.
+- The tici currently appears to lack a QNN runtime stack that can initialize for this workload; QAIRT 2.x cache-only runtime probes did not produce a working GPU/DSP path.
 - A QNN path means adding/installing runtime support and writing a backend that does not use `SNPEModel`.
 - Do not silently add CPU inference fallback; if a CPU/ONNX/tinygrad fallback is explored, gate it explicitly and measure load.
 
