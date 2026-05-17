@@ -511,6 +511,96 @@ class OrtQnnYoloDetector(YoloDetectorBase):
     os.environ["ADSP_LIBRARY_PATH"] = ":".join(qnn_paths + existing)
 
 
+class TinygradOnnxYoloDetector(YoloDetectorBase):
+  def __init__(self):
+    self._init_detector_config("model.onnx")
+    self._validate_export_runtime({"export_runtime": self.export_runtime})
+    self._add_tinygrad_python_path()
+    tinygrad_device = self._configure_tinygrad_device()
+    try:
+      from tinygrad import Tensor, TinyJit, Device
+      from tinygrad.nn.onnx import OnnxRunner
+    except ModuleNotFoundError as err:
+      raise BackendError(
+        "tinygrad dependencies are not available; set OBJECTD_TINYGRAD_PYTHONPATH"
+      ) from err
+
+    self.Tensor = Tensor
+    self.tinygrad_device = tinygrad_device or Device.DEFAULT
+    self.runner = OnnxRunner(self.model_path)
+    if self.input_name not in self.runner.graph_inputs:
+      raise BackendError(f"tinygrad_onnx input '{self.input_name}' not found in model")
+    if self.output_name not in self.runner.graph_outputs:
+      raise BackendError(f"tinygrad_onnx output '{self.output_name}' not found in model")
+
+    def run(model_input):
+      return self.runner({self.input_name: model_input})[self.output_name].contiguous()
+
+    self._jit_run = TinyJit(run)
+    self.backend_name = f"tinygrad_onnx:{Device.DEFAULT.lower()}"
+    self.ready = True
+    self._run_warmup()
+
+  def _execute_model(self) -> None:
+    if self.input_layout == "NHWC":
+      model_input = self.input.reshape(1, self.input_height, self.input_width, -1)
+    elif self.input_layout == "NCHW":
+      model_input = self.input.reshape(1, -1, self.input_height, self.input_width)
+    else:
+      raise BackendError(f"unsupported input layout '{self.input_layout}'")
+    tensor_input = self.Tensor(model_input, device=self.tinygrad_device).realize()
+    result = self._jit_run(tensor_input).realize()
+    flat_output = np.asarray(result.numpy(), dtype=np.float32).reshape(-1)
+    if flat_output.size != self.expected_output_size:
+      raise BackendError(
+        f"tinygrad_onnx output size mismatch: expected {self.expected_output_size}, got {flat_output.size}"
+      )
+    self.output[:] = flat_output
+
+  def _run_warmup(self) -> None:
+    warmup_runs = int(os.getenv("OBJECTD_TINYGRAD_WARMUP_RUNS", "0"))
+    if warmup_runs <= 0:
+      return
+    original_input = self.input.copy()
+    try:
+      self.input.fill(0.0)
+      for _ in range(warmup_runs):
+        self._execute_model()
+    finally:
+      self.input[:] = original_input
+
+  @staticmethod
+  def _validate_export_runtime(metadata: dict) -> None:
+    export_runtime = str(metadata.get("export_runtime", "")).upper()
+    if export_runtime != "ONNX":
+      raise BackendError(
+        f"objectd model export_runtime '{export_runtime or 'UNKNOWN'}' is not supported by the tinygrad_onnx backend"
+      )
+
+  @staticmethod
+  def _configure_tinygrad_device() -> str | None:
+    configured_device = os.getenv("OBJECTD_TINYGRAD_DEVICE")
+    if configured_device:
+      os.environ.setdefault("DEV", configured_device)
+      return configured_device
+    if Path("/dev/kgsl-3d0").exists():
+      os.environ.setdefault("DEV", "QCOM")
+      return "QCOM"
+    if OrtCpuYoloDetector._allow_cpu_inference():
+      os.environ.setdefault("DEV", "CPU")
+      return "CPU"
+    raise BackendError(
+      "tinygrad_onnx requires an accelerator device; set OBJECTD_TINYGRAD_DEVICE or "
+      "OBJECTD_ALLOW_CPU_INFERENCE=1 for explicit CPU measurement"
+    )
+
+  @staticmethod
+  def _add_tinygrad_python_path() -> None:
+    python_path = Path(os.getenv("OBJECTD_TINYGRAD_PYTHONPATH", DEFAULT_MODEL_DIR.parents[2] / "tinygrad_repo"))
+    if python_path.is_dir():
+      sys.path.insert(0, str(python_path))
+
+
 class OrtCpuYoloDetector(YoloDetectorBase):
   def __init__(self):
     self._init_detector_config("model.onnx")
@@ -584,7 +674,7 @@ def build_detector_backend():
     if export_runtime == "PRECOMPILED_QNN_ONNX":
       return OrtQnnYoloDetector()
     if export_runtime == "ONNX":
-      return OrtCpuYoloDetector()
+      return TinygradOnnxYoloDetector()
     if export_runtime == "QNN_DLC":
       return QnnNetRunYoloDetector()
     return SnpeYoloDetector("gpu")
@@ -598,6 +688,8 @@ def build_detector_backend():
     return OrtQnnYoloDetector()
   if backend_name in {"onnx_cpu", "ort_cpu"}:
     return OrtCpuYoloDetector()
+  if backend_name in {"tinygrad", "tinygrad_onnx"}:
+    return TinygradOnnxYoloDetector()
   if backend_name in {"qnn", "qnn_net_run"}:
     return OrtQnnYoloDetector() if backend_name == "qnn" else QnnNetRunYoloDetector()
   raise BackendError(f"unsupported OBJECTD_BACKEND '{backend_name}'")

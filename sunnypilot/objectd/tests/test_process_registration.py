@@ -16,7 +16,9 @@ from openpilot.sunnypilot.objectd.backend import (
   OrtQnnYoloDetector,
   QnnNetRunYoloDetector,
   SnpeYoloDetector,
+  TinygradOnnxYoloDetector,
 )
+import openpilot.sunnypilot.objectd.backend as objectd_backend
 from openpilot.sunnypilot.objectd.prepare_yolo11n_assets import build_metadata
 from openpilot.system.manager.process_config import managed_processes, object_hazard_enabled
 
@@ -312,6 +314,39 @@ def test_onnx_cpu_backend_is_explicit_measurement_only(monkeypatch):
   assert OrtCpuYoloDetector._allow_cpu_inference() is False
   monkeypatch.setenv("OBJECTD_ALLOW_CPU_INFERENCE", "1")
   assert OrtCpuYoloDetector._allow_cpu_inference() is True
+
+
+def test_tinygrad_onnx_backend_only_accepts_plain_onnx_assets():
+  TinygradOnnxYoloDetector._validate_export_runtime({"export_runtime": "ONNX"})
+
+  with pytest.raises(BackendError, match="QNN_DLC"):
+    TinygradOnnxYoloDetector._validate_export_runtime({"export_runtime": "QNN_DLC"})
+
+
+def test_tinygrad_onnx_device_selection_is_accelerator_first(monkeypatch):
+  monkeypatch.setenv("OBJECTD_TINYGRAD_DEVICE", "QCOM")
+  monkeypatch.delenv("DEV", raising=False)
+  assert TinygradOnnxYoloDetector._configure_tinygrad_device() == "QCOM"
+  assert objectd_backend.os.environ["DEV"] == "QCOM"
+
+
+def test_tinygrad_onnx_rejects_cpu_without_explicit_measurement_opt_in(monkeypatch):
+  monkeypatch.delenv("OBJECTD_TINYGRAD_DEVICE", raising=False)
+  monkeypatch.delenv("OBJECTD_ALLOW_CPU_INFERENCE", raising=False)
+  monkeypatch.delenv("DEV", raising=False)
+  monkeypatch.setattr(objectd_backend.Path, "exists", lambda self: False)
+
+  with pytest.raises(BackendError, match="requires an accelerator"):
+    TinygradOnnxYoloDetector._configure_tinygrad_device()
+
+
+def test_auto_onnx_assets_use_tinygrad_backend(monkeypatch):
+  detector = object()
+  monkeypatch.setenv("OBJECTD_BACKEND", "auto")
+  monkeypatch.setattr(objectd_backend, "_read_default_export_runtime", lambda: "ONNX")
+  monkeypatch.setattr(objectd_backend, "TinygradOnnxYoloDetector", lambda: detector)
+
+  assert objectd_backend.build_detector_backend() is detector
 
 
 def test_object_hazard_messages_expose_new_schema_fields():
