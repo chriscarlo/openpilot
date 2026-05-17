@@ -107,16 +107,29 @@ def test_snpe_backend_rejects_qairt_2_legacy_metadata_schema(tmp_path):
 
 def test_snpe_backend_rejects_public_qairt_2_22_dlc(tmp_path):
   model_path = tmp_path / "model.dlc"
-  dlc_metadata = {
-    "dlc-generation-info": [
-      {"converter-command": {"converter-version": "2.22.6.240515"}},
-    ],
-  }
+  dlc_metadata = "\n".join([
+    "converter-command=snpe-onnx-to-dlc --input_network yolov11_det.onnx",
+    "converter-version=2.22.6.240515184619_92920",
+    "model-version=yolo11n_object_hazard_qairt222",
+  ])
   with zipfile.ZipFile(model_path, "w", compression=zipfile.ZIP_STORED) as dlc:
-    dlc.writestr("dlc.metadata", json.dumps(dlc_metadata))
+    dlc.writestr("dlc.metadata", dlc_metadata)
 
   with pytest.raises(BackendError, match="model format 4.x"):
     SnpeYoloDetector._validate_dlc_compatibility(model_path)
+
+
+def test_snpe_backend_allows_legacy_key_value_metadata(tmp_path):
+  model_path = tmp_path / "model.dlc"
+  dlc_metadata = "\n".join([
+    "converter-command=snpe-onnx-to-dlc --input_network yolov11_det.onnx",
+    "converter-version=1.61.0.3358",
+    "model-version=yolo11n_object_hazard_snpe161",
+  ])
+  with zipfile.ZipFile(model_path, "w", compression=zipfile.ZIP_STORED) as dlc:
+    dlc.writestr("dlc.metadata", dlc_metadata)
+
+  SnpeYoloDetector._validate_dlc_compatibility(model_path)
 
 
 def test_snpe_backend_allows_legacy_converter_dlc(tmp_path):

@@ -264,16 +264,33 @@ class SnpeYoloDetector(YoloDetectorBase):
         metadata_name = next((name for name in dlc.namelist() if name.startswith("dlc.metadata")), None)
         if metadata_name is None:
           return
-        dlc_metadata = json.loads(dlc.read(metadata_name))
-    except (OSError, zipfile.BadZipFile, json.JSONDecodeError) as err:
+        dlc_metadata = SnpeYoloDetector._parse_dlc_metadata(dlc.read(metadata_name))
+    except (OSError, zipfile.BadZipFile, ValueError) as err:
       raise BackendError(f"objectd SNPE DLC metadata is unreadable: {err}") from err
 
+    SnpeYoloDetector._reject_unsupported_converter(dlc_metadata)
     for generation in dlc_metadata.get("dlcGenerationInfo", []):
       command = generation.get("converterCommand", {})
       SnpeYoloDetector._reject_unsupported_converter(command)
     for generation in dlc_metadata.get("dlc-generation-info", []):
       command = generation.get("converter-command", {})
       SnpeYoloDetector._reject_unsupported_converter(command)
+
+  @staticmethod
+  def _parse_dlc_metadata(raw_metadata: bytes) -> dict:
+    text = raw_metadata.decode("utf-8")
+    try:
+      return json.loads(text)
+    except json.JSONDecodeError:
+      metadata: dict[str, str] = {}
+      for line in text.splitlines():
+        if "=" not in line:
+          continue
+        key, value = line.split("=", 1)
+        metadata[key.strip()] = value.strip()
+      if not metadata:
+        raise ValueError("metadata is neither JSON nor key=value text")
+      return metadata
 
   @staticmethod
   def _reject_unsupported_converter(command: dict) -> None:
