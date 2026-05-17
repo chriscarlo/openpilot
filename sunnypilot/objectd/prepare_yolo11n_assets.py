@@ -128,12 +128,24 @@ def main() -> None:
                       help="Runtime that produced this asset. Default: QNN_DLC for --model-dlc, PRECOMPILED_QNN_ONNX for --model-onnx.")
   parser.add_argument("--input-layout", choices=SUPPORTED_INPUT_LAYOUTS,
                       help="Input tensor layout expected by the model. Default: NHWC for QNN assets, NCHW for SNPE_DLC.")
+  parser.add_argument("--input-dtype",
+                      help="Input tensor dtype, e.g. float32 or uint8.")
+  parser.add_argument("--input-scale", type=float,
+                      help="Input quantization scale for integer QNN assets.")
+  parser.add_argument("--input-zero-point", type=int,
+                      help="Input quantization zero point for integer QNN assets.")
   parser.add_argument("--input-size",
                       help="Input tensor size as WIDTHxHEIGHT, overriding the selected preset.")
   parser.add_argument("--input-name",
                       help="Input tensor name, overriding the selected preset.")
   parser.add_argument("--output-name",
                       help="Output tensor name, overriding the selected preset.")
+  parser.add_argument("--output-dtype",
+                      help="Output tensor dtype, e.g. float32 or uint8.")
+  parser.add_argument("--output-scale", type=float,
+                      help="Output quantization scale for integer QNN assets.")
+  parser.add_argument("--output-zero-point", type=int,
+                      help="Output quantization zero point for integer QNN assets.")
   parser.add_argument("--prediction-count", type=int,
                       help="Number of decoded predictions in the output tensor.")
   parser.add_argument("--attributes", type=int,
@@ -181,9 +193,15 @@ def main() -> None:
     args.input_layout,
     model_preset=args.model_preset,
     input_name=args.input_name,
+    input_dtype=args.input_dtype,
+    input_scale=args.input_scale,
+    input_zero_point=args.input_zero_point,
     input_width=input_width,
     input_height=input_height,
     output_name=args.output_name,
+    output_dtype=args.output_dtype,
+    output_scale=args.output_scale,
+    output_zero_point=args.output_zero_point,
     prediction_count=args.prediction_count,
     attributes=args.attributes,
     prediction_layout=args.prediction_layout,

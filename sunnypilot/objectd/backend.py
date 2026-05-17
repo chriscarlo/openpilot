@@ -75,10 +75,16 @@ class YoloDetectorBase:
     self.input_width = int(metadata["input_width"])
     self.input_height = int(metadata["input_height"])
     self.input_layout = str(metadata.get("input_layout", "NCHW")).upper()
+    self.input_dtype = str(metadata.get("input_dtype", "float32")).lower()
+    self.input_scale = float(metadata.get("input_scale", 1.0))
+    self.input_zero_point = int(metadata.get("input_zero_point", 0))
     self.prediction_count = int(metadata["prediction_count"])
     self.attributes = int(metadata["attributes"])
     self.prediction_layout = str(metadata.get("prediction_layout", "attributes_first"))
     self.output_name = str(metadata.get("output_name", "detector_output"))
+    self.output_dtype = str(metadata.get("output_dtype", "float32")).lower()
+    self.output_scale = float(metadata.get("output_scale", 1.0))
+    self.output_zero_point = int(metadata.get("output_zero_point", 0))
     self.has_objectness = bool(metadata.get("has_objectness", False))
     self.confidence_threshold = float(metadata.get("confidence_threshold", 0.25))
     self.iou_threshold = float(metadata.get("iou_threshold", 0.45))
@@ -324,7 +330,7 @@ class QnnNetRunYoloDetector(YoloDetectorBase):
       shutil.rmtree(output_dir)
     output_dir.mkdir()
 
-    self.input.astype(np.float32, copy=False).tofile(input_path)
+    self._write_qnn_input(input_path)
     input_list_path.write_text(str(input_path) + "\n", encoding="utf-8")
 
     cmd = [
@@ -347,14 +353,43 @@ class QnnNetRunYoloDetector(YoloDetectorBase):
 
     self.output[:] = self._read_qnn_output(output_dir)
 
+  def _write_qnn_input(self, input_path: Path) -> None:
+    if self.input_dtype in {"float", "float32"}:
+      self.input.astype(np.float32, copy=False).tofile(input_path)
+      return
+    if self.input_dtype == "uint8":
+      if self.input_scale <= 0.0:
+        raise BackendError("qnn uint8 input_scale must be positive")
+      quantized = np.clip(
+        np.rint(self.input.astype(np.float64) / self.input_scale + self.input_zero_point),
+        0,
+        np.iinfo(np.uint8).max,
+      ).astype(np.uint8)
+      quantized.tofile(input_path)
+      return
+    raise BackendError(f"unsupported qnn input dtype '{self.input_dtype}'")
+
   def _read_qnn_output(self, output_dir: Path) -> np.ndarray:
-    expected_bytes = self.expected_output_size * np.dtype(np.float32).itemsize
+    output_dtype = self._numpy_dtype(self.output_dtype, "output")
+    expected_bytes = self.expected_output_size * output_dtype.itemsize
     raw_outputs = sorted(output_dir.rglob("*.raw"))
     for raw_output in raw_outputs:
       if raw_output.stat().st_size == expected_bytes:
-        return np.fromfile(raw_output, dtype=np.float32, count=self.expected_output_size)
+        raw = np.fromfile(raw_output, dtype=output_dtype, count=self.expected_output_size)
+        if output_dtype == np.dtype(np.float32):
+          return raw.astype(np.float32, copy=False)
+        return (raw.astype(np.float32) - self.output_zero_point) * self.output_scale
     sizes = {str(path): path.stat().st_size for path in raw_outputs}
     raise BackendError(f"qnn-net-run did not produce expected {expected_bytes}-byte output; saw {sizes}")
+
+  @staticmethod
+  def _numpy_dtype(dtype_name: str, field_name: str) -> np.dtype:
+    normalized = dtype_name.lower()
+    if normalized in {"float", "float32"}:
+      return np.dtype(np.float32)
+    if normalized == "uint8":
+      return np.dtype(np.uint8)
+    raise BackendError(f"unsupported qnn {field_name} dtype '{dtype_name}'")
 
   @staticmethod
   def _validate_export_runtime(metadata: dict) -> None:

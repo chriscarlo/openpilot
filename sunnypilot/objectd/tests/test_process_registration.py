@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import cereal.messaging as messaging
+import numpy as np
 import pytest
 
 from openpilot.common.params import Params
@@ -107,6 +108,27 @@ def test_asset_metadata_allows_explicit_model_overrides():
   assert metadata["has_objectness"] is True
   assert metadata["labels"] == ["person", "bicycle", "car"]
   assert metadata["hazard_labels"] == ["person", "bicycle"]
+
+
+def test_asset_metadata_allows_quantized_qnn_io():
+  metadata = build_metadata(
+    "0" * 64,
+    model_preset="yolov8n",
+    export_runtime="QNN_DLC",
+    input_dtype="uint8",
+    input_scale=1.0 / 255.0,
+    input_zero_point=0,
+    output_dtype="uint8",
+    output_scale=2.5,
+    output_zero_point=1,
+  )
+
+  assert metadata["input_dtype"] == "uint8"
+  assert metadata["input_scale"] == 1.0 / 255.0
+  assert metadata["input_zero_point"] == 0
+  assert metadata["output_dtype"] == "uint8"
+  assert metadata["output_scale"] == 2.5
+  assert metadata["output_zero_point"] == 1
 
 
 def test_yolo11n_asset_metadata_allows_snpe_assets():
@@ -212,6 +234,35 @@ def test_qnn_backend_only_accepts_qnn_dlc_assets():
 
   with pytest.raises(BackendError, match="SNPE_DLC"):
     QnnNetRunYoloDetector._validate_export_runtime({"export_runtime": "SNPE_DLC"})
+
+
+def test_qnn_backend_quantizes_uint8_input(tmp_path):
+  detector = QnnNetRunYoloDetector.__new__(QnnNetRunYoloDetector)
+  detector.input = np.array([0.0, 0.5, 1.0], dtype=np.float32)
+  detector.input_dtype = "uint8"
+  detector.input_scale = 1.0 / 255.0
+  detector.input_zero_point = 0
+  input_path = tmp_path / "image.raw"
+
+  detector._write_qnn_input(input_path)
+
+  assert np.fromfile(input_path, dtype=np.uint8).tolist() == [0, 128, 255]
+
+
+def test_qnn_backend_dequantizes_uint8_output(tmp_path):
+  detector = QnnNetRunYoloDetector.__new__(QnnNetRunYoloDetector)
+  detector.expected_output_size = 3
+  detector.output_dtype = "uint8"
+  detector.output_scale = 2.5
+  detector.output_zero_point = 1
+  output_dir = tmp_path / "output"
+  output_dir.mkdir()
+  np.array([1, 2, 3], dtype=np.uint8).tofile(output_dir / "detector_output.raw")
+
+  output = detector._read_qnn_output(output_dir)
+
+  assert output.dtype == np.float32
+  assert output.tolist() == [0.0, 2.5, 5.0]
 
 
 def test_ort_qnn_backend_only_accepts_precompiled_qnn_onnx_assets():
