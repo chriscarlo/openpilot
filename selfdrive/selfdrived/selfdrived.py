@@ -66,11 +66,12 @@ def compute_subsystem_status(sm, services: list[str], ignore_valid_services: set
   return 2  # green
 
 
-def get_subsystem_services(object_hazard_enabled: bool) -> list[tuple[str, list[str]]]:
-  subsystems = [
+def get_subsystem_services() -> list[tuple[str, list[str]]]:
+  return [
     ("VEH", ["pandaStates", "deviceState", "peripheralState"]),
     ("CAM", ["roadCameraState", "driverCameraState", "wideRoadCameraState"]),
     ("MDL", ["modelV2"]),
+    ("OBJ", ["objectHazardStateSP"]),
     ("LOC", ["livePose"]),
     ("CAL", ["liveCalibration"]),
     ("PRM", ["liveParameters"]),
@@ -79,9 +80,6 @@ def get_subsystem_services(object_hazard_enabled: bool) -> list[tuple[str, list[
     ("CTL", ["controlsState", "carOutput", "carControl"]),
     ("PLN", ["longitudinalPlan"]),
   ]
-  if object_hazard_enabled:
-    subsystems.insert(3, ("OBJ", ["objectHazardStateSP"]))
-  return subsystems
 
 
 class SelfdriveD(CruiseHelper):
@@ -156,7 +154,6 @@ class SelfdriveD(CruiseHelper):
     self.is_metric = self.params.get_bool("IsMetric")
     self.is_ldw_enabled = self.params.get_bool("IsLdwEnabled")
     self.disengage_on_accelerator = self.params.get_bool("DisengageOnAccelerator")
-    self.object_hazard_enabled = self.params.get_bool("ObjectHazardEnabled")
 
     car_recognized = self.CP.brand != 'mock'
 
@@ -598,7 +595,7 @@ class SelfdriveD(CruiseHelper):
     mads.available = self.mads.enabled_toggle
 
     # Subsystem readiness statuses
-    SUBSYSTEM_SERVICES = get_subsystem_services(self.object_hazard_enabled)
+    SUBSYSTEM_SERVICES = get_subsystem_services()
     statuses = ss_sp.init('subsystemStatuses', len(SUBSYSTEM_SERVICES))
     all_green = True
     ignore_valid_services = set(self.sm.ignore_valid)
@@ -638,7 +635,6 @@ class SelfdriveD(CruiseHelper):
       self.is_metric = self.params.get_bool("IsMetric")
       self.is_ldw_enabled = self.params.get_bool("IsLdwEnabled")
       self.disengage_on_accelerator = self.params.get_bool("DisengageOnAccelerator")
-      self.object_hazard_enabled = self.params.get_bool("ObjectHazardEnabled")
       self.experimental_mode = self.params.get_bool("ExperimentalMode") and self.CP.openpilotLongitudinalControl
       self.personality = self.params.get("LongitudinalPersonality", return_default=True)
 

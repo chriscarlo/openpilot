@@ -44,11 +44,6 @@ def test_prm_readiness_checks_valid_even_if_comm_checks_ignore_valid():
   assert status == 1
 
 
-def test_object_hazard_subsystem_hidden_when_feature_disabled():
-  names = [name for name, _services in get_subsystem_services(False)]
-  assert "OBJ" not in names
-
-
-def test_object_hazard_subsystem_shown_when_feature_enabled():
-  services = get_subsystem_services(True)
+def test_object_hazard_subsystem_shown_with_manager_owned_service():
+  services = get_subsystem_services()
   assert services[3] == ("OBJ", ["objectHazardStateSP"])
