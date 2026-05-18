@@ -105,14 +105,9 @@ def main() -> None:
   runtime_config = ObjectdRuntimeConfig.from_env()
   runtime_config.apply_environment_defaults()
 
-  try:
-    backend = build_detector_backend()
-  except BackendError as err:
-    cloudlog.error("objectd backend unavailable: %s", err)
-    backend = NullDetectorBackend(str(err))
-
   tracker = HazardTracker()
   params = Params()
+  backend = NullDetectorBackend("disabled")
   pm = messaging.PubMaster(["objectHazardStateSP"])
   sm = messaging.SubMaster(["carState", "deviceState", "liveCalibration", "modelV2", "roadCameraState"])
   rk = Ratekeeper(max(1, int(round(runtime_config.detector_hz))), print_delay_threshold=None)
@@ -123,8 +118,16 @@ def main() -> None:
   while True:
     sm.update(0)
     feature_enabled = params.get_bool(ENABLE_PARAM)
-    backend.start_warmup()
-    if backend.ready and vipc_client is None:
+    if feature_enabled and isinstance(backend, NullDetectorBackend) and backend.reason == "disabled":
+      try:
+        backend = build_detector_backend()
+      except BackendError as err:
+        cloudlog.error("objectd backend unavailable: %s", err)
+        backend = NullDetectorBackend(str(err))
+
+    if feature_enabled:
+      backend.start_warmup()
+    if feature_enabled and backend.ready and vipc_client is None:
       try:
         vipc_client = connect_road_camera()
       except Exception as err:
@@ -142,10 +145,10 @@ def main() -> None:
 
     snapshot = HazardSnapshot(
       enabled=feature_enabled,
-      model_ready=backend.ready,
+      model_ready=bool(feature_enabled and backend.ready),
       backend=backend_status,
     )
-    if (backend.ready and vipc_client is not None and
+    if (feature_enabled and backend.ready and vipc_client is not None and
         sm.valid.get("modelV2", False) and sm.alive.get("modelV2", False) and
         sm.valid.get("liveCalibration", False) and sm.alive.get("liveCalibration", False)):
       try:

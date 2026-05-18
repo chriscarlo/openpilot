@@ -46,11 +46,12 @@ def test_object_hazard_enabled_requires_onroad_param_and_real_car():
   assert object_hazard_enabled(True, params, cp) is True
 
   params.get_bool.return_value = False
-  assert object_hazard_enabled(True, params, cp) is False
+  assert object_hazard_enabled(True, params, cp) is True
 
   params.get_bool.return_value = True
   assert object_hazard_enabled(False, params, cp) is False
   assert object_hazard_enabled(True, params, SimpleNamespace(notCar=True)) is False
+  params.get_bool.assert_not_called()
 
 
 def test_object_hazard_param_defaults_enabled():
