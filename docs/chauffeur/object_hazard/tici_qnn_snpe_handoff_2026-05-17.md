@@ -4,7 +4,7 @@
 
 This handoff is for the next session that will implement the real fix for the experimental `objectd` object-hazard feature on the tici.
 
-Current state: the object-hazard pipeline code is present, default-enabled, and guarded, but the available Qualcomm AI Hub `QNN_DLC` asset does not run on the current tici SNPE backend. The next real fix is either a tici-compatible SNPE DLC asset or a real QNN backend/runtime path.
+Current state: the object-hazard pipeline code is present, default-enabled, and guarded. QNN/SNPE-DLC paths are blocked on this tici, but YOLOv8n ONNX through the new `tinygrad_onnx` backend runs on the tici QCOM accelerator after TinyJit capture. The next real work is integrating that backend into the normal Chauffeur/openpilot workflow with safe asset selection, startup warmup, cadence limits, live resource monitoring, and planner-propagation validation.
 
 ## Repo / Branch State
 
@@ -18,8 +18,12 @@ Current state: the object-hazard pipeline code is present, default-enabled, and 
   - `b2bf0daf0` - `Point ORT QNN at bundled HTP libraries`
   - `35ec38561` - `Guard SNPE backend against QAIRT 2 DLCs`
   - `28978843d` - `Reject legacy QAIRT 2 DLC metadata`
+  - `c1ee26ceb` - `Support quantized QNN object hazard assets`
+  - `acafa611a` - `Use native QNN files for quantized objectd tensors`
+  - `200e8de70` - `Add tinygrad ONNX object hazard backend`
+  - `0758e4507` - `Document tinygrad object hazard tici path`
 - Tici repo: `/data/openpilot`
-- Tici head after pull: `2897884`
+- Latest known tici head after pull: `0758e45`
 - Tici had one pre-existing dirty file after pull: `live_waze_police_capture.json`
 - Important workflow rule from user: commit and push from laptop, then pull to tici. Do not leave tracked manual edits on the tici.
 
@@ -255,10 +259,10 @@ python -m pytest -n 0 --basetemp .cache/pytest_tmp -o cache_dir=.cache/pytest_ca
   sunnypilot/selfdrive/controls/lib/tests/test_object_hazard_pipeline.py
 ```
 
-Latest local result after guard commit:
+Latest local result after tinygrad backend commit:
 
 ```text
-21 passed
+43 passed
 ```
 
 Tici:
@@ -274,31 +278,117 @@ python -m compileall -q sunnypilot/objectd sunnypilot/selfdrive/controls/lib/obj
 
 Tici compileall passed.
 
-## Next Real Fix Options
+## Recommended Next Implementation Steps
 
-Preferred path A: produce a SNPE-compatible DLC.
+Treat `tinygrad_onnx` with the 256x256 YOLOv8n ONNX asset as the primary integration candidate. SNPE 1.61-compatible DLCs remain a good long-term option if a licensed legacy converter appears, but they are not the fastest route to a working feature now. QNN should be considered blocked for this tici unless a runtime known to support SDM845 appears.
 
-- The current default viable backend is still SNPE: `sunnypilot/objectd/backend.py` uses `SNPEModel` for `snpe_gpu` / `snpe_dsp`, with experimental QNN paths guarded by asset/runtime metadata.
-- The repo includes SNPE runtime libraries under `third_party/snpe`, but no converter tools were found.
-- Need a DLC whose model format is supported by the bundled tici SNPE runtime.
-- Public QAIRT 2.x converters are not sufficient; use an official SNPE 1.61-era converter package if available through Qualcomm Software Center / QPM or another licensed Qualcomm channel.
-- If a SNPE-compatible DLC is produced, update metadata so `export_runtime` is `SNPE_DLC` or omit the field. Do not use `prepare_yolo11n_assets.py` unchanged, because it currently writes `export_runtime: QNN_DLC` and the backend will reject it.
-- Add `--export-runtime` or similar to `prepare_yolo11n_assets.py` if using it for SNPE assets.
+1. Make asset selection reproducible.
 
-Path B: harden tinygrad ONNX.
+- Use the 256x256 YOLOv8n ONNX asset first:
 
-- Current evidence says this is the most viable path without a SNPE 1.61 converter.
-- Use `OBJECTD_BACKEND=tinygrad_onnx` with a smaller YOLOv8n ONNX asset, probably 256x256 first.
-- Measure onroad/offroad resource impact after JIT capture with the object-hazard live monitor.
-- Consider a startup/warmup policy because the first TinyJit capture runs are slow.
-- Keep CPU ONNX gated as measurement-only.
+```text
+/data/openpilot/.cache/objectd/yolov8n_tinygrad_256_install/model.onnx
+/data/openpilot/.cache/objectd/yolov8n_tinygrad_256_install/metadata.json
+```
 
-Path C: implement a real QNN backend.
+- Keep model binaries under `.cache/` for now. Do not commit large model assets.
+- Add or document a reproducible asset-prep command for `prepare_yolo11n_assets.py` so the asset can be rebuilt from `.cache/objectd/source/yolov8n.pt` with metadata:
+  - `export_runtime=ONNX`
+  - `input_layout=NCHW`
+  - `input_name=images`
+  - `output_name=output0`
+  - `input_size=256x256`
+  - `prediction_count=1344`
+  - `attributes=84`
+- Keep hazard labels limited to `person`, `bicycle`, `dog`, `horse`, `sheep`, and `cow`.
 
-- Current QNN DLC assets are probably appropriate for newer QNN targets, not this SDM845 tici runtime.
-- QAIRT 2.42 cache-only HTP/GPU/CPU runtime probes failed backend initialization on this tici.
-- Revisit only if a QNN runtime known to support this exact tici platform becomes available.
-- Do not silently add CPU inference fallback; if a CPU/ONNX fallback is explored, gate it explicitly and measure load.
+2. Promote the experiment into managed runtime config.
+
+- Do not require a hand-run shell export for normal testing.
+- Add a small, explicit objectd configuration path for:
+  - backend: `tinygrad_onnx`
+  - model directory: `.cache/objectd/yolov8n_tinygrad_256_install`
+  - tinygrad device: `QCOM`
+  - detector cadence
+  - warmup behavior
+- Prefer narrow objectd-specific env/params over broad changes to global modeld/tinygrad behavior.
+- Keep tracked changes local, commit/push, then pull on the tici. Do not manually edit tracked files on the tici.
+
+3. Fix startup and warmup semantics before relying on live behavior.
+
+- TinyJit capture is slow on every fresh process:
+  - first run roughly 50-60 s
+  - second run roughly 6-8 s
+  - later runs roughly 100-130 ms for 256x256 `infer()`
+- Do not let an onroad objectd process look healthy while it is still warming.
+- Recommended implementation:
+  - publish `objectHazardStateSP.ready=false` while warming
+  - keep `stopRequired=false` during warmup
+  - mark backend ready only after at least one successful real tinygrad inference after capture
+  - log warmup stage and backend errors clearly
+- Current `OBJECTD_TINYGRAD_WARMUP_RUNS` can prove the idea, but a blocking manager-start warmup may be too blunt. A nonblocking warmup inside the objectd loop is safer for integration.
+
+4. Lower and expose objectd cadence.
+
+- Current `MODEL_FREQ = 5.0` is too aggressive for a roughly 115 ms warmed detector before measuring shared GPU/CPU pressure.
+- Start live validation at 1-2 Hz.
+- Make cadence configurable, e.g. an objectd env/param with a conservative default for `tinygrad_onnx`.
+- Only raise cadence after live monitor evidence shows stable `modeld`, `camerad`, `plannerd`, `ui`, CPU, GPU, memory, and thermal behavior.
+
+5. Run live monitor validation in layers.
+
+- First pass: backend readiness and resource stability, no planner claims yet.
+- Second pass: verify `objectHazardStateSP` publishes:
+  - `backend=tinygrad_onnx:qcom`
+  - `ready=true` only after warmup
+  - visible errors if assets/backend fail
+  - bounded debug detections
+- Third pass: verify planner propagation:
+  - `objectHazardStateSP`
+  - `longitudinalPlanSP.objectHazardControl`
+  - main `longitudinalPlan.shouldStop`
+- Use:
+
+```bash
+python3 .codex/skills/object-hazard-live-monitor/scripts/object_hazard_live_monitor.py \
+  --ssh-profile commaHome \
+  --duration 45 \
+  --save-json .cache/object-hazard-monitor-tinygrad-256.json
+```
+
+If the helper cannot reach the device from this Windows/PowerShell environment, use the documented `plink` path and capture the same fields.
+
+6. Validate semantics separately from runtime.
+
+- A blank frame producing no detections only proves runtime stability.
+- Add a small offline image/synthetic-frame harness before onroad semantic claims.
+- Verify cars/trucks remain excluded even though COCO labels include them.
+- Verify vulnerable road users/animals produce detections that the path association accepts only when they are plausibly in-lane and close enough.
+- Do not tune planner thresholds to compensate for model/runtime uncertainty.
+
+7. Keep fail-closed behavior.
+
+- Missing assets, checksum mismatch, tinygrad import failure, QCOM device failure, and warmup failure should all result in visible backend errors and no stop request.
+- Avoid CPU fallback unless `OBJECTD_ALLOW_CPU_INFERENCE=1` is explicitly set for measurement.
+- Keep the SNPE/QNN-DLC guards; do not retry the failed SNPE/QNN paths.
+
+## Remaining Alternatives
+
+SNPE-compatible DLC:
+
+- Still worth pursuing if an official SNPE 1.61-era converter is available through a licensed Qualcomm channel.
+- A compatible DLC could reduce startup/JIT concerns.
+- Public QAIRT 2.x converters are not sufficient for the bundled tici SNPE runtime.
+
+Different model family:
+
+- Consider SSD-MobileNet or another older mobile detector only if tinygrad YOLOv8 resource monitoring fails.
+- Keep the semantic goal general non-car hazards. A person-only model may be useful as a prototype, but document the narrowed scope clearly.
+
+QNN:
+
+- Current `QNN_DLC` and QAIRT runtime probes are blocked by SDM845/tici backend support.
+- Revisit only with a concrete runtime stack that supports this device.
 
 Avoid:
 
