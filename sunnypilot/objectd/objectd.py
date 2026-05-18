@@ -79,11 +79,9 @@ def publish_object_hazard_state(pm: messaging.PubMaster, snapshot: HazardSnapsho
   pm.send("objectHazardStateSP", msg)
 
 
-def connect_road_camera() -> VisionIpcClient:
+def try_connect_road_camera() -> VisionIpcClient | None:
   vipc_client = VisionIpcClient("camerad", VisionStreamType.VISION_STREAM_ROAD, True)
-  while not vipc_client.connect(False):
-    time.sleep(0.1)
-  return vipc_client
+  return vipc_client if vipc_client.connect(False) else None
 
 
 def recv_latest_buffer(vipc_client: VisionIpcClient):
@@ -129,9 +127,11 @@ def main() -> None:
 
     if feature_enabled and warmup_allowed:
       backend.start_warmup()
-    if feature_enabled and backend.ready and vipc_client is None:
+    if not device_started:
+      vipc_client = None
+    if feature_enabled and device_started and backend.ready and vipc_client is None:
       try:
-        vipc_client = connect_road_camera()
+        vipc_client = try_connect_road_camera()
       except Exception as err:
         cloudlog.exception("objectd road camera connect failed: %s", err)
         vipc_client = None
