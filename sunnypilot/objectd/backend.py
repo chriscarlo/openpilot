@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import queue
 import shutil
 import subprocess
 import sys
@@ -555,81 +556,105 @@ class TinygradOnnxYoloDetector(YoloDetectorBase):
     self._init_detector_config("model.onnx")
     self._validate_export_runtime({"export_runtime": self.export_runtime})
     self._add_tinygrad_python_path()
-    tinygrad_device = self._configure_tinygrad_device()
-    try:
-      from tinygrad import Tensor, TinyJit, Device
-      from tinygrad.nn.onnx import OnnxRunner
-    except ModuleNotFoundError as err:
-      raise BackendError(
-        "tinygrad dependencies are not available; set OBJECTD_TINYGRAD_PYTHONPATH"
-      ) from err
-
-    self.Tensor = Tensor
-    self.tinygrad_device = tinygrad_device or Device.DEFAULT
-    self.runner = OnnxRunner(self.model_path)
-    if self.input_name not in self.runner.graph_inputs:
-      raise BackendError(f"tinygrad_onnx input '{self.input_name}' not found in model")
-    if self.output_name not in self.runner.graph_outputs:
-      raise BackendError(f"tinygrad_onnx output '{self.output_name}' not found in model")
-
-    def run(model_input):
-      return self.runner({self.input_name: model_input})[self.output_name].contiguous()
-
-    self._jit_run = TinyJit(run)
-    self.backend_name = f"tinygrad_onnx:{Device.DEFAULT.lower()}"
+    self.tinygrad_device = self._configure_tinygrad_device()
+    self.backend_name = f"tinygrad_onnx:{self.tinygrad_device.lower()}"
     self._warmup_runs = int(os.getenv("OBJECTD_TINYGRAD_WARMUP_RUNS", str(DEFAULT_TINYGRAD_WARMUP_RUNS)))
+    self._infer_timeout = float(os.getenv("OBJECTD_TINYGRAD_INFER_TIMEOUT", "5.0"))
     self._warmup_lock = threading.Lock()
-    self._warmup_thread: threading.Thread | None = None
-    self.ready = self._warmup_runs <= 0
+    self._worker_thread: threading.Thread | None = None
+    self._request_queue: queue.Queue = queue.Queue(maxsize=1)
+    self.ready = False
 
   def _execute_model(self) -> None:
-    if self.input_layout == "NHWC":
-      model_input = self.input.reshape(1, self.input_height, self.input_width, -1)
-    elif self.input_layout == "NCHW":
-      model_input = self.input.reshape(1, -1, self.input_height, self.input_width)
-    else:
-      raise BackendError(f"unsupported input layout '{self.input_layout}'")
-    tensor_input = self.Tensor(model_input, device=self.tinygrad_device).realize()
-    result = self._jit_run(tensor_input).realize()
-    flat_output = np.asarray(result.numpy(), dtype=np.float32).reshape(-1)
+    if not self.ready:
+      raise BackendError("tinygrad_onnx inference requested before warmup completed")
+    response_queue: queue.Queue = queue.Queue(maxsize=1)
+    try:
+      self._request_queue.put((self.input.copy(), response_queue), timeout=0.1)
+      flat_output, error = response_queue.get(timeout=self._infer_timeout)
+    except queue.Full as err:
+      raise BackendError("tinygrad_onnx worker is busy") from err
+    except queue.Empty as err:
+      raise BackendError(f"tinygrad_onnx inference timed out after {self._infer_timeout:.1f}s") from err
+    if error:
+      raise BackendError(error)
     if flat_output.size != self.expected_output_size:
       raise BackendError(
         f"tinygrad_onnx output size mismatch: expected {self.expected_output_size}, got {flat_output.size}"
     )
     self.output[:] = flat_output
 
+  def _execute_model_on_worker(self, Tensor, jit_run, model_input_flat: np.ndarray) -> np.ndarray:
+    if self.input_layout == "NHWC":
+      model_input = model_input_flat.reshape(1, self.input_height, self.input_width, -1)
+    elif self.input_layout == "NCHW":
+      model_input = model_input_flat.reshape(1, -1, self.input_height, self.input_width)
+    else:
+      raise BackendError(f"unsupported input layout '{self.input_layout}'")
+    tensor_input = Tensor(model_input, device=self.tinygrad_device).realize()
+    result = jit_run(tensor_input).realize()
+    flat_output = np.asarray(result.numpy(), dtype=np.float32).reshape(-1)
+    return flat_output
+
   def start_warmup(self) -> None:
-    if self.ready or self.last_error or self._warmup_runs <= 0:
+    if self.ready or self.last_error:
       return
     with self._warmup_lock:
-      if self.ready or self.warming or self._warmup_thread is not None:
+      if self.ready or self.warming or self._worker_thread is not None:
         return
       self.warming = True
       self.warmup_stage = "queued"
-      self._warmup_thread = threading.Thread(
-        target=self._run_warmup_thread,
-        name="objectd-tinygrad-warmup",
+      self._worker_thread = threading.Thread(
+        target=self._run_worker,
+        name="objectd-tinygrad-worker",
         daemon=True,
       )
-      self._warmup_thread.start()
+      self._worker_thread.start()
 
-  def _run_warmup_thread(self) -> None:
+  def _run_worker(self) -> None:
     try:
-      self._run_warmup_blocking()
+      Tensor, jit_run = self._build_worker_runner()
+      self._run_warmup_blocking(Tensor, jit_run)
     except Exception as err:
       self.mark_failed(str(err))
       return
     self.ready = True
     self.warming = False
     self.warmup_stage = ""
+    while True:
+      model_input_flat, response_queue = self._request_queue.get()
+      try:
+        response_queue.put((self._execute_model_on_worker(Tensor, jit_run, model_input_flat), ""))
+      except Exception as err:
+        response_queue.put((np.array([], dtype=np.float32), str(err)))
 
-  def _run_warmup_blocking(self) -> None:
+  def _build_worker_runner(self):
+    try:
+      from tinygrad import Tensor, TinyJit
+      from tinygrad.nn.onnx import OnnxRunner
+    except ModuleNotFoundError as err:
+      raise BackendError(
+        "tinygrad dependencies are not available; set OBJECTD_TINYGRAD_PYTHONPATH"
+      ) from err
+
+    runner = OnnxRunner(self.model_path)
+    if self.input_name not in runner.graph_inputs:
+      raise BackendError(f"tinygrad_onnx input '{self.input_name}' not found in model")
+    if self.output_name not in runner.graph_outputs:
+      raise BackendError(f"tinygrad_onnx output '{self.output_name}' not found in model")
+
+    def run(model_input):
+      return runner({self.input_name: model_input})[self.output_name].contiguous()
+
+    return Tensor, TinyJit(run)
+
+  def _run_warmup_blocking(self, Tensor, jit_run) -> None:
     original_input = self.input.copy()
     try:
       self.input.fill(0.0)
       for run_idx in range(self._warmup_runs):
         self.warmup_stage = f"run{run_idx + 1}of{self._warmup_runs}"
-        self._execute_model()
+        self._execute_model_on_worker(Tensor, jit_run, self.input)
     finally:
       self.input[:] = original_input
 

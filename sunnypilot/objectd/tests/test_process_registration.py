@@ -396,11 +396,13 @@ def test_tinygrad_warmup_starts_in_background_and_marks_ready():
   detector.warmup_stage = ""
   detector._warmup_runs = 1
   detector._warmup_lock = objectd_backend.threading.Lock()
-  detector._warmup_thread = None
-  detector._run_warmup_blocking = lambda: None
+  detector._worker_thread = None
+  detector._request_queue = objectd_backend.queue.Queue(maxsize=1)
+  detector._build_worker_runner = lambda: (object, object())
+  detector._run_warmup_blocking = lambda _tensor, _jit: None
 
   detector.start_warmup()
-  detector._warmup_thread.join(timeout=1.0)
+  detector._worker_thread.join(timeout=1.0)
 
   assert detector.ready is True
   assert detector.warming is False
@@ -416,15 +418,17 @@ def test_tinygrad_warmup_failure_stays_fail_closed():
   detector.warmup_stage = ""
   detector._warmup_runs = 1
   detector._warmup_lock = objectd_backend.threading.Lock()
-  detector._warmup_thread = None
+  detector._worker_thread = None
+  detector._request_queue = objectd_backend.queue.Queue(maxsize=1)
+  detector._build_worker_runner = lambda: (object, object())
 
-  def _raise_backend_error():
+  def _raise_backend_error(_tensor, _jit):
     raise BackendError("qcom compile failed")
 
   detector._run_warmup_blocking = _raise_backend_error
 
   detector.start_warmup()
-  detector._warmup_thread.join(timeout=1.0)
+  detector._worker_thread.join(timeout=1.0)
 
   assert detector.ready is False
   assert detector.warming is False
