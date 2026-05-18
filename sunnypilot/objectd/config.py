@@ -14,6 +14,7 @@ DEFAULT_TINYGRAD_DEVICE = "QCOM"
 DEFAULT_DETECTOR_HZ = 2.0
 DEFAULT_TINYGRAD_WARMUP_RUNS = 3
 DEFAULT_DEBUG_DETECTION_LIMIT = 8
+DEFAULT_ALLOW_ONROAD_WARMUP = False
 
 
 def _env_float(name: str, default: float) -> float:
@@ -30,6 +31,13 @@ def _env_int(name: str, default: int) -> int:
     return default
 
 
+def _env_bool(name: str, default: bool) -> bool:
+  value = os.getenv(name)
+  if value is None:
+    return default
+  return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 @dataclass(frozen=True)
 class ObjectdRuntimeConfig:
   backend: str = DEFAULT_BACKEND
@@ -40,6 +48,7 @@ class ObjectdRuntimeConfig:
   detector_hz: float = DEFAULT_DETECTOR_HZ
   tinygrad_warmup_runs: int = DEFAULT_TINYGRAD_WARMUP_RUNS
   debug_detection_limit: int = DEFAULT_DEBUG_DETECTION_LIMIT
+  allow_onroad_warmup: bool = DEFAULT_ALLOW_ONROAD_WARMUP
 
   @classmethod
   def from_env(cls) -> "ObjectdRuntimeConfig":
@@ -53,6 +62,7 @@ class ObjectdRuntimeConfig:
       detector_hz=max(1.0, min(2.0, _env_float("OBJECTD_DETECTOR_HZ", DEFAULT_DETECTOR_HZ))),
       tinygrad_warmup_runs=max(0, _env_int("OBJECTD_TINYGRAD_WARMUP_RUNS", DEFAULT_TINYGRAD_WARMUP_RUNS)),
       debug_detection_limit=max(0, _env_int("OBJECTD_DEBUG_DETECTION_LIMIT", DEFAULT_DEBUG_DETECTION_LIMIT)),
+      allow_onroad_warmup=_env_bool("OBJECTD_ALLOW_ONROAD_WARMUP", DEFAULT_ALLOW_ONROAD_WARMUP),
     )
 
   def apply_environment_defaults(self) -> None:
@@ -64,3 +74,4 @@ class ObjectdRuntimeConfig:
     os.environ.setdefault("OBJECTD_DETECTOR_HZ", f"{self.detector_hz:.1f}")
     os.environ.setdefault("OBJECTD_TINYGRAD_WARMUP_RUNS", str(self.tinygrad_warmup_runs))
     os.environ.setdefault("OBJECTD_DEBUG_DETECTION_LIMIT", str(self.debug_detection_limit))
+    os.environ.setdefault("OBJECTD_ALLOW_ONROAD_WARMUP", "1" if self.allow_onroad_warmup else "0")

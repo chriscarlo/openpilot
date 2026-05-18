@@ -116,7 +116,7 @@ def weather_overlay_enabled(started: bool, params: Params, CP: car.CarParams) ->
   return started and params.get_bool("WeatherOverlayEnabled")
 
 def object_hazard_enabled(started: bool, params: Params, CP: car.CarParams) -> bool:
-  return started and (not CP.notCar)
+  return not CP.notCar
 
 def mtsc_enabled(started: bool, params: Params, CP: car.CarParams) -> bool:
   # Deprecated: MTSC publisher removed in favor of direct VTSC map lookahead.

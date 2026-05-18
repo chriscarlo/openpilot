@@ -118,6 +118,8 @@ def main() -> None:
   while True:
     sm.update(0)
     feature_enabled = params.get_bool(ENABLE_PARAM)
+    device_started = bool(sm.seen["deviceState"] and sm["deviceState"].started)
+    warmup_allowed = (not device_started) or runtime_config.allow_onroad_warmup
     if feature_enabled and isinstance(backend, NullDetectorBackend) and backend.reason == "disabled":
       try:
         backend = build_detector_backend()
@@ -125,7 +127,7 @@ def main() -> None:
         cloudlog.error("objectd backend unavailable: %s", err)
         backend = NullDetectorBackend(str(err))
 
-    if feature_enabled:
+    if feature_enabled and warmup_allowed:
       backend.start_warmup()
     if feature_enabled and backend.ready and vipc_client is None:
       try:
@@ -135,6 +137,10 @@ def main() -> None:
         vipc_client = None
 
     backend_status = getattr(backend, "status_name", backend.backend_name)
+    if (feature_enabled and device_started and not runtime_config.allow_onroad_warmup and
+        not backend.ready and not getattr(backend, "warming", False) and
+        not isinstance(backend, NullDetectorBackend)):
+      backend_status = f"{backend_status}:waiting_offroad_warmup"
     if backend_status != last_backend_status:
       cloudlog.info("objectd backend status: %s", backend_status)
       last_backend_status = backend_status

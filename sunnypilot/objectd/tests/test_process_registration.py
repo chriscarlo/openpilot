@@ -20,6 +20,7 @@ from openpilot.sunnypilot.objectd.backend import (
 )
 import openpilot.sunnypilot.objectd.backend as objectd_backend
 from openpilot.sunnypilot.objectd.config import (
+  DEFAULT_ALLOW_ONROAD_WARMUP,
   DEFAULT_BACKEND,
   DEFAULT_DETECTOR_HZ,
   DEFAULT_TINYGRAD_DEVICE,
@@ -49,7 +50,7 @@ def test_object_hazard_enabled_requires_onroad_param_and_real_car():
   assert object_hazard_enabled(True, params, cp) is True
 
   params.get_bool.return_value = True
-  assert object_hazard_enabled(False, params, cp) is False
+  assert object_hazard_enabled(False, params, cp) is True
   assert object_hazard_enabled(True, params, SimpleNamespace(notCar=True)) is False
   params.get_bool.assert_not_called()
 
@@ -384,6 +385,7 @@ def test_managed_objectd_runtime_defaults_point_at_tinygrad_onnx(monkeypatch):
   assert config.tinygrad_device == DEFAULT_TINYGRAD_DEVICE == "QCOM"
   assert config.detector_hz == DEFAULT_DETECTOR_HZ == 2.0
   assert config.tinygrad_warmup_runs == DEFAULT_TINYGRAD_WARMUP_RUNS == 3
+  assert config.allow_onroad_warmup == DEFAULT_ALLOW_ONROAD_WARMUP is False
   assert objectd_backend.os.environ["OBJECTD_BACKEND"] == "tinygrad_onnx"
   assert objectd_backend.os.environ["OBJECTD_MODEL_PATH"].endswith("model.onnx")
 
