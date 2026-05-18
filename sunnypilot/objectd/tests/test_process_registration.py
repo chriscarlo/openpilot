@@ -19,6 +19,14 @@ from openpilot.sunnypilot.objectd.backend import (
   TinygradOnnxYoloDetector,
 )
 import openpilot.sunnypilot.objectd.backend as objectd_backend
+from openpilot.sunnypilot.objectd.config import (
+  DEFAULT_BACKEND,
+  DEFAULT_DETECTOR_HZ,
+  DEFAULT_TINYGRAD_DEVICE,
+  DEFAULT_TINYGRAD_WARMUP_RUNS,
+  ObjectdRuntimeConfig,
+  PRIMARY_MODEL_DIR,
+)
 from openpilot.sunnypilot.objectd.prepare_yolo11n_assets import build_metadata
 from openpilot.system.manager.process_config import managed_processes, object_hazard_enabled
 
@@ -79,6 +87,21 @@ def test_yolov8n_asset_metadata_preserves_current_decoder_contract():
   assert metadata["prediction_count"] == 8400
   assert metadata["attributes"] == 84
   assert metadata["prediction_layout"] == "attributes_first"
+  assert metadata["hazard_labels"] == ["bicycle", "cow", "dog", "horse", "person", "sheep"]
+
+
+def test_yolov8n_tinygrad_256_metadata_matches_managed_runtime():
+  metadata = build_metadata("0" * 64, model_preset="yolov8n_tinygrad_256", export_runtime="ONNX")
+
+  assert metadata["source_checkpoint"] == "YOLOv8-N / yolov8n.pt"
+  assert metadata["export_runtime"] == "ONNX"
+  assert metadata["input_name"] == "images"
+  assert metadata["input_width"] == 256
+  assert metadata["input_height"] == 256
+  assert metadata["input_layout"] == "NCHW"
+  assert metadata["output_name"] == "output0"
+  assert metadata["prediction_count"] == 1344
+  assert metadata["attributes"] == 84
   assert metadata["hazard_labels"] == ["bicycle", "cow", "dog", "horse", "person", "sheep"]
 
 
@@ -338,6 +361,75 @@ def test_tinygrad_onnx_rejects_cpu_without_explicit_measurement_opt_in(monkeypat
 
   with pytest.raises(BackendError, match="requires an accelerator"):
     TinygradOnnxYoloDetector._configure_tinygrad_device()
+
+
+def test_managed_objectd_runtime_defaults_point_at_tinygrad_onnx(monkeypatch):
+  for key in (
+    "OBJECTD_BACKEND",
+    "OBJECTD_MODEL_DIR",
+    "OBJECTD_MODEL_PATH",
+    "OBJECTD_MODEL_METADATA",
+    "OBJECTD_TINYGRAD_DEVICE",
+    "OBJECTD_DETECTOR_HZ",
+    "OBJECTD_TINYGRAD_WARMUP_RUNS",
+  ):
+    monkeypatch.delenv(key, raising=False)
+
+  config = ObjectdRuntimeConfig.from_env()
+  config.apply_environment_defaults()
+
+  assert config.backend == DEFAULT_BACKEND == "tinygrad_onnx"
+  assert config.model_dir == PRIMARY_MODEL_DIR
+  assert config.tinygrad_device == DEFAULT_TINYGRAD_DEVICE == "QCOM"
+  assert config.detector_hz == DEFAULT_DETECTOR_HZ == 2.0
+  assert config.tinygrad_warmup_runs == DEFAULT_TINYGRAD_WARMUP_RUNS == 3
+  assert objectd_backend.os.environ["OBJECTD_BACKEND"] == "tinygrad_onnx"
+  assert objectd_backend.os.environ["OBJECTD_MODEL_PATH"].endswith("model.onnx")
+
+
+def test_tinygrad_warmup_starts_in_background_and_marks_ready():
+  detector = TinygradOnnxYoloDetector.__new__(TinygradOnnxYoloDetector)
+  detector.ready = False
+  detector.warming = False
+  detector.last_error = ""
+  detector.backend_name = "tinygrad_onnx:qcom"
+  detector.warmup_stage = ""
+  detector._warmup_runs = 1
+  detector._warmup_lock = objectd_backend.threading.Lock()
+  detector._warmup_thread = None
+  detector._run_warmup_blocking = lambda: None
+
+  detector.start_warmup()
+  detector._warmup_thread.join(timeout=1.0)
+
+  assert detector.ready is True
+  assert detector.warming is False
+  assert detector.status_name == "tinygrad_onnx:qcom"
+
+
+def test_tinygrad_warmup_failure_stays_fail_closed():
+  detector = TinygradOnnxYoloDetector.__new__(TinygradOnnxYoloDetector)
+  detector.ready = False
+  detector.warming = False
+  detector.last_error = ""
+  detector.backend_name = "tinygrad_onnx:qcom"
+  detector.warmup_stage = ""
+  detector._warmup_runs = 1
+  detector._warmup_lock = objectd_backend.threading.Lock()
+  detector._warmup_thread = None
+
+  def _raise_backend_error():
+    raise BackendError("qcom compile failed")
+
+  detector._run_warmup_blocking = _raise_backend_error
+
+  detector.start_warmup()
+  detector._warmup_thread.join(timeout=1.0)
+
+  assert detector.ready is False
+  assert detector.warming is False
+  assert detector.last_error == "qcom compile failed"
+  assert detector.status_name == "tinygrad_onnx:qcom:error"
 
 
 def test_auto_onnx_assets_use_tinygrad_backend(monkeypatch):

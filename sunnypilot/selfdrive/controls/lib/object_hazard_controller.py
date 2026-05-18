@@ -9,7 +9,7 @@ from openpilot.selfdrive.car.cruise import V_CRUISE_UNSET
 COMFORT_DECEL_MPS2 = 1.8
 STOP_BUFFER_M = 3.0
 STOP_DISTANCE_M = 6.0
-STALE_STATE_MAX_AGE_S = 0.45
+STALE_STATE_MAX_AGE_S = 1.25
 
 
 def compute_hazard_speed_recommendation(distance_m: float, v_ego_mps: float, cruise_cap_mps: float | None) -> float:

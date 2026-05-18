@@ -7,11 +7,17 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import zipfile
 from pathlib import Path
 
 import numpy as np
 
+from openpilot.sunnypilot.objectd.config import (
+  DEFAULT_BACKEND,
+  DEFAULT_TINYGRAD_WARMUP_RUNS,
+  PRIMARY_MODEL_DIR,
+)
 from openpilot.sunnypilot.objectd.types import Detection
 
 try:
@@ -28,7 +34,7 @@ except ModuleNotFoundError:  # pragma: no cover - absent in dev env until built
   Runtime = None
   SNPEModel = None
 
-DEFAULT_MODEL_DIR = Path(__file__).resolve().parents[2] / ".cache" / "objectd" / "yolo11n"
+DEFAULT_MODEL_DIR = PRIMARY_MODEL_DIR
 DEFAULT_HAZARD_LABELS = {
   "person", "bicycle", "dog", "horse", "sheep", "cow",
 }
@@ -54,9 +60,21 @@ class NullDetectorBackend:
     self.reason = reason
     self.backend_name = f"null:{reason}"
     self.ready = False
+    self.warming = False
+    self.last_error = reason
 
   def infer(self, _buf) -> list[Detection]:
     return []
+
+  @property
+  def status_name(self) -> str:
+    return self.backend_name
+
+  def start_warmup(self) -> None:
+    pass
+
+  def mark_failed(self, reason: str) -> None:
+    self.last_error = reason
 
 
 class YoloDetectorBase:
@@ -97,11 +115,32 @@ class YoloDetectorBase:
 
     self.output = np.zeros(self.expected_output_size, dtype=np.float32)
     self.input = np.zeros(input_size, dtype=np.float32)
+    self.ready = False
+    self.warming = False
+    self.last_error = ""
+    self.warmup_stage = ""
 
   def infer(self, buf) -> list[Detection]:
     rgb = self._prepare_input(buf)
     self._execute_model()
     return self._decode_predictions(rgb.shape[1], rgb.shape[0])
+
+  @property
+  def status_name(self) -> str:
+    if self.last_error:
+      return f"{self.backend_name}:error"
+    if self.warming:
+      stage = f":{self.warmup_stage}" if self.warmup_stage else ""
+      return f"{self.backend_name}:warming{stage}"
+    return self.backend_name
+
+  def start_warmup(self) -> None:
+    pass
+
+  def mark_failed(self, reason: str) -> None:
+    self.ready = False
+    self.warming = False
+    self.last_error = reason
 
   def _execute_model(self) -> None:
     raise NotImplementedError
@@ -538,8 +577,10 @@ class TinygradOnnxYoloDetector(YoloDetectorBase):
 
     self._jit_run = TinyJit(run)
     self.backend_name = f"tinygrad_onnx:{Device.DEFAULT.lower()}"
-    self.ready = True
-    self._run_warmup()
+    self._warmup_runs = int(os.getenv("OBJECTD_TINYGRAD_WARMUP_RUNS", str(DEFAULT_TINYGRAD_WARMUP_RUNS)))
+    self._warmup_lock = threading.Lock()
+    self._warmup_thread: threading.Thread | None = None
+    self.ready = self._warmup_runs <= 0
 
   def _execute_model(self) -> None:
     if self.input_layout == "NHWC":
@@ -554,17 +595,40 @@ class TinygradOnnxYoloDetector(YoloDetectorBase):
     if flat_output.size != self.expected_output_size:
       raise BackendError(
         f"tinygrad_onnx output size mismatch: expected {self.expected_output_size}, got {flat_output.size}"
-      )
+    )
     self.output[:] = flat_output
 
-  def _run_warmup(self) -> None:
-    warmup_runs = int(os.getenv("OBJECTD_TINYGRAD_WARMUP_RUNS", "0"))
-    if warmup_runs <= 0:
+  def start_warmup(self) -> None:
+    if self.ready or self.last_error or self._warmup_runs <= 0:
       return
+    with self._warmup_lock:
+      if self.ready or self.warming or self._warmup_thread is not None:
+        return
+      self.warming = True
+      self.warmup_stage = "queued"
+      self._warmup_thread = threading.Thread(
+        target=self._run_warmup_thread,
+        name="objectd-tinygrad-warmup",
+        daemon=True,
+      )
+      self._warmup_thread.start()
+
+  def _run_warmup_thread(self) -> None:
+    try:
+      self._run_warmup_blocking()
+    except Exception as err:
+      self.mark_failed(str(err))
+      return
+    self.ready = True
+    self.warming = False
+    self.warmup_stage = ""
+
+  def _run_warmup_blocking(self) -> None:
     original_input = self.input.copy()
     try:
       self.input.fill(0.0)
-      for _ in range(warmup_runs):
+      for run_idx in range(self._warmup_runs):
+        self.warmup_stage = f"run{run_idx + 1}of{self._warmup_runs}"
         self._execute_model()
     finally:
       self.input[:] = original_input
@@ -668,7 +732,7 @@ def _read_default_export_runtime() -> str:
 
 
 def build_detector_backend():
-  backend_name = os.getenv("OBJECTD_BACKEND", "auto").lower()
+  backend_name = os.getenv("OBJECTD_BACKEND", DEFAULT_BACKEND).lower()
   if backend_name == "auto":
     export_runtime = _read_default_export_runtime()
     if export_runtime == "PRECOMPILED_QNN_ONNX":

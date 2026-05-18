@@ -13,6 +13,7 @@ from openpilot.common.realtime import Priority, Ratekeeper, config_realtime_proc
 from openpilot.common.swaglog import cloudlog
 
 from openpilot.sunnypilot.objectd.backend import BackendError, NullDetectorBackend, build_detector_backend
+from openpilot.sunnypilot.objectd.config import ObjectdRuntimeConfig
 from openpilot.sunnypilot.objectd.path_association import (
   DEFAULT_CAMERA_HEIGHT_M,
   HazardTracker,
@@ -26,8 +27,6 @@ from openpilot.sunnypilot.selfdrive.controls.lib.object_hazard_controller import
 )
 
 PROCESS_NAME = "sunnypilot.objectd.objectd"
-MODEL_FREQ = 5.0
-DEBUG_DETECTION_LIMIT = 8
 ENABLE_PARAM = "ObjectHazardEnabled"
 
 
@@ -103,6 +102,8 @@ def main() -> None:
   setproctitle(PROCESS_NAME)
   cloudlog.bind(daemon=PROCESS_NAME)
   config_realtime_process(4, Priority.CTRL_LOW)
+  runtime_config = ObjectdRuntimeConfig.from_env()
+  runtime_config.apply_environment_defaults()
 
   try:
     backend = build_detector_backend()
@@ -114,13 +115,36 @@ def main() -> None:
   params = Params()
   pm = messaging.PubMaster(["objectHazardStateSP"])
   sm = messaging.SubMaster(["carState", "deviceState", "liveCalibration", "modelV2", "roadCameraState"])
-  rk = Ratekeeper(int(MODEL_FREQ), print_delay_threshold=None)
-  vipc_client = connect_road_camera() if backend.ready else None
+  rk = Ratekeeper(max(1, int(round(runtime_config.detector_hz))), print_delay_threshold=None)
+  vipc_client = None
+  last_backend_status = ""
+  last_backend_error = ""
 
   while True:
     sm.update(0)
     feature_enabled = params.get_bool(ENABLE_PARAM)
-    snapshot = HazardSnapshot(enabled=feature_enabled, model_ready=backend.ready, backend=backend.backend_name)
+    backend.start_warmup()
+    if backend.ready and vipc_client is None:
+      try:
+        vipc_client = connect_road_camera()
+      except Exception as err:
+        cloudlog.exception("objectd road camera connect failed: %s", err)
+        vipc_client = None
+
+    backend_status = getattr(backend, "status_name", backend.backend_name)
+    if backend_status != last_backend_status:
+      cloudlog.info("objectd backend status: %s", backend_status)
+      last_backend_status = backend_status
+    backend_error = getattr(backend, "last_error", "")
+    if backend_error and backend_error != last_backend_error:
+      cloudlog.error("objectd backend error: %s", backend_error)
+      last_backend_error = backend_error
+
+    snapshot = HazardSnapshot(
+      enabled=feature_enabled,
+      model_ready=backend.ready,
+      backend=backend_status,
+    )
     if (backend.ready and vipc_client is not None and
         sm.valid.get("modelV2", False) and sm.alive.get("modelV2", False) and
         sm.valid.get("liveCalibration", False) and sm.alive.get("liveCalibration", False)):
@@ -156,7 +180,13 @@ def main() -> None:
             snapshot.recommended_speed = float(recommended_speed)
             snapshot.stop_required = should_stop_for_hazard(active_detection.distance_m, recommended_speed)
 
-          snapshot.detections = detections[:DEBUG_DETECTION_LIMIT]
+          snapshot.detections = detections[:runtime_config.debug_detection_limit]
+        except BackendError as err:
+          cloudlog.error("objectd backend failed closed: %s", err)
+          backend.mark_failed(str(err))
+          snapshot.model_ready = False
+          snapshot.backend = getattr(backend, "status_name", backend.backend_name)
+          tracker.update(None)
         except Exception as err:
           cloudlog.exception("objectd inference/path association failed: %s", err)
           tracker.update(None)

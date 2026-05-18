@@ -90,7 +90,7 @@ _services: dict[str, tuple] = {
   "liveMapDataSP": (True, 1., 1),
   "mapTurnSpeedControlSP": (True, 10., 10),
   "weatherOverlaySP": (True, 1., 1),
-  "objectHazardStateSP": (True, 5., 5),
+  "objectHazardStateSP": (True, 2., 5),
 
   # debug
   "uiDebug": (True, 0., 1),
