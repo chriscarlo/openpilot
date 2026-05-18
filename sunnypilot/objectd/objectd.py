@@ -9,7 +9,7 @@ from msgq.visionipc import VisionIpcClient, VisionStreamType
 from setproctitle import setproctitle
 
 from openpilot.common.params import Params
-from openpilot.common.realtime import Priority, Ratekeeper, config_realtime_process
+from openpilot.common.realtime import Ratekeeper
 from openpilot.common.swaglog import cloudlog
 
 from openpilot.sunnypilot.objectd.backend import BackendError, NullDetectorBackend, build_detector_backend
@@ -99,7 +99,6 @@ def recv_latest_buffer(vipc_client: VisionIpcClient):
 def main() -> None:
   setproctitle(PROCESS_NAME)
   cloudlog.bind(daemon=PROCESS_NAME)
-  config_realtime_process(4, Priority.CTRL_LOW)
   runtime_config = ObjectdRuntimeConfig.from_env()
   runtime_config.apply_environment_defaults()
 

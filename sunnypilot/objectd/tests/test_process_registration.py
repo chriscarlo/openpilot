@@ -385,7 +385,7 @@ def test_managed_objectd_runtime_defaults_point_at_tinygrad_onnx(monkeypatch):
   assert config.tinygrad_device == DEFAULT_TINYGRAD_DEVICE == "QCOM"
   assert config.detector_hz == DEFAULT_DETECTOR_HZ == 2.0
   assert config.tinygrad_warmup_runs == DEFAULT_TINYGRAD_WARMUP_RUNS == 3
-  assert config.allow_onroad_warmup == DEFAULT_ALLOW_ONROAD_WARMUP is False
+  assert config.allow_onroad_warmup == DEFAULT_ALLOW_ONROAD_WARMUP is True
   assert objectd_backend.os.environ["OBJECTD_BACKEND"] == "tinygrad_onnx"
   assert objectd_backend.os.environ["OBJECTD_MODEL_PATH"].endswith("model.onnx")
 

@@ -612,6 +612,7 @@ class TinygradOnnxYoloDetector(YoloDetectorBase):
       self._worker_thread.start()
 
   def _run_worker(self) -> None:
+    self._configure_worker_scheduling()
     try:
       Tensor, jit_run = self._build_worker_runner()
       self._run_warmup_blocking(Tensor, jit_run)
@@ -627,6 +628,24 @@ class TinygradOnnxYoloDetector(YoloDetectorBase):
         response_queue.put((self._execute_model_on_worker(Tensor, jit_run, model_input_flat), ""))
       except Exception as err:
         response_queue.put((np.array([], dtype=np.float32), str(err)))
+
+  @staticmethod
+  def _configure_worker_scheduling() -> None:
+    if sys.platform != "linux":
+      return
+    try:
+      if hasattr(os, "SCHED_IDLE"):
+        os.sched_setscheduler(0, os.SCHED_IDLE, os.sched_param(0))
+      elif hasattr(os, "SCHED_BATCH"):
+        os.sched_setscheduler(0, os.SCHED_BATCH, os.sched_param(0))
+    except OSError:
+      pass
+    try:
+      cpu_count = os.cpu_count()
+      if cpu_count:
+        os.sched_setaffinity(0, range(cpu_count))
+    except OSError:
+      pass
 
   def _build_worker_runner(self):
     try:
