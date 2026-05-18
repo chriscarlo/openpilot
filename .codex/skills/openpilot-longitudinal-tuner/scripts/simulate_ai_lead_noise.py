@@ -47,46 +47,52 @@ from openpilot.selfdrive.controls.radard import RADAR_TO_CAMERA, ModelLeadTracke
 
 
 EV6_LIVE_SOFT_TUNE: dict[str, float] = {
-  "lead_preview_strength": 0.80,
-  "lead_preview_gap_min_m": 3.0,
-  "lead_preview_max_buffer_m": 5.0,
-  "lead_acquire_window_s": 0.20,
-  "gap_reclaim_strength": 0.35,
-  "gap_reclaim_gap_min_m": 5.0,
-  "gap_reclaim_max_accel": 0.08,
-  "lead_keepup_strength": 1.0,
-  "lead_keepup_gap_min_m": 0.80,
-  "lead_keepup_max_accel": 0.06,
-  "lead_slowdown_strength": 0.65,
-  "lead_slowdown_max_decel": 6.0,
-  "cutin_settle_duration_s": 10.0,
-  "cutin_settle_max_decel": 0.08,
-  "cutin_settle_max_closing_speed_mps": 5.0,
-  "cutin_settle_accel_bias_mps2": 0.15,
+  "lead_preview_strength": 1.50,
+  "lead_preview_gap_min_m": 1.0,
+  "lead_preview_max_buffer_m": 10.0,
+  "lead_acquire_window_s": 1.50,
+  "gap_reclaim_strength": 0.55,
+  "gap_reclaim_gap_min_m": 3.0,
+  "gap_reclaim_max_accel": 0.12,
+  "lead_keepup_strength": 1.15,
+  "lead_keepup_gap_min_m": 0.10,
+  "lead_keepup_max_accel": 0.095,
+  "lead_slowdown_strength": 0.25,
+  "lead_slowdown_max_decel": 4.0,
+  "cutin_settle_duration_s": 6.0,
+  "cutin_settle_max_decel": 0.15,
+  "cutin_settle_max_closing_speed_mps": 2.2,
+  "cutin_settle_accel_bias_mps2": 0.12,
   "virtual_lead_slow_tau_s": 1.30,
-  "drel_filter_tau_close_s": 0.45,
-  "drel_filter_tau_open_s": 1.80,
-  "drel_filter_open_slew_max_mps": 0.70,
+  "drel_filter_tau_close_s": 0.30,
+  "drel_filter_tau_open_s": 0.80,
+  "drel_filter_open_slew_max_mps": 1.80,
   "drel_filter_innovation_gate_m": 30.0,
   "drel_filter_closing_gate_m": 12.0,
   "cruise_reacquire_pos_jerk_limit": 0.08,
   "cruise_reacquire_jerk_window_s": 3.0,
   "lead_prob_enter": 0.60,
-  "lead_prob_exit": 0.35,
-  "lead_source_acquire_frames": 2.0,
-  "lead_source_release_frames": 8.0,
-  "phantom_lead_hold_s": 0.40,
-  "phantom_lead_stable_frames": 5.0,
+  "lead_prob_exit": 0.25,
+  "lead_source_acquire_frames": 1.0,
+  "lead_source_release_frames": 20.0,
+  "phantom_lead_hold_s": 0.80,
+  "phantom_lead_stable_frames": 3.0,
   "flutter_detect_transitions": 2.0,
   "flutter_detect_window_s": 1.0,
-  "flutter_clamp_jerk_mps3": 0.18,
+  "flutter_clamp_jerk_mps3": 0.12,
   "flutter_clamp_bypass_decel_mps2": 1.5,
   "model_lead_filter_tau_s": 2.8,
   "model_lead_filter_open_slew_max_mps": 1.2,
   "model_lead_filter_safe_ttc_s": 4.0,
   "model_lead_filter_assoc_drel_m": 12.0,
-  "model_lead_filter_vrel_tau_s": 0.55,
-  "model_lead_filter_fast_vrel_tau_s": 0.22,
+  "model_lead_filter_vrel_tau_s": 0.40,
+  "model_lead_filter_fast_vrel_tau_s": 0.16,
+}
+
+EV6_LIVE_SOFT_MPC_WEIGHTS: dict[str, float] = {
+  "obstacle_cost": 2.0,
+  "accel_change_cost": 400.0,
+  "accel_cost": 1.0,
 }
 
 
@@ -354,6 +360,9 @@ def _apply_lead_tune_profile(mpc: LongitudinalMpc, args: argparse.Namespace) -> 
 
   cfg = build_lead_response_tuning_config(LEAD_TUNE_PROFILES[profile])
   mpc._live_tune_cfg = cfg
+  mpc._live_obstacle_cost = EV6_LIVE_SOFT_MPC_WEIGHTS["obstacle_cost"]
+  mpc._live_a_change_cost = EV6_LIVE_SOFT_MPC_WEIGHTS["accel_change_cost"]
+  mpc._live_a_ego_cost = EV6_LIVE_SOFT_MPC_WEIGHTS["accel_cost"]
   mpc._refresh_live_tune = lambda now, force=False: None
 
 

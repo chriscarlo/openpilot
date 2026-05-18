@@ -37,7 +37,7 @@ def test_run_manifest_benchmark_aggregates_case_scores(tmp_path: Path) -> None:
 
   payload = run_manifest_benchmark(
     manifest=manifest,
-    candidates=enumerate_candidates({}, {"Longitudinal.LiveTune.GapReclaimStrength": ["1.0", "1.25"]}),
+    candidates=enumerate_candidates({}, {"Longitudinal.LiveTune.GapReclaimStrength": ["0.45", "0.55"]}),
     controller_mode="auto",
     hyundai_tuning_mode=None,
     noise="off",

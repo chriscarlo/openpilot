@@ -87,6 +87,8 @@ class SnapshotBundle:
 
 BASE_SCENARIO_NAMES = (
   "approach",
+  "slower_lead_acquisition",
+  "decelerating_lead",
   "pullaway",
   "pullaway_close",
   "cutin",
@@ -100,17 +102,23 @@ BASE_SCENARIO_NAMES = (
   "dropout",
   "cruise_lead_handoff",
   "oscillating",
+  "random_speed_wander",
+  "goldilocks_speed_wander",
   "accordion_close",
 )
 
 CANONICAL_LEAD_PROFILE_NAMES = (
   "profile_steady_goldilocks",
+  "profile_slow_lead_acquisition",
   "profile_gentle_pullaway",
   "profile_confirmed_pullaway",
+  "profile_decelerating_lead",
   "profile_high_ttc_slowdown",
   "profile_emergency_ttc",
   "profile_stoplight_launch",
   "profile_varying_speed",
+  "profile_random_speed_wander",
+  "profile_goldilocks_speed_wander",
   "profile_benign_cutin",
   "profile_dangerous_cutin",
   "profile_duplicate_dropout",
@@ -123,10 +131,62 @@ def _scenario_step_count(duration_s: float, dt_s: float) -> int:
   return max(1, int(round(duration_s / dt_s)))
 
 
+_MPH_TO_MPS = 0.44704
+_RANDOM_SPEED_WANDER_ANCHORS_MPH = (
+  65.0,
+  70.5,
+  64.8,
+  58.7,
+  55.2,
+  62.1,
+  68.4,
+  74.8,
+  69.5,
+  72.2,
+  65.3,
+  57.6,
+  60.8,
+)
+_GOLDILOCKS_GAP_WANDER_ANCHORS_M = (
+  44.0,
+  43.2,
+  45.1,
+  44.4,
+  42.8,
+  43.7,
+  45.3,
+  44.1,
+  43.4,
+  44.8,
+)
+
+
+def _mph_to_mps(speed_mph: float) -> float:
+  return speed_mph * _MPH_TO_MPS
+
+
+def _smoothstep(progress: float) -> float:
+  clamped = min(max(progress, 0.0), 1.0)
+  return clamped * clamped * (3.0 - (2.0 * clamped))
+
+
+def _smooth_profile_value(t_s: float, anchors: tuple[float, ...], interval_s: float) -> float:
+  if len(anchors) == 1:
+    return anchors[0]
+  segment_idx = min(int(t_s // interval_s), len(anchors) - 2)
+  segment_start_t = segment_idx * interval_s
+  progress = _smoothstep((t_s - segment_start_t) / interval_s)
+  return anchors[segment_idx] + ((anchors[segment_idx + 1] - anchors[segment_idx]) * progress)
+
+
 def build_synthetic_scenario(name: str, *, duration_s: float, dt_s: float) -> tuple[float, float, list[StepInput]]:
   name = name.lower()
   if name == "approach":
     return _build_approach(duration_s, dt_s)
+  if name == "slower_lead_acquisition":
+    return _build_slower_lead_acquisition(duration_s, dt_s)
+  if name == "decelerating_lead":
+    return _build_decelerating_lead(duration_s, dt_s)
   if name == "pullaway":
     return _build_pullaway(duration_s, dt_s)
   if name == "pullaway_close":
@@ -153,14 +213,22 @@ def build_synthetic_scenario(name: str, *, duration_s: float, dt_s: float) -> tu
     return _build_cruise_lead_handoff(duration_s, dt_s)
   if name == "oscillating":
     return _build_oscillating(duration_s, dt_s)
+  if name == "random_speed_wander":
+    return _build_random_speed_wander(duration_s, dt_s)
+  if name == "goldilocks_speed_wander":
+    return _build_goldilocks_speed_wander(duration_s, dt_s)
   if name == "accordion_close":
     return _build_accordion_close(duration_s, dt_s)
   if name == "profile_steady_goldilocks":
     return _build_profile_steady_goldilocks(duration_s, dt_s)
+  if name == "profile_slow_lead_acquisition":
+    return _build_slower_lead_acquisition(duration_s, dt_s, canonical=True)
   if name == "profile_gentle_pullaway":
     return _build_profile_pullaway(duration_s, dt_s, confirmed=False)
   if name == "profile_confirmed_pullaway":
     return _build_profile_pullaway(duration_s, dt_s, confirmed=True)
+  if name == "profile_decelerating_lead":
+    return _build_decelerating_lead(duration_s, dt_s, canonical=True)
   if name == "profile_high_ttc_slowdown":
     return _build_profile_ttc_slowdown(duration_s, dt_s, emergency=False)
   if name == "profile_emergency_ttc":
@@ -169,6 +237,10 @@ def build_synthetic_scenario(name: str, *, duration_s: float, dt_s: float) -> tu
     return _build_profile_stoplight_launch(duration_s, dt_s)
   if name == "profile_varying_speed":
     return _build_profile_varying_speed(duration_s, dt_s)
+  if name == "profile_random_speed_wander":
+    return _build_random_speed_wander(duration_s, dt_s, canonical=True)
+  if name == "profile_goldilocks_speed_wander":
+    return _build_goldilocks_speed_wander(duration_s, dt_s, canonical=True)
   if name == "profile_benign_cutin":
     return _build_cutin(duration_s, dt_s, dangerous=False)
   if name == "profile_dangerous_cutin":
@@ -222,6 +294,66 @@ def _build_approach(duration_s: float, dt_s: float) -> tuple[float, float, list[
                              d_rel_override_m=gap_m if idx == 0 else None,
                              acquisition_reset=idx == 0)
     timeline.append(StepInput(t_s=t_s, cruise_speed_mps=40.0, lead_one=lead_one, note="steady slower lead"))
+  return initial_speed, 0.0, timeline
+
+
+def _build_slower_lead_acquisition(duration_s: float, dt_s: float, *, canonical: bool = False) -> tuple[float, float, list[StepInput]]:
+  initial_speed = _mph_to_mps(67.0)
+  lead_speed = _mph_to_mps(47.0)
+  reveal_t_s = 1.5
+  reveal_gap_m = 60.0
+  timeline = []
+  for idx in range(_scenario_step_count(duration_s, dt_s)):
+    t_s = idx * dt_s
+    reveal_now = abs(t_s - reveal_t_s) < (dt_s * 0.5)
+    if t_s >= reveal_t_s:
+      lead_one = LeadDirective(
+        status=True,
+        v_lead_mps=lead_speed,
+        model_prob_target=1.0,
+        d_rel_override_m=reveal_gap_m if reveal_now else None,
+        acquisition_reset=reveal_now,
+      )
+      event = "lead_reveal" if reveal_now else None
+      note = "canonical slower lead acquisition" if canonical else "new lead appears 20 mph slower than ego"
+    else:
+      lead_one = LeadDirective()
+      event = None
+      note = "cruise before slower lead acquisition"
+    timeline.append(StepInput(t_s=t_s, cruise_speed_mps=_mph_to_mps(78.0), lead_one=lead_one, event=event, note=note))
+  return initial_speed, 0.0, timeline
+
+
+def _build_decelerating_lead(duration_s: float, dt_s: float, *, canonical: bool = False) -> tuple[float, float, list[StepInput]]:
+  initial_speed = _mph_to_mps(67.0)
+  lead_base_speed = initial_speed
+  lead_speed_drop = _mph_to_mps(16.0)
+  decel_start_t = 1.5
+  decel_duration_s = 7.0
+  gap_m = 48.0
+  timeline = []
+  for idx in range(_scenario_step_count(duration_s, dt_s)):
+    t_s = idx * dt_s
+    if t_s < decel_start_t:
+      lead_speed = lead_base_speed
+      event = None
+    elif t_s < decel_start_t + decel_duration_s:
+      progress = _smoothstep((t_s - decel_start_t) / decel_duration_s)
+      lead_speed = lead_base_speed - (lead_speed_drop * progress)
+      event = "lead_decel_start" if abs(t_s - decel_start_t) < (dt_s * 0.5) else None
+    else:
+      lead_speed = lead_base_speed - lead_speed_drop
+      event = None
+
+    lead_one = LeadDirective(
+      status=True,
+      v_lead_mps=lead_speed,
+      model_prob_target=0.98 if canonical else 1.0,
+      d_rel_override_m=gap_m if idx == 0 else None,
+      acquisition_reset=idx == 0,
+    )
+    note = "canonical smooth lead deceleration" if canonical else "lead smoothly decelerates from freeway speed"
+    timeline.append(StepInput(t_s=t_s, cruise_speed_mps=_mph_to_mps(78.0), lead_one=lead_one, event=event, note=note))
   return initial_speed, 0.0, timeline
 
 
@@ -696,6 +828,46 @@ def _build_oscillating(duration_s: float, dt_s: float) -> tuple[float, float, li
                              d_rel_override_m=40.0 if idx == 0 else None,
                              acquisition_reset=idx == 0)
     timeline.append(StepInput(t_s=t_s, cruise_speed_mps=31.0, lead_one=lead_one, note="oscillating lead"))
+  return initial_speed, 0.0, timeline
+
+
+def _build_random_speed_wander(duration_s: float, dt_s: float, *, canonical: bool = False) -> tuple[float, float, list[StepInput]]:
+  anchors_mps = tuple(_mph_to_mps(speed_mph) for speed_mph in _RANDOM_SPEED_WANDER_ANCHORS_MPH)
+  initial_speed = _mph_to_mps(65.0)
+  gap_m = 52.0
+  timeline = []
+  for idx in range(_scenario_step_count(duration_s, dt_s)):
+    t_s = idx * dt_s
+    lead_speed = _smooth_profile_value(t_s, anchors_mps, interval_s=7.0)
+    lead_one = LeadDirective(
+      status=True,
+      v_lead_mps=lead_speed,
+      model_prob_target=0.98 if canonical else 1.0,
+      d_rel_override_m=gap_m if idx == 0 else None,
+      acquisition_reset=idx == 0,
+    )
+    note = "canonical random-like freeway speed wander" if canonical else "random-like lead speed wander between 55 and 75 mph"
+    timeline.append(StepInput(t_s=t_s, cruise_speed_mps=_mph_to_mps(78.0), lead_one=lead_one, note=note))
+  return initial_speed, 0.0, timeline
+
+
+def _build_goldilocks_speed_wander(duration_s: float, dt_s: float, *, canonical: bool = False) -> tuple[float, float, list[StepInput]]:
+  anchors_mps = tuple(_mph_to_mps(speed_mph) for speed_mph in _RANDOM_SPEED_WANDER_ANCHORS_MPH)
+  initial_speed = _mph_to_mps(65.0)
+  timeline = []
+  for idx in range(_scenario_step_count(duration_s, dt_s)):
+    t_s = idx * dt_s
+    lead_speed = _smooth_profile_value(t_s, anchors_mps, interval_s=7.0)
+    gap_m = _smooth_profile_value(t_s, _GOLDILOCKS_GAP_WANDER_ANCHORS_M, interval_s=5.0)
+    lead_one = LeadDirective(
+      status=True,
+      v_lead_mps=lead_speed,
+      model_prob_target=0.98 if canonical else 1.0,
+      d_rel_override_m=gap_m,
+      acquisition_reset=idx == 0,
+    )
+    note = "canonical lead-owned goldilocks speed wander" if canonical else "lead-owned goldilocks speed wander"
+    timeline.append(StepInput(t_s=t_s, cruise_speed_mps=_mph_to_mps(78.0), lead_one=lead_one, note=note))
   return initial_speed, 0.0, timeline
 
 

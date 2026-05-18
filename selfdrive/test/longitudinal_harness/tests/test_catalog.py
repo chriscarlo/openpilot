@@ -275,7 +275,7 @@ def test_catalog_cli_records_snapshot_and_sweep(tmp_path: Path, capsys) -> None:
   assert snapshot_payload["snapshotId"] > 0
 
   payload = run_sweep(
-    candidates=enumerate_candidates({}, {"Longitudinal.LiveTune.AccelChangeCost": ["90", "115"]}),
+    candidates=enumerate_candidates({}, {"Longitudinal.LiveTune.AccelChangeCost": ["350", "400"]}),
     scenarios=["approach"],
     mode="snapshot",
     snapshot=FIXTURE_DIR,

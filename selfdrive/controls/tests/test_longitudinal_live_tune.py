@@ -138,11 +138,11 @@ class TestLongitudinalMpcLiveRefresh:
     mpc.last_v_cruise_clipped = np.array([33.5, 34.1])
 
     mpc._refresh_live_tune(100.0, force=True)
-    assert mpc.get_gap_reclaim_floor() > 0.15
+    assert mpc.get_gap_reclaim_floor() > 0.05
 
     params.put("Longitudinal.LiveTune.GapReclaimStrength", 0.0)
     mpc._refresh_live_tune(100.2)
-    assert mpc.get_gap_reclaim_floor() > 0.15
+    assert mpc.get_gap_reclaim_floor() > 0.05
 
     mpc._refresh_live_tune(100.6)
     assert mpc.get_gap_reclaim_floor() == pytest.approx(0.0)

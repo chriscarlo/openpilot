@@ -72,10 +72,9 @@
 ## Source Stability Layer
 
 Four cooperating mechanisms sit between the model's raw lead output and the
-MPC's source decision. Each can be disabled individually. Defaults are
-tuned so the two **output-level** layers (Schmitt, flutter clamp) are
-active out of the box and the two **data-level** layers (dwell, phantom)
-ship as no-ops that the driver opts into on-device.
+MPC's source decision. Each can be disabled individually. Defaults now match
+the May 16, 2026 Kia EV6 freeway tune: keep lead ownership sticky, absorb
+brief model dropouts, and heavily damp source-transition accel flaps.
 
 ### 1 — Prob Schmitt trigger (radard, always-on by default)
 
@@ -87,11 +86,11 @@ acquisition-edge flicker where prob hovers ±0.02 around 0.5.
 
 - `LeadProbEnter` (default 0.6, range 0.0-1.0)
   Prob required to latch a slot on. Raise to reject flicker harder.
-- `LeadProbExit` (default 0.35, range 0.0-1.0)
+- `LeadProbExit` (default 0.25, range 0.0-1.0)
   Prob below which a latched slot releases. Must be <= Enter for
   hysteresis; setting both to 0.5 collapses to legacy behavior.
 
-### 2 — Source acquire/release dwell (MPC, opt-in)
+### 2 — Source acquire/release dwell (MPC, on by default for release)
 
 Frame-count hysteresis at the MPC boundary. Implemented in
 `LongitudinalMpc._stabilize_raw_leads()`. Requires N consecutive valid-lead
@@ -101,14 +100,14 @@ invalid-lead frames before releasing a latched lead.
 - `LeadSourceAcquireFrames` (default 1, range 1-20)
   Default 1 = no dwell. Raise to 2-3 to suppress one-frame false
   acquisitions that sneak past Schmitt. Each frame is `DT_MDL = 0.05 s`.
-- `LeadSourceReleaseFrames` (default 1, range 1-40)
-  Default 1 = no dwell. Raise to 4-8 to hold through brief dropouts.
+- `LeadSourceReleaseFrames` (default 20, range 1-40)
+  Holds through brief dropouts before releasing a latched lead.
   While phantom hold (#3) is active and within its window, release dwell
   is effectively subsumed by phantom: the slot stays latched regardless
   of raw invalid streak until the phantom window expires or yRel kill
   fires.
 
-### 3 — Phantom lead hold (MPC, opt-in)
+### 3 — Phantom lead hold (MPC, on by default)
 
 Velocity-extrapolated lead state fed to the MPC during brief raw dropouts.
 Same implementation path as #2 (`_stabilize_raw_leads`). When raw goes
@@ -116,11 +115,10 @@ invalid and preconditions are met, a synthesized `_StabilizedLead` is
 published in place with `dRel` extrapolated by last-known `vRel`,
 `aLeadK`/`modelProb` decaying linearly to zero by end of window.
 
-- `PhantomLeadHoldS` (default 0.0, range 0.0-1.5)
+- `PhantomLeadHoldS` (default 0.80, range 0.0-1.5)
   Duration the phantom persists after raw `status` flips to False.
-  Default 0 disables phantom. 0.3-0.5 s is enough to bridge single-frame
-  classifier drops without noticeably tracking an empty lane.
-- `PhantomLeadStableFrames` (default 5, range 1-40)
+  Set 0 to disable phantom.
+- `PhantomLeadStableFrames` (default 3, range 1-40)
   The lead must have been latched for at least this many frames before
   it is eligible for phantom hold. Prevents one-frame false acquisitions
   from generating a persistent ghost.
@@ -143,9 +141,9 @@ Triggered on a lead->cruise source transition. Clamps POSITIVE slew of
 Window auto-closes early when `output_a_target` reaches the cruise accel
 cap.
 
-- `CruiseReacquirePosJerkLimit` (default 0.6, range 0.0-5.0 m/s^3)
+- `CruiseReacquirePosJerkLimit` (default 0.08, range 0.0-5.0 m/s^3)
   Max upward jerk on planner output. 0 disables the mechanism.
-- `CruiseReacquireJerkWindowS` (default 1.5, range 0.0-3.0 s)
+- `CruiseReacquireJerkWindowS` (default 3.0, range 0.0-3.0 s)
   Duration after transition during which the limit is enforced. 0 also
   disables.
 
@@ -160,7 +158,7 @@ so real braking is never delayed.
   Source-transition count within the window that triggers flutter mode.
 - `FlutterDetectWindowS` (default 1.0, range 0.1-5.0 s)
   Rolling-window length for flutter detection.
-- `FlutterClampJerkMps3` (default 0.8, range 0.0-5.0 m/s^3)
+- `FlutterClampJerkMps3` (default 0.12, range 0.0-5.0 m/s^3)
   Bidirectional jerk cap. 0 disables flutter-mode clamping entirely.
 - `FlutterClampBypassDecelMps2` (default 1.5, range 0.0-5.0 m/s^2)
   If `modelAccel < -this`, the clamp is bypassed so hard braking is
@@ -171,17 +169,18 @@ so real braking is never delayed.
 Attack from the output-facing layers inward. Each step is live-tunable
 via `live_lead_tune.py`; no service restart required.
 
-1. **Verify Schmitt is doing its job.** Default 0.6/0.35. If you see
+1. **Verify Schmitt is doing its job.** Default 0.6/0.25. If you see
    source flipping at legitimately-high prob (> 0.6), there is a
    different problem — inspect `LEADROLEDBG` raw prob before tuning.
-2. **Raise flutter clamp if still felt.** Try `FlutterClampJerkMps3=1.0`
-   first; drop to `0.6` if acceleration feels rubber-banded.
-3. **Add release dwell.** Set `LeadSourceReleaseFrames=6` (~0.3 s at
-   DT_MDL). This holds through the 50-150 ms dropouts that the Schmitt
-   can't catch on its own because prob genuinely dips under Exit.
-4. **Add phantom hold.** Set `PhantomLeadHoldS=0.5`. With the default
-   `PhantomLeadStableFrames=5`, the phantom only engages for already-
-   tracked leads so brand-new flickering targets cannot create ghosts.
+2. **Tune flutter clamp only after checking source flips.** Current default
+   `FlutterClampJerkMps3=0.12` is very soft for EV comfort. Raise it only if
+   source-stability damping feels rubber-banded or delays real recovery.
+3. **Adjust release dwell as a stability-vs-staleness trade.** Current
+   default `LeadSourceReleaseFrames=20` (~1.0 s at DT_MDL) is deliberately
+   sticky for no-radar EV6 freeway follow.
+4. **Adjust phantom hold only after inspecting raw lead dropouts.** Current
+   default `PhantomLeadHoldS=0.80` with `PhantomLeadStableFrames=3` bridges
+   repeated brief classifier drops without requiring a service restart.
 5. **Add acquire dwell only if needed.** Set `LeadSourceAcquireFrames=2`
    only if the Schmitt is admitting short false acquisitions that feel
    annoying. This is a feel choice; it costs ~50 ms of acquisition
@@ -223,10 +222,11 @@ via `live_lead_tune.py`; no service restart required.
 ```bash
 /usr/local/venv/bin/python3 .codex/skills/openpilot-longitudinal-tuner/scripts/live_lead_tune.py set \
   --lead-prob-enter 0.6 \
-  --lead-prob-exit 0.35 \
-  --lead-source-release-frames 6 \
-  --phantom-lead-hold-s 0.5 \
-  --flutter-clamp-jerk-mps3 0.8
+  --lead-prob-exit 0.25 \
+  --lead-source-release-frames 20 \
+  --phantom-lead-hold-s 0.8 \
+  --phantom-lead-stable-frames 3 \
+  --flutter-clamp-jerk-mps3 0.12
 ```
 
 - Remove overrides for this feature and fall back to defaults:

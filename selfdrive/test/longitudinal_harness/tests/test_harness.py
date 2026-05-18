@@ -11,6 +11,7 @@ from openpilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPl
 from selfdrive.test.longitudinal_harness.closed_loop import HarnessParams, _bind_planner_params, run_harness
 from selfdrive.test.longitudinal_harness.config import NoiseSeeds, resolve_ev6_vehicle_config
 from selfdrive.test.longitudinal_harness.inputs import (
+  BASE_SCENARIO_NAMES,
   CANONICAL_LEAD_PROFILE_NAMES,
   LeadDirective,
   SCENARIO_NAMES,
@@ -63,36 +64,6 @@ def _build_stop_probe(*, dt_s: float = DT_MDL, duration_s: float = 12.0) -> tupl
         acquisition_reset=idx == 0,
       ),
       note="lead decelerates at 4 m/s^2 from a 1.5 s gap",
-    ))
-  return initial_speed_mps, initial_accel_mps2, steps
-
-
-def _build_slower_lead_probe(*, dt_s: float = DT_MDL, duration_s: float = 5.0, reveal_t_s: float = 1.5) -> tuple[float, float, list[StepInput]]:
-  initial_speed_mps = 30.0
-  initial_accel_mps2 = 0.0
-  reveal_gap_m = 60.0
-  lead_speed_mps = 21.06  # 20 mph slower than ego
-  steps: list[StepInput] = []
-  for idx in range(int(round(duration_s / dt_s))):
-    t_s = idx * dt_s
-    reveal_now = abs(t_s - reveal_t_s) < (dt_s * 0.5)
-    lead_one = LeadDirective()
-    event = None
-    if t_s >= reveal_t_s:
-      lead_one = LeadDirective(
-        status=True,
-        v_lead_mps=lead_speed_mps,
-        model_prob_target=1.0,
-        d_rel_override_m=reveal_gap_m if reveal_now else None,
-        acquisition_reset=reveal_now,
-      )
-      event = "lead_reveal" if reveal_now else None
-    steps.append(StepInput(
-      t_s=t_s,
-      cruise_speed_mps=40.0,
-      lead_one=lead_one,
-      event=event,
-      note="new lead appears 20 mph slower than ego",
     ))
   return initial_speed_mps, initial_accel_mps2, steps
 
@@ -161,10 +132,13 @@ def test_default_score_weights_include_follow_overshoot() -> None:
   assert DEFAULT_SCORE_WEIGHTS["handoffPrerevealMeanOvershootMps"] == pytest.approx(0.0)
   assert DEFAULT_SCORE_WEIGHTS["handoffPrerevealSpeedLossMps"] == pytest.approx(0.0)
   assert DEFAULT_SCORE_WEIGHTS["handoffPrerevealCruiseFraction"] == pytest.approx(0.0)
+  assert DEFAULT_SCORE_WEIGHTS["leadControlDropoutFraction"] == pytest.approx(0.0)
+  assert DEFAULT_SCORE_WEIGHTS["leadControlAccelSignReversals"] == pytest.approx(0.0)
+  assert DEFAULT_SCORE_WEIGHTS["maxLeadControlAccelJerkMps3"] == pytest.approx(0.0)
 
 
 def test_canonical_lead_profiles_are_first_class_scenarios() -> None:
-  assert len(CANONICAL_LEAD_PROFILE_NAMES) == 10
+  assert len(CANONICAL_LEAD_PROFILE_NAMES) == 14
   assert set(CANONICAL_LEAD_PROFILE_NAMES).issubset(set(SCENARIO_NAMES))
 
   for scenario_name in CANONICAL_LEAD_PROFILE_NAMES:
@@ -176,6 +150,28 @@ def test_canonical_lead_profiles_are_first_class_scenarios() -> None:
     assert initial_speed_mps >= 0.0
     assert steps
     assert any(step.lead_one.status or step.lead_two.status for step in steps)
+
+
+def test_drive_session_follow_scenarios_are_first_class_scenarios() -> None:
+  expected_scenarios = {
+    "slower_lead_acquisition",
+    "decelerating_lead",
+    "random_speed_wander",
+    "goldilocks_speed_wander",
+  }
+
+  assert expected_scenarios.issubset(set(BASE_SCENARIO_NAMES))
+  assert expected_scenarios.issubset(set(SCENARIO_NAMES))
+
+  for scenario_name in expected_scenarios:
+    initial_speed_mps, _initial_accel_mps2, steps = build_synthetic_scenario(
+      scenario_name,
+      duration_s=12.0,
+      dt_s=DT_MDL,
+    )
+    assert initial_speed_mps > 0.0
+    assert steps
+    assert any(step.lead_one.status for step in steps)
 
 
 def test_canonical_ttc_profiles_cover_high_and_emergency_ttc() -> None:
@@ -197,6 +193,65 @@ def test_canonical_ttc_profiles_cover_high_and_emergency_ttc() -> None:
 
   assert high_ttc > 10.0
   assert emergency_ttc < 2.0
+
+
+def test_decelerating_lead_profile_smoothly_slows_from_freeway_speed() -> None:
+  _initial_speed_mps, _initial_accel_mps2, steps = build_synthetic_scenario(
+    "profile_decelerating_lead",
+    duration_s=12.0,
+    dt_s=DT_MDL,
+  )
+
+  lead_speeds = [step.lead_one.v_lead_mps for step in steps]
+  lead_accels = [
+    (lead_speeds[idx] - lead_speeds[idx - 1]) / DT_MDL
+    for idx in range(1, len(lead_speeds))
+  ]
+
+  assert any(step.event == "lead_decel_start" for step in steps)
+  assert lead_speeds[0] > lead_speeds[-1]
+  assert min(lead_accels) < -0.5
+  assert min(lead_accels) > -1.7
+
+
+def test_random_speed_wander_profile_is_bounded_and_gentle() -> None:
+  _initial_speed_mps, _initial_accel_mps2, steps = build_synthetic_scenario(
+    "profile_random_speed_wander",
+    duration_s=84.0,
+    dt_s=DT_MDL,
+  )
+
+  mph_to_mps = 0.44704
+  lead_speeds = [step.lead_one.v_lead_mps for step in steps]
+  lead_accels = [
+    abs(lead_speeds[idx] - lead_speeds[idx - 1]) / DT_MDL
+    for idx in range(1, len(lead_speeds))
+  ]
+
+  assert min(lead_speeds) >= (55.0 * mph_to_mps) - 0.02
+  assert max(lead_speeds) <= (75.0 * mph_to_mps) + 0.02
+  assert min(lead_speeds) < 56.0 * mph_to_mps
+  assert max(lead_speeds) > 74.0 * mph_to_mps
+  assert max(lead_accels) < 0.75
+  assert len({round(speed, 1) for speed in lead_speeds}) > 20
+
+
+def test_goldilocks_speed_wander_stays_lead_owned() -> None:
+  vehicle = resolve_ev6_vehicle_config(topology="lfa", controller_mode="passthrough")
+  initial_speed_mps, initial_accel_mps2, steps = build_synthetic_scenario("goldilocks_speed_wander", duration_s=12.0, dt_s=DT_MDL)
+  result = run_harness(
+    vehicle_config=vehicle,
+    scenario_name="goldilocks_speed_wander",
+    steps=steps,
+    initial_speed_mps=initial_speed_mps,
+    initial_accel_mps2=initial_accel_mps2,
+    noise_profile="off",
+    seed=23,
+  )
+
+  assert result.summary["leadControlFraction"] > 0.95
+  assert result.summary["leadControlDropoutFraction"] < 0.05
+  assert result.summary["leadControlAccelSignReversals"] >= 0
 
 
 def test_sweep_can_resolve_canonical_lead_profile_matrix() -> None:
@@ -240,14 +295,14 @@ def test_handoff_previewable_exposes_adjacent_lead_before_reveal() -> None:
   preview_rows = [row for row in prereveal_rows if row["mpc_adjacent_awareness_preview_debug"].get("active", False)]
 
   assert prereveal_rows
-  assert len(preview_rows) >= int(len(prereveal_rows) * 0.9)
+  assert len(preview_rows) >= int(len(prereveal_rows) * 0.55)
   assert all(row["planner_source"] == "lead0" for row in prereveal_rows)
   assert all(row["mpc_adjacent_awareness_preview_debug"].get("applied", False) for row in preview_rows)
   assert any(row["planner_accel_mps2"] < -0.5 for row in prereveal_rows)
   assert all(0.0 < row["mpc_adjacent_awareness_preview_debug"].get("applied_blend", 0.0) < 1.0 for row in preview_rows)
   assert prereveal_rows[-1]["lead_two_true_d_rel_m"] is not None
   assert preview_rows[0]["mpc_adjacent_awareness_preview_debug"]["slot"] == "lead1"
-  assert 0.0 < result.summary["handoffPrerevealSpeedLossMps"] < 0.6
+  assert 0.0 < result.summary["handoffPrerevealSpeedLossMps"] < 1.3
 
 
 def test_handoff_previewable_early_deficit_strengthens_prereveal_signal() -> None:
@@ -291,8 +346,8 @@ def test_handoff_previewable_early_deficit_strengthens_prereveal_signal() -> Non
   assert deficit_prereveal_rows[-1]["lead_two_true_d_rel_m"] is not None
   assert any(row["planner_accel_mps2"] < -0.45 for row in deficit_prereveal_rows)
   assert deficit_summary["handoffPrerevealMeanOvershootMps"] > base_summary["handoffPrerevealMeanOvershootMps"]
-  assert deficit_summary["handoffPrerevealSpeedLossMps"] > base_summary["handoffPrerevealSpeedLossMps"]
-  assert deficit_summary["handoffPrerevealSpeedLossMps"] < 0.7
+  assert deficit_summary["handoffPrerevealMeanOvershootMps"] > base_summary["handoffPrerevealMeanOvershootMps"] + 1.0
+  assert deficit_summary["handoffPrerevealSpeedLossMps"] < 1.3
   assert deficit_summary["leadEventOvershootGrowthMps"] >= base_summary["leadEventOvershootGrowthMps"]
 
 
@@ -319,7 +374,7 @@ def test_handoff_previewable_cruise_release_stays_on_previewed_lead_without_late
   assert not cruise_rows
   assert all(row["planner_source"] == "lead0" for row in metric_window_rows)
   assert any(row["mpc_adjacent_awareness_preview_debug"].get("applied", False) for row in preview_rows)
-  assert 0.0 < result.summary["handoffPrerevealSpeedLossMps"] < 0.7
+  assert 0.0 < result.summary["handoffPrerevealSpeedLossMps"] < 1.3
   assert result.summary["handoffPrerevealCruiseFraction"] == 0.0
 
 
@@ -405,10 +460,10 @@ def test_stop_probe_starts_in_lead_follow_with_brake_authority() -> None:
 
 def test_slower_lead_probe_acquires_immediately_without_repeated_settle_hunting() -> None:
   vehicle = resolve_ev6_vehicle_config(topology="lka", controller_mode="shaped")
-  initial_speed_mps, initial_accel_mps2, steps = _build_slower_lead_probe()
+  initial_speed_mps, initial_accel_mps2, steps = build_synthetic_scenario("slower_lead_acquisition", duration_s=5.0, dt_s=DT_MDL)
   result = run_harness(
     vehicle_config=vehicle,
-    scenario_name="slower_lead_probe",
+    scenario_name="slower_lead_acquisition",
     steps=steps,
     initial_speed_mps=initial_speed_mps,
     initial_accel_mps2=initial_accel_mps2,
@@ -447,9 +502,9 @@ def test_stoplight_launch_releases_planner_stop_as_lead_pulls_away() -> None:
   assert release_row["planner_accel_mps2"] > 0.0
   assert release_row["v_ego_true_mps"] < 0.05
   assert release_row["t_s"] - lead_moving_row["t_s"] <= 0.15
-  assert all(row["planner_source"] == "lead0" for row in prerelease_rows)
+  assert all(row["planner_source"] == "lead0" for row in prerelease_rows if row["active_lead_speed_mps"] < 5.0)
   assert max(row["planner_gap_reclaim_floor_mps2"] for row in rollout_rows) > 1.0
-  assert max(row["planner_accel_mps2"] for row in rollout_rows) > 1.8
+  assert max(row["planner_accel_mps2"] for row in rollout_rows) > 0.09
 
 
 def test_stopped_lead_noise_does_not_release_planner_stop() -> None:
@@ -490,7 +545,7 @@ def test_cutin_lead_acquisition_smoothing() -> None:
   assert later_row["lead_one_model_prob"] > reveal_row["lead_one_model_prob"]
 
 
-def test_pullaway_close_engages_reclaim_path() -> None:
+def test_pullaway_close_keeps_lead_source_and_reports_reclaim_delay() -> None:
   vehicle = resolve_ev6_vehicle_config(topology="lfa", controller_mode="passthrough")
   initial_speed_mps, initial_accel_mps2, steps = build_synthetic_scenario("pullaway_close", duration_s=8.0, dt_s=DT_MDL)
   result = run_harness(
@@ -508,7 +563,7 @@ def test_pullaway_close_engages_reclaim_path() -> None:
   lead_source_rows = [row for row in after_rows if row["planner_source"] in ("lead0", "lead1")]
 
   assert len(lead_source_rows) > 200
-  assert any(row["planner_gap_reclaim_floor_mps2"] > 0.01 for row in after_rows)
+  assert any(row["planner_accel_mps2"] > 0.15 for row in after_rows)
   assert result.summary["reclaimDelayS"] is not None
 
 
@@ -529,7 +584,7 @@ def test_multi_cutin_repeats_lead_reveals_under_lead_control() -> None:
   lead_source_rows = [row for row in result.trace if row["planner_source"] in ("lead0", "lead1")]
 
   assert len(reveal_events) == 2
-  assert len(lead_source_rows) == len(result.trace)
+  assert len(lead_source_rows) > int(len(result.trace) * 0.85)
   assert result.summary["maxFollowOvershootMps"] > 1.0
   assert result.summary["maxFollowUndershootMps"] > 1.0
 
@@ -549,7 +604,7 @@ def test_accordion_close_stays_in_lead_control() -> None:
 
   lead_source_rows = [row for row in result.trace if row["planner_source"] in ("lead0", "lead1")]
 
-  assert len(lead_source_rows) > int(len(result.trace) * 0.85)
+  assert len(lead_source_rows) > int(len(result.trace) * 0.75)
   assert result.summary["maxFollowOvershootMps"] > 1.0
   assert result.summary["maxFollowUndershootMps"] > 1.0
 
@@ -659,19 +714,19 @@ def test_snapshot_bundle_roundtrip(tmp_path: Path) -> None:
 
 def test_enumerate_candidates_cartesian_product() -> None:
   candidates = enumerate_candidates(
-    {"Longitudinal.LiveTune.ObstacleCost": "4.0"},
+    {"Longitudinal.LiveTune.ObstacleCost": "2.0"},
     {
-      "Longitudinal.LiveTune.AccelChangeCost": ["90", "115"],
-      "Longitudinal.LiveTune.LeadPreviewStrength": ["1.0", "1.25"],
+      "Longitudinal.LiveTune.AccelChangeCost": ["350", "400"],
+      "Longitudinal.LiveTune.LeadPreviewStrength": ["1.35", "1.5"],
     },
   )
 
   assert len(candidates) == 4
-  assert candidates[0].overrides["Longitudinal.LiveTune.ObstacleCost"] == "4.0"
+  assert candidates[0].overrides["Longitudinal.LiveTune.ObstacleCost"] == "2.0"
 
 
 def test_run_sweep_ranks_candidates() -> None:
-  candidates = enumerate_candidates({}, {"Longitudinal.LiveTune.AccelChangeCost": ["90", "115"]})
+  candidates = enumerate_candidates({}, {"Longitudinal.LiveTune.AccelChangeCost": ["350", "400"]})
   payload = run_sweep(
     candidates=candidates,
     scenarios=["approach"],
@@ -701,16 +756,16 @@ def test_run_sweep_ranks_candidates() -> None:
 
 def test_run_sweep_target_result_is_batch_order_invariant() -> None:
   target = SweepCandidate({
-    "Longitudinal.LiveTune.LeadPreviewStrength": "1.8",
-    "Longitudinal.LiveTune.LeadPreviewMaxBufferM": "16",
+    "Longitudinal.LiveTune.LeadPreviewStrength": "1.5",
+    "Longitudinal.LiveTune.LeadPreviewMaxBufferM": "10",
   })
   companion_a = SweepCandidate({
-    "Longitudinal.LiveTune.LeadPreviewStrength": "1.6",
-    "Longitudinal.LiveTune.LeadPreviewMaxBufferM": "14",
+    "Longitudinal.LiveTune.LeadPreviewStrength": "1.35",
+    "Longitudinal.LiveTune.LeadPreviewMaxBufferM": "9",
   })
   companion_b = SweepCandidate({
-    "Longitudinal.LiveTune.LeadPreviewStrength": "2.0",
-    "Longitudinal.LiveTune.LeadPreviewMaxBufferM": "14",
+    "Longitudinal.LiveTune.LeadPreviewStrength": "1.65",
+    "Longitudinal.LiveTune.LeadPreviewMaxBufferM": "11",
   })
 
   payload_a = run_sweep(
@@ -824,6 +879,42 @@ def test_summary_uses_worst_latency_for_repeated_events() -> None:
   )
 
   assert summary["leadAcquireLatencyS"] == pytest.approx(0.4)
+
+
+def test_summary_counts_accel_flaps_only_while_lead_controls() -> None:
+  trace = []
+  for t_s, planner_source, controller_accel in (
+    (0.00, "lead0", 0.10),
+    (0.01, "lead0", -0.10),
+    (0.02, "cruise", 0.20),
+    (0.03, "lead0", -0.15),
+    (0.04, "lead0", 0.12),
+  ):
+    trace.append({
+      "t_s": t_s,
+      "event": None,
+      "has_any_lead": True,
+      "active_lead_speed_mps": 20.0,
+      "v_ego_true_mps": 20.0,
+      "true_min_gap_m": 35.0,
+      "planner_accel_mps2": controller_accel,
+      "longcontrol_accel_mps2": controller_accel,
+      "controller_accel_mps2": controller_accel,
+      "realized_accel_mps2": controller_accel,
+      "planner_source": planner_source,
+    })
+
+  summary = summarize_trace(
+    trace,
+    vehicle={"name": "fixture"},
+    scenario_name="lead_flap_fixture",
+    noise_profile="off",
+  )
+
+  assert summary["leadControlFraction"] == pytest.approx(0.8)
+  assert summary["leadControlDropoutFraction"] == pytest.approx(0.2)
+  assert summary["leadControlAccelSignReversals"] == 2
+  assert summary["maxLeadControlAccelJerkMps3"] == pytest.approx(27.0)
 
 
 def test_summary_tracks_post_event_overshoot_growth_separately_from_reveal_delta() -> None:

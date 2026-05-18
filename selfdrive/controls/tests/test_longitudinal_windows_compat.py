@@ -14,7 +14,7 @@ pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows-native 
 def test_windows_params_fallback_reads_defaults_and_round_trips_values():
   params = Params()
 
-  assert params.get_default_value("Longitudinal.LiveTune.GapReclaimStrength") == pytest.approx(1.5)
+  assert params.get_default_value("Longitudinal.LiveTune.GapReclaimStrength") == pytest.approx(0.55)
 
   params.put("Longitudinal.LiveTune.GapReclaimStrength", 1.25)
   params.put_bool("VibePersonalityEnabled", True)
@@ -44,4 +44,4 @@ def test_windows_longitudinal_mpc_instantiates_without_native_acados():
 
   mpc._refresh_live_tune(100.0, force=True)
 
-  assert mpc.get_gap_reclaim_floor() > 0.15
+  assert mpc.get_gap_reclaim_floor() > 0.05

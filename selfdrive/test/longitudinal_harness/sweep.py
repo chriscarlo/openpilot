@@ -26,6 +26,9 @@ DEFAULT_SCORE_WEIGHTS = {
   "leadAcquireLatencyS": 1.5,
   "handoffBrakeLatencyS": 1.5,
   "longControlRealizedDivergenceMps2": 1.0,
+  "leadControlDropoutFraction": 0.0,
+  "leadControlAccelSignReversals": 0.0,
+  "maxLeadControlAccelJerkMps3": 0.0,
 }
 
 
@@ -240,6 +243,9 @@ def score_summary(summary: dict[str, Any]) -> dict[str, float]:
     "leadAcquireLatencyS": float(summary.get("leadAcquireLatencyS") or 0.0),
     "handoffBrakeLatencyS": float(summary.get("handoffBrakeLatencyS") or 0.0),
     "longControlRealizedDivergenceMps2": float(summary.get("longControlRealizedDivergenceMps2") or 0.0),
+    "leadControlDropoutFraction": float(summary.get("leadControlDropoutFraction") or 0.0),
+    "leadControlAccelSignReversals": float(summary.get("leadControlAccelSignReversals") or 0.0),
+    "maxLeadControlAccelJerkMps3": float(summary.get("maxLeadControlAccelJerkMps3") or 0.0),
   }
 
 

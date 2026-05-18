@@ -52,6 +52,10 @@ def summarize_trace(trace: list[dict], *, vehicle: dict, scenario_name: str, noi
   handoff_prereveal_mean_overshoot_mps = _max_handoff_prereveal_mean_overshoot(trace)
   handoff_prereveal_speed_loss_mps = _max_handoff_prereveal_speed_loss(trace)
   handoff_prereveal_cruise_fraction = _max_handoff_prereveal_cruise_fraction(trace)
+  lead_control_rows = _lead_control_rows(trace)
+  lead_control_fraction = float(len(lead_control_rows)) / float(len(trace))
+  lead_control_accel_sign_reversals = _sign_reversals(lead_control_rows, "controller_accel_mps2", epsilon=0.05)
+  max_lead_control_accel_jerk_mps3 = _max_abs_rate(lead_control_rows, "controller_accel_mps2", max_step_s=0.06)
 
   return {
     "scenario": scenario_name,
@@ -71,6 +75,10 @@ def summarize_trace(trace: list[dict], *, vehicle: dict, scenario_name: str, noi
     "handoffPrerevealSpeedLossMps": handoff_prereveal_speed_loss_mps,
     "handoffPrerevealCruiseFraction": handoff_prereveal_cruise_fraction,
     "maxFollowUndershootMps": follow_undershoot,
+    "leadControlFraction": lead_control_fraction,
+    "leadControlDropoutFraction": 1.0 - lead_control_fraction,
+    "leadControlAccelSignReversals": lead_control_accel_sign_reversals,
+    "maxLeadControlAccelJerkMps3": max_lead_control_accel_jerk_mps3,
     "minTrueGapM": min((row["true_min_gap_m"] for row in active_gap_rows), default=None),
     "finalTrueGapM": final_gap_m,
     "finalHeadwayS": final_headway_s,
@@ -125,6 +133,40 @@ def _row_follow_overshoot(row: dict) -> float | None:
   if target_speed is None:
     return None
   return max(0.0, float(row["v_ego_true_mps"]) - target_speed)
+
+
+def _lead_control_rows(trace: Iterable[dict]) -> list[dict]:
+  return [row for row in trace if row.get("planner_source") in ("lead0", "lead1")]
+
+
+def _sign_reversals(rows: Iterable[dict], field: str, *, epsilon: float) -> int:
+  previous_sign = 0
+  reversals = 0
+  for row in rows:
+    value = float(row[field])
+    sign = 1 if value > epsilon else -1 if value < -epsilon else 0
+    if sign == 0:
+      continue
+    if previous_sign != 0 and sign != previous_sign:
+      reversals += 1
+    previous_sign = sign
+  return reversals
+
+
+def _max_abs_rate(rows: Iterable[dict], field: str, *, max_step_s: float) -> float:
+  previous_t: float | None = None
+  previous_value: float | None = None
+  max_rate = 0.0
+  for row in rows:
+    current_t = float(row["t_s"])
+    current_value = float(row[field])
+    if previous_t is not None and previous_value is not None:
+      dt_s = current_t - previous_t
+      if 0.0 < dt_s <= max_step_s:
+        max_rate = max(max_rate, abs(current_value - previous_value) / dt_s)
+    previous_t = current_t
+    previous_value = current_value
+  return max_rate
 
 
 def _max_lead_event_overshoot_growth(trace: list[dict]) -> float:
