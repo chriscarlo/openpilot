@@ -83,6 +83,9 @@ MODEL_PRESETS = {
   "yolo11n_tinygrad_224": tinygrad_onnx_preset(
     "yolo11n", "ultralytics/yolo11", "YOLO11-N / yolo11n.pt", 224, 1029
   ),
+  "yolo11n_tinygrad_256": tinygrad_onnx_preset(
+    "yolo11n", "ultralytics/yolo11", "YOLO11-N / yolo11n.pt", 256, 1344
+  ),
   "yolov8n_tinygrad_160": tinygrad_onnx_preset(
     "yolov8n", "ultralytics/yolov8", "YOLOv8-N / yolov8n.pt", 160, 525
   ),
