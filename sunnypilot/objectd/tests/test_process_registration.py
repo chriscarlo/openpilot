@@ -12,11 +12,14 @@ import pytest
 from openpilot.common.params import Params
 from openpilot.sunnypilot.objectd.backend import (
   BackendError,
+  COCO_80_LABELS,
+  DEFAULT_HAZARD_LABELS,
   OrtCpuYoloDetector,
   OrtQnnYoloDetector,
   QnnNetRunYoloDetector,
   SnpeYoloDetector,
   TinygradOnnxYoloDetector,
+  YoloDetectorBase,
 )
 import openpilot.sunnypilot.objectd.backend as objectd_backend
 from openpilot.sunnypilot.objectd.config import (
@@ -29,7 +32,10 @@ from openpilot.sunnypilot.objectd.config import (
   PRIMARY_MODEL_DIR,
 )
 from openpilot.sunnypilot.objectd.prepare_yolo11n_assets import build_metadata
+from openpilot.sunnypilot.objectd.scheduler import ObjectdInferenceScheduler
 from openpilot.system.manager.process_config import managed_processes, object_hazard_enabled
+
+EXPECTED_DEFAULT_HAZARD_LABELS = sorted(DEFAULT_HAZARD_LABELS)
 
 
 def test_objectd_process_registered():
@@ -74,7 +80,7 @@ def test_yolo11n_asset_metadata_matches_backend_contract():
   assert metadata["attributes"] == 84
   assert metadata["prediction_layout"] == "attributes_first"
   assert metadata["has_objectness"] is False
-  assert metadata["hazard_labels"] == ["bicycle", "cow", "dog", "horse", "person", "sheep"]
+  assert metadata["hazard_labels"] == EXPECTED_DEFAULT_HAZARD_LABELS
 
 
 def test_yolov8n_asset_metadata_preserves_current_decoder_contract():
@@ -89,7 +95,7 @@ def test_yolov8n_asset_metadata_preserves_current_decoder_contract():
   assert metadata["prediction_count"] == 8400
   assert metadata["attributes"] == 84
   assert metadata["prediction_layout"] == "attributes_first"
-  assert metadata["hazard_labels"] == ["bicycle", "cow", "dog", "horse", "person", "sheep"]
+  assert metadata["hazard_labels"] == EXPECTED_DEFAULT_HAZARD_LABELS
 
 
 def test_yolov8n_tinygrad_160_metadata_matches_managed_runtime():
@@ -104,7 +110,7 @@ def test_yolov8n_tinygrad_160_metadata_matches_managed_runtime():
   assert metadata["output_name"] == "output0"
   assert metadata["prediction_count"] == 525
   assert metadata["attributes"] == 84
-  assert metadata["hazard_labels"] == ["bicycle", "cow", "dog", "horse", "person", "sheep"]
+  assert metadata["hazard_labels"] == EXPECTED_DEFAULT_HAZARD_LABELS
 
 
 def test_yolo11n_tinygrad_160_metadata_matches_managed_runtime():
@@ -122,7 +128,7 @@ def test_yolo11n_tinygrad_160_metadata_matches_managed_runtime():
   assert metadata["attributes"] == 84
   assert metadata["prediction_layout"] == "attributes_first"
   assert metadata["has_objectness"] is False
-  assert metadata["hazard_labels"] == ["bicycle", "cow", "dog", "horse", "person", "sheep"]
+  assert metadata["hazard_labels"] == EXPECTED_DEFAULT_HAZARD_LABELS
 
 
 def test_yolo11n_tinygrad_fallback_metadata_presets_are_available():
@@ -146,7 +152,39 @@ def test_yolov8n_tinygrad_256_metadata_remains_available_for_override():
   assert metadata["output_name"] == "output0"
   assert metadata["prediction_count"] == 1344
   assert metadata["attributes"] == 84
-  assert metadata["hazard_labels"] == ["bicycle", "cow", "dog", "horse", "person", "sheep"]
+  assert metadata["hazard_labels"] == EXPECTED_DEFAULT_HAZARD_LABELS
+
+
+def test_default_hazard_labels_include_rigid_road_obstacles_but_not_soft_debris():
+  for label in ("person", "dog", "car", "motorcycle", "fire hydrant", "chair", "refrigerator"):
+    assert label in DEFAULT_HAZARD_LABELS
+  for label in ("banana", "apple", "fork", "book", "toothbrush"):
+    assert label not in DEFAULT_HAZARD_LABELS
+
+
+def test_decoder_filters_default_hazard_labels():
+  detector = YoloDetectorBase.__new__(YoloDetectorBase)
+  detector.attributes = 84
+  detector.prediction_count = 2
+  detector.prediction_layout = "attributes_first"
+  detector.has_objectness = False
+  detector.confidence_threshold = 0.25
+  detector.iou_threshold = 0.45
+  detector.input_width = 10
+  detector.input_height = 10
+  detector.labels = COCO_80_LABELS
+  detector.hazard_labels = set(DEFAULT_HAZARD_LABELS)
+  detector._crop_offset_x = 0
+  detector._crop_offset_y = 0
+  detector.output = np.zeros((detector.attributes, detector.prediction_count), dtype=np.float32)
+  detector.output[:4, 0] = [5.0, 5.0, 2.0, 2.0]
+  detector.output[:4, 1] = [7.0, 7.0, 2.0, 2.0]
+  detector.output[4 + COCO_80_LABELS.index("banana"), 0] = 0.95
+  detector.output[4 + COCO_80_LABELS.index("car"), 1] = 0.90
+
+  detections = detector._decode_predictions(10, 10)
+
+  assert [detection.class_name for detection in detections] == ["car"]
 
 
 def test_asset_metadata_allows_explicit_model_overrides():
@@ -407,6 +445,11 @@ def test_tinygrad_onnx_rejects_cpu_without_explicit_measurement_opt_in(monkeypat
     TinygradOnnxYoloDetector._configure_tinygrad_device()
 
 
+def test_tinygrad_worker_affinity_parser_accepts_lists_and_ranges():
+  assert TinygradOnnxYoloDetector._parse_cpu_affinity("") == set()
+  assert TinygradOnnxYoloDetector._parse_cpu_affinity("0,2-3,5") == {0, 2, 3, 5}
+
+
 def test_managed_objectd_runtime_defaults_point_at_tinygrad_onnx(monkeypatch):
   for key in (
     "OBJECTD_BACKEND",
@@ -416,6 +459,8 @@ def test_managed_objectd_runtime_defaults_point_at_tinygrad_onnx(monkeypatch):
     "OBJECTD_TINYGRAD_DEVICE",
     "OBJECTD_DETECTOR_HZ",
     "OBJECTD_TINYGRAD_WARMUP_RUNS",
+    "OBJECTD_ROI_MODE",
+    "OMP_NUM_THREADS",
   ):
     monkeypatch.delenv(key, raising=False)
 
@@ -431,6 +476,38 @@ def test_managed_objectd_runtime_defaults_point_at_tinygrad_onnx(monkeypatch):
   assert config.allow_onroad_warmup == DEFAULT_ALLOW_ONROAD_WARMUP is True
   assert objectd_backend.os.environ["OBJECTD_BACKEND"] == "tinygrad_onnx"
   assert objectd_backend.os.environ["OBJECTD_MODEL_PATH"].endswith("model.onnx")
+  assert objectd_backend.os.environ["OMP_NUM_THREADS"] == "1"
+  assert objectd_backend.os.environ["OBJECTD_ROI_MODE"] == "road_wide"
+
+
+def test_objectd_inference_scheduler_skips_one_tick_after_overrun():
+  scheduler = ObjectdInferenceScheduler(detector_hz=2.0, infer_budget_ms=100.0, phase_sec=0.0)
+  scheduler.next_run_time = 10.0
+
+  assert scheduler.should_run(9.9) is False
+  assert scheduler.should_run(10.0) is True
+  scheduler.record_runtime(0.150)
+  assert scheduler.should_run(10.5) is False
+  assert scheduler.should_run(11.0) is True
+
+
+def test_road_wide_roi_crops_top_of_nv12_frame(monkeypatch):
+  if objectd_backend.cv2 is None:
+    pytest.skip("opencv unavailable")
+  monkeypatch.setenv("OBJECTD_ROI_MODE", "road_wide")
+  monkeypatch.setenv("OBJECTD_ROI_TOP_FRACTION", "0.25")
+  detector = YoloDetectorBase.__new__(YoloDetectorBase)
+  detector.roi_mode = "road_wide"
+  detector.roi_top_fraction = 0.25
+  y_plane = np.full((8, 8), 64, dtype=np.uint8)
+  uv_plane = np.full((4, 8), 128, dtype=np.uint8)
+  buf = SimpleNamespace(data=np.vstack((y_plane, uv_plane)).tobytes(), stride=8, width=8, height=8)
+
+  rgb = detector._visionbuf_to_rgb(buf)
+
+  assert rgb.shape == (6, 8, 3)
+  assert detector._crop_offset_x == 0
+  assert detector._crop_offset_y == 2
 
 
 def test_tinygrad_warmup_starts_in_background_and_marks_ready():

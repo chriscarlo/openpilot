@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import time
+import os
 from dataclasses import dataclass, field
 
 from cereal import messaging
@@ -21,6 +22,7 @@ from openpilot.sunnypilot.objectd.path_association import (
   build_road_calibration_transform,
   project_model_path,
 )
+from openpilot.sunnypilot.objectd.scheduler import ObjectdInferenceScheduler
 from openpilot.sunnypilot.selfdrive.controls.lib.object_hazard_controller import (
   compute_hazard_speed_recommendation,
   should_stop_for_hazard,
@@ -101,6 +103,11 @@ def main() -> None:
   cloudlog.bind(daemon=PROCESS_NAME)
   runtime_config = ObjectdRuntimeConfig.from_env()
   runtime_config.apply_environment_defaults()
+  if os.getenv("OBJECTD_NICE", "5").strip():
+    try:
+      os.nice(int(os.getenv("OBJECTD_NICE", "5")))
+    except (AttributeError, OSError, ValueError):
+      pass
 
   tracker = HazardTracker()
   params = Params()
@@ -108,6 +115,11 @@ def main() -> None:
   pm = messaging.PubMaster(["objectHazardStateSP"])
   sm = messaging.SubMaster(["carState", "deviceState", "liveCalibration", "modelV2", "roadCameraState"])
   rk = Ratekeeper(max(1, int(round(runtime_config.detector_hz))), print_delay_threshold=None)
+  scheduler = ObjectdInferenceScheduler(
+    runtime_config.detector_hz,
+    runtime_config.infer_budget_ms,
+    runtime_config.schedule_phase_sec,
+  )
   vipc_client = None
   last_backend_status = ""
   last_backend_error = ""
@@ -153,9 +165,13 @@ def main() -> None:
       model_ready=bool(feature_enabled and backend.ready),
       backend=backend_status,
     )
-    if (feature_enabled and backend.ready and vipc_client is not None and
-        sm.valid.get("modelV2", False) and sm.alive.get("modelV2", False) and
-        sm.valid.get("liveCalibration", False) and sm.alive.get("liveCalibration", False)):
+    inference_ready = (
+      feature_enabled and backend.ready and vipc_client is not None and
+      sm.valid.get("modelV2", False) and sm.alive.get("modelV2", False) and
+      sm.valid.get("liveCalibration", False) and sm.alive.get("liveCalibration", False)
+    )
+    if inference_ready and scheduler.should_run():
+      infer_start = time.monotonic()
       try:
         buf = recv_latest_buffer(vipc_client)
       except Exception as err:
@@ -200,7 +216,8 @@ def main() -> None:
           tracker.update(None)
       else:
         tracker.update(None)
-    else:
+      scheduler.record_runtime(time.monotonic() - infer_start)
+    elif not inference_ready:
       tracker.update(None)
 
     publish_object_hazard_state(pm, snapshot)

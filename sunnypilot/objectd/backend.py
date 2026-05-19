@@ -37,7 +37,13 @@ except ModuleNotFoundError:  # pragma: no cover - absent in dev env until built
 
 DEFAULT_MODEL_DIR = PRIMARY_MODEL_DIR
 DEFAULT_HAZARD_LABELS = {
-  "person", "bicycle", "dog", "horse", "sheep", "cow",
+  "person",
+  "bicycle", "car", "motorcycle", "bus", "train", "truck",
+  "bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe",
+  "traffic light", "fire hydrant", "stop sign", "parking meter", "bench",
+  "backpack", "suitcase", "skis", "snowboard", "skateboard",
+  "chair", "couch", "potted plant", "bed", "dining table", "toilet",
+  "tv", "laptop", "microwave", "oven", "sink", "refrigerator",
 }
 COCO_80_LABELS = [
   "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat", "traffic light",
@@ -82,6 +88,10 @@ class YoloDetectorBase:
   def _init_detector_config(self, default_model_name: str = "model.dlc") -> None:
     if cv2 is None:
       raise BackendError("opencv-python-headless is required for objectd preprocessing")
+    try:
+      cv2.setNumThreads(max(1, int(os.getenv("OBJECTD_CV2_THREADS", "1"))))
+    except Exception:
+      pass
 
     self.model_dir = Path(os.getenv("OBJECTD_MODEL_DIR", DEFAULT_MODEL_DIR))
     self.model_path = Path(os.getenv("OBJECTD_MODEL_PATH", self.model_dir / default_model_name))
@@ -110,6 +120,10 @@ class YoloDetectorBase:
     self.labels = list(metadata.get("labels", COCO_80_LABELS))
     self.hazard_labels = set(metadata.get("hazard_labels", sorted(DEFAULT_HAZARD_LABELS)))
     self.expected_output_size = self.prediction_count * self.attributes
+    self.roi_mode = os.getenv("OBJECTD_ROI_MODE", "road_wide").strip().lower()
+    self.roi_top_fraction = max(0.0, min(0.45, self._env_float("OBJECTD_ROI_TOP_FRACTION", 0.15)))
+    self._crop_offset_x = 0
+    self._crop_offset_y = 0
 
     input_channels = int(metadata.get("input_channels", 3))
     input_size = self.input_width * self.input_height * input_channels
@@ -145,6 +159,13 @@ class YoloDetectorBase:
 
   def _execute_model(self) -> None:
     raise NotImplementedError
+
+  @staticmethod
+  def _env_float(name: str, default: float) -> float:
+    try:
+      return float(os.getenv(name, str(default)))
+    except ValueError:
+      return default
 
   def _prepare_input(self, buf) -> np.ndarray:
     rgb = self._visionbuf_to_rgb(buf)
@@ -185,9 +206,29 @@ class YoloDetectorBase:
       raise BackendError(f"objectd model checksum mismatch for {path}")
 
   @staticmethod
-  def _visionbuf_to_rgb(buf) -> np.ndarray:
+  def _round_even(value: int) -> int:
+    return value - (value % 2)
+
+  def _visionbuf_to_rgb(self, buf) -> np.ndarray:
     frame = np.frombuffer(buf.data, dtype=np.uint8).reshape((-1, buf.stride))
-    yuv = frame[:buf.height + buf.height // 2, :buf.width]
+    x0 = 0
+    y0 = 0
+    x1 = buf.width
+    y1 = buf.height
+    if self.roi_mode == "road_wide":
+      y0 = self._round_even(int(buf.height * self.roi_top_fraction))
+    elif self.roi_mode != "full":
+      raise BackendError(f"unsupported objectd ROI mode '{self.roi_mode}'")
+
+    y0 = max(0, min(y0, buf.height - 2))
+    y1 = max(y0 + 2, self._round_even(y1))
+    y_plane = frame[:buf.height, :buf.width]
+    uv_plane = frame[buf.height:buf.height + buf.height // 2, :buf.width]
+    y_crop = y_plane[y0:y1, x0:x1]
+    uv_crop = uv_plane[y0 // 2:y1 // 2, x0:x1]
+    yuv = np.vstack((y_crop, uv_crop))
+    self._crop_offset_x = x0
+    self._crop_offset_y = y0
     return cv2.cvtColor(yuv, cv2.COLOR_YUV2RGB_NV12)
 
   def _decode_predictions(self, source_width: int, source_height: int) -> list[Detection]:
@@ -230,6 +271,10 @@ class YoloDetectorBase:
       y_min = max(0.0, (cy - height / 2.0) * scale_y)
       x_max = min(source_width - 1.0, (cx + width / 2.0) * scale_x)
       y_max = min(source_height - 1.0, (cy + height / 2.0) * scale_y)
+      x_min += self._crop_offset_x
+      x_max += self._crop_offset_x
+      y_min += self._crop_offset_y
+      y_max += self._crop_offset_y
       filtered.append((np.array([x_min, y_min, x_max, y_max], dtype=np.float32), float(confidence), label))
 
     if not filtered:
@@ -641,11 +686,25 @@ class TinygradOnnxYoloDetector(YoloDetectorBase):
     except OSError:
       pass
     try:
-      cpu_count = os.cpu_count()
-      if cpu_count:
-        os.sched_setaffinity(0, range(cpu_count))
-    except OSError:
+      affinity = TinygradOnnxYoloDetector._parse_cpu_affinity(os.getenv("OBJECTD_CPU_AFFINITY", ""))
+      if affinity:
+        os.sched_setaffinity(0, affinity)
+    except (AttributeError, OSError, ValueError):
       pass
+
+  @staticmethod
+  def _parse_cpu_affinity(value: str) -> set[int]:
+    cpus: set[int] = set()
+    for part in value.split(","):
+      part = part.strip()
+      if not part:
+        continue
+      if "-" in part:
+        start, end = part.split("-", 1)
+        cpus.update(range(int(start), int(end) + 1))
+      else:
+        cpus.add(int(part))
+    return cpus
 
   def _build_worker_runner(self):
     try:
