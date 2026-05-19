@@ -107,6 +107,37 @@ def test_yolov8n_tinygrad_160_metadata_matches_managed_runtime():
   assert metadata["hazard_labels"] == ["bicycle", "cow", "dog", "horse", "person", "sheep"]
 
 
+def test_yolo11n_tinygrad_160_metadata_matches_managed_runtime():
+  metadata = build_metadata("0" * 64, model_preset="yolo11n_tinygrad_160")
+
+  assert metadata["source_repo"] == "ultralytics/yolo11"
+  assert metadata["source_checkpoint"] == "YOLO11-N / yolo11n.pt"
+  assert metadata["export_runtime"] == "ONNX"
+  assert metadata["input_name"] == "images"
+  assert metadata["input_width"] == 160
+  assert metadata["input_height"] == 160
+  assert metadata["input_layout"] == "NCHW"
+  assert metadata["output_name"] == "output0"
+  assert metadata["prediction_count"] == 525
+  assert metadata["attributes"] == 84
+  assert metadata["prediction_layout"] == "attributes_first"
+  assert metadata["has_objectness"] is False
+  assert metadata["hazard_labels"] == ["bicycle", "cow", "dog", "horse", "person", "sheep"]
+
+
+def test_yolo11n_tinygrad_fallback_metadata_presets_are_available():
+  metadata_192 = build_metadata("0" * 64, model_preset="yolo11n_tinygrad_192")
+  metadata_224 = build_metadata("0" * 64, model_preset="yolo11n_tinygrad_224")
+
+  assert metadata_192["input_width"] == 192
+  assert metadata_192["input_height"] == 192
+  assert metadata_192["prediction_count"] == 756
+  assert metadata_224["input_width"] == 224
+  assert metadata_224["input_height"] == 224
+  assert metadata_224["prediction_count"] == 1029
+  assert metadata_192["export_runtime"] == metadata_224["export_runtime"] == "ONNX"
+
+
 def test_yolov8n_tinygrad_256_metadata_remains_available_for_override():
   metadata = build_metadata("0" * 64, model_preset="yolov8n_tinygrad_256", export_runtime="ONNX")
 
@@ -393,6 +424,7 @@ def test_managed_objectd_runtime_defaults_point_at_tinygrad_onnx(monkeypatch):
 
   assert config.backend == DEFAULT_BACKEND == "tinygrad_onnx"
   assert config.model_dir == PRIMARY_MODEL_DIR
+  assert config.model_dir.name == "yolo11n_tinygrad_160_install"
   assert config.tinygrad_device == DEFAULT_TINYGRAD_DEVICE == "QCOM"
   assert config.detector_hz == DEFAULT_DETECTOR_HZ == 2.0
   assert config.tinygrad_warmup_runs == DEFAULT_TINYGRAD_WARMUP_RUNS == 3

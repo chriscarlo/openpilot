@@ -9,6 +9,36 @@ from pathlib import Path
 
 from openpilot.sunnypilot.objectd.backend import COCO_80_LABELS, DEFAULT_HAZARD_LABELS, DEFAULT_MODEL_DIR
 
+def tinygrad_onnx_preset(
+  model_family: str,
+  source_repo: str,
+  source_checkpoint: str,
+  input_size: int,
+  prediction_count: int,
+) -> dict:
+  return {
+    "source_repo": source_repo,
+    "source_checkpoint": source_checkpoint,
+    "export_notes": (
+      f"Export with Ultralytics ONNX opset 12, imgsz={input_size}, "
+      f"simplify=False, and raw output [1,84,{prediction_count}]."
+    ),
+    "input_name": "images",
+    "input_width": input_size,
+    "input_height": input_size,
+    "input_channels": 3,
+    "output_name": "output0",
+    "prediction_count": prediction_count,
+    "attributes": 84,
+    "prediction_layout": "attributes_first",
+    "has_objectness": False,
+    "labels": COCO_80_LABELS,
+    "hazard_labels": sorted(DEFAULT_HAZARD_LABELS),
+    "decoder_family": "yolo_anchor_free",
+    "model_family": model_family,
+  }
+
+
 MODEL_PRESETS = {
   "yolo11n": {
     "source_repo": "qualcomm/YOLOv11-Detection",
@@ -44,40 +74,21 @@ MODEL_PRESETS = {
     "hazard_labels": sorted(DEFAULT_HAZARD_LABELS),
     "decoder_family": "yolo_anchor_free",
   },
-  "yolov8n_tinygrad_160": {
-    "source_repo": "ultralytics/yolov8",
-    "source_checkpoint": "YOLOv8-N / yolov8n.pt",
-    "export_notes": "Export with Ultralytics ONNX opset 12, imgsz=160, simplify=False, and raw output [1,84,525].",
-    "input_name": "images",
-    "input_width": 160,
-    "input_height": 160,
-    "input_channels": 3,
-    "output_name": "output0",
-    "prediction_count": 525,
-    "attributes": 84,
-    "prediction_layout": "attributes_first",
-    "has_objectness": False,
-    "labels": COCO_80_LABELS,
-    "hazard_labels": sorted(DEFAULT_HAZARD_LABELS),
-    "decoder_family": "yolo_anchor_free",
-  },
-  "yolov8n_tinygrad_256": {
-    "source_repo": "ultralytics/yolov8",
-    "source_checkpoint": "YOLOv8-N / yolov8n.pt",
-    "export_notes": "Export with Ultralytics ONNX opset 12, imgsz=256, simplify=False, and raw output [1,84,1344].",
-    "input_name": "images",
-    "input_width": 256,
-    "input_height": 256,
-    "input_channels": 3,
-    "output_name": "output0",
-    "prediction_count": 1344,
-    "attributes": 84,
-    "prediction_layout": "attributes_first",
-    "has_objectness": False,
-    "labels": COCO_80_LABELS,
-    "hazard_labels": sorted(DEFAULT_HAZARD_LABELS),
-    "decoder_family": "yolo_anchor_free",
-  },
+  "yolo11n_tinygrad_160": tinygrad_onnx_preset(
+    "yolo11n", "ultralytics/yolo11", "YOLO11-N / yolo11n.pt", 160, 525
+  ),
+  "yolo11n_tinygrad_192": tinygrad_onnx_preset(
+    "yolo11n", "ultralytics/yolo11", "YOLO11-N / yolo11n.pt", 192, 756
+  ),
+  "yolo11n_tinygrad_224": tinygrad_onnx_preset(
+    "yolo11n", "ultralytics/yolo11", "YOLO11-N / yolo11n.pt", 224, 1029
+  ),
+  "yolov8n_tinygrad_160": tinygrad_onnx_preset(
+    "yolov8n", "ultralytics/yolov8", "YOLOv8-N / yolov8n.pt", 160, 525
+  ),
+  "yolov8n_tinygrad_256": tinygrad_onnx_preset(
+    "yolov8n", "ultralytics/yolov8", "YOLOv8-N / yolov8n.pt", 256, 1344
+  ),
 }
 SUPPORTED_EXPORT_RUNTIMES = ("QNN_DLC", "SNPE_DLC", "PRECOMPILED_QNN_ONNX", "ONNX")
 SUPPORTED_INPUT_LAYOUTS = ("NCHW", "NHWC")
@@ -110,11 +121,13 @@ def load_labels(path: Path) -> list[str]:
 
 def build_metadata(
   model_sha256: str,
-  export_runtime: str = "QNN_DLC",
+  export_runtime: str | None = None,
   input_layout: str | None = None,
   model_preset: str = "yolo11n",
   **overrides,
 ) -> dict:
+  if export_runtime is None:
+    export_runtime = "ONNX" if "_tinygrad_" in model_preset else "QNN_DLC"
   export_runtime = export_runtime.upper()
   if export_runtime not in SUPPORTED_EXPORT_RUNTIMES:
     raise ValueError(f"unsupported export_runtime '{export_runtime}'")
@@ -207,7 +220,7 @@ def main() -> None:
     raise FileNotFoundError(model_src)
   export_runtime = args.export_runtime
   if export_runtime is None:
-    if args.model_onnx is not None and args.model_preset.startswith("yolov8n_tinygrad_"):
+    if args.model_onnx is not None and "_tinygrad_" in args.model_preset:
       export_runtime = "ONNX"
     else:
       export_runtime = "PRECOMPILED_QNN_ONNX" if args.model_onnx is not None else "QNN_DLC"

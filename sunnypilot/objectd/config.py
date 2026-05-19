@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-PRIMARY_MODEL_DIR = REPO_ROOT / ".cache" / "objectd" / "yolov8n_tinygrad_160_install"
+PRIMARY_MODEL_DIR = REPO_ROOT / ".cache" / "objectd" / "yolo11n_tinygrad_160_install"
 PRIMARY_MODEL_PATH = PRIMARY_MODEL_DIR / "model.onnx"
 PRIMARY_METADATA_PATH = PRIMARY_MODEL_DIR / "metadata.json"
 
