@@ -192,6 +192,11 @@ def install_fake_long_mpc(*, module_name: str = 'openpilot.selfdrive.controls.li
   fake = types.ModuleType(module_name)
   fake.LongitudinalMpc = FakeLongitudinalMpc
   fake.T_IDXS = list(ModelConstants.T_IDXS)
+
+  def get_low_speed_launch_follow_max_accel(_v_ego, _lead, _t_follow, base_max_accel: float) -> float:
+    return float(base_max_accel)
+
+  fake.get_low_speed_launch_follow_max_accel = get_low_speed_launch_follow_max_accel
   sys.modules[module_name] = fake
 
 

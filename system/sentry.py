@@ -7,13 +7,10 @@ from enum import Enum
 from sentry_sdk.integrations.threading import ThreadingIntegration
 
 from openpilot.common.params import Params
-from openpilot.system.athena.registration import UNREGISTERED_DONGLE_ID
 from openpilot.system.hardware import HARDWARE
 from openpilot.system.hardware.hw import Paths
 from openpilot.common.swaglog import cloudlog
 from openpilot.system.version import get_build_metadata, get_version
-
-from openpilot.sunnypilot.sunnylink.api import UNREGISTERED_SUNNYLINK_DONGLE_ID
 
 CRASHES_DIR = Paths.crash_log_root()
 
@@ -105,6 +102,9 @@ def set_user() -> None:
 
 
 def get_properties() -> tuple[str, str, str]:
+  from openpilot.system.athena.registration import UNREGISTERED_DONGLE_ID
+  from openpilot.sunnypilot.sunnylink.api import UNREGISTERED_SUNNYLINK_DONGLE_ID
+
   params = Params()
   hardware_serial: str = params.get("HardwareSerial") or ""
   git_username: str = params.get("GithubUsername") or ""

@@ -130,7 +130,11 @@ build.kernel.*.log
 docs/chauffeur/bluetooth3x/archived/
 docs/chauffeur/bluetooth3x/diagnostics/
 docs/chauffeur/bluetooth3x/bootloops/
+docs/chauffeur/object_hazard/object_hazard_next_agent_prompt_2026-05-17.md
 cythonize
+
+### Local Codex runtime config ###
+.codex/config.toml
 
 ### Secrets / private keys (defense-in-depth; keys should never live in this tree) ###
 id_rsa*
