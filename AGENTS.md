@@ -30,3 +30,4 @@
 ## Needs human confirmation (temporary; keep very short)
 
 - Before the next tici test, confirm the object-hazard model assets exist on device or that `OBJECTD_MODEL_PATH` and `OBJECTD_MODEL_METADATA` point to valid files; this repo does not track those assets, so re-check the external source or use a saved Qualcomm AI Hub export artifact.
+- Current observed tici SSH path is network-dependent; confirm SSID/IP, then use plink with host key `SHA256:6amqutAc1NEx5tHhXbY2MJ69eqyhKRf5mbGjqQ2HOQc`: `& 'C:\Program Files\PuTTY\plink.exe' -batch -hostkey 'SHA256:6amqutAc1NEx5tHhXbY2MJ69eqyhKRf5mbGjqQ2HOQc' -ssh -i 'C:\Users\chrisr0122\.ssh\puttygen051426_ppk.ppk' comma@172.20.10.2 'cd /data/openpilot && git status --short'`.
