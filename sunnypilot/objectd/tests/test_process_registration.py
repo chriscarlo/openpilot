@@ -92,15 +92,26 @@ def test_yolov8n_asset_metadata_preserves_current_decoder_contract():
   assert metadata["hazard_labels"] == ["bicycle", "cow", "dog", "horse", "person", "sheep"]
 
 
-def test_yolov8n_tinygrad_256_metadata_matches_managed_runtime():
-  metadata = build_metadata("0" * 64, model_preset="yolov8n_tinygrad_256", export_runtime="ONNX")
+def test_yolov8n_tinygrad_160_metadata_matches_managed_runtime():
+  metadata = build_metadata("0" * 64, model_preset="yolov8n_tinygrad_160", export_runtime="ONNX")
 
   assert metadata["source_checkpoint"] == "YOLOv8-N / yolov8n.pt"
   assert metadata["export_runtime"] == "ONNX"
   assert metadata["input_name"] == "images"
+  assert metadata["input_width"] == 160
+  assert metadata["input_height"] == 160
+  assert metadata["input_layout"] == "NCHW"
+  assert metadata["output_name"] == "output0"
+  assert metadata["prediction_count"] == 525
+  assert metadata["attributes"] == 84
+  assert metadata["hazard_labels"] == ["bicycle", "cow", "dog", "horse", "person", "sheep"]
+
+
+def test_yolov8n_tinygrad_256_metadata_remains_available_for_override():
+  metadata = build_metadata("0" * 64, model_preset="yolov8n_tinygrad_256", export_runtime="ONNX")
+
   assert metadata["input_width"] == 256
   assert metadata["input_height"] == 256
-  assert metadata["input_layout"] == "NCHW"
   assert metadata["output_name"] == "output0"
   assert metadata["prediction_count"] == 1344
   assert metadata["attributes"] == 84

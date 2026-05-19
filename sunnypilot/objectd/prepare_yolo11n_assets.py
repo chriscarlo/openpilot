@@ -44,6 +44,23 @@ MODEL_PRESETS = {
     "hazard_labels": sorted(DEFAULT_HAZARD_LABELS),
     "decoder_family": "yolo_anchor_free",
   },
+  "yolov8n_tinygrad_160": {
+    "source_repo": "ultralytics/yolov8",
+    "source_checkpoint": "YOLOv8-N / yolov8n.pt",
+    "export_notes": "Export with Ultralytics ONNX opset 12, imgsz=160, simplify=False, and raw output [1,84,525].",
+    "input_name": "images",
+    "input_width": 160,
+    "input_height": 160,
+    "input_channels": 3,
+    "output_name": "output0",
+    "prediction_count": 525,
+    "attributes": 84,
+    "prediction_layout": "attributes_first",
+    "has_objectness": False,
+    "labels": COCO_80_LABELS,
+    "hazard_labels": sorted(DEFAULT_HAZARD_LABELS),
+    "decoder_family": "yolo_anchor_free",
+  },
   "yolov8n_tinygrad_256": {
     "source_repo": "ultralytics/yolov8",
     "source_checkpoint": "YOLOv8-N / yolov8n.pt",
@@ -190,7 +207,7 @@ def main() -> None:
     raise FileNotFoundError(model_src)
   export_runtime = args.export_runtime
   if export_runtime is None:
-    if args.model_onnx is not None and args.model_preset == "yolov8n_tinygrad_256":
+    if args.model_onnx is not None and args.model_preset.startswith("yolov8n_tinygrad_"):
       export_runtime = "ONNX"
     else:
       export_runtime = "PRECOMPILED_QNN_ONNX" if args.model_onnx is not None else "QNN_DLC"
