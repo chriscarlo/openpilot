@@ -8,7 +8,8 @@ import numpy as np
 from openpilot.sunnypilot.objectd.types import Detection
 
 DEFAULT_CAMERA_HEIGHT_M = 1.22
-DEFAULT_PATH_WIDTH_M = 2.5
+DEFAULT_PATH_WIDTH_M = 1.8
+DEFAULT_ACTIVE_CONFIDENCE_THRESHOLD = 0.35
 MIN_LOOKAHEAD_M = 3.0
 MAX_LOOKAHEAD_M = 40.0
 
@@ -114,7 +115,8 @@ def project_model_path(model_position, calib_transform: np.ndarray, *, camera_he
   return ProjectedPath(center_screen[valid_width], half_width_px[valid_width], forward_m[valid_width])
 
 
-def associate_detections(detections: list[Detection], projected_path: ProjectedPath) -> tuple[list[Detection], Detection | None]:
+def associate_detections(detections: list[Detection], projected_path: ProjectedPath, *,
+                         active_confidence_threshold: float = DEFAULT_ACTIVE_CONFIDENCE_THRESHOLD) -> tuple[list[Detection], Detection | None]:
   if projected_path.center_px.shape[0] == 0:
     return detections, None
 
@@ -141,7 +143,7 @@ def associate_detections(detections: list[Detection], projected_path: ProjectedP
       footpoint_y=float(footpoint_y),
     )
     associated.append(updated)
-    if on_path and distance_m < nearest_distance:
+    if on_path and detection.confidence >= active_confidence_threshold and distance_m < nearest_distance:
       nearest_distance = distance_m
       active_detection = updated
 
