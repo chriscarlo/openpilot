@@ -56,6 +56,14 @@ MODEL_LEAD_ACCEL_TAU_S = 0.60
 MODEL_LEAD_PROB_TAU_S = 0.80
 MODEL_LEAD_CENTER_PATH_GATE_M = 2.6
 MODEL_LEAD_CUTIN_VLAT_MPS = 0.7
+LEAD_TRACK_PROB_DROPOUT_MIN_SPEED_MPS = 4.0
+LEAD_TRACK_PROB_DROPOUT_MIN_DREL_M = 1.0
+LEAD_TRACK_PROB_DROPOUT_NEAR_DREL_M = 25.0
+LEAD_TRACK_PROB_DROPOUT_NEAR_HEADWAY_S = 1.6
+LEAD_TRACK_PROB_DROPOUT_CENTER_Y_ABS_M = 1.5
+LEAD_TRACK_PROB_DROPOUT_PULLING_AWAY_MAX_MPS = 0.5
+LEAD_TRACK_PROB_DROPOUT_URGENT_CLOSING_MPS = 1.0
+LEAD_TRACK_PROB_DROPOUT_URGENT_TTC_S = 8.0
 
 
 def _finite_float(value: Any, default: float = 0.0) -> float:
@@ -572,6 +580,67 @@ def _is_lead_prob_accepted(lead_prob: float, prev_latched: bool,
   return lead_prob > (lower if prev_latched else upper)
 
 
+def _hyundai_scc_track_without_lateral(CP: structs.CarParams, CP_SP: structs.CarParamsSP) -> bool:
+  return bool(
+    getattr(CP, "brand", "") == "hyundai" and
+    (
+      int(getattr(CP_SP, "flags", 0)) & int(HyundaiFlagsSP.ENHANCED_SCC) or
+      int(getattr(CP, "flags", 0)) & int(HyundaiFlags.CAMERA_SCC | HyundaiFlags.CANFD_CAMERA_SCC)
+    )
+  )
+
+
+def _lead_msg_y_rel(lead_msg: capnp._DynamicStructReader) -> float:
+  try:
+    y_rel = float(-lead_msg.y[0])
+    return y_rel if math.isfinite(y_rel) else math.nan
+  except Exception:
+    return math.nan
+
+
+def _select_prob_dropout_track(v_ego: float, tracks: dict[int, Track], lead_msg: capnp._DynamicStructReader,
+                               CP: structs.CarParams, CP_SP: structs.CarParamsSP) -> Track | None:
+  """Retain a measured close/closing track when an already-latched model lead prob dips."""
+  if float(v_ego) < LEAD_TRACK_PROB_DROPOUT_MIN_SPEED_MPS:
+    return None
+
+  allow_missing_lateral = _hyundai_scc_track_without_lateral(CP, CP_SP)
+  fallback_y_rel = _lead_msg_y_rel(lead_msg)
+  best: tuple[float, Track] | None = None
+  near_drel = max(LEAD_TRACK_PROB_DROPOUT_NEAR_DREL_M,
+                  LEAD_TRACK_PROB_DROPOUT_NEAR_HEADWAY_S * max(float(v_ego), 0.0))
+
+  for track in tracks.values():
+    d_rel = _finite_float(getattr(track, "dRel", math.nan), math.nan)
+    y_rel = _finite_float(getattr(track, "yRel", math.nan), math.nan)
+    v_rel = _finite_float(getattr(track, "vRel", math.nan), math.nan)
+    measured = bool(getattr(track, "measured", False))
+    if (not measured or not math.isfinite(d_rel) or not math.isfinite(v_rel)):
+      continue
+    if not math.isfinite(y_rel):
+      if not allow_missing_lateral or not math.isfinite(fallback_y_rel):
+        continue
+      y_rel = fallback_y_rel
+    if d_rel < LEAD_TRACK_PROB_DROPOUT_MIN_DREL_M or abs(y_rel) > LEAD_TRACK_PROB_DROPOUT_CENTER_Y_ABS_M:
+      continue
+
+    closing_speed = max(0.0, -v_rel)
+    near_following = d_rel <= near_drel and v_rel <= LEAD_TRACK_PROB_DROPOUT_PULLING_AWAY_MAX_MPS
+    urgent_ttc = d_rel / max(closing_speed, 1e-3)
+    urgent_closing = (
+      closing_speed >= LEAD_TRACK_PROB_DROPOUT_URGENT_CLOSING_MPS and
+      urgent_ttc <= LEAD_TRACK_PROB_DROPOUT_URGENT_TTC_S
+    )
+    if not (near_following or urgent_closing):
+      continue
+
+    score = d_rel - 2.0 * closing_speed
+    if best is None or score < best[0]:
+      best = (score, track)
+
+  return None if best is None else best[1]
+
+
 def get_lead(v_ego: float, ready: bool, tracks: dict[int, Track], lead_msg: capnp._DynamicStructReader,
              model_v_ego: float, CP: structs.CarParams, CP_SP: structs.CarParamsSP, model_msg: capnp._DynamicStructReader,
              low_speed_override: bool = True, prev_latched: bool = False,
@@ -594,6 +663,11 @@ def get_lead(v_ego: float, ready: bool, tracks: dict[int, Track], lead_msg: capn
     if model_lead_tracker is not None:
       lead_dict = add_path_relative_lead_metrics(lead_dict, model_msg, lead_msg)
       lead_dict = model_lead_tracker.update_from_vision(lead_dict, now=now, v_ego=v_ego, lead_slot=lead_slot)
+  elif (track is None) and ready and prev_latched and not prob_accepted:
+    dropout_track = _select_prob_dropout_track(v_ego, tracks, lead_msg, CP, CP_SP)
+    if dropout_track is not None:
+      lead_dict = dropout_track.get_RadarState(lead_msg.prob)
+      lead_dict = get_custom_yrel(CP, CP_SP, lead_dict, lead_msg)
 
   if low_speed_override:
     low_speed_tracks = [c for c in tracks.values() if c.potential_low_speed_lead(v_ego)]

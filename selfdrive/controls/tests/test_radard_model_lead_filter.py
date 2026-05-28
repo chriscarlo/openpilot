@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from opendbc.car.hyundai.values import HyundaiFlags
 from openpilot.selfdrive.controls.radard import (
   KalmanParams,
   ModelLeadTracker,
@@ -45,6 +46,10 @@ def _model_lead(*, d_rel, v_ego=29.0, v_lead=29.0, prob=0.96, y_rel=0.0, v_lat=0
 
 def _cp():
   return SimpleNamespace(brand="hyundai", flags=0)
+
+
+def _camera_scc_cp():
+  return SimpleNamespace(brand="hyundai", flags=int(HyundaiFlags.CANFD_CAMERA_SCC))
 
 
 def _cp_sp():
@@ -181,3 +186,188 @@ class TestRadardModelLeadFilter:
     track.update(30.0, 0.0, 0.0, 29.0, True)
 
     assert track.get_RadarState()["dRel"] == pytest.approx(30.0)
+
+  def test_latched_close_closing_track_survives_model_prob_dropout(self):
+    v_ego = 30.0 * 0.44704
+    track = Track(42, v_ego, KalmanParams(0.05))
+    track.update(17.4, 0.0, -0.8, v_ego - 0.8, True)
+
+    lead = get_lead(
+      v_ego,
+      True,
+      {42: track},
+      _model_lead(d_rel=17.4, v_ego=v_ego, v_lead=v_ego - 0.8, prob=0.10),
+      v_ego,
+      _cp(),
+      _cp_sp(),
+      _model_path(),
+      low_speed_override=True,
+      prev_latched=True,
+      prob_enter=0.60,
+      prob_exit=0.25,
+    )
+
+    assert lead["status"]
+    assert lead["radar"]
+    assert lead["radarTrackId"] == 42
+    assert lead["dRel"] == pytest.approx(17.4)
+    assert lead["vRel"] == pytest.approx(-0.8)
+
+  def test_latched_close_steady_track_survives_model_prob_dropout(self):
+    v_ego = 30.0 * 0.44704
+    track = Track(48, v_ego, KalmanParams(0.05))
+    track.update(17.4, 0.0, 0.0, v_ego, True)
+
+    lead = get_lead(
+      v_ego,
+      True,
+      {48: track},
+      _model_lead(d_rel=17.4, v_ego=v_ego, v_lead=v_ego, prob=0.10),
+      v_ego,
+      _cp(),
+      _cp_sp(),
+      _model_path(),
+      low_speed_override=True,
+      prev_latched=True,
+      prob_enter=0.60,
+      prob_exit=0.25,
+    )
+
+    assert lead["status"]
+    assert lead["radarTrackId"] == 48
+    assert lead["dRel"] == pytest.approx(17.4)
+    assert lead["vRel"] == pytest.approx(0.0)
+
+  def test_latched_close_fast_pulling_away_track_drops_on_model_prob_dropout(self):
+    v_ego = 30.0 * 0.44704
+    track = Track(49, v_ego, KalmanParams(0.05))
+    track.update(17.4, 0.0, 1.0, v_ego + 1.0, True)
+
+    lead = get_lead(
+      v_ego,
+      True,
+      {49: track},
+      _model_lead(d_rel=17.4, v_ego=v_ego, v_lead=v_ego + 1.0, prob=0.10),
+      v_ego,
+      _cp(),
+      _cp_sp(),
+      _model_path(),
+      low_speed_override=True,
+      prev_latched=True,
+      prob_enter=0.60,
+      prob_exit=0.25,
+    )
+
+    assert not lead["status"]
+
+  def test_unlatched_track_does_not_acquire_on_low_model_prob(self):
+    v_ego = 30.0 * 0.44704
+    track = Track(45, v_ego, KalmanParams(0.05))
+    track.update(17.4, 0.0, -0.8, v_ego - 0.8, True)
+
+    lead = get_lead(
+      v_ego,
+      True,
+      {45: track},
+      _model_lead(d_rel=17.4, v_ego=v_ego, v_lead=v_ego - 0.8, prob=0.10),
+      v_ego,
+      _cp(),
+      _cp_sp(),
+      _model_path(),
+      low_speed_override=True,
+      prev_latched=False,
+      prob_enter=0.60,
+      prob_exit=0.25,
+    )
+
+    assert not lead["status"]
+
+  def test_off_path_track_still_drops_when_model_prob_drops(self):
+    v_ego = 30.0 * 0.44704
+    track = Track(43, v_ego, KalmanParams(0.05))
+    track.update(17.4, 2.2, -0.8, v_ego - 0.8, True)
+
+    lead = get_lead(
+      v_ego,
+      True,
+      {43: track},
+      _model_lead(d_rel=17.4, v_ego=v_ego, v_lead=v_ego - 0.8, prob=0.10, y_rel=2.2),
+      v_ego,
+      _cp(),
+      _cp_sp(),
+      _model_path(),
+      low_speed_override=True,
+      prev_latched=True,
+      prob_enter=0.60,
+      prob_exit=0.25,
+    )
+
+    assert not lead["status"]
+
+  def test_far_nonurgent_track_still_drops_when_model_prob_drops(self):
+    v_ego = 30.0 * 0.44704
+    track = Track(44, v_ego, KalmanParams(0.05))
+    track.update(75.0, 0.0, -0.6, v_ego - 0.6, True)
+
+    lead = get_lead(
+      v_ego,
+      True,
+      {44: track},
+      _model_lead(d_rel=75.0, v_ego=v_ego, v_lead=v_ego - 0.6, prob=0.10),
+      v_ego,
+      _cp(),
+      _cp_sp(),
+      _model_path(),
+      low_speed_override=True,
+      prev_latched=True,
+      prob_enter=0.60,
+      prob_exit=0.25,
+    )
+
+    assert not lead["status"]
+
+  def test_camera_scc_track_without_lateral_can_bridge_model_prob_dropout(self):
+    v_ego = 30.0 * 0.44704
+    track = Track(46, v_ego, KalmanParams(0.05))
+    track.update(17.4, math.nan, -0.8, v_ego - 0.8, True)
+
+    lead = get_lead(
+      v_ego,
+      True,
+      {46: track},
+      _model_lead(d_rel=17.4, v_ego=v_ego, v_lead=v_ego - 0.8, prob=0.10),
+      v_ego,
+      _camera_scc_cp(),
+      _cp_sp(),
+      _model_path(),
+      low_speed_override=True,
+      prev_latched=True,
+      prob_enter=0.60,
+      prob_exit=0.25,
+    )
+
+    assert lead["status"]
+    assert lead["radarTrackId"] == 46
+    assert math.isfinite(lead["yRel"])
+
+  def test_non_scc_track_without_lateral_still_drops_on_model_prob_dropout(self):
+    v_ego = 30.0 * 0.44704
+    track = Track(47, v_ego, KalmanParams(0.05))
+    track.update(17.4, math.nan, -0.8, v_ego - 0.8, True)
+
+    lead = get_lead(
+      v_ego,
+      True,
+      {47: track},
+      _model_lead(d_rel=17.4, v_ego=v_ego, v_lead=v_ego - 0.8, prob=0.10),
+      v_ego,
+      _cp(),
+      _cp_sp(),
+      _model_path(),
+      low_speed_override=True,
+      prev_latched=True,
+      prob_enter=0.60,
+      prob_exit=0.25,
+    )
+
+    assert not lead["status"]
