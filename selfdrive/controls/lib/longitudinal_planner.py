@@ -11,8 +11,10 @@ from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.modeld.constants import ModelConstants
 from openpilot.selfdrive.controls.lib.longcontrol import LongCtrlState
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LongitudinalMpc
+from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import get_headway_follow_distance
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import get_low_speed_launch_follow_max_accel
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import T_IDXS as T_IDXS_MPC
+from openpilot.selfdrive.controls.lib.longitudinal_live_tune import LeadResponseTuningConfig
 from openpilot.selfdrive.controls.lib.drive_helpers import CONTROL_N, get_accel_from_plan
 from openpilot.selfdrive.car.cruise import V_CRUISE_MAX, V_CRUISE_UNSET
 from openpilot.common.swaglog import cloudlog
@@ -72,6 +74,114 @@ def should_release_stop_for_lead_launch(CP, *, standstill: bool, v_ego: float,
   return bool(lead_pullaway_speed > max(float(getattr(CP, "vEgoStarting", 0.0)), 0.1))
 
 
+def get_lead_brake_release_accel_floor(mpc, *, v_ego: float, lead_source: str, control_leads):
+  debug = {
+    "active": False,
+    "reason": "inactive",
+    "floor_mps2": None,
+    "gap_error_m": None,
+    "pullaway_mps": None,
+    "time_to_target_s": None,
+    "danger_surplus_m": None,
+    "brake_authority_decel_mps2": None,
+    "brake_authority_gap_m": None,
+    "brake_authority_surplus_m": None,
+  }
+  vibe_controller = getattr(mpc, "vibe_controller", None)
+  if vibe_controller is None or not bool(vibe_controller.is_follow_enabled()):
+    debug["reason"] = "vibe_follow_disabled"
+    return None, debug
+  tuning = getattr(mpc, "_live_tune_cfg", None)
+  tuning = tuning if tuning is not None else LeadResponseTuningConfig.defaults()
+
+  if lead_source not in ("lead0", "lead1") or float(v_ego) < tuning.lead_brake_release_min_speed_mps:
+    return None, debug
+
+  lead_idx = 0 if lead_source == "lead0" else 1
+  if lead_idx >= len(control_leads):
+    debug["reason"] = "missing_lead"
+    return None, debug
+
+  lead = control_leads[lead_idx]
+  if lead is None or not bool(getattr(lead, "status", False)):
+    debug["reason"] = "invalid_lead"
+    return None, debug
+
+  t_follow = float(getattr(mpc, "current_t_follow", 0.0) or 0.0)
+  if t_follow <= 0.0:
+    debug["reason"] = "missing_t_follow"
+    return None, debug
+
+  lead_v = max(0.0, float(getattr(lead, "vLead", v_ego) or v_ego))
+  lead_drel = max(0.0, float(getattr(lead, "dRel", 0.0) or 0.0))
+  lead_accel = float(getattr(lead, "aLeadK", 0.0) or 0.0)
+  lead_vrel = float(getattr(lead, "vRel", lead_v - float(v_ego)) or 0.0)
+  pullaway_speed = max(lead_vrel, lead_v - float(v_ego))
+  closing_speed = max(0.0, -lead_vrel, float(v_ego) - lead_v)
+  gap_error = lead_drel - get_headway_follow_distance(float(v_ego), t_follow)
+  debug["gap_error_m"] = float(gap_error)
+  debug["pullaway_mps"] = float(pullaway_speed)
+
+  params = getattr(mpc, "params", None)
+  if params is None:
+    debug["reason"] = "missing_mpc_geometry"
+    return None, debug
+
+  brake_decel = max(1e-3, abs(min(0.0, float(params[0, 0]) if float(params[0, 0]) < 0.0 else ACCEL_MIN)))
+  relative_stop_extra_m = (closing_speed ** 2) / (2.0 * brake_decel)
+  brake_authority_gap = get_headway_follow_distance(float(v_ego), t_follow) + relative_stop_extra_m
+  brake_authority_surplus = lead_drel - brake_authority_gap
+  debug["brake_authority_decel_mps2"] = float(brake_decel)
+  debug["brake_authority_gap_m"] = float(brake_authority_gap)
+  debug["brake_authority_surplus_m"] = float(brake_authority_surplus)
+  debug["danger_surplus_m"] = float(brake_authority_surplus)
+  if brake_authority_surplus < -tuning.lead_brake_release_brake_deficit_margin_m:
+    debug["reason"] = "brake_authority_deficit"
+    return None, debug
+
+  if lead_accel < tuning.lead_brake_release_lead_decel_min_mps2:
+    debug["reason"] = "lead_decelerating"
+    return None, debug
+
+  if gap_error >= 0.0:
+    if closing_speed > 0.0:
+      decel_needed = (closing_speed ** 2) / (2.0 * max(gap_error, 0.5))
+      release_floor = -min(decel_needed, brake_decel)
+    else:
+      release_floor = tuning.lead_brake_release_coast_bias_mps2
+    time_to_target_s = 0.0
+  elif (gap_error >= -tuning.lead_brake_release_near_target_margin_m and
+        closing_speed <= tuning.lead_brake_release_near_target_max_closing_mps):
+    release_floor = tuning.lead_brake_release_near_target_floor_mps2
+    time_to_target_s = 0.0
+  else:
+    if pullaway_speed <= tuning.lead_brake_release_min_pullaway_mps:
+      debug["reason"] = "not_opening"
+      return None, debug
+    time_to_target_s = -gap_error / max(pullaway_speed, 1e-3)
+    if time_to_target_s > tuning.lead_brake_release_lookahead_s:
+      debug["time_to_target_s"] = float(time_to_target_s)
+      debug["reason"] = "target_too_far"
+      return None, debug
+    progress = 1.0 - float(np.clip(time_to_target_s / tuning.lead_brake_release_lookahead_s, 0.0, 1.0))
+    release_floor = float(np.interp(
+      progress,
+      [0.0, 1.0],
+      [tuning.lead_brake_release_approach_floor_mps2, tuning.lead_brake_release_coast_bias_mps2],
+    ))
+
+  debug["active"] = True
+  if gap_error >= 0.0:
+    debug["reason"] = "closing_to_target" if closing_speed > 0.0 else "gap_recovered"
+  elif release_floor == tuning.lead_brake_release_near_target_floor_mps2:
+    debug["reason"] = "near_target"
+  else:
+    debug["reason"] = "projected_recovery"
+  debug["floor_mps2"] = float(release_floor)
+  debug["time_to_target_s"] = float(time_to_target_s)
+  return float(release_floor), debug
+
+
 def get_coast_accel(pitch):
   return np.sin(pitch) * -5.65 - 0.3  # fitted from data using xx/projects/allow_throttle/compute_coast_accel.py
 
@@ -114,6 +224,8 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     self._source_transition_frames: deque = deque()
     self._flutter_clamp_prev_a: float = 0.0
     self._flutter_mode_active: bool = False
+    self.lead_brake_release_accel_floor = 0.0
+    self.lead_brake_release_debug = {"active": False, "reason": "init"}
 
     self.v_desired_trajectory = np.zeros(CONTROL_N)
     self.a_desired_trajectory = np.zeros(CONTROL_N)
@@ -312,6 +424,17 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
 
     lead_source = str(getattr(self.mpc, "source", ""))
     control_leads = getattr(self.mpc, "control_leads", ())
+    lead_brake_release_floor, lead_brake_release_debug = get_lead_brake_release_accel_floor(
+      self.mpc,
+      v_ego=v_ego,
+      lead_source=lead_source,
+      control_leads=control_leads,
+    )
+    self.lead_brake_release_accel_floor = float(lead_brake_release_floor or 0.0)
+    self.lead_brake_release_debug = lead_brake_release_debug
+    if lead_brake_release_floor is not None and not self.output_should_stop:
+      output_a_target = max(output_a_target, float(lead_brake_release_floor))
+
     if lead_source in ("lead0", "lead1"):
       lead_idx = 0 if lead_source == "lead0" else 1
       if lead_idx < len(control_leads):

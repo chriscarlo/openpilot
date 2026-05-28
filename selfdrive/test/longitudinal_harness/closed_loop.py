@@ -13,6 +13,11 @@ from opendbc.car.structs import CarControlSP
 from openpilot.common.gps import get_gps_location_service
 from openpilot.common.realtime import DT_CTRL, DT_MDL
 from openpilot.selfdrive.controls.lib.longcontrol import LongControl, LongCtrlState
+from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import (
+  desired_follow_distance,
+  get_headway_follow_distance,
+  get_safe_obstacle_distance,
+)
 from openpilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPlanner
 from openpilot.selfdrive.controls.radard import _LEAD_ACCEL_TAU
 from openpilot.selfdrive.modeld.constants import ModelConstants
@@ -161,6 +166,48 @@ def _long_control_state_name(state: int) -> str:
   if state == LongCtrlState.pid:
     return "pid"
   return f"unknown:{state}"
+
+
+def _mpc_follow_geometry(planner: LongitudinalPlanner,
+                         control_gap_m: float | None,
+                         control_lead_speed_mps: float | None) -> dict[str, float | None]:
+  mpc = planner.mpc
+  t_follow = float(getattr(mpc, "current_t_follow", 0.0) or 0.0)
+  v_ego = float(getattr(mpc, "x0", [0.0, 0.0])[1])
+  x_ego = float(getattr(mpc, "x0", [0.0])[0])
+  params = getattr(mpc, "params", None)
+  active_obstacle = float(params[0, 2]) if params is not None else None
+  danger_factor = float(params[0, 5]) if params is not None else None
+  comfort_obstacle_distance = get_safe_obstacle_distance(v_ego, t_follow)
+  headway_gap = get_headway_follow_distance(v_ego, t_follow)
+  active_obstacle_gap = None if active_obstacle is None else active_obstacle - x_ego
+  comfort_surplus = None if active_obstacle_gap is None else active_obstacle_gap - comfort_obstacle_distance
+  danger_surplus = (
+    None if active_obstacle_gap is None or danger_factor is None
+    else active_obstacle_gap - danger_factor * comfort_obstacle_distance
+  )
+  desired_true_gap = (
+    None if control_lead_speed_mps is None
+    else desired_follow_distance(v_ego, float(control_lead_speed_mps), t_follow)
+  )
+  control_gap_error = (
+    None if control_gap_m is None or desired_true_gap is None
+    else float(control_gap_m) - desired_true_gap
+  )
+
+  return {
+    "planner_t_follow_s": t_follow,
+    "planner_v_ego_mps": v_ego,
+    "planner_active_obstacle_m": active_obstacle,
+    "planner_active_obstacle_gap_m": active_obstacle_gap,
+    "planner_headway_gap_m": float(headway_gap),
+    "planner_comfort_obstacle_distance_m": float(comfort_obstacle_distance),
+    "planner_comfort_obstacle_surplus_m": comfort_surplus,
+    "planner_lead_danger_factor": danger_factor,
+    "planner_danger_obstacle_surplus_m": danger_surplus,
+    "planner_desired_true_gap_m": desired_true_gap,
+    "control_true_gap_error_m": control_gap_error,
+  }
 
 
 class DelayedVehiclePlant:
@@ -330,6 +377,7 @@ def run_harness(*,
       control_meta = lead_meta.get(control_slot_name or "", {})
       control_lead_speed = control_meta.get("v_lead_mps")
       control_true_gap = control_meta.get("true_d_rel_m")
+      follow_geometry = _mpc_follow_geometry(planner, control_true_gap, control_lead_speed)
 
       trace.append({
         "t_s": tick_t_s,
@@ -340,6 +388,7 @@ def run_harness(*,
         "planner_should_stop": planner_should_stop,
         "planner_gap_reclaim_floor_mps2": float(getattr(planner.mpc, "gap_reclaim_accel_floor", 0.0) or 0.0),
         "planner_cutin_settle_floor_mps2": float(getattr(planner.mpc, "cutin_settle_accel_floor", 0.0) or 0.0),
+        "planner_lead_brake_release_floor_mps2": float(getattr(planner, "lead_brake_release_accel_floor", 0.0) or 0.0),
         "planner_lead_present_cruise_cap_mps2": float(getattr(planner.mpc, "lead_present_cruise_accel_cap", 0.0) or 0.0),
         "planner_accel_clip_min_mps2": float(getattr(planner, "_planner_output_accel_limits", (0.0, 0.0))[0]),
         "planner_accel_clip_max_mps2": float(getattr(planner, "_planner_output_accel_limits", (0.0, 0.0))[1]),
@@ -359,6 +408,7 @@ def run_harness(*,
         "has_control_lead": control_lead_speed is not None,
         "control_lead_speed_mps": control_lead_speed,
         "control_true_gap_m": control_true_gap,
+        **follow_geometry,
         "true_min_gap_m": min(active_true_gaps) if active_true_gaps else None,
         "lead_one_status": lead_meta["leadOne"]["status"],
         "lead_two_status": lead_meta["leadTwo"]["status"],
@@ -373,6 +423,7 @@ def run_harness(*,
         "mpc_acc_source_debug": _to_builtin(getattr(planner.mpc, "acc_source_debug", {})),
         "mpc_cutin_settle_debug": _to_builtin(getattr(planner.mpc, "cutin_settle_debug", {})),
         "mpc_lead_preview_debug": _to_builtin(getattr(planner.mpc, "lead_approach_preview_debug", {})),
+        "planner_lead_brake_release_debug": _to_builtin(getattr(planner, "lead_brake_release_debug", {})),
         "mpc_adjacent_awareness_preview_debug": _to_builtin(getattr(planner.mpc, "adjacent_awareness_preview_debug", {})),
         "mpc_hyundai_virtual_lead_debug": _to_builtin(getattr(planner.mpc, "hyundai_virtual_lead_debug", {})),
       })

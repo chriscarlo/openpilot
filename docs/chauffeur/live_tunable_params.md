@@ -37,6 +37,23 @@ Accel ceiling for a followed slower/braking lead. The first hint only trims posi
 | `LeadSlowdownStrength` | 0.25 | 0.0–2.0 | Scale for the normal slowdown ceiling; panic/short-TTC authority is not reduced by this |
 | `LeadSlowdownMaxDecel` | 4.0 | 0.0–6.0 | Maximum braking magnitude the slowdown ceiling may request before vehicle/controller limits apply |
 
+## Lead Brake Release
+
+Vibe-follow-only accel floor that prevents continued heavy decel after the Vibe headway target has recovered or is about to recover. Safety gating uses relative closing distance against the planner's available negative accel (`-6 m/s²` on this Hyundai/EV6 GT path), while hard lead decel still blocks release.
+
+| Param Key | Default | Range | Description |
+|---|---|---|---|
+| `LeadBrakeReleaseMinSpeedMps` | 5.0 | 0.0–20.0 | Minimum ego speed for brake release |
+| `LeadBrakeReleaseBrakeDeficitMarginM` | 1.5 | 0.0–10.0 | Relative-braking-distance deficit allowed before release stays disabled |
+| `LeadBrakeReleaseLookaheadS` | 2.0 | 0.1–6.0 | Projected time-to-target window for easing continued decel |
+| `LeadBrakeReleaseMinPullawayMps` | 0.10 | 0.0–3.0 | Minimum opening speed for projected-recovery release |
+| `LeadBrakeReleaseNearTargetMarginM` | 1.5 | 0.0–8.0 | Headway deficit treated as near target when closing is small |
+| `LeadBrakeReleaseNearTargetMaxClosingMps` | 0.75 | 0.0–4.0 | Max closing speed eligible for near-target release |
+| `LeadBrakeReleaseNearTargetFloorMps2` | -0.05 | -2.0–0.5 | Floor near target; raise toward/above zero to counter EV regen |
+| `LeadBrakeReleaseLeadDecelMinMps2` | -0.75 | -6.0–0.0 | Disable release when the lead is braking harder than this |
+| `LeadBrakeReleaseApproachFloorMps2` | -0.60 | -6.0–0.0 | Most decel allowed while projected recovery ramps toward near-coast |
+| `LeadBrakeReleaseCoastBiasMps2` | 0.05 | -0.5–0.8 | Floor once target is recovered and ego is no longer closing |
+
 ## Lead Preview
 
 | Param Key | Default | Range | Description |

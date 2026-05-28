@@ -113,6 +113,105 @@ def _build_stopped_lead_noise_probe(*, dt_s: float = DT_MDL, duration_s: float =
   return initial_speed_mps, initial_accel_mps2, steps
 
 
+def _vibe_follow_overrides(headway_s: float) -> dict[str, str]:
+  params = {
+    "VibePersonalityEnabled": "1",
+    "VibeFollowPersonalityEnabled": "1",
+    "VibeAccelPersonalityEnabled": "0",
+  }
+  for idx in range(4):
+    params[f"VibeTune.Follow.Standard.Headway{idx}"] = f"{headway_s:.2f}"
+  return params
+
+
+def _build_lead_brake_release_probe(*,
+                                    dt_s: float = DT_MDL,
+                                    duration_s: float = 10.0,
+                                    initial_gap_m: float = 32.0) -> tuple[float, float, list[StepInput]]:
+  initial_speed_mps = 29.0
+  initial_accel_mps2 = 0.0
+  lead_initial_speed_mps = 29.0
+  lead_final_speed_mps = 24.5
+  decel_start_s = 1.5
+  decel_end_s = 3.2
+  steps: list[StepInput] = []
+  for idx in range(int(round(duration_s / dt_s))):
+    t_s = idx * dt_s
+    if t_s < decel_start_s:
+      lead_speed_mps = lead_initial_speed_mps
+    else:
+      progress = min(1.0, max(0.0, (t_s - decel_start_s) / (decel_end_s - decel_start_s)))
+      lead_speed_mps = lead_initial_speed_mps + (lead_final_speed_mps - lead_initial_speed_mps) * progress
+    steps.append(StepInput(
+      t_s=t_s,
+      cruise_speed_mps=33.0,
+      lead_one=LeadDirective(
+        status=True,
+        v_lead_mps=lead_speed_mps,
+        model_prob_target=1.0,
+        d_rel_override_m=initial_gap_m if idx == 0 else None,
+        acquisition_reset=idx == 0,
+      ),
+      note="lead slows once, then holds speed after ego has entered follow gap recovery",
+    ))
+  return initial_speed_mps, initial_accel_mps2, steps
+
+
+def _build_panic_stop_lead_probe(*,
+                                 dt_s: float = DT_MDL,
+                                 duration_s: float = 6.0,
+                                 initial_gap_m: float = 27.0) -> tuple[float, float, list[StepInput]]:
+  initial_speed_mps = 29.0
+  initial_accel_mps2 = 0.0
+  lead_initial_speed_mps = 29.0
+  lead_decel_mps2 = 7.0
+  decel_start_s = 0.2
+  steps: list[StepInput] = []
+  for idx in range(int(round(duration_s / dt_s))):
+    t_s = idx * dt_s
+    decel_elapsed_s = max(0.0, t_s - decel_start_s)
+    lead_speed_mps = max(0.0, lead_initial_speed_mps - lead_decel_mps2 * decel_elapsed_s)
+    lead_accel_mps2 = -lead_decel_mps2 if lead_speed_mps > 0.0 and t_s >= decel_start_s else 0.0
+    steps.append(StepInput(
+      t_s=t_s,
+      cruise_speed_mps=33.0,
+      lead_one=LeadDirective(
+        status=True,
+        v_lead_mps=lead_speed_mps,
+        a_lead_k_mps2=lead_accel_mps2,
+        model_prob_target=1.0,
+        d_rel_override_m=initial_gap_m if idx == 0 else None,
+        acquisition_reset=idx == 0,
+      ),
+      note="lead panic stops from freeway speed",
+    ))
+  return initial_speed_mps, initial_accel_mps2, steps
+
+
+def _build_high_closing_recovered_gap_probe(*,
+                                            dt_s: float = DT_MDL,
+                                            duration_s: float = 2.0,
+                                            initial_gap_m: float = 85.0) -> tuple[float, float, list[StepInput]]:
+  initial_speed_mps = 30.0
+  initial_accel_mps2 = 0.0
+  lead_speed_mps = 20.0
+  steps: list[StepInput] = []
+  for idx in range(int(round(duration_s / dt_s))):
+    steps.append(StepInput(
+      t_s=idx * dt_s,
+      cruise_speed_mps=33.0,
+      lead_one=LeadDirective(
+        status=True,
+        v_lead_mps=lead_speed_mps,
+        model_prob_target=1.0,
+        d_rel_override_m=initial_gap_m if idx == 0 else None,
+        acquisition_reset=idx == 0,
+      ),
+      note="large gap with high closing speed to a steady slower lead",
+    ))
+  return initial_speed_mps, initial_accel_mps2, steps
+
+
 def _count_sign_reversals(rows: list[dict], field: str, *, epsilon: float = 0.05) -> int:
   previous_sign = 0
   reversals = 0
@@ -478,6 +577,98 @@ def test_slower_lead_probe_acquires_immediately_without_repeated_settle_hunting(
   assert settle_window
   assert _count_sign_reversals(settle_window, "controller_accel_mps2") <= 1
   assert _count_sign_reversals(settle_window, "realized_accel_mps2") <= 1
+
+
+def test_lead_brake_release_eases_as_vibe_follow_gap_recovers(monkeypatch: pytest.MonkeyPatch) -> None:
+  monkeypatch.setenv("OPENPILOT_TEST_MPC_SAFE_OBSTACLE_GEOMETRY", "1")
+  vehicle = resolve_ev6_vehicle_config(
+    topology="lfa",
+    controller_mode="passthrough",
+    param_overrides=_vibe_follow_overrides(1.30),
+    plant_overrides={"command_delay_s": 0.25},
+  )
+  initial_speed_mps, initial_accel_mps2, steps = _build_lead_brake_release_probe()
+  result = run_harness(
+    vehicle_config=vehicle,
+    scenario_name="lead_brake_release_probe",
+    steps=steps,
+    initial_speed_mps=initial_speed_mps,
+    initial_accel_mps2=initial_accel_mps2,
+    noise_profile="off",
+    seed=1,
+  )
+
+  parity_row = next(row for row in result.trace
+                    if row["t_s"] >= 3.2 and
+                    row["planner_source"] in ("lead0", "lead1") and
+                    row["has_control_lead"] and
+                    row["control_lead_speed_mps"] - row["v_ego_true_mps"] >= 0.0 and
+                    row["control_true_gap_error_m"] >= -0.5 and
+                    row["planner_danger_obstacle_surplus_m"] > 5.0)
+
+  assert parity_row["planner_t_follow_s"] == pytest.approx(1.05, abs=0.10)
+  assert parity_row["control_true_gap_error_m"] == pytest.approx(0.0, abs=2.0)
+  assert parity_row["planner_danger_obstacle_surplus_m"] > 5.0
+  assert parity_row["planner_accel_mps2"] >= -0.05
+  assert parity_row["longcontrol_accel_mps2"] >= -0.05
+
+
+def test_lead_brake_release_does_not_soften_panic_stop(monkeypatch: pytest.MonkeyPatch) -> None:
+  monkeypatch.setenv("OPENPILOT_TEST_MPC_SAFE_OBSTACLE_GEOMETRY", "1")
+  vehicle = resolve_ev6_vehicle_config(
+    topology="lfa",
+    controller_mode="passthrough",
+    param_overrides=_vibe_follow_overrides(1.30),
+    plant_overrides={"command_delay_s": 0.25},
+  )
+  initial_speed_mps, initial_accel_mps2, steps = _build_panic_stop_lead_probe()
+  result = run_harness(
+    vehicle_config=vehicle,
+    scenario_name="panic_stop_lead_probe",
+    steps=steps,
+    initial_speed_mps=initial_speed_mps,
+    initial_accel_mps2=initial_accel_mps2,
+    noise_profile="off",
+    seed=1,
+  )
+
+  danger_row = next(row for row in result.trace
+                    if row["planner_source"] in ("lead0", "lead1") and
+                    row["has_control_lead"] and
+                    row["planner_danger_obstacle_surplus_m"] < 0.0)
+
+  assert danger_row["control_lead_speed_mps"] < danger_row["v_ego_true_mps"]
+  assert danger_row["planner_accel_mps2"] <= -3.0
+  assert danger_row["longcontrol_accel_mps2"] <= -3.0
+
+
+def test_lead_brake_release_uses_available_brake_authority_without_coasting_fast_closure(monkeypatch: pytest.MonkeyPatch) -> None:
+  monkeypatch.setenv("OPENPILOT_TEST_MPC_SAFE_OBSTACLE_GEOMETRY", "1")
+  vehicle = resolve_ev6_vehicle_config(
+    topology="lfa",
+    controller_mode="passthrough",
+    param_overrides=_vibe_follow_overrides(1.30),
+    plant_overrides={"command_delay_s": 0.25},
+  )
+  initial_speed_mps, initial_accel_mps2, steps = _build_high_closing_recovered_gap_probe()
+  result = run_harness(
+    vehicle_config=vehicle,
+    scenario_name="high_closing_recovered_gap_probe",
+    steps=steps,
+    initial_speed_mps=initial_speed_mps,
+    initial_accel_mps2=initial_accel_mps2,
+    noise_profile="off",
+    seed=1,
+  )
+
+  first_row = next(row for row in result.trace if row["planner_source"] in ("lead0", "lead1"))
+  release_debug = first_row["planner_lead_brake_release_debug"]
+
+  assert first_row["planner_danger_obstacle_surplus_m"] < 0.0
+  assert release_debug["brake_authority_decel_mps2"] == pytest.approx(6.0)
+  assert release_debug["brake_authority_surplus_m"] > 10.0
+  assert release_debug["reason"] == "closing_to_target"
+  assert -1.5 <= first_row["planner_accel_mps2"] <= -0.5
 
 
 def test_stoplight_launch_releases_planner_stop_as_lead_pulls_away() -> None:

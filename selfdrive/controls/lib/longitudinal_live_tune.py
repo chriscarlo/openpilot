@@ -157,6 +157,106 @@ LEAD_RESPONSE_TUNE_SPECS = (
     description="Maximum braking magnitude the slower/braking-lead ceiling may request before vehicle/controller limits apply.",
   ),
   LeadResponseTuneSpec(
+    attr="lead_brake_release_min_speed_mps",
+    key="Longitudinal.LiveTune.LeadBrakeReleaseMinSpeedMps",
+    cli_name="lead-brake-release-min-speed",
+    label="release_min_speed",
+    default=5.0,
+    minimum=0.0,
+    maximum=20.0,
+    description="Minimum ego speed for the Vibe follow-gap brake-release floor.",
+  ),
+  LeadResponseTuneSpec(
+    attr="lead_brake_release_brake_deficit_margin_m",
+    key="Longitudinal.LiveTune.LeadBrakeReleaseBrakeDeficitMarginM",
+    cli_name="lead-brake-release-deficit-margin",
+    label="release_deficit_margin",
+    default=1.5,
+    minimum=0.0,
+    maximum=10.0,
+    description="Allowed relative-braking-distance deficit before the release floor stays disabled.",
+  ),
+  LeadResponseTuneSpec(
+    attr="lead_brake_release_lookahead_s",
+    key="Longitudinal.LiveTune.LeadBrakeReleaseLookaheadS",
+    cli_name="lead-brake-release-lookahead",
+    label="release_lookahead",
+    default=2.0,
+    minimum=0.1,
+    maximum=6.0,
+    description="Lookahead window for easing decel when an opening gap is projected to recover the Vibe headway target.",
+  ),
+  LeadResponseTuneSpec(
+    attr="lead_brake_release_min_pullaway_mps",
+    key="Longitudinal.LiveTune.LeadBrakeReleaseMinPullawayMps",
+    cli_name="lead-brake-release-min-pullaway",
+    label="release_min_pullaway",
+    default=0.10,
+    minimum=0.0,
+    maximum=3.0,
+    description="Minimum opening speed before projected Vibe target recovery can ease continued braking.",
+  ),
+  LeadResponseTuneSpec(
+    attr="lead_brake_release_near_target_margin_m",
+    key="Longitudinal.LiveTune.LeadBrakeReleaseNearTargetMarginM",
+    cli_name="lead-brake-release-near-target-margin",
+    label="release_near_target_margin",
+    default=1.5,
+    minimum=0.0,
+    maximum=8.0,
+    description="Vibe headway deficit that can be treated as near target when closing speed is small.",
+  ),
+  LeadResponseTuneSpec(
+    attr="lead_brake_release_near_target_max_closing_mps",
+    key="Longitudinal.LiveTune.LeadBrakeReleaseNearTargetMaxClosingMps",
+    cli_name="lead-brake-release-near-target-closing",
+    label="release_near_target_closing",
+    default=0.75,
+    minimum=0.0,
+    maximum=4.0,
+    description="Maximum closing speed still eligible for the near-target decel floor.",
+  ),
+  LeadResponseTuneSpec(
+    attr="lead_brake_release_near_target_floor_mps2",
+    key="Longitudinal.LiveTune.LeadBrakeReleaseNearTargetFloorMps2",
+    cli_name="lead-brake-release-near-target-floor",
+    label="release_near_target_floor",
+    default=-0.05,
+    minimum=-2.0,
+    maximum=0.5,
+    description="Accel floor applied near the recovered Vibe headway target; can be slightly positive to counter regen.",
+  ),
+  LeadResponseTuneSpec(
+    attr="lead_brake_release_lead_decel_min_mps2",
+    key="Longitudinal.LiveTune.LeadBrakeReleaseLeadDecelMinMps2",
+    cli_name="lead-brake-release-lead-decel-min",
+    label="release_lead_decel_min",
+    default=-0.75,
+    minimum=-6.0,
+    maximum=0.0,
+    description="Disable brake release when the lead is braking harder than this threshold.",
+  ),
+  LeadResponseTuneSpec(
+    attr="lead_brake_release_approach_floor_mps2",
+    key="Longitudinal.LiveTune.LeadBrakeReleaseApproachFloorMps2",
+    cli_name="lead-brake-release-approach-floor",
+    label="release_approach_floor",
+    default=-0.60,
+    minimum=-6.0,
+    maximum=0.0,
+    description="Most braking allowed by the projected-recovery release floor before it ramps toward near-coast.",
+  ),
+  LeadResponseTuneSpec(
+    attr="lead_brake_release_coast_bias_mps2",
+    key="Longitudinal.LiveTune.LeadBrakeReleaseCoastBiasMps2",
+    cli_name="lead-brake-release-coast-bias",
+    label="release_coast_bias",
+    default=0.05,
+    minimum=-0.5,
+    maximum=0.8,
+    description="Accel floor once the Vibe headway target is recovered and ego is no longer closing.",
+  ),
+  LeadResponseTuneSpec(
     attr="cutin_settle_duration_s",
     key="Longitudinal.LiveTune.CutInSettleDurationS",
     cli_name="cutin-settle-duration-s",
@@ -457,6 +557,16 @@ class LeadResponseTuningConfig:
   lead_keepup_max_accel: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_keepup_max_accel"].default
   lead_slowdown_strength: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_slowdown_strength"].default
   lead_slowdown_max_decel: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_slowdown_max_decel"].default
+  lead_brake_release_min_speed_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_brake_release_min_speed_mps"].default
+  lead_brake_release_brake_deficit_margin_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_brake_release_brake_deficit_margin_m"].default
+  lead_brake_release_lookahead_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_brake_release_lookahead_s"].default
+  lead_brake_release_min_pullaway_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_brake_release_min_pullaway_mps"].default
+  lead_brake_release_near_target_margin_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_brake_release_near_target_margin_m"].default
+  lead_brake_release_near_target_max_closing_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_brake_release_near_target_max_closing_mps"].default
+  lead_brake_release_near_target_floor_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_brake_release_near_target_floor_mps2"].default
+  lead_brake_release_lead_decel_min_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_brake_release_lead_decel_min_mps2"].default
+  lead_brake_release_approach_floor_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_brake_release_approach_floor_mps2"].default
+  lead_brake_release_coast_bias_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_brake_release_coast_bias_mps2"].default
   cutin_settle_duration_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cutin_settle_duration_s"].default
   cutin_settle_max_decel: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cutin_settle_max_decel"].default
   cutin_settle_max_closing_speed_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cutin_settle_max_closing_speed_mps"].default
