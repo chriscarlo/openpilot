@@ -2,7 +2,7 @@
 from parameterized import parameterized_class
 import unittest
 
-from opendbc.car.hyundai.values import HyundaiSafetyFlags
+from opendbc.car.hyundai.values import HYUNDAI_CANFD_STEER_DELTA_DOWN, HYUNDAI_CANFD_STEER_DELTA_UP, HyundaiSafetyFlags
 from opendbc.car.structs import CarParams
 from opendbc.safety.tests.libsafety import libsafety_py
 import opendbc.safety.tests.common as common
@@ -28,8 +28,8 @@ class TestHyundaiCanfdBase(HyundaiButtonBase, common.PandaCarSafetyTest, common.
   STANDSTILL_THRESHOLD = 12  # 0.375 kph
   FWD_BLACKLISTED_ADDRS = {2: [0x50, 0x2a4]}
 
-  MAX_RATE_UP = 8
-  MAX_RATE_DOWN = 9
+  MAX_RATE_UP = HYUNDAI_CANFD_STEER_DELTA_UP
+  MAX_RATE_DOWN = HYUNDAI_CANFD_STEER_DELTA_DOWN
   MAX_TORQUE_LOOKUP = [0], [409]
 
   MAX_RT_DELTA = 336

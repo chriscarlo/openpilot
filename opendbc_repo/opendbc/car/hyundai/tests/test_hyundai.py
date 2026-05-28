@@ -12,7 +12,8 @@ from opendbc.car.hyundai.values import CAMERA_SCC_CAR, CANFD_CAR, CAN_GEARS, CAR
                                          HYBRID_CAR, EV_CAR, FW_QUERY_CONFIG, LEGACY_SAFETY_MODE_CAR, CANFD_FUZZY_WHITELIST, \
                                          UNSUPPORTED_LONGITUDINAL_CAR, PLATFORM_CODE_ECUS, HYUNDAI_VERSION_REQUEST_LONG, \
                                          HyundaiFlags, get_platform_codes, HyundaiSafetyFlags, \
-                                         NON_SCC_CAR
+                                         NON_SCC_CAR, CarControllerParams, HYUNDAI_CANFD_STEER_DELTA_DOWN, \
+                                         HYUNDAI_CANFD_STEER_DELTA_UP
 from opendbc.car.hyundai.fingerprints import FW_VERSIONS
 
 Ecu = CarParams.Ecu
@@ -69,6 +70,15 @@ class TestHyundaiFingerprint:
     for car_model in CAR:
       CP = CarInterface.get_params(car_model, fingerprint, [], False, False, False)
       assert bool(CP.flags & HyundaiFlags.ALT_LIMITS) == bool(CP.safetyConfigs[-1].safetyParam & HyundaiSafetyFlags.ALT_LIMITS)
+
+  def test_canfd_steer_ramp_limits(self):
+    CP = CarInterface.get_non_essential_params(CAR.KIA_EV6)
+    params = CarControllerParams(CP)
+
+    assert HYUNDAI_CANFD_STEER_DELTA_UP == 7
+    assert HYUNDAI_CANFD_STEER_DELTA_DOWN == 9
+    assert params.STEER_DELTA_UP == HYUNDAI_CANFD_STEER_DELTA_UP
+    assert params.STEER_DELTA_DOWN == HYUNDAI_CANFD_STEER_DELTA_DOWN
 
   def test_can_features(self):
     # Test no EV/HEV in any gear lists (should all use ELECT_GEAR)

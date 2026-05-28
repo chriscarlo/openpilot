@@ -12,6 +12,9 @@ from opendbc.sunnypilot.car.hyundai.values import HyundaiFlagsSP
 
 Ecu = CarParams.Ecu
 
+HYUNDAI_CANFD_STEER_DELTA_UP = 7
+HYUNDAI_CANFD_STEER_DELTA_DOWN = 9
+
 
 class CarControllerParams:
   ACCEL_MIN = -6.0 # m/s
@@ -31,8 +34,8 @@ class CarControllerParams:
       self.STEER_DRIVER_ALLOWANCE = 250
       self.STEER_DRIVER_MULTIPLIER = 2
       self.STEER_THRESHOLD = 250
-      self.STEER_DELTA_UP = 7
-      self.STEER_DELTA_DOWN = 8
+      self.STEER_DELTA_UP = HYUNDAI_CANFD_STEER_DELTA_UP
+      self.STEER_DELTA_DOWN = HYUNDAI_CANFD_STEER_DELTA_DOWN
 
     # To determine the limit for your car, find the maximum value that the stock LKAS will request.
     # If the max stock LKAS request is <384, add your car to this list.
