@@ -140,7 +140,8 @@ class TestLeadInteractionHeuristics:
 
     keepup_floor = get_lead_keepup_accel_floor(33.5, first_hint, 1.3, tuning)
 
-    assert 0.0 < keepup_floor < 0.015
+    assert keepup_floor == pytest.approx(0.0181125)
+    assert 0.0 < keepup_floor < 0.02
 
   def test_keepup_gap_bias_stays_below_ev_tactile_threshold_near_target(self):
     tuning = LeadResponseTuningConfig(lead_keepup_gap_min_m=0.80, lead_keepup_max_accel=0.06)
@@ -234,15 +235,27 @@ class TestLeadInteractionHeuristics:
 
     assert ceiling == pytest.approx(-6.0)
 
-  def test_slowdown_ceiling_applies_below_two_mps_for_close_closing_lead(self):
+  def test_slowdown_ceiling_stays_out_below_two_mps_for_terminal_rollout(self):
     tuning = LeadResponseTuningConfig(lead_slowdown_strength=0.5, lead_slowdown_max_decel=6.0)
     close_closing_lead = _make_lead(d_rel=8.6, v_lead=0.9, a_lead=0.0)
     setattr(close_closing_lead, "vRel", -0.92)
 
     ceiling = get_lead_slowdown_accel_ceiling(1.82, close_closing_lead, 1.3, tuning)
 
-    assert ceiling is not None
-    assert ceiling < 0.0
+    assert ceiling is None
+
+  def test_slowdown_ceiling_reengages_at_two_mps_for_close_stopped_lead(self):
+    tuning = LeadResponseTuningConfig(lead_slowdown_strength=0.5, lead_slowdown_max_decel=6.0)
+    stopped_lead = _make_lead(d_rel=0.5, v_lead=0.0, a_lead=-4.0)
+    setattr(stopped_lead, "vRel", -2.1)
+
+    just_below = get_lead_slowdown_accel_ceiling(1.99, stopped_lead, 1.3, tuning)
+    at_gate = get_lead_slowdown_accel_ceiling(2.0, stopped_lead, 1.3, tuning)
+    above_gate = get_lead_slowdown_accel_ceiling(2.1, stopped_lead, 1.3, tuning)
+
+    assert just_below is None
+    assert at_gate == pytest.approx(-6.0)
+    assert above_gate == pytest.approx(-6.0)
 
   def test_gap_reclaim_effective_cap_expands_toward_personality_accel_for_large_surplus_gap(self):
     wide_pullaway = _make_lead(d_rel=72.0, v_lead=35.2, a_lead=0.2)
@@ -315,7 +328,8 @@ class TestLeadInteractionHeuristics:
 
     factor = get_lead_handoff_danger_factor(27.0, inside_headway, 1.3, handoff_remaining_s=1.25)
 
-    assert factor > 0.93
+    assert factor == pytest.approx(0.90625)
+    assert factor > 0.90
 
   def test_lead_handoff_danger_factor_supports_projected_slower_far_lead(self):
     slower_far_lead = _make_lead(d_rel=56.0, v_lead=22.0, a_lead=0.0)
@@ -374,7 +388,8 @@ class TestLeadInteractionHeuristics:
     floor = get_cutin_settle_accel_floor(33.5, benign, 1.3, age_s=4.0)
 
     assert floor is not None
-    assert 0.15 < floor < 0.20  # positive due to the stronger default regen bias (+0.20)
+    assert floor == pytest.approx(0.0984090909090909)
+    assert 0.09 < floor < 0.11
     assert get_cutin_settle_accel_floor(33.5, dangerous, 1.3, age_s=1.0) is None
 
   def test_cutin_settle_floor_blocks_braking_for_same_speed_merge(self):
@@ -382,7 +397,7 @@ class TestLeadInteractionHeuristics:
 
     floor = get_cutin_settle_accel_floor(33.5, same_speed, 1.3, age_s=1.0)
 
-    assert floor == pytest.approx(0.20)  # pure regen bias, no decel (closing_speed=0)
+    assert floor == pytest.approx(0.12)  # pure regen bias, no decel (closing_speed=0)
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="plant-backed lead interaction scenarios require the native acados solver")
