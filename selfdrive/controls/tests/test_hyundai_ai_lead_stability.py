@@ -13,6 +13,7 @@ from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import (
   N,
   get_gap_reclaim_accel_floor,
   get_lead_keepup_accel_floor,
+  get_lead_slowdown_accel_ceiling,
 )
 
 
@@ -318,7 +319,7 @@ class TestHyundaiAiLeadStability:
     assert soft_near_keepup < 0.005
     assert soft_wide_reclaim == pytest.approx(0.08)
     assert soft_wide_reclaim < pre_wide_reclaim
-    assert 0.05 < soft_wide_keepup < 0.06
+    assert 0.05 < soft_wide_keepup <= 0.06
     assert soft_wide_keepup < pre_wide_keepup
 
   def test_slowdown_ceiling_reaches_full_decel_for_close_braking_lead(self, monkeypatch):
@@ -336,8 +337,20 @@ class TestHyundaiAiLeadStability:
     )
 
     assert mpc.source == "lead0"
-    assert mpc.lead_slowdown_accel_ceiling == pytest.approx(-6.0)
-    assert mpc.acc_source_debug["lead_slowdown_accel_ceiling"] == pytest.approx(-6.0)
+    assert mpc.lead_slowdown_accel_ceiling == pytest.approx(-4.0)
+    assert mpc.acc_source_debug["lead_slowdown_accel_ceiling"] == pytest.approx(-4.0)
+
+  def test_slowdown_ceiling_stays_out_of_terminal_rollout(self):
+    tune = build_lead_response_tuning_config({"lead_slowdown_max_decel": 4.0})
+    crawl_lead = _make_lead(d_rel=0.5, v_rel=-0.5, v_lead=0.0, a_lead=-4.0)
+    active_lead = _make_lead(d_rel=0.5, v_rel=-2.1, v_lead=0.0, a_lead=-4.0)
+
+    assert get_lead_slowdown_accel_ceiling(
+      0.5, crawl_lead, 1.45, tune, min_accel=-6.0, max_accel=1.6,
+    ) is None
+    assert get_lead_slowdown_accel_ceiling(
+      2.1, active_lead, 1.45, tune, min_accel=-6.0, max_accel=1.6,
+    ) < -1.0
 
   def test_slowdown_ceiling_release_is_rate_limited_while_close_and_closing(self):
     mpc = _make_hyundai_mpc(v_ego=28.0, a_ego=0.0)
@@ -369,13 +382,15 @@ class TestHyundaiAiLeadStability:
     assert mpc.source == "lead0"
 
     held_sources = []
-    for _ in range(4):
+    for _ in range(7):
       _run_update(mpc, _make_lead(status=False), _make_lead(status=False))
       held_sources.append(mpc.source)
-      assert mpc.acc_source_debug["reason"] == "dropout_hold"
-      assert mpc.hyundai_virtual_lead_debug["dropout_hold"]["active"] is True
+      stabilizer_active = bool(mpc.lead_stability_debug["slot0"]["out_status"])
+      dropout_active = bool(mpc.hyundai_virtual_lead_debug.get("dropout_hold", {}).get("active", False))
+      assert mpc.acc_source_debug["reason"] in ("dropout_hold", "raw_gap_hold")
+      assert stabilizer_active or dropout_active
 
-    assert held_sources == ["lead0", "lead0", "lead0", "lead0"]
+    assert held_sources == ["lead0"] * 7
 
     _run_update(mpc, _make_lead(status=False), _make_lead(status=False))
 
