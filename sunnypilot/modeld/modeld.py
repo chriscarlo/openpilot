@@ -19,7 +19,12 @@ from openpilot.common.transformations.model import get_warp_matrix
 from openpilot.system import sentry
 from openpilot.selfdrive.controls.lib.desire_helper import DesireHelper
 from openpilot.selfdrive.controls.lib.drive_helpers import get_accel_from_plan, smooth_value
-from openpilot.selfdrive.modeld.camera_offset_helper import CameraOffsetHelper
+from openpilot.selfdrive.modeld.camera_offset_helper import (
+  CAMERA_OFFSET_AUTO_LEARNED_PARAM,
+  CameraOffsetHelper,
+  camera_offset_auto_enabled,
+  should_persist_auto_offset,
+)
 
 from openpilot.sunnypilot.livedelay.helpers import get_lat_delay
 from openpilot.sunnypilot.modeld.runners import ModelRunner, Runtime
@@ -202,6 +207,11 @@ def main(demo=False):
   meta_main = FrameMeta()
   meta_extra = FrameMeta()
   camera_offset_helper = CameraOffsetHelper(ModelConstants.MODEL_FREQ)
+  camera_offset_helper.set_offset(params.get("CameraOffset", return_default=True))
+  camera_offset_helper.load_auto_tune_offset(params.get(CAMERA_OFFSET_AUTO_LEARNED_PARAM, return_default=True))
+  camera_offset_helper.set_auto_enabled(camera_offset_auto_enabled(params))
+  last_saved_auto_offset = camera_offset_helper.get_auto_tune_offset()
+  last_auto_offset_save_t = time.monotonic()
 
 
   if demo:
@@ -259,7 +269,7 @@ def main(demo=False):
       model.lat_delay = get_lat_delay(params, sm["liveDelay"].lateralDelay)
     if sm.frame % 10 == 0:
       camera_offset_helper.set_offset(params.get("CameraOffset", return_default=True))
-      camera_offset_helper.set_auto_enabled(params.get_bool("CameraOffsetAuto"))
+      camera_offset_helper.set_auto_enabled(camera_offset_auto_enabled(params))
     lat_delay = model.lat_delay + model.LAT_SMOOTH_SECONDS
     if sm.updated["liveCalibration"] and sm.seen['roadCameraState'] and sm.seen['deviceState']:
       device_from_calib_euler = np.array(sm["liveCalibration"].rpyCalib, dtype=np.float32)
@@ -344,6 +354,12 @@ def main(demo=False):
         blinkers_active=sm['carState'].leftBlinker or sm['carState'].rightBlinker,
         desired_curvature=drivingdata_send.drivingModelData.action.desiredCurvature,
       )
+      current_auto_offset = camera_offset_helper.get_auto_tune_offset()
+      now_monotonic = time.monotonic()
+      if should_persist_auto_offset(current_auto_offset, last_saved_auto_offset, now_monotonic, last_auto_offset_save_t):
+        params.put_nonblocking(CAMERA_OFFSET_AUTO_LEARNED_PARAM, current_auto_offset)
+        last_saved_auto_offset = current_auto_offset
+        last_auto_offset_save_t = now_monotonic
 
       fill_pose_msg(posenet_send, model_output, meta_main.frame_id, vipc_dropped_frames, meta_main.timestamp_eof, live_calib_seen)
       pm.send('modelV2', modelv2_send)

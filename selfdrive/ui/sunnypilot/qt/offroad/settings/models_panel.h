@@ -70,6 +70,7 @@ private:
   ParamControlSP *dynamicModeldOutputs;
   ParamControlSP *lagd_toggle_control;
   OptionControlSP *delay_control;
+  ParamControlSP *camera_offset_auto_control;
   OptionControlSP *camera_offset_control;
   LabelControlSP *learned_camera_offset_label;
   LabelControlSP *effective_camera_offset_label;

@@ -25,7 +25,12 @@ from openpilot.common.transformations.camera import DEVICE_CAMERAS
 from openpilot.common.transformations.model import get_warp_matrix
 from openpilot.selfdrive.controls.lib.desire_helper import DesireHelper
 from openpilot.selfdrive.controls.lib.drive_helpers import get_accel_from_plan, smooth_value, get_curvature_from_plan
-from openpilot.selfdrive.modeld.camera_offset_helper import CameraOffsetHelper, should_persist_auto_offset
+from openpilot.selfdrive.modeld.camera_offset_helper import (
+  CAMERA_OFFSET_AUTO_LEARNED_PARAM,
+  CameraOffsetHelper,
+  camera_offset_auto_enabled,
+  should_persist_auto_offset,
+)
 from openpilot.selfdrive.modeld.parse_model_outputs import Parser
 from openpilot.selfdrive.modeld.fill_model_msg import fill_model_msg, fill_pose_msg, PublishState
 from openpilot.selfdrive.modeld.constants import ModelConstants, Plan
@@ -47,9 +52,6 @@ POLICY_METADATA_PATH = Path(__file__).parent / 'models/driving_policy_metadata.p
 LAT_SMOOTH_SECONDS = 0.0
 LONG_SMOOTH_SECONDS = 0.3
 MIN_LAT_CONTROL_SPEED = 0.3
-CAMERA_OFFSET_AUTO_LEARNED_PARAM = "CameraOffsetAutoLearned"
-
-
 def get_action_from_model(model_output: dict[str, np.ndarray], prev_action: log.ModelDataV2.Action,
                           lat_action_t: float, long_action_t: float, v_ego: float) -> log.ModelDataV2.Action:
     plan = model_output['plan'][0]
@@ -326,7 +328,7 @@ def main(demo=False):
   camera_offset_helper = CameraOffsetHelper(ModelConstants.MODEL_FREQ)
   camera_offset_helper.set_offset(params.get("CameraOffset", return_default=True))
   camera_offset_helper.load_auto_tune_offset(params.get(CAMERA_OFFSET_AUTO_LEARNED_PARAM, return_default=True))
-  camera_offset_helper.set_auto_enabled(params.get_bool("CameraOffsetAuto"))
+  camera_offset_helper.set_auto_enabled(camera_offset_auto_enabled(params))
   last_saved_auto_offset = camera_offset_helper.get_auto_tune_offset()
   last_auto_offset_save_t = time.monotonic()
 
@@ -387,7 +389,7 @@ def main(demo=False):
       model.lat_delay = get_lat_delay(params, sm["liveDelay"].lateralDelay)
     if sm.frame % 10 == 0:
       camera_offset_helper.set_offset(params.get("CameraOffset", return_default=True))
-      camera_offset_helper.set_auto_enabled(params.get_bool("CameraOffsetAuto"))
+      camera_offset_helper.set_auto_enabled(camera_offset_auto_enabled(params))
     # Ensure sane, non-zero delay for any downstream math/model inputs
     lat_delay = max(model.lat_delay + LAT_SMOOTH_SECONDS, 0.01)
     lateral_control_params = np.array([v_ego, lat_delay], dtype=np.float32)

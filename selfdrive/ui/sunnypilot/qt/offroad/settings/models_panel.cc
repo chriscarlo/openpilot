@@ -232,6 +232,15 @@ ModelsPanel::ModelsPanel(QWidget *parent) : QWidget(parent) {
 
   list->addItem(horizontal_line());
 
+  camera_offset_auto_control = new ParamControlSP(
+      "CameraOffsetAuto",
+      tr("Auto Lane Centering"),
+      tr("Automatically learns and applies a camera offset from lane-line centering on straight road segments."),
+      "../assets/offroad/icon_shell.png", this);
+  connect(camera_offset_auto_control, &ParamControlSP::toggleFlipped, this, &ModelsPanel::updateLabels);
+  camera_offset_auto_control->showDescription();
+  list->addItem(camera_offset_auto_control);
+
   camera_offset_control = new OptionControlSP(
       "CameraOffset",
       tr("Adjust Camera Offset"),
@@ -581,6 +590,7 @@ void ModelsPanel::updateLabels() {
     const bool auto_offset_enabled = params.getBool("CameraOffsetAuto");
     const float effective_offset = std::clamp(manual_offset + (auto_offset_enabled ? learned_offset : 0.0f), -0.35f, 0.35f);
 
+    camera_offset_auto_control->refresh();
     camera_offset_control->setLabel(QString::number(manual_offset, 'f', 2) + " m");
     learned_camera_offset_label->setText(QString("%1 (%2)")
       .arg(QString::number(learned_offset, 'f', 2) + " m", auto_offset_enabled ? tr("applied") : tr("stored")));
@@ -645,6 +655,7 @@ void ModelsPanel::showEvent(QShowEvent *event) {
   if (delay_control->isVisible()) {
     delay_control->showDescription();
   }
+  camera_offset_auto_control->showDescription();
   camera_offset_control->showDescription();
   learned_camera_offset_label->showDescription();
   effective_camera_offset_label->showDescription();

@@ -7,6 +7,12 @@ from openpilot.common.filter_simple import FirstOrderFilter
 
 AUTO_TUNE_PERSIST_MIN_DELTA = 0.002
 AUTO_TUNE_PERSIST_INTERVAL_S = 5.0
+CAMERA_OFFSET_AUTO_PARAM = "CameraOffsetAuto"
+CAMERA_OFFSET_AUTO_LEARNED_PARAM = "CameraOffsetAutoLearned"
+
+
+def camera_offset_auto_enabled(params) -> bool:
+  return bool(params.get(CAMERA_OFFSET_AUTO_PARAM, return_default=True))
 
 
 def should_persist_auto_offset(current_offset: float, last_saved_offset: float,

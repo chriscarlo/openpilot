@@ -1,6 +1,11 @@
 import pytest
 
-from openpilot.selfdrive.modeld.camera_offset_helper import CameraOffsetHelper, should_persist_auto_offset
+from openpilot.common.params import Params
+from openpilot.selfdrive.modeld.camera_offset_helper import (
+  CameraOffsetHelper,
+  camera_offset_auto_enabled,
+  should_persist_auto_offset,
+)
 
 
 class TestCameraOffsetHelper:
@@ -51,3 +56,17 @@ def test_should_not_persist_subthreshold_delta():
 def test_should_wait_for_debounce_window_after_initial_save():
   assert not should_persist_auto_offset(0.010, 0.005, 4.9, 0.0)
   assert should_persist_auto_offset(0.010, 0.005, 5.0, 0.0)
+
+
+def test_camera_offset_auto_enabled_uses_param_default_when_unset():
+  params = Params()
+  params.remove("CameraOffsetAuto")
+
+  assert camera_offset_auto_enabled(params)
+
+
+def test_camera_offset_auto_enabled_allows_explicit_disable():
+  params = Params()
+  params.put_bool("CameraOffsetAuto", False)
+
+  assert not camera_offset_auto_enabled(params)
