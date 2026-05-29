@@ -80,6 +80,9 @@ LEAD_APPROACH_PREVIEW_ACQUIRE_GAP_CAP_FRACTION = 0.95
 LEAD_APPROACH_PREVIEW_ACQUIRE_GAIN = 1.45
 LEAD_APPROACH_PREVIEW_ACQUIRE_TIGHT_GAP_GAIN = 0.35
 LEAD_APPROACH_PREVIEW_ACQUIRE_TIGHT_GAP_MAX_FRACTION = 0.20
+LEAD_APPROACH_PREVIEW_ANTICIPATORY_CLOSING_MIN_MPS = 1.25
+LEAD_APPROACH_PREVIEW_ANTICIPATORY_TTC_BP = [6.0, 9.0, 12.0, 14.0]
+LEAD_APPROACH_PREVIEW_ANTICIPATORY_GAP_FRACTION_V = [0.55, 0.30, 0.10, 0.0]
 LEAD_APPROACH_PREVIEW_DECEL_BP = [0.0, 0.5, 1.5, 3.0]
 LEAD_APPROACH_PREVIEW_DECEL_V = [1.0, 1.05, 1.20, 1.35]
 LEAD_HANDOFF_DANGER_MIN_SPEED = 12.0
@@ -150,6 +153,9 @@ LEAD_SLOWDOWN_GAP_GATE_BP = [-2.0, 0.0, 3.0, 8.0]
 LEAD_SLOWDOWN_GAP_GATE_V = [1.0, 1.0, 0.50, 0.0]
 LEAD_SLOWDOWN_CLOSING_MATCH_BP = [0.0, 0.5, 1.5]
 LEAD_SLOWDOWN_CLOSING_MATCH_V = [0.0, 0.35, 1.0]
+LEAD_SLOWDOWN_ANTICIPATORY_CLOSING_MIN_MPS = 1.25
+LEAD_SLOWDOWN_ANTICIPATORY_LEAD_DECEL_GAIN = 1.0
+LEAD_SLOWDOWN_ANTICIPATORY_STRENGTH_FLOOR = 1.0
 LEAD_SLOWDOWN_DANGER_MOTION_CLOSING_BP = [0.30, 1.0, 3.0]
 LEAD_SLOWDOWN_DANGER_MOTION_CLOSING_V = [0.0, 0.35, 1.0]
 LEAD_SLOWDOWN_DANGER_MOTION_DECEL_BP = [0.50, 1.5, 4.0]
@@ -212,6 +218,11 @@ HYUNDAI_VIRTUAL_LEAD_RELEASE_IMMEDIATE_RAW_GAP_SURPLUS_M = 4.5
 HYUNDAI_VIRTUAL_LEAD_RELEASE_IMMEDIATE_RAW_PULLAWAY_MPS = 0.45
 HYUNDAI_VIRTUAL_LEAD_RELEASE_AGREEMENT_MAX_DREL_ERR_M = 3.0
 HYUNDAI_VIRTUAL_LEAD_RAW_OBSTACLE_MARGIN_M = 1.00
+HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_MIN_SPEED = 8.0
+HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_CLOSING_MPS = 1.5
+HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_CLOSING_MAX_MPS = 4.0
+HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_GAP_SURPLUS_M = 20.0
+HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_OBSTACLE_MARGIN_M = 12.0
 HYUNDAI_VIRTUAL_LEAD_DROPOUT_STABLE_MIN_S = 3.0
 HYUNDAI_VIRTUAL_LEAD_DROPOUT_HOLD_S = 0.75
 HYUNDAI_VIRTUAL_LEAD_DROPOUT_MAX_ABS_VREL_MPS = 0.35
@@ -518,6 +529,8 @@ def compute_lead_approach_preview(v_ego, lead, t_follow,
     "ttc_to_headway_s": None,
     "projected_deficit_m": 0.0,
     "preview_time_s": 0.0,
+    "anticipatory_ttc_blend": 0.0,
+    "anticipatory_buffer_m": 0.0,
     "preview_buffer_m": 0.0,
   }
   if lead is None or not getattr(lead, 'status', False):
@@ -566,7 +579,18 @@ def compute_lead_approach_preview(v_ego, lead, t_follow,
 
   base_preview = closing_speed * preview_time
   projected_preview = projected_deficit * LEAD_APPROACH_PREVIEW_PROJECTED_DEFICIT_GAIN
-  preview_buffer = max(base_preview, projected_preview)
+  anticipatory_ttc_blend = 0.0
+  anticipatory_buffer = 0.0
+  if (ttc_to_headway is not None and
+      closing_speed >= LEAD_APPROACH_PREVIEW_ANTICIPATORY_CLOSING_MIN_MPS and
+      gap_surplus > gap_min_m):
+    anticipatory_ttc_blend = float(np.interp(
+      float(ttc_to_headway),
+      LEAD_APPROACH_PREVIEW_ANTICIPATORY_TTC_BP,
+      LEAD_APPROACH_PREVIEW_ANTICIPATORY_GAP_FRACTION_V,
+    ))
+    anticipatory_buffer = max(0.0, gap_surplus) * max(0.0, anticipatory_ttc_blend)
+  preview_buffer = max(base_preview, projected_preview, anticipatory_buffer)
   lead_decel_scale = float(np.interp(lead_decel, LEAD_APPROACH_PREVIEW_DECEL_BP, LEAD_APPROACH_PREVIEW_DECEL_V))
   if acquire_window_active:
     preview_buffer *= LEAD_APPROACH_PREVIEW_ACQUIRE_GAIN
@@ -582,6 +606,8 @@ def compute_lead_approach_preview(v_ego, lead, t_follow,
     "ttc_to_headway_s": None if ttc_to_headway is None else float(ttc_to_headway),
     "projected_deficit_m": float(projected_deficit),
     "preview_time_s": float(preview_time),
+    "anticipatory_ttc_blend": float(anticipatory_ttc_blend),
+    "anticipatory_buffer_m": float(anticipatory_buffer),
     "preview_buffer_m": float(preview_buffer),
   }
   return preview_buffer, debug
@@ -862,7 +888,8 @@ def get_lead_keepup_accel_floor(v_ego, lead, t_follow,
 def get_lead_slowdown_accel_ceiling(v_ego, lead, t_follow,
                                     tuning: LeadResponseTuningConfig | None = None,
                                     min_accel: float = ACCEL_MIN,
-                                    max_accel: float = ACCEL_MAX) -> float | None:
+                                    max_accel: float = ACCEL_MAX,
+                                    anticipatory_enabled: bool = True) -> float | None:
   tuning = LeadResponseTuningConfig.defaults() if tuning is None else tuning
   v_ego = float(v_ego)
   if lead is None or not getattr(lead, 'status', False) or v_ego < LEAD_SLOWDOWN_MIN_SPEED:
@@ -926,6 +953,18 @@ def get_lead_slowdown_accel_ceiling(v_ego, lead, t_follow,
     headway_required_decel = 0.0
   ttc_headway_gate = float(np.interp(ttc_headway, LEAD_SLOWDOWN_TTC_HEADWAY_BP, LEAD_SLOWDOWN_TTC_HEADWAY_V))
   closing_decel = headway_required_decel * max(headway_deficit_gate, ttc_headway_gate)
+  anticipatory_headway_gate = 0.0
+  if (anticipatory_enabled and
+      closing_speed >= LEAD_SLOWDOWN_ANTICIPATORY_CLOSING_MIN_MPS and
+      gap_surplus > 0.0):
+    anticipatory_headway_gate = float(np.interp(
+      ttc_headway,
+      LEAD_APPROACH_PREVIEW_ANTICIPATORY_TTC_BP,
+      LEAD_APPROACH_PREVIEW_ANTICIPATORY_GAP_FRACTION_V,
+    ))
+  anticipatory_decel = (
+    headway_required_decel + lead_decel * LEAD_SLOWDOWN_ANTICIPATORY_LEAD_DECEL_GAIN
+  ) * max(0.0, anticipatory_headway_gate)
 
   danger_required_decel = 0.0
   if closing_speed > 0.0 or lead_decel > 0.0:
@@ -958,7 +997,11 @@ def get_lead_slowdown_accel_ceiling(v_ego, lead, t_follow,
   ))
 
   strength = max(0.0, float(tuning.lead_slowdown_strength))
-  comfort_decel = min(LEAD_SLOWDOWN_COMFORT_DECEL_CAP, max(lead_match_decel, closing_decel) * strength)
+  anticipatory_strength = 0.0 if strength <= 0.0 else max(strength, LEAD_SLOWDOWN_ANTICIPATORY_STRENGTH_FLOOR)
+  comfort_decel = min(
+    LEAD_SLOWDOWN_COMFORT_DECEL_CAP,
+    max(max(lead_match_decel, closing_decel) * strength, anticipatory_decel * anticipatory_strength),
+  )
   decel_mag = min(max_decel, max(comfort_decel, danger_decel))
   if decel_mag < LEAD_SLOWDOWN_MIN_DECEL_OUTPUT:
     if positive_accel_ceiling >= float(max_accel) - 1e-3:
@@ -1949,7 +1992,8 @@ class LongitudinalMpc:
 
   def _apply_hyundai_gap_reclaim(self, raw_lead_obstacle: np.ndarray, filtered_lead_obstacle: np.ndarray,
                                  raw_lead, filtered_lead, raw_metrics: dict[str, float],
-                                 settled_follow: bool, now: float) -> tuple[np.ndarray, bool]:
+                                 settled_follow: bool, now: float,
+                                 anticipatory_slowdown_enabled: bool = False) -> tuple[np.ndarray, bool]:
     self.gap_reclaim_accel_floor = 0.0
     self.lead_keepup_accel_floor = 0.0
     self.gap_reclaim_obstacle_push = 0.0
@@ -2025,6 +2069,7 @@ class LongitudinalMpc:
         self._live_tune_cfg,
         min_accel=ACCEL_MIN,
         max_accel=ACCEL_MAX,
+        anticipatory_enabled=anticipatory_slowdown_enabled,
       )
       for lead in (raw_lead, filtered_lead)
     ]
@@ -2662,8 +2707,17 @@ class LongitudinalMpc:
       float(getattr(best_lead, 'vLead', self.x0[1]) or self.x0[1]) <= queue_vlead_cap and
       raw_metrics["pullaway_speed"] <= queue_pullaway_cap
     )
+    approach_obstacle_delta_m = raw_metrics["obstacle_0"] - float(cruise_obstacle[0])
+    approach_reacquire = (
+      float(self.x0[1]) >= HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_MIN_SPEED and
+      raw_metrics["closing_speed"] >= HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_CLOSING_MPS and
+      raw_metrics["closing_speed"] <= HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_CLOSING_MAX_MPS and
+      raw_gap_surplus_for_release <= HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_GAP_SURPLUS_M and
+      approach_obstacle_delta_m <= HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_OBSTACLE_MARGIN_M
+    )
     raw_requires_owner = (
       low_speed_queue_hold or
+      approach_reacquire or
       raw_gap_surplus_for_release <= HYUNDAI_VIRTUAL_LEAD_RETAIN_GAP_SURPLUS_M or
       raw_metrics["obstacle_0"] <= (float(cruise_obstacle[0]) - HYUNDAI_VIRTUAL_LEAD_RAW_OBSTACLE_MARGIN_M)
     )
@@ -2702,6 +2756,8 @@ class LongitudinalMpc:
         reason = "low_speed_queue_hold"
       elif raw_metrics["gap_surplus"] <= HYUNDAI_VIRTUAL_LEAD_RETAIN_GAP_SURPLUS_M:
         reason = "raw_gap_hold"
+      elif approach_reacquire:
+        reason = "approach_reacquire"
       else:
         reason = "raw_obstacle_hold"
     elif active_mode == 'lead':
@@ -2745,6 +2801,7 @@ class LongitudinalMpc:
         raw_metrics,
         steady_follow,
         now,
+        anticipatory_slowdown_enabled=approach_reacquire,
       )
     else:
       self._acc_obstacle_mode = 'cruise'
@@ -2772,6 +2829,10 @@ class LongitudinalMpc:
       "filtered_gap_surplus_for_release_m": float(filtered_gap_surplus_for_release),
       "raw_pullaway_mps": float(raw_metrics["pullaway_speed"]),
       "filtered_pullaway_mps": float(filtered_metrics["pullaway_speed"]),
+      "raw_closing_mps": float(raw_metrics["closing_speed"]),
+      "filtered_closing_mps": float(filtered_metrics["closing_speed"]),
+      "approach_obstacle_delta_m": float(approach_obstacle_delta_m),
+      "approach_reacquire": bool(approach_reacquire),
       "low_speed_launch_factor": float(low_speed_launch_factor),
       "low_speed_queue_speed_cap_mps": float(queue_speed_cap),
       "low_speed_queue_vlead_cap_mps": float(queue_vlead_cap),

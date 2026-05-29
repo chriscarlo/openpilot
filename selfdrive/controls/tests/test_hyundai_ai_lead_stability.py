@@ -73,6 +73,11 @@ def _run_update(mpc: LongitudinalMpc, lead0, lead1, *, v_cruise=40.0):
   mpc.update(radarstate, v_cruise, x, v, a, j, personality=log.LongitudinalPersonality.standard)
 
 
+def _run_update_with_state(mpc: LongitudinalMpc, lead0, lead1, *, v_ego, a_ego=0.0, v_cruise=40.0):
+  mpc.set_cur_state(v_ego, a_ego)
+  _run_update(mpc, lead0, lead1, v_cruise=v_cruise)
+
+
 class _MonotonicStub:
   def __init__(self, start=100.0, step=0.2):
     self.value = start
@@ -93,6 +98,46 @@ def _planner_test_setup():
 
 
 class TestHyundaiAiLeadStability:
+  def test_steady_model_lead_reacquires_when_stop_sign_closing_before_gap_collapses(self):
+    v_cruise_30mph = 48.0 / 3.6
+    mpc = _make_hyundai_mpc(v_ego=13.0, a_ego=0.0, time_fn=_MonotonicStub(step=0.2))
+
+    for _ in range(20):
+      _run_update_with_state(
+        mpc,
+        _make_lead(d_rel=49.0, y_rel=0.04, d_path=0.04, v_rel=0.0, v_lead=13.0, a_lead=0.0,
+                   model_prob=0.99, radar=False, radar_track_id=-1006),
+        _make_lead(status=False),
+        v_ego=13.0,
+        v_cruise=v_cruise_30mph,
+      )
+    assert mpc.source == "cruise"
+
+    loglike_samples = (
+      (13.02, 47.19, -0.10, 12.92, -0.02),
+      (13.08, 46.56, -1.41, 11.62, -0.09),
+      (13.15, 44.64, -1.06, 12.12, -0.27),
+      (13.25, 40.63, -1.21, 12.02, -0.21),
+      (13.23, 39.62, -1.33, 11.93, -0.36),
+      (13.20, 36.48, -1.62, 11.62, -0.38),
+      (13.24, 33.92, -1.93, 11.31, -0.38),
+    )
+    for v_ego, d_rel, v_rel, v_lead, a_lead in loglike_samples:
+      _run_update_with_state(
+        mpc,
+        _make_lead(d_rel=d_rel, y_rel=0.04, d_path=0.04, v_rel=v_rel, v_lead=v_lead,
+                   a_lead=a_lead, model_prob=0.99, radar=False, radar_track_id=-1006),
+        _make_lead(status=False),
+        v_ego=v_ego,
+        v_cruise=v_cruise_30mph,
+      )
+
+    assert mpc.source == "lead0"
+    assert mpc.acc_source_debug["reason"] == "approach_reacquire"
+    assert mpc.acc_source_debug["approach_reacquire"] is True
+    assert mpc.acc_source_debug["raw_closing_mps"] >= 1.9
+    assert mpc.lead_slowdown_accel_ceiling < -0.15
+
   def test_same_synthetic_model_track_can_switch_slots_without_source_reset(self, monkeypatch):
     monkeypatch.setattr(
       "openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc.time.monotonic",
