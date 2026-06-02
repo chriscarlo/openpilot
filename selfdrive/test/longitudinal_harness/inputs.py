@@ -101,6 +101,7 @@ BASE_SCENARIO_NAMES = (
   "duplicate_pair",
   "dropout",
   "cruise_lead_handoff",
+  "far_cruise_slow_lead",
   "oscillating",
   "random_speed_wander",
   "goldilocks_speed_wander",
@@ -211,6 +212,8 @@ def build_synthetic_scenario(name: str, *, duration_s: float, dt_s: float) -> tu
     return _build_dropout(duration_s, dt_s)
   if name == "cruise_lead_handoff":
     return _build_cruise_lead_handoff(duration_s, dt_s)
+  if name == "far_cruise_slow_lead":
+    return _build_far_cruise_slow_lead(duration_s, dt_s)
   if name == "oscillating":
     return _build_oscillating(duration_s, dt_s)
   if name == "random_speed_wander":
@@ -813,6 +816,33 @@ def _build_cruise_lead_handoff(duration_s: float, dt_s: float) -> tuple[float, f
       event = "lead_reveal" if abs(t_s - reveal_t) < (dt_s * 0.5) else None
       note = "slower lead appears"
     timeline.append(StepInput(t_s=t_s, cruise_speed_mps=40.0, lead_one=lead_one, event=event, note=note))
+  return initial_speed, 0.0, timeline
+
+
+def _build_far_cruise_slow_lead(duration_s: float, dt_s: float) -> tuple[float, float, list[StepInput]]:
+  initial_speed = 27.5
+  reveal_t = 0.5
+  timeline = []
+  for idx in range(_scenario_step_count(duration_s, dt_s)):
+    t_s = idx * dt_s
+    if t_s < reveal_t:
+      lead_one = LeadDirective()
+      event = None
+      note = "cruise before model lead"
+    else:
+      is_reveal = abs(t_s - reveal_t) < (dt_s * 0.5)
+      lead_one = LeadDirective(
+        status=True,
+        v_lead_mps=26.3,
+        model_prob_target=0.94,
+        d_rel_override_m=86.0 if is_reveal else None,
+        acquisition_reset=is_reveal,
+        radar=False,
+        radar_track_id=-1006,
+      )
+      event = "lead_reveal" if is_reveal else None
+      note = "far stable slower model lead"
+    timeline.append(StepInput(t_s=t_s, cruise_speed_mps=32.0, lead_one=lead_one, event=event, note=note))
   return initial_speed, 0.0, timeline
 
 

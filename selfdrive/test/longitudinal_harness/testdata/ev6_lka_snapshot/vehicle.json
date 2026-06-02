@@ -1,5 +1,5 @@
 {
-  "controllerMode": "shaped",
+  "controllerMode": "passthrough",
   "initialAccelMps2": 0.0,
   "initialSpeedMps": 27.0,
   "name": "ev6_lka_snapshot_fixture",
@@ -7,10 +7,12 @@
     "aego_measure_delay_s": 0.1,
     "accel_rise_tau_s": 0.3,
     "brake_tau_s": 0.2,
-    "command_delay_s": 0.45,
+    "command_delay_s": 0.5,
     "regen_tau_s": 0.4,
     "regen_threshold_mps2": -1.0
   },
-  "radarUnavailable": false,
+  "radarUnavailable": true,
+  "spFlags": 4,
+  "spSafetyParam": 2,
   "topology": "lka"
 }

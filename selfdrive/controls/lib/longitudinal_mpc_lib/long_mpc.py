@@ -275,6 +275,8 @@ LEAD_PRESENT_CRUISE_MIN_SPEED = 4.0
 LEAD_PRESENT_CRUISE_CLOSING_TIGHTEN_BP = [0.0, 1.0, 3.0, 5.0]
 LEAD_PRESENT_CRUISE_CLOSING_TIGHTEN_V = [1.0, 0.65, 0.25, 0.10]
 LEAD_PRESENT_CRUISE_CLOSING_PROJECTION_S = 3.0
+LEAD_PRESENT_CRUISE_COAST_CLOSING_MPS = 1.0
+LEAD_PRESENT_CRUISE_COAST_ACCEL_CAP = 0.0
 
 # ---------------------------------------------------------------------------
 # Lead distance prediction-corrector filter
@@ -1068,7 +1070,10 @@ def get_lead_present_cruise_accel_cap(v_ego, lead, t_follow,
   pullaway_blend = float(np.interp(pullaway_speed, LEAD_PRESENT_CRUISE_PULLAWAY_BP, LEAD_PRESENT_CRUISE_PULLAWAY_V))
   closing_tighten = float(np.interp(closing_speed, LEAD_PRESENT_CRUISE_CLOSING_TIGHTEN_BP, LEAD_PRESENT_CRUISE_CLOSING_TIGHTEN_V))
   blend = max(gap_blend, pullaway_blend) * closing_tighten
-  return float(comfort_cap + (accel_cap - comfort_cap) * blend)
+  cap = float(comfort_cap + (accel_cap - comfort_cap) * blend)
+  if closing_speed >= LEAD_PRESENT_CRUISE_COAST_CLOSING_MPS and pullaway_speed <= 0.0:
+    cap = min(cap, LEAD_PRESENT_CRUISE_COAST_ACCEL_CAP)
+  return cap
 
 
 def should_start_cutin_settle_event(prev_role: str, prev_control_active: bool, current_role: str,
@@ -1335,6 +1340,7 @@ class LongitudinalMpc:
     self.gap_reclaim_personality_max_accel = 0.0
     self.gap_reclaim_effective_cap = 0.0
     self.lead_present_cruise_accel_cap = 0.0
+    self.cruise_owned_accel_cap = None
     self._gap_reclaim_blend = 0.0
     self._gap_reclaim_last_t = None
     self._raw_reclaim_safety_override_active = False
@@ -3212,6 +3218,8 @@ class LongitudinalMpc:
       )
       self.lead_present_cruise_accel_cap = float(lead_present_cruise_cap or 0.0)
       planner_accel_limits = None if lead_present_cruise_cap is None else (ACCEL_MIN, float(lead_present_cruise_cap))
+      cruise_owned_accel_cap = None
+      self.cruise_owned_accel_cap = None
       response_model = self.get_cruise_response_model(v_ego, planner_accel_limits=planner_accel_limits)
       self.last_cruise_response_model = response_model
 
@@ -3276,6 +3284,8 @@ class LongitudinalMpc:
         self._close_lead_last_seen_t is not None and
         (now - float(self._close_lead_last_seen_t)) < CLOSE_LEAD_MEMORY_HOLD_S
       )
+      if self.source == 'cruise' and lead_present_cruise_cap is not None:
+        cruise_owned_accel_cap = float(lead_present_cruise_cap)
 
       transition_accel_cap = self._get_lead_to_cruise_transition_accel_cap(now, float(v_ego), personality_max_accel)
       # Close-lead memory: if the normal transition cap expired but a lead was
@@ -3286,6 +3296,7 @@ class LongitudinalMpc:
         capped_max_accel = float(transition_accel_cap)
         if lead_present_cruise_cap is not None:
           capped_max_accel = min(capped_max_accel, float(lead_present_cruise_cap))
+        cruise_owned_accel_cap = float(capped_max_accel)
         response_model = self.get_cruise_response_model(v_ego, planner_accel_limits=(ACCEL_MIN, capped_max_accel))
         self.last_cruise_response_model = response_model
         v_lower, v_upper, v_cruise_clipped = clip_cruise_speed_profile(
@@ -3318,11 +3329,17 @@ class LongitudinalMpc:
         self.acc_source_debug["source_transition_from"] = None
         self.acc_source_debug["source_transition_elapsed_s"] = None
         self.acc_source_debug["source_transition_accel_cap"] = None
+      if self.source == 'cruise' and cruise_owned_accel_cap is not None:
+        self.cruise_owned_accel_cap = float(cruise_owned_accel_cap)
+        self.params[:,1] = np.minimum(self.params[:,1], float(cruise_owned_accel_cap))
+      else:
+        self.cruise_owned_accel_cap = None
 
       if self.acc_source_debug:
         self.acc_source_debug["adjacent_awareness_preview_active"] = bool(self.adjacent_awareness_preview_debug.get("active", False))
         self.acc_source_debug["adjacent_awareness_preview_applied"] = bool(self.adjacent_awareness_preview_debug.get("applied", False))
         self.acc_source_debug["adjacent_awareness_preview_slot"] = self.adjacent_awareness_preview_debug.get("slot")
+        self.acc_source_debug["cruise_owned_accel_cap"] = None if cruise_owned_accel_cap is None else float(cruise_owned_accel_cap)
 
       self.gap_reclaim_accel_floor = self.get_gap_reclaim_floor()
       self.lead_keepup_accel_floor = self.get_lead_keepup_floor()
@@ -3368,6 +3385,7 @@ class LongitudinalMpc:
       self.gap_reclaim_personality_max_accel = 0.0
       self.gap_reclaim_effective_cap = 0.0
       self.lead_present_cruise_accel_cap = 0.0
+      self.cruise_owned_accel_cap = None
       self._gap_reclaim_blend = 0.0
       self._gap_reclaim_last_t = now
       self.cutin_settle_active = False

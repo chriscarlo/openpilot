@@ -435,6 +435,10 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     if lead_brake_release_floor is not None and not self.output_should_stop:
       output_a_target = max(output_a_target, float(lead_brake_release_floor))
 
+    cruise_owned_accel_cap = getattr(self.mpc, "cruise_owned_accel_cap", None)
+    if lead_source == "cruise" and cruise_owned_accel_cap is not None:
+      output_a_target = min(output_a_target, float(cruise_owned_accel_cap))
+
     if lead_source in ("lead0", "lead1"):
       lead_idx = 0 if lead_source == "lead0" else 1
       if lead_idx < len(control_leads):

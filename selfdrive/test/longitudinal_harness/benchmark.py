@@ -98,7 +98,7 @@ def build_parser() -> argparse.ArgumentParser:
 
   run_manifest = subparsers.add_parser("run", help="Run a multi-bundle benchmark manifest")
   run_manifest.add_argument("--manifest", type=Path, required=True)
-  run_manifest.add_argument("--controller-mode", choices=("auto", "passthrough", "shaped"), default="auto")
+  run_manifest.add_argument("--controller-mode", choices=("auto", "passthrough", "shaped"), default="passthrough")
   run_manifest.add_argument("--hyundai-tuning-mode", choices=("off", "dynamic", "predictive"), default=None)
   run_manifest.add_argument("--noise", choices=("off", "realistic", "stress"), default="off")
   run_manifest.add_argument("--seed", type=int, default=42)
@@ -187,7 +187,7 @@ def run_manifest_benchmark(*,
       scenarios=[],
       mode="snapshot",
       snapshot=snapshot_path,
-      topology="lfa",
+      topology="lka",
       controller_mode=controller_mode,
       hyundai_tuning_mode=hyundai_tuning_mode,
       noise=noise,

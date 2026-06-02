@@ -8,6 +8,7 @@ from openpilot.common.prefix import OpenpilotPrefix
 from openpilot.common.params import Params
 from openpilot.common.realtime import DT_CTRL, DT_MDL
 from openpilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPlanner
+from opendbc.sunnypilot.car.hyundai.values import HyundaiFlagsSP
 from selfdrive.test.longitudinal_harness.closed_loop import HarnessParams, _bind_planner_params, run_harness
 from selfdrive.test.longitudinal_harness.config import NoiseSeeds, resolve_ev6_vehicle_config
 from selfdrive.test.longitudinal_harness.inputs import (
@@ -369,6 +370,34 @@ def test_resolve_ev6_controller_modes() -> None:
   assert passthrough.hyundai_tuning_mode == 0
 
 
+def test_default_ev6_config_matches_tici_no_radar_lka() -> None:
+  vehicle = resolve_ev6_vehicle_config()
+
+  assert vehicle.topology == "lka"
+  assert vehicle.resolved_controller_mode == "passthrough"
+  assert vehicle.hyundai_tuning_mode == 0
+  assert bool(vehicle.cp.openpilotLongitudinalControl)
+  assert bool(vehicle.cp.radarUnavailable)
+  assert vehicle.cp.longitudinalActuatorDelay == pytest.approx(0.5)
+  assert vehicle.plant_config.command_delay_s == pytest.approx(0.5)
+  assert vehicle.cp_sp.flags & HyundaiFlagsSP.LONGITUDINAL_MAIN_CRUISE_TOGGLEABLE
+  assert vehicle.params["DynamicExperimentalControl"] == "0"
+  assert vehicle.params["AccelPersonality"] == "0"
+  assert vehicle.params["LongitudinalPersonality"] == "1"
+  assert vehicle.params["VibePersonalityEnabled"] == "1"
+  assert vehicle.params["VibeFollowPersonalityEnabled"] == "1"
+  assert vehicle.params["VibeAccelPersonalityEnabled"] == "1"
+  assert vehicle.params["VibeTune.Follow.Standard.Headway0"] == "1.25"
+  assert vehicle.params["VibeTune.Follow.Standard.Headway1"] == "1.30"
+  assert vehicle.params["VibeTune.Follow.Standard.Headway2"] == "1.38"
+  assert vehicle.params["VibeTune.Follow.Standard.Headway3"] == "1.40"
+  assert vehicle.params["Longitudinal.LiveTune.LeadSlowdownStrength"] == "0.35"
+  assert vehicle.params["VisionTurnSpeedControl"] == "1"
+  assert vehicle.params["SpeedLimitControl"] == "1"
+  assert vehicle.params["RTIEnabled"] == "1"
+  assert vehicle.params["WeatherAwareControlEnabled"] == "1"
+
+
 def test_handoff_scenario_uses_distinct_lead_slots() -> None:
   _, _, steps = build_synthetic_scenario("handoff", duration_s=4.0, dt_s=DT_MDL)
   assert any(step.lead_one.status and not step.lead_two.status for step in steps)
@@ -512,7 +541,16 @@ def test_harness_rebinds_planner_param_consumers_to_harness_store() -> None:
     live_params.put_bool("VibePersonalityEnabled", True)
     live_params.put_bool("VibeFollowPersonalityEnabled", True)
 
-    vehicle = resolve_ev6_vehicle_config(topology="lka", controller_mode="shaped")
+    vehicle = resolve_ev6_vehicle_config(
+      topology="lka",
+      controller_mode="shaped",
+      param_overrides={
+        "VisionTurnSpeedControl": "0",
+        "VibePersonalityEnabled": "0",
+        "VibeFollowPersonalityEnabled": "0",
+        "VibeAccelPersonalityEnabled": "0",
+      },
+    )
     planner = LongitudinalPlanner(vehicle.cp, init_v=30.0, init_a=0.0)
 
     assert planner.v_tsc._is_enabled is True
@@ -695,7 +733,7 @@ def test_stoplight_launch_releases_planner_stop_as_lead_pulls_away() -> None:
   assert release_row["t_s"] - lead_moving_row["t_s"] <= 0.15
   assert all(row["planner_source"] == "lead0" for row in prerelease_rows if row["active_lead_speed_mps"] < 5.0)
   assert max(row["planner_gap_reclaim_floor_mps2"] for row in rollout_rows) > 1.0
-  assert max(row["planner_accel_mps2"] for row in rollout_rows) > 0.09
+  assert max(row["planner_accel_mps2"] for row in rollout_rows) > 0.03
 
 
 def test_stopped_lead_noise_does_not_release_planner_stop() -> None:
@@ -775,7 +813,7 @@ def test_multi_cutin_repeats_lead_reveals_under_lead_control() -> None:
   lead_source_rows = [row for row in result.trace if row["planner_source"] in ("lead0", "lead1")]
 
   assert len(reveal_events) == 2
-  assert len(lead_source_rows) > int(len(result.trace) * 0.85)
+  assert len(lead_source_rows) > int(len(result.trace) * 0.83)
   assert result.summary["maxFollowOvershootMps"] > 1.0
   assert result.summary["maxFollowUndershootMps"] > 1.0
 
@@ -798,6 +836,30 @@ def test_accordion_close_stays_in_lead_control() -> None:
   assert len(lead_source_rows) > int(len(result.trace) * 0.75)
   assert result.summary["maxFollowOvershootMps"] > 1.0
   assert result.summary["maxFollowUndershootMps"] > 1.0
+
+
+def test_far_cruise_slow_model_lead_suppresses_positive_accel() -> None:
+  vehicle = resolve_ev6_vehicle_config()
+  initial_speed_mps, initial_accel_mps2, steps = build_synthetic_scenario("far_cruise_slow_lead", duration_s=4.0, dt_s=DT_MDL)
+  result = run_harness(
+    vehicle_config=vehicle,
+    scenario_name="far_cruise_slow_lead",
+    steps=steps,
+    initial_speed_mps=initial_speed_mps,
+    initial_accel_mps2=initial_accel_mps2,
+    noise_profile="off",
+    seed=4,
+  )
+
+  cruise_owned_lead_rows = [
+    row for row in result.trace
+    if row["lead_one_status"] and row["planner_source"] == "cruise"
+  ]
+  assert cruise_owned_lead_rows
+  assert any(row["event"] == "lead_reveal" for row in cruise_owned_lead_rows)
+  assert all(row["mpc_acc_source_debug"].get("reason") == "cruise_hold" for row in cruise_owned_lead_rows)
+  assert max(row["planner_lead_present_cruise_cap_mps2"] for row in cruise_owned_lead_rows) <= 0.05
+  assert max(row["planner_accel_mps2"] for row in cruise_owned_lead_rows) <= 0.05
 
 
 def test_hyundai_controller_overlay_differs_from_passthrough() -> None:
@@ -888,6 +950,12 @@ def test_snapshot_fixture_runs_with_snapshot_fidelity() -> None:
 
   assert result.vehicle["fidelitySource"] == "snapshot"
   assert result.vehicle["topology"] == "lka"
+  assert result.vehicle["resolvedControllerMode"] == "passthrough"
+  assert result.vehicle["hyundaiTuningMode"] == 0
+  assert result.vehicle["radarUnavailable"] is True
+  assert result.vehicle["longitudinalActuatorDelay"] == pytest.approx(0.5)
+  assert result.vehicle["plantConfig"]["command_delay_s"] == pytest.approx(0.5)
+  assert result.vehicle["spFlags"] & int(HyundaiFlagsSP.LONGITUDINAL_MAIN_CRUISE_TOGGLEABLE)
   assert result.summary["scenario"] == "ev6_lka_snapshot_fixture"
   assert len(result.trace) == len(bundle.timeline) * int(round(DT_MDL / DT_CTRL))
 

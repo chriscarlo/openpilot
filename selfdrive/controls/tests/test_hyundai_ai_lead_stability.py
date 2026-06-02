@@ -736,6 +736,7 @@ class TestHyundaiAiLeadStability:
     assert 0.55 < mpc.lead_present_cruise_accel_cap < 1.20
     assert mpc.last_cruise_response_model is not None
     assert mpc.last_cruise_response_model.max_accel_mps2 == pytest.approx(mpc.lead_present_cruise_accel_cap)
+    assert mpc.params[0, 1] == pytest.approx(mpc.lead_present_cruise_accel_cap)
 
   def test_near_gap_follow_keeps_full_accel_limit(self, monkeypatch):
     monkeypatch.setattr(

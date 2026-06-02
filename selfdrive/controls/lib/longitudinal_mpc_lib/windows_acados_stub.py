@@ -53,8 +53,8 @@ class AcadosOcpSolverCython:
       dt = max(1e-3, float(self.t_idxs[i + 1] - self.t_idxs[i]))
       x_i, v_i, a_i = [float(v) for v in self.x[i]]
       p = self.params[i]
-      a_min = float(p[0]) if p[0] else -3.5
-      a_max = float(p[1]) if p[1] else 2.0
+      a_min = float(p[0]) if np.isfinite(p[0]) else -3.5
+      a_max = float(p[1]) if np.isfinite(p[1]) else 2.0
       obstacle = float(p[2]) if p[2] else 1e9
       t_follow = max(0.5, float(p[4]) if p[4] else 1.45)
       danger_factor = max(0.0, float(p[5]) if p[5] else 0.75)

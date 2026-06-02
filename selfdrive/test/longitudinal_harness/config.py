@@ -9,7 +9,7 @@ from opendbc.car.hyundai.interface import CarInterface
 from opendbc.car.hyundai.radar_interface import RADAR_START_ADDR
 from opendbc.car.hyundai.values import CAR, HyundaiFlags
 from opendbc.sunnypilot.car.hyundai.longitudinal.helpers import LongitudinalTuningType
-from opendbc.sunnypilot.car.hyundai.values import HyundaiFlagsSP
+from opendbc.sunnypilot.car.hyundai.values import HyundaiFlagsSP, HyundaiSafetyFlagsSP
 
 FRIENDLY_PARAM_NAMES = {
   "obstacle_cost": "Longitudinal.LiveTune.ObstacleCost",
@@ -59,6 +59,11 @@ FRIENDLY_PARAM_NAMES = {
   "kalman_drel_r": "Longitudinal.LiveTune.KalmanDRelR",
   "kalman_drel_gain_max": "Longitudinal.LiveTune.KalmanDRelGainMax",
   "kalman_drel_deadband_m": "Longitudinal.LiveTune.KalmanDRelDeadbandM",
+  "accel_personality": "AccelPersonality",
+  "longitudinal_personality": "LongitudinalPersonality",
+  "vibe_enabled": "VibePersonalityEnabled",
+  "vibe_follow_enabled": "VibeFollowPersonalityEnabled",
+  "vibe_accel_enabled": "VibeAccelPersonalityEnabled",
   "hyundai_tuning_mode": "HyundaiLongitudinalTuning",
   "long_tuning_custom_toggle": "LongTuningCustomToggle",
   "long_tuning_accel_min": "LongTuningAccelMin",
@@ -72,6 +77,9 @@ FRIENDLY_PARAM_NAMES = {
 
 DEFAULT_PARAM_VALUES = {
   "DynamicExperimentalControl": "0",
+  "ExperimentalMode": "0",
+  "AccelPersonality": "0",
+  "LongitudinalPersonality": "1",
   "Longitudinal.LiveTune.ObstacleCost": "2.0",
   "Longitudinal.LiveTune.AccelChangeCost": "400.0",
   "Longitudinal.LiveTune.AccelCost": "1.0",
@@ -85,7 +93,7 @@ DEFAULT_PARAM_VALUES = {
   "Longitudinal.LiveTune.LeadKeepUpStrength": "1.15",
   "Longitudinal.LiveTune.LeadKeepUpGapMinM": "0.10",
   "Longitudinal.LiveTune.LeadKeepUpMaxAccel": "0.095",
-  "Longitudinal.LiveTune.LeadSlowdownStrength": "0.25",
+  "Longitudinal.LiveTune.LeadSlowdownStrength": "0.35",
   "Longitudinal.LiveTune.LeadSlowdownMaxDecel": "4.0",
   "Longitudinal.LiveTune.LeadBrakeReleaseMinSpeedMps": "5.0",
   "Longitudinal.LiveTune.LeadBrakeReleaseBrakeDeficitMarginM": "1.5",
@@ -139,13 +147,64 @@ DEFAULT_PARAM_VALUES = {
   "LongTuningMinUpperJerk": "0.5",
   "LongTuningMinLowerJerk": "0.5",
   "LongTuningJerkLimits": "4.0",
-  "VibePersonalityEnabled": "0",
-  "VibeFollowPersonalityEnabled": "0",
-  "VibeAccelPersonalityEnabled": "0",
-  "VisionTurnSpeedControl": "0",
-  "SpeedLimitControl": "0",
-  "RTIEnabled": "0",
-  "WeatherAwareControlEnabled": "0",
+  "VibePersonalityEnabled": "1",
+  "VibeFollowPersonalityEnabled": "1",
+  "VibeAccelPersonalityEnabled": "1",
+  "VibeTune.Follow.Relaxed.Headway0": "1.25",
+  "VibeTune.Follow.Relaxed.Headway1": "1.60",
+  "VibeTune.Follow.Relaxed.Headway2": "1.85",
+  "VibeTune.Follow.Relaxed.Headway3": "2.20",
+  "VibeTune.Follow.Standard.Headway0": "1.25",
+  "VibeTune.Follow.Standard.Headway1": "1.30",
+  "VibeTune.Follow.Standard.Headway2": "1.38",
+  "VibeTune.Follow.Standard.Headway3": "1.40",
+  "VibeTune.Follow.Aggressive.Headway0": "1.19",
+  "VibeTune.Follow.Aggressive.Headway1": "1.19",
+  "VibeTune.Follow.Aggressive.Headway2": "1.29",
+  "VibeTune.Follow.Aggressive.Headway3": "1.29",
+  "VibeTune.Brake.Relaxed.Decel0": "-0.50",
+  "VibeTune.Brake.Relaxed.Decel1": "-0.80",
+  "VibeTune.Brake.Relaxed.Decel2": "-1.20",
+  "VibeTune.Brake.Relaxed.Decel3": "-1.20",
+  "VibeTune.Brake.Standard.Decel0": "-1.05",
+  "VibeTune.Brake.Standard.Decel1": "-1.15",
+  "VibeTune.Brake.Standard.Decel2": "-1.30",
+  "VibeTune.Brake.Standard.Decel3": "-1.30",
+  "VibeTune.Brake.Aggressive.Decel0": "-1.10",
+  "VibeTune.Brake.Aggressive.Decel1": "-1.25",
+  "VibeTune.Brake.Aggressive.Decel2": "-1.40",
+  "VibeTune.Brake.Aggressive.Decel3": "-1.40",
+  "VibeTune.Accel.Eco.Max0": "1.10",
+  "VibeTune.Accel.Eco.Max1": "1.00",
+  "VibeTune.Accel.Eco.Max2": "0.85",
+  "VibeTune.Accel.Eco.Max3": "0.76",
+  "VibeTune.Accel.Eco.Max4": "0.58",
+  "VibeTune.Accel.Eco.Max5": "0.46",
+  "VibeTune.Accel.Eco.Max6": "0.365",
+  "VibeTune.Accel.Eco.Max7": "0.317",
+  "VibeTune.Accel.Eco.Max8": "0.089",
+  "VibeTune.Accel.Normal.Max0": "2.00",
+  "VibeTune.Accel.Normal.Max1": "2.00",
+  "VibeTune.Accel.Normal.Max2": "1.42",
+  "VibeTune.Accel.Normal.Max3": "1.10",
+  "VibeTune.Accel.Normal.Max4": "0.65",
+  "VibeTune.Accel.Normal.Max5": "0.56",
+  "VibeTune.Accel.Normal.Max6": "0.43",
+  "VibeTune.Accel.Normal.Max7": "0.36",
+  "VibeTune.Accel.Normal.Max8": "0.12",
+  "VibeTune.Accel.Sport.Max0": "4.00",
+  "VibeTune.Accel.Sport.Max1": "4.00",
+  "VibeTune.Accel.Sport.Max2": "3.80",
+  "VibeTune.Accel.Sport.Max3": "3.50",
+  "VibeTune.Accel.Sport.Max4": "2.00",
+  "VibeTune.Accel.Sport.Max5": "1.75",
+  "VibeTune.Accel.Sport.Max6": "1.325",
+  "VibeTune.Accel.Sport.Max7": "1.15",
+  "VibeTune.Accel.Sport.Max8": "0.50",
+  "VisionTurnSpeedControl": "1",
+  "SpeedLimitControl": "1",
+  "RTIEnabled": "1",
+  "WeatherAwareControlEnabled": "1",
 }
 
 
@@ -247,6 +306,9 @@ class ResolvedVehicleConfig:
       "openpilotLongitudinalControl": bool(self.cp.openpilotLongitudinalControl),
       "pcmCruise": bool(self.cp.pcmCruise),
       "radarUnavailable": bool(self.cp.radarUnavailable),
+      "cpFlags": int(self.cp.flags),
+      "spFlags": int(self.cp_sp.flags),
+      "spSafetyParam": int(self.cp_sp.safetyParam),
       "longitudinalActuatorDelay": float(self.cp.longitudinalActuatorDelay),
       "vEgoStopping": float(self.cp.vEgoStopping),
       "startingState": bool(self.cp.startingState),
@@ -305,8 +367,8 @@ def _apply_hyundai_tuning(CP: structs.CarParams, CP_SP: structs.CarParamsSP, par
 
 
 def resolve_ev6_vehicle_config(*,
-                               topology: str = "lfa",
-                               controller_mode: str = "auto",
+                               topology: str = "lka",
+                               controller_mode: str = "passthrough",
                                tune_source: str = "defaults",
                                param_overrides: dict[str, Any] | None = None,
                                hyundai_tuning_mode: int | None = None,
@@ -331,6 +393,13 @@ def resolve_ev6_vehicle_config(*,
   CP_SP = CarInterface.get_params_sp(CP, CAR.KIA_EV6, fingerprint, car_fw, True, False)
   CP.openpilotLongitudinalControl = True
   CP.pcmCruise = False
+  CP_SP.flags |= HyundaiFlagsSP.LONGITUDINAL_MAIN_CRUISE_TOGGLEABLE.value
+  CP_SP.safetyParam |= HyundaiSafetyFlagsSP.LONG_MAIN_CRUISE_TOGGLEABLE
+
+  if snapshot_vehicle and "spFlags" in snapshot_vehicle:
+    CP_SP.flags = int(snapshot_vehicle["spFlags"])
+  if snapshot_vehicle and "spSafetyParam" in snapshot_vehicle:
+    CP_SP.safetyParam = int(snapshot_vehicle["spSafetyParam"])
 
   if controller_mode == "shaped" and int(params.get("HyundaiLongitudinalTuning", "0")) == LongitudinalTuningType.OFF:
     params["HyundaiLongitudinalTuning"] = str(LongitudinalTuningType.DYNAMIC)
