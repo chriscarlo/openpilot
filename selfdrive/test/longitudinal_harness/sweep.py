@@ -46,7 +46,8 @@ def build_parser() -> argparse.ArgumentParser:
                       help="run the fixed EV6 lead-profile matrix used for longitudinal tune comparisons")
   parser.add_argument("--snapshot", type=Path, default=None, help="Snapshot bundle directory for --mode snapshot")
   parser.add_argument("--topology", choices=("lka", "lfa"), default="lka")
-  parser.add_argument("--controller-mode", choices=("auto", "passthrough", "shaped"), default="passthrough")
+  parser.add_argument("--controller-mode", choices=("auto", "device", "passthrough", "shaped"), default="device")
+  parser.add_argument("--perception-filter", choices=("auto", "direct", "radard"), default="auto")
   parser.add_argument("--hyundai-tuning-mode", choices=("off", "dynamic", "predictive"), default=None)
   parser.add_argument("--noise", choices=tuple(NOISE_PROFILES.keys()), default="realistic")
   parser.add_argument("--duration", type=float, default=12.0)
@@ -83,6 +84,7 @@ def main(argv: list[str] | None = None) -> int:
     snapshot=args.snapshot,
     topology=args.topology,
     controller_mode=args.controller_mode,
+    perception_filter=args.perception_filter,
     hyundai_tuning_mode=hyundai_tuning_mode,
     noise=args.noise,
     duration_s=args.duration,
@@ -134,6 +136,7 @@ def run_sweep(*,
               snapshot: Path | None,
               topology: str,
               controller_mode: str,
+              perception_filter: str = "auto",
               hyundai_tuning_mode: int | None,
               noise: str,
               duration_s: float,
@@ -198,6 +201,7 @@ def run_sweep(*,
         noise_profile=noise,
         seed=scenario_seeds[scenario_name],
         noise_seeds=scenario_noise_seeds[scenario_name],
+        perception_filter=perception_filter,
       )
       vehicle_description = result.vehicle
       scenario_summaries[scenario_name] = result.summary

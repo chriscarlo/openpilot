@@ -9,8 +9,21 @@ from openpilot.common.params import Params
 from openpilot.common.realtime import DT_CTRL, DT_MDL
 from openpilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPlanner
 from opendbc.sunnypilot.car.hyundai.values import HyundaiFlagsSP
-from selfdrive.test.longitudinal_harness.closed_loop import HarnessParams, _bind_planner_params, run_harness
-from selfdrive.test.longitudinal_harness.config import NoiseSeeds, resolve_ev6_vehicle_config
+from selfdrive.test.longitudinal_harness.closed_loop import (
+  HarnessParams,
+  LeadTrackState,
+  NoiseStreams,
+  VehiclePlantState,
+  _bind_planner_params,
+  _build_lead,
+  run_harness,
+)
+from selfdrive.test.longitudinal_harness.config import (
+  NOISE_PROFILES,
+  NoiseSeeds,
+  load_livetune_snapshot,
+  resolve_ev6_vehicle_config,
+)
 from selfdrive.test.longitudinal_harness.inputs import (
   BASE_SCENARIO_NAMES,
   CANONICAL_LEAD_PROFILE_NAMES,
@@ -363,21 +376,41 @@ def test_resolve_ev6_controller_modes() -> None:
   assert shaped.resolved_controller_mode == "shaped"
   assert not bool(shaped.cp.radarUnavailable)
   assert shaped.hyundai_tuning_mode != 0
+  assert shaped.perception_filter == "direct"
 
   passthrough = resolve_ev6_vehicle_config(topology="lfa", controller_mode="passthrough")
   assert passthrough.resolved_controller_mode == "passthrough"
   assert bool(passthrough.cp.radarUnavailable)
   assert passthrough.hyundai_tuning_mode == 0
+  assert passthrough.perception_filter == "direct"
+
+  device = resolve_ev6_vehicle_config(topology="lka", controller_mode="device")
+  assert device.resolved_controller_mode == "device"
+  assert bool(device.cp.radarUnavailable)
+  assert device.hyundai_tuning_mode == 0
+  assert device.perception_filter == "radard"
+
+  explicit = resolve_ev6_vehicle_config(topology="lka", controller_mode="device", perception_filter="direct")
+  assert explicit.perception_filter == "direct"
 
 
 def test_default_ev6_config_matches_tici_no_radar_lka() -> None:
   vehicle = resolve_ev6_vehicle_config()
 
   assert vehicle.topology == "lka"
-  assert vehicle.resolved_controller_mode == "passthrough"
+  # The real EV6 always routes actuators.accel through the Hyundai
+  # LongitudinalController no-radar EMA branch; the old passthrough default
+  # omitted that stage from the loop entirely.
+  assert vehicle.resolved_controller_mode == "device"
+  # The EV6's only lead source is modelV2.leadsV3 through radard's Schmitt prob
+  # latch + ModelLeadTracker (selfdrive/controls/radard.py); the old config fed
+  # the planner directly-fabricated, unlagged radarState leads.
+  assert vehicle.perception_filter == "radard"
   assert vehicle.hyundai_tuning_mode == 0
   assert bool(vehicle.cp.openpilotLongitudinalControl)
   assert bool(vehicle.cp.radarUnavailable)
+  # Model leads always publish aLeadTau=0.3 on the radar-less EV6 (radard.py).
+  assert vehicle.a_lead_tau_s == pytest.approx(0.3)
   assert vehicle.cp.longitudinalActuatorDelay == pytest.approx(0.5)
   assert vehicle.plant_config.command_delay_s == pytest.approx(0.5)
   assert vehicle.cp_sp.flags & HyundaiFlagsSP.LONGITUDINAL_MAIN_CRUISE_TOGGLEABLE
@@ -392,10 +425,218 @@ def test_default_ev6_config_matches_tici_no_radar_lka() -> None:
   assert vehicle.params["VibeTune.Follow.Standard.Headway2"] == "1.38"
   assert vehicle.params["VibeTune.Follow.Standard.Headway3"] == "1.40"
   assert vehicle.params["Longitudinal.LiveTune.LeadSlowdownStrength"] == "0.35"
+  # MPC live-tune params seeded from the device dump, not the unseeded-Params
+  # fallbacks (obstacle 4.0 / accel-change 200 / accel 0 / Kalman dRel OFF).
+  assert vehicle.metadata["livetuneSource"].endswith("device_livetune_snapshot_20260701.txt")
+  assert vehicle.params["Longitudinal.LiveTune.ObstacleCost"] == "2.0"
+  assert vehicle.params["Longitudinal.LiveTune.AccelChangeCost"] == "400.0"
+  assert vehicle.params["Longitudinal.LiveTune.AccelCost"] == "1.0"
+  assert vehicle.params["Longitudinal.LiveTune.UseKalmanDRelFilter"] == "1"
   assert vehicle.params["VisionTurnSpeedControl"] == "1"
   assert vehicle.params["SpeedLimitControl"] == "1"
   assert vehicle.params["RTIEnabled"] == "1"
   assert vehicle.params["WeatherAwareControlEnabled"] == "1"
+
+
+def test_livetune_snapshot_seeds_mpc_costs() -> None:
+  with OpenpilotPrefix():
+    vehicle = resolve_ev6_vehicle_config()
+    planner = LongitudinalPlanner(vehicle.cp, init_v=30.0, init_a=0.0)
+    _bind_planner_params(planner, HarnessParams(vehicle.params))
+
+    # Device dump values (docs/chauffeur/longitudinal/device_livetune_snapshot_20260701.txt),
+    # not the unseeded-Params fallbacks (obstacle 4.0 / accel-change 200 / accel 0 / Kalman OFF).
+    assert planner.mpc._live_obstacle_cost == pytest.approx(2.0)
+    assert planner.mpc._live_a_change_cost == pytest.approx(400.0)
+    assert planner.mpc._live_a_ego_cost == pytest.approx(1.0)
+    assert planner.mpc._use_kalman_drel is True
+
+
+def test_livetune_snapshot_accepts_dropin_dump(tmp_path: Path) -> None:
+  parsed = load_livetune_snapshot()
+  assert parsed["Longitudinal.LiveTune.ObstacleCost"] == "2.0"
+  assert parsed["Longitudinal.LiveTune.PhantomLeadHoldS"] == "0.8"
+
+  dump = tmp_path / "next_device_dump.txt"
+  dump.write_text("Longitudinal.LiveTune.ObstacleCost = 3.5\n")
+  from_file = resolve_ev6_vehicle_config(livetune_snapshot=dump)
+  assert from_file.params["Longitudinal.LiveTune.ObstacleCost"] == "3.5"
+  assert from_file.metadata["livetuneSource"] == str(dump)
+
+  from_dict = resolve_ev6_vehicle_config(livetune_snapshot={"Longitudinal.LiveTune.AccelChangeCost": 350.0})
+  assert from_dict.params["Longitudinal.LiveTune.AccelChangeCost"] == "350.0"
+  assert from_dict.metadata["livetuneSource"] == "dict"
+
+  unseeded = resolve_ev6_vehicle_config(livetune_snapshot=None)
+  assert "livetuneSource" not in unseeded.metadata
+
+
+def test_device_mode_runs_hyundai_no_radar_ema_stage_at_50hz() -> None:
+  initial_speed_mps, initial_accel_mps2, steps = build_synthetic_scenario("approach", duration_s=2.0, dt_s=DT_MDL)
+  result = run_harness(
+    vehicle_config=resolve_ev6_vehicle_config(),
+    scenario_name="approach",
+    steps=steps,
+    initial_speed_mps=initial_speed_mps,
+    initial_accel_mps2=initial_accel_mps2,
+    noise_profile="off",
+    seed=3,
+  )
+
+  # The no-radar EMA stage shapes the CAN command away from the LongControl output.
+  assert result.vehicle["resolvedControllerMode"] == "device"
+  assert result.summary["hyundaiControllerShapingDivergenceMps2"] > 0.01
+
+  # 50 Hz cadence: the controller only updates on even control ticks
+  # (opendbc/car/hyundai/carcontroller.py: frame % 2 == 0) and holds in between.
+  for even_row, odd_row in zip(result.trace[0::2], result.trace[1::2], strict=False):
+    assert odd_row["controller_accel_mps2"] == pytest.approx(even_row["controller_accel_mps2"])
+
+  # actual_accel = 0.12*cmd + 0.88*prev on every 50 Hz update
+  # (opendbc/sunnypilot/car/hyundai/longitudinal/controller.py calculate_accel).
+  for idx in range(2, min(len(result.trace), 200), 2):
+    expected = 0.12 * result.trace[idx]["longcontrol_accel_mps2"] + 0.88 * result.trace[idx - 1]["controller_accel_mps2"]
+    assert result.trace[idx]["controller_accel_mps2"] == pytest.approx(expected, abs=1e-9)
+
+
+def test_radard_perception_stage_lags_decelerating_lead() -> None:
+  vehicle = resolve_ev6_vehicle_config()
+  assert vehicle.perception_filter == "radard"
+  initial_speed_mps, initial_accel_mps2, steps = build_synthetic_scenario("decelerating_lead", duration_s=10.0, dt_s=DT_MDL)
+
+  def _run(perception_filter: str):
+    return run_harness(
+      vehicle_config=vehicle,
+      scenario_name="decelerating_lead",
+      steps=steps,
+      initial_speed_mps=initial_speed_mps,
+      initial_accel_mps2=initial_accel_mps2,
+      noise_profile="off",
+      seed=7,
+      perception_filter=perception_filter,
+    )
+
+  filtered = _run("auto")
+  direct = _run("direct")
+  assert filtered.vehicle["perceptionFilter"] == "radard"
+  assert direct.vehicle["perceptionFilter"] == "direct"
+
+  def _lags(result, t_lo: float, t_hi: float) -> list[float]:
+    return [
+      row["lead_one_published_d_rel_m"] - row["lead_one_true_d_rel_m"]
+      for row in result.trace
+      if t_lo <= row["t_s"] <= t_hi
+      and row["lead_one_true_d_rel_m"] is not None
+      and row["lead_one_published_d_rel_m"] is not None
+    ]
+
+  # Window where the lead's deceleration keeps the gap closing on the tracker's
+  # slow path (closing < 2.5 m/s, TTC > safe gate: no fast-close snap).
+  direct_lags = _lags(direct, 3.0, 8.0)
+  filtered_lags = _lags(filtered, 3.0, 8.0)
+  assert direct_lags and filtered_lags
+
+  # Direct mode publishes truth (noise off); only intra-step staleness remains.
+  assert max(abs(lag) for lag in direct_lags) < 0.35
+
+  # Fidelity property of the stage: ModelLeadTracker's closing-side EMA/slew
+  # (dRel tau 2.8 s x1.6 when the innovation closes, radard.py) keeps the
+  # published dRel ABOVE truth for the whole closing phase — the documented
+  # perception lag the EV6's planner always sees and the direct loop never did.
+  assert min(filtered_lags) > 0.1
+  assert max(filtered_lags) > 0.6
+  assert sum(filtered_lags) / len(filtered_lags) > 0.4
+
+  # And the lag has a closed-loop consequence: ego gets deeper into the gap
+  # before braking catches up than the truth-fed loop ever showed.
+  assert filtered.summary["minTrueGapM"] < direct.summary["minTrueGapM"] - 1.0
+
+
+def test_config_a_lead_tau_changes_closed_loop_response() -> None:
+  initial_speed_mps, initial_accel_mps2, steps = build_synthetic_scenario("decelerating_lead", duration_s=6.0, dt_s=DT_MDL)
+
+  def _run(a_lead_tau_s: float | None):
+    return run_harness(
+      vehicle_config=resolve_ev6_vehicle_config(controller_mode="passthrough", a_lead_tau_s=a_lead_tau_s),
+      scenario_name="decelerating_lead",
+      steps=steps,
+      initial_speed_mps=initial_speed_mps,
+      initial_accel_mps2=initial_accel_mps2,
+      noise_profile="off",
+      seed=11,
+    )
+
+  runtime_tau = _run(None)
+  legacy_tau = _run(1.5)
+  assert runtime_tau.vehicle["aLeadTauS"] == pytest.approx(0.3)
+  assert legacy_tau.vehicle["aLeadTauS"] == pytest.approx(1.5)
+
+  # tau=0.3 (radard.py model leads) keeps the lead's decel alive across the MPC
+  # horizon far longer than the legacy radar-track 1.5, so braking must deepen.
+  min_runtime = min(row["planner_accel_mps2"] for row in runtime_tau.trace)
+  min_legacy = min(row["planner_accel_mps2"] for row in legacy_tau.trace)
+  assert min_runtime < min_legacy - 0.02
+
+
+def test_ev6_measured_noise_profile_produces_heavy_tail_and_dropouts() -> None:
+  duration_s = 20.0
+  steps = [
+    StepInput(
+      t_s=idx * DT_MDL,
+      cruise_speed_mps=28.0,
+      lead_one=LeadDirective(
+        status=True,
+        v_lead_mps=25.0,
+        model_prob_target=0.9,
+        d_rel_override_m=55.0 if idx == 0 else None,
+      ),
+    )
+    for idx in range(int(round(duration_s / DT_MDL)))
+  ]
+  result = run_harness(
+    vehicle_config=resolve_ev6_vehicle_config(controller_mode="passthrough"),
+    scenario_name="steady_follow_measured_noise",
+    steps=steps,
+    initial_speed_mps=25.0,
+    noise_profile="ev6_measured",
+    seed=42,
+  )
+
+  rows = [row for row in result.trace if row["lead_one_status"]]
+  assert rows
+  errors = [abs(row["lead_one_measured_d_rel_m"] - row["lead_one_true_d_rel_m"]) for row in rows]
+  # Heavy tail: the calibrated outlier model must produce large jumps the plain
+  # gaussian profiles never do.
+  assert max(errors) > 4.0
+  # Lead-prob dropouts must appear during steady following.
+  assert min(row["lead_one_model_prob"] for row in rows) == pytest.approx(0.0)
+
+
+def test_ev6_measured_noise_profile_jitters_lateral_fields() -> None:
+  profile = NOISE_PROFILES["ev6_measured"]
+  streams = NoiseStreams.from_seeds(NoiseSeeds.from_base(7))
+  track = LeadTrackState()
+  state = VehiclePlantState(
+    time_s=0.0,
+    true_distance_m=0.0,
+    true_speed_mps=25.0,
+    true_accel_mps2=0.0,
+    measured_speed_mps=25.0,
+    measured_accel_mps2=0.0,
+  )
+  directive = LeadDirective(status=True, v_lead_mps=25.0, model_prob_target=0.9, d_rel_override_m=40.0)
+
+  y_values = []
+  d_path_values = []
+  for _ in range(50):
+    lead, _ = _build_lead("leadOne", track, directive, state, profile, DT_MDL, streams, 0.3)
+    y_values.append(float(lead.yRel))
+    d_path_values.append(float(lead.dPath))
+
+  assert len(set(y_values)) > 1
+  assert len(set(d_path_values)) > 1
+  assert max(abs(value) for value in y_values) > 0.2
+  assert max(abs(value) for value in d_path_values) > 0.2
 
 
 def test_handoff_scenario_uses_distinct_lead_slots() -> None:
@@ -938,6 +1179,9 @@ def test_snapshot_fixture_runs_with_snapshot_fidelity() -> None:
     snapshot_vehicle=bundle.vehicle,
     snapshot_params=bundle.params,
   )
+  # Snapshot timelines record the device's published (already radard-filtered)
+  # radarState, so replay must not run the radard stage a second time.
+  assert vehicle.perception_filter == "direct"
   result = run_harness(
     vehicle_config=vehicle,
     scenario_name=bundle.name,
@@ -946,11 +1190,14 @@ def test_snapshot_fixture_runs_with_snapshot_fidelity() -> None:
     initial_accel_mps2=bundle.initial_accel_mps2,
     noise_profile="off",
     seed=11,
+    perception_filter="auto",
   )
 
   assert result.vehicle["fidelitySource"] == "snapshot"
   assert result.vehicle["topology"] == "lka"
-  assert result.vehicle["resolvedControllerMode"] == "passthrough"
+  assert result.vehicle["perceptionFilter"] == "direct"
+  # Real EV6 LKA routes always ran the CarController no-radar EMA stage.
+  assert result.vehicle["resolvedControllerMode"] == "device"
   assert result.vehicle["hyundaiTuningMode"] == 0
   assert result.vehicle["radarUnavailable"] is True
   assert result.vehicle["longitudinalActuatorDelay"] == pytest.approx(0.5)

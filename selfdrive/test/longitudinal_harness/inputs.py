@@ -23,6 +23,8 @@ class LeadDirective:
   radar: bool = False
   radar_track_id: int = -1
   acquisition_reset: bool = False
+  # Per-step override of the vehicle config's aLeadTau (EV6 runtime publishes 0.3).
+  a_lead_tau_s: float | None = None
 
   @classmethod
   def from_json(cls, payload: dict[str, Any] | None) -> LeadDirective:

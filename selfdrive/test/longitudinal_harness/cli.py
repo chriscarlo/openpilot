@@ -15,7 +15,8 @@ def build_parser() -> argparse.ArgumentParser:
   parser.add_argument("--scenario", default="approach", choices=SCENARIO_NAMES)
   parser.add_argument("--snapshot", type=Path, default=None, help="Snapshot bundle directory for --mode snapshot")
   parser.add_argument("--topology", choices=("lka", "lfa"), default="lka")
-  parser.add_argument("--controller-mode", choices=("auto", "passthrough", "shaped"), default="passthrough")
+  parser.add_argument("--controller-mode", choices=("auto", "device", "passthrough", "shaped"), default="device")
+  parser.add_argument("--perception-filter", choices=("auto", "direct", "radard"), default="auto")
   parser.add_argument("--hyundai-tuning-mode", choices=("off", "dynamic", "predictive"), default=None)
   parser.add_argument("--noise", choices=tuple(NOISE_PROFILES.keys()), default="realistic")
   parser.add_argument("--duration", type=float, default=12.0)
@@ -73,6 +74,7 @@ def main(argv: list[str] | None = None) -> int:
     noise_profile=args.noise,
     seed=args.seed,
     noise_seeds=noise_seeds,
+    perception_filter=args.perception_filter,
   )
 
   print(json.dumps(result.summary, indent=2, sort_keys=True))

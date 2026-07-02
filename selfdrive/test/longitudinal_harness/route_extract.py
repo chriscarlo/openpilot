@@ -452,7 +452,11 @@ def write_episode_bundle(scan: RouteScanResult, candidate: EpisodeCandidate, bun
     prev_status["leadOne"] = frame.lead_one.status
     prev_status["leadTwo"] = frame.lead_two.status
 
-  controller_mode = "shaped" if (not scan.metadata.radar_unavailable and int(scan.observed_params.get("HyundaiLongitudinalTuning", "0")) != 0) else "passthrough"
+  if not scan.metadata.radar_unavailable and int(scan.observed_params.get("HyundaiLongitudinalTuning", "0")) != 0:
+    controller_mode = "shaped"
+  else:
+    # radar-unavailable routes always ran the CarController's no-radar EMA stage
+    controller_mode = "device"
   bundle = SnapshotBundle(
     path=episode_root,
     vehicle={
@@ -462,6 +466,9 @@ def write_episode_bundle(scan: RouteScanResult, candidate: EpisodeCandidate, bun
       "episodeType": candidate.episode_type,
       "topology": scan.metadata.topology,
       "controllerMode": controller_mode,
+      # Snapshot timelines record radarState as published on device, i.e. already
+      # radard-filtered; replaying them through the radard stage would double-filter.
+      "perceptionFilter": "direct",
       "openpilotLongitudinalControl": scan.metadata.openpilot_longitudinal,
       "radarUnavailable": scan.metadata.radar_unavailable,
       "safetyParam": scan.metadata.safety_param,

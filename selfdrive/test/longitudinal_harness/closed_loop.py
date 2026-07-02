@@ -137,6 +137,24 @@ class LeadTrackState:
   a_lead_k_mps2: float = 0.0
   last_speed_for_accel: float = 0.0
   just_acquired: bool = False
+  dropout_remaining_s: float = 0.0
+
+
+@dataclass
+class NoiseStreams:
+  drel: np.random.Generator
+  vrel: np.random.Generator
+  lat: np.random.Generator
+  prob: np.random.Generator
+
+  @classmethod
+  def from_seeds(cls, seeds: NoiseSeeds) -> NoiseStreams:
+    return cls(
+      drel=np.random.default_rng(seeds.drel),
+      vrel=np.random.default_rng(seeds.vrel),
+      lat=np.random.default_rng(seeds.lat),
+      prob=np.random.default_rng(seeds.prob),
+    )
 
 
 @dataclass
@@ -270,14 +288,23 @@ def run_harness(*,
                 initial_accel_mps2: float = 0.0,
                 noise_profile: str = "realistic",
                 seed: int = 42,
-                noise_seeds: NoiseSeeds | None = None) -> SimulationResult:
+                noise_seeds: NoiseSeeds | None = None,
+                perception_filter: str = "direct") -> SimulationResult:
   planner_dt_s = DT_MDL
   control_dt_s = DT_CTRL
   profile = NOISE_PROFILES[noise_profile]
+  if perception_filter not in ("direct", "radard", "auto"):
+    raise ValueError(f"unsupported perception_filter '{perception_filter}'")
+  if perception_filter == "auto":
+    # Follow the config's declared fidelity (legacy direct constructions predate
+    # the field and always fabricated radarState directly).
+    perception_filter = str(getattr(vehicle_config, "perception_filter", "direct"))
   control_ticks_per_step = max(1, int(round(planner_dt_s / control_dt_s)))
   seeds = noise_seeds or NoiseSeeds.from_base(seed)
-  drel_rng = np.random.default_rng(seeds.drel)
-  vrel_rng = np.random.default_rng(seeds.vrel)
+  noise_streams = NoiseStreams.from_seeds(seeds)
+  # aLeadTau published on synthesized leads; legacy fallback keeps direct/off-config
+  # constructions at the radar-track value they explicitly carried before.
+  a_lead_tau_s = float(getattr(vehicle_config, "a_lead_tau_s", _LEAD_ACCEL_TAU))
 
   planner = LongitudinalPlanner(vehicle_config.cp, init_v=initial_speed_mps, init_a=initial_accel_mps2)
   sim_time_s = [0.0]
@@ -285,11 +312,21 @@ def run_harness(*,
   harness_params = HarnessParams(vehicle_config.params)
   _bind_planner_params(planner, harness_params)
 
+  radard_stage = None
+  if perception_filter == "radard":
+    from openpilot.selfdrive.test.longitudinal_harness.radard_stage import RadardPerceptionStage
+    radard_stage = RadardPerceptionStage(vehicle_config.cp, vehicle_config.cp_sp, harness_params)
+
   long_control = LongControl(vehicle_config.cp)
   hyundai_controller = None
-  if vehicle_config.cp.brand == "hyundai" and vehicle_config.resolved_controller_mode == "shaped":
+  controller_update_decimation = 1
+  if vehicle_config.cp.brand == "hyundai" and vehicle_config.resolved_controller_mode in ("shaped", "device"):
     from opendbc.sunnypilot.car.hyundai.longitudinal.controller import LongitudinalController
     hyundai_controller = LongitudinalController(vehicle_config.cp, vehicle_config.cp_sp)
+    if vehicle_config.resolved_controller_mode == "device":
+      # The real CarController steps LongitudinalController only on even frames
+      # (opendbc/car/hyundai/carcontroller.py: frame % 2 == 0 -> 50 Hz).
+      controller_update_decimation = 2
 
   plant = DelayedVehiclePlant(
     dt_s=control_dt_s,
@@ -312,10 +349,20 @@ def run_harness(*,
   planner_accel = float(initial_accel_mps2)
   planner_source = "cruise"
   planner_should_stop = False
+  control_tick = 0
 
   for step in steps:
     sim_time_s[0] = float(step.t_s)
-    radar_state, _ = _build_radar_state(lead_tracks, step, state, profile, planner_dt_s, drel_rng, vrel_rng)
+    radar_state, _ = _build_radar_state(lead_tracks, step, state, profile, planner_dt_s, noise_streams, a_lead_tau_s)
+    if radard_stage is not None:
+      # The raw fabricated leads become leadsV3-shaped measurements and the planner
+      # sees only what the real radard pipeline would publish; ground truth for the
+      # metrics keeps flowing from lead_tracks via _current_lead_meta below.
+      radar_state = radard_stage.update(radar_state, now_s=step.t_s, measured_speed_mps=state.measured_speed_mps)
+    published_d_rel = {
+      slot: (float(getattr(radar_state, slot).dRel) if getattr(radar_state, slot).status else None)
+      for slot in ("leadOne", "leadTwo")
+    }
     sm = _build_submaster(step, state, radar_state, long_control.long_control_state, bool(vehicle_config.cp.openpilotLongitudinalControl))
     planner.update(sm)
     planner_accel = float(planner.output_a_target)
@@ -337,24 +384,26 @@ def run_harness(*,
       controller_jerk_upper = 0.0
       controller_jerk_lower = 0.0
       if hyundai_controller is not None:
-        CC = SimpleNamespace(
-          actuators=SimpleNamespace(accel=longcontrol_accel, longControlState=long_control.long_control_state),
-          longActive=long_active,
-          enabled=True,
-          hudControl=SimpleNamespace(visualAlert=None),
-        )
-        CC_SP = SimpleNamespace(params=vehicle_config.cc_sp_params, flags=vehicle_config.cp_sp.flags)
-        CC_SP.leadOne = radar_state.leadOne
-        CC_SP.leadTwo = radar_state.leadTwo
-        CS = SimpleNamespace(
-          out=SimpleNamespace(vEgo=state.measured_speed_mps, aEgo=state.measured_accel_mps2),
-          aBasis=state.measured_accel_mps2,
-        )
-        hyundai_controller.update(CC, CC_SP, CS)
+        if control_tick % controller_update_decimation == 0:
+          CC = SimpleNamespace(
+            actuators=SimpleNamespace(accel=longcontrol_accel, longControlState=long_control.long_control_state),
+            longActive=long_active,
+            enabled=True,
+            hudControl=SimpleNamespace(visualAlert=None),
+          )
+          CC_SP = SimpleNamespace(params=vehicle_config.cc_sp_params, flags=vehicle_config.cp_sp.flags)
+          CC_SP.leadOne = radar_state.leadOne
+          CC_SP.leadTwo = radar_state.leadTwo
+          CS = SimpleNamespace(
+            out=SimpleNamespace(vEgo=state.measured_speed_mps, aEgo=state.measured_accel_mps2),
+            aBasis=state.measured_accel_mps2,
+          )
+          hyundai_controller.update(CC, CC_SP, CS)
         controller_accel = float(hyundai_controller.actual_accel)
         controller_jerk_upper = float(hyundai_controller.jerk_upper)
         controller_jerk_lower = float(hyundai_controller.jerk_lower)
 
+      control_tick += 1
       delayed_command, realized_accel, measured_accel, measured_speed = plant.step(controller_accel)
       tick_t_s = float(step.t_s + (control_idx * control_dt_s))
       state = VehiclePlantState(
@@ -416,6 +465,8 @@ def run_harness(*,
         "lead_two_true_d_rel_m": lead_meta["leadTwo"]["true_d_rel_m"],
         "lead_one_measured_d_rel_m": lead_meta["leadOne"]["measured_d_rel_m"],
         "lead_two_measured_d_rel_m": lead_meta["leadTwo"]["measured_d_rel_m"],
+        "lead_one_published_d_rel_m": published_d_rel["leadOne"],
+        "lead_two_published_d_rel_m": published_d_rel["leadTwo"],
         "lead_one_a_lead_k_mps2": lead_meta["leadOne"]["a_lead_k_mps2"],
         "lead_two_a_lead_k_mps2": lead_meta["leadTwo"]["a_lead_k_mps2"],
         "lead_one_model_prob": lead_meta["leadOne"]["model_prob"],
@@ -429,6 +480,7 @@ def run_harness(*,
       })
 
   vehicle_description = vehicle_config.describe()
+  vehicle_description["perceptionFilter"] = perception_filter
   vehicle_description["noiseProfile"] = profile.name
   vehicle_description["noiseSeeds"] = seeds.as_dict()
   summary = summarize_trace(trace, vehicle=vehicle_description, scenario_name=scenario_name, noise_profile=profile.name)
@@ -506,8 +558,8 @@ def _build_radar_state(lead_tracks: dict[str, LeadTrackState],
                        state: VehiclePlantState,
                        noise_profile: NoiseProfile,
                        dt_s: float,
-                       drel_rng: np.random.Generator,
-                       vrel_rng: np.random.Generator) -> tuple[log.RadarState, dict[str, dict[str, Any]]]:
+                       noise_streams: NoiseStreams,
+                       a_lead_tau_s: float) -> tuple[log.RadarState, dict[str, dict[str, Any]]]:
   radar_state = log.RadarState.new_message()
   lead_meta = {}
   for slot_name, directive in (("leadOne", step.lead_one), ("leadTwo", step.lead_two)):
@@ -518,8 +570,8 @@ def _build_radar_state(lead_tracks: dict[str, LeadTrackState],
       state,
       noise_profile,
       dt_s,
-      drel_rng,
-      vrel_rng,
+      noise_streams,
+      a_lead_tau_s,
     )
     setattr(radar_state, slot_name, lead_message)
   return radar_state, lead_meta
@@ -531,8 +583,8 @@ def _build_lead(slot_name: str,
                 state: VehiclePlantState,
                 noise_profile: NoiseProfile,
                 dt_s: float,
-                drel_rng: np.random.Generator,
-                vrel_rng: np.random.Generator) -> tuple[log.RadarState.LeadData, dict[str, Any]]:
+                noise_streams: NoiseStreams,
+                a_lead_tau_s: float) -> tuple[log.RadarState.LeadData, dict[str, Any]]:
   lead = log.RadarState.LeadData.new_message()
   true_d_rel = None
   measured_d_rel = None
@@ -543,6 +595,7 @@ def _build_lead(slot_name: str,
     track.acquisition_age_s = 0.0
     track.measured_d_rel_m = None
     track.a_lead_k_mps2 = 0.0
+    track.dropout_remaining_s = 0.0
     return lead, {
       "status": False,
       "true_d_rel_m": None,
@@ -575,15 +628,22 @@ def _build_lead(slot_name: str,
   if directive.measured_d_rel_m is not None:
     measured_d_rel = directive.measured_d_rel_m
   else:
-    measured_d_rel = _apply_distance_noise(true_d_rel, noise_profile, drel_rng)
+    measured_d_rel = _apply_distance_noise(true_d_rel, noise_profile, noise_streams.drel)
 
   if directive.measured_v_rel_mps is not None:
     measured_v_rel = directive.measured_v_rel_mps
   else:
     std = max(noise_profile.vrel_floor_mps, noise_profile.vrel_factor * max(true_d_rel, 0.0))
-    measured_v_rel = (track.speed_mps - state.true_speed_mps) + (_rng_normal(vrel_rng, std) if std > 0.0 else 0.0)
+    measured_v_rel = (track.speed_mps - state.true_speed_mps) + (_rng_normal(noise_streams.vrel, std) if std > 0.0 else 0.0)
 
   target_prob = directive.model_prob_target
+  if noise_profile.prob_dropout_rate_hz > 0.0 and target_prob > 0.0:
+    if track.dropout_remaining_s > 0.0:
+      track.dropout_remaining_s = max(0.0, track.dropout_remaining_s - dt_s)
+      target_prob = 0.0
+    elif float(noise_streams.prob.random()) < noise_profile.prob_dropout_rate_hz * dt_s:
+      track.dropout_remaining_s = max(0.0, noise_profile.prob_dropout_duration_s - dt_s)
+      target_prob = 0.0
   if target_prob > 0.0 and track.acquisition_age_s < 0.25:
     track.model_prob = min(target_prob, max(track.model_prob, (track.acquisition_age_s + dt_s) / 0.25))
   else:
@@ -601,17 +661,24 @@ def _build_lead(slot_name: str,
   track.measured_d_rel_m = measured_d_rel
   track.a_lead_k_mps2 = a_lead_k
 
+  y_rel = float(directive.y_rel_m)
+  d_path = float(directive.d_path_m if directive.d_path_m is not None else directive.y_rel_m)
+  if noise_profile.y_rel_sigma_m > 0.0:
+    y_rel += _rng_normal(noise_streams.lat, noise_profile.y_rel_sigma_m)
+  if noise_profile.d_path_sigma_m > 0.0:
+    d_path += _rng_normal(noise_streams.lat, noise_profile.d_path_sigma_m)
+
   lead.status = True
   lead.dRel = float(measured_d_rel)
-  lead.yRel = float(directive.y_rel_m)
+  lead.yRel = y_rel
   lead.vRel = float(measured_v_rel)
   lead.aRel = float(a_lead_k - state.measured_accel_mps2)
   lead.vLead = float(track.speed_mps)
   lead.vLeadK = float(v_lead_k)
   lead.aLeadK = float(a_lead_k)
-  lead.aLeadTau = float(_LEAD_ACCEL_TAU)
+  lead.aLeadTau = float(directive.a_lead_tau_s) if directive.a_lead_tau_s is not None else float(a_lead_tau_s)
   lead.modelProb = float(track.model_prob)
-  lead.dPath = float(directive.d_path_m if directive.d_path_m is not None else directive.y_rel_m)
+  lead.dPath = d_path
   lead.vLat = float(directive.v_lat_mps)
   lead.fcw = bool(directive.fcw)
   lead.radar = bool(directive.radar)
@@ -660,10 +727,37 @@ def _current_lead_meta(lead_tracks: dict[str, LeadTrackState], state: VehiclePla
 
 
 def _apply_distance_noise(true_d_rel: float, profile: NoiseProfile, rng: np.random.Generator) -> float:
+  if profile.drel_measured_bands:
+    sigma = _measured_drel_sigma(true_d_rel)
+    if float(rng.random()) < _measured_outlier_prob(true_d_rel):
+      sigma += profile.drel_outlier_extra_sigma_m
+    return max(0.0, true_d_rel + _rng_normal(rng, sigma))
   if profile.name == "off" or profile.drel_frac <= 0.0:
     return true_d_rel
   std = max(profile.drel_floor_m, profile.drel_frac * max(true_d_rel, 0.0))
   return max(0.0, true_d_rel + _rng_normal(rng, std))
+
+
+def _measured_drel_sigma(d_rel: float) -> float:
+  # Distance-band sigmas calibrated to real EV6 captures
+  # (selfdrive/controls/lib/tests/test_lead_filter_ab.py::_noise_sigma).
+  d = max(d_rel, 5.0)
+  if d < 40.0:
+    return 0.5
+  if d < 80.0:
+    return 0.5 + (d - 40.0) * 0.04
+  return 2.1 + (d - 80.0) * 0.15
+
+
+def _measured_outlier_prob(d_rel: float) -> float:
+  # Distance-dependent outlier probability from the same calibration
+  # (selfdrive/controls/lib/tests/test_lead_filter_ab.py::_outlier_prob).
+  d = max(d_rel, 5.0)
+  if d < 40.0:
+    return 0.03
+  if d < 80.0:
+    return 0.03 + (d - 40.0) * 0.001
+  return 0.07 + (d - 80.0) * 0.004
 
 
 def _rng_normal(rng: np.random.Generator, std: float) -> float:

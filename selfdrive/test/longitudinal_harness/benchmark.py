@@ -98,7 +98,8 @@ def build_parser() -> argparse.ArgumentParser:
 
   run_manifest = subparsers.add_parser("run", help="Run a multi-bundle benchmark manifest")
   run_manifest.add_argument("--manifest", type=Path, required=True)
-  run_manifest.add_argument("--controller-mode", choices=("auto", "passthrough", "shaped"), default="passthrough")
+  run_manifest.add_argument("--controller-mode", choices=("auto", "device", "passthrough", "shaped"), default="device")
+  run_manifest.add_argument("--perception-filter", choices=("auto", "direct", "radard"), default="auto")
   run_manifest.add_argument("--hyundai-tuning-mode", choices=("off", "dynamic", "predictive"), default=None)
   run_manifest.add_argument("--noise", choices=("off", "realistic", "stress"), default="off")
   run_manifest.add_argument("--seed", type=int, default=42)
@@ -159,6 +160,7 @@ def run_manifest_benchmark(*,
                            manifest: BenchmarkManifest,
                            candidates: list[SweepCandidate],
                            controller_mode: str,
+                           perception_filter: str = "auto",
                            hyundai_tuning_mode: int | None,
                            noise: str,
                            seed: int,
@@ -189,6 +191,7 @@ def run_manifest_benchmark(*,
       snapshot=snapshot_path,
       topology="lka",
       controller_mode=controller_mode,
+      perception_filter=perception_filter,
       hyundai_tuning_mode=hyundai_tuning_mode,
       noise=noise,
       duration_s=0.0,
@@ -326,6 +329,7 @@ def _handle_run_manifest(args) -> dict[str, Any]:
     manifest=manifest,
     candidates=candidates,
     controller_mode=args.controller_mode,
+    perception_filter=args.perception_filter,
     hyundai_tuning_mode=_parse_hyundai_tuning_mode(args.hyundai_tuning_mode),
     noise=args.noise,
     seed=args.seed,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any
 
 from opendbc.car import gen_empty_fingerprint, structs
@@ -10,6 +11,40 @@ from opendbc.car.hyundai.radar_interface import RADAR_START_ADDR
 from opendbc.car.hyundai.values import CAR, HyundaiFlags
 from opendbc.sunnypilot.car.hyundai.longitudinal.helpers import LongitudinalTuningType
 from opendbc.sunnypilot.car.hyundai.values import HyundaiFlagsSP, HyundaiSafetyFlagsSP
+
+# The EV6's only lead source is vision: radard publishes aLeadTau=0.3 on every model
+# lead (selfdrive/controls/radard.py ModelLeadTrack.update / get_RadarState_from_vision),
+# not the radar-track default _LEAD_ACCEL_TAU=1.5 the legacy plant/harness hardcoded.
+EV6_MODEL_LEAD_A_LEAD_TAU_S = 0.3
+
+# Live-tune params dumped from the real device (2026-07-01, dongle CHAUFFEUR_DEV_e521630c).
+# Drop in a newer dump by pointing resolve_ev6_vehicle_config(livetune_snapshot=...) at it.
+DEVICE_LIVETUNE_SNAPSHOT_PATH = (
+  Path(__file__).resolve().parents[3] / "docs" / "chauffeur" / "longitudinal" / "device_livetune_snapshot_20260701.txt"
+)
+
+
+def load_livetune_snapshot(source: str | Path | dict[str, Any] | None = None) -> dict[str, str]:
+  """Load a device param dump as a {param_name: value} mapping.
+
+  Accepts a dict (returned normalized) or a path to a dump of "Key = value" lines,
+  the format produced by the re-dump command documented in
+  docs/chauffeur/longitudinal/test_runtime_gap_audit_20260701.md.
+  """
+  if source is None:
+    source = DEVICE_LIVETUNE_SNAPSHOT_PATH
+  if isinstance(source, dict):
+    return {str(key): str(value) for key, value in source.items()}
+
+  values: dict[str, str] = {}
+  for line in Path(source).read_text().splitlines():
+    line = line.strip()
+    if not line or line.startswith("#") or "=" not in line:
+      continue
+    key, _, value = line.partition("=")
+    values[key.strip()] = value.strip()
+  return values
+
 
 FRIENDLY_PARAM_NAMES = {
   "obstacle_cost": "Longitudinal.LiveTune.ObstacleCost",
@@ -38,16 +73,20 @@ FRIENDLY_PARAM_NAMES = {
   "drel_filter_closing_gate_m": "Longitudinal.LiveTune.DRelFilterClosingGateM",
   "cruise_reacquire_pos_jerk_limit": "Longitudinal.LiveTune.CruiseReacquirePosJerkLimit",
   "cruise_reacquire_jerk_window_s": "Longitudinal.LiveTune.CruiseReacquireJerkWindowS",
+  "cruise_reacquire_jerk_ramp": "Longitudinal.LiveTune.CruiseReacquireJerkRamp",
   "lead_prob_enter": "Longitudinal.LiveTune.LeadProbEnter",
   "lead_prob_exit": "Longitudinal.LiveTune.LeadProbExit",
   "lead_source_acquire_frames": "Longitudinal.LiveTune.LeadSourceAcquireFrames",
   "lead_source_release_frames": "Longitudinal.LiveTune.LeadSourceReleaseFrames",
   "phantom_lead_hold_s": "Longitudinal.LiveTune.PhantomLeadHoldS",
   "phantom_lead_stable_frames": "Longitudinal.LiveTune.PhantomLeadStableFrames",
+  "phantom_lead_decel_hold_factor": "Longitudinal.LiveTune.PhantomLeadDecelHoldFactor",
+  "phantom_lead_decel_trend_gain": "Longitudinal.LiveTune.PhantomLeadDecelTrendGain",
   "flutter_detect_transitions": "Longitudinal.LiveTune.FlutterDetectTransitions",
   "flutter_detect_window_s": "Longitudinal.LiveTune.FlutterDetectWindowS",
   "flutter_clamp_jerk_mps3": "Longitudinal.LiveTune.FlutterClampJerkMps3",
   "flutter_clamp_bypass_decel_mps2": "Longitudinal.LiveTune.FlutterClampBypassDecelMps2",
+  "flutter_clamp_brake_jerk_mps3": "Longitudinal.LiveTune.FlutterClampBrakeJerkMps3",
   "model_lead_filter_tau_s": "Longitudinal.LiveTune.ModelLeadFilterTauS",
   "model_lead_filter_open_slew_max_mps": "Longitudinal.LiveTune.ModelLeadFilterOpenSlewMaxMps",
   "model_lead_filter_safe_ttc_s": "Longitudinal.LiveTune.ModelLeadFilterSafeTtcS",
@@ -122,16 +161,20 @@ DEFAULT_PARAM_VALUES = {
   "Longitudinal.LiveTune.DRelFilterClosingGateM": "12.0",
   "Longitudinal.LiveTune.CruiseReacquirePosJerkLimit": "0.08",
   "Longitudinal.LiveTune.CruiseReacquireJerkWindowS": "3.0",
+  "Longitudinal.LiveTune.CruiseReacquireJerkRamp": "0.8",
   "Longitudinal.LiveTune.LeadProbEnter": "0.60",
   "Longitudinal.LiveTune.LeadProbExit": "0.25",
   "Longitudinal.LiveTune.LeadSourceAcquireFrames": "1.0",
   "Longitudinal.LiveTune.LeadSourceReleaseFrames": "20.0",
   "Longitudinal.LiveTune.PhantomLeadHoldS": "0.80",
   "Longitudinal.LiveTune.PhantomLeadStableFrames": "3.0",
+  "Longitudinal.LiveTune.PhantomLeadDecelHoldFactor": "1.0",
+  "Longitudinal.LiveTune.PhantomLeadDecelTrendGain": "1.0",
   "Longitudinal.LiveTune.FlutterDetectTransitions": "2.0",
   "Longitudinal.LiveTune.FlutterDetectWindowS": "1.0",
   "Longitudinal.LiveTune.FlutterClampJerkMps3": "0.12",
   "Longitudinal.LiveTune.FlutterClampBypassDecelMps2": "1.5",
+  "Longitudinal.LiveTune.FlutterClampBrakeJerkMps3": "1.5",
   "Longitudinal.LiveTune.ModelLeadFilterTauS": "2.80",
   "Longitudinal.LiveTune.ModelLeadFilterOpenSlewMaxMps": "1.20",
   "Longitudinal.LiveTune.ModelLeadFilterSafeTtcS": "4.00",
@@ -215,6 +258,20 @@ class NoiseProfile:
   drel_floor_m: float
   vrel_factor: float
   vrel_floor_mps: float
+  # Measured EV6 heavy-tail dRel model: distance-band sigmas plus occasional large
+  # outlier jumps, ported from the calibrated generator in
+  # selfdrive/controls/lib/tests/test_lead_filter_ab.py (fitted to real EV6 captures).
+  # When True the band model replaces the fractional gaussian above.
+  drel_measured_bands: bool = False
+  drel_outlier_extra_sigma_m: float = 0.0
+  # Lateral jitter on the published yRel/dPath (runtime dPath is model-path derived
+  # and noisy; it gates leads in/out of MPC control via the role classifier).
+  y_rel_sigma_m: float = 0.0
+  d_path_sigma_m: float = 0.0
+  # Transient model-lead probability dropouts (modelProb forced to 0 for the window),
+  # exercising the phantom-hold / source-hysteresis stack.
+  prob_dropout_rate_hz: float = 0.0
+  prob_dropout_duration_s: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -223,6 +280,8 @@ class NoiseSeeds:
   vrel: int
   aego: int
   vego: int
+  lat: int = 4
+  prob: int = 5
 
   @classmethod
   def from_base(cls, base_seed: int) -> NoiseSeeds:
@@ -231,6 +290,8 @@ class NoiseSeeds:
       vrel=int(base_seed) + 1,
       aego=int(base_seed) + 2,
       vego=int(base_seed) + 3,
+      lat=int(base_seed) + 4,
+      prob=int(base_seed) + 5,
     )
 
   def offset(self, delta: int) -> NoiseSeeds:
@@ -239,6 +300,8 @@ class NoiseSeeds:
       vrel=self.vrel + delta,
       aego=self.aego + delta,
       vego=self.vego + delta,
+      lat=self.lat + delta,
+      prob=self.prob + delta,
     )
 
   def with_overrides(self,
@@ -246,12 +309,16 @@ class NoiseSeeds:
                      drel: int | None = None,
                      vrel: int | None = None,
                      aego: int | None = None,
-                     vego: int | None = None) -> NoiseSeeds:
+                     vego: int | None = None,
+                     lat: int | None = None,
+                     prob: int | None = None) -> NoiseSeeds:
     return NoiseSeeds(
       drel=self.drel if drel is None else drel,
       vrel=self.vrel if vrel is None else vrel,
       aego=self.aego if aego is None else aego,
       vego=self.vego if vego is None else vego,
+      lat=self.lat if lat is None else lat,
+      prob=self.prob if prob is None else prob,
     )
 
   def as_dict(self) -> dict[str, int]:
@@ -262,6 +329,24 @@ NOISE_PROFILES: dict[str, NoiseProfile] = {
   "off": NoiseProfile("off", 0.0, 0.0, 0.0, 0.0),
   "realistic": NoiseProfile("realistic", 0.03, 0.75, 0.05, 0.05),
   "stress": NoiseProfile("stress", 0.07, 1.5, 0.10, 0.2),
+  # Repo-measured EV6 lead-noise characterization in the loop:
+  # - dRel band sigmas + 8 m extra-sigma outliers and vRel sigma 0.3 m/s from
+  #   selfdrive/controls/lib/tests/test_lead_filter_ab.py (fitted to real EV6
+  #   captures 2026-04-08; 2% of frames >12 m jumps).
+  # - yRel/dPath jitter 0.35 m from the model-lead yStd used by
+  #   .codex/skills/openpilot-longitudinal-tuner/scripts/simulate_ai_lead_noise.py.
+  # - prob dropouts ~0.15 Hz x 0.7 s from the audit's real-log corroboration
+  #   (11 lead status flips in 33 s of calm traffic; ~0.7 s vision dropouts) in
+  #   docs/chauffeur/longitudinal/test_runtime_gap_audit_20260701.md.
+  "ev6_measured": NoiseProfile(
+    "ev6_measured", 0.0, 0.0, 0.0, 0.3,
+    drel_measured_bands=True,
+    drel_outlier_extra_sigma_m=8.0,
+    y_rel_sigma_m=0.35,
+    d_path_sigma_m=0.35,
+    prob_dropout_rate_hz=0.15,
+    prob_dropout_duration_s=0.7,
+  ),
 }
 
 
@@ -293,6 +378,13 @@ class ResolvedVehicleConfig:
   cp_sp: structs.CarParamsSP
   cc_sp_params: list[structs.CarControlSP.Param]
   plant_config: VehiclePlantConfig
+  # aLeadTau published on synthesized leads; EV6 model leads always carry 0.3
+  # (radard.py). Non-EV6/legacy consumers must set their value explicitly.
+  a_lead_tau_s: float = EV6_MODEL_LEAD_A_LEAD_TAU_S
+  # Lead perception stage between synthesized ground truth and the planner:
+  # "direct" fabricates radarState from directives (legacy), "radard" routes the
+  # leads through the real radard pipeline (Schmitt latch + ModelLeadTracker).
+  perception_filter: str = "direct"
   metadata: dict[str, Any] = field(default_factory=dict)
 
   def describe(self) -> dict[str, Any]:
@@ -300,6 +392,8 @@ class ResolvedVehicleConfig:
       "topology": self.topology,
       "requestedControllerMode": self.requested_controller_mode,
       "resolvedControllerMode": self.resolved_controller_mode,
+      "perceptionFilter": self.perception_filter,
+      "aLeadTauS": float(self.a_lead_tau_s),
       "hyundaiTuningMode": self.hyundai_tuning_mode,
       "tuneSource": self.tune_source,
       "fidelitySource": self.fidelity_source,
@@ -368,18 +462,25 @@ def _apply_hyundai_tuning(CP: structs.CarParams, CP_SP: structs.CarParamsSP, par
 
 def resolve_ev6_vehicle_config(*,
                                topology: str = "lka",
-                               controller_mode: str = "passthrough",
+                               controller_mode: str = "device",
                                tune_source: str = "defaults",
                                param_overrides: dict[str, Any] | None = None,
                                hyundai_tuning_mode: int | None = None,
                                snapshot_vehicle: dict[str, Any] | None = None,
                                snapshot_params: dict[str, Any] | None = None,
-                               plant_overrides: dict[str, Any] | None = None) -> ResolvedVehicleConfig:
-  if controller_mode not in ("auto", "passthrough", "shaped"):
+                               plant_overrides: dict[str, Any] | None = None,
+                               livetune_snapshot: str | Path | dict[str, Any] | None = DEVICE_LIVETUNE_SNAPSHOT_PATH,
+                               a_lead_tau_s: float | None = None,
+                               perception_filter: str = "auto") -> ResolvedVehicleConfig:
+  if controller_mode not in ("auto", "device", "passthrough", "shaped"):
     raise ValueError(f"unsupported controller_mode '{controller_mode}'")
+  if perception_filter not in ("auto", "direct", "radard"):
+    raise ValueError(f"unsupported perception_filter '{perception_filter}'")
 
   fingerprint, car_fw = build_synthetic_ev6_inputs(topology)
   params = dict(DEFAULT_PARAM_VALUES)
+  if livetune_snapshot is not None:
+    params.update(normalize_param_overrides(load_livetune_snapshot(livetune_snapshot)))
   params.update(normalize_param_overrides(snapshot_params))
   params.update(normalize_param_overrides(param_overrides))
 
@@ -404,7 +505,7 @@ def resolve_ev6_vehicle_config(*,
   if controller_mode == "shaped" and int(params.get("HyundaiLongitudinalTuning", "0")) == LongitudinalTuningType.OFF:
     params["HyundaiLongitudinalTuning"] = str(LongitudinalTuningType.DYNAMIC)
 
-  if controller_mode == "passthrough":
+  if controller_mode in ("device", "passthrough"):
     CP.radarUnavailable = True
   elif controller_mode == "shaped":
     CP.radarUnavailable = False
@@ -413,15 +514,35 @@ def resolve_ev6_vehicle_config(*,
 
   _apply_hyundai_tuning(CP, CP_SP, params)
 
-  resolved_controller_mode = (
-    "shaped"
-    if (int(params.get("HyundaiLongitudinalTuning", "0")) != LongitudinalTuningType.OFF and not CP.radarUnavailable)
-    else "passthrough"
-  )
+  if controller_mode == "device":
+    # tici fidelity: the real EV6 CarController always routes actuators.accel through
+    # LongitudinalController with CP.radarUnavailable=True, taking the no-radar EMA
+    # branch (opendbc/sunnypilot/car/hyundai/longitudinal/controller.py calculate_accel)
+    # regardless of the Hyundai tuning toggle.
+    resolved_controller_mode = "device"
+  else:
+    resolved_controller_mode = (
+      "shaped"
+      if (int(params.get("HyundaiLongitudinalTuning", "0")) != LongitudinalTuningType.OFF and not CP.radarUnavailable)
+      else "passthrough"
+    )
   if controller_mode == "shaped" and resolved_controller_mode != "shaped":
     raise ValueError("requested shaped EV6 controller mode, but Hyundai runtime shaping is not active")
   if controller_mode == "passthrough" and resolved_controller_mode != "passthrough":
     raise ValueError("requested passthrough EV6 controller mode, but config resolved to shaped mode")
+
+  if perception_filter == "auto":
+    if snapshot_vehicle and snapshot_vehicle.get("perceptionFilter"):
+      # Snapshot bundles record radarState as published on device, i.e. already
+      # radard-filtered; route_extract labels them "direct" to avoid double-filtering.
+      perception_filter = str(snapshot_vehicle["perceptionFilter"])
+    elif resolved_controller_mode == "device":
+      # tici fidelity: on the radar-less EV6 the only lead source is
+      # modelV2.leadsV3 through radard's Schmitt prob latch + ModelLeadTracker
+      # (selfdrive/controls/radard.py) before radarState reaches the planner.
+      perception_filter = "radard"
+    else:
+      perception_filter = "direct"
 
   plant_config = VehiclePlantConfig(command_delay_s=float(CP.longitudinalActuatorDelay))
   if snapshot_vehicle and snapshot_vehicle.get("plantConfig"):
@@ -429,9 +550,17 @@ def resolve_ev6_vehicle_config(*,
   if plant_overrides:
     plant_config = VehiclePlantConfig(**{**plant_config.as_dict(), **plant_overrides})
 
+  if a_lead_tau_s is None:
+    if snapshot_vehicle and "aLeadTauS" in snapshot_vehicle:
+      a_lead_tau_s = float(snapshot_vehicle["aLeadTauS"])
+    else:
+      a_lead_tau_s = EV6_MODEL_LEAD_A_LEAD_TAU_S
+
   metadata = {}
   if snapshot_vehicle:
     metadata.update({k: v for k, v in snapshot_vehicle.items() if k not in {"plantConfig"}})
+  if livetune_snapshot is not None:
+    metadata["livetuneSource"] = "dict" if isinstance(livetune_snapshot, dict) else str(livetune_snapshot)
 
   return ResolvedVehicleConfig(
     topology=topology,
@@ -445,5 +574,7 @@ def resolve_ev6_vehicle_config(*,
     cp_sp=CP_SP,
     cc_sp_params=build_cc_sp_params(params),
     plant_config=plant_config,
+    a_lead_tau_s=float(a_lead_tau_s),
+    perception_filter=perception_filter,
     metadata=metadata,
   )
