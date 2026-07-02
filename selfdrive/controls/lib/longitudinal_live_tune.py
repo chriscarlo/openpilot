@@ -67,6 +67,21 @@ LEAD_RESPONSE_TUNE_SPECS = (
     description="Upper cap on how much closer the previewed lead obstacle can be pulled.",
   ),
   LeadResponseTuneSpec(
+    attr="lead_preview_min_speed_mps",
+    key="Longitudinal.LiveTune.LeadPreviewMinSpeedMps",
+    cli_name="lead-preview-min-speed",
+    label="preview_min_speed",
+    default=6.0,
+    minimum=0.0,
+    maximum=8.0,
+    description="Ego speed (m/s) at which the lead-approach preview fades to zero; it ramps linearly up to full strength "
+                "at 8.0 m/s (LEAD_APPROACH_PREVIEW_MIN_SPEED). Replaces the historical hard cut at 8.0, which stepped the "
+                "previewed obstacle by up to LeadPreviewMaxBufferM instantly when the planner's filtered speed wobbled "
+                "across 8.0. Activity superset at defaults: behavior at/above 8.0 m/s is unchanged; below it the fade only "
+                "adds preview that used to be zero. Rollback sentinel: 8.0 (the spec maximum) reproduces the legacy hard "
+                "cut exactly.",
+  ),
+  LeadResponseTuneSpec(
     attr="lead_acquire_window_s",
     key="Longitudinal.LiveTune.LeadAcquireWindowS",
     cli_name="lead-acquire-window-s",
@@ -996,6 +1011,7 @@ class LeadResponseTuningConfig:
   lead_preview_strength: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_preview_strength"].default
   lead_preview_gap_min_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_preview_gap_min_m"].default
   lead_preview_max_buffer_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_preview_max_buffer_m"].default
+  lead_preview_min_speed_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_preview_min_speed_mps"].default
   lead_acquire_window_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_acquire_window_s"].default
   gap_reclaim_strength: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["gap_reclaim_strength"].default
   gap_reclaim_gap_min_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["gap_reclaim_gap_min_m"].default

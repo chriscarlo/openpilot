@@ -376,6 +376,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"Longitudinal.LiveTune.LeadSlowdownKinematicHeadroom", {PERSISTENT | BACKUP, FLOAT, "1.5"}},
     {"Longitudinal.LiveTune.LeadSlowdownKinematicMarginM", {PERSISTENT | BACKUP, FLOAT, "4.0"}},
     {"Longitudinal.LiveTune.LeadSlowdownKinematicOncomingVLeadMps", {PERSISTENT | BACKUP, FLOAT, "-2.5"}},
+    {"Longitudinal.LiveTune.LeadPreviewMinSpeedMps", {PERSISTENT | BACKUP, FLOAT, "6.0"}},
     {"Longitudinal.LiveTune.LeadHandoffStoppingNeedDecelMps2", {PERSISTENT | BACKUP, FLOAT, "0.80"}},
     {"Longitudinal.LiveTune.LeadHandoffStoppingNeedRefSpeedMps", {PERSISTENT | BACKUP, FLOAT, "8.0"}},
     {"Longitudinal.LiveTune.LeadBrakeReleaseMinSpeedMps", {PERSISTENT | BACKUP, FLOAT, "5.0"}},

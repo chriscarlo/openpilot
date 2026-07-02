@@ -77,6 +77,7 @@ Vibe-follow-only accel floor that prevents continued heavy decel after the Vibe 
 | `LeadPreviewStrength` | 1.5 | 0.0–2.0 | How early a newly recognized slower lead shapes decel |
 | `LeadPreviewGapMinM` | 1.0 | 0.0–10.0 | Min extra slack before preview activates |
 | `LeadPreviewMaxBufferM` | 10.0 | 0.0–25.0 | Max closer-pull of previewed lead obstacle |
+| `LeadPreviewMinSpeedMps` | 6.0 | 0.0–8.0 | Ego speed at which the preview fades to zero, ramping linearly to full strength at 8.0 m/s. Replaces the historical hard cut at 8.0, which stepped the previewed obstacle by up to `LeadPreviewMaxBufferM` (10 m) INSTANTLY whenever the planner's drifting filtered speed wobbled across 8.0 — a latent jerk source whenever the lead already owns the obstacle (this knife-edge is what split the ~18 mph band: at v0 >= 8 the preview advanced the handoff, at v0 < 8 it never engaged). Activity superset at the default: at/above 8.0 m/s behavior is bit-identical to the hard gate; below it the fade only adds preview that used to be zero. The acquire-window path is untouched. Legacy rollback sentinel: 8.0 (the spec maximum) reproduces the hard cut exactly |
 | `LeadAcquireWindowS` | 1.5 | 0.0–3.0 | Short stronger-preview window after a lead appears or jumps materially slower/closer |
 
 ## Cut-In Settle

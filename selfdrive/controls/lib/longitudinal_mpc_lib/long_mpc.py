@@ -588,8 +588,27 @@ def compute_lead_approach_preview(v_ego, lead, t_follow,
   if lead is None or not getattr(lead, 'status', False):
     return 0.0, debug
 
-  if v_ego < LEAD_APPROACH_PREVIEW_MIN_SPEED and not acquire_window_active:
-    return 0.0, debug
+  # Low-speed preview fade (knife-edge hardening): the historical hard cut at
+  # v_ego < LEAD_APPROACH_PREVIEW_MIN_SPEED steps the previewed lead obstacle
+  # by up to lead_preview_max_buffer_m (10 m) instantaneously whenever the
+  # drifting v_desired filter state wobbles across 8.0 m/s — a latent jerk
+  # source whenever the lead already owns the obstacle. Instead, fade the
+  # preview linearly from zero at LeadPreviewMinSpeedMps up to full strength
+  # at LEAD_APPROACH_PREVIEW_MIN_SPEED. Activity superset at defaults: at or
+  # above 8.0 m/s the fade is exactly 1.0 (bit-identical to the hard gate);
+  # below it the fade only ADDS preview that used to be zero. Rollback:
+  # LeadPreviewMinSpeedMps = 8.0 reproduces the hard cut exactly. The acquire
+  # window path is untouched (fade forced to 1.0 there, as before).
+  min_speed_fade = 1.0
+  if not acquire_window_active:
+    fade_lo = float(np.clip(float(tuning.lead_preview_min_speed_mps), 0.0, LEAD_APPROACH_PREVIEW_MIN_SPEED))
+    if fade_lo >= LEAD_APPROACH_PREVIEW_MIN_SPEED:
+      min_speed_fade = 1.0 if v_ego >= LEAD_APPROACH_PREVIEW_MIN_SPEED else 0.0
+    else:
+      min_speed_fade = float(np.interp(v_ego, [fade_lo, LEAD_APPROACH_PREVIEW_MIN_SPEED], [0.0, 1.0]))
+    if min_speed_fade <= 0.0:
+      debug["min_speed_fade"] = 0.0
+      return 0.0, debug
 
   low_speed_acquire = bool(acquire_window_active and float(v_ego) < LEAD_APPROACH_PREVIEW_MIN_SPEED)
 
@@ -647,6 +666,7 @@ def compute_lead_approach_preview(v_ego, lead, t_follow,
   if acquire_window_active:
     preview_buffer *= LEAD_APPROACH_PREVIEW_ACQUIRE_GAIN
   preview_buffer *= lead_decel_scale * tuning.lead_preview_strength
+  preview_buffer *= min_speed_fade
   preview_buffer = float(np.clip(preview_buffer, 0.0, max_buffer))
   debug = {
     "active": bool(preview_buffer > 0.0),
@@ -660,6 +680,7 @@ def compute_lead_approach_preview(v_ego, lead, t_follow,
     "preview_time_s": float(preview_time),
     "anticipatory_ttc_blend": float(anticipatory_ttc_blend),
     "anticipatory_buffer_m": float(anticipatory_buffer),
+    "min_speed_fade": float(min_speed_fade),
     "preview_buffer_m": float(preview_buffer),
   }
   return preview_buffer, debug
