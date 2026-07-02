@@ -9,7 +9,9 @@ import numpy as np
 from cereal import log, messaging
 from opendbc.car.hyundai.interface import CarInterface
 from opendbc.car.interfaces import ACCEL_MAX, ACCEL_MIN
-from opendbc.car.structs import CarControlSP
+from opendbc.car.structs import CarControl, CarControlSP
+
+_VisualAlert = CarControl.HUDControl.VisualAlert
 from openpilot.common.gps import get_gps_location_service
 from openpilot.common.realtime import DT_CTRL, DT_MDL
 from openpilot.selfdrive.controls.lib.longcontrol import LongControl, LongCtrlState
@@ -349,6 +351,16 @@ def run_harness(*,
   planner_accel = float(initial_accel_mps2)
   planner_source = "cruise"
   planner_should_stop = False
+  planner_fcw = False
+  # FCW visual-alert chain fidelity: longitudinalPlan.fcw raises EventName.fcw in
+  # selfdrive/selfdrived/selfdrived.py (planner_fcw = sm['longitudinalPlan'].fcw and
+  # enabled), which carries VisualAlert.fcw for 2.0 s (selfdrive/selfdrived/events.py
+  # EventName.fcw alert duration), controlsd forwards it as hudControl.visualAlert
+  # (selfdrive/controls/controlsd.py), and the Hyundai LongitudinalController routes
+  # visualAlert==fcw to emergency_control()
+  # (opendbc/sunnypilot/car/hyundai/longitudinal/controller.py update()).
+  FCW_ALERT_DURATION_S = 2.0
+  fcw_alert_until_s = -1.0
   control_tick = 0
 
   for step in steps:
@@ -368,6 +380,12 @@ def run_harness(*,
     planner_accel = float(planner.output_a_target)
     planner_source = str(getattr(planner.mpc, "source", ""))
     planner_should_stop = bool(planner.output_should_stop)
+    planner_fcw = bool(getattr(planner, "fcw", False))
+    if planner_fcw:
+      # selfdrived raises EventName.fcw while longitudinalPlan.fcw is set; the
+      # alert carries VisualAlert.fcw for 2.0 s (events.py) and refreshes while
+      # the event stays active.
+      fcw_alert_until_s = float(step.t_s) + FCW_ALERT_DURATION_S
 
     for control_idx in range(control_ticks_per_step):
       long_active = bool(vehicle_config.cp.openpilotLongitudinalControl)
@@ -385,11 +403,12 @@ def run_harness(*,
       controller_jerk_lower = 0.0
       if hyundai_controller is not None:
         if control_tick % controller_update_decimation == 0:
+          fcw_alert_active = (step.t_s + (control_idx * control_dt_s)) < fcw_alert_until_s
           CC = SimpleNamespace(
             actuators=SimpleNamespace(accel=longcontrol_accel, longControlState=long_control.long_control_state),
             longActive=long_active,
             enabled=True,
-            hudControl=SimpleNamespace(visualAlert=None),
+            hudControl=SimpleNamespace(visualAlert=_VisualAlert.fcw if fcw_alert_active else None),
           )
           CC_SP = SimpleNamespace(params=vehicle_config.cc_sp_params, flags=vehicle_config.cp_sp.flags)
           CC_SP.leadOne = radar_state.leadOne
@@ -435,6 +454,9 @@ def run_harness(*,
         "planner_source": planner_source,
         "planner_accel_mps2": planner_accel,
         "planner_should_stop": planner_should_stop,
+        "planner_fcw": planner_fcw,
+        "mpc_crash_cnt": float(getattr(planner.mpc, "crash_cnt", 0.0)),
+        "fcw_visual_alert_active": bool(tick_t_s < fcw_alert_until_s),
         "planner_gap_reclaim_floor_mps2": float(getattr(planner.mpc, "gap_reclaim_accel_floor", 0.0) or 0.0),
         "planner_cutin_settle_floor_mps2": float(getattr(planner.mpc, "cutin_settle_accel_floor", 0.0) or 0.0),
         "planner_lead_brake_release_floor_mps2": float(getattr(planner, "lead_brake_release_accel_floor", 0.0) or 0.0),
