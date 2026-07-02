@@ -169,15 +169,17 @@ class ModelLeadTrack:
     # so the vRel-tau blend and slew boost are disabled too (exact legacy).
     if float(cfg.model_lead_filter_blend_tau_floor_s) >= float(cfg.model_lead_filter_tau_s):
       return 0.0
+    blend_min_span = float(getattr(cfg, 'model_lead_blend_min_span', MODEL_LEAD_BLEND_MIN_SPAN))
+    ttc_min_closing_mps = float(getattr(cfg, 'model_lead_blend_ttc_min_closing_mps', MODEL_LEAD_BLEND_TTC_MIN_CLOSING_MPS))
     closing_speed = max(0.0, -raw_vrel)
     urgency = 0.0
     close_lo = float(cfg.model_lead_filter_blend_close_lo_mps)
     close_span = MODEL_LEAD_STRONG_CLOSING_MPS - close_lo
-    if close_span >= MODEL_LEAD_BLEND_MIN_SPAN:
+    if close_span >= blend_min_span:
       urgency = float(np.clip((closing_speed - close_lo) / close_span, 0.0, 1.0))
     ttc_hi = float(cfg.model_lead_filter_blend_ttc_hi_s)
     ttc_span = ttc_hi - float(cfg.model_lead_filter_safe_ttc_s)
-    if closing_speed > MODEL_LEAD_BLEND_TTC_MIN_CLOSING_MPS and ttc_span >= MODEL_LEAD_BLEND_MIN_SPAN:
+    if closing_speed > ttc_min_closing_mps and ttc_span >= blend_min_span:
       ttc_s = raw_drel / max(closing_speed, 0.1)
       urgency = max(urgency, float(np.clip((ttc_hi - ttc_s) / ttc_span, 0.0, 1.0)))
     return urgency
@@ -261,6 +263,20 @@ class ModelLeadTrack:
       # than the internal state. Capped at the active regime's actual filter
       # delay so the fast-adopting path is not over-corrected at high closing.
       lag_comp_s = min(float(cfg.model_lead_filter_lag_comp_s), float(self.drel_lag_s))
+      if lag_comp_s > 0.0:
+        # Stopping-regime fade: below FadeLo ego speed the compensation is off,
+        # above FadeHi it is full, linear ramp between. At low ego speed the
+        # filter lag error is proportionally tiny (closing speeds are small) so
+        # compensation buys little safety while pushing the stop point back.
+        # Degenerate span (FadeHi <= FadeLo, e.g. both 0) disables the fade and
+        # restores full compensation everywhere — the pessimistic direction.
+        fade_hi_mps = float(cfg.model_lead_filter_lag_comp_fade_hi_mps)
+        fade_lo_mps = float(cfg.model_lead_filter_lag_comp_fade_lo_mps)
+        fade_span_mps = fade_hi_mps - fade_lo_mps
+        blend_min_span = float(getattr(cfg, 'model_lead_blend_min_span', MODEL_LEAD_BLEND_MIN_SPAN))
+        if fade_span_mps >= blend_min_span:
+          v_ego_est = max(0.0, float(self.vLead) - float(self.vRel))
+          lag_comp_s *= float(np.clip((v_ego_est - fade_lo_mps) / fade_span_mps, 0.0, 1.0))
       if lag_comp_s > 0.0:
         closing_mps = max(0.0, -self.vRel - float(cfg.model_lead_filter_lag_comp_deadzone_mps))
         published_drel = max(0.0, published_drel - closing_mps * lag_comp_s)

@@ -2433,6 +2433,7 @@ class LongitudinalMpc:
       return False
 
     meas_tau = max(0.1, float(getattr(cfg, 'lead_accel_corr_meas_tau_s', 0.3)))
+    max_dt_s = float(getattr(cfg, 'lead_accel_corr_max_dt_s', LEAD_ACCEL_CORR_MAX_DT_S))
     if state.corr_meas_t is None:
       identity_change = True
       dt = 0.0
@@ -2442,7 +2443,7 @@ class LongitudinalMpc:
       a_fd = (float(lead.vLead) - float(state.corr_meas_v)) / dt if dt > 1e-3 else 0.0
       identity_change = (
         state.corr_track_id != int(lead.radarTrackId) or
-        not (1e-3 < dt < LEAD_ACCEL_CORR_MAX_DT_S) or
+        not (1e-3 < dt < max_dt_s) or
         abs(a_fd) > LEAD_ACCEL_CORR_MEAS_A_GATE_MPS2
       )
     if identity_change:
@@ -2462,15 +2463,19 @@ class LongitudinalMpc:
     ttc_guard = float(getattr(cfg, 'lead_accel_corr_ttc_guard_s', 8.0))
     closing_guard = float(getattr(cfg, 'lead_accel_corr_closing_guard_mps', 1.5))
     near_gap_m = float(getattr(cfg, 'lead_accel_corr_near_headway_s', 1.2)) * v_ego
+    closing_rearm_mps = float(getattr(cfg, 'lead_accel_corr_closing_rearm_mps', LEAD_ACCEL_CORR_CLOSING_REARM_MPS))
+    ttc_rearm_s = float(getattr(cfg, 'lead_accel_corr_ttc_rearm_s', LEAD_ACCEL_CORR_TTC_REARM_S))
+    headway_rearm_m = float(getattr(cfg, 'lead_accel_corr_headway_rearm_m', LEAD_ACCEL_CORR_HEADWAY_REARM_M))
+    settle_tau_mult = float(getattr(cfg, 'lead_accel_corr_settle_tau_mult', LEAD_ACCEL_CORR_SETTLE_TAU_MULT))
     if ttc <= ttc_guard or closing >= closing_guard or float(lead.dRel) <= near_gap_m:
       state.corr_danger_latched = True
-    elif (closing <= max(0.0, closing_guard - LEAD_ACCEL_CORR_CLOSING_REARM_MPS) and
-          ttc >= ttc_guard + LEAD_ACCEL_CORR_TTC_REARM_S and
-          float(lead.dRel) > near_gap_m + LEAD_ACCEL_CORR_HEADWAY_REARM_M):
+    elif (closing <= max(0.0, closing_guard - closing_rearm_mps) and
+          ttc >= ttc_guard + ttc_rearm_s and
+          float(lead.dRel) > near_gap_m + headway_rearm_m):
       state.corr_danger_latched = False
 
     if (state.corr_danger_latched or lead.aLeadK >= 0.0 or
-        state.corr_settled_s < LEAD_ACCEL_CORR_SETTLE_TAU_MULT * meas_tau):
+        state.corr_settled_s < settle_tau_mult * meas_tau):
       return False
     bounded = max(float(lead.aLeadK), min(0.0, float(state.corr_a_meas_lp)) - margin)
     if bounded <= float(lead.aLeadK):
@@ -2507,14 +2512,17 @@ class LongitudinalMpc:
         new_valid = _StabilizedLead.from_reader(raw)
         if state.last_valid is not None and state.last_valid_t is not None:
           trend_dt = float(now) - float(state.last_valid_t)
+          drel_jump_gate_m = float(getattr(cfg, 'lead_stabilizer_trend_drel_jump_m', LEAD_STABILIZER_TREND_DREL_JUMP_M))
+          yrel_jump_gate_m = float(getattr(cfg, 'lead_stabilizer_trend_yrel_jump_m', LEAD_STABILIZER_TREND_YREL_JUMP_M))
+          trend_tau_s = float(getattr(cfg, 'lead_stabilizer_trend_tau_s', LEAD_STABILIZER_TREND_TAU_S))
           expected_drel = state.last_valid.dRel + state.last_valid.vRel * trend_dt
-          identity_jump = (abs(new_valid.dRel - expected_drel) > LEAD_STABILIZER_TREND_DREL_JUMP_M
-                           or abs(new_valid.yRel - state.last_valid.yRel) > LEAD_STABILIZER_TREND_YREL_JUMP_M)
+          identity_jump = (abs(new_valid.dRel - expected_drel) > drel_jump_gate_m
+                           or abs(new_valid.yRel - state.last_valid.yRel) > yrel_jump_gate_m)
           if identity_jump or not (1e-3 < trend_dt < 0.5):
             state.a_lead_k_trend = 0.0
           else:
             trend_raw = (new_valid.aLeadK - state.last_valid.aLeadK) / trend_dt
-            alpha = trend_dt / (trend_dt + LEAD_STABILIZER_TREND_TAU_S)
+            alpha = trend_dt / (trend_dt + trend_tau_s)
             state.a_lead_k_trend += alpha * (trend_raw - state.a_lead_k_trend)
         else:
           state.a_lead_k_trend = 0.0

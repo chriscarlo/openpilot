@@ -105,6 +105,8 @@ Fills the cliff between the slow model-lead dRel filter (tau 2.8, 1.6x when clos
 
 The lag compensation moves only the PUBLISHED dRel closer by `closing * LagCompS` (closing measured beyond `LagCompDeadzoneMps` on the filtered vRel); internal filter state is untouched and publication never moves farther. The compensation is capped at the active filter regime's effective tau, so the fast-close path (actual delay ~0.12 s) is not over-corrected at high closing speeds. `LagCompS=0` disables (verified byte-identical legacy publication). Raise toward 1.2 to bias earlier braking (measured +0.7 m min gap in the gray-zone sweep at negligible steady-noise cost).
 
+The compensation additionally fades out in the stopping regime on ego speed: fully off at/below `LagCompFadeLoMps`, fully on at/above `LagCompFadeHiMps`, linear between. At low ego speed the filter-lag error is proportionally tiny (closing speeds are small), so the compensation adds little safety there while pushing the approach-to-stop point meters farther back (approach-to-stop behind a stopping lead from 15 m/s, clean final stopped gap: 8.85 m with full compensation, 6.19 m at the shipped 12/18 fade, 6.02 m with `LagCompS=0`; the 25-31 m/s gray-zone closed loop is bit-identical with and without the fade because ego never drops below `FadeHiMps` there). Ego speed is estimated publish-side as `vLead - vRel` from the track state. Disable the fade (full compensation at every speed, the pre-fade behavior) by setting `FadeHi <= FadeLo`, e.g. both 0 — the degenerate span resolves to the pessimistic direction.
+
 | Param Key | Default | Range | Description |
 |---|---|---|---|
 | `ModelLeadFilterBlendTauFloorS` | 0.30 | 0.05–8.0 | dRel filter tau at full closing urgency. >= `ModelLeadFilterTauS` disables the whole blend (exact legacy) |
@@ -113,6 +115,10 @@ The lag compensation moves only the PUBLISHED dRel closer by `closing * LagCompS
 | `ModelLeadFilterBlendSlewBoostMps` | 6.0 | 0.0–20.0 | Extra closing dRel slew allowance (m/s) at full urgency. 0 disables |
 | `ModelLeadFilterLagCompS` | 0.6 | 0.0–2.0 | Closing-only group-delay compensation (s) on published dRel, capped at the active regime's filter delay. 0 disables |
 | `ModelLeadFilterLagCompDeadzoneMps` | 0.5 | 0.0–5.0 | Closing speed ignored by lag comp; keeps steady vRel jitter out of published dRel |
+| `ModelLeadFilterLagCompFadeLoMps` | 12.0 | 0.0–30.0 | Ego speed at/below which lag comp is fully faded out (stopping regime) |
+| `ModelLeadFilterLagCompFadeHiMps` | 18.0 | 0.0–40.0 | Ego speed at/above which lag comp is fully active. FadeHi <= FadeLo disables the fade (full comp everywhere) |
+| `ModelLeadBlendMinSpan` | 0.01 | 0.001–1.0 | Degeneracy guard: a closing-urgency blend span (closing-speed, TTC, or lag-comp fade) narrower than this collapses to disabled (u=0) instead of a possible sign flip |
+| `ModelLeadBlendTtcMinClosingMps` | 0.3 | 0.0–3.0 | Minimum closing speed before the TTC-based closing-urgency term is evaluated; guards TTC=dRel/closing near zero closing speed |
 
 ## Cruise Reacquire Jerk Limit
 
@@ -145,6 +151,9 @@ Acquire/release dwell on lead `status` at the MPC boundary, plus kinematically-p
 | `PhantomLeadStableFrames` | 3 | 1–40 | Consecutive stable frames required before a dropped lead is eligible for phantom |
 | `PhantomLeadDecelHoldFactor` | 1.0 | 0.0–1.0 | Fraction of the last measured lead decel (aLeadK<0) held through the phantom window. 1 = full hold; 0 = legacy linear decay to zero |
 | `PhantomLeadDecelTrendGain` | 1.0 | 0.0–1.0 | Fraction of the measured pre-drop d(aLeadK)/dt continued through the phantom window (deepening trends only). 0 = hold constant |
+| `LeadStabilizerTrendTauS` | 0.20 | 0.05–1.0 | EMA time constant for the measured d(aLeadK)/dt used by the phantom trend hold. Lower = faster trend response, more noise passed through |
+| `LeadStabilizerTrendDRelJumpM` | 3.0 | 1.0–10.0 | Identity gate: a dRel step this far off the propagated position between consecutive valid frames is a track swap, not a measurement |
+| `LeadStabilizerTrendYRelJumpM` | 1.5 | 0.3–5.0 | Identity gate: a lateral (yRel) jump this large between consecutive valid frames is a track swap, not a measurement |
 
 ## Lead Accel Corroboration Bound (MPC)
 
@@ -157,6 +166,11 @@ Bounds uncorroborated transient negative aLeadK at the single MPC lead ingress (
 | `LeadAccelCorrTtcGuardS` | 8.0 | 2.0–20.0 | Bound bypassed at or below this TTC |
 | `LeadAccelCorrClosingGuardMps` | 1.5 | 0.0–10.0 | Bound bypassed at or above this closing speed |
 | `LeadAccelCorrNearHeadwayS` | 1.2 | 0.0–4.0 | Bound bypassed inside this headway of gap |
+| `LeadAccelCorrClosingRearmMps` | 0.5 | 0.0–5.0 | Dangerous-state bypass hysteresis: closing speed must drop this far below `ClosingGuardMps` before the bypass can disengage |
+| `LeadAccelCorrTtcRearmS` | 2.0 | 0.0–10.0 | Dangerous-state bypass hysteresis: TTC must rise this far above `TtcGuardS` before the bypass can disengage |
+| `LeadAccelCorrHeadwayRearmM` | 2.0 | 0.0–10.0 | Dangerous-state bypass hysteresis: gap must exceed the near-headway gate by this many meters before the bypass can disengage |
+| `LeadAccelCorrSettleTauMult` | 2.0 | 0.5–5.0 | Multiple of `MeasTauS` of same-track vLead history required before the bound can clamp aLeadK |
+| `LeadAccelCorrMaxDtS` | 0.5 | 0.05–2.0 | Max frame-to-frame dt admitted as a same-track vLead measurement; a larger gap resets the corroboration low-pass |
 
 ## Flutter Mode Clamp (asymmetric jerk)
 

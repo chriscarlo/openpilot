@@ -643,6 +643,28 @@ LEAD_RESPONSE_TUNE_SPECS = (
     description="Closing speed ignored by the lag compensation; keeps steady-noise vRel jitter out of published dRel.",
   ),
   LeadResponseTuneSpec(
+    attr="model_lead_filter_lag_comp_fade_lo_mps",
+    key="Longitudinal.LiveTune.ModelLeadFilterLagCompFadeLoMps",
+    cli_name="model-lead-lag-comp-fade-lo",
+    label="model_lead_lag_comp_fade_lo",
+    default=12.0,
+    minimum=0.0,
+    maximum=30.0,
+    description="Ego speed (m/s) at/below which the lag compensation is fully faded out (stopping regime). "
+                "FadeHi <= FadeLo disables the fade entirely (full compensation at all speeds).",
+  ),
+  LeadResponseTuneSpec(
+    attr="model_lead_filter_lag_comp_fade_hi_mps",
+    key="Longitudinal.LiveTune.ModelLeadFilterLagCompFadeHiMps",
+    cli_name="model-lead-lag-comp-fade-hi",
+    label="model_lead_lag_comp_fade_hi",
+    default=18.0,
+    minimum=0.0,
+    maximum=40.0,
+    description="Ego speed (m/s) at/above which the lag compensation is fully active. Linear ramp from FadeLo. "
+                "Set both to 0 to disable the fade (full compensation everywhere, pre-fade behavior).",
+  ),
+  LeadResponseTuneSpec(
     attr="lead_accel_corr_margin_mps2",
     key="Longitudinal.LiveTune.LeadAccelCorrMarginMps2",
     cli_name="lead-accel-corr-margin",
@@ -693,6 +715,116 @@ LEAD_RESPONSE_TUNE_SPECS = (
     minimum=0.0,
     maximum=4.0,
     description="Corroboration bound is bypassed inside this headway (s) of gap.",
+  ),
+  LeadResponseTuneSpec(
+    attr="lead_accel_corr_closing_rearm_mps",
+    key="Longitudinal.LiveTune.LeadAccelCorrClosingRearmMps",
+    cli_name="lead-accel-corr-closing-rearm",
+    label="lead_accel_corr_closing_rearm",
+    default=0.5,
+    minimum=0.0,
+    maximum=5.0,
+    description="Dangerous-state bypass hysteresis: closing speed must drop this far below ClosingGuardMps before "
+                "the bypass can disengage.",
+  ),
+  LeadResponseTuneSpec(
+    attr="lead_accel_corr_ttc_rearm_s",
+    key="Longitudinal.LiveTune.LeadAccelCorrTtcRearmS",
+    cli_name="lead-accel-corr-ttc-rearm",
+    label="lead_accel_corr_ttc_rearm",
+    default=2.0,
+    minimum=0.0,
+    maximum=10.0,
+    description="Dangerous-state bypass hysteresis: TTC must rise this far above TtcGuardS before the bypass can "
+                "disengage.",
+  ),
+  LeadResponseTuneSpec(
+    attr="lead_accel_corr_headway_rearm_m",
+    key="Longitudinal.LiveTune.LeadAccelCorrHeadwayRearmM",
+    cli_name="lead-accel-corr-headway-rearm",
+    label="lead_accel_corr_headway_rearm",
+    default=2.0,
+    minimum=0.0,
+    maximum=10.0,
+    description="Dangerous-state bypass hysteresis: gap must exceed the near-headway gate by this many meters "
+                "before the bypass can disengage.",
+  ),
+  LeadResponseTuneSpec(
+    attr="lead_accel_corr_settle_tau_mult",
+    key="Longitudinal.LiveTune.LeadAccelCorrSettleTauMult",
+    cli_name="lead-accel-corr-settle-tau-mult",
+    label="lead_accel_corr_settle_tau_mult",
+    default=2.0,
+    minimum=0.5,
+    maximum=5.0,
+    description="Multiple of MeasTauS of same-track vLead history required before the corroboration bound can "
+                "clamp aLeadK.",
+  ),
+  LeadResponseTuneSpec(
+    attr="lead_accel_corr_max_dt_s",
+    key="Longitudinal.LiveTune.LeadAccelCorrMaxDtS",
+    cli_name="lead-accel-corr-max-dt",
+    label="lead_accel_corr_max_dt",
+    default=0.5,
+    minimum=0.05,
+    maximum=2.0,
+    description="Max frame-to-frame dt admitted as a same-track vLead measurement; a larger gap resets the "
+                "corroboration low-pass (treated as a track identity change).",
+  ),
+  LeadResponseTuneSpec(
+    attr="lead_stabilizer_trend_tau_s",
+    key="Longitudinal.LiveTune.LeadStabilizerTrendTauS",
+    cli_name="lead-stabilizer-trend-tau",
+    label="lead_stabilizer_trend_tau",
+    default=0.20,
+    minimum=0.05,
+    maximum=1.0,
+    description="EMA time constant for the measured d(aLeadK)/dt used by the phantom trend hold. Lower = faster "
+                "trend response, more measurement noise passed through.",
+  ),
+  LeadResponseTuneSpec(
+    attr="lead_stabilizer_trend_drel_jump_m",
+    key="Longitudinal.LiveTune.LeadStabilizerTrendDRelJumpM",
+    cli_name="lead-stabilizer-trend-drel-jump",
+    label="lead_stabilizer_trend_drel_jump",
+    default=3.0,
+    minimum=1.0,
+    maximum=10.0,
+    description="Identity gate for the trend measurement: a dRel step this far off the propagated position between "
+                "consecutive valid frames is treated as a track swap, not a measurement.",
+  ),
+  LeadResponseTuneSpec(
+    attr="lead_stabilizer_trend_yrel_jump_m",
+    key="Longitudinal.LiveTune.LeadStabilizerTrendYRelJumpM",
+    cli_name="lead-stabilizer-trend-yrel-jump",
+    label="lead_stabilizer_trend_yrel_jump",
+    default=1.5,
+    minimum=0.3,
+    maximum=5.0,
+    description="Identity gate for the trend measurement: a lateral (yRel) jump this large between consecutive "
+                "valid frames is treated as a track swap, not a measurement.",
+  ),
+  LeadResponseTuneSpec(
+    attr="model_lead_blend_min_span",
+    key="Longitudinal.LiveTune.ModelLeadBlendMinSpan",
+    cli_name="model-lead-blend-min-span",
+    label="model_lead_blend_min_span",
+    default=1e-2,
+    minimum=1e-3,
+    maximum=1.0,
+    description="Degeneracy guard (radard): a closing-urgency blend span (closing-speed, TTC, or lag-comp fade) "
+                "narrower than this collapses to disabled (u=0) instead of risking a sign flip.",
+  ),
+  LeadResponseTuneSpec(
+    attr="model_lead_blend_ttc_min_closing_mps",
+    key="Longitudinal.LiveTune.ModelLeadBlendTtcMinClosingMps",
+    cli_name="model-lead-blend-ttc-min-closing",
+    label="model_lead_blend_ttc_min_closing",
+    default=0.3,
+    minimum=0.0,
+    maximum=3.0,
+    description="Minimum closing speed (radard) before the TTC-based closing-urgency term is evaluated at all; "
+                "guards TTC=dRel/closing against blowing up near zero closing speed.",
   ),
 )
 
@@ -761,11 +893,23 @@ class LeadResponseTuningConfig:
   model_lead_filter_blend_slew_boost_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_filter_blend_slew_boost_mps"].default
   model_lead_filter_lag_comp_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_filter_lag_comp_s"].default
   model_lead_filter_lag_comp_deadzone_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_filter_lag_comp_deadzone_mps"].default
+  model_lead_filter_lag_comp_fade_lo_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_filter_lag_comp_fade_lo_mps"].default
+  model_lead_filter_lag_comp_fade_hi_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_filter_lag_comp_fade_hi_mps"].default
   lead_accel_corr_margin_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_accel_corr_margin_mps2"].default
   lead_accel_corr_meas_tau_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_accel_corr_meas_tau_s"].default
   lead_accel_corr_ttc_guard_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_accel_corr_ttc_guard_s"].default
   lead_accel_corr_closing_guard_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_accel_corr_closing_guard_mps"].default
   lead_accel_corr_near_headway_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_accel_corr_near_headway_s"].default
+  lead_accel_corr_closing_rearm_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_accel_corr_closing_rearm_mps"].default
+  lead_accel_corr_ttc_rearm_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_accel_corr_ttc_rearm_s"].default
+  lead_accel_corr_headway_rearm_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_accel_corr_headway_rearm_m"].default
+  lead_accel_corr_settle_tau_mult: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_accel_corr_settle_tau_mult"].default
+  lead_accel_corr_max_dt_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_accel_corr_max_dt_s"].default
+  lead_stabilizer_trend_tau_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_stabilizer_trend_tau_s"].default
+  lead_stabilizer_trend_drel_jump_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_stabilizer_trend_drel_jump_m"].default
+  lead_stabilizer_trend_yrel_jump_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_stabilizer_trend_yrel_jump_m"].default
+  model_lead_blend_min_span: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_blend_min_span"].default
+  model_lead_blend_ttc_min_closing_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_blend_ttc_min_closing_mps"].default
 
   @classmethod
   def defaults(cls) -> LeadResponseTuningConfig:
