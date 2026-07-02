@@ -44,7 +44,9 @@ LongitudinalPanel::LongitudinalPanel(QWidget *parent) : QWidget(parent) {
     tr("Advanced driving personality system with separate controls for acceleration behavior (Eco/Normal/Sport) and following distance/braking (Relaxed/Standard/Aggressive). "
       "Customize your driving experience with independent acceleration and distance personalities."),
     "../assets/offroad/icon_shell.png", nullptr, false, false);
-  list->addItem(vibePersonalityControl);
+  // Master + follow-distance personality are integrated into stock behavior (default ON) and are
+  // no longer surfaced as toggles; the control objects are still constructed so the refresh()
+  // wiring below stays valid. Acceleration personality remains an opt-in toggle.
 
   connect(vibePersonalityControl, &ParamControlSP::toggleFlipped, [=]() {
     refresh(offroad);
@@ -64,7 +66,7 @@ LongitudinalPanel::LongitudinalPanel(QWidget *parent) : QWidget(parent) {
     tr("Controls following distance and braking behavior: Relaxed (longer distance, gentler braking), Standard (balanced), Aggressive (shorter distance, firmer braking). "
       "Fine-tune your comfort level in traffic situations."),
     "../assets/offroad/icon_shell.png", nullptr, false, false);
-  list->addItem(vibeFollowPersonalityControl);
+  // Not added to the list: follow-distance personality is always on (see note above).
 
   vibeTuningControl = new VibeTuningControl(this);
   list->addItem(vibeTuningControl);

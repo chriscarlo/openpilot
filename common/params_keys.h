@@ -354,9 +354,11 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"MTSCProfile", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"MTSCRealtime", {PERSISTENT | BACKUP, BOOL, "0"}},
     
-    {"VibePersonalityEnabled", {PERSISTENT | BACKUP, BOOL, "0"}},
+    // Follow-distance personality is integrated into stock behavior: master + follow default ON
+    // and their GUI toggles are removed. Accel personality stays opt-in (default OFF).
+    {"VibePersonalityEnabled", {PERSISTENT | BACKUP, BOOL, "1"}},
     {"VibeAccelPersonalityEnabled", {PERSISTENT | BACKUP, BOOL, "0"}},
-    {"VibeFollowPersonalityEnabled", {PERSISTENT | BACKUP, BOOL, "0"}},
+    {"VibeFollowPersonalityEnabled", {PERSISTENT | BACKUP, BOOL, "1"}},
 
     // Runtime-tunable lead response knobs for ACC lead preview and safe gap reclaim.
     {"Longitudinal.LiveTune.LeadPreviewStrength", {PERSISTENT | BACKUP, FLOAT, "1.5"}},
@@ -418,19 +420,21 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"Longitudinal.LiveTune.AccelChangeCost", {PERSISTENT | BACKUP, FLOAT, "400.0"}},
     {"Longitudinal.LiveTune.AccelCost", {PERSISTENT | BACKUP, FLOAT, "1.0"}},
 
-    // Vibe tuning profiles (defaults match current profile tables)
-    {"VibeTune.Follow.Relaxed.Headway0", {PERSISTENT | BACKUP, FLOAT, "1.25"}},
-    {"VibeTune.Follow.Relaxed.Headway1", {PERSISTENT | BACKUP, FLOAT, "1.60"}},
-    {"VibeTune.Follow.Relaxed.Headway2", {PERSISTENT | BACKUP, FLOAT, "1.85"}},
-    {"VibeTune.Follow.Relaxed.Headway3", {PERSISTENT | BACKUP, FLOAT, "2.20"}},
-    {"VibeTune.Follow.Standard.Headway0", {PERSISTENT | BACKUP, FLOAT, "1.35"}},
-    {"VibeTune.Follow.Standard.Headway1", {PERSISTENT | BACKUP, FLOAT, "1.35"}},
-    {"VibeTune.Follow.Standard.Headway2", {PERSISTENT | BACKUP, FLOAT, "1.40"}},
-    {"VibeTune.Follow.Standard.Headway3", {PERSISTENT | BACKUP, FLOAT, "1.40"}},
-    {"VibeTune.Follow.Aggressive.Headway0", {PERSISTENT | BACKUP, FLOAT, "1.20"}},
-    {"VibeTune.Follow.Aggressive.Headway1", {PERSISTENT | BACKUP, FLOAT, "1.20"}},
-    {"VibeTune.Follow.Aggressive.Headway2", {PERSISTENT | BACKUP, FLOAT, "1.30"}},
-    {"VibeTune.Follow.Aggressive.Headway3", {PERSISTENT | BACKUP, FLOAT, "1.30"}},
+    // Vibe follow-distance profiles (headway seconds at 0/44/50/90 mph anchors).
+    // Defaults kept in sync with DEFAULT_FOLLOW_DISTANCE_PROFILES in vibe_personality.py.
+    // EV6 retune: three distinct banks, relaxed tops at 1.8s; standard/aggressive tighter.
+    {"VibeTune.Follow.Relaxed.Headway0", {PERSISTENT | BACKUP, FLOAT, "1.60"}},
+    {"VibeTune.Follow.Relaxed.Headway1", {PERSISTENT | BACKUP, FLOAT, "1.65"}},
+    {"VibeTune.Follow.Relaxed.Headway2", {PERSISTENT | BACKUP, FLOAT, "1.70"}},
+    {"VibeTune.Follow.Relaxed.Headway3", {PERSISTENT | BACKUP, FLOAT, "1.80"}},
+    {"VibeTune.Follow.Standard.Headway0", {PERSISTENT | BACKUP, FLOAT, "1.45"}},
+    {"VibeTune.Follow.Standard.Headway1", {PERSISTENT | BACKUP, FLOAT, "1.50"}},
+    {"VibeTune.Follow.Standard.Headway2", {PERSISTENT | BACKUP, FLOAT, "1.55"}},
+    {"VibeTune.Follow.Standard.Headway3", {PERSISTENT | BACKUP, FLOAT, "1.65"}},
+    {"VibeTune.Follow.Aggressive.Headway0", {PERSISTENT | BACKUP, FLOAT, "1.30"}},
+    {"VibeTune.Follow.Aggressive.Headway1", {PERSISTENT | BACKUP, FLOAT, "1.35"}},
+    {"VibeTune.Follow.Aggressive.Headway2", {PERSISTENT | BACKUP, FLOAT, "1.40"}},
+    {"VibeTune.Follow.Aggressive.Headway3", {PERSISTENT | BACKUP, FLOAT, "1.50"}},
 
     {"VibeTune.Brake.Relaxed.Decel0", {PERSISTENT | BACKUP, FLOAT, "-0.50"}},
     {"VibeTune.Brake.Relaxed.Decel1", {PERSISTENT | BACKUP, FLOAT, "-0.80"}},

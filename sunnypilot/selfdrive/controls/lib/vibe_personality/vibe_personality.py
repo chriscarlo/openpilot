@@ -48,18 +48,20 @@ MIN_ACCEL_PROFILES = DEFAULT_MIN_ACCEL_PROFILES
 MIN_ACCEL_BREAKPOINTS = [0.0, 10.0, 25.0, 50.0]
 
 # Following Distance Profiles mapped to LongPersonality (relaxed/standard/aggressive)
+# EV6 retune: three distinct banks, relaxed tops at 1.8s; standard/aggressive tighter.
+# Anchors are 0/44/50/90 mph; kept in sync with VibeTune.Follow.* defaults in params_keys.h.
 DEFAULT_FOLLOW_DISTANCE_PROFILES = {
   LongPersonality.relaxed: {
     'x_vel':  [0.0, 19.7, 22.2, 40.0],
-    'y_dist': (1.25, 1.60, 1.85, 2.20),
+    'y_dist': (1.60, 1.65, 1.70, 1.80),
   },
   LongPersonality.standard: {
     'x_vel':  [0.0, 19.7, 22.2, 40.0],
-    'y_dist': (1.35, 1.35, 1.40, 1.40),
+    'y_dist': (1.45, 1.50, 1.55, 1.65),
   },
   LongPersonality.aggressive: {
     'x_vel':  [0.0, 19.7, 22.2, 40.0],
-    'y_dist': (1.20, 1.20, 1.30, 1.30),
+    'y_dist': (1.30, 1.35, 1.40, 1.50),
   },
 }
 FOLLOW_DISTANCE_PROFILES = DEFAULT_FOLLOW_DISTANCE_PROFILES
