@@ -36,8 +36,9 @@ LeadHandoffStoppingNeedDecelMps2 / LeadHandoffStoppingNeedRefSpeedMps,
 rollback 1e9 = exact legacy handoff) hands the solver the lead obstacle as soon
 as stopping STOP_DISTANCE short of the lead kinematically requires the
 threshold decel, using the M1 kinematic-bound two-branch physics with inverted
-oncoming semantics. Post-fix at defaults: 8/80 -> worst 0.3 s step 0.49,
-peak -2.72, stop gap 6.47 m; 7/80 -> 0.54 / -2.88 / 5.86 m.
+oncoming semantics. Post-fix at composed HEAD defaults (with the preview
+fade): 8/80 -> worst 0.3 s step 0.46, peak -2.64, stop gap 6.51 m;
+7/80 -> 0.53 / -2.81 / 5.88 m.
 
 Calm-human reference from 8 m/s with 80 m warning: steady decel 0.43 m/s^2,
 peak well under 1.5 m/s^2 with early onset, stopping ~STOP_DISTANCE (6 m)
