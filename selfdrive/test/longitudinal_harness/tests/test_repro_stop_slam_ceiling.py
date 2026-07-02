@@ -147,10 +147,6 @@ def test_calm_approach_scenario_wiring() -> None:
   ), "deep-brake frames not owned by lead_slowdown_accel_ceiling: mechanism changed, re-investigate"
 
 
-@pytest.mark.xfail(strict=True, reason="Lead-slowdown ceiling danger term (closing^2 / 2*danger_surplus, "
-                                       "long_mpc.py get_lead_slowdown_accel_ceiling) saturates at "
-                                       "lead_slowdown_max_decel on a calm noise-free approach to a stopped "
-                                       "lead, slamming the brakes well before the natural stop point")
 def test_no_brake_slam_on_calm_noise_free_approach() -> None:
   result = _run()
 

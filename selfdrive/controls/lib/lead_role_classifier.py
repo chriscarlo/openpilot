@@ -31,6 +31,8 @@ class ControlLead:
   vLeadK: float = 0.0
   aLeadK: float = 0.0
   fcw: bool = False
+  # Producer-side veto on FCW/crash escalation (see cereal RadarState.LeadData).
+  fcwSuppressed: bool = False
   aLeadTau: float = 1.5
   modelProb: float = 0.0
   radar: bool = False
@@ -50,6 +52,7 @@ class ControlLead:
       vLeadK=float(getattr(lead, "vLeadK", 0.0) or 0.0),
       aLeadK=float(getattr(lead, "aLeadK", 0.0) or 0.0),
       fcw=bool(getattr(lead, "fcw", False)),
+      fcwSuppressed=bool(getattr(lead, "fcwSuppressed", False)),
       aLeadTau=float(getattr(lead, "aLeadTau", 1.5) or 1.5),
       modelProb=float(getattr(lead, "modelProb", 0.0) or 0.0),
       radar=bool(getattr(lead, "radar", False)),

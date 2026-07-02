@@ -163,6 +163,12 @@ LEAD_SLOWDOWN_DANGER_MOTION_DECEL_V = [0.0, 0.35, 1.0]
 LEAD_SLOWDOWN_HARD_BRAKE_DECEL_BP = [3.0, 5.0, 6.0]
 LEAD_SLOWDOWN_HARD_BRAKE_DECEL_V = [0.0, 0.50, 1.0]
 LEAD_SLOWDOWN_LEAD_DECEL_OVERSHOOT = 1.05
+# Hard floor for the energy-consistency bound's gap reserve (see
+# get_lead_slowdown_accel_ceiling): below ~1 m the margin gives LESS ceiling
+# braking (wrong direction for the permissive end of a safety tunable) and the
+# inside-margin full-authority restoration becomes unreachable. The matching
+# hard ceiling is STOP_DISTANCE - 1.0, enforced at the same clip site.
+LEAD_SLOWDOWN_KINEMATIC_MARGIN_MIN_M = 1.0
 LEAD_SLOWDOWN_COMFORT_DECEL_CAP = 1.0
 LEAD_SLOWDOWN_MIN_DECEL_OUTPUT = 0.03
 LEAD_SLOWDOWN_CEILING_RELEASE_RATE_MPS3 = 0.45
@@ -298,12 +304,13 @@ class _StabilizedLead:
   of attributes MPC callers read, so downstream code is oblivious to whether
   it's looking at a raw capnp reader or a phantom-extrapolated snapshot."""
   __slots__ = ('status', 'dRel', 'yRel', 'vRel', 'vLead', 'aLeadK', 'modelProb',
-               'dPath', 'vLat', 'aLeadTau', 'aRel', 'vLeadK', 'fcw', 'radar',
-               'radarTrackId')
+               'dPath', 'vLat', 'aLeadTau', 'aRel', 'vLeadK', 'fcw',
+               'fcwSuppressed', 'radar', 'radarTrackId')
 
   def __init__(self, status=False, dRel=0.0, yRel=0.0, vRel=0.0, vLead=0.0,
                 aLeadK=0.0, modelProb=0.0, dPath=0.0, vLat=0.0, aLeadTau=0.0,
-                aRel=0.0, vLeadK=0.0, fcw=False, radar=False, radarTrackId=-1):
+                aRel=0.0, vLeadK=0.0, fcw=False, fcwSuppressed=False, radar=False,
+                radarTrackId=-1):
     self.status = bool(status)
     self.dRel = float(dRel)
     self.yRel = float(yRel)
@@ -317,6 +324,7 @@ class _StabilizedLead:
     self.aRel = float(aRel)
     self.vLeadK = float(vLeadK)
     self.fcw = bool(fcw)
+    self.fcwSuppressed = bool(fcwSuppressed)
     self.radar = bool(radar)
     self.radarTrackId = int(radarTrackId)
 
@@ -347,6 +355,7 @@ class _StabilizedLead:
       aRel=cls._safe_attr(rd, 'aRel'),
       vLeadK=cls._safe_attr(rd, 'vLeadK'),
       fcw=bool(getattr(rd, 'fcw', False)),
+      fcwSuppressed=bool(getattr(rd, 'fcwSuppressed', False)),
       radar=bool(getattr(rd, 'radar', False)),
       radarTrackId=int(getattr(rd, 'radarTrackId', -1) or -1),
     )
@@ -1013,6 +1022,62 @@ def get_lead_slowdown_accel_ceiling(v_ego, lead, t_follow,
   if closing_speed > 0.0 or lead_decel > 0.0:
     danger_required_gap = danger_surplus if danger_surplus > 0.0 else max(d_rel - CRASH_DISTANCE, 1.0)
     danger_required_decel = (closing_speed ** 2) / (2.0 * max(danger_required_gap, 0.3)) + lead_decel * LEAD_SLOWDOWN_LEAD_DECEL_OVERSHOOT
+  # Energy-consistency bound (calm-stop slam fix): danger_surplus measures the
+  # distance to 0.75*headway, a line the natural stop point sits INSIDE at low
+  # speed, so on every normal stop the denominator above collapses to its 0.3 m
+  # floor and the danger term saturates to lead_slowdown_max_decel. Physics is
+  # the collapse-proof reference instead: the gated danger demand may never
+  # exceed `headroom` times the decel actually required to stop `margin` short
+  # of the lead (including the lead's remaining braking distance when it is
+  # slowing). Genuine threats keep full authority by construction: when the
+  # available stopping distance is truly small the physical requirement itself
+  # is large (and the bound disappears once the lead is projected to stop
+  # inside `margin`), and matching a braking lead's own decel (with overshoot)
+  # is never capped. Applied AFTER the danger gates (see danger_decel below) so
+  # it only trims demands that exceed K x physics, never the gate softening.
+  kinematic_headroom = max(1.0, float(tuning.lead_slowdown_kinematic_headroom))
+  # Margin is clamped in code, not just in the tunable spec: values at/above
+  # STOP_DISTANCE (6 m) inflate the bound near the natural stop point enough to
+  # fully readmit the calm-stop slam (verified: margin=6.0 reproduces the legacy
+  # -4.0 saturation), and margin below ~1 m starves the ceiling of its stop-gap
+  # reserve AND makes the inside-margin full-authority restoration unreachable.
+  # No live-tunable (or direct param) value may cross either line.
+  kinematic_margin = float(np.clip(float(tuning.lead_slowdown_kinematic_margin_m),
+                                   LEAD_SLOWDOWN_KINEMATIC_MARGIN_MIN_M,
+                                   STOP_DISTANCE - 1.0))
+  # Closing speed for the bound comes from v_lead = max(0, vLead), NOT from the
+  # published closing_speed above. radard publishes vLead = v_ego + vRel
+  # (radard.py ModelLeadTrack.update), so for a MOVING lead this difference is
+  # still the boosted -vRel (lag comp / urgency blend overshoot) — the bound is
+  # physics-true only through the zero clamp on v_lead: exact for stopped /
+  # near-stopped leads (the calm-stop collapse case, where the boost artifact
+  # publishes vLead ~ -1.2 m/s and the clamp discards it), and conservative
+  # (over-braking side) for moving leads. The boost still fully drives the
+  # danger DEMAND above; only this BOUND discards it. Known open case: a
+  # creeping lead (~0.8 m/s) approached at 8 m/s noise-off still saturates the
+  # ceiling to max decel — pre-existing behavior (legacy emulation identical),
+  # NOT covered by this bound.
+  # Oncoming/reversing bypass: the max(0, vLead) clamp would credit a genuinely
+  # oncoming lead as merely stationary and trim a ceiling the true closure rate
+  # (v_ego + |vLead|) fully justifies. Below the bypass threshold (default
+  # -2.5 m/s, clearly beyond the ~-1.2 m/s near-stop boost artifact) the bound
+  # is skipped entirely and the danger term keeps full legacy authority.
+  kinematic_closing = max(0.0, v_ego - v_lead)
+  match_avail_gap = d_rel - kinematic_margin
+  required_kinematic_decel = None
+  if v_lead_raw >= float(tuning.lead_slowdown_kinematic_oncoming_vlead_mps) and match_avail_gap > 0.05:
+    required_kinematic_decel = (kinematic_closing ** 2) / (2.0 * match_avail_gap)
+    if lead_decel > 0.05:
+      lead_stop_dist = (v_lead ** 2) / (2.0 * lead_decel)
+      stop_avail_gap = d_rel + lead_stop_dist - kinematic_margin
+      if stop_avail_gap > 0.05:
+        required_kinematic_decel = max(required_kinematic_decel, (v_ego ** 2) / (2.0 * stop_avail_gap))
+      else:
+        required_kinematic_decel = None
+  danger_decel_cap = None
+  if required_kinematic_decel is not None:
+    danger_decel_cap = max(kinematic_headroom * required_kinematic_decel,
+                           lead_decel * LEAD_SLOWDOWN_LEAD_DECEL_OVERSHOOT)
   danger_deficit_gate = float(np.interp(projected_danger_deficit, LEAD_SLOWDOWN_DANGER_DEFICIT_BP, LEAD_SLOWDOWN_DANGER_DEFICIT_V))
   ttc_danger_gate = float(np.interp(ttc_danger, LEAD_SLOWDOWN_TTC_DANGER_BP, LEAD_SLOWDOWN_TTC_DANGER_V))
   ttc_collision_gate = float(np.interp(ttc_collision, LEAD_SLOWDOWN_TTC_COLLISION_BP, LEAD_SLOWDOWN_TTC_COLLISION_V))
@@ -1026,6 +1091,8 @@ def get_lead_slowdown_accel_ceiling(v_ego, lead, t_follow,
     max(danger_deficit_gate, ttc_danger_gate) * danger_motion_gate * hard_brake_gate,
   )
   danger_decel = danger_required_decel * danger_gate
+  if danger_decel_cap is not None:
+    danger_decel = min(danger_decel, danger_decel_cap)
 
   proximity_gate = max(gap_gate, headway_deficit_gate, ttc_headway_gate)
   onset = max(
@@ -2236,6 +2303,7 @@ class LongitudinalMpc:
                                          slow_tau_s=self._live_tune_cfg.virtual_lead_slow_tau_s,
                                          sign_transition_tau_s=HYUNDAI_VIRTUAL_LEAD_SIGN_TRANSITION_TAU_S)
     reclaim.fcw = optimistic.fcw
+    reclaim.fcwSuppressed = bool(getattr(optimistic, 'fcwSuppressed', False))
     reclaim.aLeadTau = optimistic.aLeadTau
     reclaim.modelProb = self._filter_symmetric_metric(prev.modelProb, optimistic.modelProb, dt_s, HYUNDAI_VIRTUAL_LEAD_MODEL_PROB_TAU_S)
     reclaim.radar = optimistic.radar
@@ -2325,6 +2393,7 @@ class LongitudinalMpc:
                                              slow_tau_s=cfg.virtual_lead_slow_tau_s,
                                              sign_transition_tau_s=HYUNDAI_VIRTUAL_LEAD_SIGN_TRANSITION_TAU_S)
       filtered.fcw = raw_lead.fcw
+      filtered.fcwSuppressed = bool(getattr(raw_lead, 'fcwSuppressed', False))
       filtered.aLeadTau = raw_lead.aLeadTau
       filtered.modelProb = self._filter_symmetric_metric(prev.modelProb, raw_lead.modelProb, dt_s, HYUNDAI_VIRTUAL_LEAD_MODEL_PROB_TAU_S)
       filtered.radar = raw_lead.radar
@@ -2598,6 +2667,7 @@ class LongitudinalMpc:
           aRel=state.last_valid.aRel,
           vLeadK=state.last_valid.vLeadK,
           fcw=state.last_valid.fcw,
+          fcwSuppressed=bool(getattr(state.last_valid, 'fcwSuppressed', False)),
           radar=state.last_valid.radar,
           radarTrackId=state.last_valid.radarTrackId,
         )
@@ -3609,24 +3679,37 @@ class LongitudinalMpc:
 
     fcw_lead_xv = None
     fcw_model_prob = 0.0
+    fcw_suppressed = False
     if self.mode == 'acc':
       if self.source == 'lead0' and control_lead0.status:
         fcw_lead_xv = lead_xv_0
         fcw_model_prob = float(control_lead0.modelProb)
+        fcw_suppressed = bool(getattr(control_lead0, 'fcwSuppressed', False))
       elif self.source == 'lead1' and control_lead1.status:
         fcw_lead_xv = lead_xv_1
         fcw_model_prob = float(control_lead1.modelProb)
+        fcw_suppressed = bool(getattr(control_lead1, 'fcwSuppressed', False))
     else:
       if self.source == 'lead0' and control_lead0.status:
         fcw_lead_xv = lead_xv_0
         fcw_model_prob = float(control_lead0.modelProb)
+        fcw_suppressed = bool(getattr(control_lead0, 'fcwSuppressed', False))
       elif self.source == 'lead1' and control_lead1.status:
         fcw_lead_xv = lead_xv_1
         fcw_model_prob = float(control_lead1.modelProb)
+        fcw_suppressed = bool(getattr(control_lead1, 'fcwSuppressed', False))
 
+    # fcwSuppressed is the producing tracker's veto: the raw measurement stream
+    # does NOT corroborate the filtered closeness (phantom-collapsed lead), so a
+    # predicted crash against it must not accrue toward FCW / the Hyundai
+    # emergency-braking override. Default False everywhere it is not computed,
+    # which preserves legacy behavior for radar tracks and fabricated leads; a
+    # corroborated genuine threat is never suppressed (raw <= filtered + tol on
+    # a real collision course), so genuine FCW timing is frame-identical.
     if (fcw_lead_xv is not None and
             np.any(fcw_lead_xv[FCW_IDXS,0] - self.x_sol[FCW_IDXS,0] < CRASH_DISTANCE) and
-            fcw_model_prob > 0.9):
+            fcw_model_prob > 0.9 and
+            not fcw_suppressed):
       self.crash_cnt += 1
     else:
       self.crash_cnt = 0

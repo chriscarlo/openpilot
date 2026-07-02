@@ -755,6 +755,11 @@ struct RadarState @0x9a185389d6fdd05f {
     modelProb @13 :Float32;
     radar @14 :Bool;
     radarTrackId @15 :Int32 = -1;
+    # True when the publishing tracker could NOT corroborate the filtered dRel
+    # against its raw measurements (raw says the lead is materially farther).
+    # Consumers treat this as a veto on FCW/crash escalation only; default
+    # False preserves legacy behavior for producers that never set it.
+    fcwSuppressed @16 :Bool;
 
     aLeadDEPRECATED @5 :Float32;
   }

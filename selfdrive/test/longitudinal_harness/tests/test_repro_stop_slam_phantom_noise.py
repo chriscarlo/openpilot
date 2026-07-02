@@ -135,11 +135,42 @@ def test_noisy_calm_approach_scenario_wiring() -> None:
   assert stop_row["true_min_gap_m"] > 0.0
 
 
-@pytest.mark.xfail(strict=True, reason="ev6_measured inward dRel outlier self-justifies adoption through the "
-                                       "fast-close gates (radard.py _fast_closing_supported) and the open-slew-"
-                                       "capped recovery cannot outrun the closing prediction: published dRel "
-                                       "collapses to ~1.8 m while the true gap is ~12.8 m and the planner steps "
-                                       "to full braking well before the natural stop point")
+def test_m2_no_phantom_collapse_and_no_slam_step_under_measured_noise() -> None:
+  """GREEN pin of the M2 fix on the exact repro scenario.
+
+  The strict-xfail test below stays xfail on the min-true-gap floor conjunct
+  (owned by the M1/M3 stopping chain), so it cannot catch an M2 regression:
+  it would stay xfail whether the phantom returns or not. This test enforces
+  the two M2 criteria — no phantom collapse and no mid-approach slam step —
+  as hard green assertions on the same seed-99 run.
+  """
+  result = _run()
+
+  phantom = _phantom_collapse(result)
+  assert phantom is None, (
+    f"phantom collapse returned: t={phantom['t_s']:.2f} "
+    f"published={phantom['lead_one_published_d_rel_m']:.2f} m "
+    f"true={phantom['lead_one_true_d_rel_m']:.2f} m"
+  )
+
+  slam = _slam_step(result)
+  assert slam is None, (
+    f"slam step returned: {slam[0]['planner_accel_mps2']:+.2f} -> "
+    f"{slam[1]['planner_accel_mps2']:+.2f} m/s^2 over "
+    f"[{slam[0]['t_s']:.2f}, {slam[1]['t_s']:.2f}] s at true gap "
+    f"{slam[0]['lead_one_true_d_rel_m']:.2f} m"
+  )
+
+
+@pytest.mark.xfail(strict=True, reason="Phantom mechanism FIXED (fast-close corroboration + corroborated opening "
+                                       "recovery in radard.py ModelLeadTrack): no phantom collapse and no slam "
+                                       "step under measured noise. Remaining conjunct: minTrueGapM 3.74 < 4.0 "
+                                       "floor, owned by the composed-tree M1/M3 stopping chain — given accurate "
+                                       "published gaps it stops 2.9-4.0 m short on 11/14 ev6_measured seeds, and "
+                                       "clean no-phantom seeds show the identical short stops with M2 fully "
+                                       "disabled (FastCloseConfirmFrames=1, OpenRecoveryMaxEgoMps=0), so do NOT "
+                                       "re-diagnose the fast-close outlier adoption; see the stopping-chain "
+                                       "residual owner task in docs/chauffeur/live_tunable_params.md")
 def test_no_phantom_collapse_slam_under_measured_noise() -> None:
   result = _run()
 

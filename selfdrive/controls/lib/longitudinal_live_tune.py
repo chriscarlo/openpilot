@@ -157,6 +157,42 @@ LEAD_RESPONSE_TUNE_SPECS = (
     description="Maximum braking magnitude the slower/braking-lead ceiling may request before vehicle/controller limits apply.",
   ),
   LeadResponseTuneSpec(
+    attr="lead_slowdown_kinematic_headroom",
+    key="Longitudinal.LiveTune.LeadSlowdownKinematicHeadroom",
+    cli_name="lead-slowdown-kinematic-headroom",
+    label="slowdown_kinematic_headroom",
+    default=1.5,
+    minimum=1.0,
+    maximum=5.0,
+    description="Multiple of the kinematically required stop decel the slowdown danger term may demand; caps the danger-surplus collapse on calm stops without limiting genuine short-gap threats.",
+  ),
+  LeadResponseTuneSpec(
+    attr="lead_slowdown_kinematic_margin_m",
+    key="Longitudinal.LiveTune.LeadSlowdownKinematicMarginM",
+    cli_name="lead-slowdown-kinematic-margin-m",
+    label="slowdown_kinematic_margin",
+    default=4.0,
+    minimum=1.0,
+    maximum=5.0,
+    description="Gap reserve for the slowdown kinematic bound: the danger term is uncapped (full authority) once the lead is "
+                "projected to stop inside this distance. Range is enforced again in code (1.0 to STOP_DISTANCE-1.0 = 5.0): at "
+                "6 m the bound inflates near the natural stop point and readmits the calm-stop slam; below 1 m the bound gives "
+                "LESS ceiling braking and the inside-margin full-authority restoration is unreachable.",
+  ),
+  LeadResponseTuneSpec(
+    attr="lead_slowdown_kinematic_oncoming_vlead_mps",
+    key="Longitudinal.LiveTune.LeadSlowdownKinematicOncomingVLeadMps",
+    cli_name="lead-slowdown-kinematic-oncoming-vlead",
+    label="slowdown_kinematic_oncoming_vlead",
+    default=-2.5,
+    minimum=-6.0,
+    maximum=-1.5,
+    description="Published vLead (m/s) below which the slowdown kinematic bound is bypassed entirely (full legacy danger "
+                "authority for oncoming/reversing leads, whose true closure the max(0, vLead) clamp would understate). Must "
+                "stay clearly below the ~-1.2 m/s near-stop vRel-boost artifact (max -1.5) or the calm-stop fix is defeated; "
+                "more negative than -6 would deny genuinely oncoming leads their uncapped authority.",
+  ),
+  LeadResponseTuneSpec(
     attr="lead_brake_release_min_speed_mps",
     key="Longitudinal.LiveTune.LeadBrakeReleaseMinSpeedMps",
     cli_name="lead-brake-release-min-speed",
@@ -665,6 +701,100 @@ LEAD_RESPONSE_TUNE_SPECS = (
                 "Set both to 0 to disable the fade (full compensation everywhere, pre-fade behavior).",
   ),
   LeadResponseTuneSpec(
+    attr="model_lead_filter_fast_close_confirm_frames",
+    key="Longitudinal.LiveTune.ModelLeadFilterFastCloseConfirmFrames",
+    cli_name="model-lead-fast-close-confirm-frames",
+    label="model_lead_fast_close_confirm",
+    default=2.0,
+    minimum=1.0,
+    maximum=6.0,
+    description="Consecutive qualifying frames (50 ms each) of beyond-gate inward dRel innovation required before the "
+                "fast-close path adopts a much-closer measurement. 1 = legacy single-frame adoption; 2 filters isolated "
+                "heavy-tail outliers while adding 50 ms to genuine cut-in fast adoption (urgency blend still reacts in frame 1).",
+  ),
+  LeadResponseTuneSpec(
+    attr="model_lead_filter_open_recovery_confirm_frames",
+    key="Longitudinal.LiveTune.ModelLeadFilterOpenRecoveryConfirmFrames",
+    cli_name="model-lead-open-recovery-confirm-frames",
+    label="model_lead_open_recovery_confirm",
+    default=4.0,
+    minimum=1.0,
+    maximum=12.0,
+    description="Consecutive frames of beyond-gate OPENING dRel innovation required before the corroborated low-speed "
+                "recovery engages to heal a wrong-too-close track state. Higher = more conservative healing.",
+  ),
+  LeadResponseTuneSpec(
+    attr="model_lead_filter_open_recovery_tau_s",
+    key="Longitudinal.LiveTune.ModelLeadFilterOpenRecoveryTauS",
+    cli_name="model-lead-open-recovery-tau",
+    label="model_lead_open_recovery_tau",
+    default=0.5,
+    minimum=0.05,
+    maximum=8.0,
+    description="dRel filter tau used while the corroborated opening recovery is engaged (bypasses the opening slew "
+                "cap up to this tau's step). >= ModelLeadFilterTauS effectively restores the legacy slew-only recovery.",
+  ),
+  LeadResponseTuneSpec(
+    attr="model_lead_filter_open_recovery_max_ego_mps",
+    key="Longitudinal.LiveTune.ModelLeadFilterOpenRecoveryMaxEgoMps",
+    cli_name="model-lead-open-recovery-max-ego",
+    label="model_lead_open_recovery_max_ego",
+    default=8.0,
+    minimum=0.0,
+    maximum=40.0,
+    description="Ego speed (m/s) at/below which the corroborated opening recovery may engage. 0 disables the recovery "
+                "entirely (legacy opening behavior at all speeds).",
+  ),
+  LeadResponseTuneSpec(
+    attr="model_lead_filter_open_recovery_innov_gate_m",
+    key="Longitudinal.LiveTune.ModelLeadFilterOpenRecoveryInnovGateM",
+    cli_name="model-lead-open-recovery-innov-gate",
+    label="model_lead_open_recovery_innov_gate",
+    default=2.5,
+    minimum=0.1,
+    maximum=10.0,
+    description="Opening dRel innovation (m) a frame must exceed to count toward the recovery confirmation. Default "
+                "mirrors the 2.5 m close gate so only deeply-wrong states heal; lowering toward 1.0 also heals the "
+                "~1-2 m pessimistic noise-rectification bias near stops (measured 0.1-0.4 m shorter true stop gaps).",
+  ),
+  LeadResponseTuneSpec(
+    attr="model_lead_fcw_corrob_tol_m",
+    key="Longitudinal.LiveTune.ModelLeadFcwCorrobTolM",
+    cli_name="model-lead-fcw-corrob-tol",
+    label="model_lead_fcw_corrob_tol",
+    default=2.5,
+    minimum=0.5,
+    maximum=50.0,
+    description="FCW-corroboration tolerance (m): a raw model dRel more than this ABOVE the filtered dRel counts as a "
+                "disagreement vote (raw says the lead is farther, i.e. the filtered closeness is uncorroborated). "
+                "Closing-lag disagreement is impossible by sign, so genuine threats always agree; base noise at crash "
+                "range is sigma ~0.5 m, so 2.5 m = 5 sigma against false disagreement.",
+  ),
+  LeadResponseTuneSpec(
+    attr="model_lead_fcw_corrob_min_agree",
+    key="Longitudinal.LiveTune.ModelLeadFcwCorrobMinAgree",
+    cli_name="model-lead-fcw-corrob-min-agree",
+    label="model_lead_fcw_corrob_min_agree",
+    default=2.0,
+    minimum=0.0,
+    maximum=8.0,
+    description="Minimum agreeing frames within the FCW-corroboration window for a model lead to stay FCW-eligible "
+                "(fcwSuppressed=False). 0 disables suppression entirely (legacy: any predicted crash with prob > 0.9 "
+                "accrues crash_cnt regardless of raw-measurement corroboration).",
+  ),
+  LeadResponseTuneSpec(
+    attr="model_lead_fcw_corrob_window",
+    key="Longitudinal.LiveTune.ModelLeadFcwCorrobWindow",
+    cli_name="model-lead-fcw-corrob-window",
+    label="model_lead_fcw_corrob_window",
+    default=3.0,
+    minimum=1.0,
+    maximum=8.0,
+    description="FCW-corroboration vote window (frames, 50 ms each). Majority vote (MinAgree of Window) bridges "
+                "isolated outward measurement outliers (~3% of close-range frames) so genuine FCW timing is untouched, "
+                "while a phantom-collapsed track (raw persistently far above the filter) is suppressed within one frame.",
+  ),
+  LeadResponseTuneSpec(
     attr="lead_accel_corr_margin_mps2",
     key="Longitudinal.LiveTune.LeadAccelCorrMarginMps2",
     cli_name="lead-accel-corr-margin",
@@ -845,6 +975,9 @@ class LeadResponseTuningConfig:
   lead_keepup_max_accel: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_keepup_max_accel"].default
   lead_slowdown_strength: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_slowdown_strength"].default
   lead_slowdown_max_decel: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_slowdown_max_decel"].default
+  lead_slowdown_kinematic_headroom: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_slowdown_kinematic_headroom"].default
+  lead_slowdown_kinematic_margin_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_slowdown_kinematic_margin_m"].default
+  lead_slowdown_kinematic_oncoming_vlead_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_slowdown_kinematic_oncoming_vlead_mps"].default
   lead_brake_release_min_speed_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_brake_release_min_speed_mps"].default
   lead_brake_release_brake_deficit_margin_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_brake_release_brake_deficit_margin_m"].default
   lead_brake_release_lookahead_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_brake_release_lookahead_s"].default
@@ -895,6 +1028,14 @@ class LeadResponseTuningConfig:
   model_lead_filter_lag_comp_deadzone_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_filter_lag_comp_deadzone_mps"].default
   model_lead_filter_lag_comp_fade_lo_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_filter_lag_comp_fade_lo_mps"].default
   model_lead_filter_lag_comp_fade_hi_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_filter_lag_comp_fade_hi_mps"].default
+  model_lead_filter_fast_close_confirm_frames: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_filter_fast_close_confirm_frames"].default
+  model_lead_filter_open_recovery_confirm_frames: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_filter_open_recovery_confirm_frames"].default
+  model_lead_filter_open_recovery_tau_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_filter_open_recovery_tau_s"].default
+  model_lead_filter_open_recovery_max_ego_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_filter_open_recovery_max_ego_mps"].default
+  model_lead_filter_open_recovery_innov_gate_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_filter_open_recovery_innov_gate_m"].default
+  model_lead_fcw_corrob_tol_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_fcw_corrob_tol_m"].default
+  model_lead_fcw_corrob_min_agree: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_fcw_corrob_min_agree"].default
+  model_lead_fcw_corrob_window: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_fcw_corrob_window"].default
   lead_accel_corr_margin_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_accel_corr_margin_mps2"].default
   lead_accel_corr_meas_tau_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_accel_corr_meas_tau_s"].default
   lead_accel_corr_ttc_guard_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_accel_corr_ttc_guard_s"].default

@@ -143,10 +143,15 @@ def test_fcw_scenario_wiring() -> None:
   assert all(result.trace[min(i + 5, len(result.trace) - 1)]["fcw_visual_alert_active"] for i in fcw_rows)
 
 
-@pytest.mark.xfail(strict=True, reason="Phantom gap collapse drives mpc.crash_cnt > 2 on a calm approach; "
-                                       "longitudinalPlan.fcw -> VisualAlert.fcw -> Hyundai emergency_control "
-                                       "commands -5.5 m/s^2 in one 20 ms tick below the planner, bypassing "
-                                       "EMA and jerk limits (controller.py update()/emergency_control)")
+@pytest.mark.xfail(strict=True, reason="FCW cascade fixed (fcwSuppressed corroboration veto: radard.py "
+                                       "_update_fcw_corroboration -> long_mpc.py crash_cnt gate; no false FCW, "
+                                       "controller bounded at -3.99). Remaining conjunct: minTrueGapM 3.74 < 4.0 "
+                                       "floor, owned by the composed-tree M1/M3 stopping chain (stops 2.9-4.0 m "
+                                       "short on 11/14 ev6_measured seeds given accurate published gaps; NOT the "
+                                       "lead-filter — lowering ModelLeadFilterOpenRecoveryInnovGateM makes stops "
+                                       "SHORTER) — same residual that keeps test_repro_stop_slam_phantom_noise "
+                                       "xfailed; see the stopping-chain residual owner task in "
+                                       "docs/chauffeur/live_tunable_params.md")
 def test_no_fcw_emergency_braking_on_calm_approach() -> None:
   result = _run()
 

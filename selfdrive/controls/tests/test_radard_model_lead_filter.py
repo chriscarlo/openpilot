@@ -1,3 +1,4 @@
+import dataclasses
 import math
 import random
 from types import SimpleNamespace
@@ -6,8 +7,10 @@ import numpy as np
 import pytest
 
 from opendbc.car.hyundai.values import HyundaiFlags
+from openpilot.selfdrive.controls.lib.longitudinal_live_tune import LeadResponseTuningConfig
 from openpilot.selfdrive.controls.radard import (
   KalmanParams,
+  ModelLeadTrack,
   ModelLeadTracker,
   RADAR_TO_CAMERA,
   Track,
@@ -371,3 +374,172 @@ class TestRadardModelLeadFilter:
     )
 
     assert not lead["status"]
+
+
+DT_FRAME_S = 0.05
+
+
+def _cfg(**overrides) -> LeadResponseTuningConfig:
+  cfg = LeadResponseTuningConfig()
+  return dataclasses.replace(cfg, **overrides) if overrides else cfg
+
+
+def _lead_dict(d_rel, v_rel, v_ego):
+  return {
+    "dRel": float(d_rel),
+    "yRel": 0.0,
+    "vRel": float(v_rel),
+    "vLead": float(v_ego + v_rel),
+    "vLeadK": float(v_ego + v_rel),
+    "aLeadK": 0.0,
+    "aLeadTau": 0.3,
+    "modelProb": 0.95,
+    "dPath": 0.0,
+    "vLat": 0.0,
+  }
+
+
+def _approach_track(cfg, *, v_ego=6.0, d0=30.0, frames=20):
+  """Settled track approaching a stopped lead: raw dRel tracks truth each frame."""
+  v_rel = -float(v_ego)
+  track = ModelLeadTrack.from_lead_dict(-1001, _lead_dict(d0, v_rel, v_ego), 0.0, 0)
+  t, d = 0.0, float(d0)
+  for _ in range(frames):
+    t += DT_FRAME_S
+    d = max(0.0, d + v_rel * DT_FRAME_S)
+    track.update(_lead_dict(d, v_rel, v_ego), t, v_ego, cfg, 0)
+  return track, t, d
+
+
+class TestModelLeadFastCloseCorroborationAndOpenRecovery:
+  """Pins the M2 fix (corroboration-before-adoption + corroborated opening
+  recovery) with green tests: the strict-xfail phantom repro stays xfail on an
+  unrelated stopping-chain conjunct, so it cannot catch an M2 regression."""
+
+  def test_isolated_inward_outlier_is_not_fast_adopted(self):
+    # The exact phantom mechanism: one heavy-tailed inward dRel outlier during
+    # a > 2.5 m/s approach (strong_closing always true) must NOT collapse the
+    # track in a single 50 ms frame.
+    cfg = _cfg()
+    v_ego = 6.0
+    track, t, d = _approach_track(cfg, v_ego=v_ego)
+    pre_drel = track.dRel
+
+    t += DT_FRAME_S
+    d -= v_ego * DT_FRAME_S
+    outlier = d - 10.0
+    track.update(_lead_dict(outlier, -v_ego, v_ego), t, v_ego, cfg, 0)
+
+    # Partial pessimistic adoption only (urgency blend at the boosted close
+    # slew, ~0.5 m/frame) -- nowhere near the raw outlier.
+    assert track.dRel > outlier + 8.0
+    assert pre_drel - track.dRel < 1.2
+
+    # Truth resumes: the track re-converges instead of ratcheting.
+    for _ in range(5):
+      t += DT_FRAME_S
+      d -= v_ego * DT_FRAME_S
+      track.update(_lead_dict(d, -v_ego, v_ego), t, v_ego, cfg, 0)
+    assert abs(track.dRel - d) < 1.0
+
+  def test_two_consecutive_qualifying_frames_are_fast_adopted(self):
+    # Latency bound for genuine same-track close threats beyond the gate: the
+    # second consecutive qualifying frame reaches the fast path (alpha >= 0.65)
+    # and the track converges onto the raw measurement within 3 frames.
+    cfg = _cfg()
+    v_ego = 6.0
+    track, t, d = _approach_track(cfg, v_ego=v_ego)
+
+    drels = []
+    raw = None
+    for _ in range(3):
+      t += DT_FRAME_S
+      d -= v_ego * DT_FRAME_S
+      raw = d - 10.0
+      track.update(_lead_dict(raw, -v_ego, v_ego), t, v_ego, cfg, 0)
+      drels.append(track.dRel)
+
+    # Frame 1 is partial (slew-clamped), frame 2 is the fast adoption jump.
+    assert drels[0] - drels[1] > 5.0
+    assert abs(drels[2] - raw) < 1.5
+
+  def test_legacy_kill_switch_confirm_frames_one_restores_single_frame_adoption(self):
+    # ConfirmFrames=1 must restore the legacy instant fast-close adoption.
+    cfg = _cfg(model_lead_filter_fast_close_confirm_frames=1.0)
+    v_ego = 6.0
+    track, t, d = _approach_track(cfg, v_ego=v_ego)
+
+    t += DT_FRAME_S
+    d -= v_ego * DT_FRAME_S
+    outlier = d - 10.0
+    track.update(_lead_dict(outlier, -v_ego, v_ego), t, v_ego, cfg, 0)
+
+    assert track.dRel < outlier + 4.0  # alpha >= 0.65 on ~-10 m innovation
+
+  def _collapse_then_truth(self, cfg, *, v_ego, truth_frames, collapse_m=12.0):
+    """Fast-collapse a settled track, then resume truthful measurements.
+
+    Returns (track, per-frame (raw, dRel, step_above_prediction) list, final raw d)."""
+    v_rel = -6.0  # closing 6 m/s in every variant (lead speed = v_ego - 6)
+    track, t, d = _approach_track(cfg, v_ego=v_ego, d0=40.0)
+    for _ in range(3):
+      t += DT_FRAME_S
+      d += v_rel * DT_FRAME_S
+      track.update(_lead_dict(d - collapse_m, v_rel, v_ego), t, v_ego, cfg, 0)
+    assert track.dRel < d - collapse_m + 4.0  # state is wrong-too-close
+
+    rows = []
+    for _ in range(truth_frames):
+      t += DT_FRAME_S
+      d += v_rel * DT_FRAME_S
+      predicted = track.predict_drel(t)
+      track.update(_lead_dict(d, v_rel, v_ego), t, v_ego, cfg, 0)
+      rows.append((d, track.dRel, track.dRel - predicted))
+    return track, rows, d
+
+  def test_corroborated_opening_recovery_heals_wrong_too_close_state(self):
+    cfg = _cfg()
+    open_slew_step_m = float(cfg.model_lead_filter_open_slew_max_mps) * DT_FRAME_S
+    track, rows, d = self._collapse_then_truth(cfg, v_ego=6.0, truth_frames=30)
+
+    # Before OpenRecoveryConfirmFrames (4) consecutive beyond-gate opening
+    # frames, healing is still opening-slew limited.
+    for _raw, _drel, step in rows[:3]:
+      assert step <= open_slew_step_m + 1e-6
+    # Once armed, the recovery bypasses the slew cap toward the measurement...
+    assert rows[3][2] > open_slew_step_m * 5.0
+    # ...heals within ~tau (0.5 s): < 2.5 m error well inside 1.5 s...
+    assert d - track.dRel < 2.5
+    # ...and never steps PAST the raw measurement on any frame.
+    for raw, drel, _ in rows:
+      assert drel <= raw + 1e-6
+
+  def test_opening_recovery_does_not_engage_above_speed_gate(self):
+    cfg = _cfg()
+    open_slew_step_m = float(cfg.model_lead_filter_open_slew_max_mps) * DT_FRAME_S
+    # v_ego 12 > OpenRecoveryMaxEgoMps 8: recovery must never arm.
+    track, rows, d = self._collapse_then_truth(cfg, v_ego=12.0, truth_frames=30)
+
+    for _raw, _drel, step in rows:
+      assert step <= open_slew_step_m + 1e-6
+    assert d - track.dRel > 8.0  # still wrong-too-close: slew-only recovery
+
+  def test_open_recovery_max_ego_zero_is_exact_disable_even_at_standstill(self):
+    # Kill switch: OpenRecoveryMaxEgoMps=0 must not arm at v_ego exactly 0.0
+    # (0.0 <= 0.0 would otherwise hold), so A/B isolation is bit-exact legacy.
+    for max_ego, expect_recovery in ((0.0, False), (8.0, True)):
+      cfg = _cfg(model_lead_filter_open_recovery_max_ego_mps=max_ego)
+      open_slew_step_m = float(cfg.model_lead_filter_open_slew_max_mps) * DT_FRAME_S
+      track = ModelLeadTrack.from_lead_dict(-1001, _lead_dict(5.0, 0.0, 0.0), 0.0, 0)
+      t = 0.0
+      for _ in range(10):
+        t += DT_FRAME_S
+        predicted = track.predict_drel(t)
+        track.update(_lead_dict(17.0, 0.0, 0.0), t, 0.0, cfg, 0)
+        step = track.dRel - predicted
+        if not expect_recovery:
+          assert step <= open_slew_step_m + 1e-6
+      if expect_recovery:
+        assert track.dRel > 8.0
+      else:
+        assert track.dRel <= 5.0 + 10 * open_slew_step_m + 1e-6

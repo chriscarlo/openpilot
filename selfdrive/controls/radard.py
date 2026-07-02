@@ -2,7 +2,7 @@
 import math
 import numpy as np
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import capnp
@@ -69,6 +69,10 @@ LEAD_TRACK_PROB_DROPOUT_CENTER_Y_ABS_M = 1.5
 LEAD_TRACK_PROB_DROPOUT_PULLING_AWAY_MAX_MPS = 0.5
 LEAD_TRACK_PROB_DROPOUT_URGENT_CLOSING_MPS = 1.0
 LEAD_TRACK_PROB_DROPOUT_URGENT_TTC_S = 8.0
+# FCW-corroboration vote history depth (frames). The live-tunable vote window
+# (ModelLeadFcwCorrobWindow) is clamped to this; history is seeded all-True so
+# a freshly acquired track (a genuine sudden cut-in) is never suppressed.
+MODEL_LEAD_FCW_CORROB_HIST_LEN = 8
 
 
 def _finite_float(value: Any, default: float = 0.0) -> float:
@@ -102,10 +106,23 @@ class ModelLeadTrack:
   age: int = 1
   missed: int = 0
   closer_confirm_frames: int = 0
+  # Consecutive frames the raw measurement has been beyond the innovation gate
+  # on the OPENING side; corroborates that a much-too-close internal state
+  # (e.g. a wrongly adopted inward outlier) should be healed.
+  opening_confirm_frames: int = 0
   last_slot: int = -1
   # Effective closing-side dRel filter delay of the most recent update; caps the
   # publish-side lag compensation so a fast-adopting regime is not over-corrected.
   drel_lag_s: float = 0.0
+  # FCW corroboration: per-frame votes on whether the raw measurement agrees
+  # with the filtered dRel (raw NOT materially farther than the filter). A
+  # phantom-collapsed state (filtered dRel far below what the model keeps
+  # measuring) loses the vote and is published with fcwSuppressed=True so the
+  # planner cannot escalate it into crash_cnt/FCW. Seeded all-True: new tracks
+  # (genuine sudden cut-ins) and the missed-frame hold keep legacy FCW timing.
+  fcw_agree_hist: deque = field(default_factory=lambda: deque([True] * MODEL_LEAD_FCW_CORROB_HIST_LEN,
+                                                              maxlen=MODEL_LEAD_FCW_CORROB_HIST_LEN))
+  fcw_suppressed: bool = False
 
   @classmethod
   def from_lead_dict(cls, identifier: int, lead_dict: dict[str, Any], now: float, lead_slot: int) -> "ModelLeadTrack":
@@ -149,10 +166,28 @@ class ModelLeadTrack:
     else:
       self.closer_confirm_frames = max(0, self.closer_confirm_frames - 1)
 
+    # Corroboration before adoption: a single heavy-tailed inward dRel outlier
+    # can satisfy every gate above on its own (the TTC gate is computed from
+    # the raw sample and strong_closing holds for ANY approach > 2.5 m/s), so
+    # one noise frame used to collapse the track in a single 50 ms step. A real
+    # cut-in / close threat keeps measuring beyond the gate frame after frame,
+    # so requiring N qualifying frames (default 2 = one extra 50 ms frame,
+    # during which the closing-urgency blend below still adopts pessimistically
+    # at the boosted close slew) filters isolated outliers at ~0.01% of their
+    # single-frame rate. ConfirmFrames=1 restores the legacy instant adoption.
+    #
+    # Confirmation-starvation band (genuine same-track jumps of roughly
+    # 2.5-3.5 m): frame-1's urgency-blend adoption pulls the next frame's
+    # innovation back UNDER the 2.5 m gate, so this counter decrements and fast
+    # adoption never fires for that band — the worst-case adoption latency is
+    # NOT 2 frames there. Convergence is via the blend over ~0.3-0.6 s
+    # (measured: 2.4 m optimism -> 1.0 m in 0.3 s at 6 m/s ego). This matches
+    # legacy risk acceptance: legacy carried the same optimism magnitude for
+    # within-gate <= 2.5 m jumps, which never reached the fast path either.
+    required_frames = max(1, int(round(float(cfg.model_lead_filter_fast_close_confirm_frames))))
     return bool(
-      low_ttc or
-      strong_closing or
-      (cutin_like and self.closer_confirm_frames >= 1)
+      (low_ttc or strong_closing or cutin_like) and
+      self.closer_confirm_frames >= required_frames
     )
 
   @staticmethod
@@ -197,6 +232,16 @@ class ModelLeadTrack:
     dt_s = float(np.clip(float(now) - self.last_t, 0.0, 0.25))
     predicted_drel = self.predict_drel(now)
     innovation_m = raw_drel - predicted_drel
+    # The arming gate is intentionally smaller than the 2.5 m close-innovation
+    # gate: besides deep phantom adoptions, the closing-urgency blend rectifies
+    # symmetric short-range noise into a persistent ~1-2 m pessimistic dRel bias
+    # during the last meters of a stop (closing side adopts at the urgency tau,
+    # opening side is slew-capped), and that bias must also heal.
+    open_recovery_gate_m = float(cfg.model_lead_filter_open_recovery_innov_gate_m)
+    if innovation_m > open_recovery_gate_m > 0.0:
+      self.opening_confirm_frames += 1
+    else:
+      self.opening_confirm_frames = 0
     fast_closing = self._fast_closing_supported(raw_drel, raw_vrel, raw_dpath, raw_vlat, innovation_m, v_ego, cfg)
 
     urgency = 0.0 if fast_closing else self._closing_urgency(raw_drel, raw_vrel, innovation_m, cfg)
@@ -217,11 +262,34 @@ class ModelLeadTrack:
         tau_s = tau_s ** (1.0 - urgency) * floor_eff ** urgency
         close_slew_mps += float(cfg.model_lead_filter_blend_slew_boost_mps) * urgency
       drel_alpha = _ema_alpha(dt_s, tau_s)
+      open_step_max_m = max(0.0, open_slew_mps) * dt_s
+      # Corroborated low-speed symmetric recovery: if the raw measurement has
+      # been beyond the innovation gate on the OPENING side for N consecutive
+      # frames (isolated opening outliers at the measured 2% rate cannot chain
+      # that long), the internal state is wrong-too-close — e.g. a phantom
+      # inward adoption — and must heal before standstill instead of ratcheting
+      # against the still-closing prediction at the 1.2 m/s opening slew.
+      # Restricted to low ego speed (MaxEgoMps, 0 disables) where a wrongly
+      # optimistic dRel costs little stopping distance and the phantom-collapse
+      # ratchet does its damage.
+      # MaxEgoMps > 0.0 guard makes the documented kill switch exact: with the
+      # knob at 0.0, 'v_ego <= 0.0' would still arm the recovery at standstill,
+      # so A/B isolation with OpenRecoveryMaxEgoMps=0 would not be bit-exact
+      # legacy while stopped.
+      open_recovery_required = max(1, int(round(float(cfg.model_lead_filter_open_recovery_confirm_frames))))
+      open_recovery_max_ego_mps = float(cfg.model_lead_filter_open_recovery_max_ego_mps)
+      if (innovation_m > 0.0 and
+          self.opening_confirm_frames >= open_recovery_required and
+          open_recovery_max_ego_mps > 0.0 and
+          float(v_ego) <= open_recovery_max_ego_mps):
+        recovery_alpha = _ema_alpha(dt_s, float(cfg.model_lead_filter_open_recovery_tau_s))
+        drel_alpha = max(drel_alpha, recovery_alpha)
+        open_step_max_m = max(open_step_max_m, recovery_alpha * innovation_m)
       target_drel = predicted_drel + drel_alpha * innovation_m
       step_m = float(np.clip(
         target_drel - predicted_drel,
         -max(0.0, close_slew_mps) * dt_s,
-        max(0.0, open_slew_mps) * dt_s,
+        open_step_max_m,
       ))
       next_drel = predicted_drel + step_m
       self.drel_lag_s = float(tau_s)
@@ -239,6 +307,7 @@ class ModelLeadTrack:
     prob_alpha = _ema_alpha(dt_s, MODEL_LEAD_PROB_TAU_S)
 
     self.dRel = float(max(0.0, next_drel))
+    self._update_fcw_corroboration(raw_drel, cfg)
     self.yRel = float(self.yRel + lat_alpha * (raw_yrel - self.yRel))
     self.dPath = float(self.dPath + lat_alpha * (raw_dpath - self.dPath))
     self.vLat = float(self.vLat + lat_alpha * (raw_vlat - self.vLat))
@@ -253,6 +322,30 @@ class ModelLeadTrack:
     self.age += 1
     self.missed = 0
     return self.get_RadarState(cfg)
+
+  def _update_fcw_corroboration(self, raw_drel: float, cfg: LeadResponseTuningConfig) -> None:
+    """Vote on whether the raw model measurement corroborates the filtered dRel.
+
+    Direction matters: only 'raw says the lead is FARTHER than the filter by
+    more than the tolerance' counts as disagreement. On a genuine collision
+    course the closing-side EMA lags BEHIND raw (filtered >= raw), so genuine
+    threats always agree; the only sustained raw-above-filter regime is a
+    wrongly-adopted inward excursion whose recovery is open-slew limited (the
+    phantom collapse). A majority vote over a short window bridges isolated
+    outward measurement outliers (~3% of frames at close range) so genuine FCW
+    timing is untouched, while a phantom — corroborated at most on its isolated
+    inward-outlier frames — stays suppressed. MinAgree <= 0 disables (legacy).
+    """
+    tol_m = float(getattr(cfg, 'model_lead_fcw_corrob_tol_m', 2.5))
+    min_agree = int(round(float(getattr(cfg, 'model_lead_fcw_corrob_min_agree', 2.0))))
+    window = int(round(float(getattr(cfg, 'model_lead_fcw_corrob_window', 3.0))))
+    self.fcw_agree_hist.append(bool((raw_drel - self.dRel) <= tol_m))
+    if min_agree <= 0:
+      self.fcw_suppressed = False
+      return
+    window = int(np.clip(window, min_agree, MODEL_LEAD_FCW_CORROB_HIST_LEN))
+    recent = list(self.fcw_agree_hist)[-window:]
+    self.fcw_suppressed = sum(recent) < min_agree
 
   def get_RadarState(self, cfg: LeadResponseTuningConfig | None = None) -> dict[str, Any]:
     published_drel = float(self.dRel)
@@ -289,6 +382,7 @@ class ModelLeadTrack:
       "aLeadK": float(self.aLeadK),
       "aLeadTau": float(self.aLeadTau),
       "fcw": False,
+      "fcwSuppressed": bool(self.fcw_suppressed),
       "modelProb": float(self.modelProb),
       "status": True,
       "radar": False,
