@@ -48,7 +48,12 @@ MODEL_LEAD_DUPLICATE_CLOSING_KEEP_SEPARATE_MPS = 2.5
 MODEL_LEAD_SAME_SLOT_RECOVER_DREL_GATE_M = 80.0
 MODEL_LEAD_CLOSE_INNOVATION_M = 2.5
 MODEL_LEAD_FAST_CLOSE_TAU_S = 0.12
+MODEL_LEAD_STRONG_CLOSING_MPS = 2.5
 MODEL_LEAD_NOISE_CLOSE_SLEW_MPS = 1.0
+# Urgency blend degeneracy guards: both endpoints are independently live-tunable,
+# so a degenerate span must collapse to u=0 (current behavior), never sign-flip.
+MODEL_LEAD_BLEND_MIN_SPAN = 1e-2
+MODEL_LEAD_BLEND_TTC_MIN_CLOSING_MPS = 0.3
 MODEL_LEAD_VREL_TAU_S = 0.40
 MODEL_LEAD_FAST_VREL_TAU_S = 0.16
 MODEL_LEAD_LAT_TAU_S = 0.45
@@ -98,6 +103,9 @@ class ModelLeadTrack:
   missed: int = 0
   closer_confirm_frames: int = 0
   last_slot: int = -1
+  # Effective closing-side dRel filter delay of the most recent update; caps the
+  # publish-side lag compensation so a fast-adopting regime is not over-corrected.
+  drel_lag_s: float = 0.0
 
   @classmethod
   def from_lead_dict(cls, identifier: int, lead_dict: dict[str, Any], now: float, lead_slot: int) -> "ModelLeadTrack":
@@ -134,7 +142,7 @@ class ModelLeadTrack:
     ttc_s = raw_drel / max(closing_speed, 0.1)
     very_close = raw_drel <= max(10.0, float(v_ego) * 0.55)
     low_ttc = closing_speed > 0.5 and ttc_s <= float(cfg.model_lead_filter_safe_ttc_s)
-    strong_closing = closing_speed >= 2.5
+    strong_closing = closing_speed >= MODEL_LEAD_STRONG_CLOSING_MPS
 
     if centered or cutin_like or low_ttc or strong_closing or very_close:
       self.closer_confirm_frames += 1
@@ -146,6 +154,33 @@ class ModelLeadTrack:
       strong_closing or
       (cutin_like and self.closer_confirm_frames >= 1)
     )
+
+  @staticmethod
+  def _closing_urgency(raw_drel: float, raw_vrel: float, innovation_m: float,
+                       cfg: LeadResponseTuningConfig) -> float:
+    # Continuous urgency in [0, 1] filling the cliff between the slow filter and
+    # the hard fast-close gates (which stay verbatim as the u=1 short-circuit).
+    # Pessimistic direction only: nonzero only when the measurement says the
+    # lead is CLOSER than predicted, so the blend can only speed convergence
+    # toward a closer lead, never toward a farther one.
+    if innovation_m >= 0.0:
+      return 0.0
+    # BlendTauFloorS >= ModelLeadFilterTauS is the documented disable: force u=0
+    # so the vRel-tau blend and slew boost are disabled too (exact legacy).
+    if float(cfg.model_lead_filter_blend_tau_floor_s) >= float(cfg.model_lead_filter_tau_s):
+      return 0.0
+    closing_speed = max(0.0, -raw_vrel)
+    urgency = 0.0
+    close_lo = float(cfg.model_lead_filter_blend_close_lo_mps)
+    close_span = MODEL_LEAD_STRONG_CLOSING_MPS - close_lo
+    if close_span >= MODEL_LEAD_BLEND_MIN_SPAN:
+      urgency = float(np.clip((closing_speed - close_lo) / close_span, 0.0, 1.0))
+    ttc_hi = float(cfg.model_lead_filter_blend_ttc_hi_s)
+    ttc_span = ttc_hi - float(cfg.model_lead_filter_safe_ttc_s)
+    if closing_speed > MODEL_LEAD_BLEND_TTC_MIN_CLOSING_MPS and ttc_span >= MODEL_LEAD_BLEND_MIN_SPAN:
+      ttc_s = raw_drel / max(closing_speed, 0.1)
+      urgency = max(urgency, float(np.clip((ttc_hi - ttc_s) / ttc_span, 0.0, 1.0)))
+    return urgency
 
   def update(self, lead_dict: dict[str, Any], now: float, v_ego: float,
              cfg: LeadResponseTuningConfig, lead_slot: int) -> dict[str, Any]:
@@ -162,13 +197,23 @@ class ModelLeadTrack:
     innovation_m = raw_drel - predicted_drel
     fast_closing = self._fast_closing_supported(raw_drel, raw_vrel, raw_dpath, raw_vlat, innovation_m, v_ego, cfg)
 
+    urgency = 0.0 if fast_closing else self._closing_urgency(raw_drel, raw_vrel, innovation_m, cfg)
+
     if fast_closing:
       drel_alpha = max(0.65, _ema_alpha(dt_s, MODEL_LEAD_FAST_CLOSE_TAU_S))
       next_drel = predicted_drel + drel_alpha * innovation_m
+      self.drel_lag_s = MODEL_LEAD_FAST_CLOSE_TAU_S
     else:
       close_slew_mps = MODEL_LEAD_NOISE_CLOSE_SLEW_MPS + max(0.0, -raw_vrel) * 0.4
       open_slew_mps = float(cfg.model_lead_filter_open_slew_max_mps) + max(0.0, raw_vrel)
       tau_s = float(cfg.model_lead_filter_tau_s) * (1.6 if innovation_m < 0.0 else 1.0)
+      if urgency > 0.0:
+        # Geometric blend toward the urgency tau floor; floor_eff never exceeds
+        # tau_s so blended closing adoption is never slower than legacy, and the
+        # slew boost keeps the close-slew clamp from binding at high urgency.
+        floor_eff = min(float(cfg.model_lead_filter_blend_tau_floor_s), tau_s)
+        tau_s = tau_s ** (1.0 - urgency) * floor_eff ** urgency
+        close_slew_mps += float(cfg.model_lead_filter_blend_slew_boost_mps) * urgency
       drel_alpha = _ema_alpha(dt_s, tau_s)
       target_drel = predicted_drel + drel_alpha * innovation_m
       step_m = float(np.clip(
@@ -177,11 +222,15 @@ class ModelLeadTrack:
         max(0.0, open_slew_mps) * dt_s,
       ))
       next_drel = predicted_drel + step_m
+      self.drel_lag_s = float(tau_s)
 
-    vrel_tau_s = (
-      float(cfg.model_lead_filter_fast_vrel_tau_s) if fast_closing
-      else float(cfg.model_lead_filter_vrel_tau_s)
-    )
+    if fast_closing:
+      vrel_tau_s = float(cfg.model_lead_filter_fast_vrel_tau_s)
+    elif urgency > 0.0:
+      vrel_tau_s = ((1.0 - urgency) * float(cfg.model_lead_filter_vrel_tau_s)
+                    + urgency * float(cfg.model_lead_filter_fast_vrel_tau_s))
+    else:
+      vrel_tau_s = float(cfg.model_lead_filter_vrel_tau_s)
     vrel_alpha = _ema_alpha(dt_s, vrel_tau_s)
     lat_alpha = _ema_alpha(dt_s, MODEL_LEAD_LAT_TAU_S)
     accel_alpha = _ema_alpha(dt_s, MODEL_LEAD_ACCEL_TAU_S)
@@ -201,11 +250,22 @@ class ModelLeadTrack:
     self.last_slot = int(lead_slot)
     self.age += 1
     self.missed = 0
-    return self.get_RadarState()
+    return self.get_RadarState(cfg)
 
-  def get_RadarState(self) -> dict[str, Any]:
+  def get_RadarState(self, cfg: LeadResponseTuningConfig | None = None) -> dict[str, Any]:
+    published_drel = float(self.dRel)
+    if cfg is not None:
+      # Closing-only group-delay compensation on the PUBLISHED dRel; internal
+      # filter state is untouched (no feedback). Publication only ever moves
+      # CLOSER, never farther, so a held/filtered lead is never more optimistic
+      # than the internal state. Capped at the active regime's actual filter
+      # delay so the fast-adopting path is not over-corrected at high closing.
+      lag_comp_s = min(float(cfg.model_lead_filter_lag_comp_s), float(self.drel_lag_s))
+      if lag_comp_s > 0.0:
+        closing_mps = max(0.0, -self.vRel - float(cfg.model_lead_filter_lag_comp_deadzone_mps))
+        published_drel = max(0.0, published_drel - closing_mps * lag_comp_s)
     return {
-      "dRel": float(self.dRel),
+      "dRel": published_drel,
       "yRel": float(self.yRel),
       "vRel": float(self.vRel),
       "vLead": float(self.vLead),
@@ -356,7 +416,7 @@ class ModelLeadTracker:
         self._tracks.pop(stale_identifier, None)
 
     if track.identifier in self._updated_track_ids:
-      return track.get_RadarState()
+      return track.get_RadarState(self._cfg)
 
     self._updated_track_ids.add(track.identifier)
     return track.update(lead_dict, now, v_ego, self._cfg, lead_slot)

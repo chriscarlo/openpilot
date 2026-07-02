@@ -129,7 +129,11 @@ def test_phantom_window_mechanism_is_active():
   after = [row for row in dropout.trace if row["t_s"] >= DROPOUT_END_S - _EPS_S][0]
   assert before["lead_one_published_d_rel_m"] is not None
   assert after["lead_one_published_d_rel_m"] is not None
-  assert after["lead_one_published_d_rel_m"] == pytest.approx(after["true_min_gap_m"], abs=1.0)
+  # Track continuity at reacquire: never optimistic vs truth; the closing-only
+  # publish-side lag compensation (ModelLeadFilterLagCompS x closing, ~2.1 m at
+  # this reacquire's closing rate) may move the published gap closer, never wider.
+  assert after["lead_one_published_d_rel_m"] <= after["true_min_gap_m"] + 1.0
+  assert after["lead_one_published_d_rel_m"] >= after["true_min_gap_m"] - 3.5
   # Ground truth keeps flowing during the dropout and the gap keeps collapsing.
   assert drop_window[-1]["true_min_gap_m"] < drop_window[0]["true_min_gap_m"] - 1.0
   # The clean twin never loses its published lead.

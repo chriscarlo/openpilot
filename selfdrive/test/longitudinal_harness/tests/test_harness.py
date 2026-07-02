@@ -500,11 +500,21 @@ def test_device_mode_runs_hyundai_no_radar_ema_stage_at_50hz() -> None:
 
 
 def test_radard_perception_stage_lags_decelerating_lead() -> None:
-  vehicle = resolve_ev6_vehicle_config()
-  assert vehicle.perception_filter == "radard"
+  # Re-baselined when the closing urgency blend + publish-side lag compensation
+  # landed (ModelLeadFilterBlend*/LagComp* live-tune params): the legacy
+  # optimistic-lag characterization is pinned verbatim under the documented
+  # exact-legacy rollback params, and the shipped defaults get the new contract
+  # (published dRel never meaningfully optimistic, pessimism bounded by
+  # LagCompS x closing, and a measurably smaller closed-loop gap cost).
+  rollback_overrides = {
+    "model_lead_filter_blend_tau_floor_s": "8.0",  # >= ModelLeadFilterTauS: blend off
+    "model_lead_filter_lag_comp_s": "0.0",
+  }
   initial_speed_mps, initial_accel_mps2, steps = build_synthetic_scenario("decelerating_lead", duration_s=10.0, dt_s=DT_MDL)
 
-  def _run(perception_filter: str):
+  def _run(perception_filter: str, overrides: dict[str, str] | None = None):
+    vehicle = resolve_ev6_vehicle_config(param_overrides=overrides)
+    assert vehicle.perception_filter == "radard"
     return run_harness(
       vehicle_config=vehicle,
       scenario_name="decelerating_lead",
@@ -517,8 +527,10 @@ def test_radard_perception_stage_lags_decelerating_lead() -> None:
     )
 
   filtered = _run("auto")
+  legacy = _run("auto", rollback_overrides)
   direct = _run("direct")
   assert filtered.vehicle["perceptionFilter"] == "radard"
+  assert legacy.vehicle["perceptionFilter"] == "radard"
   assert direct.vehicle["perceptionFilter"] == "direct"
 
   def _lags(result, t_lo: float, t_hi: float) -> list[float]:
@@ -534,22 +546,28 @@ def test_radard_perception_stage_lags_decelerating_lead() -> None:
   # slow path (closing < 2.5 m/s, TTC > safe gate: no fast-close snap).
   direct_lags = _lags(direct, 3.0, 8.0)
   filtered_lags = _lags(filtered, 3.0, 8.0)
-  assert direct_lags and filtered_lags
+  legacy_lags = _lags(legacy, 3.0, 8.0)
+  assert direct_lags and filtered_lags and legacy_lags
 
   # Direct mode publishes truth (noise off); only intra-step staleness remains.
   assert max(abs(lag) for lag in direct_lags) < 0.35
 
-  # Fidelity property of the stage: ModelLeadTracker's closing-side EMA/slew
-  # (dRel tau 2.8 s x1.6 when the innovation closes, radard.py) keeps the
-  # published dRel ABOVE truth for the whole closing phase — the documented
-  # perception lag the EV6's planner always sees and the direct loop never did.
-  assert min(filtered_lags) > 0.1
-  assert max(filtered_lags) > 0.6
-  assert sum(filtered_lags) / len(filtered_lags) > 0.4
+  # Legacy fidelity property (rollback params): ModelLeadTracker's closing-side
+  # EMA/slew (dRel tau 2.8 s x1.6 when the innovation closes, radard.py) keeps
+  # the published dRel ABOVE truth for the whole closing phase — the documented
+  # perception lag the EV6's planner used to see and the direct loop never did.
+  assert min(legacy_lags) > 0.1
+  assert max(legacy_lags) > 0.6
+  assert sum(legacy_lags) / len(legacy_lags) > 0.4
+  assert legacy.summary["minTrueGapM"] < direct.summary["minTrueGapM"] - 1.0
 
-  # And the lag has a closed-loop consequence: ego gets deeper into the gap
-  # before braking catches up than the truth-fed loop ever showed.
-  assert filtered.summary["minTrueGapM"] < direct.summary["minTrueGapM"] - 1.0
+  # Shipped-default contract: published dRel is never meaningfully optimistic
+  # (measured max +0.05 m at landing), the deliberate closing-only pessimism is
+  # bounded by LagCompS x closing (measured -2.24 m at landing), and the lag's
+  # closed-loop gap cost shrinks vs the legacy stage.
+  assert max(filtered_lags) < 0.35
+  assert min(filtered_lags) > -3.0
+  assert filtered.summary["minTrueGapM"] > legacy.summary["minTrueGapM"] + 0.5
 
 
 def test_config_a_lead_tau_changes_closed_loop_response() -> None:

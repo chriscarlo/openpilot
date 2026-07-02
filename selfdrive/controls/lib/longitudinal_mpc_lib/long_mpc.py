@@ -352,10 +352,39 @@ class _StabilizedLead:
     )
 
 
+# Smoothing for the measured d(aLeadK)/dt used by the phantom trend hold.
+LEAD_STABILIZER_TREND_TAU_S = 0.20
+# Identity gates for the trend measurement: a same-slot track swap (cut-in
+# replacing the tracked lead) steps aLeadK across two different physical cars,
+# which is not a measurement. Detected as dRel far off the propagated position
+# or a lateral jump between consecutive valid frames.
+LEAD_STABILIZER_TREND_DREL_JUMP_M = 3.0
+LEAD_STABILIZER_TREND_YREL_JUMP_M = 1.5
+
+# aLeadK corroboration bound (uncorroborated transient lead-decel guard).
+# LeadAccelCorrMarginMps2 at/above the disable value passes aLeadK through.
+LEAD_ACCEL_CORR_DISABLE_MARGIN_MPS2 = 10.0
+# A vLead finite-difference beyond this physical-accel gate is a track identity
+# change (lead swap), not a measurement: reset and re-settle, never clamp with it.
+LEAD_ACCEL_CORR_MEAS_A_GATE_MPS2 = 10.0
+# Bound stays inactive until this many taus of same-track vLead history exist.
+LEAD_ACCEL_CORR_SETTLE_TAU_MULT = 2.0
+# Dangerous-state bypass hysteresis: once latched, the bypass only disengages
+# when closing/TTC/gap clear the guards by these margins, so noisy stabilized
+# vRel hovering at a guard boundary cannot chatter aLeadK in the MPC horizon.
+LEAD_ACCEL_CORR_CLOSING_REARM_MPS = 0.5
+LEAD_ACCEL_CORR_TTC_REARM_S = 2.0
+LEAD_ACCEL_CORR_HEADWAY_REARM_M = 2.0
+LEAD_ACCEL_CORR_MAX_DT_S = 0.5
+
+
 class _LeadStabilityState:
   """Per-slot state for the acquire/release dwell + phantom extrapolation filter."""
   __slots__ = ('latched', 'valid_streak', 'invalid_streak',
-               'latched_valid_streak', 'last_valid', 'last_valid_t')
+               'latched_valid_streak', 'last_valid', 'last_valid_t',
+               'a_lead_k_trend', 'corr_meas_t', 'corr_meas_v',
+               'corr_a_meas_lp', 'corr_settled_s', 'corr_track_id',
+               'corr_danger_latched')
 
   def __init__(self):
     self.latched = False
@@ -364,6 +393,18 @@ class _LeadStabilityState:
     self.latched_valid_streak = 0
     self.last_valid: _StabilizedLead | None = None
     self.last_valid_t: float | None = None
+    # EMA-smoothed d(aLeadK)/dt over valid frames; lets the phantom continue
+    # the measured convergence of the (lagged) lead-accel estimate.
+    self.a_lead_k_trend = 0.0
+    # Low-passed finite-difference of stabilized vLead used to corroborate
+    # negative aLeadK; frozen (not decayed) while the slot has no fresh
+    # measurement, reset on track identity changes.
+    self.corr_meas_t: float | None = None
+    self.corr_meas_v = 0.0
+    self.corr_a_meas_lp = 0.0
+    self.corr_settled_s = 0.0
+    self.corr_track_id: int | None = None
+    self.corr_danger_latched = False
 
 
 class LeadDistanceFilter:
@@ -1292,6 +1333,7 @@ class LongitudinalMpc:
     self.lead_role_debug = {}
     self.last_lead_role_log_t = 0.0
     self._lead_stability_state = [_LeadStabilityState(), _LeadStabilityState()]
+    self._lead_stability_phantom_slots: tuple[bool, bool] = (False, False)
     self.lead_stability_debug: dict[str, Any] = {}
 
   def reset(self):
@@ -2287,6 +2329,17 @@ class LongitudinalMpc:
       filtered.modelProb = self._filter_symmetric_metric(prev.modelProb, raw_lead.modelProb, dt_s, HYUNDAI_VIRTUAL_LEAD_MODEL_PROB_TAU_S)
       filtered.radar = raw_lead.radar
       filtered.radarTrackId = raw_lead.radarTrackId
+      # A stabilizer phantom is synthetic, noiseless extrapolation: smoothing it
+      # only lags the propagated closure, making the MPC's lead MORE optimistic
+      # than the held measurement. Clamp the filtered view to be no more
+      # optimistic than the phantom while the source slot is phantom-held.
+      slot_idx = {"lead0": 0, "lead1": 1}.get(str(lead_source), None)
+      if slot_idx is not None and self._lead_stability_phantom_slots[slot_idx]:
+        filtered.dRel = min(filtered.dRel, raw_lead.dRel)
+        filtered.vRel = min(filtered.vRel, raw_lead.vRel)
+        filtered.vLead = min(filtered.vLead, raw_lead.vLead)
+        filtered.vLeadK = min(filtered.vLeadK, raw_lead.vLeadK)
+        filtered.aLeadK = min(filtered.aLeadK, raw_lead.aLeadK)
       self._hyundai_virtual_lead_last_drel_error_m = abs(float(raw_lead.dRel) - float(filtered.dRel))
       self._hyundai_virtual_lead = filtered
       self._hyundai_virtual_lead_source = lead_source
@@ -2351,11 +2404,87 @@ class LongitudinalMpc:
       roles.get("lead1") == LeadRoleClassifier.CENTER_CONTROL
     )
 
+  def _apply_lead_accel_corr_bound(self, slot: int, lead: _StabilizedLead, raw_valid: bool, now: float) -> bool:
+    """Bound uncorroborated negative aLeadK by the measured vLead trend at the
+    single lead ingress feeding role classifier, previews, process_lead and the
+    brake-release floor. Applied ONLY on fresh-measurement, non-phantom frames
+    in non-dangerous states: a phantom/held lead keeps its held decel (never
+    made more optimistic than the last measured state), and any dangerous state
+    passes full aLeadK through. Returns True when the bound trimmed aLeadK."""
+    state = self._lead_stability_state[slot]
+    cfg = self._live_tune_cfg
+    margin = float(getattr(cfg, 'lead_accel_corr_margin_mps2', LEAD_ACCEL_CORR_DISABLE_MARGIN_MPS2))
+    if margin >= LEAD_ACCEL_CORR_DISABLE_MARGIN_MPS2:
+      state.corr_meas_t = None
+      state.corr_danger_latched = False
+      return False
+    if not lead.status:
+      state.corr_meas_t = None
+      state.corr_a_meas_lp = 0.0
+      state.corr_settled_s = 0.0
+      state.corr_track_id = None
+      state.corr_danger_latched = False
+      return False
+
+    fresh = raw_valid and not self._lead_stability_phantom_slots[slot]
+    if not fresh:
+      # No fresh measurement (phantom hold / stale latch): freeze the low-pass
+      # (a decay toward zero would fabricate corroboration) and never clamp.
+      return False
+
+    meas_tau = max(0.1, float(getattr(cfg, 'lead_accel_corr_meas_tau_s', 0.3)))
+    if state.corr_meas_t is None:
+      identity_change = True
+      dt = 0.0
+      a_fd = 0.0
+    else:
+      dt = float(now) - float(state.corr_meas_t)
+      a_fd = (float(lead.vLead) - float(state.corr_meas_v)) / dt if dt > 1e-3 else 0.0
+      identity_change = (
+        state.corr_track_id != int(lead.radarTrackId) or
+        not (1e-3 < dt < LEAD_ACCEL_CORR_MAX_DT_S) or
+        abs(a_fd) > LEAD_ACCEL_CORR_MEAS_A_GATE_MPS2
+      )
+    if identity_change:
+      state.corr_a_meas_lp = 0.0
+      state.corr_settled_s = 0.0
+    else:
+      alpha = dt / (dt + meas_tau)
+      state.corr_a_meas_lp += alpha * (a_fd - state.corr_a_meas_lp)
+      state.corr_settled_s += dt
+    state.corr_meas_t = float(now)
+    state.corr_meas_v = float(lead.vLead)
+    state.corr_track_id = int(lead.radarTrackId)
+
+    v_ego = float(self.x0[1])
+    closing = max(0.0, v_ego - float(lead.vLead))
+    ttc = float(lead.dRel) / max(closing, 0.1)
+    ttc_guard = float(getattr(cfg, 'lead_accel_corr_ttc_guard_s', 8.0))
+    closing_guard = float(getattr(cfg, 'lead_accel_corr_closing_guard_mps', 1.5))
+    near_gap_m = float(getattr(cfg, 'lead_accel_corr_near_headway_s', 1.2)) * v_ego
+    if ttc <= ttc_guard or closing >= closing_guard or float(lead.dRel) <= near_gap_m:
+      state.corr_danger_latched = True
+    elif (closing <= max(0.0, closing_guard - LEAD_ACCEL_CORR_CLOSING_REARM_MPS) and
+          ttc >= ttc_guard + LEAD_ACCEL_CORR_TTC_REARM_S and
+          float(lead.dRel) > near_gap_m + LEAD_ACCEL_CORR_HEADWAY_REARM_M):
+      state.corr_danger_latched = False
+
+    if (state.corr_danger_latched or lead.aLeadK >= 0.0 or
+        state.corr_settled_s < LEAD_ACCEL_CORR_SETTLE_TAU_MULT * meas_tau):
+      return False
+    bounded = max(float(lead.aLeadK), min(0.0, float(state.corr_a_meas_lp)) - margin)
+    if bounded <= float(lead.aLeadK):
+      return False
+    lead.aLeadK = bounded
+    return True
+
   def _stabilize_raw_leads(self, raw_lead0: Any, raw_lead1: Any, now: float) -> tuple[_StabilizedLead, _StabilizedLead]:
     """Apply acquire/release dwell + phantom extrapolation to each raw lead.
     Returns duck-typed _StabilizedLead objects that downstream MPC code treats
-    as if they were capnp readers. Defaults leave behavior unchanged
-    (acquire_frames=1, release_frames=1, phantom_hold_s=0 collapses to raw passthrough)."""
+    as if they were capnp readers. At shipped defaults (PhantomLeadHoldS=0.8)
+    the phantom owns release: the release_frames unlatch branch only runs when
+    phantom_hold_s=0. Set acquire_frames=1, release_frames=1, phantom_hold_s=0
+    to collapse to raw passthrough."""
     cfg = self._live_tune_cfg
     acquire_frames = int(max(1, round(float(getattr(cfg, 'lead_source_acquire_frames', 1.0) or 1.0))))
     release_frames = int(max(1, round(float(getattr(cfg, 'lead_source_release_frames', 1.0) or 1.0))))
@@ -2363,16 +2492,33 @@ class LongitudinalMpc:
     stable_frames = int(max(1, round(float(getattr(cfg, 'phantom_lead_stable_frames', 1.0) or 1.0))))
 
     outs: list[_StabilizedLead] = []
+    phantom_slots = [False, False]
+    raw_valids = [False, False]
     for slot, raw in enumerate((raw_lead0, raw_lead1)):
       state = self._lead_stability_state[slot]
       raw_valid = bool(getattr(raw, 'status', False)) if raw is not None else False
+      raw_valids[slot] = raw_valid
 
       if raw_valid:
         state.valid_streak += 1
         state.invalid_streak = 0
         if state.latched:
           state.latched_valid_streak += 1
-        state.last_valid = _StabilizedLead.from_reader(raw)
+        new_valid = _StabilizedLead.from_reader(raw)
+        if state.last_valid is not None and state.last_valid_t is not None:
+          trend_dt = float(now) - float(state.last_valid_t)
+          expected_drel = state.last_valid.dRel + state.last_valid.vRel * trend_dt
+          identity_jump = (abs(new_valid.dRel - expected_drel) > LEAD_STABILIZER_TREND_DREL_JUMP_M
+                           or abs(new_valid.yRel - state.last_valid.yRel) > LEAD_STABILIZER_TREND_YREL_JUMP_M)
+          if identity_jump or not (1e-3 < trend_dt < 0.5):
+            state.a_lead_k_trend = 0.0
+          else:
+            trend_raw = (new_valid.aLeadK - state.last_valid.aLeadK) / trend_dt
+            alpha = trend_dt / (trend_dt + LEAD_STABILIZER_TREND_TAU_S)
+            state.a_lead_k_trend += alpha * (trend_raw - state.a_lead_k_trend)
+        else:
+          state.a_lead_k_trend = 0.0
+        state.last_valid = new_valid
         state.last_valid_t = now
       else:
         state.invalid_streak += 1
@@ -2410,14 +2556,34 @@ class LongitudinalMpc:
             state.latched_valid_streak = 0
             outs.append(_StabilizedLead(status=False))
             continue
+        decay = max(0.0, 1.0 - age / max(phantom_hold_s, 1e-3))
+        # A held lead must never be kinematically more optimistic than its last
+        # measurement: hold measured decel through the phantom window (scaled by
+        # phantom_decel_hold_factor; 0 restores legacy decay-to-zero), continue
+        # the measured deepening trend of the lagged aLeadK estimate (never the
+        # relaxing trend), and propagate vRel/vLead/dRel with it. Positive accel
+        # still decays — an extrapolated pull-away is the optimistic direction.
+        hold_factor = float(min(1.0, max(0.0, float(getattr(cfg, 'phantom_lead_decel_hold_factor', 1.0) or 0.0))))
+        trend_gain = float(min(1.0, max(0.0, float(getattr(cfg, 'phantom_lead_decel_trend_gain', 1.0) or 0.0))))
+        a_meas = state.last_valid.aLeadK
+        if a_meas < 0.0:
+          a_base = a_meas * (hold_factor + (1.0 - hold_factor) * decay)
+          trend = min(0.0, state.a_lead_k_trend) * trend_gain
+          a_hold = max(-10.0, a_base + trend * age)
+        else:
+          a_base = a_meas * decay
+          trend = 0.0
+          a_hold = a_base
+        a_prop = min(a_base, 0.0)
         phantom = _StabilizedLead(
           status=True,
-          dRel=max(1.0, state.last_valid.dRel + state.last_valid.vRel * age),
+          dRel=max(1.0, state.last_valid.dRel + state.last_valid.vRel * age
+                   + 0.5 * a_prop * age * age + trend * age ** 3 / 6.0),
           yRel=state.last_valid.yRel,
-          vRel=state.last_valid.vRel,
-          vLead=state.last_valid.vLead,
-          aLeadK=state.last_valid.aLeadK * max(0.0, 1.0 - age / max(phantom_hold_s, 1e-3)),
-          modelProb=state.last_valid.modelProb * max(0.0, 1.0 - age / max(phantom_hold_s, 1e-3)),
+          vRel=state.last_valid.vRel + a_prop * age + 0.5 * trend * age * age,
+          vLead=max(0.0, state.last_valid.vLead + a_prop * age + 0.5 * trend * age * age),
+          aLeadK=a_hold,
+          modelProb=state.last_valid.modelProb * decay,
           dPath=state.last_valid.dPath,
           vLat=state.last_valid.vLat,
           aLeadTau=state.last_valid.aLeadTau,
@@ -2427,11 +2593,17 @@ class LongitudinalMpc:
           radar=state.last_valid.radar,
           radarTrackId=state.last_valid.radarTrackId,
         )
+        phantom_slots[slot] = True
         outs.append(phantom)
         continue
 
       outs.append(_StabilizedLead(status=False))
 
+    self._lead_stability_phantom_slots = tuple(phantom_slots)
+    corr_clamped = [
+      self._apply_lead_accel_corr_bound(slot, outs[slot], raw_valids[slot], now)
+      for slot in range(2)
+    ]
     self.lead_stability_debug = {
       f"slot{slot}": {
         "latched": bool(state.latched),
@@ -2439,7 +2611,11 @@ class LongitudinalMpc:
         "invalid_streak": int(state.invalid_streak),
         "latched_valid_streak": int(state.latched_valid_streak),
         "phantom_age_s": (float(now - state.last_valid_t) if state.last_valid_t is not None else None),
+        "phantom_active": bool(phantom_slots[slot]),
         "out_status": bool(outs[slot].status),
+        "accel_corr_clamped": bool(corr_clamped[slot]),
+        "accel_corr_a_meas_lp": float(state.corr_a_meas_lp),
+        "accel_corr_danger_latched": bool(state.corr_danger_latched),
       }
       for slot, state in enumerate(self._lead_stability_state)
     }

@@ -65,10 +65,14 @@ def _blip_steps() -> list[StepInput]:
 
 
 @lru_cache(maxsize=None)
-def _run(a_lead_tau_s: float):
+def _run(a_lead_tau_s: float, corr_bound_disabled: bool = False):
   # Direct perception is required here: the radard stage always republishes
   # aLeadTau=0.3 for accepted leads, which would erase the tau A/B under test.
-  vehicle = resolve_ev6_vehicle_config(a_lead_tau_s=a_lead_tau_s, perception_filter="direct")
+  vehicle = resolve_ev6_vehicle_config(
+    a_lead_tau_s=a_lead_tau_s,
+    perception_filter="direct",
+    param_overrides={"lead_accel_corr_margin_mps2": "10.0"} if corr_bound_disabled else None,
+  )
   return run_harness(
     vehicle_config=vehicle,
     scenario_name="alead_blip_steady_follow",
@@ -119,12 +123,10 @@ def _fmt(metrics: dict[str, float | None]) -> str:
   )
 
 
-@pytest.mark.xfail(
-  strict=True,
-  reason="aLeadTau fidelity gap: runtime tau=0.3 persists a 0.6 s aLeadK=-1.0 vision blip across the MPC "
-         "horizon, so ego brakes and hangs back for seconds behind a lead that never slowed "
-         "(test_runtime_gap_audit_20260701.md R9)",
-)
+# GAP R9 (test_runtime_gap_audit_20260701.md): was strict-xfail until the
+# aLeadK corroboration bound (LeadAccelCorr* live-tune params) clamped
+# uncorroborated transient lead decel at the _stabilize_raw_leads ingress;
+# now a green regression test.
 def test_runtime_tau_alead_blip_stays_calm() -> None:
   result = _run(EV6_MODEL_LEAD_A_LEAD_TAU_S)
   metrics = _measure(result)
@@ -141,19 +143,34 @@ def test_runtime_tau_alead_blip_stays_calm() -> None:
 
 
 def test_alead_blip_persistence_tracks_a_lead_tau() -> None:
-  # Mechanism attribution for the xfail above: identical directives, only the
-  # published aLeadTau differs. The extra braking at tau=0.3 lives in the
-  # POST-blip window (directive aLeadK is 0.0 again), i.e. it is the MPC's
-  # retained lead-accel estimate extrapolated with the runtime tau — not the
-  # blip's direct effect, which both taus share. Revisit alongside the xfail
-  # marker when the runtime transient response changes.
+  # Mechanism attribution for the (former) xfail above, re-baselined when the
+  # aLeadK corroboration bound landed. Two halves:
+  #   (1) With the bound at the shipped LeadAccelCorrMarginMps2=0.5, the blip is
+  #       clamped for BOTH taus: min planner accel stays above the audit's
+  #       -0.35 floor at tau=0.3 and tau=1.5, and the tau-dependent brake-hold
+  #       persistence collapses (the old >=0.5 s divergence is gone).
+  #   (2) Disabling the bound (margin >= 10) restores the measured
+  #       tau-dependent divergence — the original R9 assertions, kept verbatim
+  #       as the rollback regression test.
   runtime = _measure(_run(EV6_MODEL_LEAD_A_LEAD_TAU_S))
   legacy = _measure(_run(float(_LEAD_ACCEL_TAU)))
   assert legacy["aLeadTauS"] == pytest.approx(1.5)
 
   detail = f"runtime[{_fmt(runtime)}] legacy[{_fmt(legacy)}]"
-  # Measured today: post-blip min -0.239 vs -0.182 m/s^2, brake held until
-  # 6.69 s vs 5.64 s, speed loss 0.799 vs 0.623 m/s.
-  assert runtime["min_post_blip_planner_accel_mps2"] < legacy["min_post_blip_planner_accel_mps2"] - 0.03, detail
-  assert runtime["brake_hold_until_s"] > legacy["brake_hold_until_s"] + 0.5, detail
-  assert runtime["speed_loss_mps"] > legacy["speed_loss_mps"] + 0.1, detail
+  # Measured at landing: min planner accel -0.184 at both taus (bound floor
+  # min(0, a_meas) - 0.5 during the blip), brake hold until 4.74 s at both.
+  assert runtime["min_planner_accel_mps2"] >= PLANNER_BRAKE_FLOOR_MPS2, detail
+  assert legacy["min_planner_accel_mps2"] >= PLANNER_BRAKE_FLOOR_MPS2, detail
+  assert runtime["min_post_blip_planner_accel_mps2"] >= PLANNER_BRAKE_FLOOR_MPS2, detail
+  assert legacy["min_post_blip_planner_accel_mps2"] >= PLANNER_BRAKE_FLOOR_MPS2, detail
+  assert runtime["brake_hold_until_s"] < legacy["brake_hold_until_s"] + 0.5, detail
+
+  runtime_off = _measure(_run(EV6_MODEL_LEAD_A_LEAD_TAU_S, corr_bound_disabled=True))
+  legacy_off = _measure(_run(float(_LEAD_ACCEL_TAU), corr_bound_disabled=True))
+  detail_off = f"runtime[{_fmt(runtime_off)}] legacy[{_fmt(legacy_off)}]"
+  # Measured with the bound disabled (same numbers as the pre-fix baseline):
+  # post-blip min -0.239 vs -0.182 m/s^2, brake held until 6.69 s vs 5.64 s,
+  # speed loss 0.799 vs 0.623 m/s.
+  assert runtime_off["min_post_blip_planner_accel_mps2"] < legacy_off["min_post_blip_planner_accel_mps2"] - 0.03, detail_off
+  assert runtime_off["brake_hold_until_s"] > legacy_off["brake_hold_until_s"] + 0.5, detail_off
+  assert runtime_off["speed_loss_mps"] > legacy_off["speed_loss_mps"] + 0.1, detail_off

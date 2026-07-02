@@ -379,6 +379,16 @@ LEAD_RESPONSE_TUNE_SPECS = (
     description="Duration (s) the cruise_reacquire_pos_jerk_limit is enforced after a lead drops. 0 disables.",
   ),
   LeadResponseTuneSpec(
+    attr="cruise_reacquire_jerk_ramp_mps3_per_s",
+    key="Longitudinal.LiveTune.CruiseReacquireJerkRamp",
+    cli_name="cruise-reacquire-jerk-ramp",
+    label="cruise_reacquire_jerk_ramp",
+    default=0.8,
+    minimum=0.0,
+    maximum=5.0,
+    description="Growth rate (m/s^3 per s) of the reacquire jerk allowance after a lead drops; first frames stay at CruiseReacquirePosJerkLimit. 0 = fixed limit for the whole window.",
+  ),
+  LeadResponseTuneSpec(
     attr="lead_prob_enter",
     key="Longitudinal.LiveTune.LeadProbEnter",
     cli_name="lead-prob-enter",
@@ -439,6 +449,26 @@ LEAD_RESPONSE_TUNE_SPECS = (
     description="Consecutive stable frames required before a dropped lead is eligible for phantom hold.",
   ),
   LeadResponseTuneSpec(
+    attr="phantom_lead_decel_hold_factor",
+    key="Longitudinal.LiveTune.PhantomLeadDecelHoldFactor",
+    cli_name="phantom-lead-decel-hold-factor",
+    label="phantom_lead_decel_hold_factor",
+    default=1.0,
+    minimum=0.0,
+    maximum=1.0,
+    description="Fraction of the last measured lead decel (aLeadK<0) held through the phantom window. 1 = full hold; 0 = legacy linear decay to zero. Positive aLeadK always decays.",
+  ),
+  LeadResponseTuneSpec(
+    attr="phantom_lead_decel_trend_gain",
+    key="Longitudinal.LiveTune.PhantomLeadDecelTrendGain",
+    cli_name="phantom-lead-decel-trend-gain",
+    label="phantom_lead_decel_trend_gain",
+    default=1.0,
+    minimum=0.0,
+    maximum=1.0,
+    description="Fraction of the measured pre-drop d(aLeadK)/dt continued through the phantom window (deepening trends only; relaxing trends are never extrapolated). 0 = hold constant.",
+  ),
+  LeadResponseTuneSpec(
     attr="flutter_detect_transitions",
     key="Longitudinal.LiveTune.FlutterDetectTransitions",
     cli_name="flutter-detect-transitions",
@@ -477,6 +507,16 @@ LEAD_RESPONSE_TUNE_SPECS = (
     minimum=0.0,
     maximum=5.0,
     description="If modelAccel < -this, flutter clamp is bypassed so hard braking is not delayed.",
+  ),
+  LeadResponseTuneSpec(
+    attr="flutter_clamp_brake_jerk_mps3",
+    key="Longitudinal.LiveTune.FlutterClampBrakeJerkMps3",
+    cli_name="flutter-clamp-brake-jerk-mps3",
+    label="flutter_clamp_brake_jerk_mps3",
+    default=1.5,
+    minimum=0.0,
+    maximum=5.0,
+    description="Downward jerk cap (m/s^3) while flutter mode is active; never tighter than FlutterClampJerkMps3. 0 = symmetric legacy clamp.",
   ),
   LeadResponseTuneSpec(
     attr="model_lead_filter_tau_s",
@@ -538,6 +578,122 @@ LEAD_RESPONSE_TUNE_SPECS = (
     maximum=1.0,
     description="Relative-velocity filter tau used when model-lead gating admits a low-TTC or strongly closing event.",
   ),
+  LeadResponseTuneSpec(
+    attr="model_lead_filter_blend_tau_floor_s",
+    key="Longitudinal.LiveTune.ModelLeadFilterBlendTauFloorS",
+    cli_name="model-lead-blend-tau-floor",
+    label="model_lead_blend_tau_floor",
+    default=0.30,
+    minimum=0.05,
+    maximum=8.0,
+    description="dRel filter tau at full closing urgency (geometric blend from ModelLeadFilterTauS). "
+                ">= ModelLeadFilterTauS forces urgency to 0 and disables the whole blend (exact legacy).",
+  ),
+  LeadResponseTuneSpec(
+    attr="model_lead_filter_blend_close_lo_mps",
+    key="Longitudinal.LiveTune.ModelLeadFilterBlendCloseLoMps",
+    cli_name="model-lead-blend-close-lo",
+    label="model_lead_blend_close_lo",
+    default=1.0,
+    minimum=0.0,
+    maximum=2.4,
+    description="Closing speed where dRel-filter urgency starts; hi endpoint is the fixed 2.5 m/s strong-closing gate, "
+                "so the maximum stays below 2.5 to keep the blend span positive.",
+  ),
+  LeadResponseTuneSpec(
+    attr="model_lead_filter_blend_ttc_hi_s",
+    key="Longitudinal.LiveTune.ModelLeadFilterBlendTtcHiS",
+    cli_name="model-lead-blend-ttc-hi",
+    label="model_lead_blend_ttc_hi",
+    default=12.0,
+    minimum=10.5,
+    maximum=30.0,
+    description="TTC where dRel-filter urgency starts; low endpoint is ModelLeadFilterSafeTtcS (max 10.0), "
+                "so the minimum stays above it to keep the blend span positive.",
+  ),
+  LeadResponseTuneSpec(
+    attr="model_lead_filter_blend_slew_boost_mps",
+    key="Longitudinal.LiveTune.ModelLeadFilterBlendSlewBoostMps",
+    cli_name="model-lead-blend-slew-boost",
+    label="model_lead_blend_slew_boost",
+    default=6.0,
+    minimum=0.0,
+    maximum=20.0,
+    description="Extra closing dRel slew allowance (m/s) at full urgency so the close-slew clamp cannot bind. 0 disables.",
+  ),
+  LeadResponseTuneSpec(
+    attr="model_lead_filter_lag_comp_s",
+    key="Longitudinal.LiveTune.ModelLeadFilterLagCompS",
+    cli_name="model-lead-lag-comp",
+    label="model_lead_lag_comp",
+    default=0.6,
+    minimum=0.0,
+    maximum=2.0,
+    description="Closing-only group-delay compensation (s) on the PUBLISHED model-lead dRel; capped at the active "
+                "filter regime's delay. Publication only moves closer, never farther. 0 disables.",
+  ),
+  LeadResponseTuneSpec(
+    attr="model_lead_filter_lag_comp_deadzone_mps",
+    key="Longitudinal.LiveTune.ModelLeadFilterLagCompDeadzoneMps",
+    cli_name="model-lead-lag-comp-deadzone",
+    label="model_lead_lag_comp_deadzone",
+    default=0.5,
+    minimum=0.0,
+    maximum=5.0,
+    description="Closing speed ignored by the lag compensation; keeps steady-noise vRel jitter out of published dRel.",
+  ),
+  LeadResponseTuneSpec(
+    attr="lead_accel_corr_margin_mps2",
+    key="Longitudinal.LiveTune.LeadAccelCorrMarginMps2",
+    cli_name="lead-accel-corr-margin",
+    label="lead_accel_corr_margin",
+    default=0.5,
+    minimum=0.0,
+    maximum=10.0,
+    description="Max uncorroborated lead decel (m/s^2) below the measured vLead trend passed to the MPC in "
+                "non-dangerous, fresh-measurement states. >= 10 disables the bound entirely.",
+  ),
+  LeadResponseTuneSpec(
+    attr="lead_accel_corr_meas_tau_s",
+    key="Longitudinal.LiveTune.LeadAccelCorrMeasTauS",
+    cli_name="lead-accel-corr-meas-tau",
+    label="lead_accel_corr_meas_tau",
+    default=0.3,
+    minimum=0.1,
+    maximum=2.0,
+    description="Low-pass tau for the measured vLead trend used to corroborate aLeadK. 0.6 measurably delayed "
+                "hard-brake onset in the design sweep - do not raise casually.",
+  ),
+  LeadResponseTuneSpec(
+    attr="lead_accel_corr_ttc_guard_s",
+    key="Longitudinal.LiveTune.LeadAccelCorrTtcGuardS",
+    cli_name="lead-accel-corr-ttc-guard",
+    label="lead_accel_corr_ttc_guard",
+    default=8.0,
+    minimum=2.0,
+    maximum=20.0,
+    description="Corroboration bound is bypassed (full aLeadK passes) at or below this TTC.",
+  ),
+  LeadResponseTuneSpec(
+    attr="lead_accel_corr_closing_guard_mps",
+    key="Longitudinal.LiveTune.LeadAccelCorrClosingGuardMps",
+    cli_name="lead-accel-corr-closing-guard",
+    label="lead_accel_corr_closing_guard",
+    default=1.5,
+    minimum=0.0,
+    maximum=10.0,
+    description="Corroboration bound is bypassed at or above this closing speed.",
+  ),
+  LeadResponseTuneSpec(
+    attr="lead_accel_corr_near_headway_s",
+    key="Longitudinal.LiveTune.LeadAccelCorrNearHeadwayS",
+    cli_name="lead-accel-corr-near-headway",
+    label="lead_accel_corr_near_headway",
+    default=1.2,
+    minimum=0.0,
+    maximum=4.0,
+    description="Corroboration bound is bypassed inside this headway (s) of gap.",
+  ),
 )
 
 LEAD_RESPONSE_TUNE_SPECS_BY_ATTR = {spec.attr: spec for spec in LEAD_RESPONSE_TUNE_SPECS}
@@ -579,22 +735,37 @@ class LeadResponseTuningConfig:
   drel_filter_closing_gate_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["drel_filter_closing_gate_m"].default
   cruise_reacquire_pos_jerk_limit: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cruise_reacquire_pos_jerk_limit"].default
   cruise_reacquire_jerk_window_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cruise_reacquire_jerk_window_s"].default
+  cruise_reacquire_jerk_ramp_mps3_per_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cruise_reacquire_jerk_ramp_mps3_per_s"].default
   lead_prob_enter: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_prob_enter"].default
   lead_prob_exit: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_prob_exit"].default
   lead_source_acquire_frames: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_source_acquire_frames"].default
   lead_source_release_frames: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_source_release_frames"].default
   phantom_lead_hold_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["phantom_lead_hold_s"].default
   phantom_lead_stable_frames: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["phantom_lead_stable_frames"].default
+  phantom_lead_decel_hold_factor: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["phantom_lead_decel_hold_factor"].default
+  phantom_lead_decel_trend_gain: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["phantom_lead_decel_trend_gain"].default
   flutter_detect_transitions: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["flutter_detect_transitions"].default
   flutter_detect_window_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["flutter_detect_window_s"].default
   flutter_clamp_jerk_mps3: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["flutter_clamp_jerk_mps3"].default
   flutter_clamp_bypass_decel_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["flutter_clamp_bypass_decel_mps2"].default
+  flutter_clamp_brake_jerk_mps3: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["flutter_clamp_brake_jerk_mps3"].default
   model_lead_filter_tau_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_filter_tau_s"].default
   model_lead_filter_open_slew_max_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_filter_open_slew_max_mps"].default
   model_lead_filter_safe_ttc_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_filter_safe_ttc_s"].default
   model_lead_filter_assoc_drel_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_filter_assoc_drel_m"].default
   model_lead_filter_vrel_tau_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_filter_vrel_tau_s"].default
   model_lead_filter_fast_vrel_tau_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_filter_fast_vrel_tau_s"].default
+  model_lead_filter_blend_tau_floor_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_filter_blend_tau_floor_s"].default
+  model_lead_filter_blend_close_lo_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_filter_blend_close_lo_mps"].default
+  model_lead_filter_blend_ttc_hi_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_filter_blend_ttc_hi_s"].default
+  model_lead_filter_blend_slew_boost_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_filter_blend_slew_boost_mps"].default
+  model_lead_filter_lag_comp_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_filter_lag_comp_s"].default
+  model_lead_filter_lag_comp_deadzone_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_filter_lag_comp_deadzone_mps"].default
+  lead_accel_corr_margin_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_accel_corr_margin_mps2"].default
+  lead_accel_corr_meas_tau_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_accel_corr_meas_tau_s"].default
+  lead_accel_corr_ttc_guard_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_accel_corr_ttc_guard_s"].default
+  lead_accel_corr_closing_guard_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_accel_corr_closing_guard_mps"].default
+  lead_accel_corr_near_headway_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_accel_corr_near_headway_s"].default
 
   @classmethod
   def defaults(cls) -> LeadResponseTuningConfig:

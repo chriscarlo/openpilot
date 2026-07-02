@@ -99,14 +99,30 @@ Vibe-follow-only accel floor that prevents continued heavy decel after the Vibe 
 | `ModelLeadFilterVRelTauS` | 0.40 | 0.10–2.0 | Source-side model-lead relative-velocity filter tau. Lower = faster accel/decel recognition |
 | `ModelLeadFilterFastVRelTauS` | 0.16 | 0.05–1.0 | Relative-velocity filter tau used after low-TTC or strongly closing model-lead admission |
 
+### Model-Lead Closing Urgency Blend + Lag Compensation (radard)
+
+Fills the cliff between the slow model-lead dRel filter (tau 2.8, 1.6x when closing) and the hard fast-close gates: a continuous urgency u in [0,1] — computed ONLY when the measurement says the lead is closer than predicted — blends the dRel tau geometrically toward `BlendTauFloorS`, boosts the closing slew allowance by `BlendSlewBoostMps*u`, and blends the vRel tau toward `ModelLeadFilterFastVRelTauS`. The existing fast gates stay verbatim as the u=1 short-circuit, so nothing adopts a closer lead slower than before. Disable: `ModelLeadFilterBlendTauFloorS >= ModelLeadFilterTauS` forces u=0 everywhere (dRel tau, vRel tau and slew boost all revert), which is the verified byte-identical legacy rollback. Degenerate spans (close-lo at/above the fixed 2.5 m/s strong-closing gate, ttc-hi at/below `ModelLeadFilterSafeTtcS`) also collapse to u=0, never to u=1.
+
+The lag compensation moves only the PUBLISHED dRel closer by `closing * LagCompS` (closing measured beyond `LagCompDeadzoneMps` on the filtered vRel); internal filter state is untouched and publication never moves farther. The compensation is capped at the active filter regime's effective tau, so the fast-close path (actual delay ~0.12 s) is not over-corrected at high closing speeds. `LagCompS=0` disables (verified byte-identical legacy publication). Raise toward 1.2 to bias earlier braking (measured +0.7 m min gap in the gray-zone sweep at negligible steady-noise cost).
+
+| Param Key | Default | Range | Description |
+|---|---|---|---|
+| `ModelLeadFilterBlendTauFloorS` | 0.30 | 0.05–8.0 | dRel filter tau at full closing urgency. >= `ModelLeadFilterTauS` disables the whole blend (exact legacy) |
+| `ModelLeadFilterBlendCloseLoMps` | 1.0 | 0.0–2.4 | Closing speed where urgency starts; hi endpoint is the fixed 2.5 m/s strong-closing gate |
+| `ModelLeadFilterBlendTtcHiS` | 12.0 | 10.5–30.0 | TTC where urgency starts; low endpoint is `ModelLeadFilterSafeTtcS` (max 10.0) |
+| `ModelLeadFilterBlendSlewBoostMps` | 6.0 | 0.0–20.0 | Extra closing dRel slew allowance (m/s) at full urgency. 0 disables |
+| `ModelLeadFilterLagCompS` | 0.6 | 0.0–2.0 | Closing-only group-delay compensation (s) on published dRel, capped at the active regime's filter delay. 0 disables |
+| `ModelLeadFilterLagCompDeadzoneMps` | 0.5 | 0.0–5.0 | Closing speed ignored by lag comp; keeps steady vRel jitter out of published dRel |
+
 ## Cruise Reacquire Jerk Limit
 
-Softens the upward accel slew after the MPC source transitions from lead-follow to cruise (lead lost / classifier dropout). Only clips positive excursion — braking and steady lead-follow are unaffected. Window auto-ends when output_a_target reaches the cruise accel cap.
+Softens the upward accel slew after the MPC source transitions from lead-follow to cruise (lead lost / classifier dropout). Only clips positive excursion — braking and steady lead-follow are unaffected. Window auto-ends when output_a_target reaches the cruise accel cap. The allowed jerk starts at `CruiseReacquirePosJerkLimit` and grows by `CruiseReacquireJerkRamp` every second, so the first frames after the handoff stay soft but recovery toward set speed is not pinned at the pre-departure follow accel for the whole window. When the ramped ceiling reaches the MPC request before the window expires (true at the 0.8 default in the audited departure scenario), the legacy accel step at window expiry is also avoided; small ramp values can still leave a residual step there. On a device that has not rebuilt `common` after this key landed, the planner falls back to the spec default (0.8) rather than legacy behavior; set `CruiseReacquireJerkRamp=0` for the verified exact-legacy fixed allowance.
 
 | Param Key | Default | Range | Description |
 |---|---|---|---|
 | `CruiseReacquirePosJerkLimit` | 0.08 | 0.0–5.0 | Max upward jerk (m/s^3) on planner output during cruise after a lead drops. 0 disables |
 | `CruiseReacquireJerkWindowS` | 3.0 | 0.0–3.0 | Duration (s) the jerk limit is enforced after a lead → cruise transition. 0 disables |
+| `CruiseReacquireJerkRamp` | 0.8 | 0.0–5.0 | Growth rate (m/s^3 per s) of the jerk allowance across the window. 0 = fixed allowance (legacy hang-back) |
 
 ## Lead Prob Schmitt Trigger (radard)
 
@@ -119,7 +135,7 @@ Asymmetric hysteresis on vision-model lead prob in radard. Per-slot latch: a slo
 
 ## Lead Source Dwell + Phantom Hold (MPC)
 
-Acquire/release dwell on lead `status` at the MPC boundary, plus velocity-extrapolated phantom hold for lead data continuity through brief dropouts. Set `PhantomLeadHoldS=0` to disable phantom. Set both dwell frame counts to 1 to disable dwell.
+Acquire/release dwell on lead `status` at the MPC boundary, plus kinematically-propagated phantom hold for lead data continuity through brief dropouts. A phantom of a decelerating lead holds the last measured decel (no decay toward zero), continues the measured deepening trend of the lagged aLeadK estimate, and propagates dRel/vRel/vLead with it — the held lead is never kinematically more optimistic than its last measurement. Positive (pull-away) accel still decays toward zero. The trend measurement resets on validity gaps >0.5 s and on track-identity discontinuities between consecutive valid frames (dRel >3 m off the propagated position, or a >1.5 m yRel jump), so a cut-in replacing the tracked lead never contributes a cross-car d(aLeadK)/dt to a later phantom. Set `PhantomLeadHoldS=0` to disable phantom. Set both dwell frame counts to 1 to disable dwell.
 
 | Param Key | Default | Range | Description |
 |---|---|---|---|
@@ -127,16 +143,31 @@ Acquire/release dwell on lead `status` at the MPC boundary, plus velocity-extrap
 | `LeadSourceReleaseFrames` | 20 | 1–40 | Consecutive invalid-lead frames required before MPC releases a latched lead (ignored while phantom hold is active) |
 | `PhantomLeadHoldS` | 0.80 | 0.0–1.5 | Duration (s) the last-known lead is extrapolated after status goes False. 0 disables phantom |
 | `PhantomLeadStableFrames` | 3 | 1–40 | Consecutive stable frames required before a dropped lead is eligible for phantom |
+| `PhantomLeadDecelHoldFactor` | 1.0 | 0.0–1.0 | Fraction of the last measured lead decel (aLeadK<0) held through the phantom window. 1 = full hold; 0 = legacy linear decay to zero |
+| `PhantomLeadDecelTrendGain` | 1.0 | 0.0–1.0 | Fraction of the measured pre-drop d(aLeadK)/dt continued through the phantom window (deepening trends only). 0 = hold constant |
 
-## Flutter Mode Clamp (bidirectional jerk)
+## Lead Accel Corroboration Bound (MPC)
 
-When the MPC source flip-flops at the edge of lead acquisition (brake-tap sensation), enter flutter mode and clamp `output_a_target` slew in BOTH directions for comfort. Bypassed on strong modelAccel braking so real decel is not delayed.
+Bounds uncorroborated transient negative aLeadK at the single MPC lead ingress (`_stabilize_raw_leads` output, feeding role classifier, previews, `process_lead` and the brake-release floor): when the low-passed finite-difference of stabilized vLead (a_meas) does not corroborate the model's decel claim, aLeadK is floored at `min(0, a_meas) - LeadAccelCorrMarginMps2`. The bound is bypassed entirely — full aLeadK passes — in any of: a dangerous state (TTC <= `TtcGuardS`, closing >= `ClosingGuardMps`, or gap <= `NearHeadwayS` x v_ego; latched with hysteresis so guard-boundary noise cannot chatter aLeadK), a phantom-held or stale (non-fresh-measurement) slot (the a_meas low-pass is frozen, not decayed, through the hold, and a held braking lead keeps its full measured decel), or before ~2x`MeasTauS` of same-track vLead history exists (the low-pass resets on track identity changes: radarTrackId change, reacquisition, or a vLead step beyond a 10 m/s^2 physical-accel gate). `LeadAccelCorrMarginMps2 >= 10` disables the bound entirely (verified rollback: restores the measured tau-dependent blip divergence in test_repro_alead_tau_transient.py). Do not raise `MeasTauS` casually: 0.6 measurably delayed hard-brake onset in the design sweep.
+
+| Param Key | Default | Range | Description |
+|---|---|---|---|
+| `LeadAccelCorrMarginMps2` | 0.5 | 0.0–10.0 | Max uncorroborated lead decel below the measured vLead trend passed to the MPC. >= 10 disables |
+| `LeadAccelCorrMeasTauS` | 0.3 | 0.1–2.0 | Low-pass tau for the measured vLead trend |
+| `LeadAccelCorrTtcGuardS` | 8.0 | 2.0–20.0 | Bound bypassed at or below this TTC |
+| `LeadAccelCorrClosingGuardMps` | 1.5 | 0.0–10.0 | Bound bypassed at or above this closing speed |
+| `LeadAccelCorrNearHeadwayS` | 1.2 | 0.0–4.0 | Bound bypassed inside this headway of gap |
+
+## Flutter Mode Clamp (asymmetric jerk)
+
+When the MPC source flip-flops at the edge of lead acquisition (brake-tap sensation), enter flutter mode and clamp `output_a_target` slew for comfort. Braking has its own, never-tighter allowance (`FlutterClampBrakeJerkMps3`): tap suppression comes from the slow positive release, while brake onset is not throttled below what the MPC requests. Bypassed entirely on strong modelAccel braking so hard decel is never delayed. On a device that has not rebuilt `common` after `FlutterClampBrakeJerkMps3` landed, the planner falls back to the spec default (1.5) rather than legacy behavior; set `FlutterClampBrakeJerkMps3=0` for the verified exact-legacy symmetric clamp (setting both it and `CruiseReacquireJerkRamp` to 0 is the verified full rollback of the post-flicker-hang fix).
 
 | Param Key | Default | Range | Description |
 |---|---|---|---|
 | `FlutterDetectTransitions` | 2 | 1–10 | Source transitions within the window that trigger flutter mode |
 | `FlutterDetectWindowS` | 1.0 | 0.1–5.0 | Rolling-window length for flutter detection |
-| `FlutterClampJerkMps3` | 0.12 | 0.0–5.0 | Bidirectional jerk cap (m/s^3) during flutter mode. 0 disables |
+| `FlutterClampJerkMps3` | 0.12 | 0.0–5.0 | Upward jerk cap (m/s^3) during flutter mode. 0 disables the clamp |
+| `FlutterClampBrakeJerkMps3` | 1.5 | 0.0–5.0 | Downward jerk cap (m/s^3) during flutter mode; effective cap is max(this, `FlutterClampJerkMps3`). 0 = symmetric legacy clamp |
 | `FlutterClampBypassDecelMps2` | 1.5 | 0.0–5.0 | If modelAccel < -this, clamp is bypassed |
 
 ## Setting Params from SSH

@@ -115,10 +115,10 @@ def _row_at(trace: list[dict], t_s: float) -> dict:
 
 
 def test_flicker_latches_flutter_and_departure_arms_reacquire(flicker_trace: list[dict]) -> None:
-  # Scenario-validity guard (not the behavioral xfail): prove the trace goes
+  # Scenario-validity guard (not the behavioral test): prove the trace goes
   # through the audited mechanism — flutter latched by the flicker, reacquire
-  # window armed by the departure — so the xfail below cannot rot into failing
-  # for an unrelated reason.
+  # window armed by the departure — so the behavioral test below cannot rot
+  # into passing/failing for an unrelated reason.
   transitions = _source_transitions(flicker_trace)
   flicker_flips = [t for t in transitions if FLICKER_START_S <= t[0] < DEPARTURE_S]
   # lead0->cruise once the phantom hold expires, cruise->lead0 on reacquisition:

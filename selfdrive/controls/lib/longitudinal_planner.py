@@ -471,6 +471,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     tune_cfg = getattr(self.mpc, "_live_tune_cfg", None)
     jerk_limit = float(getattr(tune_cfg, "cruise_reacquire_pos_jerk_limit", 0.0) or 0.0)
     window_s = float(getattr(tune_cfg, "cruise_reacquire_jerk_window_s", 0.0) or 0.0)
+    jerk_ramp = float(getattr(tune_cfg, "cruise_reacquire_jerk_ramp_mps3_per_s", 0.0) or 0.0)
 
     source_is_lead = lead_source in ("lead0", "lead1")
     dt = float(max(self.dt, 1e-3))
@@ -485,7 +486,14 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
       self._cruise_pos_jerk_frames_left = 0
 
     if self._cruise_pos_jerk_frames_left > 0 and jerk_limit > 0.0:
-      slew_ceiling = self._cruise_pos_jerk_prev_a + jerk_limit * dt
+      # Allowed jerk escalates the longer the handoff persists: the first frames
+      # stay as soft as the base limit (suppressing the abrupt post-flicker
+      # surge this clamp exists for), but recovery toward set speed is no longer
+      # pinned near the pre-departure follow accel for the whole window.
+      window_frames = max(1, int(math.ceil(window_s / dt))) if window_s > 0.0 else self._cruise_pos_jerk_frames_left
+      elapsed_s = max(0, window_frames - self._cruise_pos_jerk_frames_left) * dt
+      allowed_jerk = jerk_limit + max(jerk_ramp, 0.0) * elapsed_s
+      slew_ceiling = self._cruise_pos_jerk_prev_a + allowed_jerk * dt
       if self.output_a_target > slew_ceiling:
         self.output_a_target = slew_ceiling
       self._cruise_pos_jerk_frames_left -= 1
@@ -505,6 +513,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     window_s = float(getattr(tune_cfg, "flutter_detect_window_s", 1.0) or 1.0)
     jerk_cap = float(getattr(tune_cfg, "flutter_clamp_jerk_mps3", 0.0) or 0.0)
     bypass_decel = float(getattr(tune_cfg, "flutter_clamp_bypass_decel_mps2", 1.5) or 1.5)
+    brake_jerk_cap = float(getattr(tune_cfg, "flutter_clamp_brake_jerk_mps3", 0.0) or 0.0)
 
     if jerk_cap <= 0.0 or window_s <= 0.0:
       self._source_transition_frames.clear()
@@ -540,11 +549,14 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
       if not (bypass_decel > 0.0 and (model_accel < -abs(bypass_decel) or self.output_a_target < -abs(bypass_decel))):
         dt = float(max(self.dt, 1e-3))
         max_step = jerk_cap * dt
+        # Braking gets its own, never-tighter jerk allowance: taps are suppressed
+        # by the slow release (positive cap), not by throttling brake onset.
+        max_brake_step = max(brake_jerk_cap, jerk_cap) * dt
         delta = self.output_a_target - self._flutter_clamp_prev_a
         if delta > max_step:
           self.output_a_target = self._flutter_clamp_prev_a + max_step
-        elif delta < -max_step:
-          self.output_a_target = self._flutter_clamp_prev_a - max_step
+        elif delta < -max_brake_step:
+          self.output_a_target = self._flutter_clamp_prev_a - max_brake_step
 
     self._flutter_clamp_prev_a = float(self.output_a_target)
 
