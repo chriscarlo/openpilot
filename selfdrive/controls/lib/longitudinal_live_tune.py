@@ -193,6 +193,36 @@ LEAD_RESPONSE_TUNE_SPECS = (
                 "more negative than -6 would deny genuinely oncoming leads their uncapped authority.",
   ),
   LeadResponseTuneSpec(
+    attr="lead_handoff_stopping_need_decel_mps2",
+    key="Longitudinal.LiveTune.LeadHandoffStoppingNeedDecelMps2",
+    cli_name="lead-handoff-stopping-need-decel",
+    label="handoff_stopping_need_decel",
+    default=0.80,
+    minimum=0.05,
+    maximum=1e9,
+    description="Kinematic stopping-need cruise->lead obstacle handoff threshold (m/s^2) at/below the reference speed: "
+                "hand the MPC the lead obstacle as soon as stopping STOP_DISTANCE short of the lead requires at least "
+                "this decel (scaled by max(1, v_ego/LeadHandoffStoppingNeedRefSpeedMps) above the reference speed). "
+                "Fixes the midband (~18 mph) stop slam where every early handoff leg is structurally blocked and "
+                "braking starts at ~21 m. OR'd into raw_requires_owner, so it can only make the handoff earlier. "
+                "Legacy rollback sentinel: 1e9 (the spec maximum deliberately admits it) makes the leg unreachable and "
+                "restores the pre-fix handoff exactly.",
+  ),
+  LeadResponseTuneSpec(
+    attr="lead_handoff_stopping_need_ref_speed_mps",
+    key="Longitudinal.LiveTune.LeadHandoffStoppingNeedRefSpeedMps",
+    cli_name="lead-handoff-stopping-need-ref-speed",
+    label="handoff_stopping_need_ref_speed",
+    default=8.0,
+    minimum=1.0,
+    maximum=1e9,
+    description="Reference ego speed (m/s) for the stopping-need handoff threshold: below it the threshold is the flat "
+                "base value; above it the threshold scales by v_ego/ref (a constant-time-headway trigger for stopped "
+                "leads). Bounds ghost/false-positive exposure at highway speed to ranges where the required decel is "
+                "genuinely proportional, and keeps 9-10 m/s calm stops inside the human stop-gap window. Sentinel: 1e9 "
+                "(the spec maximum deliberately admits it) disables scaling entirely (flat threshold at every speed).",
+  ),
+  LeadResponseTuneSpec(
     attr="lead_brake_release_min_speed_mps",
     key="Longitudinal.LiveTune.LeadBrakeReleaseMinSpeedMps",
     cli_name="lead-brake-release-min-speed",
@@ -978,6 +1008,8 @@ class LeadResponseTuningConfig:
   lead_slowdown_kinematic_headroom: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_slowdown_kinematic_headroom"].default
   lead_slowdown_kinematic_margin_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_slowdown_kinematic_margin_m"].default
   lead_slowdown_kinematic_oncoming_vlead_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_slowdown_kinematic_oncoming_vlead_mps"].default
+  lead_handoff_stopping_need_decel_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_handoff_stopping_need_decel_mps2"].default
+  lead_handoff_stopping_need_ref_speed_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_handoff_stopping_need_ref_speed_mps"].default
   lead_brake_release_min_speed_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_brake_release_min_speed_mps"].default
   lead_brake_release_brake_deficit_margin_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_brake_release_brake_deficit_margin_m"].default
   lead_brake_release_lookahead_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_brake_release_lookahead_s"].default

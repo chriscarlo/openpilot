@@ -20,8 +20,6 @@ from __future__ import annotations
 
 import functools
 
-import pytest
-
 from openpilot.common.realtime import DT_MDL
 from selfdrive.test.longitudinal_harness.closed_loop import SimulationResult, run_harness
 from selfdrive.test.longitudinal_harness.config import NoiseSeeds, resolve_ev6_vehicle_config
@@ -162,15 +160,13 @@ def test_m2_no_phantom_collapse_and_no_slam_step_under_measured_noise() -> None:
   )
 
 
-@pytest.mark.xfail(strict=True, reason="Phantom mechanism FIXED (fast-close corroboration + corroborated opening "
-                                       "recovery in radard.py ModelLeadTrack): no phantom collapse and no slam "
-                                       "step under measured noise. Remaining conjunct: minTrueGapM 3.74 < 4.0 "
-                                       "floor, owned by the composed-tree M1/M3 stopping chain — given accurate "
-                                       "published gaps it stops 2.9-4.0 m short on 11/14 ev6_measured seeds, and "
-                                       "clean no-phantom seeds show the identical short stops with M2 fully "
-                                       "disabled (FastCloseConfirmFrames=1, OpenRecoveryMaxEgoMps=0), so do NOT "
-                                       "re-diagnose the fast-close outlier adoption; see the stopping-chain "
-                                       "residual owner task in docs/chauffeur/live_tunable_params.md")
+# XPASS -> marker removed (assertions untouched): the last red conjunct
+# (minTrueGapM >= 4.0, owned by the composed-tree stopping chain that stopped
+# 2.9-4.0 m short given accurate published gaps) was fixed by the kinematic
+# stopping-need cruise->lead handoff leg (long_mpc.py stopping_need_hold,
+# LeadHandoffStoppingNeedDecelMps2), which hands the solver the lead obstacle
+# from long range so the MPC plans the whole stop instead of inheriting a
+# late-handoff deficit.
 def test_no_phantom_collapse_slam_under_measured_noise() -> None:
   result = _run()
 

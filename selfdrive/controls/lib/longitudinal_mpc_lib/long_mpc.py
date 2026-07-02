@@ -1121,6 +1121,59 @@ def get_lead_slowdown_accel_ceiling(v_ego, lead, t_follow,
   return float(np.clip(min(positive_accel_ceiling, -decel_mag), -max_decel, float(max_accel)))
 
 
+def compute_lead_stopping_need_decel(v_ego, lead,
+                                     tuning: LeadResponseTuningConfig | None = None) -> float:
+  """Decel magnitude (m/s^2, positive) kinematically required to stop
+  STOP_DISTANCE short of the lead, for the cruise->lead handoff trigger.
+
+  Mirrors the M1 kinematic-bound two-branch physics in
+  get_lead_slowdown_accel_ceiling (max(0, vLead) clamp, closing-speed match
+  branch, and the lead-stop-extended v_ego branch for a decelerating lead) so
+  the trigger and the ceiling bound cannot disagree about what physics demands.
+
+  Two deliberate divergences from the M1 bound:
+  - Oncoming semantics are INVERTED: M1's oncoming bypass returns None to grant
+    the ceiling full authority; a trigger must FIRE for oncoming leads instead,
+    so below the oncoming vLead threshold the need is computed with the full
+    closure rate v_ego + |vLead|.
+  - The margin is STOP_DISTANCE (the MPC's own stop offset), not the tunable
+    kinematic margin: the trigger asks "does stopping where the MPC would stop
+    already require this much decel", and a larger margin only fires earlier
+    (the safe direction).
+
+  Returns inf when ego is already inside the margin (or the decelerating lead's
+  projected stop point is): the handoff leg must fire unconditionally there.
+  In practice those frames are already owned by raw_gap_hold, which is what
+  keeps the 1e9 rollback value behaviorally identical to the legacy handoff.
+  """
+  tuning = LeadResponseTuningConfig.defaults() if tuning is None else tuning
+  if lead is None or not getattr(lead, 'status', False):
+    return 0.0
+
+  v_ego = float(v_ego)
+  d_rel = float(getattr(lead, 'dRel', 0.0) or 0.0)
+  v_lead_raw = _lead_float(lead, 'vLead', v_ego)
+  oncoming = v_lead_raw < float(tuning.lead_slowdown_kinematic_oncoming_vlead_mps)
+  v_lead = max(0.0, v_lead_raw)
+  # Same clamp as the M1 bound for normal leads; full closure for oncoming.
+  closing = max(0.0, v_ego - (v_lead_raw if oncoming else v_lead))
+
+  match_avail_gap = d_rel - STOP_DISTANCE
+  if match_avail_gap <= 0.05:
+    return float('inf')
+  required = (closing ** 2) / (2.0 * match_avail_gap)
+
+  lead_decel = max(0.0, -float(getattr(lead, 'aLeadK', 0.0) or 0.0))
+  if lead_decel > 0.05:
+    lead_stop_dist = (v_lead ** 2) / (2.0 * lead_decel)
+    stop_avail_gap = d_rel + lead_stop_dist - STOP_DISTANCE
+    if stop_avail_gap > 0.05:
+      required = max(required, (v_ego ** 2) / (2.0 * stop_avail_gap))
+    else:
+      required = float('inf')
+  return float(required)
+
+
 def get_low_speed_launch_follow_factor(v_ego, lead, t_follow) -> float:
   if lead is None or not getattr(lead, 'status', False):
     return 0.0
@@ -2975,11 +3028,38 @@ class LongitudinalMpc:
       raw_gap_surplus_for_release <= HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_GAP_SURPLUS_M and
       approach_obstacle_delta_m <= HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_OBSTACLE_MARGIN_M
     )
+    # Stopping-need handoff (midband-slam fix): on this Hyundai AI-lead-stability
+    # path the solver sees ONLY the active obstacle, so while cruise owns it a
+    # stopped/slowing lead is invisible at any distance. Hand the solver the
+    # lead obstacle as soon as the kinematic decel required to stop
+    # STOP_DISTANCE short of the lead reaches the live-tunable threshold —
+    # OR'd into raw_requires_owner so it can only make the handoff EARLIER,
+    # never delay or weaken any existing handoff/release/ceiling/FCW path.
+    # Rollback: LeadHandoffStoppingNeedDecelMps2 = 1e9 makes the leg
+    # unreachable (exact legacy handoff behavior).
+    stopping_need_decel_mps2 = compute_lead_stopping_need_decel(
+      float(self.x0[1]), best_lead, self._live_tune_cfg)
+    # The threshold scales with ego speed above the reference (midband) speed:
+    # at the 6-8 m/s slam band it is the flat base value, while at highway
+    # speed the same base would fire for any latched stopped lead out to
+    # ~700+ m equivalent, so scaling (a) bounds ghost/false-positive exposure
+    # at 20-30 m/s to ranges where physics genuinely demands proportional
+    # decel, and (b) keeps the 9-10 m/s calm-stop gap inside the human window
+    # (the perception dRel bias grows with the length of the gentle decel
+    # phase). Base * max(1, v/ref) with ref=8.0 is a constant-time-headway
+    # trigger for the stopped-lead case. RefSpeed=1e9 => flat threshold.
+    stopping_need_ref_speed = max(1.0, float(self._live_tune_cfg.lead_handoff_stopping_need_ref_speed_mps))
+    stopping_need_threshold_mps2 = (
+      float(self._live_tune_cfg.lead_handoff_stopping_need_decel_mps2) *
+      max(1.0, float(self.x0[1]) / stopping_need_ref_speed)
+    )
+    stopping_need_hold = stopping_need_decel_mps2 >= stopping_need_threshold_mps2
     raw_requires_owner = (
       low_speed_queue_hold or
       approach_reacquire or
       raw_gap_surplus_for_release <= HYUNDAI_VIRTUAL_LEAD_RETAIN_GAP_SURPLUS_M or
-      raw_metrics["obstacle_0"] <= (float(cruise_obstacle[0]) - HYUNDAI_VIRTUAL_LEAD_RAW_OBSTACLE_MARGIN_M)
+      raw_metrics["obstacle_0"] <= (float(cruise_obstacle[0]) - HYUNDAI_VIRTUAL_LEAD_RAW_OBSTACLE_MARGIN_M) or
+      stopping_need_hold
     )
     release_ready = (
       filtered_gap_surplus_for_release >= HYUNDAI_VIRTUAL_LEAD_RELEASE_GAP_SURPLUS_M and
@@ -3018,8 +3098,10 @@ class LongitudinalMpc:
         reason = "raw_gap_hold"
       elif approach_reacquire:
         reason = "approach_reacquire"
-      else:
+      elif raw_metrics["obstacle_0"] <= (float(cruise_obstacle[0]) - HYUNDAI_VIRTUAL_LEAD_RAW_OBSTACLE_MARGIN_M):
         reason = "raw_obstacle_hold"
+      else:
+        reason = "stopping_need_hold"
     elif active_mode == 'lead':
       if immediate_release and raw_immediate_release_ready and release_agreement_ok:
         active_mode = 'cruise'
@@ -3103,6 +3185,9 @@ class LongitudinalMpc:
       "raw_release_ready": bool(raw_release_ready),
       "release_agreement_ok": bool(release_agreement_ok),
       "low_speed_queue_hold": bool(low_speed_queue_hold),
+      "stopping_need_decel_mps2": float(stopping_need_decel_mps2),
+      "stopping_need_threshold_mps2": float(stopping_need_threshold_mps2),
+      "stopping_need_hold": bool(stopping_need_hold),
       "gap_reclaim_blend": float(self._gap_reclaim_blend),
       "lead_keepup_accel_floor": float(self.lead_keepup_accel_floor),
       "lead_slowdown_accel_ceiling": None if self.lead_slowdown_accel_ceiling is None else float(self.lead_slowdown_accel_ceiling),
