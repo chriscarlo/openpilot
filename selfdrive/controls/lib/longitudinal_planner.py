@@ -11,6 +11,7 @@ from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.modeld.constants import ModelConstants
 from openpilot.selfdrive.controls.lib.longcontrol import LongCtrlState
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LongitudinalMpc
+from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import COMFORT_BRAKE
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import get_headway_follow_distance
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import get_low_speed_launch_follow_max_accel
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import T_IDXS as T_IDXS_MPC
@@ -36,6 +37,14 @@ ALLOW_THROTTLE_THRESHOLD = 0.4
 MIN_ALLOW_THROTTLE_SPEED = 2.5
 LEAD_LAUNCH_RELEASE_HOLD_S = 0.10
 LEAD_LAUNCH_RELEASE_MIN_DREL_M = 5.0
+
+# Follow-regime gap reclaim (F2 of the limit-cycle fix): the raise above the
+# coast bias only phases in once the lead is genuinely pulling away, so a
+# settled equal-speed follow keeps today's coast floor bit-identically.
+GAP_RECLAIM_FOLLOW_PULLAWAY_BP = [0.35, 1.25]
+GAP_RECLAIM_FOLLOW_PULLAWAY_V = [0.0, 1.0]
+GAP_RECLAIM_FOLLOW_PROJECT_HORIZON_S = 1.2
+GAP_RECLAIM_FOLLOW_MIN_GAP_DIV_M = 0.5
 
 # Lookup table for turns
 # Allow higher total accel (lateral+longitudinal) at low speeds and taper with speed
@@ -80,6 +89,7 @@ def get_lead_brake_release_accel_floor(mpc, *, v_ego: float, lead_source: str, c
     "reason": "inactive",
     "floor_mps2": None,
     "gap_error_m": None,
+    "vrel_credit_m": None,
     "pullaway_mps": None,
     "time_to_target_s": None,
     "danger_surplus_m": None,
@@ -118,9 +128,43 @@ def get_lead_brake_release_accel_floor(mpc, *, v_ego: float, lead_source: str, c
   lead_vrel = float(getattr(lead, "vRel", lead_v - float(v_ego)) or 0.0)
   pullaway_speed = max(lead_vrel, lead_v - float(v_ego))
   closing_speed = max(0.0, -lead_vrel, float(v_ego) - lead_v)
-  gap_error = lead_drel - get_headway_follow_distance(float(v_ego), t_follow)
+
+  # vRel-aware gap error (variant A of the limit-cycle brake-hold fix): measure
+  # recovery against the same target the MPC itself uses —
+  # desired_follow_distance(v_ego, v_lead, t_follow) — instead of the bare
+  # equal-speed headway gap. The stopped-equivalence difference
+  # (v_lead^2 - v_ego^2) / (2 * COMFORT_BRAKE) is granted only as CREDIT
+  # (lead genuinely faster -> the headway target the MPC has already recovered
+  # past is closer than the equal-speed one), never as extra pessimism, and:
+  #   - the lead-speed basis is the more pessimistic of vLead and
+  #     v_ego + vRel, so a closing state (either signal) gets zero credit and
+  #     keeps today's headway-based (more-braking) eligibility bit-identically;
+  #   - the credit is capped at lead_brake_release_vrel_credit_cap_m so a
+  #     misassociated much-faster lead cannot buy a coast floor at any
+  #     distance. Cap = 0 is the rollback sentinel (exact legacy gap error).
+  vrel_credit = 0.0
+  credit_cap_m = float(tuning.lead_brake_release_vrel_credit_cap_m)
+  if credit_cap_m > 0.0:
+    lead_v_pessimistic = max(0.0, min(lead_v, float(v_ego) + lead_vrel))
+    # Recovery projection: the tracker's aLeadK leads its vRel by several
+    # hundred ms, so a lead that has finished a transient slowdown reads
+    # "accelerating hard" well before its published speed crosses back over
+    # ego's. Project the pessimistic lead-speed basis forward by the POSITIVE
+    # part of aLeadK only — a decelerating or steady lead gets nothing, and
+    # the total credit stays under the same cap — so the release floor swings
+    # up within the actuation lag of true recovery instead of a half second
+    # late. Rollback sentinel: LeadBrakeReleaseRecoveryProjS = 0.
+    lead_v_pessimistic += max(0.0, lead_accel) * float(tuning.lead_brake_release_recovery_proj_s)
+    vrel_credit = min(
+      credit_cap_m,
+      max(0.0, (lead_v_pessimistic ** 2 - float(v_ego) ** 2) / (2.0 * COMFORT_BRAKE)),
+    )
+  gap_error = lead_drel + vrel_credit - get_headway_follow_distance(float(v_ego), t_follow)
   debug["gap_error_m"] = float(gap_error)
+  debug["vrel_credit_m"] = float(vrel_credit)
   debug["pullaway_mps"] = float(pullaway_speed)
+  debug["closing_mps"] = float(closing_speed)
+  debug["lead_accel_mps2"] = float(lead_accel)
 
   params = getattr(mpc, "params", None)
   if params is None:
@@ -130,7 +174,10 @@ def get_lead_brake_release_accel_floor(mpc, *, v_ego: float, lead_source: str, c
   brake_decel = max(1e-3, abs(min(0.0, float(params[0, 0]) if float(params[0, 0]) < 0.0 else ACCEL_MIN)))
   relative_stop_extra_m = (closing_speed ** 2) / (2.0 * brake_decel)
   brake_authority_gap = get_headway_follow_distance(float(v_ego), t_follow) + relative_stop_extra_m
-  brake_authority_surplus = lead_drel - brake_authority_gap
+  # Eligibility uses the same vRel-aware recovery measure as gap_error: credit
+  # is zero in every closing state, so no closing state gets looser eligibility
+  # than the legacy headway-based gate.
+  brake_authority_surplus = lead_drel + vrel_credit - brake_authority_gap
   debug["brake_authority_decel_mps2"] = float(brake_decel)
   debug["brake_authority_gap_m"] = float(brake_authority_gap)
   debug["brake_authority_surplus_m"] = float(brake_authority_surplus)
@@ -149,6 +196,33 @@ def get_lead_brake_release_accel_floor(mpc, *, v_ego: float, lead_source: str, c
       release_floor = -min(decel_needed, brake_decel)
     else:
       release_floor = tuning.lead_brake_release_coast_bias_mps2
+      # Follow-regime gap reclaim (F2): once the vRel-aware target is
+      # recovered and the lead is pulling away, raise the floor toward
+      # gap_reclaim_follow_max_accel so ego matches lead speed BEFORE the
+      # equal-speed gap is regained, instead of crawling up at the MPC's
+      # unwind jerk and then having to accelerate harder and overshoot.
+      # The raise is tapered by the kinematic overshoot bound: project the
+      # closing speed that the CURRENT commanded accel produces over a short
+      # horizon; the decel that projected closure would need to shed over the
+      # remaining (vRel-aware) gap surplus scales the extra authority away.
+      # Rollback sentinel: GapReclaimFollowMaxAccel <= the coast bias
+      # disables the raise entirely (exact pre-fix coast floor);
+      # GapReclaimTaperGain = 0 removes only the taper (naive raise).
+      follow_cap = float(tuning.gap_reclaim_follow_max_accel)
+      if follow_cap > release_floor:
+        pullaway_ramp = float(np.interp(pullaway_speed, GAP_RECLAIM_FOLLOW_PULLAWAY_BP, GAP_RECLAIM_FOLLOW_PULLAWAY_V))
+        if pullaway_ramp > 0.0:
+          horizon_s = GAP_RECLAIM_FOLLOW_PROJECT_HORIZON_S
+          ego_accel = float(getattr(mpc, "x0", (0.0, 0.0, 0.0))[2])
+          projected_closing = max(
+            0.0,
+            (float(v_ego) + ego_accel * horizon_s) - (lead_v + lead_accel * horizon_s),
+          )
+          overshoot_decel_need = (projected_closing ** 2) / (2.0 * max(gap_error, GAP_RECLAIM_FOLLOW_MIN_GAP_DIV_M))
+          overshoot_taper = float(np.clip(1.0 - float(tuning.gap_reclaim_taper_gain) * overshoot_decel_need, 0.0, 1.0))
+          release_floor += (follow_cap - release_floor) * pullaway_ramp * overshoot_taper
+          debug["follow_reclaim_taper"] = float(overshoot_taper)
+          debug["follow_reclaim_pullaway_ramp"] = float(pullaway_ramp)
     time_to_target_s = 0.0
   elif (gap_error >= -tuning.lead_brake_release_near_target_margin_m and
         closing_speed <= tuning.lead_brake_release_near_target_max_closing_mps):
@@ -434,6 +508,19 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     self.lead_brake_release_debug = lead_brake_release_debug
     if lead_brake_release_floor is not None and not self.output_should_stop:
       output_a_target = max(output_a_target, float(lead_brake_release_floor))
+      # The M1 kinematic slowdown ceiling must win over the release floor while
+      # the lead is a corroborated threat: in the overlap state (lead
+      # decelerating between the slowdown onset threshold and the release
+      # path's -0.75 m/s^2 gate, or any closing state) the kinematic bound may
+      # demand more braking than the floor would allow. Gate the re-clamp on
+      # the threat signals themselves so the ceiling's slew-limited RELEASE
+      # tail (a comfort mechanism, not a threat bound) cannot re-brake a
+      # recovered, opening gap below the bound release floor.
+      lead_is_threatening = (
+        float(lead_brake_release_debug.get("lead_accel_mps2") or 0.0) < 0.0 or
+        float(lead_brake_release_debug.get("closing_mps") or 0.0) > 0.0)
+      if lead_slowdown_ceiling is not None and lead_is_threatening:
+        output_a_target = min(output_a_target, float(lead_slowdown_ceiling))
 
     cruise_owned_accel_cap = getattr(self.mpc, "cruise_owned_accel_cap", None)
     if lead_source == "cruise" and cruise_owned_accel_cap is not None:

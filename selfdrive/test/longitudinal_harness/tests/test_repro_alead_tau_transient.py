@@ -71,7 +71,18 @@ def _run(a_lead_tau_s: float, corr_bound_disabled: bool = False):
   vehicle = resolve_ev6_vehicle_config(
     a_lead_tau_s=a_lead_tau_s,
     perception_filter="direct",
-    param_overrides={"lead_accel_corr_margin_mps2": "10.0"} if corr_bound_disabled else None,
+    # The disabled config emulates the pre-fix tree: the aLeadK corroboration
+    # bound is opened AND the later-landed lead-brake-release recovery fix
+    # (vRel credit + recovery projection + follow reclaim) is rolled back via
+    # its sentinels, since its -0.05 near-target floor would otherwise clip
+    # both tau configs to the same post-blip minimum and mask the tau lag
+    # difference this sanity leg demonstrates.
+    param_overrides={
+      "lead_accel_corr_margin_mps2": "10.0",
+      "lead_brake_release_vrel_credit_cap_m": "0",
+      "lead_brake_release_recovery_proj_s": "0",
+      "gap_reclaim_follow_max_accel": "0",
+    } if corr_bound_disabled else None,
   )
   return run_harness(
     vehicle_config=vehicle,

@@ -122,6 +122,35 @@ LEAD_RESPONSE_TUNE_SPECS = (
     description="Cap on the positive accel floor used to close a safe extra gap.",
   ),
   LeadResponseTuneSpec(
+    attr="gap_reclaim_follow_max_accel",
+    key="Longitudinal.LiveTune.GapReclaimFollowMaxAccel",
+    cli_name="gap-reclaim-follow-max-accel",
+    label="reclaim_follow_max_accel",
+    default=0.25,
+    minimum=0.0,
+    maximum=1.5,
+    description="Follow-regime cap on the positive accel floor used to match a pulling-away lead's speed once the "
+                "vRel-aware follow target is recovered (the brake-release path's recovered branch). Separate from the "
+                "shared GapReclaimMaxAccel (which stays at its default for the launch/stoplight reclaim and the Hyundai "
+                "lead-to-cruise transition floor). The raise above the coast bias phases in with lead pullaway speed and "
+                "is tapered by the kinematic overshoot bound (GapReclaimTaperGain). Rollback sentinel: any value at or "
+                "below LeadBrakeReleaseCoastBiasMps2 (e.g. 0) disables the raise, restoring the pre-fix coast floor.",
+  ),
+  LeadResponseTuneSpec(
+    attr="gap_reclaim_taper_gain",
+    key="Longitudinal.LiveTune.GapReclaimTaperGain",
+    cli_name="gap-reclaim-taper-gain",
+    label="reclaim_taper_gain",
+    default=2.0,
+    minimum=0.0,
+    maximum=20.0,
+    description="Kinematic overshoot taper for the follow-regime gap reclaim floor, in 1/(m/s^2): the extra authority "
+                "above the coast bias is scaled by clip(1 - gain * c_proj^2 / (2 * gap_surplus), 0, 1) where c_proj is "
+                "the closing speed projected from the current commanded accel over 1.2 s. Larger = extra authority "
+                "fades sooner as projected closure grows (strictly less accel than a naive raise). 0 disables only the "
+                "taper (naive raise, diagnostic); use GapReclaimFollowMaxAccel = 0 to roll the whole raise back.",
+  ),
+  LeadResponseTuneSpec(
     attr="lead_keepup_strength",
     key="Longitudinal.LiveTune.LeadKeepUpStrength",
     cli_name="lead-keepup-strength",
@@ -326,6 +355,35 @@ LEAD_RESPONSE_TUNE_SPECS = (
     minimum=-6.0,
     maximum=0.0,
     description="Most braking allowed by the projected-recovery release floor before it ramps toward near-coast.",
+  ),
+  LeadResponseTuneSpec(
+    attr="lead_brake_release_vrel_credit_cap_m",
+    key="Longitudinal.LiveTune.LeadBrakeReleaseVrelCreditCapM",
+    cli_name="lead-brake-release-vrel-credit-cap",
+    label="release_vrel_credit_cap",
+    default=10.0,
+    minimum=0.0,
+    maximum=20.0,
+    description="Cap (m) on the vRel-aware gap-error credit max(0, vLead^2 - vEgo^2) / (2 * COMFORT_BRAKE) granted to the "
+                "brake-release path when the lead is corroborated faster than ego (both vLead and vEgo + vRel must agree, "
+                "so closing states get zero credit and keep the legacy headway-based eligibility bit-identically). Aligns "
+                "release eligibility with the MPC's own vRel-aware desired_follow_distance target so the planner stops "
+                "holding brake after the MPC's gap is already recovered; the cap keeps a misassociated much-faster lead "
+                "from buying a coast floor at any distance. Rollback sentinel: 0 restores the pure headway gap error.",
+  ),
+  LeadResponseTuneSpec(
+    attr="lead_brake_release_recovery_proj_s",
+    key="Longitudinal.LiveTune.LeadBrakeReleaseRecoveryProjS",
+    cli_name="lead-brake-release-recovery-proj",
+    label="release_recovery_proj",
+    default=3.0,
+    minimum=0.0,
+    maximum=5.0,
+    description="Horizon (s) by which the brake-release vRel-credit basis projects the lead speed forward using the "
+                "POSITIVE part of aLeadK only (a decelerating or steady lead gets zero projection). Compensates the "
+                "tracker's vRel lag behind aLeadK when a lead finishes a transient slowdown, so the release floor stops "
+                "holding brake ~0.5 s late; the projected credit still saturates at LeadBrakeReleaseVrelCreditCapM. "
+                "Rollback sentinel: 0 disables the projection (speed-signal-only credit).",
   ),
   LeadResponseTuneSpec(
     attr="lead_brake_release_coast_bias_mps2",
@@ -1016,6 +1074,8 @@ class LeadResponseTuningConfig:
   gap_reclaim_strength: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["gap_reclaim_strength"].default
   gap_reclaim_gap_min_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["gap_reclaim_gap_min_m"].default
   gap_reclaim_max_accel: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["gap_reclaim_max_accel"].default
+  gap_reclaim_follow_max_accel: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["gap_reclaim_follow_max_accel"].default
+  gap_reclaim_taper_gain: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["gap_reclaim_taper_gain"].default
   lead_keepup_strength: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_keepup_strength"].default
   lead_keepup_gap_min_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_keepup_gap_min_m"].default
   lead_keepup_max_accel: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_keepup_max_accel"].default
@@ -1035,6 +1095,8 @@ class LeadResponseTuningConfig:
   lead_brake_release_near_target_floor_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_brake_release_near_target_floor_mps2"].default
   lead_brake_release_lead_decel_min_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_brake_release_lead_decel_min_mps2"].default
   lead_brake_release_approach_floor_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_brake_release_approach_floor_mps2"].default
+  lead_brake_release_vrel_credit_cap_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_brake_release_vrel_credit_cap_m"].default
+  lead_brake_release_recovery_proj_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_brake_release_recovery_proj_s"].default
   lead_brake_release_coast_bias_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_brake_release_coast_bias_mps2"].default
   cutin_settle_duration_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cutin_settle_duration_s"].default
   cutin_settle_max_decel: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cutin_settle_max_decel"].default

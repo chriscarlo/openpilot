@@ -42,8 +42,6 @@ from __future__ import annotations
 
 import functools
 
-import pytest
-
 from openpilot.common.realtime import DT_MDL
 from selfdrive.test.longitudinal_harness.closed_loop import SimulationResult, run_harness
 from selfdrive.test.longitudinal_harness.config import resolve_ev6_vehicle_config
@@ -78,6 +76,19 @@ MAX_SETTLE_S = 16.0
 
 # Safety floor shared by every leg: a fix must not trade ringing for proximity.
 MIN_TRUE_GAP_FLOOR_M = {HW_V0_MPS: 30.0, CITY_V0_MPS: 10.0}
+
+# Calm-approach (SUDDEN-slow) leg of the seat report, encoded as always-green
+# guards (asserted in the wiring test so they can never hide inside an
+# expected failure): for these MILD lead slowdowns (a 1.5 m/s dip / a
+# 0.4 m/s^2 ease) the braking onset must stay within calm EV6 regen feel.
+# Measured on the fixed tree (noise-off): dip 0.212 m/s^2-per-0.3s worst step
+# and -0.476 m/s^2 planner minimum; ease 0.039 and -0.380. Bounds leave
+# headroom but trip if a future change converts these mild dips into stabby
+# braking. They bound the response to a MILD disturbance only — genuine
+# threats are owned by the kinematic ceiling / FCW paths, which these
+# scenarios never engage (min true gap stays >= the floors above).
+MAX_CALM_ONSET_STEP_MPS2_PER_0P3S = {HW_V0_MPS: 0.35, CITY_V0_MPS: 0.25}
+MIN_CALM_PLANNER_ACCEL_MPS2 = {HW_V0_MPS: -0.80, CITY_V0_MPS: -0.65}
 
 
 def _lead_speed_dip(t_s: float, v0: float) -> float:
@@ -238,6 +249,30 @@ def test_follow_limit_cycle_scenario_wiring() -> None:
       f"{case}: min true gap {result.summary['minTrueGapM']:.2f} m breached the "
       f"safety floor {MIN_TRUE_GAP_FLOOR_M[v0]} m")
 
+    # Calm-approach (SUDDEN-slow) leg: the braking onset for this MILD lead
+    # slowdown must stay within calm EV6 regen feel — no stab, no deep brake.
+    post = _post_rows(result)
+    below = [r for r in post if r["control_true_gap_error_m"] < 0.0]
+    if below:
+      first_below_t = below[0]["t_s"]
+      recover_t = next((r["t_s"] for r in post
+                        if r["t_s"] > first_below_t and r["control_true_gap_error_m"] >= 0.0),
+                       post[-1]["t_s"])
+      seg = [r for r in post if first_below_t <= r["t_s"] <= recover_t]
+      min_accel = min(r["planner_accel_mps2"] for r in seg)
+      worst_step = 0.0
+      for i, r in enumerate(seg):
+        for q in seg[i + 1:]:
+          if q["t_s"] - r["t_s"] > 0.3 + 1e-6:
+            break
+          worst_step = max(worst_step, r["planner_accel_mps2"] - q["planner_accel_mps2"])
+      assert worst_step <= MAX_CALM_ONSET_STEP_MPS2_PER_0P3S[v0], (
+        f"{case}: braking onset step {worst_step:.3f} m/s^2 per 0.3 s exceeds the calm bound "
+        f"{MAX_CALM_ONSET_STEP_MPS2_PER_0P3S[v0]} for a mild lead slowdown")
+      assert min_accel >= MIN_CALM_PLANNER_ACCEL_MPS2[v0], (
+        f"{case}: planner decel {min_accel:.3f} m/s^2 exceeds the calm bound "
+        f"{MIN_CALM_PLANNER_ACCEL_MPS2[v0]} for a mild lead slowdown")
+
     # The follow is genuinely settled at target when the disturbance begins and
     # the lead stays in MPC control throughout.
     pre = [r for r in result.trace[::5]
@@ -265,12 +300,6 @@ def test_follow_limit_cycle_scenario_wiring() -> None:
       ), f"{case}: release floor bound during a hold frame: mechanism changed, re-investigate"
 
 
-@pytest.mark.xfail(strict=True,
-                   reason="Follow limit-cycle brake-hold + late-re-accel legs (user seat report): the planner "
-                          "holds brake ~1 s after the gap has recovered while no longer closing (the "
-                          "lead-brake-release path is gated out as brake_authority_deficit on lag-filtered "
-                          "headway gap error, then never binds), then re-accelerates so slowly that ego is "
-                          "still ~1.6 m/s under lead speed, and the reclaimed gap collapses 3.6 m under target.")
 def test_highway_dip_releases_brake_and_matches_lead_speed() -> None:
   metrics = _measure(_run("highway_dip"))
   physics = (
@@ -292,11 +321,6 @@ def test_highway_dip_releases_brake_and_matches_lead_speed() -> None:
           and metrics["overshoot_gap_err_m"] >= MIN_OVERSHOOT_GAP_ERR_M), physics
 
 
-@pytest.mark.xfail(strict=True,
-                   reason="Follow limit-cycle ringing leg at city speed (user seat report: regen bucking worst "
-                          "at moderate speed): the gap error rings twice and takes 21 s to settle; the same "
-                          "scenario with the lag-comp fade disabled settles in 14.9 s with one crossing, so "
-                          "the bounds are achievable.")
 def test_city_ease_settles_without_ringing() -> None:
   metrics = _measure(_run("city_ease"))
   physics = (
