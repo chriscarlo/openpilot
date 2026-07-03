@@ -20,7 +20,7 @@ EV6_MODEL_LEAD_A_LEAD_TAU_S = 0.3
 # Live-tune params dumped from the real device (2026-07-01, dongle CHAUFFEUR_DEV_e521630c).
 # Drop in a newer dump by pointing resolve_ev6_vehicle_config(livetune_snapshot=...) at it.
 DEVICE_LIVETUNE_SNAPSHOT_PATH = (
-  Path(__file__).resolve().parents[3] / "docs" / "chauffeur" / "longitudinal" / "device_livetune_snapshot_20260701.txt"
+  Path(__file__).resolve().parents[3] / "docs" / "chauffeur" / "longitudinal" / "device_livetune_snapshot_20260702.txt"
 )
 
 
