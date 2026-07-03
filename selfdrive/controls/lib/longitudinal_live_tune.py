@@ -654,6 +654,47 @@ LEAD_RESPONSE_TUNE_SPECS = (
     description="Cap on relatch peak decel (m/s^2) while the blend window is active on a non-urgent, large-TTC relatch. Removed by the urgency bypass. 0 = no cap.",
   ),
   LeadResponseTuneSpec(
+    attr="handoff_limit_window_s",
+    key="Longitudinal.LiveTune.HandoffLimitWindowS",
+    cli_name="handoff-limit-window-s",
+    label="handoff_limit_window_s",
+    default=0.40,
+    minimum=0.0,
+    maximum=1.0,
+    description="CD6 (road 200-6): duration (s) a SYMMETRIC per-frame delta clamp on the planner output is armed after any "
+                "cruise<->lead source transition, so a vLeadK-rollover handoff cannot sign-flip aTarget in a single frame. "
+                "The upward (accel-increasing) leg always applies (limiting acceleration is always safe); the downward "
+                "(braking) leg is bypassed under the shared relatch urgency signal (fast-close / short-TTC / FCW / "
+                "requested hard decel) so emergency braking is never delayed. Rollback sentinel: 0 disables the windowed "
+                "limiter entirely (pre-CD6 hard handoff).",
+  ),
+  LeadResponseTuneSpec(
+    attr="handoff_limit_max_delta_mps2",
+    key="Longitudinal.LiveTune.HandoffLimitMaxDeltaMps2",
+    cli_name="handoff-limit-max-delta-mps2",
+    label="handoff_limit_max_delta_mps2",
+    default=0.30,
+    minimum=0.0,
+    maximum=2.0,
+    description="CD6: maximum |output_a_target - prev_a| (m/s^2) allowed per frame while the handoff limiter window is "
+                "active (comfortably under the oracle's 0.4 one-frame bound). Symmetric bound; the downward leg is "
+                "urgency-bypassed. Only meaningful when HandoffLimitWindowS > 0.",
+  ),
+  LeadResponseTuneSpec(
+    attr="handoff_inside_df_positive_cap_mps2",
+    key="Longitudinal.LiveTune.HandoffInsideDfPositiveCapMps2",
+    cli_name="handoff-inside-df-positive-cap-mps2",
+    label="handoff_inside_df_positive_cap_mps2",
+    default=0.10,
+    minimum=0.0,
+    maximum=10.0,
+    description="CD6 EDGE1 (road 200-13 phase-1): always-on cap on positive output_a_target (m/s^2) while the source is "
+                "cruise AND a valid control lead is inside desired_follow_distance(v_ego, v_lead, t_follow) on a closing "
+                "(ego-faster / negative-vRel) trend, so the planner stops spending headway accelerating into a sub-target "
+                "lead before lead0 latches. Not windowed. Rollback sentinel: a large value (e.g. 10 = the spec maximum) "
+                "disables the cap.",
+  ),
+  LeadResponseTuneSpec(
     attr="lead_prob_enter",
     key="Longitudinal.LiveTune.LeadProbEnter",
     cli_name="lead-prob-enter",
@@ -1373,6 +1414,9 @@ class LeadResponseTuningConfig:
   cruise_relatch_bypass_decel_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cruise_relatch_bypass_decel_mps2"].default
   cruise_relatch_urgent_lead_decel_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cruise_relatch_urgent_lead_decel_mps2"].default
   cruise_relatch_max_decel_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cruise_relatch_max_decel_mps2"].default
+  handoff_limit_window_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["handoff_limit_window_s"].default
+  handoff_limit_max_delta_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["handoff_limit_max_delta_mps2"].default
+  handoff_inside_df_positive_cap_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["handoff_inside_df_positive_cap_mps2"].default
   lead_prob_enter: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_prob_enter"].default
   lead_prob_exit: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_prob_exit"].default
   lead_source_acquire_frames: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_source_acquire_frames"].default

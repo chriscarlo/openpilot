@@ -366,6 +366,13 @@ def run_harness(*,
   for step in steps:
     sim_time_s[0] = float(step.t_s)
     radar_state, _ = _build_radar_state(lead_tracks, step, state, profile, planner_dt_s, noise_streams, a_lead_tau_s)
+    # The RAW fabricated leads (pre-radard) are the model output that in production
+    # arrives as modelV2.leadsV3 — before the radard Schmitt latch. The planner
+    # publishes control off the radard-filtered radarState, but it also receives
+    # modelV2.leadsV3 directly (as in production), which is the only lead signal
+    # available while a fresh model lead's prob is still ramping below the enter
+    # band. Snapshot it here so _build_submaster can expose it on modelV2.leadsV3.
+    raw_model_radar_state = radar_state
     if radard_stage is not None:
       # The raw fabricated leads become leadsV3-shaped measurements and the planner
       # sees only what the real radard pipeline would publish; ground truth for the
@@ -387,7 +394,10 @@ def run_harness(*,
       }
       for slot in ("leadOne", "leadTwo")
     }
-    sm = _build_submaster(step, state, radar_state, long_control.long_control_state, bool(vehicle_config.cp.openpilotLongitudinalControl))
+    sm = _build_submaster(step, state, radar_state, long_control.long_control_state,
+                          bool(vehicle_config.cp.openpilotLongitudinalControl),
+                          raw_model_radar_state=raw_model_radar_state,
+                          measured_speed_mps=state.measured_speed_mps)
     planner.update(sm)
     planner_accel = float(planner.output_a_target)
     planner_source = str(getattr(planner.mpc, "source", ""))
@@ -517,6 +527,7 @@ def run_harness(*,
         "planner_lead_brake_release_debug": _to_builtin(getattr(planner, "lead_brake_release_debug", {})),
         "planner_cruise_reacquire_debug": _to_builtin(getattr(planner, "cruise_reacquire_debug", {})),
         "planner_relatch_blend_debug": _to_builtin(getattr(planner, "relatch_blend_debug", {})),
+        "planner_handoff_limit_debug": _to_builtin(getattr(planner, "handoff_limit_debug", {})),
         "mpc_adjacent_awareness_preview_debug": _to_builtin(getattr(planner.mpc, "adjacent_awareness_preview_debug", {})),
         "mpc_hyundai_virtual_lead_debug": _to_builtin(getattr(planner.mpc, "hyundai_virtual_lead_debug", {})),
       })
@@ -529,7 +540,8 @@ def run_harness(*,
   return SimulationResult(vehicle=vehicle_description, summary=summary, trace=trace)
 
 
-def _build_submaster(step: StepInput, state: VehiclePlantState, radar_state, long_control_state, long_active: bool) -> SubMasterStub:
+def _build_submaster(step: StepInput, state: VehiclePlantState, radar_state, long_control_state, long_active: bool,
+                     *, raw_model_radar_state=None, measured_speed_mps: float = 0.0) -> SubMasterStub:
   radar = messaging.new_message("radarState")
   radar.radarState = radar_state
   control = messaging.new_message("controlsState")
@@ -561,6 +573,17 @@ def _build_submaster(step: StepInput, state: VehiclePlantState, radar_state, lon
   model.modelV2.acceleration = acceleration
   model.modelV2.action.desiredAcceleration = float(state.measured_accel_mps2 + 0.1)
   model.modelV2.meta.disengagePredictions.gasPressProbs = [1.0 for _ in range(6)]
+  # modelV2.leadsV3: the raw MODEL lead output (pre-radard, prob still ramping),
+  # exactly what modeld publishes in production. The planner reads radard-filtered
+  # radarState for control, but ALSO receives this raw model lead — the only lead
+  # signal available before the Schmitt enter latch. Fill it from the raw
+  # fabricated leads (mirrors radard_stage._fill_lead_v3, which inverts
+  # get_RadarState_from_vision) so the planner sees the same measurement radard did.
+  if raw_model_radar_state is not None:
+    from openpilot.selfdrive.test.longitudinal_harness.radard_stage import _fill_lead_v3
+    leads_v3 = model.modelV2.init("leadsV3", 2)
+    for slot, raw_lead in enumerate((raw_model_radar_state.leadOne, raw_model_radar_state.leadTwo)):
+      _fill_lead_v3(leads_v3[slot], raw_lead, model_v_ego=float(measured_speed_mps))
 
   live_parameters = messaging.new_message("liveParameters")
   car_state_sp = messaging.new_message("carStateSP")

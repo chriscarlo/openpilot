@@ -57,8 +57,6 @@ from __future__ import annotations
 
 import functools
 
-import pytest
-
 from openpilot.common.realtime import DT_MDL
 from selfdrive.test.longitudinal_harness.closed_loop import SimulationResult, run_harness
 from selfdrive.test.longitudinal_harness.config import resolve_ev6_vehicle_config
@@ -274,10 +272,6 @@ def test_signflip_scenario_wiring() -> None:
     "published dRel moved too much during the rollover; not a pure vLeadK artifact")
 
 
-@pytest.mark.xfail(strict=True, reason="CD6 (road 200-6): a vLeadK rollover on a far cruise lead flips the "
-                                       "cruise<->lead0 handoff, and the single-frame cruise-side dive slams "
-                                       "aTarget negative (no both-signs post-transition rate limit); the device "
-                                       "EMA controller diverges from the planner at the flip frame")
 def test_signflip_one_frame_delta_and_divergence_bounded() -> None:
   result = _run_signflip()
   flip = _sf_flip_frame(_planner_rows(result))
@@ -330,10 +324,6 @@ def test_edge1_scenario_wiring() -> None:
     f"scenario does not exercise the cruise-into-lead boundary")
 
 
-@pytest.mark.xfail(strict=True, reason="CD6 EDGE1 (road 200-13 phase-1): a sub-target lead resolves inside the "
-                                       "desired follow distance while the cruise source is still in control, so "
-                                       "the planner spends headway - positive aTarget into the lead - until lead0 "
-                                       "latches (no inside-df positive-aTarget cap on the cruise source)")
 def test_edge1_positive_accel_capped_inside_desired_follow() -> None:
   result = _run_edge1()
   rows = _planner_rows(result)

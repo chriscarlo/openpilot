@@ -13,6 +13,7 @@ from openpilot.selfdrive.controls.lib.longcontrol import LongCtrlState
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LongitudinalMpc
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import COMFORT_BRAKE
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import get_headway_follow_distance
+from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import desired_follow_distance
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import get_low_speed_launch_follow_max_accel
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import T_IDXS as T_IDXS_MPC
 from openpilot.selfdrive.controls.lib.longitudinal_live_tune import LeadResponseTuningConfig
@@ -28,6 +29,32 @@ from openpilot.sunnypilot.selfdrive.controls.lib.planner_lag_debug import (
   start_span,
 )
 from openpilot.sunnypilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPlannerSP
+
+# Mirror of selfdrive/controls/radard.py RADAR_TO_CAMERA (RADAR ~1.5 m ahead of
+# the camera/mesh frame). modelV2.leadsV3[*].x[0] is measured in the camera frame,
+# so subtract this to recover the radar-frame dRel the planner reasons about. Kept
+# as a local constant to avoid pulling radard's import chain into the planner.
+_RADAR_TO_CAMERA_M = 1.52
+# Minimum raw model-lead prob for the CD6 EDGE1 cap to treat a leadsV3 slot as a
+# real approaching lead. Below the radard Schmitt enter band (default 0.6) but well
+# above sensor/model noise, so a genuinely-present lead whose prob is still ramping
+# up (road 200-13: the headway is spent on exactly those pre-latch frames) arms the
+# positive cap while a spurious far blip does not. The cap only ever REDUCES a
+# positive accel, so a false positive here can never delay braking.
+_HANDOFF_EDGE1_MODEL_PROB_FLOOR = 0.15
+# The CD6 EDGE1 cap fires only when the lead is CLEARLY inside the follow distance
+# (gap < this fraction of df), not merely skimming the df boundary. A lead spending
+# headway (road 200-13: gap 38 m vs df ~67 m, ratio ~0.57) is deep inside; a far
+# lead momentarily reading inside df only because a vLeadK rollover inflated df
+# (road 200-6: gap 70 m vs df ~71 m, ratio ~0.98 at the artifact peak) is a boundary
+# skim and must NOT trip the positive cap — otherwise the cap's own engagement adds
+# a one-frame accel drop that the handoff sign-flip bound would then flag.
+_HANDOFF_EDGE1_INSIDE_DF_FRACTION = 0.9
+# Single-frame drop in the MPC cruise-owned accel cap that flags the rollover-driven
+# pre-handoff cruise dive (road 200-6: cap collapses 0.86 -> 0.0). Large enough that
+# only a genuine collapse — not the cap's gradual pre-collapse taper — arms the
+# symmetric window.
+_HANDOFF_CAP_COLLAPSE_DROP_MPS2 = 0.3
 
 LON_MPC_STEP = 0.2  # first step is 0.2s
 A_CRUISE_MAX_VALS = [1.6, 1.2, 0.8, 0.6]
@@ -372,6 +399,37 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
       "neg_cap_mps2": 0.0,
       "clipped": False,
     }
+    # --- CD6: symmetric post-transition handoff limiter (road 200-6 / 200-13). ---
+    # After ANY cruise<->lead source transition, a SYMMETRIC per-frame delta clamp
+    # bounds |output_a_target - prev_a| for a short window so a vLeadK-rollover
+    # handoff cannot sign-flip aTarget in one frame. The UPWARD leg always applies
+    # (limiting accel is always safe); the DOWNWARD (braking) leg is bypassed under
+    # the shared relatch urgency signal so emergency braking is never delayed. A
+    # separate always-on EDGE1 cap limits positive aTarget while the cruise source
+    # accelerates into a lead already inside the desired follow distance.
+    self._handoff_prev_src: str = ""
+    self._handoff_limit_frames_left: int = 0
+    self._handoff_prev_a: float = 0.0
+    # Previous frame's MPC cruise-owned accel cap. A large single-frame DROP in it
+    # is the narrow signal of the rollover-driven pre-handoff cruise dive; a far
+    # slow lead the MPC steadily suppresses keeps the cap ~0 (no drop) and so does
+    # not arm the window.
+    self._handoff_prev_cruise_cap: float | None = None
+    # EDGE1 cap release-slew state: a hard positive cap keyed on a flickering model
+    # prob can toggle off in one frame and let the accel jump back up. Rate-limit
+    # only the cap's RELEASE (upward) leg so transient toggling cannot inject a
+    # one-frame positive swing. Engagement (reducing accel) is never delayed.
+    self._handoff_edge1_active: bool = False
+    self._handoff_edge1_prev_out: float = 0.0
+    # Read-only observability for the handoff limiter (surfaced by the harness).
+    self.handoff_limit_debug: dict = {
+      "active": False,
+      "frames_left": 0,
+      "down_bypassed": False,
+      "bypass_reason": "",
+      "edge1_capped": False,
+      "clipped": False,
+    }
     self.lead_brake_release_accel_floor = 0.0
     self.lead_brake_release_debug = {"active": False, "reason": "init"}
     # Observability for the cruise-reacquire jerk ramp (read-only; does not
@@ -653,6 +711,34 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     # clamp) and only ever tightens the DOWNWARD move; braking under any urgency
     # signal bypasses it entirely (proven safe: emergency relatch test).
     self._apply_relatch_obstacle_blend(lead_source, control_leads)
+    # CD6: the symmetric post-transition handoff limiter is the FINAL composed
+    # limiter — it runs AFTER the relatch blend so it bounds the fully composed
+    # output_a_target. It anchors on the previous frame's final output and, while
+    # armed after a source flip, symmetrically bounds the per-frame delta (the
+    # upward leg always applies; the downward leg is urgency-bypassed). It also
+    # applies the always-on EDGE1 positive-accel cap on the cruise source.
+    #
+    # The EDGE1 cap keys on the raw MODEL leads (modelV2.leadsV3). On road 200-13
+    # the cruise source spends positive headway on the frames where a slower lead
+    # is already inside the follow distance but its model prob is still ramping
+    # BELOW the radard Schmitt enter band — so it is NOT yet a control_lead or a
+    # published radarState lead. The raw model lead is the only signal available
+    # then, and the planner receives it (modelV2.leadsV3) exactly as in production.
+    # Reduce each raw model lead to (d_rel, v_lead, prob); prob gates presence.
+    model_leads: list[tuple[float, float, float]] = []
+    try:
+      for lv in sm['modelV2'].leadsV3:
+        prob = float(getattr(lv, "prob", 0.0) or 0.0)
+        xs = getattr(lv, "x", None)
+        vs = getattr(lv, "v", None)
+        if xs is None or vs is None or len(xs) == 0 or len(vs) == 0:
+          continue
+        d_rel = float(xs[0]) - _RADAR_TO_CAMERA_M
+        v_lead = float(vs[0])
+        model_leads.append((d_rel, v_lead, prob))
+    except Exception:
+      model_leads = []
+    self._apply_handoff_transition_limit(lead_source, control_leads, model_leads, v_ego)
 
     end_span(total_span)
 
@@ -1020,6 +1106,164 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     # frame, cannot be active because flutter mode needs >=2 transitions).
     self._relatch_blend_prev_a = float(self.output_a_target)
     self._relatch_prev_src = lead_source
+
+  def _apply_handoff_transition_limit(self, lead_source: str, control_leads=(),
+                                      model_leads=(), v_ego: float = 0.0) -> None:
+    # CD6 (road 200-6): a vLeadK rollover on a FAR non-hazard lead flips the
+    # cruise<->lead0 source and the fresh obstacle sign-flips output_a_target in a
+    # single 50 ms frame (+0.58 -> -0.56). This is the felt VACILLATION. Bound the
+    # per-frame delta SYMMETRICALLY for a short window after ANY source flip so no
+    # single frame moves aTarget more than HandoffLimitMaxDeltaMps2.
+    #
+    # CRITICAL ASYMMETRY IN THE BYPASS: the UPWARD (accel-increasing) leg ALWAYS
+    # applies — limiting acceleration is always safe. The DOWNWARD (braking) leg is
+    # bypassed under the EXACT relatch urgency signal (_relatch_urgency_bypass:
+    # FCW / short-TTC / fast-close on the owned lead, or a requested hard decel) so
+    # a genuine close/closing lead is braked with full authority within one frame
+    # of the transition — emergency braking is NEVER delayed by this limiter.
+    #
+    # This is the FINAL composed limiter (runs after the relatch blend), so it
+    # anchors on _handoff_prev_a (the previous frame's final output).
+    cfg = getattr(self.mpc, "_live_tune_cfg", None)
+    window_s = float(getattr(cfg, "handoff_limit_window_s", 0.0) or 0.0)
+    max_delta = float(getattr(cfg, "handoff_limit_max_delta_mps2", 0.0) or 0.0)
+    inside_df_cap = float(getattr(cfg, "handoff_inside_df_positive_cap_mps2", 10.0))
+    dt = float(max(self.dt, 1e-3))
+
+    # A source transition is a cruise<->lead OR lead0<->lead1 flip vs the previous
+    # frame. Skip the init-empty-string -> first-source edge (not a real handoff).
+    prev_src = self._handoff_prev_src
+    real_flip = bool(prev_src) and prev_src != lead_source
+
+    # The cruise<->lead0 handoff on a vLeadK rollover (road 200-6) is preceded by a
+    # cruise-SIDE dive: as the rolled-over vRel makes a far lead momentarily look
+    # like a fast-closing obstacle, the MPC's cruise-owned accel cap COLLAPSES from
+    # a high value to ~0 in one frame and slams the cruise output negative — one to
+    # a few frames BEFORE the source LABEL flips to lead0. Arming only on the label
+    # flip misses that dive. The precise, narrow signal is that sudden cap collapse:
+    # a large single-frame DROP in cruise_owned_accel_cap. This distinguishes the
+    # rollover slam (cap 0.86 -> 0.0) from a far slow lead the MPC is legitimately
+    # and steadily suppressing (cap already ~0, no collapse — must NOT arm, or the
+    # legitimate suppression to ~0 would be held positive). Only meaningful while
+    # cruise owns the source.
+    cur_cruise_cap = getattr(self.mpc, "cruise_owned_accel_cap", None)
+    cap_collapsed = False
+    if (lead_source == "cruise" and cur_cruise_cap is not None and
+        self._handoff_prev_cruise_cap is not None and
+        self._handoff_prev_cruise_cap - float(cur_cruise_cap) > _HANDOFF_CAP_COLLAPSE_DROP_MPS2):
+      cap_collapsed = True
+
+    if (real_flip or cap_collapsed) and window_s > 0.0 and max_delta > 0.0:
+      self._handoff_limit_frames_left = int(math.ceil(window_s / dt))
+    self._handoff_prev_cruise_cap = None if cur_cruise_cap is None else float(cur_cruise_cap)
+
+    # The lead whose threat state governs the DOWNWARD-leg bypass: the source-owned
+    # slot when a lead owns the source, else (cruise-side dive) the closest closing
+    # control lead. Passing the real lead (not None) matters — _relatch_urgency_bypass
+    # returns "no_lead_obj" (an unconditional bypass) for None, which would let the
+    # pre-handoff cruise dive through unclamped. With the real lead its FCW / TTC /
+    # closing / lead-decel tests plus the requested-decel floor still bypass any
+    # genuine emergency braking.
+    urgency_lead = self._lead_owned_slot(lead_source, control_leads)
+    if urgency_lead is None:
+      for lead in control_leads:
+        if lead is None or not bool(getattr(lead, "status", False)):
+          continue
+        if float(getattr(lead, "vRel", 0.0) or 0.0) < 0.0 or (v_ego - float(getattr(lead, "vLead", 0.0) or 0.0)) > 0.1:
+          urgency_lead = lead
+          break
+
+    down_bypassed = False
+    bypass_reason = ""
+    windowed_clipped = False
+    if self._handoff_limit_frames_left > 0 and window_s > 0.0 and max_delta > 0.0:
+      target = float(self.output_a_target)
+      delta = target - self._handoff_prev_a
+      if delta > max_delta:
+        # UPWARD (accel-increasing) leg — ALWAYS applies (limiting accel is safe).
+        self.output_a_target = self._handoff_prev_a + max_delta
+        windowed_clipped = True
+      elif delta < -max_delta and target < 0.0:
+        # DOWNWARD (braking) leg. The CD6 defect is a SIGN FLIP into braking, so
+        # only bound the descent once the target actually enters braking territory
+        # (target < 0). A drop that merely REDUCES positive accel toward a floor
+        # (e.g. the MPC's own lead-present cruise-accel cap suppressing accel to ~0
+        # as a far slow lead appears) is legitimate comfort behavior — never a felt
+        # slam — and passes unclamped. Braking under the shared relatch urgency
+        # signal is bypassed so genuine emergency braking is never delayed.
+        bypassed, reason = self._relatch_urgency_bypass(urgency_lead, cfg)
+        down_bypassed = bool(bypassed)
+        bypass_reason = reason
+        if not bypassed:
+          self.output_a_target = self._handoff_prev_a - max_delta
+          windowed_clipped = True
+      self._handoff_limit_frames_left -= 1
+      # End the window early once the transition has settled (the raw move is
+      # already within the per-frame bound), so steady state is never constrained.
+      if abs(delta) <= max_delta:
+        self._handoff_limit_frames_left = 0
+
+    # EDGE1 cap (always-on, NOT windowed; road 200-13 phase-1): while the cruise
+    # source owns control and a slower lead is already INSIDE the desired follow
+    # distance on a closing (ego-faster) trend, cap positive output_a_target so the
+    # planner stops spending headway accelerating into the sub-target lead before it
+    # latches. It keys on the raw MODEL leads (modelV2.leadsV3), NOT the stabilized
+    # control_leads or the radard-published radarState leads: on the road the
+    # headway is spent precisely on the frames where the lead's model prob is still
+    # ramping BELOW the Schmitt enter band, so it is not yet a control lead nor a
+    # published radarState lead — a control_leads-only check misses exactly the
+    # frames that spend it. A modest prob floor keeps far spurious model blips from
+    # arming the cap. Uses desired_follow_distance from the same module the oracle
+    # imports. Positive-only (never adds braking), so it cannot delay any decel.
+    # Rollback: a large cap (spec max 10) makes this unreachable.
+    edge1_capped = False
+    t_follow = float(getattr(self.mpc, "current_t_follow", 0.0) or 0.0)
+    if lead_source == "cruise" and self.output_a_target > inside_df_cap and v_ego > 1.0:
+      for d_rel, v_lead, prob in model_leads:
+        # Presence floor: ignore absent / very-low-confidence model blips.
+        if prob < _HANDOFF_EDGE1_MODEL_PROB_FLOOR:
+          continue
+        # Closing = ego faster than the model lead speed (the negative-vRel trend
+        # the road exhibited). A lead pulling away is never capped.
+        closing = v_ego - v_lead
+        if closing <= 0.1:
+          continue
+        df = desired_follow_distance(v_ego, v_lead, t_follow=t_follow)
+        if 0.0 < d_rel < df * _HANDOFF_EDGE1_INSIDE_DF_FRACTION:
+          self.output_a_target = min(self.output_a_target, inside_df_cap)
+          edge1_capped = True
+          break
+
+    # EDGE1 RELEASE slew: when the cap disengages (e.g. a flickering model prob dips
+    # below the presence floor for a frame, or the lead crosses the df boundary),
+    # the accel would otherwise jump straight back to the uncapped cruise value in
+    # one frame. Rate-limit ONLY that upward release by max_delta so a transient
+    # toggle cannot inject a positive one-frame swing. Release-only and upward-only:
+    # it never reduces accel and never delays braking. Uses the same max_delta as
+    # the windowed limiter; if the limiter is disabled (window/max_delta 0) there is
+    # nothing to smooth against, so it no-ops.
+    if (not edge1_capped and self._handoff_edge1_active and max_delta > 0.0 and
+        self.output_a_target > self._handoff_edge1_prev_out + max_delta):
+      self.output_a_target = self._handoff_edge1_prev_out + max_delta
+      edge1_release_slewed = True
+    else:
+      edge1_release_slewed = False
+    # The cap is "active" for release-slew purposes while it clips OR while its
+    # release is still being slewed toward the uncapped value.
+    self._handoff_edge1_active = bool(edge1_capped or edge1_release_slewed)
+    self._handoff_edge1_prev_out = float(self.output_a_target)
+
+    self.handoff_limit_debug = {
+      "active": bool(self._handoff_limit_frames_left > 0 or windowed_clipped),
+      "frames_left": int(self._handoff_limit_frames_left),
+      "down_bypassed": bool(down_bypassed),
+      "bypass_reason": str(bypass_reason),
+      "edge1_capped": bool(edge1_capped),
+      "clipped": bool(windowed_clipped or edge1_capped),
+    }
+
+    self._handoff_prev_a = float(self.output_a_target)
+    self._handoff_prev_src = lead_source
 
   def _apply_flutter_mode_clamp(self, lead_source: str, model_accel: float) -> None:
     # Bidirectional jerk clamp when the MPC source is flip-flopping at the
