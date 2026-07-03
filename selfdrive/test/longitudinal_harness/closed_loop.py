@@ -515,6 +515,7 @@ def run_harness(*,
         "mpc_cutin_settle_debug": _to_builtin(getattr(planner.mpc, "cutin_settle_debug", {})),
         "mpc_lead_preview_debug": _to_builtin(getattr(planner.mpc, "lead_approach_preview_debug", {})),
         "planner_lead_brake_release_debug": _to_builtin(getattr(planner, "lead_brake_release_debug", {})),
+        "planner_cruise_reacquire_debug": _to_builtin(getattr(planner, "cruise_reacquire_debug", {})),
         "mpc_adjacent_awareness_preview_debug": _to_builtin(getattr(planner.mpc, "adjacent_awareness_preview_debug", {})),
         "mpc_hyundai_virtual_lead_debug": _to_builtin(getattr(planner.mpc, "hyundai_virtual_lead_debug", {})),
       })

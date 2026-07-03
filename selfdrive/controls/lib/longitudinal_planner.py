@@ -326,6 +326,18 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     self._flutter_mode_active: bool = False
     self.lead_brake_release_accel_floor = 0.0
     self.lead_brake_release_debug = {"active": False, "reason": "init"}
+    # Observability for the cruise-reacquire jerk ramp (read-only; does not
+    # affect behavior). Lets the longitudinal harness prove whether the ramp is
+    # escalating above its jerk floor and how far into the window it is.
+    self.cruise_reacquire_debug: dict = {
+      "active": False,
+      "frames_left": 0,
+      "elapsed_s": 0.0,
+      "allowed_jerk_mps3": 0.0,
+      "jerk_floor_mps3": 0.0,
+      "slew_ceiling_mps2": 0.0,
+      "clipped": False,
+    }
 
     self.v_desired_trajectory = np.zeros(CONTROL_N)
     self.a_desired_trajectory = np.zeros(CONTROL_N)
@@ -607,11 +619,31 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
       elapsed_s = max(0, window_frames - self._cruise_pos_jerk_frames_left) * dt
       allowed_jerk = jerk_limit + max(jerk_ramp, 0.0) * elapsed_s
       slew_ceiling = self._cruise_pos_jerk_prev_a + allowed_jerk * dt
-      if self.output_a_target > slew_ceiling:
+      clipped = self.output_a_target > slew_ceiling
+      if clipped:
         self.output_a_target = slew_ceiling
+      self.cruise_reacquire_debug = {
+        "active": True,
+        "frames_left": int(self._cruise_pos_jerk_frames_left),
+        "elapsed_s": float(elapsed_s),
+        "allowed_jerk_mps3": float(allowed_jerk),
+        "jerk_floor_mps3": float(jerk_limit),
+        "slew_ceiling_mps2": float(slew_ceiling),
+        "clipped": bool(clipped),
+      }
       self._cruise_pos_jerk_frames_left -= 1
       if self.output_a_target >= float(self._planner_output_accel_limits[1]) - 1e-3:
         self._cruise_pos_jerk_frames_left = 0
+    else:
+      self.cruise_reacquire_debug = {
+        "active": False,
+        "frames_left": int(self._cruise_pos_jerk_frames_left),
+        "elapsed_s": 0.0,
+        "allowed_jerk_mps3": 0.0,
+        "jerk_floor_mps3": float(jerk_limit),
+        "slew_ceiling_mps2": 0.0,
+        "clipped": False,
+      }
 
     self._cruise_pos_jerk_prev_a = float(self.output_a_target)
     self._prev_mpc_source = lead_source
