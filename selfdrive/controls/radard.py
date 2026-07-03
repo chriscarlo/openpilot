@@ -562,10 +562,24 @@ class ModelLeadTracker:
     y_raw_tol = float(self._cfg.model_lead_assoc_y_raw_tol_m)
     if raw_vrel < 0.0:
       y_raw_tol = min(y_raw_tol, MODEL_LEAD_ASSOC_Y_GATE_M)
+    # CD4 rollback-completeness: the fix dropped the legacy y_err clause from the
+    # same-frame-duplicate merge. To let the documented rollback sentinel (set
+    # ModelLeadAssocDPathGateM AND ModelLeadAssocYRawTolM both to 3.0 =
+    # MODEL_LEAD_ASSOC_Y_GATE_M) FULLY restore the pre-fix churn, gate that clause on
+    # the SAME knob. Key on the CONFIGURED raw-y tolerance (NOT the vrel-narrowed
+    # y_raw_tol above, which is 3.0 for any closing candidate even at the default):
+    # only when the configured knob itself is at/below the legacy 3.0 m gate (the
+    # rollback sentinel) require y_err <= MODEL_LEAD_DUPLICATE_PATH_GATE_M for a
+    # same-frame duplicate, exactly as the pre-CD4 code did. At the default (7.0) the
+    # clause stays dropped, so default behavior is bit-identical to a67737c0b.
+    cfg_y_raw_tol = float(self._cfg.model_lead_assoc_y_raw_tol_m)
+    duplicate_y_ok = (cfg_y_raw_tol > MODEL_LEAD_ASSOC_Y_GATE_M or
+                      y_err <= MODEL_LEAD_DUPLICATE_PATH_GATE_M)
     same_frame_duplicate = (
       track.identifier in self._updated_track_ids and
       track.last_slot != int(lead_slot) and
       path_err <= MODEL_LEAD_DUPLICATE_PATH_GATE_M and
+      duplicate_y_ok and
       vrel_err <= MODEL_LEAD_DUPLICATE_VREL_GATE_MPS
     )
     closer_safety_candidate = (
