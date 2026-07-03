@@ -25,10 +25,32 @@ def _make_stub(jerk_limit: float = 0.6, window_s: float = 1.5,
     _prev_mpc_source="",
     _cruise_pos_jerk_frames_left=0,
     _cruise_pos_jerk_prev_a=0.0,
+    # CD5 exit-cause classifier + collapse-holdback state (additive; these unit
+    # tests exercise the positive-jerk clamp only, so published_lead is None and
+    # the classifier stays in its fail-safe "departure" path — full ramp).
+    _exit_lookback=deque(maxlen=32),
+    _exit_max_prob_drop=0.0,
+    _exit_prev_pub_prob=None,
+    _exit_drel_dropout=False,
+    _exit_peak_prob=0.0,
+    _exit_last_status_true_prob=None,
+    _exit_lead_track_id=-1,
+    _exit_lead_last_drel=None,
+    _last_lead_owned_track_id=-1,
+    _last_lead_owned_drel=None,
+    _reacquire_armed_pending=False,
+    _reacquire_exit_cause="none",
+    _collapse_holdback_frames_left=0,
+    cruise_reacquire_debug={},
     mpc=SimpleNamespace(_live_tune_cfg=cfg),
   )
   stub._apply_cruise_reacquire_jerk_limit = types.MethodType(
     LongitudinalPlanner._apply_cruise_reacquire_jerk_limit, stub,
+  )
+  # _lead_owned_slot is a staticmethod: assign the plain function (no self bind).
+  stub._lead_owned_slot = LongitudinalPlanner._lead_owned_slot
+  stub._classify_exit_cause = types.MethodType(
+    LongitudinalPlanner._classify_exit_cause, stub,
   )
   return stub
 

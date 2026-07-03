@@ -324,6 +324,54 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     self._source_transition_frames: deque = deque()
     self._flutter_clamp_prev_a: float = 0.0
     self._flutter_mode_active: bool = False
+    # --- CD5: lost-vs-departed memory for the cruise-reacquire ramp (part b) and
+    # the fresh-lead relatch obstacle blend (part a). ---
+    # Ring buffer of the lead-owned slot's recent (status, modelProb, dRel) used
+    # to classify WHY a lead0/lead1 -> cruise exit happened (a recoverable
+    # prob-collapse vs a genuine departure). Bounded length; oldest dropped.
+    self._exit_lookback: deque = deque(maxlen=32)
+    # Accumulators tracked while the source is lead-owned (reset on cruise): the
+    # largest single-frame drop in the PUBLISHED radarState modelProb (a gradual
+    # prob-collapse stays small; a genuine departure shows an abrupt cliff) and
+    # whether the published dRel ever dropped out mid-track.
+    self._exit_max_prob_drop: float = 0.0
+    self._exit_prev_pub_prob: float | None = None
+    self._exit_drel_dropout: bool = False
+    self._exit_peak_prob: float = 0.0
+    # Published modelProb at the most recent frame the published lead's status
+    # was True: a prob-COLLAPSE fades gradually so this is LOW at the status
+    # flip; a genuine DEPARTURE vanishes abruptly with this still HIGH. This is
+    # the primary collapse-vs-departure discriminator.
+    self._exit_last_status_true_prob: float | None = None
+    self._reacquire_exit_cause: str = "none"
+    self._collapse_holdback_frames_left: int = 0
+    # The physical identity (radarTrackId) and last continuous dRel of the lead
+    # that owned the source just before a cruise exit. Used to arm the relatch
+    # blend ONLY on a same-physical-lead re-presentation (not a fresh cut-in).
+    self._exit_lead_track_id: int = -1
+    self._exit_lead_last_drel: float | None = None
+    # Identity of the slot that currently owns the source (snapshotted into the
+    # exit-lead identity only at a lead->cruise handoff). Pending flag ensures the
+    # relatch blend fires only after a genuine handoff, not on first acquisition.
+    self._last_lead_owned_track_id: int = -1
+    self._last_lead_owned_drel: float | None = None
+    self._reacquire_armed_pending: bool = False
+    # Relatch obstacle blend state (part a): a self-contained negative-leg slew
+    # clamp on output_a_target for a short window after a non-urgent, same-lead
+    # cruise -> lead relatch, so the fresh ObstacleCost cannot yank aTarget in a
+    # single frame. CD6-independent (does not import/depend on any CD6 symbol).
+    self._relatch_blend_frames_left: int = 0
+    self._relatch_blend_prev_a: float = 0.0
+    self._relatch_prev_src: str = ""
+    # Read-only observability for the relatch blend (surfaced by the harness).
+    self.relatch_blend_debug: dict = {
+      "active": False,
+      "frames_left": 0,
+      "bypassed": False,
+      "bypass_reason": "",
+      "neg_cap_mps2": 0.0,
+      "clipped": False,
+    }
     self.lead_brake_release_accel_floor = 0.0
     self.lead_brake_release_debug = {"active": False, "reason": "init"}
     # Observability for the cruise-reacquire jerk ramp (read-only; does not
@@ -337,6 +385,8 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
       "jerk_floor_mps3": 0.0,
       "slew_ceiling_mps2": 0.0,
       "clipped": False,
+      "exit_cause": "none",
+      "collapse_holdback_frames_left": 0,
     }
 
     self.v_desired_trajectory = np.zeros(CONTROL_N)
@@ -581,13 +631,76 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     self.output_a_target = np.clip(output_a_target, accel_clip[0], accel_clip[1])
     self.prev_accel_clip = accel_clip
 
+    # Published-radarState snapshot of the source-owned slot for exit-cause
+    # classification (CD5 part b). The RAW published modelProb — not the MPC's
+    # stabilized control_lead prob, which is pinned high through a collapse — is
+    # what distinguishes a gradual prob-collapse (small per-frame decay) from a
+    # genuine departure (an abrupt single-frame prob cliff). Snapshot the slot
+    # that owns the source; fall back to leadOne.
+    published_lead = None
+    try:
+      rs = sm['radarState']
+      published_lead = rs.leadTwo if lead_source == "lead1" else rs.leadOne
+    except Exception:
+      published_lead = None
+
     model_accel_for_flutter = float(sm['modelV2'].action.desiredAcceleration) if hasattr(sm['modelV2'], 'action') else 0.0
-    self._apply_cruise_reacquire_jerk_limit(lead_source)
+    self._apply_cruise_reacquire_jerk_limit(lead_source, control_leads, published_lead)
     self._apply_flutter_mode_clamp(lead_source, model_accel_for_flutter)
+    # CD5(a): the relatch obstacle blend is the FINAL negative-leg authority, so
+    # there is exactly one binding downward slew clamp per frame. It anchors on
+    # the previous frame's final output (shared prev_a semantics with the flutter
+    # clamp) and only ever tightens the DOWNWARD move; braking under any urgency
+    # signal bypasses it entirely (proven safe: emergency relatch test).
+    self._apply_relatch_obstacle_blend(lead_source, control_leads)
 
     end_span(total_span)
 
-  def _apply_cruise_reacquire_jerk_limit(self, lead_source: str) -> None:
+  @staticmethod
+  def _lead_owned_slot(lead_source: str, control_leads):
+    # The _StabilizedLead object that currently owns the MPC source, or None.
+    if lead_source not in ("lead0", "lead1"):
+      return None
+    idx = 0 if lead_source == "lead0" else 1
+    if idx < len(control_leads):
+      return control_leads[idx]
+    return None
+
+  def _classify_exit_cause(self, exit_prob_lo: float, abrupt_prob_drop: float) -> str:
+    # Classify WHY the lead-owned slot handed off to cruise, from the PUBLISHED
+    # radarState modelProb history accumulated while the slot owned the source.
+    #
+    # Key signal (verified on the CD5 oracle): the MPC's stabilized control_lead
+    # prob is pinned high through a collapse and so cannot discriminate; the RAW
+    # published modelProb does — a prob-COLLAPSE decays GRADUALLY (largest single
+    # frame drop ~0.04), while a genuine DEPARTURE shows an ABRUPT cliff (a single
+    # frame drop ~0.9 when the track is lost). We track the largest single-frame
+    # published-prob drop plus a dRel-dropout flag while lead-owned.
+    #   "collapse": no abrupt prob cliff (max single-frame drop < abrupt_prob_drop)
+    #     AND the lead was genuinely latched at some point (peak prob above the
+    #     exit band) AND the published dRel never dropped out AND the prob ended
+    #     at/below the Schmitt exit band. Perception faded with the lead still
+    #     there (road ff4).
+    #   "departure": an abrupt prob cliff, a mid-track dRel dropout, or the lead
+    #     never having been solidly latched — an abrupt track loss.
+    # Fail SAFE toward braking on ambiguity: anything not matching the collapse
+    # pattern returns "departure" (full positive ramp; the relatch blend
+    # separately refuses to arm a negative-leg clamp on an unknown exit lead).
+    if self._exit_last_status_true_prob is None or self._exit_prev_pub_prob is None:
+      return "departure"
+
+    was_latched = self._exit_peak_prob > exit_prob_lo
+    # The collapse fingerprint: the lead was solidly latched at some point, then
+    # its published prob FADED to (roughly) the Schmitt exit band by the last
+    # status-True frame. `1 - abrupt_prob_drop` is the "still high" line: a
+    # last-status-True prob at/above it means the track vanished abruptly with
+    # the prob still high -> departure. Below it (faded) -> collapse.
+    faded = self._exit_last_status_true_prob <= (1.0 - max(abrupt_prob_drop, 1e-6))
+    if was_latched and faded:
+      return "collapse"
+    return "departure"
+
+  def _apply_cruise_reacquire_jerk_limit(self, lead_source: str, control_leads=(), published_lead=None) -> None:
     # When the MPC's selected source transitions from lead-follow to cruise, the
     # planner's output accel can jump sharply as it seeks the set speed. Clamp the
     # upward slew for a short window so the transition feels less abrupt. Braking
@@ -597,27 +710,122 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     jerk_limit = float(getattr(tune_cfg, "cruise_reacquire_pos_jerk_limit", 0.0) or 0.0)
     window_s = float(getattr(tune_cfg, "cruise_reacquire_jerk_window_s", 0.0) or 0.0)
     jerk_ramp = float(getattr(tune_cfg, "cruise_reacquire_jerk_ramp_mps3_per_s", 0.0) or 0.0)
+    holdback_s = float(getattr(tune_cfg, "cruise_collapse_holdback_s", 0.0) or 0.0)
+    lookback_frames = int(max(1, round(float(getattr(tune_cfg, "cruise_exit_lookback_frames", 7.0) or 7.0))))
+    abrupt_prob_drop = float(getattr(tune_cfg, "cruise_exit_abrupt_prob_drop", 0.3) or 0.3)
+    # Radard's live Schmitt exit band edge (default 0.25). Cite the live-tuned
+    # value rather than a stale hardcode; the collapse classifier keys on prob
+    # ending below this band after a gradual decay.
+    exit_prob_lo = float(getattr(tune_cfg, "lead_prob_exit", 0.25) or 0.25)
 
     source_is_lead = lead_source in ("lead0", "lead1")
     dt = float(max(self.dt, 1e-3))
+
+    lead_slot = self._lead_owned_slot(lead_source, control_leads)
+
+    # Track the exit-cause signals from the PUBLISHED radarState modelProb while
+    # the source is lead-owned: the largest single-frame prob drop (a gradual
+    # prob-collapse stays small, a departure shows an abrupt cliff), the peak
+    # prob (was it ever solidly latched), a mid-track dRel dropout, and a short
+    # tail of the published (status, prob, dRel) so the classifier can confirm
+    # the prob ended below the Schmitt exit band. All accumulators reset on
+    # cruise so a stale departed history can never leak into a later exit.
+    if self._exit_lookback.maxlen != max(1, lookback_frames):
+      self._exit_lookback = deque(list(self._exit_lookback)[-lookback_frames:], maxlen=max(1, lookback_frames))
+    if source_is_lead and published_lead is not None:
+      pub_status = bool(getattr(published_lead, "status", False))
+      pub_prob = float(getattr(published_lead, "modelProb", 0.0) or 0.0)
+      pub_drel_raw = getattr(published_lead, "dRel", None)
+      pub_drel = None if pub_drel_raw is None else float(pub_drel_raw)
+      # A dRel dropout mid-track: status false / dRel unavailable / dRel ~0 while
+      # we had previously seen a real gap.
+      if (not pub_status) or pub_drel is None or (pub_drel is not None and pub_drel <= 0.5 and self._exit_peak_prob > 0.0):
+        self._exit_drel_dropout = True
+      if self._exit_prev_pub_prob is not None:
+        drop = self._exit_prev_pub_prob - pub_prob
+        if drop > self._exit_max_prob_drop:
+          self._exit_max_prob_drop = drop
+      self._exit_prev_pub_prob = pub_prob
+      self._exit_peak_prob = max(self._exit_peak_prob, pub_prob)
+      # Latch the published prob at the last frame the published status was True
+      # (and the gap was real): the primary collapse-vs-departure discriminator.
+      if pub_status and pub_drel is not None and pub_drel > 0.5:
+        self._exit_last_status_true_prob = pub_prob
+      self._exit_lookback.append((pub_status, pub_prob, pub_drel))
+    # Track the CONTROL-lead identity of the CURRENTLY lead-owned slot. This is
+    # snapshotted into the exit-lead identity only at the lead->cruise EXIT below
+    # (NOT every lead frame), so the relatch same-physical-lead guard compares a
+    # relatched lead against the DEPARTED lead — never against itself, which
+    # would spuriously arm the blend on the very first lead acquisition.
+    if source_is_lead and lead_slot is not None:
+      self._last_lead_owned_track_id = int(getattr(lead_slot, "radarTrackId", -1) or -1)
+      self._last_lead_owned_drel = float(getattr(lead_slot, "dRel", 0.0) or 0.0)
 
     if (self._prev_mpc_source in ("lead0", "lead1") and not source_is_lead and
         jerk_limit > 0.0 and window_s > 0.0):
       self._cruise_pos_jerk_frames_left = int(math.ceil(window_s / dt))
       # _cruise_pos_jerk_prev_a carries the prior frame's clipped output_a_target,
       # so we intentionally do not overwrite it here — it is our slew anchor.
+      # Snapshot the DEPARTING lead's identity so the relatch blend can require a
+      # same-physical-lead re-presentation, and arm the pending-relatch flag so
+      # the blend only fires on a relatch that follows a genuine lead->cruise
+      # handoff (never on the first lead acquisition).
+      self._exit_lead_track_id = int(self._last_lead_owned_track_id)
+      self._exit_lead_last_drel = (None if self._last_lead_owned_drel is None
+                                   else float(self._last_lead_owned_drel))
+      self._reacquire_armed_pending = True
+      # Classify the exit cause from the pre-exit published-prob signals; on a
+      # recoverable prob-collapse, pin the ramp at its floor for the holdback
+      # window so a phantom perception dropout does not license the full
+      # re-acceleration escalation a genuine departure would (road ff4).
+      # Fail-safe: ambiguity returns "departure" (full ramp).
+      self._reacquire_exit_cause = self._classify_exit_cause(exit_prob_lo, abrupt_prob_drop)
+      if self._reacquire_exit_cause == "collapse" and holdback_s > 0.0:
+        self._collapse_holdback_frames_left = int(math.ceil(holdback_s / dt))
+      else:
+        self._collapse_holdback_frames_left = 0
 
     if source_is_lead:
       self._cruise_pos_jerk_frames_left = 0
+      self._reacquire_exit_cause = "none"
+      # A real corroborated closing/threatening lead relatch clears the holdback
+      # (a collapse followed by a genuine re-approach must NOT be held back).
+      if lead_slot is not None:
+        closing = -float(getattr(lead_slot, "vRel", 0.0) or 0.0)
+        a_lead = float(getattr(lead_slot, "aLeadK", 0.0) or 0.0)
+        if closing > 0.0 or a_lead < 0.0 or bool(getattr(lead_slot, "fcw", False)):
+          self._collapse_holdback_frames_left = 0
+    elif self._cruise_pos_jerk_frames_left == 0:
+      # Steady cruise (not in an active reacquire window): drop the departed
+      # lead history / accumulators so they cannot leak into a later exit.
+      self._exit_lookback.clear()
+      self._exit_max_prob_drop = 0.0
+      self._exit_prev_pub_prob = None
+      self._exit_drel_dropout = False
+      self._exit_peak_prob = 0.0
+      self._exit_last_status_true_prob = None
+      # The reacquire window expired without a relatch: forget the departed lead
+      # identity and disarm the pending-relatch flag so a much later, unrelated
+      # cruise->lead acquisition is never treated as a relatch of this lead.
+      self._reacquire_armed_pending = False
+      self._exit_lead_track_id = -1
+      self._exit_lead_last_drel = None
+
+    if self._collapse_holdback_frames_left > 0:
+      effective_ramp = 0.0
+    else:
+      effective_ramp = max(jerk_ramp, 0.0)
 
     if self._cruise_pos_jerk_frames_left > 0 and jerk_limit > 0.0:
       # Allowed jerk escalates the longer the handoff persists: the first frames
       # stay as soft as the base limit (suppressing the abrupt post-flicker
       # surge this clamp exists for), but recovery toward set speed is no longer
-      # pinned near the pre-departure follow accel for the whole window.
+      # pinned near the pre-departure follow accel for the whole window. After a
+      # prob-collapse exit the ramp term is held at 0 (pinned at the floor) for
+      # the holdback window.
       window_frames = max(1, int(math.ceil(window_s / dt))) if window_s > 0.0 else self._cruise_pos_jerk_frames_left
       elapsed_s = max(0, window_frames - self._cruise_pos_jerk_frames_left) * dt
-      allowed_jerk = jerk_limit + max(jerk_ramp, 0.0) * elapsed_s
+      allowed_jerk = jerk_limit + effective_ramp * elapsed_s
       slew_ceiling = self._cruise_pos_jerk_prev_a + allowed_jerk * dt
       clipped = self.output_a_target > slew_ceiling
       if clipped:
@@ -630,6 +838,8 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
         "jerk_floor_mps3": float(jerk_limit),
         "slew_ceiling_mps2": float(slew_ceiling),
         "clipped": bool(clipped),
+        "exit_cause": str(self._reacquire_exit_cause),
+        "collapse_holdback_frames_left": int(self._collapse_holdback_frames_left),
       }
       self._cruise_pos_jerk_frames_left -= 1
       if self.output_a_target >= float(self._planner_output_accel_limits[1]) - 1e-3:
@@ -643,10 +853,173 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
         "jerk_floor_mps3": float(jerk_limit),
         "slew_ceiling_mps2": 0.0,
         "clipped": False,
+        "exit_cause": str(self._reacquire_exit_cause),
+        "collapse_holdback_frames_left": int(self._collapse_holdback_frames_left),
       }
+
+    if self._collapse_holdback_frames_left > 0:
+      self._collapse_holdback_frames_left -= 1
 
     self._cruise_pos_jerk_prev_a = float(self.output_a_target)
     self._prev_mpc_source = lead_source
+
+  def _relatch_urgency_bypass(self, lead_slot, cfg) -> tuple[bool, str]:
+    # Shared urgency predicate evaluated on the relatch ARMING frame BEFORE any
+    # clamp is applied. If ANY threat signal is present, the blend is disarmed
+    # and full braking passes THIS frame — no rate-limit ever delays real
+    # braking. Ambiguity resolves toward MORE braking.
+    urgent_ttc = float(getattr(cfg, "cruise_relatch_urgent_ttc_s", 4.0) or 4.0)
+    urgent_closing = float(getattr(cfg, "cruise_relatch_urgent_closing_mps", 2.5) or 2.5)
+    bypass_decel = float(getattr(cfg, "cruise_relatch_bypass_decel_mps2", -1.5) or -1.5)
+    urgent_lead_decel = float(getattr(cfg, "cruise_relatch_urgent_lead_decel_mps2", -1.0) or -1.0)
+
+    # Requested decel already at/below the bypass floor: let it through.
+    if bypass_decel < 0.0 and self.output_a_target <= bypass_decel:
+      return True, "requested_decel"
+    if lead_slot is None:
+      # No lead object to reason about -> do not risk suppressing braking.
+      return True, "no_lead_obj"
+    if bool(getattr(lead_slot, "fcw", False)):
+      return True, "fcw"
+    closing = -float(getattr(lead_slot, "vRel", 0.0) or 0.0)
+    if urgent_closing > 0.0 and closing >= urgent_closing:
+      return True, "closing"
+    d_rel = float(getattr(lead_slot, "dRel", 0.0) or 0.0)
+    if closing > 1e-3:
+      ttc = d_rel / max(closing, 1e-3)
+      if urgent_ttc > 0.0 and ttc <= urgent_ttc:
+        return True, "ttc"
+    a_lead = float(getattr(lead_slot, "aLeadK", 0.0) or 0.0)
+    if urgent_lead_decel < 0.0 and a_lead <= urgent_lead_decel:
+      # Lead has begun braking at long range: TTC/closing/FCW lag it. Bypass the
+      # blend AND the large-TTC decel cap so anticipatory braking is not clipped.
+      return True, "lead_decel"
+    return False, ""
+
+  def _apply_relatch_obstacle_blend(self, lead_source: str, control_leads=()) -> None:
+    # CD5(a): after a cruise -> lead relatch, the fresh ObstacleCost can slam
+    # output_a_target down in a single frame (road 200-9 tap2: 2.7 m/s^2 in
+    # 270 ms) even when the relatched lead is NOT a threat. Blend the NEW
+    # obstacle's downward pull in over CruiseRelatchBlendS by slew-limiting only
+    # the DOWNWARD move of output_a_target, and cap the relatch peak decel while
+    # TTC is large. Self-contained negative-leg clamp (no CD6 dependency). The
+    # upward leg is untouched (brake RELEASE is never slowed). Bypassed entirely
+    # under any urgency signal so genuine braking is never delayed.
+    cfg = getattr(self.mpc, "_live_tune_cfg", None)
+    blend_s = float(getattr(cfg, "cruise_relatch_blend_s", 0.0) or 0.0)
+    blend_jerk = float(getattr(cfg, "cruise_relatch_blend_jerk_mps3", 0.0) or 0.0)
+    release_jerk = float(getattr(cfg, "cruise_relatch_release_jerk_mps3", 0.0) or 0.0)
+    max_decel = float(getattr(cfg, "cruise_relatch_max_decel_mps2", 0.0) or 0.0)
+    dt = float(max(self.dt, 1e-3))
+
+    source_is_lead = lead_source in ("lead0", "lead1")
+    lead_slot = self._lead_owned_slot(lead_source, control_leads)
+
+    # Default debug (overwritten below when the blend is active or bypassed).
+    debug = {"active": False, "frames_left": int(self._relatch_blend_frames_left),
+             "bypassed": False, "bypass_reason": "", "neg_cap_mps2": 0.0, "clipped": False}
+
+    # Detect a relatch: previous frame NOT lead-owned, this frame lead-owned.
+    # _prev_mpc_source is updated inside _apply_cruise_reacquire_jerk_limit (runs
+    # before this), so it already holds THIS frame's source; track our own edge
+    # via _relatch_prev_src instead.
+    prev_src = self._relatch_prev_src
+    # A relatch is a cruise -> lead edge that FOLLOWS a genuine lead -> cruise
+    # handoff (the reacquire window armed and is still pending). This gate is
+    # what keeps the very first lead ACQUISITION (and any cruise->lead edge that
+    # was not preceded by a real lead departure) from being treated as a relatch.
+    is_relatch = ((prev_src not in ("lead0", "lead1")) and source_is_lead and
+                  self._reacquire_armed_pending)
+
+    if is_relatch and blend_s > 0.0 and (blend_jerk > 0.0 or release_jerk > 0.0):
+      # Consume the pending flag: this handoff's relatch has now been evaluated.
+      self._reacquire_armed_pending = False
+      # Track-identity / cut-in guard: arm ONLY on a same-physical-lead
+      # re-presentation. A fresh cut-in (new radarTrackId AND a dRel
+      # discontinuity vs the pre-cruise lead, or unknown exit identity) must
+      # never be negative-leg-blended — full braking passes.
+      new_track = int(getattr(lead_slot, "radarTrackId", -1) or -1) if lead_slot is not None else -1
+      new_drel = float(getattr(lead_slot, "dRel", 0.0) or 0.0) if lead_slot is not None else None
+      same_track = (self._exit_lead_track_id >= 0 and new_track >= 0 and
+                    new_track == self._exit_lead_track_id)
+      drel_continuous = (self._exit_lead_last_drel is not None and new_drel is not None and
+                         abs(new_drel - self._exit_lead_last_drel) <= max(3.0, 0.1 * abs(self._exit_lead_last_drel)))
+      same_physical_lead = same_track or drel_continuous
+
+      bypassed, reason = self._relatch_urgency_bypass(lead_slot, cfg)
+      if same_physical_lead and not bypassed:
+        self._relatch_blend_frames_left = int(math.ceil(blend_s / dt))
+      else:
+        self._relatch_blend_frames_left = 0
+        debug = {"active": False, "frames_left": 0,
+                 "bypassed": True,
+                 "bypass_reason": (reason if bypassed else "cut_in"),
+                 "neg_cap_mps2": 0.0, "clipped": False}
+
+    # While armed, re-check urgency EACH frame (a lead that starts braking mid
+    # blend must brake immediately) and slew-limit only the downward leg. The
+    # window RIDES THROUGH brief source flaps (lead <-> cruise Schmitt chatter at
+    # the relatch instant): a momentarily-absent lead_slot is NOT treated as
+    # urgent, because the fresh-obstacle downward pull that this clamp exists to
+    # spread persists in the MPC output across the flap. Only a present-lead
+    # threat signal (FCW / closing / short-TTC / lead-decel) or a requested decel
+    # at/below the bypass floor disarms.
+    if self._relatch_blend_frames_left > 0 and (blend_jerk > 0.0 or release_jerk > 0.0):
+      if lead_slot is not None:
+        bypassed, reason = self._relatch_urgency_bypass(lead_slot, cfg)
+      else:
+        # Transient flap: no lead object this frame. Do not disarm on absence;
+        # keep the downward slew clamp. Still honor the requested-decel bypass so
+        # a genuinely hard MPC brake is never throttled.
+        bypass_decel = float(getattr(cfg, "cruise_relatch_bypass_decel_mps2", -1.5) or -1.5)
+        bypassed = bypass_decel < 0.0 and self.output_a_target <= bypass_decel
+        reason = "requested_decel" if bypassed else ""
+      if bypassed:
+        # Disarm: full braking passes unmodified this frame.
+        self._relatch_blend_frames_left = 0
+        debug = {"active": False, "frames_left": 0, "bypassed": True,
+                 "bypass_reason": reason or "urgent", "neg_cap_mps2": 0.0, "clipped": False}
+      else:
+        clipped = False
+        # DOWNWARD (brake-onset) leg: jerk-capped so the fresh ObstacleCost cannot
+        # slam aTarget in one frame. Safety-critical; the urgency bypass above has
+        # already let any genuine threat past unmodified.
+        max_down_step = blend_jerk * dt
+        neg_floor = self._relatch_blend_prev_a - max_down_step
+        if blend_jerk > 0.0 and self.output_a_target < neg_floor:
+          self.output_a_target = neg_floor
+          clipped = True
+        # UPWARD (brake-RELEASE) leg: jerk-capped so the abrupt release blip as the
+        # obstacle cost settles out is smoothed. ALWAYS-SAFE — it only ever keeps
+        # MORE brake (delays release), never reduces braking or delays onset — so
+        # it is NOT urgency-bypassed. Skips the arming frame's initial approach
+        # (prev_a is the pre-relatch cruise accel, so the first downward move is
+        # governed by the down leg, not this).
+        if release_jerk > 0.0:
+          pos_ceiling = self._relatch_blend_prev_a + release_jerk * dt
+          if self.output_a_target > pos_ceiling:
+            self.output_a_target = pos_ceiling
+            clipped = True
+        # Large-TTC decel cap: while the blend is active on a non-urgent relatch
+        # the peak decel is capped (comfort braking toward a distant non-threat).
+        # The urgency bypass above already removed this under any threat.
+        if max_decel < 0.0 and self.output_a_target < max_decel:
+          self.output_a_target = max_decel
+          clipped = True
+        debug = {"active": True, "frames_left": int(self._relatch_blend_frames_left),
+                 "bypassed": False, "bypass_reason": "",
+                 "neg_cap_mps2": float(neg_floor), "clipped": bool(clipped)}
+        self._relatch_blend_frames_left -= 1
+
+    self.relatch_blend_debug = debug
+
+    # Shared prev_a anchor: the relatch blend is the FINAL negative-leg clamp, so
+    # its anchor is the previous frame's final output — the same value the
+    # flutter clamp will anchor on next frame. Exactly one binding downward slew
+    # per frame (this one; the flutter clamp precedes it and, on a single-relatch
+    # frame, cannot be active because flutter mode needs >=2 transitions).
+    self._relatch_blend_prev_a = float(self.output_a_target)
+    self._relatch_prev_src = lead_source
 
   def _apply_flutter_mode_clamp(self, lead_source: str, model_accel: float) -> None:
     # Bidirectional jerk clamp when the MPC source is flip-flopping at the

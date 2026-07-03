@@ -544,6 +544,116 @@ LEAD_RESPONSE_TUNE_SPECS = (
     description="Growth rate (m/s^3 per s) of the reacquire jerk allowance after a lead drops; first frames stay at CruiseReacquirePosJerkLimit. 0 = fixed limit for the whole window.",
   ),
   LeadResponseTuneSpec(
+    attr="cruise_collapse_holdback_s",
+    key="Longitudinal.LiveTune.CruiseCollapseHoldbackS",
+    cli_name="cruise-collapse-holdback-s",
+    label="cruise_collapse_holdback_s",
+    default=2.0,
+    minimum=0.0,
+    maximum=5.0,
+    description="Seconds after a prob-COLLAPSE lead->cruise exit to pin the reacquire jerk at CruiseReacquirePosJerkLimit (no ramp escalation). A genuine departure keeps the full ramp. 0 = pre-CD5 (ramp escalates regardless of exit cause).",
+  ),
+  LeadResponseTuneSpec(
+    attr="cruise_exit_lookback_frames",
+    key="Longitudinal.LiveTune.CruiseExitLookbackFrames",
+    cli_name="cruise-exit-lookback-frames",
+    label="cruise_exit_lookback_frames",
+    default=7.0,
+    minimum=1.0,
+    maximum=20.0,
+    description="Frames of departing lead (status,modelProb,dRel) published history retained at a lead->cruise exit (used to confirm the prob ended below the Schmitt exit band).",
+  ),
+  LeadResponseTuneSpec(
+    attr="cruise_exit_abrupt_prob_drop",
+    key="Longitudinal.LiveTune.CruiseExitAbruptProbDrop",
+    cli_name="cruise-exit-abrupt-prob-drop",
+    label="cruise_exit_abrupt_prob_drop",
+    default=0.3,
+    minimum=0.05,
+    maximum=1.0,
+    description="Largest single-frame PUBLISHED modelProb drop (while lead-owned) at/above which a lead->cruise exit is classified a genuine DEPARTURE (abrupt track cliff) rather than a recoverable prob-COLLAPSE (gradual decay). Only 'collapse' pins the reacquire ramp at its floor. Raise to make collapse-classification (and the holdback) less eager.",
+  ),
+  LeadResponseTuneSpec(
+    attr="cruise_relatch_blend_s",
+    key="Longitudinal.LiveTune.CruiseRelatchBlendS",
+    cli_name="cruise-relatch-blend-s",
+    label="cruise_relatch_blend_s",
+    default=1.5,
+    minimum=0.0,
+    maximum=3.0,
+    description="Duration (s) the relatch obstacle blend stays armed after a fresh, non-urgent, same-lead cruise->lead relatch. Spans the obstacle-cost settle: the downward pull is slew-blended in AND the brake-release blip at settle-out is smoothed. 0 = pre-CD5 hard obstacle swap.",
+  ),
+  LeadResponseTuneSpec(
+    attr="cruise_relatch_blend_jerk_mps3",
+    key="Longitudinal.LiveTune.CruiseRelatchBlendJerkMps3",
+    cli_name="cruise-relatch-blend-jerk",
+    label="cruise_relatch_blend_jerk",
+    default=2.0,
+    minimum=0.0,
+    maximum=10.0,
+    description="Negative-leg (brake-onset) jerk cap (m/s^3) during the relatch blend window; spreads the fresh-obstacle brake step. Urgency-bypassed. 0 = no downward slew (blend disabled).",
+  ),
+  LeadResponseTuneSpec(
+    attr="cruise_relatch_release_jerk_mps3",
+    key="Longitudinal.LiveTune.CruiseRelatchReleaseJerkMps3",
+    cli_name="cruise-relatch-release-jerk",
+    label="cruise_relatch_release_jerk",
+    default=2.0,
+    minimum=0.0,
+    maximum=10.0,
+    description="Positive-leg (brake-RELEASE) jerk cap (m/s^3) during the relatch blend window; smooths the abrupt release blip as the obstacle cost settles. Always-safe (only ever keeps MORE brake, never delays brake onset), so it is NOT urgency-bypassed. 0 = release leg untouched (pre-CD5).",
+  ),
+  LeadResponseTuneSpec(
+    attr="cruise_relatch_urgent_ttc_s",
+    key="Longitudinal.LiveTune.CruiseRelatchUrgentTtcS",
+    cli_name="cruise-relatch-urgent-ttc-s",
+    label="cruise_relatch_urgent_ttc_s",
+    default=4.0,
+    minimum=0.0,
+    maximum=15.0,
+    description="Relatch TTC (s) at/below which the blend AND large-TTC decel cap are bypassed (full braking passes immediately). Shares the emergency bypass.",
+  ),
+  LeadResponseTuneSpec(
+    attr="cruise_relatch_urgent_closing_mps",
+    key="Longitudinal.LiveTune.CruiseRelatchUrgentClosingMps",
+    cli_name="cruise-relatch-urgent-closing-mps",
+    label="cruise_relatch_urgent_closing_mps",
+    default=2.5,
+    minimum=0.0,
+    maximum=20.0,
+    description="Relatch closing speed (m/s) at/above which the blend AND large-TTC decel cap are bypassed.",
+  ),
+  LeadResponseTuneSpec(
+    attr="cruise_relatch_bypass_decel_mps2",
+    key="Longitudinal.LiveTune.CruiseRelatchBypassDecelMps2",
+    cli_name="cruise-relatch-bypass-decel-mps2",
+    label="cruise_relatch_bypass_decel_mps2",
+    default=-1.5,
+    minimum=-5.0,
+    maximum=0.0,
+    description="Requested-decel (m/s^2) at/below which the relatch blend is bypassed (mirrors the flutter bypass). Full braking passes the arming frame.",
+  ),
+  LeadResponseTuneSpec(
+    attr="cruise_relatch_urgent_lead_decel_mps2",
+    key="Longitudinal.LiveTune.CruiseRelatchUrgentLeadDecelMps2",
+    cli_name="cruise-relatch-urgent-lead-decel-mps2",
+    label="cruise_relatch_urgent_lead_decel_mps2",
+    default=-1.0,
+    minimum=-5.0,
+    maximum=0.0,
+    description="Relatched lead aLeadK (m/s^2) at/below which the blend AND large-TTC decel cap are bypassed (anticipatory braking toward a decelerating lead; TTC/closing/FCW lag a lead that just began braking at long range).",
+  ),
+  LeadResponseTuneSpec(
+    attr="cruise_relatch_max_decel_mps2",
+    key="Longitudinal.LiveTune.CruiseRelatchMaxDecelMps2",
+    cli_name="cruise-relatch-max-decel-mps2",
+    label="cruise_relatch_max_decel_mps2",
+    default=-0.8,
+    minimum=-5.0,
+    maximum=0.0,
+    description="Cap on relatch peak decel (m/s^2) while the blend window is active on a non-urgent, large-TTC relatch. Removed by the urgency bypass. 0 = no cap.",
+  ),
+  LeadResponseTuneSpec(
     attr="lead_prob_enter",
     key="Longitudinal.LiveTune.LeadProbEnter",
     cli_name="lead-prob-enter",
@@ -1252,6 +1362,17 @@ class LeadResponseTuningConfig:
   cruise_reacquire_pos_jerk_limit: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cruise_reacquire_pos_jerk_limit"].default
   cruise_reacquire_jerk_window_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cruise_reacquire_jerk_window_s"].default
   cruise_reacquire_jerk_ramp_mps3_per_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cruise_reacquire_jerk_ramp_mps3_per_s"].default
+  cruise_collapse_holdback_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cruise_collapse_holdback_s"].default
+  cruise_exit_lookback_frames: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cruise_exit_lookback_frames"].default
+  cruise_exit_abrupt_prob_drop: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cruise_exit_abrupt_prob_drop"].default
+  cruise_relatch_blend_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cruise_relatch_blend_s"].default
+  cruise_relatch_blend_jerk_mps3: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cruise_relatch_blend_jerk_mps3"].default
+  cruise_relatch_release_jerk_mps3: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cruise_relatch_release_jerk_mps3"].default
+  cruise_relatch_urgent_ttc_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cruise_relatch_urgent_ttc_s"].default
+  cruise_relatch_urgent_closing_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cruise_relatch_urgent_closing_mps"].default
+  cruise_relatch_bypass_decel_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cruise_relatch_bypass_decel_mps2"].default
+  cruise_relatch_urgent_lead_decel_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cruise_relatch_urgent_lead_decel_mps2"].default
+  cruise_relatch_max_decel_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cruise_relatch_max_decel_mps2"].default
   lead_prob_enter: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_prob_enter"].default
   lead_prob_exit: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_prob_exit"].default
   lead_source_acquire_frames: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_source_acquire_frames"].default

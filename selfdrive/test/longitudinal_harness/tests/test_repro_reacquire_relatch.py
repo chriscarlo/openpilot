@@ -52,8 +52,6 @@ from __future__ import annotations
 
 import functools
 
-import pytest
-
 from openpilot.common.realtime import DT_MDL
 from selfdrive.test.longitudinal_harness.closed_loop import SimulationResult, run_harness
 from selfdrive.test.longitudinal_harness.config import resolve_ev6_vehicle_config
@@ -342,11 +340,6 @@ def test_collapse_and_departure_both_exit_to_cruise() -> None:
 # =============================================================================
 # PART (a) STRICT-XFAIL: fresh-lead relatch slam on a non-threatening lead
 # =============================================================================
-@pytest.mark.xfail(strict=True, reason="CD5(a): the CruiseReacquireJerkRamp accelerates cruise, then a fresh-lead "
-                                       "relatch on a NON-threatening lead (true TTC 84 s) slams aTarget by 1.6 m/s^2 "
-                                       "in a single frame with no obstacle blend (road 200-9 tap2: aTarget -2.08 "
-                                       "slam, 2.7 m/s^2 swing in 270 ms). Fix: blend the relatch obstacle in over "
-                                       "0.3-0.5 s so the fresh ObstacleCost cannot yank aTarget in one frame.")
 def test_relatch_slam_bounded_on_nonthreatening_lead() -> None:
   result = _run_relatch()
 
@@ -372,11 +365,6 @@ def test_relatch_slam_bounded_on_nonthreatening_lead() -> None:
 # PART (b) STRICT-XFAIL: no lost-vs-departed memory - a recoverable prob-collapse
 # escalates the reacquire jerk exactly like a genuine departure.
 # =============================================================================
-@pytest.mark.xfail(strict=True, reason="CD5(b): the reacquire jerk ramp has NO lost-vs-departed memory - after a "
-                                       "prob-COLLAPSE exit (lead physically present, dRel/vRel continuous) it "
-                                       "escalates above the CruiseReacquirePosJerkLimit floor just as it does after "
-                                       "a genuine departure (road ff4: +0.72 surge). Fix: hold the reacquire jerk at "
-                                       "the floor for ~2 s after a collapse-exit, gated on exit cause.")
 def test_collapse_exit_holds_reacquire_jerk_floor() -> None:
   collapse = _run_collapse()
   departure = _run_departure()
@@ -472,3 +460,86 @@ def test_emergency_relatch_not_rate_limited() -> None:
   )
   assert onset_delay is not None and onset_delay <= EMERG_MAX_ONSET_DELAY_S, physics
   assert peak_decel <= -3.0, physics
+
+
+# =============================================================================
+# SAFETY INVARIANT (stays GREEN): a MODERATE cut-in toward a decelerating lead
+# at long range must NOT be blend-delayed. The relatch blend's urgency-bypass
+# predicate is thin here - closing 2.0 < urgent-closing, TTC 15 s > urgent-TTC,
+# no FCW - so the aLeadK <= CruiseRelatchUrgentLeadDecelMps2 bypass (and the
+# cut-in track-identity guard) must let anticipatory braking pass within one
+# frame of the pre-fix (blend-off) path. This covers the CD2/lead_decel gap the
+# extreme-FCW emergency test does not exercise.
+# =============================================================================
+MOD_CUTIN_APPEAR_S = 5.0
+MOD_CUTIN_GAP_M = 30.0
+MOD_CUTIN_VREL_MPS = -2.0        # closing 2.0 < urgent-closing 2.5
+MOD_CUTIN_ALEADK_MPS2 = -1.0     # lead already braking; TTC 15 s > urgent-TTC 4 s
+MOD_CUTIN_TRUE_TTC_S = MOD_CUTIN_GAP_M / abs(MOD_CUTIN_VREL_MPS)
+MOD_ONSET_TOLERANCE_S = 0.10     # blend must not delay onset beyond ~one frame
+
+
+def _build_steps_moderate_cutin() -> list[StepInput]:
+  steps: list[StepInput] = []
+  n = int(round(12.0 / DT_MDL))
+  for i in range(n):
+    t = i * DT_MDL
+    if t < MOD_CUTIN_APPEAR_S:
+      # No lead: plain cruise, so the appearance is a genuine cruise->lead
+      # transition (relatch-arming edge) onto a NEW track.
+      lead = LeadDirective(status=False)
+    else:
+      lead = LeadDirective(status=True, v_lead_mps=EGO_V0_MPS + MOD_CUTIN_VREL_MPS,
+                           model_prob_target=0.98,
+                           a_lead_k_mps2=MOD_CUTIN_ALEADK_MPS2,
+                           d_rel_override_m=MOD_CUTIN_GAP_M if abs(t - MOD_CUTIN_APPEAR_S) < 1e-6 else None,
+                           acquisition_reset=abs(t - MOD_CUTIN_APPEAR_S) < 1e-6)
+    steps.append(StepInput(t_s=t, cruise_speed_mps=CRUISE_SPEED_MPS, lead_one=lead))
+  return steps
+
+
+def _moderate_cutin_brake_onset(*, blend_s: str) -> tuple[float | None, float]:
+  cfg = resolve_ev6_vehicle_config(param_overrides={
+    "Longitudinal.LiveTune.CruiseRelatchBlendS": blend_s,
+  })
+  result = run_harness(
+    vehicle_config=cfg,
+    scenario_name=f"reacquire_moderate_cutin_blend_{blend_s}",
+    steps=_build_steps_moderate_cutin(),
+    initial_speed_mps=EGO_V0_MPS,
+    noise_profile="off", seed=42, perception_filter="auto",
+  )
+  onset = None
+  peak = 0.0
+  for row in result.trace:
+    if row["t_s"] >= MOD_CUTIN_APPEAR_S:
+      a = row["planner_accel_mps2"]
+      if onset is None and a <= -0.5:
+        onset = float(row["t_s"]) - MOD_CUTIN_APPEAR_S
+      if a < peak:
+        peak = a
+  return onset, peak
+
+
+def test_moderate_cutin_decel_lead_not_blend_delayed() -> None:
+  """SAFETY: a moderate cut-in (30 m, closing 2.0 < urgent, TTC 15 s > urgent,
+  no FCW) toward an already-decelerating lead (aLeadK -1.0) must brake within one
+  frame of the blend-OFF path - the aLeadK lead-decel bypass (and cut-in guard)
+  keep the relatch blend from clipping anticipatory braking."""
+  on_onset, on_peak = _moderate_cutin_brake_onset(blend_s="1.5")   # blend active (default)
+  off_onset, off_peak = _moderate_cutin_brake_onset(blend_s="0.0")  # rollback sentinel
+
+  physics = (
+    f"moderate cut-in at {MOD_CUTIN_GAP_M:.0f} m / vRel {MOD_CUTIN_VREL_MPS:+.1f} "
+    f"(closing {abs(MOD_CUTIN_VREL_MPS):.1f} < urgent 2.5, TTC {MOD_CUTIN_TRUE_TTC_S:.0f} s > urgent 4, "
+    f"no FCW), lead aLeadK {MOD_CUTIN_ALEADK_MPS2:+.1f} (already braking):\n"
+    f"  brake (<= -0.5) onset: blend-ON {on_onset} s vs blend-OFF {off_onset} s "
+    f"(tolerance {MOD_ONSET_TOLERANCE_S} s)\n"
+    f"  peak decel: blend-ON {on_peak:.3f} vs blend-OFF {off_peak:.3f} m/s^2"
+  )
+  assert on_onset is not None and off_onset is not None, physics
+  # Blend must not delay braking onset beyond ~one frame vs the pre-fix path.
+  assert on_onset <= off_onset + MOD_ONSET_TOLERANCE_S, physics
+  # And the anticipatory brake magnitude must not be materially clipped by the
+  # blend (the aLeadK bypass removes the large-TTC decel cap for a decel lead).
+  assert on_peak <= off_peak + 0.15, physics

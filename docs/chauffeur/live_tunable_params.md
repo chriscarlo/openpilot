@@ -202,6 +202,30 @@ Softens the upward accel slew after the MPC source transitions from lead-follow 
 | `CruiseReacquireJerkWindowS` | 3.0 | 0.0–3.0 | Duration (s) the jerk limit is enforced after a lead → cruise transition. 0 disables |
 | `CruiseReacquireJerkRamp` | 0.8 | 0.0–5.0 | Growth rate (m/s^3 per s) of the jerk allowance across the window. 0 = fixed allowance (legacy hang-back) |
 
+## CD5: Lost-vs-Departed Reacquire Memory + Relatch Obstacle Blend
+
+Two composed mechanisms on top of the cruise-reacquire ramp, both live-tunable with rollback sentinels. Every added negative-leg limiter is bypassed under any urgency signal so genuine braking is never delayed; the collapse holdback only ever constrains the POSITIVE (cruise re-accel) leg.
+
+**(b) Exit-cause classifier + collapse holdback.** At a lead0/lead1 → cruise handoff the departing lead's PUBLISHED `radarState` modelProb history classifies WHY it left: a *prob-collapse* (perception faded gradually — the last status-True published prob is low, near the Schmitt exit band) vs a *genuine departure* (an abrupt prob cliff with the prob still high). After a collapse-exit the reacquire ramp term is pinned at 0 (allowed jerk held at `CruiseReacquirePosJerkLimit`) for `CruiseCollapseHoldbackS`, so a phantom perception dropout does not license the full cruise re-acceleration escalation a real departure would (road ff4 +0.72 surge). A genuine departure keeps the full ramp. The holdback resets to 0 the instant a corroborated closing/threatening lead relatches (a collapse followed by a real re-approach is never held back). Ambiguity fails safe to "departure" (full ramp).
+
+**(a) Relatch obstacle blend.** After a genuine lead→cruise handoff, a same-physical-lead relatch (matched by `radarTrackId` or a dRel-continuous re-presentation of the departed lead — a fresh cut-in track is never blended) has its fresh ObstacleCost slew-blended into `output_a_target` over `CruiseRelatchBlendS` instead of slamming in one frame (road 200-9 tap2: 2.7 m/s^2 swing in 270 ms). The DOWNWARD (brake-onset) leg is jerk-capped by `CruiseRelatchBlendJerkMps3` and is fully bypassed under any urgency signal (FCW, TTC ≤ `CruiseRelatchUrgentTtcS`, closing ≥ `CruiseRelatchUrgentClosingMps`, requested decel ≤ `CruiseRelatchBypassDecelMps2`, or lead aLeadK ≤ `CruiseRelatchUrgentLeadDecelMps2`). The UPWARD (brake-RELEASE) leg is jerk-capped by `CruiseRelatchReleaseJerkMps3` to smooth the release blip as the obstacle cost settles — this is always-safe (it only ever keeps MORE brake, never delays onset) so it is NOT bypassed. A large-TTC decel cap `CruiseRelatchMaxDecelMps2` limits comfort braking toward a distant non-threat and is removed by the same urgency bypass. Only ONE binding negative-leg slew clamp exists per frame (this one runs last; the flutter clamp needs ≥2 transitions and cannot bind on a single relatch frame).
+
+Rollback sentinels (restore exact pre-CD5 behavior): `CruiseCollapseHoldbackS=0` (ramp escalates regardless of exit cause), `CruiseRelatchBlendS=0` (hard obstacle swap), `CruiseRelatchBlendJerkMps3=0` and `CruiseRelatchReleaseJerkMps3=0` (both legs untouched). Setting all four to 0 is the verified full CD5 rollback (slam returns to ~1.6 m/s^2 one-frame, collapse ramp escalates to ~0.72 like a departure).
+
+| Param Key | Default | Range | Description |
+|---|---|---|---|
+| `CruiseCollapseHoldbackS` | 2.0 | 0.0–5.0 | Seconds after a prob-COLLAPSE exit to pin the reacquire jerk at `CruiseReacquirePosJerkLimit` (no ramp escalation). 0 = pre-CD5 (ramp escalates regardless of exit cause) |
+| `CruiseExitLookbackFrames` | 7 | 1–20 | Frames of published departing-lead history retained at a lead→cruise exit (confirms prob ended below the Schmitt exit band) |
+| `CruiseExitAbruptProbDrop` | 0.3 | 0.05–1.0 | Last-status-True published prob at/above `1 − this` = abrupt track cliff → DEPARTURE; below = gradual fade → COLLAPSE. Raise to make collapse-classification (and the holdback) less eager |
+| `CruiseRelatchBlendS` | 1.5 | 0.0–3.0 | Duration (s) the relatch blend stays armed after a same-lead cruise→lead relatch (spans the obstacle-cost settle). 0 = pre-CD5 hard obstacle swap |
+| `CruiseRelatchBlendJerkMps3` | 2.0 | 0.0–10.0 | Downward (brake-onset) jerk cap during the relatch blend; urgency-bypassed. 0 = no downward slew |
+| `CruiseRelatchReleaseJerkMps3` | 2.0 | 0.0–10.0 | Upward (brake-RELEASE) jerk cap during the relatch blend; always-safe (keeps more brake, never delays onset), NOT bypassed. 0 = release leg untouched (pre-CD5) |
+| `CruiseRelatchUrgentTtcS` | 4.0 | 0.0–15.0 | Relatch TTC (s) at/below which the blend AND large-TTC decel cap are bypassed (full braking passes immediately) |
+| `CruiseRelatchUrgentClosingMps` | 2.5 | 0.0–20.0 | Relatch closing speed (m/s) at/above which the blend AND decel cap are bypassed |
+| `CruiseRelatchBypassDecelMps2` | -1.5 | -5.0–0.0 | Requested decel (m/s^2) at/below which the relatch blend is bypassed (mirrors the flutter bypass) |
+| `CruiseRelatchUrgentLeadDecelMps2` | -1.0 | -5.0–0.0 | Relatched-lead aLeadK (m/s^2) at/below which the blend AND decel cap are bypassed (anticipatory braking toward a decelerating lead; TTC/closing/FCW lag it) |
+| `CruiseRelatchMaxDecelMps2` | -0.8 | -5.0–0.0 | Cap on relatch peak decel while the blend is active on a non-urgent, large-TTC relatch. Removed by the urgency bypass. 0 = no cap |
+
 ## Lead Prob Schmitt Trigger (radard)
 
 Asymmetric hysteresis on vision-model lead prob in radard. Per-slot latch: a slot must cross `Enter` to latch on, and fall below `Exit` to release. Defaults create a 0.35-wide hysteresis band around the old 0.5 threshold.
