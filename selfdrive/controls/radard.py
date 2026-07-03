@@ -307,7 +307,7 @@ class ModelLeadTrack:
     prob_alpha = _ema_alpha(dt_s, MODEL_LEAD_PROB_TAU_S)
 
     self.dRel = float(max(0.0, next_drel))
-    self._update_fcw_corroboration(raw_drel, cfg)
+    self._update_fcw_corroboration(raw_drel, raw_vrel, cfg)
     self.yRel = float(self.yRel + lat_alpha * (raw_yrel - self.yRel))
     self.dPath = float(self.dPath + lat_alpha * (raw_dpath - self.dPath))
     self.vLat = float(self.vLat + lat_alpha * (raw_vlat - self.vLat))
@@ -323,18 +323,39 @@ class ModelLeadTrack:
     self.missed = 0
     return self.get_RadarState(cfg)
 
-  def _update_fcw_corroboration(self, raw_drel: float, cfg: LeadResponseTuningConfig) -> None:
+  def _update_fcw_corroboration(self, raw_drel: float, raw_vrel: float,
+                                cfg: LeadResponseTuningConfig) -> None:
     """Vote on whether the raw model measurement corroborates the filtered dRel.
 
-    Direction matters: only 'raw says the lead is FARTHER than the filter by
-    more than the tolerance' counts as disagreement. On a genuine collision
-    course the closing-side EMA lags BEHIND raw (filtered >= raw), so genuine
-    threats always agree; the only sustained raw-above-filter regime is a
-    wrongly-adopted inward excursion whose recovery is open-slew limited (the
-    phantom collapse). A majority vote over a short window bridges isolated
-    outward measurement outliers (~3% of frames at close range) so genuine FCW
-    timing is untouched, while a phantom — corroborated at most on its isolated
-    inward-outlier frames — stays suppressed. MinAgree <= 0 disables (legacy).
+    Two regimes make filtered dRel sit BELOW raw by more than the tolerance:
+
+    (1) Phantom collapse: a wrongly-adopted inward outlier whose one-way
+        open-slew recovery cannot heal it. The raw stream keeps measuring the
+        lead FAR AWAY and NOT closing (raw is itself safe), so the filtered
+        closeness is uncorroborated and must be suppressed from FCW.
+
+    (2) Deliberate closing-urgency pessimism: on a GENUINE fast close the
+        blend/lag-comp publish path intentionally runs the filtered dRel
+        several metres more pessimistic than the (optimistic) raw model x
+        (road 200-13: filtered 11 m vs raw 16 m while closing 7 m/s). Here the
+        raw stream ITSELF corroborates an imminent threat, so suppressing FCW
+        silences a real collision course (CD2).
+
+    The false invariant the old veto rested on was 'filtered >= raw on genuine
+    threats'. That holds only for the pure closing-EMA lag; it is violated
+    exactly by the deliberate pessimism above. So before the raw-vs-filter
+    disagreement vote can suppress, an escape hatch checks the RAW kinematics
+    directly: if raw is genuinely closing (>= RawClosingMinMps) with a raw-side
+    TTC at/under RawTtcMaxS, the raw measurement corroborates the threat on its
+    own and FCW is never suppressed, regardless of the filtered-vs-raw delta.
+    The deep phantom (raw not closing, raw far) fails this gate and stays
+    suppressed; the genuine urgency-pessimism close passes it and stays FCW
+    eligible. RawClosingMinMps <= 0 OR RawTtcMaxS <= 0 disables the escape
+    (exact legacy raw-vs-filter veto).
+
+    A majority vote over a short window still bridges isolated outward
+    measurement outliers (~3% of frames at close range). MinAgree <= 0 disables
+    suppression entirely (legacy).
     """
     tol_m = float(getattr(cfg, 'model_lead_fcw_corrob_tol_m', 2.5))
     min_agree = int(round(float(getattr(cfg, 'model_lead_fcw_corrob_min_agree', 2.0))))
@@ -343,6 +364,19 @@ class ModelLeadTrack:
     if min_agree <= 0:
       self.fcw_suppressed = False
       return
+
+    # Raw-kinematic threat escape: the raw stream independently corroborates an
+    # imminent collision, so the deliberate closing-urgency pessimism must not
+    # be misread as a phantom collapse (CD2).
+    raw_closing_min_mps = float(getattr(cfg, 'model_lead_fcw_corrob_raw_closing_min_mps', 1.0))
+    raw_ttc_max_s = float(getattr(cfg, 'model_lead_fcw_corrob_raw_ttc_max_s', 3.5))
+    raw_closing = max(0.0, -float(raw_vrel))
+    if (raw_closing_min_mps > 0.0 and raw_ttc_max_s > 0.0 and
+        raw_closing >= raw_closing_min_mps and
+        (float(raw_drel) / max(raw_closing, 0.1)) <= raw_ttc_max_s):
+      self.fcw_suppressed = False
+      return
+
     window = int(np.clip(window, min_agree, MODEL_LEAD_FCW_CORROB_HIST_LEN))
     recent = list(self.fcw_agree_hist)[-window:]
     self.fcw_suppressed = sum(recent) < min_agree

@@ -129,6 +129,116 @@ class TestModelLeadFcwCorroborationVote:
     assert not any(s["fcwSuppressed"] for s in states)
 
 
+class TestRawKinematicFcwEscape:
+  """CD2 oracle: the raw-kinematic escape (road unit 200-13 EDGE1).
+
+  The old raw-vs-filter veto rested on a FALSE invariant — 'filtered dRel >= raw
+  on genuine threats'. It is violated by the deliberate closing-urgency pessimism:
+  on a genuine fast close the blend/lag-comp publish path runs the filtered dRel
+  several metres BELOW the (optimistic) raw model x (road: filtered ~11 m vs raw
+  ~16 m while closing 7 m/s, raw-minus-filtered ~5-6 m > the 2.5 m tol). The vote
+  then misreads that as a phantom collapse and suppresses FCW on a real collision
+  course. The escape corroborates against the RAW stream directly: when raw is
+  genuinely closing at/under a raw-side TTC bound, FCW stays eligible regardless
+  of the filtered-vs-raw delta.
+
+  This class is the CD2 unit oracle that flips on the CD2 knob ALONE
+  (RawClosingMinMps / RawTtcMaxS), independent of the CD3 aLeadK-amplify fix:
+  the escape ON keeps the genuine deliberate-pessimism close FCW-eligible, and
+  rolling either knob to 0 reverts it to the legacy veto (suppressed) — while the
+  deep phantom (raw far, raw NOT closing) stays suppressed in every configuration.
+  """
+
+  # Road-derived deliberate-pessimism close (200-13): raw ~16 m closing 7 m/s
+  # (raw TTC ~2.3 s, inside the 3.5 s window) while the published/filtered dRel
+  # runs ~5 m more pessimistic — the exact raw-vs-filter disagreement the legacy
+  # veto misread as a phantom.
+  V_EGO = 24.0
+  RAW_CLOSING = 7.0
+  RAW_D_REL0 = 16.0
+  FILTER_SEED_D_REL = 11.0  # filter starts pessimistic vs raw (closing-urgency blend)
+
+  def _run_close(self, cfg):
+    # Seed the filter pessimistic (11 m) while raw measures 16 m closing 7 m/s,
+    # so raw - filtered stays above the 2.5 m tol for the whole close (the
+    # disagreement the legacy veto suppresses on).
+    track = ModelLeadTrack.from_lead_dict(
+      -1001, _lead_dict(d_rel=self.FILTER_SEED_D_REL, v_rel=-self.RAW_CLOSING, v_ego=self.V_EGO), 0.0, 0)
+    suppressed = []
+    deltas = []
+    raw_d = self.RAW_D_REL0
+    for i in range(1, 30):
+      raw_d = max(2.0, raw_d - self.RAW_CLOSING * DT)
+      state = track.update(
+        _lead_dict(d_rel=raw_d, v_rel=-self.RAW_CLOSING, v_ego=self.V_EGO), i * DT, self.V_EGO, cfg, 0)
+      suppressed.append(state["fcwSuppressed"])
+      deltas.append(raw_d - track.dRel)
+    return suppressed, deltas
+
+  def test_deliberate_pessimism_close_stays_fcw_eligible(self):
+    # Escape ON (default 1.0 m/s / 3.5 s): the genuine close is never suppressed.
+    cfg = _cfg()
+    suppressed, deltas = self._run_close(cfg)
+    # Premise: the raw-vs-filter disagreement (raw more than tol above filtered)
+    # is actually present — otherwise the veto would never have fired and this
+    # test would be vacuous.
+    assert max(deltas) > 2.5, f"test premise: raw-minus-filtered must exceed tol (max delta {max(deltas):.2f})"
+    assert not any(suppressed), (
+      f"genuine deliberate-pessimism close must stay FCW-eligible with the raw escape on; "
+      f"suppressed indices {[i for i, s in enumerate(suppressed) if s]}"
+    )
+
+  def test_rollback_closing_min_zero_restores_legacy_suppression(self):
+    # RawClosingMinMps=0 disables the escape -> the legacy raw-vs-filter veto
+    # suppresses this genuine close (the CD2 defect). This is what makes the
+    # oracle go RED on rollback of the CD2 knob alone.
+    cfg = _cfg(model_lead_fcw_corrob_raw_closing_min_mps=0.0)
+    suppressed, _ = self._run_close(cfg)
+    assert sum(suppressed) >= 20, (
+      f"legacy veto must suppress the deep close once the escape is rolled back "
+      f"({sum(suppressed)}/{len(suppressed)} suppressed)"
+    )
+
+  def test_rollback_ttc_max_zero_restores_legacy_suppression(self):
+    # RawTtcMaxS=0 also disables the escape -> legacy suppression returns.
+    cfg = _cfg(model_lead_fcw_corrob_raw_ttc_max_s=0.0)
+    suppressed, _ = self._run_close(cfg)
+    assert sum(suppressed) >= 20, (
+      f"legacy veto must suppress the deep close once the escape is rolled back "
+      f"({sum(suppressed)}/{len(suppressed)} suppressed)"
+    )
+
+  def test_deep_phantom_stays_suppressed_with_escape_on(self):
+    # The deep phantom measures raw FAR and NOT closing (raw vRel 0), so it fails
+    # the escape gate and stays suppressed even with the escape on — the
+    # phantom-suppression direction the fcw_override / phantom-noise oracles
+    # protect must survive the CD2 fix.
+    cfg = _cfg()
+    track = ModelLeadTrack.from_lead_dict(-1001, _lead_dict(d_rel=2.0, v_ego=12.0), 0.0, 0)
+    states = [track.update(_lead_dict(d_rel=13.0, v_ego=12.0), (i + 1) * DT, 12.0, cfg, 0) for i in range(4)]
+    assert float(track.dRel) < 4.0, "test premise: filter must still be collapsed"
+    assert states[-1]["fcwSuppressed"] is True
+    assert states[1]["fcwSuppressed"] is True, "phantom must stay suppressed by the second disagreeing frame"
+
+  def test_far_slow_close_below_ttc_bound_stays_suppressed(self):
+    # A collapsed-filter track whose raw stream IS closing but only slowly, far
+    # away (raw 40 m closing 3 m/s, raw TTC ~13 s > 3.5 s), fails the TTC gate and
+    # stays suppressed — the escape opens only for imminent raw threats, not any
+    # closing at all.
+    cfg = _cfg()
+    track = ModelLeadTrack.from_lead_dict(-1001, _lead_dict(d_rel=2.0, v_ego=12.0), 0.0, 0)
+    suppressed = []
+    raw_d = 40.0
+    for i in range(1, 12):
+      raw_d -= 3.0 * DT
+      state = track.update(_lead_dict(d_rel=raw_d, v_rel=-3.0, v_ego=12.0), i * DT, 12.0, cfg, 0)
+      suppressed.append(state["fcwSuppressed"])
+    assert float(track.dRel) < 4.0, "test premise: filter must still be collapsed"
+    assert sum(suppressed) >= 8, (
+      f"far/slow raw close (TTC >> bound) must stay suppressed ({sum(suppressed)}/{len(suppressed)})"
+    )
+
+
 def _configure_vibe_follow(headway=1.3):
   params = Params()
   params.put_bool('VibePersonalityEnabled', True)

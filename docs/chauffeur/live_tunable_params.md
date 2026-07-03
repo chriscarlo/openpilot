@@ -174,6 +174,8 @@ A phantom-collapsed model-lead track (filtered dRel far below what the model kee
 | `ModelLeadFcwCorrobTolM` | 2.5 | 0.5–50.0 | Raw dRel this far ABOVE the filtered dRel is a disagreement vote (5 sigma of close-range base noise) |
 | `ModelLeadFcwCorrobMinAgree` | 2 | 0–8 | Agreeing frames required in the window to stay FCW-eligible. 0 disables suppression (legacy) |
 | `ModelLeadFcwCorrobWindow` | 3 | 1–8 | Vote window (50 ms frames); majority vote bridges isolated outward measurement outliers |
+| `ModelLeadFcwCorrobRawClosingMinMps` | 1.0 | 0.0–20.0 | Raw-kinematic FCW-corroboration escape: min raw closing speed (m/s) for the raw measurement to hold FCW eligible even when filtered dRel runs more pessimistic than raw (deliberate closing-urgency blend, CD2). A phantom measures raw not closing, so it stays suppressed. 0 disables the escape (legacy raw-vs-filter veto; rollback) |
+| `ModelLeadFcwCorrobRawTtcMaxS` | 3.5 | 0.0–15.0 | Raw-kinematic FCW-corroboration escape: max raw-side TTC (s, raw dRel / raw closing) at/under which the raw measurement holds FCW eligible regardless of the filtered-vs-raw delta (CD2). 0 disables the escape (rollback) |
 
 ## Cruise Reacquire Jerk Limit
 

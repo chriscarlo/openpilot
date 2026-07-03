@@ -914,6 +914,33 @@ LEAD_RESPONSE_TUNE_SPECS = (
                 "while a phantom-collapsed track (raw persistently far above the filter) is suppressed within one frame.",
   ),
   LeadResponseTuneSpec(
+    attr="model_lead_fcw_corrob_raw_closing_min_mps",
+    key="Longitudinal.LiveTune.ModelLeadFcwCorrobRawClosingMinMps",
+    cli_name="model-lead-fcw-corrob-raw-closing-min",
+    label="model_lead_fcw_corrob_raw_closing_min",
+    default=1.0,
+    minimum=0.0,
+    maximum=20.0,
+    description="Raw-kinematic FCW-corroboration escape: minimum raw closing speed (m/s) for the raw model "
+                "measurement to independently corroborate an imminent threat and hold FCW eligible even when the "
+                "filtered dRel runs more pessimistic than raw (the deliberate closing-urgency blend, road 200-13 CD2). "
+                "A phantom collapse measures raw NOT closing, so it fails this gate and stays suppressed. 0 disables "
+                "the escape (exact legacy raw-vs-filter veto; rollback knob).",
+  ),
+  LeadResponseTuneSpec(
+    attr="model_lead_fcw_corrob_raw_ttc_max_s",
+    key="Longitudinal.LiveTune.ModelLeadFcwCorrobRawTtcMaxS",
+    cli_name="model-lead-fcw-corrob-raw-ttc-max",
+    label="model_lead_fcw_corrob_raw_ttc_max",
+    default=3.5,
+    minimum=0.0,
+    maximum=15.0,
+    description="Raw-kinematic FCW-corroboration escape: maximum raw-side TTC (s, computed on the raw model dRel and "
+                "raw closing speed) at/under which the raw measurement independently corroborates an imminent threat "
+                "and holds FCW eligible regardless of the filtered-vs-raw delta (CD2). Aligns with the road-derived "
+                "deep-close TTC band (200-13: TTC 1.9 s at the stomp). 0 disables the escape (rollback knob).",
+  ),
+  LeadResponseTuneSpec(
     attr="lead_accel_corr_margin_mps2",
     key="Longitudinal.LiveTune.LeadAccelCorrMarginMps2",
     cli_name="lead-accel-corr-margin",
@@ -1163,6 +1190,8 @@ class LeadResponseTuningConfig:
   model_lead_fcw_corrob_tol_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_fcw_corrob_tol_m"].default
   model_lead_fcw_corrob_min_agree: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_fcw_corrob_min_agree"].default
   model_lead_fcw_corrob_window: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_fcw_corrob_window"].default
+  model_lead_fcw_corrob_raw_closing_min_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_fcw_corrob_raw_closing_min_mps"].default
+  model_lead_fcw_corrob_raw_ttc_max_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_fcw_corrob_raw_ttc_max_s"].default
   lead_accel_corr_margin_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_accel_corr_margin_mps2"].default
   lead_accel_corr_meas_tau_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_accel_corr_meas_tau_s"].default
   lead_accel_corr_ttc_guard_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_accel_corr_ttc_guard_s"].default
