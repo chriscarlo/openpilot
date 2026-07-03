@@ -1138,6 +1138,67 @@ LEAD_RESPONSE_TUNE_SPECS = (
     description="Minimum closing speed (radard) before the TTC-based closing-urgency term is evaluated at all; "
                 "guards TTC=dRel/closing against blowing up near zero closing speed.",
   ),
+  LeadResponseTuneSpec(
+    attr="model_lead_assoc_dpath_gate_m",
+    key="Longitudinal.LiveTune.ModelLeadAssocDPathGateM",
+    cli_name="model-lead-assoc-dpath-gate",
+    label="model_lead_assoc_dpath_gate",
+    default=1.8,
+    minimum=0.5,
+    maximum=6.0,
+    description="CD4 (radard): PRIMARY path-relative lateral-continuity gate for ModelLeadTracker association. A model "
+                "lead whose path-relative dPath differs from a track's filtered dPath by more than this is treated as a "
+                "different physical lead (spawns its own track). Replaces the shared 3.0 m gate that keyed on RAW yRel, "
+                "which a curve-induced yRel drift (+1.93 -> -8.3 m, dPath still < 0.9 m) repeatedly blew, churning the "
+                "published track id. Genuine adjacent/cut-in leads at a truly different offset still exceed this and stay "
+                "separate. Rollback sentinel: set to 3.0 alongside ModelLeadAssocYRawTolM=3.0 to restore the legacy "
+                "shared 3.0 m gate exactly.",
+  ),
+  LeadResponseTuneSpec(
+    attr="model_lead_assoc_y_raw_tol_m",
+    key="Longitudinal.LiveTune.ModelLeadAssocYRawTolM",
+    cli_name="model-lead-assoc-y-raw-tol",
+    label="model_lead_assoc_y_raw_tol",
+    default=7.0,
+    minimum=3.0,
+    maximum=12.0,
+    description="CD4 (radard): separate, LARGER tolerance for the RAW yRel term in ModelLeadTracker association, "
+                "replacing the 3.0 m hard reject that a curve-induced raw-yRel excursion tripped on the same physical "
+                "lead. Continuity is now gated PRIMARILY on dPath (ModelLeadAssocDPathGateM); raw y_err only rejects when "
+                "it exceeds this wider tolerance. Safety: when the candidate is CLOSING (raw vRel < 0) the raw-y "
+                "tolerance is held at the legacy 3.0 m so a slow-closing near lead in a momentary low-dPath band cannot "
+                "be masked into a farther track (the widening applies only to the opening/lane-relevant case). Rollback "
+                "sentinel: set to 3.0 (alongside ModelLeadAssocDPathGateM=3.0) to restore the legacy shared 3.0 m gate.",
+  ),
+  LeadResponseTuneSpec(
+    attr="model_lead_step_guard_abs_m",
+    key="Longitudinal.LiveTune.ModelLeadStepGuardAbsM",
+    cli_name="model-lead-step-guard-abs",
+    label="model_lead_step_guard_abs",
+    default=3.0,
+    minimum=0.0,
+    maximum=20.0,
+    description="CD4 (radard): absolute floor (m) of the OPENING-ONLY published-dRel single-frame step bound. While a "
+                "track persists with a prior published value, a published dRel jump FARTHER than "
+                "max(this, ModelLeadStepGuardFrac*dRel) in one frame is clamped to that bound (defense-in-depth against "
+                "any residual fabricated opening step). SAFETY: the guard is one-sided by construction -- it clamps ONLY "
+                "the opening (farther) direction; a closing (nearer) reading is NEVER clamped, so it can never delay or "
+                "attenuate emergency braking and is exempt from the rate-limit safety rule. Never binds on a track's "
+                "first publish. Rollback sentinel: 0.0 (or ModelLeadStepGuardFrac=0.0) disables the guard entirely.",
+  ),
+  LeadResponseTuneSpec(
+    attr="model_lead_step_guard_frac",
+    key="Longitudinal.LiveTune.ModelLeadStepGuardFrac",
+    cli_name="model-lead-step-guard-frac",
+    label="model_lead_step_guard_frac",
+    default=0.10,
+    minimum=0.0,
+    maximum=1.0,
+    description="CD4 (radard): dRel-proportional term of the OPENING-ONLY published-dRel single-frame step bound "
+                "max(ModelLeadStepGuardAbsM, this*dRel). See ModelLeadStepGuardAbsM: opening-only, never clamps a closing "
+                "reading, exempt from the emergency-braking rate-limit rule. Rollback sentinel: 0.0 (or "
+                "ModelLeadStepGuardAbsM=0.0) disables the guard entirely.",
+  ),
 )
 
 LEAD_RESPONSE_TUNE_SPECS_BY_ATTR = {spec.attr: spec for spec in LEAD_RESPONSE_TUNE_SPECS}
@@ -1246,6 +1307,10 @@ class LeadResponseTuningConfig:
   lead_stabilizer_trend_yrel_jump_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_stabilizer_trend_yrel_jump_m"].default
   model_lead_blend_min_span: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_blend_min_span"].default
   model_lead_blend_ttc_min_closing_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_blend_ttc_min_closing_mps"].default
+  model_lead_assoc_dpath_gate_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_assoc_dpath_gate_m"].default
+  model_lead_assoc_y_raw_tol_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_assoc_y_raw_tol_m"].default
+  model_lead_step_guard_abs_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_step_guard_abs_m"].default
+  model_lead_step_guard_frac: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_step_guard_frac"].default
 
   @classmethod
   def defaults(cls) -> LeadResponseTuningConfig:

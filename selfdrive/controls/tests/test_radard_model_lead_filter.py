@@ -543,3 +543,189 @@ class TestModelLeadFastCloseCorroborationAndOpenRecovery:
         assert track.dRel > 8.0
       else:
         assert track.dRel <= 5.0 + 10 * open_slew_step_m + 1e-6
+
+
+def _cd4_lead(d_rel, *, y_rel=0.0, d_path=0.0, v_rel=0.0, v_ego=20.0, prob=0.97):
+  return {
+    "dRel": float(d_rel),
+    "yRel": float(y_rel),
+    "vRel": float(v_rel),
+    "vLead": float(v_ego + v_rel),
+    "vLeadK": float(v_ego + v_rel),
+    "aLeadK": 0.0,
+    "aLeadTau": 0.3,
+    "modelProb": float(prob),
+    "dPath": float(d_path),
+    "vLat": 0.0,
+    "status": True,
+  }
+
+
+class TestModelLeadCD4AssociationAndStepGuard:
+  """CD4: association keys lateral continuity on the path-relative dPath (widened
+  raw-yRel tolerance), and an opening-only published-dRel step guard. Proves the
+  fix holds continuity through a raw-yRel excursion, does NOT mask a
+  closer/closing adjacent lead, and never clamps a closing (nearer) step."""
+
+  def test_raw_yrel_excursion_holds_track_id_when_dpath_stays_in_lane(self):
+    # One physical lead through a curve: raw yRel drifts well past the legacy
+    # 3.0 m gate while dPath stays in-lane. The track id must stay constant.
+    tracker = ModelLeadTracker(params=_NoParams())
+    v_ego = 20.0
+    ids = []
+    for frame in range(40):
+      now = frame * DT_FRAME_S
+      # yRel ramps -1.5 -> -8.0 m; dPath stays inside +/-0.6 m the whole time.
+      y_rel = -1.5 - 6.5 * (frame / 39.0)
+      d_path = 0.4 * math.sin(frame * 0.3)
+      tracker.begin_frame(now)
+      out = tracker.update_from_vision(
+        _cd4_lead(45.0, y_rel=y_rel, d_path=d_path, v_ego=v_ego),
+        now=now, v_ego=v_ego, lead_slot=0,
+      )
+      tracker.end_frame()
+      ids.append(int(out["radarTrackId"]))
+    # Legacy would have churned the id when yRel crossed the 3.0 m gate.
+    assert len(set(ids)) == 1
+    assert ids[-1] <= -1001
+
+  def test_closing_adjacent_lead_in_widened_band_stays_separate(self):
+    # Amendment 1: a genuinely CLOSER + CLOSING lead whose raw yRel sits in the
+    # widened band (3 m < |y| < 7 m) but at a real path offset must NOT be
+    # absorbed into the established far track. It must spawn its own track so a
+    # slow-closing near threat is never masked into a farther one.
+    tracker = ModelLeadTracker(params=_NoParams())
+    v_ego = 20.0
+    far_id = None
+    for frame in range(20):
+      now = frame * DT_FRAME_S
+      tracker.begin_frame(now)
+      far = tracker.update_from_vision(
+        _cd4_lead(60.0, y_rel=0.0, d_path=0.0, v_rel=0.0, v_ego=v_ego),
+        now=now, v_ego=v_ego, lead_slot=0,
+      )
+      tracker.end_frame()
+      far_id = int(far["radarTrackId"])
+
+    # New lead in slot 1: 30 m (much closer than the 60 m track), closing 5 m/s,
+    # raw yRel 5 m AND dPath 4 m (a real different-lane offset).
+    now = 20 * DT_FRAME_S
+    tracker.begin_frame(now)
+    tracker.update_from_vision(
+      _cd4_lead(60.0, y_rel=0.0, d_path=0.0, v_rel=0.0, v_ego=v_ego),
+      now=now, v_ego=v_ego, lead_slot=0,
+    )
+    near = tracker.update_from_vision(
+      _cd4_lead(30.0, y_rel=5.0, d_path=4.0, v_rel=-5.0, v_ego=v_ego),
+      now=now, v_ego=v_ego, lead_slot=1,
+    )
+    tracker.end_frame()
+    assert int(near["radarTrackId"]) != far_id
+    assert float(near["dRel"]) < 33.0  # publishes its true close dRel, not the far one
+
+  def test_step_guard_first_publish_is_unclamped(self):
+    # A fresh cut-in must publish its true close dRel on frame 1 with zero
+    # attenuation: the guard never binds without a prior published value.
+    cfg = _cfg()  # defaults: guard enabled
+    track = ModelLeadTrack.from_lead_dict(-1001, _cd4_lead(18.0, v_rel=-6.0, v_ego=20.0), 0.0, 0)
+    published = track.get_RadarState(cfg)
+    assert float(published["dRel"]) == pytest.approx(18.0, abs=1e-6)
+
+  def test_step_guard_clamps_opening_step_only(self):
+    # Establish a settled published value, then jump the internal dRel FARTHER by
+    # far more than max(3, 0.1*dRel) in one frame. The published step must be
+    # clamped to the opening bound.
+    cfg = _cfg()
+    v_ego = 20.0
+    track = ModelLeadTrack.from_lead_dict(-1001, _cd4_lead(40.0, v_rel=0.0, v_ego=v_ego), 0.0, 0)
+    # Prime last_published_drel via a publish at ~40 m.
+    track.get_RadarState(cfg)
+    prev = track.last_published_drel
+    assert prev is not None
+    # Force the internal filtered dRel to a far jump (simulate a fabricated step)
+    # and advance the frame key so the guard evaluates this as a new frame.
+    track.dRel = 70.0
+    track.vRel = 0.0
+    track.last_t = 0.05
+    out = track.get_RadarState(cfg)
+    # Guard bound is computed on the pre-clamp published value (70 m, no lag comp
+    # since vRel=0): max(3, 0.1*70) = 7, so the publish is held to prev + 7.
+    bound = max(cfg.model_lead_step_guard_abs_m, cfg.model_lead_step_guard_frac * 70.0)
+    assert float(out["dRel"]) == pytest.approx(float(prev) + bound, abs=1e-6)
+    assert float(out["dRel"]) < 70.0  # actually clamped
+
+  def test_step_guard_never_clamps_closing_step(self):
+    # A step that moves the lead CLOSER (the only direction that can trigger
+    # braking) is NEVER clamped, so emergency braking is never delayed.
+    cfg = _cfg()
+    v_ego = 20.0
+    track = ModelLeadTrack.from_lead_dict(-1001, _cd4_lead(60.0, v_rel=0.0, v_ego=v_ego), 0.0, 0)
+    track.get_RadarState(cfg)
+    # Jump the filtered dRel much CLOSER in one frame.
+    track.dRel = 20.0
+    track.last_t = 0.05
+    out = track.get_RadarState(cfg)
+    assert float(out["dRel"]) == pytest.approx(20.0, abs=1e-6)
+
+  def test_step_guard_disable_sentinel_restores_legacy_publish(self):
+    # Either knob at 0 disables the guard: a far opening step publishes unclamped.
+    for cfg in (_cfg(model_lead_step_guard_abs_m=0.0), _cfg(model_lead_step_guard_frac=0.0)):
+      track = ModelLeadTrack.from_lead_dict(-1001, _cd4_lead(40.0, v_rel=0.0, v_ego=20.0), 0.0, 0)
+      track.get_RadarState(cfg)
+      track.dRel = 70.0
+      track.last_t = 0.05
+      out = track.get_RadarState(cfg)
+      assert float(out["dRel"]) == pytest.approx(70.0, abs=1e-6)
+
+  def test_step_guard_idempotent_within_frame_no_double_clamp(self):
+    # A duplicate slot calls get_RadarState twice in one frame. The second call
+    # must reuse the first clamped output, not re-clamp against the just-stored
+    # value (which would ratchet a genuine opening continuation shorter).
+    cfg = _cfg()
+    track = ModelLeadTrack.from_lead_dict(-1001, _cd4_lead(40.0, v_rel=0.0, v_ego=20.0), 0.0, 0)
+    track.get_RadarState(cfg)
+    track.dRel = 70.0
+    track.last_t = 0.05
+    first = float(track.get_RadarState(cfg)["dRel"])
+    second = float(track.get_RadarState(cfg)["dRel"])
+    assert second == pytest.approx(first, abs=1e-9)
+
+  def test_widened_raw_y_tol_absorbs_jump_that_legacy_gate_rejects(self):
+    # A single-frame raw-yRel jump of ~5 m (dPath in-lane, opening lead so the
+    # closing-side clamp does not apply) is ABSORBED into the same track under
+    # the widened 7 m tolerance, but REJECTED (new track) once both gate knobs are
+    # rolled back to the legacy shared 3.0 m -- proving the rollback sentinel and
+    # that the fix is what admits the continuity.
+    def run(cfg):
+      tracker = ModelLeadTracker(params=_NoParams())
+      tracker._refresh_config = lambda now: None
+      tracker._cfg = cfg
+      v_ego = 20.0
+      # Settle a track at yRel ~ -1.0 (opening lead: pull-away, vRel +0.2).
+      for frame in range(15):
+        now = frame * DT_FRAME_S
+        tracker.begin_frame(now)
+        out = tracker.update_from_vision(
+          _cd4_lead(45.0, y_rel=-1.0, d_path=0.2, v_rel=0.2, v_ego=v_ego),
+          now=now, v_ego=v_ego, lead_slot=0,
+        )
+        tracker.end_frame()
+      settled_id = int(out["radarTrackId"])
+      # Abrupt raw yRel jump to -6.0 in one frame (y_err ~5 m > 3.0, < 7.0);
+      # dPath stays in-lane. Opening (vRel > 0) so raw-y widening applies.
+      now = 15 * DT_FRAME_S
+      tracker.begin_frame(now)
+      jumped = tracker.update_from_vision(
+        _cd4_lead(45.0, y_rel=-6.0, d_path=0.3, v_rel=0.2, v_ego=v_ego),
+        now=now, v_ego=v_ego, lead_slot=0,
+      )
+      tracker.end_frame()
+      return settled_id, int(jumped["radarTrackId"])
+
+    settled_fix, jumped_fix = run(_cfg())  # widened default
+    assert jumped_fix == settled_fix  # absorbed, continuity held
+
+    settled_legacy, jumped_legacy = run(
+      _cfg(model_lead_assoc_dpath_gate_m=3.0, model_lead_assoc_y_raw_tol_m=3.0)
+    )
+    assert jumped_legacy != settled_legacy  # legacy 3.0 m gate spawns a new id

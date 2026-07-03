@@ -123,6 +123,16 @@ class ModelLeadTrack:
   fcw_agree_hist: deque = field(default_factory=lambda: deque([True] * MODEL_LEAD_FCW_CORROB_HIST_LEN,
                                                               maxlen=MODEL_LEAD_FCW_CORROB_HIST_LEN))
   fcw_suppressed: bool = False
+  # CD4 opening-only published-dRel step guard (publish-only, mirrors lag-comp):
+  # the last value actually PUBLISHED for this track. None until the track's
+  # first publish so the guard never binds on frame 1 (a fresh cut-in publishes
+  # its true close dRel unclamped). The guard also caches which frame it last
+  # evaluated so a duplicate slot's second same-frame get_RadarState call reuses
+  # the first call's result instead of comparing against (and re-clamping) the
+  # value that same-frame call just wrote.
+  last_published_drel: float | None = None
+  _step_guard_eval_t: float | None = None
+  _step_guard_last_out: float | None = None
 
   @classmethod
   def from_lead_dict(cls, identifier: int, lead_dict: dict[str, Any], now: float, lead_slot: int) -> "ModelLeadTrack":
@@ -407,6 +417,22 @@ class ModelLeadTrack:
       if lag_comp_s > 0.0:
         closing_mps = max(0.0, -self.vRel - float(cfg.model_lead_filter_lag_comp_deadzone_mps))
         published_drel = max(0.0, published_drel - closing_mps * lag_comp_s)
+
+    # CD4 published-dRel single-frame OPENING-ONLY step guard (defense-in-depth).
+    # Runs AFTER lag-comp on the post-lag-comp published value and stores the
+    # (clamped) result, so the reference tracks the actual publication. It clamps
+    # ONLY the OPENING (farther, smaller-urgency) direction: a step that moves the
+    # lead CLOSER is never touched, so it can never delay or attenuate emergency
+    # braking (the closing/fast-close/FCW path bypasses this rate-limit by
+    # construction -- the clamp branch is unreachable for closing steps). It also
+    # never touches internal filter state (publish-only, like lag-comp), so it
+    # adds no feedback lag. Evaluated exactly ONCE per frame per track (keyed on
+    # last_t, which the same-frame duplicate early-return path also observes) so a
+    # second same-frame call reuses the first result instead of double-clamping.
+    # Never binds on the first publish (last_published_drel is None) so a fresh
+    # genuine cut-in publishes its true close dRel with zero attenuation.
+    if cfg is not None:
+      published_drel = self._apply_step_guard(published_drel, cfg)
     return {
       "dRel": published_drel,
       "yRel": float(self.yRel),
@@ -424,6 +450,43 @@ class ModelLeadTrack:
       "dPath": float(self.dPath),
       "vLat": float(self.vLat),
     }
+
+  def _apply_step_guard(self, published_drel: float, cfg: LeadResponseTuningConfig) -> float:
+    abs_m = float(getattr(cfg, 'model_lead_step_guard_abs_m', 0.0))
+    frac = float(getattr(cfg, 'model_lead_step_guard_frac', 0.0))
+    # Disable sentinel: either term at/below zero restores exact legacy publish.
+    if abs_m <= 0.0 or frac <= 0.0:
+      self.last_published_drel = float(published_drel)
+      self._step_guard_eval_t = None
+      self._step_guard_last_out = None
+      return float(published_drel)
+
+    # Once-per-frame idempotency: a duplicate slot calls get_RadarState twice in
+    # one frame (once in update(), once via the already-updated early-return).
+    # Both calls share last_t (the track was updated this frame), so on the
+    # second same-frame call reuse the first call's clamped output instead of
+    # comparing published_drel against the value the first call just stored (which
+    # would let a genuine opening continuation get clamped a second time).
+    now_key = float(self.last_t)
+    if self._step_guard_eval_t is not None and self._step_guard_eval_t == now_key \
+       and self._step_guard_last_out is not None:
+      return float(self._step_guard_last_out)
+
+    prev = self.last_published_drel
+    out = float(published_drel)
+    # Only guard when the same track persisted with a prior published value
+    # (never bind on the first publish -> a fresh cut-in is unclamped on frame 1).
+    if prev is not None:
+      opening_step = out - float(prev)
+      if opening_step > 0.0:  # OPENING (farther) only; closing is never clamped.
+        bound = max(abs_m, frac * out)
+        if opening_step > bound:
+          out = float(prev) + bound
+
+    self.last_published_drel = out
+    self._step_guard_eval_t = now_key
+    self._step_guard_last_out = out
+    return out
 
 
 class ModelLeadTracker:
@@ -482,11 +545,27 @@ class ModelLeadTracker:
     path_err = abs(track.dPath - raw_dpath)
     y_err = abs(track.yRel - raw_yrel)
     vrel_err = abs(track.vRel - raw_vrel)
+    # CD4: gate lateral continuity PRIMARILY on the path-relative dPath, which
+    # stays lane-relevant through curves, and give the RAW yRel a separate, LARGER
+    # tolerance. The legacy shared 3.0 m gate keyed on raw yRel, which a
+    # curve-induced yRel drift (+1.93 -> -8.3 m, dPath still < 0.9 m) repeatedly
+    # blew on the SAME physical lead, churning the published track id. Rollback:
+    # set both knobs to 3.0 to restore the legacy shared 3.0 m gate.
+    dpath_gate = float(self._cfg.model_lead_assoc_dpath_gate_m)
+    # Closing-side safety (amendment 1): the raw-y widening applies only to the
+    # OPENING/lane-relevant case. When the candidate is CLOSING (raw vRel < 0) hold
+    # the raw-y tolerance at the legacy 3.0 m so a slow-closing near lead whose
+    # dPath momentarily reads inside the dPath gate while its true yRel is 3-7 m
+    # cannot be masked into a farther track. Fast-close/short-TTC/cut-in cases are
+    # additionally protected downstream (closer_safety_candidate + per-track
+    # fast-close/closing-urgency adoption), so this is belt-and-suspenders.
+    y_raw_tol = float(self._cfg.model_lead_assoc_y_raw_tol_m)
+    if raw_vrel < 0.0:
+      y_raw_tol = min(y_raw_tol, MODEL_LEAD_ASSOC_Y_GATE_M)
     same_frame_duplicate = (
       track.identifier in self._updated_track_ids and
       track.last_slot != int(lead_slot) and
       path_err <= MODEL_LEAD_DUPLICATE_PATH_GATE_M and
-      y_err <= MODEL_LEAD_DUPLICATE_PATH_GATE_M and
       vrel_err <= MODEL_LEAD_DUPLICATE_VREL_GATE_MPS
     )
     closer_safety_candidate = (
@@ -496,15 +575,18 @@ class ModelLeadTracker:
     if same_frame_duplicate and not closer_safety_candidate:
       drel_gate = max(drel_gate, MODEL_LEAD_DUPLICATE_DREL_GATE_M)
 
-    if drel_err > drel_gate or path_err > MODEL_LEAD_ASSOC_Y_GATE_M or y_err > MODEL_LEAD_ASSOC_Y_GATE_M:
+    if drel_err > drel_gate or path_err > dpath_gate or y_err > y_raw_tol:
       return None
     if vrel_err > MODEL_LEAD_ASSOC_VREL_GATE_MPS:
       return None
     updated_penalty = 0.25 if track.identifier in self._updated_track_ids else 0.0
+    # Normalize each term by its own gate so the closest-dPath track still wins
+    # and the widened raw-y contribution is softened (not weighted at the old
+    # 3.0 m scale, which would let raw-yRel drift dominate the ranking).
     return float(
       drel_err / max(drel_gate, 1e-3) +
-      path_err / MODEL_LEAD_ASSOC_Y_GATE_M +
-      y_err / MODEL_LEAD_ASSOC_Y_GATE_M +
+      path_err / max(dpath_gate, 1e-3) +
+      y_err / max(y_raw_tol, 1e-3) +
       vrel_err / MODEL_LEAD_ASSOC_VREL_GATE_MPS +
       updated_penalty
     )
@@ -533,10 +615,18 @@ class ModelLeadTracker:
       path_err = abs(track.dPath - raw_dpath)
       y_err = abs(track.yRel - raw_yrel)
       vrel_err = abs(track.vRel - raw_vrel)
+      # CD4: same dPath-primary / raw-y-widened treatment as _association_score so
+      # the recovery path cannot reject a genuine same-slot continuation on a
+      # curve-induced yRel excursion either. Raw-y stays at the legacy 3.0 m when
+      # the candidate is closing (see _association_score amendment-1 rationale).
+      dpath_gate = float(self._cfg.model_lead_assoc_dpath_gate_m)
+      y_raw_tol = float(self._cfg.model_lead_assoc_y_raw_tol_m)
+      if raw_vrel < 0.0:
+        y_raw_tol = min(y_raw_tol, MODEL_LEAD_ASSOC_Y_GATE_M)
       if (
         drel_err > MODEL_LEAD_SAME_SLOT_RECOVER_DREL_GATE_M or
-        path_err > MODEL_LEAD_ASSOC_Y_GATE_M or
-        y_err > MODEL_LEAD_ASSOC_Y_GATE_M or
+        path_err > dpath_gate or
+        y_err > y_raw_tol or
         vrel_err > MODEL_LEAD_ASSOC_VREL_GATE_MPS
       ):
         continue
