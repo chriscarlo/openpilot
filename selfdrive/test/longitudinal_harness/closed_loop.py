@@ -375,6 +375,18 @@ def run_harness(*,
       slot: (float(getattr(radar_state, slot).dRel) if getattr(radar_state, slot).status else None)
       for slot in ("leadOne", "leadTwo")
     }
+    # Post-perception lead kinematics as the planner sees them (after the radard
+    # stage when active): the aLeadK/vRel the MPC extrapolates with, plus the
+    # tracker's FCW corroboration veto (radard.py _update_fcw_corroboration ->
+    # fcwSuppressed -> long_mpc.py crash_cnt reset).
+    published_lead_kinematics = {
+      slot: {
+        "v_rel_mps": float(getattr(radar_state, slot).vRel) if getattr(radar_state, slot).status else None,
+        "a_lead_k_mps2": float(getattr(radar_state, slot).aLeadK) if getattr(radar_state, slot).status else None,
+        "fcw_suppressed": bool(getattr(radar_state, slot).fcwSuppressed),
+      }
+      for slot in ("leadOne", "leadTwo")
+    }
     sm = _build_submaster(step, state, radar_state, long_control.long_control_state, bool(vehicle_config.cp.openpilotLongitudinalControl))
     planner.update(sm)
     planner_accel = float(planner.output_a_target)
@@ -489,6 +501,12 @@ def run_harness(*,
         "lead_two_measured_d_rel_m": lead_meta["leadTwo"]["measured_d_rel_m"],
         "lead_one_published_d_rel_m": published_d_rel["leadOne"],
         "lead_two_published_d_rel_m": published_d_rel["leadTwo"],
+        "lead_one_published_v_rel_mps": published_lead_kinematics["leadOne"]["v_rel_mps"],
+        "lead_two_published_v_rel_mps": published_lead_kinematics["leadTwo"]["v_rel_mps"],
+        "lead_one_published_a_lead_k_mps2": published_lead_kinematics["leadOne"]["a_lead_k_mps2"],
+        "lead_two_published_a_lead_k_mps2": published_lead_kinematics["leadTwo"]["a_lead_k_mps2"],
+        "lead_one_fcw_suppressed": published_lead_kinematics["leadOne"]["fcw_suppressed"],
+        "lead_two_fcw_suppressed": published_lead_kinematics["leadTwo"]["fcw_suppressed"],
         "lead_one_a_lead_k_mps2": lead_meta["leadOne"]["a_lead_k_mps2"],
         "lead_two_a_lead_k_mps2": lead_meta["leadTwo"]["a_lead_k_mps2"],
         "lead_one_model_prob": lead_meta["leadOne"]["model_prob"],
@@ -651,6 +669,9 @@ def _build_lead(slot_name: str,
     measured_d_rel = directive.measured_d_rel_m
   else:
     measured_d_rel = _apply_distance_noise(true_d_rel, noise_profile, noise_streams.drel)
+
+  if directive.measured_d_rel_bias_m:
+    measured_d_rel = max(0.0, measured_d_rel + float(directive.measured_d_rel_bias_m))
 
   if directive.measured_v_rel_mps is not None:
     measured_v_rel = directive.measured_v_rel_mps

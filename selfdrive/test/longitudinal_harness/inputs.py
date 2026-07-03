@@ -13,6 +13,10 @@ class LeadDirective:
   model_prob_target: float = 0.0
   d_rel_override_m: float | None = None
   measured_d_rel_m: float | None = None
+  # Additive raw-measurement distance bias (m): models the vision model's
+  # far-range x optimism against ground truth (road-measured on 200-13 EDGE1:
+  # raw leadsV3 x ran +5.8..+7.3 m above the true gap through the deep close).
+  measured_d_rel_bias_m: float = 0.0
   measured_v_rel_mps: float | None = None
   a_lead_k_mps2: float | None = None
   v_lead_k_mps: float | None = None
