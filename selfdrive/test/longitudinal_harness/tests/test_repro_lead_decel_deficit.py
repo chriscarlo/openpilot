@@ -150,6 +150,33 @@ def _run(reported_ratio: float) -> SimulationResult:
   )
 
 
+# CD3 fix knob: the MPC lead stabilizer amplifies the underreported aLeadK toward
+# the corroborating vLead-trend finite-difference (_apply_lead_accel_corr_bound
+# amplify branch). Gain 1.0 = shipped fix; gain 0.0 = pre-fix rollback sentinel.
+FIX_AMPLIFY_GAIN = 1.0
+ROLLBACK_AMPLIFY_GAIN = 0.0
+
+
+@functools.lru_cache(maxsize=2)
+def _vehicle_config_amplify(amplify_gain: float):
+  return resolve_ev6_vehicle_config(param_overrides={
+    "Longitudinal.LiveTune.LeadAccelCorrAmplifyGain": f"{amplify_gain:g}",
+  })
+
+
+@functools.lru_cache(maxsize=2)
+def _run_amplify(amplify_gain: float) -> SimulationResult:
+  return run_harness(
+    vehicle_config=_vehicle_config_amplify(amplify_gain),
+    scenario_name=f"lead_decel_deficit_amplify_{amplify_gain:g}",
+    steps=_build_steps(REPORTED_ACCEL_RATIO),
+    initial_speed_mps=EGO_V0_MPS,
+    noise_profile="off",
+    seed=42,
+    perception_filter="auto",
+  )
+
+
 def _thw_s(row: dict) -> float | None:
   gap = row["true_min_gap_m"]
   if gap is None or row["v_ego_true_mps"] <= 0.5:
@@ -353,3 +380,62 @@ def test_phantom_collapse_still_never_fires_fcw() -> None:
     f"phantom-collapse scenario raised FCW at t={false_fcw['t_s']:.2f}s "
     f"(v_ego {false_fcw['v_ego_true_mps']:.2f} m/s, true gap {false_fcw['true_min_gap_m']:.2f} m)"
   )
+
+
+def test_amplify_gain_knob_fix_vs_rollback() -> None:
+  """CD3 fix-knob oracle (the NEW threshold's rollback sentinel).
+
+  The SAFETY RULE requires EVERY new threshold to have an oracled rollback knob.
+  CD1 encodes this via test_project_gain_knob_fix_vs_rollback and CD2 via its
+  raw-closing escape; this test exercises the CD3 fix's own knob directly:
+  LeadAccelCorrAmplifyGain, which scales how strongly the MPC lead stabilizer
+  amplifies the underreported aLeadK toward the corroborating vLead-trend
+  finite-difference (_apply_lead_accel_corr_bound amplify branch).
+
+    gain = 1.0 (the fix): the MPC extrapolates the true lead decel from the
+      model+trend agreement and brakes early enough that the near-collision never
+      develops - min THW holds >= 0.9 s and TTC never dips into the deep-TTC
+      window (road pathology absent).
+    gain = 0.0 (rollback sentinel): the pre-fix un-amplified aLeadK is restored,
+      so the MPC only sees the 0.3x-underreported decel; the road pathology
+      reappears - THW collapses to ~0.49 s / TTC ~2.36 s and the deep-TTC window
+      opens (road: THW 0.45 s / TTC 1.9 s at the driver stomp).
+
+  The injected true kinematics are identical in both twins; only the amplify gain
+  differs, so any behavioral divergence is attributable to the CD3 fix alone."""
+  fix = _run_amplify(FIX_AMPLIFY_GAIN)
+  rollback = _run_amplify(ROLLBACK_AMPLIFY_GAIN)
+  m_fix = _measure(fix)
+  m_roll = _measure(rollback)
+
+  # Matched twins: identical true lead kinematics, only the amplify gain differs.
+  for r_fix, r_roll in zip(fix.trace, rollback.trace, strict=True):
+    assert r_fix["active_lead_speed_mps"] == pytest.approx(r_roll["active_lead_speed_mps"], abs=1e-9)
+    assert r_fix["lead_one_a_lead_k_mps2"] == pytest.approx(r_roll["lead_one_a_lead_k_mps2"], abs=1e-9)
+
+  fix_window = _deep_ttc_window(fix.trace)
+  roll_window = _deep_ttc_window(rollback.trace)
+
+  physics = (
+    f"CD3 amplify-gain knob (LeadAccelCorrAmplifyGain), lead brakes {TRUE_DECEL_MPS2} m/s^2 true "
+    f"while raw leadsV3.a reports only {REPORTED_ACCEL_RATIO}x:\n"
+    f"  gain={FIX_AMPLIFY_GAIN} (fix):      min THW {m_fix['min_thw_s']:.3f} s (floor {MIN_THW_FLOOR_S} s), "
+    f"min TTC {m_fix['min_ttc_s']:.2f} s, deep-TTC window {len(fix_window)} ticks\n"
+    f"  gain={ROLLBACK_AMPLIFY_GAIN} (rollback): min THW {m_roll['min_thw_s']:.3f} s, "
+    f"min TTC {m_roll['min_ttc_s']:.2f} s, deep-TTC window {len(roll_window)} ticks "
+    f"(pre-fix pathology; road THW 0.45 s / TTC 1.9 s at the driver stomp)"
+  )
+
+  # The fix: THW holds at/above the floor and TTC never enters the deep window.
+  assert m_fix["min_thw_s"] >= MIN_THW_FLOOR_S, physics
+  assert not fix_window, physics
+
+  # The rollback sentinel restores the road pathology: THW collapses below the
+  # floor and the deep-TTC window opens.
+  assert m_roll["min_thw_s"] < MIN_THW_FLOOR_S, physics
+  assert roll_window, physics
+
+  # And the fix is strictly safer than its own rollback on the two headline
+  # road-derived metrics (larger THW headroom, larger TTC margin).
+  assert m_fix["min_thw_s"] > m_roll["min_thw_s"], physics
+  assert m_fix["min_ttc_s"] > m_roll["min_ttc_s"], physics
