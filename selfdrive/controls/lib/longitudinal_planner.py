@@ -190,9 +190,28 @@ def get_lead_brake_release_accel_floor(mpc, *, v_ego: float, lead_source: str, c
     debug["reason"] = "lead_decelerating"
     return None, debug
 
+  # CD1 fix — lead-decel-aware brake-release floor (road 200-15-17 TAP 1). The
+  # closing / near-target branches below sized the floor from the INSTANTANEOUS
+  # closing speed only, treating the lead as holding its current speed. A lead
+  # braking to a stop at a decel shallow enough to stay inside the -0.75
+  # lead_brake_release_lead_decel_min veto (road aLeadK -0.42..-0.63) keeps
+  # closing faster every tick, so the true required ego decel is the legacy
+  # relative-closure term PLUS the lead's own deceleration (relative-frame
+  # kinematics: for the relative velocity to null out inside the gap surplus the
+  # ego decel must overcome a_lead as well). Adding that term deepens the floor
+  # exactly when the lead is decelerating so the floor stops clipping the MPC's
+  # correct ramping brake; a steady or accelerating lead contributes zero, so
+  # every non-decelerating state keeps today's floor bit-identically.
+  # lead_decel_extra is the magnitude (>= 0) the lead's braking adds to the
+  # required ego decel, scaled by the live-tunable projection gain
+  # (lead_brake_release_lead_decel_project_gain; 0 = exact legacy rollback).
+  lead_decel_extra = (max(0.0, -lead_accel) *
+                      float(tuning.lead_brake_release_lead_decel_project_gain))
+  debug["lead_decel_extra_mps2"] = float(lead_decel_extra)
+  near_target_branch = False
   if gap_error >= 0.0:
     if closing_speed > 0.0:
-      decel_needed = (closing_speed ** 2) / (2.0 * max(gap_error, 0.5))
+      decel_needed = (closing_speed ** 2) / (2.0 * max(gap_error, 0.5)) + lead_decel_extra
       release_floor = -min(decel_needed, brake_decel)
     else:
       release_floor = tuning.lead_brake_release_coast_bias_mps2
@@ -226,7 +245,14 @@ def get_lead_brake_release_accel_floor(mpc, *, v_ego: float, lead_source: str, c
     time_to_target_s = 0.0
   elif (gap_error >= -tuning.lead_brake_release_near_target_margin_m and
         closing_speed <= tuning.lead_brake_release_near_target_max_closing_mps):
-    release_floor = tuning.lead_brake_release_near_target_floor_mps2
+    # Near-target hold at the shallow near-target floor, but lower it by the
+    # lead's own deceleration so a lead braking hard inside the near-target band
+    # cannot be pinned above the decel its own braking demands. Steady lead ->
+    # lead_decel_extra = 0 -> exact legacy near-target floor.
+    release_floor = min(tuning.lead_brake_release_near_target_floor_mps2,
+                        tuning.lead_brake_release_near_target_floor_mps2 - lead_decel_extra)
+    release_floor = max(release_floor, -brake_decel)
+    near_target_branch = True
     time_to_target_s = 0.0
   else:
     if pullaway_speed <= tuning.lead_brake_release_min_pullaway_mps:
@@ -247,7 +273,7 @@ def get_lead_brake_release_accel_floor(mpc, *, v_ego: float, lead_source: str, c
   debug["active"] = True
   if gap_error >= 0.0:
     debug["reason"] = "closing_to_target" if closing_speed > 0.0 else "gap_recovered"
-  elif release_floor == tuning.lead_brake_release_near_target_floor_mps2:
+  elif near_target_branch:
     debug["reason"] = "near_target"
   else:
     debug["reason"] = "projected_recovery"

@@ -390,6 +390,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"Longitudinal.LiveTune.LeadBrakeReleaseNearTargetFloorMps2", {PERSISTENT | BACKUP, FLOAT, "-0.05"}},
     {"Longitudinal.LiveTune.LeadBrakeReleaseLeadDecelMinMps2", {PERSISTENT | BACKUP, FLOAT, "-0.75"}},
     {"Longitudinal.LiveTune.LeadBrakeReleaseApproachFloorMps2", {PERSISTENT | BACKUP, FLOAT, "-0.60"}},
+    {"Longitudinal.LiveTune.LeadBrakeReleaseLeadDecelProjectGain", {PERSISTENT | BACKUP, FLOAT, "1.0"}},
     {"Longitudinal.LiveTune.LeadBrakeReleaseVrelCreditCapM", {PERSISTENT | BACKUP, FLOAT, "10.0"}},
     {"Longitudinal.LiveTune.LeadBrakeReleaseRecoveryProjS", {PERSISTENT | BACKUP, FLOAT, "3.0"}},
     {"Longitudinal.LiveTune.LeadBrakeReleaseCoastBiasMps2", {PERSISTENT | BACKUP, FLOAT, "0.05"}},

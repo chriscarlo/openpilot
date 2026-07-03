@@ -357,6 +357,22 @@ LEAD_RESPONSE_TUNE_SPECS = (
     description="Most braking allowed by the projected-recovery release floor before it ramps toward near-coast.",
   ),
   LeadResponseTuneSpec(
+    attr="lead_brake_release_lead_decel_project_gain",
+    key="Longitudinal.LiveTune.LeadBrakeReleaseLeadDecelProjectGain",
+    cli_name="lead-brake-release-lead-decel-project-gain",
+    label="release_lead_decel_project_gain",
+    default=1.0,
+    minimum=0.0,
+    maximum=2.0,
+    description="CD1 fix (road 200-15-17 TAP 1): scale on the lead's own deceleration magnitude added to the required "
+                "ego decel in the brake-release floor's closing and near-target branches, so a lead braking to a stop "
+                "at a decel too shallow to trip LeadBrakeReleaseLeadDecelMinMps2 (road aLeadK -0.42..-0.63, inside the "
+                "-0.75 veto) can no longer clip the MPC's ramping brake above what the still-decelerating lead demands. "
+                "At 1.0 the floor uses the exact relative-frame requirement (legacy closure decel + |aLeadK|); a steady "
+                "or accelerating lead contributes zero regardless of the gain, so all non-decelerating states keep the "
+                "shipped floor bit-identically. Rollback sentinel: 0 restores the pre-fix instantaneous-closing floor.",
+  ),
+  LeadResponseTuneSpec(
     attr="lead_brake_release_vrel_credit_cap_m",
     key="Longitudinal.LiveTune.LeadBrakeReleaseVrelCreditCapM",
     cli_name="lead-brake-release-vrel-credit-cap",
@@ -1095,6 +1111,7 @@ class LeadResponseTuningConfig:
   lead_brake_release_near_target_floor_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_brake_release_near_target_floor_mps2"].default
   lead_brake_release_lead_decel_min_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_brake_release_lead_decel_min_mps2"].default
   lead_brake_release_approach_floor_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_brake_release_approach_floor_mps2"].default
+  lead_brake_release_lead_decel_project_gain: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_brake_release_lead_decel_project_gain"].default
   lead_brake_release_vrel_credit_cap_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_brake_release_vrel_credit_cap_m"].default
   lead_brake_release_recovery_proj_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_brake_release_recovery_proj_s"].default
   lead_brake_release_coast_bias_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_brake_release_coast_bias_mps2"].default

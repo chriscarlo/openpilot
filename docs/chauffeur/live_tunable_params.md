@@ -69,6 +69,7 @@ Follow limit-cycle fix (2026-07-02, seat report: buck/slow/hold/late-re-accel/ov
 | `LeadBrakeReleaseNearTargetMaxClosingMps` | 0.75 | 0.0–4.0 | Max closing speed eligible for near-target release |
 | `LeadBrakeReleaseNearTargetFloorMps2` | -0.05 | -2.0–0.5 | Floor near target; raise toward/above zero to counter EV regen |
 | `LeadBrakeReleaseLeadDecelMinMps2` | -0.75 | -6.0–0.0 | Disable release when the lead is braking harder than this |
+| `LeadBrakeReleaseLeadDecelProjectGain` | 1.0 | 0.0–2.0 | CD1 fix: scale on the lead's own decel magnitude added to the required ego decel in the release floor's closing and near-target branches, so a lead braking to a stop inside the `LeadBrakeReleaseLeadDecelMinMps2` veto can no longer clip the MPC's ramping brake above what the still-decelerating lead demands. Steady/accelerating lead adds zero (bit-identical to shipped). 0 = pre-fix instantaneous-closing floor (rollback) |
 | `LeadBrakeReleaseVrelCreditCapM` | 10.0 | 0.0–20.0 | Cap (m) on the vRel-aware recovery credit; closing states always get zero credit. 0 = legacy headway-only gap error |
 | `LeadBrakeReleaseRecoveryProjS` | 3.0 | 0.0–5.0 | Horizon (s) projecting the credit basis forward by the POSITIVE part of aLeadK only. 0 = no projection |
 | `GapReclaimFollowMaxAccel` | 0.25 | 0.0–1.5 | Follow-regime cap on the recovered-gap re-accel floor (separate from the shared `GapReclaimMaxAccel`). <= coast bias (e.g. 0) disables the raise |
