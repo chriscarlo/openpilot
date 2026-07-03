@@ -16,7 +16,7 @@ All params are read at runtime via `Longitudinal.LiveTune.*` keys. Changes take 
 |---|---|---|---|
 | `GapReclaimStrength` | 0.55 | 0.0–2.0 | How eagerly ACC closes extra gap on pullaway |
 | `GapReclaimGapMinM` | 3.0 | 0.0–10.0 | Minimum extra gap before reclaim activates |
-| `GapReclaimMaxAccel` | 0.12 | 0.0–0.75 | Cap on positive accel floor for gap closing |
+| `GapReclaimMaxAccel` | 0.30 | 0.0–0.75 | Cap on positive accel floor for gap closing. Raised from 0.12 in the 2026-07-02 comfort retune: the post-fix road test showed reclaim intent saturating against the old cap (median THW-recovery 5.4 s / p90 10.7 s, 48% of steady-follow time above 2.0 s THW), so the seat preference is a faster, still-comfort-bounded reclaim |
 
 ## Lead Keep-Up
 
@@ -26,7 +26,7 @@ Tiny immediate accel floor for a followed lead that starts pulling away. This is
 |---|---|---|---|
 | `LeadKeepUpStrength` | 1.15 | 0.0–2.0 | Scale for the immediate keep-up floor. The first hint stays tiny; confirmed pull-aways can climb to `LeadKeepUpMaxAccel` |
 | `LeadKeepUpGapMinM` | 0.10 | 0.0–5.0 | Extra gap above nominal headway before distance-based keep-up starts |
-| `LeadKeepUpMaxAccel` | 0.095 | 0.0–5.0 | Cap on keep-up floor before planner/personality accel limits. Leave the default tiny for EV comfort |
+| `LeadKeepUpMaxAccel` | 0.22 | 0.0–5.0 | Cap on keep-up floor before planner/personality accel limits. Raised from 0.095 in the 2026-07-02 comfort retune (seat preference, same reclaim-saturation road data as `GapReclaimMaxAccel`); still small relative to the 0.75+ range so the "leave it tiny" EV-comfort intent holds, just less capped than before |
 
 ## Lead Slowdown
 
@@ -72,7 +72,7 @@ Follow limit-cycle fix (2026-07-02, seat report: buck/slow/hold/late-re-accel/ov
 | `LeadBrakeReleaseLeadDecelProjectGain` | 1.0 | 0.0–2.0 | CD1 fix: scale on the lead's own decel magnitude added to the required ego decel in the release floor's closing and near-target branches, so a lead braking to a stop inside the `LeadBrakeReleaseLeadDecelMinMps2` veto can no longer clip the MPC's ramping brake above what the still-decelerating lead demands. Steady/accelerating lead adds zero (bit-identical to shipped). 0 = pre-fix instantaneous-closing floor (rollback) |
 | `LeadBrakeReleaseVrelCreditCapM` | 10.0 | 0.0–20.0 | Cap (m) on the vRel-aware recovery credit; closing states always get zero credit. 0 = legacy headway-only gap error |
 | `LeadBrakeReleaseRecoveryProjS` | 3.0 | 0.0–5.0 | Horizon (s) projecting the credit basis forward by the POSITIVE part of aLeadK only. 0 = no projection |
-| `GapReclaimFollowMaxAccel` | 0.25 | 0.0–1.5 | Follow-regime cap on the recovered-gap re-accel floor (separate from the shared `GapReclaimMaxAccel`). <= coast bias (e.g. 0) disables the raise |
+| `GapReclaimFollowMaxAccel` | 0.32 | 0.0–1.5 | Follow-regime cap on the recovered-gap re-accel floor (separate from the shared `GapReclaimMaxAccel`). <= coast bias (e.g. 0) disables the raise. Raised from 0.25 toward (but NOT to) the 0.45 comfort-retune target on 2026-07-02: `test_repro_follow_limit_cycle.py` (the steady-follow bucking oracle) starts failing at 0.40 (highway rebound overshoot -2.99 m breaches the -2.5 m floor) and fails harder at 0.45 (highway -3.52 m AND city ringing regresses to 2 cycles / 17.2 s settle); 0.32 was the swept value with real margin on both legs (highway overshoot -2.20 m vs -2.5 floor, city 1 cycle / 11.7 s settle vs the 16.0 s bound). `GapReclaimMaxAccel` and `LeadKeepUpMaxAccel` do not interact with this oracle (bit-identical highway/city metrics with those two alone raised to their new defaults) so only this knob was capped short of the requested value |
 | `GapReclaimTaperGain` | 2.0 | 0.0–20.0 | Kinematic overshoot taper on the follow re-accel raise, 1/(m/s²): extra authority scales by clip(1 - gain·c_proj²/(2·gap_surplus), 0, 1). 0 = naive raise (diagnostic) |
 | `LeadBrakeReleaseApproachFloorMps2` | -0.60 | -6.0–0.0 | Most decel allowed while projected recovery ramps toward near-coast |
 | `LeadBrakeReleaseCoastBiasMps2` | 0.05 | -0.5–0.8 | Floor once target is recovered and ego is no longer closing |
