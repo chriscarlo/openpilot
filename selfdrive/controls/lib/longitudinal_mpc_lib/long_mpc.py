@@ -385,6 +385,14 @@ LEAD_ACCEL_CORR_CLOSING_REARM_MPS = 0.5
 LEAD_ACCEL_CORR_TTC_REARM_S = 2.0
 LEAD_ACCEL_CORR_HEADWAY_REARM_M = 2.0
 LEAD_ACCEL_CORR_MAX_DT_S = 0.5
+# aLeadK amplify (CD3 lead-decel truth deficit). When the model already reports
+# braking and the corroborating vLead trend is meaningfully deeper, pull aLeadK
+# toward the measured trend. Gain 0 disables (rollback to bound-only). Deadband
+# rejects steady/lightly-braking finite-difference jitter; cap bounds how far a
+# single noisy trend sample can deepen aLeadK in one frame.
+LEAD_ACCEL_CORR_AMPLIFY_GAIN = 0.0
+LEAD_ACCEL_CORR_AMPLIFY_DEADBAND_MPS2 = 0.35
+LEAD_ACCEL_CORR_AMPLIFY_CAP_MPS2 = 2.0
 
 
 class _LeadStabilityState:
@@ -2617,8 +2625,51 @@ class LongitudinalMpc:
           float(lead.dRel) > near_gap_m + headway_rearm_m):
       state.corr_danger_latched = False
 
-    if (state.corr_danger_latched or lead.aLeadK >= 0.0 or
-        state.corr_settled_s < settle_tau_mult * meas_tau):
+    settled = state.corr_settled_s >= settle_tau_mult * meas_tau
+
+    # Corroborated aLeadK AMPLIFY (CD3 lead-decel truth deficit). The model's
+    # leadsV3 'a' chronically underreports real lead braking (road 200-13:
+    # published aLeadK peaked -0.48 while the position-derived truth was
+    # -1.3..-2.3 m/s^2), and radard's 0.6 s accel EMA halves it again. The
+    # vLead-trend finite-difference (corr_a_meas_lp, already low-passed here)
+    # measures the real decel from vLead alone: in that exact event it tracked
+    # -1.7..-1.9 while aLeadK sat at -0.54. Pull aLeadK toward that measured
+    # trend when BOTH agree the lead is braking, so the MPC extrapolates a
+    # truthful decel instead of a barely-moving lead.
+    #
+    # Safety-shaped gates (why this cannot fabricate phantom braking):
+    #  - lead.aLeadK < 0: the MODEL must already report braking. A coasting or
+    #    accelerating model report is never overridden into decel; the trend
+    #    can only DEEPEN an already-reported brake, never invent one.
+    #  - corr_a_meas_lp < lead.aLeadK - deadband: the kinematic trend must be
+    #    meaningfully MORE negative than the model. The deadband rejects the
+    #    finite-difference jitter of a steady/lightly-braking lead (ev6_measured
+    #    vRel noise + prob dropouts) that would otherwise chatter aLeadK.
+    #  - settled: same-track vLead history >= settle_tau_mult * meas_tau, so a
+    #    fresh acquisition / track swap cannot inject a spurious first-frame trend.
+    #  - runs while danger-latched (unlike the downward bound): a genuine close
+    #    is exactly when the deficit is dangerous, and the model-already-negative
+    #    gate keeps it corroborated.
+    # Gain / deadband / cap are all live-tunable; gain 0 restores the old
+    # bound-only behavior exactly (kill switch).
+    amplify_gain = float(getattr(cfg, 'lead_accel_corr_amplify_gain',
+                                 LEAD_ACCEL_CORR_AMPLIFY_GAIN))
+    amplify_deadband = float(getattr(cfg, 'lead_accel_corr_amplify_deadband_mps2',
+                                     LEAD_ACCEL_CORR_AMPLIFY_DEADBAND_MPS2))
+    amplify_cap = float(getattr(cfg, 'lead_accel_corr_amplify_cap_mps2',
+                                LEAD_ACCEL_CORR_AMPLIFY_CAP_MPS2))
+    if (amplify_gain > 0.0 and settled and lead.aLeadK < 0.0 and
+        float(state.corr_a_meas_lp) < float(lead.aLeadK) - amplify_deadband):
+      # Never pull past the measured trend, and never deepen by more than the
+      # per-frame cap below the current aLeadK (bounds a single noisy trend
+      # sample). Sign is preserved: target is always <= aLeadK < 0.
+      target = max(float(state.corr_a_meas_lp), float(lead.aLeadK) - amplify_cap)
+      amplified = float(lead.aLeadK) + amplify_gain * (target - float(lead.aLeadK))
+      if amplified < float(lead.aLeadK):
+        lead.aLeadK = amplified
+        return True
+
+    if (state.corr_danger_latched or lead.aLeadK >= 0.0 or not settled):
       return False
     bounded = max(float(lead.aLeadK), min(0.0, float(state.corr_a_meas_lp)) - margin)
     if bounded <= float(lead.aLeadK):

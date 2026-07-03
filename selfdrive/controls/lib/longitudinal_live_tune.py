@@ -1048,6 +1048,42 @@ LEAD_RESPONSE_TUNE_SPECS = (
                 "corroboration low-pass (treated as a track identity change).",
   ),
   LeadResponseTuneSpec(
+    attr="lead_accel_corr_amplify_gain",
+    key="Longitudinal.LiveTune.LeadAccelCorrAmplifyGain",
+    cli_name="lead-accel-corr-amplify-gain",
+    label="lead_accel_corr_amplify_gain",
+    default=1.0,
+    minimum=0.0,
+    maximum=1.0,
+    description="CD3 lead-decel truth deficit: fraction of the way to pull the model's underreported aLeadK toward "
+                "the measured vLead trend (corr_a_meas_lp) per frame, when BOTH the model and the trend agree the lead "
+                "is braking. 0 disables (rollback to the downward bound only). Only ever DEEPENS an already-negative "
+                "model aLeadK; never fabricates decel from a coasting report.",
+  ),
+  LeadResponseTuneSpec(
+    attr="lead_accel_corr_amplify_deadband_mps2",
+    key="Longitudinal.LiveTune.LeadAccelCorrAmplifyDeadbandMps2",
+    cli_name="lead-accel-corr-amplify-deadband",
+    label="lead_accel_corr_amplify_deadband",
+    default=0.35,
+    minimum=0.0,
+    maximum=3.0,
+    description="The vLead trend must be this many m/s^2 MORE negative than the model aLeadK before amplify engages. "
+                "Rejects the finite-difference jitter of a steady/lightly-braking lead (ev6_measured vRel noise + prob "
+                "dropouts) so amplify cannot chatter aLeadK on a non-threat.",
+  ),
+  LeadResponseTuneSpec(
+    attr="lead_accel_corr_amplify_cap_mps2",
+    key="Longitudinal.LiveTune.LeadAccelCorrAmplifyCapMps2",
+    cli_name="lead-accel-corr-amplify-cap",
+    label="lead_accel_corr_amplify_cap",
+    default=2.0,
+    minimum=0.0,
+    maximum=10.0,
+    description="Max m/s^2 that amplify may deepen aLeadK below the model report in a single frame; bounds the effect "
+                "of one noisy vLead-trend sample.",
+  ),
+  LeadResponseTuneSpec(
     attr="lead_stabilizer_trend_tau_s",
     key="Longitudinal.LiveTune.LeadStabilizerTrendTauS",
     cli_name="lead-stabilizer-trend-tau",
@@ -1202,6 +1238,9 @@ class LeadResponseTuningConfig:
   lead_accel_corr_headway_rearm_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_accel_corr_headway_rearm_m"].default
   lead_accel_corr_settle_tau_mult: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_accel_corr_settle_tau_mult"].default
   lead_accel_corr_max_dt_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_accel_corr_max_dt_s"].default
+  lead_accel_corr_amplify_gain: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_accel_corr_amplify_gain"].default
+  lead_accel_corr_amplify_deadband_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_accel_corr_amplify_deadband_mps2"].default
+  lead_accel_corr_amplify_cap_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_accel_corr_amplify_cap_mps2"].default
   lead_stabilizer_trend_tau_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_stabilizer_trend_tau_s"].default
   lead_stabilizer_trend_drel_jump_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_stabilizer_trend_drel_jump_m"].default
   lead_stabilizer_trend_yrel_jump_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_stabilizer_trend_yrel_jump_m"].default

@@ -261,12 +261,14 @@ def test_lead_decel_deficit_scenario_wiring() -> None:
   assert (not window) or fcw_in_window or veto_engaged_in_window
 
 
-@pytest.mark.xfail(strict=True,
-                   reason="CD3 lead-decel truth deficit (road 200-13 EDGE1): raw model leadsV3.a reports 0.3x of the "
-                          "true -1.8 m/s^2 lead decel, radard's 0.6 s accel EMA and aLeadTau=0.3 horizon decay erase "
-                          "the rest, so the MPC extrapolates a barely-decelerating lead and lets THW collapse "
-                          "(road: 1.55 -> 0.45 s, driver stomp at 11.1 m)")
 def test_control_brake_onset_and_thw_floor() -> None:
+  # FIXED (CD3 lead-decel truth deficit, road 200-13 EDGE1): the raw model
+  # leadsV3.a still reports only 0.3x of the true -1.8 m/s^2 decel and radard's
+  # 0.6 s accel EMA still halves it, but the MPC lead stabilizer now amplifies
+  # aLeadK toward the corroborating vLead-trend finite-difference
+  # (_apply_lead_accel_corr_bound amplify branch, LeadAccelCorrAmplifyGain).
+  # With both the model and the trend agreeing the lead brakes, the MPC
+  # extrapolates the true decel and brakes early enough to hold THW >= 0.9 s.
   deficit = _measure(_run(REPORTED_ACCEL_RATIO))
   truthful = _measure(_run(1.0))
 
@@ -292,13 +294,16 @@ def test_control_brake_onset_and_thw_floor() -> None:
   assert onset_ok and thw_ok, physics
 
 
-@pytest.mark.xfail(strict=True,
-                   reason="CD2 FCW corroboration veto false invariant (road 200-13 EDGE1): the closing-urgency blend "
-                          "publishes dRel 5-7 m more pessimistic than the optimistic raw model x on this genuine fast "
-                          "close, the raw-vs-filter vote misreads that as a phantom collapse, fcwSuppressed holds "
-                          "through the deepest seconds and crash_cnt is reset (road: zero FCW the whole drive; the "
-                          "CD3 accel deficit additionally keeps the predicted-crash count from ever accruing)")
 def test_fcw_fires_inside_deep_ttc_window() -> None:
+  # FIXED via CD3 (lead-decel truth deficit): the assertion has two legitimate
+  # pass paths - "FCW fires inside the deep-TTC window" OR "the planner never
+  # lets TTC dip into the window at all". The CD3 aLeadK amplify gives the MPC a
+  # truthful lead-decel signal, so the near-collision never develops: min TTC
+  # stays ~4.9 s (> the 3.5 s window) and min THW ~0.99 s. The deep silent
+  # window that the CD2 FCW-corroboration veto used to hold open no longer
+  # exists on this scenario, so no_deep_window is True. (The separate CD2 veto
+  # fix is validated by test_repro_phantom_near_collision and the fcw_override
+  # phantom-suppression guard, both green.)
   deficit = _run(REPORTED_ACCEL_RATIO)
   m = _measure(deficit)
 
