@@ -426,6 +426,8 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"Longitudinal.LiveTune.HandoffLimitWindowS", {PERSISTENT | BACKUP, FLOAT, "0.40"}},
     {"Longitudinal.LiveTune.HandoffLimitMaxDeltaMps2", {PERSISTENT | BACKUP, FLOAT, "0.30"}},
     {"Longitudinal.LiveTune.HandoffInsideDfPositiveCapMps2", {PERSISTENT | BACKUP, FLOAT, "0.10"}},
+    {"Longitudinal.LiveTune.ComfortJerkLimitMps3", {PERSISTENT | BACKUP, FLOAT, "0.8"}},
+    {"Longitudinal.LiveTune.ComfortJerkBypassDecelMps2", {PERSISTENT | BACKUP, FLOAT, "-1.5"}},
     {"Longitudinal.LiveTune.LeadProbEnter", {PERSISTENT | BACKUP, FLOAT, "0.6"}},
     {"Longitudinal.LiveTune.LeadProbExit", {PERSISTENT | BACKUP, FLOAT, "0.25"}},
     {"Longitudinal.LiveTune.LeadSourceAcquireFrames", {PERSISTENT | BACKUP, FLOAT, "1.0"}},

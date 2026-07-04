@@ -304,7 +304,6 @@ def test_comfort_floor_jerk_scenario_wiring() -> None:
     "the injected vRel band did not reach the published tracker; noise not exercised")
 
 
-@pytest.mark.xfail(strict=True, reason="CD7: no comfort anti-jerk envelope on planner output (fix pending)")
 def test_comfort_floor_one_frame_jerk_bounded() -> None:
   result = _run()
   post = _post_settle_rows(result)
@@ -329,7 +328,6 @@ def test_comfort_floor_one_frame_jerk_bounded() -> None:
   assert jerk_ok and reversals_ok, physics
 
 
-@pytest.mark.xfail(strict=True, reason="CD7: ComfortJerkLimitMps3 envelope not yet implemented (fix pending)")
 def test_comfort_jerk_limit_knob_fix_vs_rollback() -> None:
   """CD7 fix-knob oracle (the NEW threshold's rollback sentinel).
 

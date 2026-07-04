@@ -695,6 +695,43 @@ LEAD_RESPONSE_TUNE_SPECS = (
                 "disables the cap.",
   ),
   LeadResponseTuneSpec(
+    attr="comfort_jerk_limit_mps3",
+    key="Longitudinal.LiveTune.ComfortJerkLimitMps3",
+    cli_name="comfort-jerk-limit-mps3",
+    label="comfort_jerk_limit_mps3",
+    default=0.8,
+    minimum=0.0,
+    maximum=50.0,
+    description="CD7 (road 200-10 / 200-9 tap1 / 201-9): graded-onset comfort anti-jerk envelope on the planner's FINAL "
+                "output_a_target. Bounds the per-frame DOWNWARD (comfort-braking-onset) delta output_a_target to "
+                "comfort_jerk_limit_mps3 * dt (0.8 m/s^3 * 0.05 s = 0.04 m/s^2/frame) so a single noisy vRel frame under "
+                "a benign steady LEAD follow cannot step-change aTarget hard into a brake (road: -0.31 -> -1.00 in "
+                "0.15 s, ~4.6 m/s^3) - the felt unnecessary-braking blip. ASYMMETRIC (down-leg only): the UPWARD leg "
+                "(brake-RELEASE and re-accel toward a followed lead) is always-safe and left FREE so managed release/"
+                "re-accel moves are never blunted (matches the CD5 relatch blend / flutter clamp precedent). SCOPE-GATED "
+                "to the steady-lead-follow regime: engages only when a lead0/lead1 source owns control with NO source "
+                "flip, CD6 handoff limiter/EDGE1 cap, CD5 relatch blend, or flutter clamp active this frame. FULLY "
+                "BYPASSED whenever ANY hazard/urgency signal is active - the SAME _relatch_urgency_bypass signal CD5/CD6 "
+                "use (FCW / short-TTC / fast-close on the owned lead, or a requested hard decel) - so real braking is "
+                "NEVER rate-limited. Runs AFTER the CD6 handoff limiter as the truly-final composed limiter. Only grades "
+                "the ONSET of a downward step (no sustained floor is lowered once prev_a catches up). Rollback sentinel: "
+                "a large value (e.g. 50 = the spec maximum) makes the per-frame bound unreachable and disables the "
+                "envelope (pre-CD7 un-enveloped output); 0 also disables it.",
+  ),
+  LeadResponseTuneSpec(
+    attr="comfort_jerk_bypass_decel_mps2",
+    key="Longitudinal.LiveTune.ComfortJerkBypassDecelMps2",
+    cli_name="comfort-jerk-bypass-decel-mps2",
+    label="comfort_jerk_bypass_decel_mps2",
+    default=-1.5,
+    minimum=-5.0,
+    maximum=0.0,
+    description="CD7: requested-decel floor (m/s^2) at/below which the comfort jerk envelope is bypassed regardless of the "
+                "lead-object urgency tests (mirrors the flutter/relatch bypass floor). A raw output_a_target at/below this "
+                "passes unmodified this frame so a hard MPC brake is never throttled even if no lead object is present to "
+                "evaluate. Rollback sentinel: 0 disables this floor (lead-object urgency signal only).",
+  ),
+  LeadResponseTuneSpec(
     attr="lead_prob_enter",
     key="Longitudinal.LiveTune.LeadProbEnter",
     cli_name="lead-prob-enter",
@@ -1417,6 +1454,8 @@ class LeadResponseTuningConfig:
   handoff_limit_window_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["handoff_limit_window_s"].default
   handoff_limit_max_delta_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["handoff_limit_max_delta_mps2"].default
   handoff_inside_df_positive_cap_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["handoff_inside_df_positive_cap_mps2"].default
+  comfort_jerk_limit_mps3: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["comfort_jerk_limit_mps3"].default
+  comfort_jerk_bypass_decel_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["comfort_jerk_bypass_decel_mps2"].default
   lead_prob_enter: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_prob_enter"].default
   lead_prob_exit: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_prob_exit"].default
   lead_source_acquire_frames: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_source_acquire_frames"].default

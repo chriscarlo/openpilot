@@ -55,6 +55,11 @@ _HANDOFF_EDGE1_INSIDE_DF_FRACTION = 0.9
 # only a genuine collapse — not the cap's gradual pre-collapse taper — arms the
 # symmetric window.
 _HANDOFF_CAP_COLLAPSE_DROP_MPS2 = 0.3
+# CD7 comfort jerk envelope: a per-frame step bound at/above this (m/s^2/frame) is
+# treated as effectively unbounded, so a large ComfortJerkLimitMps3 rollback
+# sentinel (e.g. 50 m/s^3 * 0.05 s = 2.5 m/s^2/frame) disables the envelope
+# without touching any real single-frame move (the whole accel range is ~[-4, 2]).
+_COMFORT_JERK_DISABLE_STEP_MPS2 = 2.0
 
 LON_MPC_STEP = 0.2  # first step is 0.2s
 A_CRUISE_MAX_VALS = [1.6, 1.2, 0.8, 0.6]
@@ -430,6 +435,24 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
       "edge1_capped": False,
       "clipped": False,
     }
+    # --- CD7: graded-onset comfort anti-jerk envelope (road 200-10 / 200-9 / 201-9). ---
+    # The truly-FINAL limiter (runs after the CD6 handoff limiter). While NO
+    # hazard/urgency gate is active, it bounds |output_a_target - prev_a| per frame
+    # to ComfortJerkLimitMps3 * dt so a single noisy vRel frame under a benign
+    # steady follow cannot step-change aTarget hard. Symmetric when benign; fully
+    # bypassed under any hazard/urgency signal (the shared _relatch_urgency_bypass)
+    # so real braking is NEVER rate-limited. Anchors on the previous frame's final
+    # output (the same value published last frame).
+    self._comfort_jerk_prev_a: float = 0.0
+    self._comfort_jerk_prev_src: str = ""
+    self.comfort_jerk_debug: dict = {
+      "active": False,
+      "bypassed": False,
+      "bypass_reason": "",
+      "gated_reason": "",
+      "max_step_mps2": 0.0,
+      "clipped": False,
+    }
     self.lead_brake_release_accel_floor = 0.0
     self.lead_brake_release_debug = {"active": False, "reason": "init"}
     # Observability for the cruise-reacquire jerk ramp (read-only; does not
@@ -739,6 +762,12 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     except Exception:
       model_leads = []
     self._apply_handoff_transition_limit(lead_source, control_leads, model_leads, v_ego)
+    # CD7: the graded-onset comfort anti-jerk envelope is the truly-FINAL limiter.
+    # It runs AFTER the handoff limiter so it bounds the fully composed
+    # output_a_target, and it is fully bypassed under any hazard/urgency signal so
+    # real braking (already passed by every earlier limiter's urgency bypass) is
+    # never rate-limited.
+    self._apply_comfort_jerk_envelope(lead_source, control_leads)
 
     end_span(total_span)
 
@@ -1264,6 +1293,122 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
 
     self._handoff_prev_a = float(self.output_a_target)
     self._handoff_prev_src = lead_source
+
+  def _apply_comfort_jerk_envelope(self, lead_source: str, control_leads=()) -> None:
+    # CD7 (road 200-10 / 200-9 tap1 / 201-9): under a benign STEADY single-source
+    # LEAD follow the MPC QP output can step-change output_a_target hard on a single
+    # noisy vRel frame (road: -0.31 -> -1.00 in 0.15 s, ~4.6 m/s^3) even though
+    # nothing hazardous is happening - the felt THROTTLE_BLIP_JERK / VACILLATION.
+    # No earlier limiter bounds this: the handoff/relatch/flutter clamps only arm
+    # on a source flip or flutter, and none of those is happening here. Bound
+    # |output_a_target - prev_a| per frame to ComfortJerkLimitMps3 * dt as the
+    # truly-FINAL composed limiter.
+    #
+    # SCOPE GATE (narrow, non-regressing): the envelope engages ONLY in the exact
+    # steady-lead-follow regime the CD7 blip lives in - a lead0/lead1 source with
+    # NO other composed limiter or cap doing legitimate fast work this frame. It is
+    # gated OFF (raw output passes) whenever the source is cruise-owned (the cruise
+    # accel cap does legitimate one-frame accel SUPPRESSION toward ~0 on a far slow
+    # lead), a source flip just occurred, or the CD6 handoff limiter / EDGE1 cap /
+    # CD5 relatch blend / flutter clamp is engaged this frame. Those limiters make
+    # deliberate fast moves (a graded handoff delta, a cap engagement) that an
+    # unconditional per-frame bound would over-smooth and defeat - so the envelope
+    # defers to them and only shaves the pure steady-follow spike they never touch.
+    #
+    # CRITICAL SAFETY: even inside its regime the envelope is FULLY BYPASSED
+    # whenever ANY hazard/urgency signal is active - the SAME _relatch_urgency_bypass
+    # predicate CD5/CD6 use (FCW / short-TTC / fast-close on the owned lead, or a
+    # requested hard decel). So genuine braking and cut-in response pass THIS frame
+    # unmodified; only the benign steady-follow comfort-brake blip is graded.
+    #
+    # ASYMMETRIC (down-leg only): the bound applies ONLY to the DOWNWARD
+    # (comfort-braking-onset) move - the road's headline defect (a sudden unnecessary
+    # brake, 200-10: -0.31 -> -1.00) and the safety-relevant felt jerk. The UPWARD
+    # leg (brake-RELEASE and re-accel toward a followed lead) is always-safe and must
+    # stay fast, so it is left free (matching CD5's relatch blend and the flutter
+    # clamp). This is what keeps the legitimate managed release/re-accel moves from
+    # being blunted while still killing the felt comfort-brake blip.
+    #
+    # It only grades the ONSET of the sustained downward move (a step into a brake):
+    # once the output holds the value for a couple frames prev_a catches up and
+    # Delta -> 0, so no sustained comfort floor is lowered.
+    cfg = getattr(self.mpc, "_live_tune_cfg", None)
+    jerk_limit = float(getattr(cfg, "comfort_jerk_limit_mps3", 0.0) or 0.0)
+    bypass_decel = float(getattr(cfg, "comfort_jerk_bypass_decel_mps2", -1.5) or -1.5)
+    dt = float(max(self.dt, 1e-3))
+    max_step = jerk_limit * dt
+
+    prev_src = self._comfort_jerk_prev_src
+    self._comfort_jerk_prev_src = lead_source
+
+    # Disabled (rollback sentinel: jerk_limit <= 0, or a large value whose
+    # per-frame bound is unreachable): pass through, keep the anchor fresh.
+    if jerk_limit <= 0.0 or max_step >= _COMFORT_JERK_DISABLE_STEP_MPS2:
+      self.comfort_jerk_debug = {"active": False, "bypassed": False, "bypass_reason": "",
+                                 "gated_reason": "disabled", "max_step_mps2": float(max_step), "clipped": False}
+      self._comfort_jerk_prev_a = float(self.output_a_target)
+      return
+
+    # SCOPE GATE: engage only in the steady-lead-follow regime. Any of these means
+    # another mechanism is legitimately shaping the output this frame - defer.
+    gated_reason = ""
+    if lead_source not in ("lead0", "lead1"):
+      gated_reason = "not_lead_source"       # cruise cap does legitimate suppression
+    elif prev_src != lead_source:
+      gated_reason = "source_transition"     # a handoff frame the CD6 limiter owns
+    elif bool(self.handoff_limit_debug.get("active")) or bool(self.handoff_limit_debug.get("clipped")):
+      gated_reason = "handoff_limiter"       # CD6 windowed clamp / EDGE1 cap engaged
+    elif bool(self.relatch_blend_debug.get("active")):
+      gated_reason = "relatch_blend"         # CD5 relatch blend engaged
+    elif bool(self._flutter_mode_active):
+      gated_reason = "flutter_mode"          # flutter clamp engaged
+    if gated_reason:
+      self.comfort_jerk_debug = {"active": False, "bypassed": False, "bypass_reason": "",
+                                 "gated_reason": gated_reason, "max_step_mps2": float(max_step), "clipped": False}
+      self._comfort_jerk_prev_a = float(self.output_a_target)
+      return
+
+    # In-regime: the source is lead-owned, so the urgency lead IS the source-owned
+    # slot. Passing the real lead (not None) matters - _relatch_urgency_bypass
+    # returns an unconditional bypass for None, which would defeat the envelope.
+    urgency_lead = self._lead_owned_slot(lead_source, control_leads)
+
+    # Hazard/urgency bypass (the SAME predicate as CD5/CD6). If ANY threat signal
+    # is present, the envelope is disarmed and the raw output passes unmodified so
+    # genuine braking is never rate-limited. With no lead object this frame (a
+    # transient slot flap while still lead-source), honor only the requested-decel
+    # floor so a hard MPC brake is never throttled; a benign flap is still graded.
+    if urgency_lead is not None:
+      bypassed, reason = self._relatch_urgency_bypass(urgency_lead, cfg)
+      # _relatch_urgency_bypass uses cruise_relatch_bypass_decel_mps2 for its
+      # requested-decel floor; also honor the CD7-specific floor so the envelope's
+      # own configured hard-brake bypass applies.
+      if not bypassed and bypass_decel < 0.0 and self.output_a_target <= bypass_decel:
+        bypassed, reason = True, "requested_decel"
+    else:
+      bypassed = bypass_decel < 0.0 and self.output_a_target <= bypass_decel
+      reason = "requested_decel" if bypassed else ""
+
+    clipped = False
+    if bypassed:
+      self.comfort_jerk_debug = {"active": True, "bypassed": True, "bypass_reason": reason or "urgent",
+                                 "gated_reason": "", "max_step_mps2": float(max_step), "clipped": False}
+    else:
+      # ASYMMETRIC (down-leg only): bound only the DOWNWARD (comfort-braking-onset)
+      # move - the road's headline CD7 defect (a sudden unnecessary brake blip,
+      # 200-10: -0.31 -> -1.00) and the safety-relevant felt jerk. The UPWARD leg
+      # (brake-RELEASE and re-accel toward a followed lead) is always-safe (it only
+      # ever reduces braking / matches a lead) and must stay fast, so it is left
+      # free - matching the CD5 relatch blend and flutter clamp precedent, and so
+      # the legitimate managed release/re-accel moves are never blunted.
+      delta = self.output_a_target - self._comfort_jerk_prev_a
+      if delta < -max_step:
+        self.output_a_target = self._comfort_jerk_prev_a - max_step
+        clipped = True
+      self.comfort_jerk_debug = {"active": True, "bypassed": False, "bypass_reason": "",
+                                 "gated_reason": "", "max_step_mps2": float(max_step), "clipped": bool(clipped)}
+
+    self._comfort_jerk_prev_a = float(self.output_a_target)
 
   def _apply_flutter_mode_clamp(self, lead_source: str, model_accel: float) -> None:
     # Bidirectional jerk clamp when the MPC source is flip-flopping at the
