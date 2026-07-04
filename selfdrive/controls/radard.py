@@ -143,6 +143,15 @@ class ModelLeadTrack:
   # and the clamp only ever makes the published vLead SLOWER (more urgent).
   raw_vlead_hist: deque = field(default_factory=lambda: deque(maxlen=8))
   drel_hist: deque = field(default_factory=lambda: deque(maxlen=8))
+  # CD9 corroborated-closing governor (road 205-6 Event B) evidence window:
+  # (t, raw_drel, raw_vrel, raw_alead) per measured frame. Windowed means over
+  # the RAW streams detect a sustained closure the slow publish-side EMAs are
+  # lagging; heavy-tail single-frame dRel outliers cannot dominate the
+  # k-endpoint means. governor_closing_mps caches the least-aggressive
+  # corroborated closure for the publish clamp while the latch holds.
+  closing_evidence: deque = field(default_factory=lambda: deque(maxlen=64))
+  governor_hold_until_t: float = -1.0
+  governor_closing_mps: float = 0.0
 
   @classmethod
   def from_lead_dict(cls, identifier: int, lead_dict: dict[str, Any], now: float, lead_slot: int) -> "ModelLeadTrack":
@@ -265,6 +274,12 @@ class ModelLeadTrack:
     fast_closing = self._fast_closing_supported(raw_drel, raw_vrel, raw_dpath, raw_vlat, innovation_m, v_ego, cfg)
 
     urgency = 0.0 if fast_closing else self._closing_urgency(raw_drel, raw_vrel, innovation_m, cfg)
+    # CD9: a corroborated sustained closure forces full urgency (the existing
+    # fast-tau/slew-boost machinery) even while the per-frame gates read calm -
+    # the road event sat below BlendCloseLoMps for the entire first second.
+    governor_active = self._update_closing_governor(now, raw_drel, raw_vrel, raw_alead, cfg)
+    if governor_active and not fast_closing:
+      urgency = 1.0
 
     if fast_closing:
       drel_alpha = max(0.65, _ema_alpha(dt_s, MODEL_LEAD_FAST_CLOSE_TAU_S))
@@ -323,7 +338,12 @@ class ModelLeadTrack:
       vrel_tau_s = float(cfg.model_lead_filter_vrel_tau_s)
     vrel_alpha = _ema_alpha(dt_s, vrel_tau_s)
     lat_alpha = _ema_alpha(dt_s, MODEL_LEAD_LAT_TAU_S)
-    accel_alpha = _ema_alpha(dt_s, MODEL_LEAD_ACCEL_TAU_S)
+    # CD9: while the governor is latched the aLeadK EMA runs at the fast tau so
+    # the published lead decel converges to the model's measurement ~3x sooner
+    # (road: the 0.60 s tau halved the published decel through the whole event).
+    accel_tau_s = float(getattr(cfg, 'closing_governor_alead_tau_s', MODEL_LEAD_ACCEL_TAU_S)) \
+      if governor_active else MODEL_LEAD_ACCEL_TAU_S
+    accel_alpha = _ema_alpha(dt_s, accel_tau_s)
     prob_alpha = _ema_alpha(dt_s, MODEL_LEAD_PROB_TAU_S)
 
     self.dRel = float(max(0.0, next_drel))
@@ -335,6 +355,8 @@ class ModelLeadTrack:
     self.vLead = float(v_ego + self.vRel)
     self.vLeadK = self.vLead
     self._apply_far_range_vlead_optimism_clamp(raw_vrel, v_ego, next_drel, now, cfg)
+    if governor_active:
+      self._apply_closing_governor_vlead_clamp(v_ego)
     self.aLeadK = float(self.aLeadK + accel_alpha * (raw_alead - self.aLeadK))
     self.aLeadTau = 0.3
     self.modelProb = float(self.modelProb + prob_alpha * (raw_prob - self.modelProb))
@@ -343,6 +365,111 @@ class ModelLeadTrack:
     self.age += 1
     self.missed = 0
     return self.get_RadarState(cfg)
+
+  def _update_closing_governor(self, now: float, raw_drel: float, raw_vrel: float,
+                               raw_alead: float, cfg: LeadResponseTuningConfig) -> bool:
+    """CD9 corroborated-closing governor (road 205-6 Event B).
+
+    The road near-collision was pure publish-side latency: the model's RAW
+    streams showed a braking lead on time (sustained raw aLead -0.55 from
+    onset, raw vRel closing, raw dRel collapsing), but the published state ran
+    a compounded EMA lag behind them - vRel tau 0.60 with the urgency blend
+    gated below BlendCloseLoMps, dRel close-tau 2.8x1.6 under a ~1 m/s slew
+    clamp, aLeadK tau 0.60 halving the decel - so the planner's brake ramp
+    trailed the closure by ~1.9 s and the driver had to stomp at THW 1.10 s.
+
+    This governor watches the RAW evidence over a short window and, when the
+    window CORROBORATES a sustained closure two independent ways, latches a
+    fast-filter regime (urgency forced to 1 -> existing fast taus; fast aLeadK
+    tau) plus a one-directional publish clamp of vLead toward the LEAST
+    aggressive corroborated closure. Two arm paths, BOTH requiring the
+    windowed raw vRel to agree the lead is closing (> MinClosingMps):
+
+      position-excess: the endpoint-mean slope of the raw dRel window closes
+        faster than the currently PUBLISHED closing speed by MarginMps - the
+        tracker's own position stream is outrunning what it publishes.
+      sustained-decel: the windowed mean raw lead accel is below
+        -AccelOnsetMps2 - the earliest reliable road signal (raw aLead mean
+        separated -0.55 vs -0.10 steady ~0.5 s before the position slope).
+
+    Noise immunity is structural: single heavy-tail dRel outliers (road:
+    +-1.5-3 m frames) cannot dominate k-endpoint means over the window;
+    symmetric vRel noise cannot hold a windowed mean past MinClosingMps while
+    ALSO faking a position excess / sustained decel; an opening or steady
+    follow fails the vRel-agreement gate outright. The clamp only ever LOWERS
+    the published vLead (more urgent), never raises it, and the taus it forces
+    still filter the model's own measurements - nothing is fabricated.
+
+    Rollback sentinels: ClosingGovernorMarginMps >= 99 disables the governor
+    entirely (exact legacy publish); ClosingGovernorAccelOnsetMps2 >= 99
+    disables the sustained-decel arm path only.
+    """
+    self.closing_evidence.append((float(now), float(raw_drel), float(raw_vrel), float(raw_alead)))
+
+    margin = float(getattr(cfg, 'closing_governor_margin_mps', 99.0))
+    if margin >= 99.0:
+      self.governor_hold_until_t = -1.0
+      self.governor_closing_mps = 0.0
+      return False
+
+    window_s = max(0.2, float(getattr(cfg, 'closing_governor_window_s', 0.7)))
+    while self.closing_evidence and (now - self.closing_evidence[0][0]) > window_s:
+      self.closing_evidence.popleft()
+
+    active = now <= self.governor_hold_until_t
+    samples = list(self.closing_evidence)
+    span = samples[-1][0] - samples[0][0] if len(samples) >= 2 else 0.0
+    # Demand real coverage of the window (missed/dropped frames leave holes):
+    # a sparse window must not arm the fast regime.
+    if len(samples) < 8 or span < 0.5 * window_s:
+      return active
+
+    min_closing = float(getattr(cfg, 'closing_governor_min_closing_mps', 0.30))
+    vrel_closing = -(sum(s[2] for s in samples) / len(samples))
+    if vrel_closing <= min_closing:
+      return active
+
+    k = max(2, len(samples) // 4)
+    first_k, last_k = samples[:k], samples[-k:]
+    t_first = sum(s[0] for s in first_k) / k
+    t_last = sum(s[0] for s in last_k) / k
+    if (t_last - t_first) <= 1e-3:
+      return active
+    d_first = sum(s[1] for s in first_k) / k
+    d_last = sum(s[1] for s in last_k) / k
+    pos_closing = -(d_last - d_first) / (t_last - t_first)
+
+    published_closing = max(0.0, -float(self.vRel))
+    armed_position = pos_closing > published_closing + margin and pos_closing > min_closing
+
+    accel_onset = float(getattr(cfg, 'closing_governor_accel_onset_mps2', 99.0))
+    alead_mean = sum(s[3] for s in samples) / len(samples)
+    armed_decel = accel_onset < 99.0 and alead_mean < -accel_onset
+
+    if armed_position or armed_decel:
+      hold_s = float(getattr(cfg, 'closing_governor_hold_s', 1.0))
+      self.governor_hold_until_t = float(now) + max(0.1, hold_s)
+      # Corroborated closure for the publish clamp: the position stream may
+      # LEAD the velocity evidence by a bounded trust headroom (the road's raw
+      # v-stream itself lied optimistic against the model's own position
+      # stream), but never beyond it - a pure position phantom stays capped
+      # near the gated vRel evidence.
+      pos_trust = float(getattr(cfg, 'closing_governor_pos_trust_excess_mps', 0.0))
+      self.governor_closing_mps = float(max(0.0, min(pos_closing, vrel_closing + max(0.0, pos_trust))))
+      return True
+    return active
+
+  def _apply_closing_governor_vlead_clamp(self, v_ego: float) -> None:
+    # One-directional (more-urgent-only) publish clamp toward the corroborated
+    # closure. Runs AFTER the EMA writes and the CD8 far-range clamp; min()
+    # semantics mean it can only ever lower the published vLead further.
+    if self.governor_closing_mps <= 0.0:
+      return
+    target_vlead = max(0.0, float(v_ego) - self.governor_closing_mps)
+    if target_vlead < self.vLead:
+      self.vLead = float(target_vlead)
+      self.vLeadK = float(target_vlead)
+      self.vRel = float(target_vlead - float(v_ego))
 
   def _apply_far_range_vlead_optimism_clamp(self, raw_vrel: float, v_ego: float,
                                             next_drel: float, now: float,

@@ -1448,6 +1448,153 @@ LEAD_RESPONSE_TUNE_SPECS = (
                 "stopping lead reads ~0). Raise toward 1.0 to admit any lead slower than ego (least restrictive); lower to "
                 "demand a more nearly-stopped lead. Only meaningful when the clamp is otherwise armed.",
   ),
+  LeadResponseTuneSpec(
+    attr="closing_governor_margin_mps",
+    key="Longitudinal.LiveTune.ClosingGovernorMarginMps",
+    cli_name="closing-governor-margin",
+    label="closing_governor_margin",
+    default=0.75,
+    minimum=0.05,
+    maximum=100.0,
+    description="CD9 (radard, road 205-6 Event B): corroborated-closing governor MASTER arm margin (m/s). The governor "
+                "latches when the windowed position-derived closure of the RAW model dRel stream exceeds the currently "
+                "published closing speed by at least this margin AND the windowed RAW vRel agrees the lead is closing "
+                "(> ClosingGovernorMinClosingMps). While latched it forces the closing-side fast taus (dRel blend floor, "
+                "fast vRel tau, fast aLeadK tau) and one-directionally clamps the published vLead toward the LEAST "
+                "aggressive corroborated closure - the road defect was ~1.2 s of publish-side EMA lag against a braking "
+                "lead while the tracker's own raw stream showed the truth. Steady-follow noise cannot latch it: both "
+                "windowed means must agree beyond the margin. Rollback sentinel: >= 99 disables the governor entirely "
+                "(exact legacy publish).",
+  ),
+  LeadResponseTuneSpec(
+    attr="closing_governor_min_closing_mps",
+    key="Longitudinal.LiveTune.ClosingGovernorMinClosingMps",
+    cli_name="closing-governor-min-closing",
+    label="closing_governor_min_closing",
+    default=0.30,
+    minimum=0.05,
+    maximum=5.0,
+    description="CD9 (radard): minimum windowed RAW-vRel closing speed (m/s) required to corroborate EITHER governor arm "
+                "path (position-excess or sustained-lead-decel). Below this the lead is not provably closing and the "
+                "governor stays inert regardless of position slope - this is what keeps opening/steady follows and pure "
+                "position-noise runs from latching. Raise to demand a harder closure before the fast path engages.",
+  ),
+  LeadResponseTuneSpec(
+    attr="closing_governor_window_s",
+    key="Longitudinal.LiveTune.ClosingGovernorWindowS",
+    cli_name="closing-governor-window",
+    label="closing_governor_window",
+    default=0.60,
+    minimum=0.20,
+    maximum=2.0,
+    description="CD9 (radard): evidence window (s) for the corroborated-closing governor's raw-stream means (endpoint-mean "
+                "position slope, mean raw vRel, mean raw lead accel). Longer = more noise immunity but later latch and a "
+                "larger inherent estimate lag (~window/2 x closure accel). Harness sweep on the road-205-6 repro: 0.6 "
+                "holds min THW 1.04 with a -0.26 worst steady-noise excursion across seeds; 0.5 buys THW 1.14 but puts "
+                "the steady heavy-tail excursion at -0.53, uncomfortably near the -0.6 phantom-brake line. Single "
+                "heavy-tail raw dRel outliers (road: +-1.5-3 m frames) cannot dominate the k-endpoint means.",
+  ),
+  LeadResponseTuneSpec(
+    attr="closing_governor_accel_onset_mps2",
+    key="Longitudinal.LiveTune.ClosingGovernorAccelOnsetMps2",
+    cli_name="closing-governor-accel-onset",
+    label="closing_governor_accel_onset",
+    default=0.35,
+    minimum=0.05,
+    maximum=100.0,
+    description="CD9 (radard): sustained-lead-decel arm path - the governor also latches when the windowed mean RAW model "
+                "lead accel is below -this (m/s^2) while the windowed raw vRel corroborates closing. On the road event the "
+                "raw aLead mean separated cleanly (-0.55 sustained during the brake vs -0.10 steady phase) a full ~0.5 s "
+                "before the position slope confirmed - this is the earliest reliable signal. Rollback sentinel: >= 99 "
+                "disables this arm path only (position-excess path unaffected).",
+  ),
+  LeadResponseTuneSpec(
+    attr="closing_governor_pos_trust_excess_mps",
+    key="Longitudinal.LiveTune.ClosingGovernorPosTrustExcessMps",
+    cli_name="closing-governor-pos-trust-excess",
+    label="closing_governor_pos_trust",
+    default=1.5,
+    minimum=0.0,
+    maximum=100.0,
+    description="CD9 (radard): how far (m/s) the position-derived closure may LEAD the windowed raw-vRel closing evidence "
+                "in the governor's publish clamp: clamp closure = min(position closure, vRel closure + this). The road "
+                "event's raw v-stream itself ran ~+1.5-2.3 m/s optimistic against the model's own position stream, so a "
+                "pure min(pos, vRel) cap republished most of the lie; the position slope was the truth-teller. This bounds "
+                "how much the clamp trusts position beyond what velocity corroborates - a pure position phantom with "
+                "minimal vRel agreement is still capped near the (gated) vRel evidence. 0.0 = strict min(pos, vRel) "
+                "(most conservative).",
+  ),
+  LeadResponseTuneSpec(
+    attr="closing_governor_hold_s",
+    key="Longitudinal.LiveTune.ClosingGovernorHoldS",
+    cli_name="closing-governor-hold",
+    label="closing_governor_hold",
+    default=1.00,
+    minimum=0.10,
+    maximum=5.0,
+    description="CD9 (radard): latch hold (s) after the last frame the governor's arm conditions were satisfied. Keeps the "
+                "fast-tau regime engaged across single non-qualifying frames mid-closure so the response does not chatter "
+                "between fast and slow filtering while the threat is still developing.",
+  ),
+  LeadResponseTuneSpec(
+    attr="closing_governor_alead_tau_s",
+    key="Longitudinal.LiveTune.ClosingGovernorALeadTauS",
+    cli_name="closing-governor-alead-tau",
+    label="closing_governor_alead_tau",
+    default=0.18,
+    minimum=0.05,
+    maximum=2.0,
+    description="CD9 (radard): aLeadK EMA tau (s) while the corroborated-closing governor is latched, replacing the fixed "
+                "0.60 s MODEL_LEAD_ACCEL_TAU_S that halved the published lead decel through the whole road event (pub -0.3 "
+                "vs raw -0.7 at onset; -1.3 vs -2.1 late). Only the time constant changes - the published value is still "
+                "an EMA of the model's own accel measurement, never fabricated.",
+  ),
+  LeadResponseTuneSpec(
+    attr="launch_release_min_drel_m",
+    key="Longitudinal.LiveTune.LaunchReleaseMinDrelM",
+    cli_name="launch-release-min-drel",
+    label="launch_release_min_drel",
+    default=5.0,
+    minimum=2.0,
+    maximum=30.0,
+    description="Event A (road 205-13): ABSOLUTE published-dRel arming gate (m) for releasing the stop latch on a lead "
+                "launch - the legacy hardcoded 5.0. The release arms once published dRel exceeds EITHER this absolute "
+                "range OR stop-settle dRel + LaunchReleaseDepartGateM (departure-relative), whichever is smaller; a hard "
+                "floor of 2.0 m always applies. On the road the stop settled at a published 4.15 m, so this absolute gate "
+                "alone forced the lead to open 0.85 m of published gap (~1.0 s of held -2.0 full brake) before release "
+                "could even arm.",
+  ),
+  LeadResponseTuneSpec(
+    attr="launch_release_depart_gate_m",
+    key="Longitudinal.LiveTune.LaunchReleaseDepartGateM",
+    cli_name="launch-release-depart-gate",
+    label="launch_release_depart_gate",
+    default=0.20,
+    minimum=0.0,
+    maximum=100.0,
+    description="Event A (road 205-13): DEPARTURE-RELATIVE arming gate (m) - the published dRel rise above the minimum "
+                "published dRel seen during THIS stop that proves the lead is genuinely departing. Arms the stop-latch "
+                "release as min(absolute gate, stop-min + this), so a stop that settles at 4.1 m does not need the lead "
+                "to reach an arbitrary 5.0 m before the car can begin releasing the brake. Works with the existing "
+                "pullaway-speed and hold-frame conditions unchanged. Rollback sentinel: >= 99 restores the pure absolute "
+                "gate (exact legacy arming).",
+  ),
+  LeadResponseTuneSpec(
+    attr="launch_follow_accel_floor_max_mps2",
+    key="Longitudinal.LiveTune.LaunchFollowAccelFloorMaxMps2",
+    cli_name="launch-follow-accel-floor-max",
+    label="launch_follow_accel_floor_max",
+    default=1.8,
+    minimum=0.0,
+    maximum=2.5,
+    description="Event A (road 205-13): low-speed launch-follow accel FLOOR ceiling (m/s^2). The planner floors its output "
+                "accel at get_low_speed_launch_follow_factor(...) x this while a lead is departing at low ego speed, so "
+                "the launch DEMAND actually rises toward the departing lead instead of relying on the MPC's jerk-shaped "
+                "ramp from standstill (road: demand peaked +1.02 while the lead departed at +5 m/s and the driver "
+                "pedaled). The existing factor already scales by ego speed, lead speed, pullaway and gap surplus, and the "
+                "existing launch clip raise still bounds the ceiling; the floor never applies while shouldStop or while "
+                "the lead is closing. Rollback sentinel: 0.0 disables the floor entirely (exact legacy demand).",
+  ),
 )
 
 LEAD_RESPONSE_TUNE_SPECS_BY_ATTR = {spec.attr: spec for spec in LEAD_RESPONSE_TUNE_SPECS}
@@ -1580,6 +1727,16 @@ class LeadResponseTuningConfig:
   lead_vlead_optimism_clamp_gain: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_vlead_optimism_clamp_gain"].default
   lead_vlead_optimism_clamp_confirm_frames: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_vlead_optimism_clamp_confirm_frames"].default
   lead_vlead_optimism_clamp_slow_lead_frac: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_vlead_optimism_clamp_slow_lead_frac"].default
+  closing_governor_margin_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["closing_governor_margin_mps"].default
+  closing_governor_min_closing_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["closing_governor_min_closing_mps"].default
+  closing_governor_window_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["closing_governor_window_s"].default
+  closing_governor_accel_onset_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["closing_governor_accel_onset_mps2"].default
+  closing_governor_pos_trust_excess_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["closing_governor_pos_trust_excess_mps"].default
+  closing_governor_hold_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["closing_governor_hold_s"].default
+  closing_governor_alead_tau_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["closing_governor_alead_tau_s"].default
+  launch_release_min_drel_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["launch_release_min_drel_m"].default
+  launch_release_depart_gate_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["launch_release_depart_gate_m"].default
+  launch_follow_accel_floor_max_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["launch_follow_accel_floor_max_mps2"].default
 
   @classmethod
   def defaults(cls) -> LeadResponseTuningConfig:
