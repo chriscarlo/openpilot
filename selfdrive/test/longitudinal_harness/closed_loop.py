@@ -413,11 +413,17 @@ def run_harness(*,
     for control_idx in range(control_ticks_per_step):
       long_active = bool(vehicle_config.cp.openpilotLongitudinalControl)
       accel_limits = CarInterface.get_pid_accel_limits(vehicle_config.cp, state.measured_speed_mps, step.cruise_speed_mps)
+      # EV6 CAN-FD fidelity: with openpilot longitudinal, carstate hardwires
+      # cruiseState.standstill=False (opendbc hyundai carstate CAN-FD branch), so
+      # LongControl's starting_condition is never blocked at a stop. Fabricating
+      # standstill from v<0.01 here pinned the state machine in `stopping` forever
+      # and made stop->launch scenarios unrepresentable.
+      cruise_standstill = (not bool(vehicle_config.cp.openpilotLongitudinalControl)) and state.true_speed_mps < 0.01
       cs_loc = SimpleNamespace(
         vEgo=state.measured_speed_mps,
         aEgo=state.measured_accel_mps2,
         brakePressed=False,
-        cruiseState=SimpleNamespace(standstill=state.true_speed_mps < 0.01),
+        cruiseState=SimpleNamespace(standstill=cruise_standstill),
       )
       longcontrol_accel = float(long_control.update(long_active, cs_loc, planner_accel, planner_should_stop, accel_limits))
 
