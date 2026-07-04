@@ -389,6 +389,7 @@ def run_harness(*,
     published_lead_kinematics = {
       slot: {
         "v_rel_mps": float(getattr(radar_state, slot).vRel) if getattr(radar_state, slot).status else None,
+        "v_lead_mps": float(getattr(radar_state, slot).vLead) if getattr(radar_state, slot).status else None,
         "a_lead_k_mps2": float(getattr(radar_state, slot).aLeadK) if getattr(radar_state, slot).status else None,
         "fcw_suppressed": bool(getattr(radar_state, slot).fcwSuppressed),
       }
@@ -513,6 +514,8 @@ def run_harness(*,
         "lead_two_published_d_rel_m": published_d_rel["leadTwo"],
         "lead_one_published_v_rel_mps": published_lead_kinematics["leadOne"]["v_rel_mps"],
         "lead_two_published_v_rel_mps": published_lead_kinematics["leadTwo"]["v_rel_mps"],
+        "lead_one_published_v_lead_mps": published_lead_kinematics["leadOne"]["v_lead_mps"],
+        "lead_two_published_v_lead_mps": published_lead_kinematics["leadTwo"]["v_lead_mps"],
         "lead_one_published_a_lead_k_mps2": published_lead_kinematics["leadOne"]["a_lead_k_mps2"],
         "lead_two_published_a_lead_k_mps2": published_lead_kinematics["leadTwo"]["a_lead_k_mps2"],
         "lead_one_fcw_suppressed": published_lead_kinematics["leadOne"]["fcw_suppressed"],
@@ -703,6 +706,13 @@ def _build_lead(slot_name: str,
   else:
     std = max(noise_profile.vrel_floor_mps, noise_profile.vrel_factor * max(true_d_rel, 0.0))
     measured_v_rel = (track.speed_mps - state.true_speed_mps) + (_rng_normal(noise_streams.vrel, std) if std > 0.0 else 0.0)
+
+  # Far-range stopped-traffic vLead OPTIMISM (CD8): additive raw-vRel bias so the
+  # published vLead runs high (lead looks faster/less-urgent than truth). Mirrors
+  # measured_d_rel_bias_m: it perturbs only the RAW measurement the tracker sees;
+  # ground-truth kinematics (track.speed_mps) are untouched.
+  if directive.v_lead_bias_mps:
+    measured_v_rel = measured_v_rel + float(directive.v_lead_bias_mps)
 
   target_prob = directive.model_prob_target
   if noise_profile.prob_dropout_rate_hz > 0.0 and target_prob > 0.0:

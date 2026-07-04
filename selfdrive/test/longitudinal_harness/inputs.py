@@ -17,6 +17,16 @@ class LeadDirective:
   # far-range x optimism against ground truth (road-measured on 200-13 EDGE1:
   # raw leadsV3 x ran +5.8..+7.3 m above the true gap through the deep close).
   measured_d_rel_bias_m: float = 0.0
+  # Additive raw-measurement velocity bias (m/s): models the vision model's
+  # far-range stopped-traffic OPTIMISM against ground truth (road-measured on
+  # 200-13 EDGE2: while a far, newly-acquired stopped/slow lead is still
+  # stopping, the published vLead ran ~+4 m/s high vs position-derived truth
+  # during the 43-48 s window, decaying to truth as the gap closes). Positive =
+  # published vLead runs HIGH (lead looks faster/less-urgent than it is). Flows
+  # into the raw measured vRel -> leadsV3.v (radard_stage.py _fill_lead_v3
+  # entry.v = model_v_ego + vRel) -> the REAL radard ModelLeadTracker vRel/vLead
+  # EMA the MPC extrapolates with, exactly as measured_d_rel_bias_m does for x.
+  v_lead_bias_mps: float = 0.0
   measured_v_rel_mps: float | None = None
   a_lead_k_mps2: float | None = None
   v_lead_k_mps: float | None = None
