@@ -1,5 +1,7 @@
 Longitudinal.LiveTune.AccelChangeCost = 400.0
 Longitudinal.LiveTune.AccelCost = 1.0
+Longitudinal.LiveTune.ComfortJerkBypassDecelMps2 = -1.5
+Longitudinal.LiveTune.ComfortJerkLimitMps3 = 0.8
 Longitudinal.LiveTune.CruiseCollapseHoldbackS = 2.0
 Longitudinal.LiveTune.CruiseExitAbruptProbDrop = 0.3
 Longitudinal.LiveTune.CruiseExitLookbackFrames = 7.0
