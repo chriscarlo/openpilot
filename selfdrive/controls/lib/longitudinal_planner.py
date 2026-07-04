@@ -14,7 +14,8 @@ from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import Longi
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import COMFORT_BRAKE
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import get_headway_follow_distance
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import desired_follow_distance
-from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import get_low_speed_launch_follow_max_accel
+from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import (get_low_speed_launch_follow_factor,
+                                                                            get_low_speed_launch_follow_max_accel)
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import T_IDXS as T_IDXS_MPC
 from openpilot.selfdrive.controls.lib.longitudinal_live_tune import LeadResponseTuningConfig
 from openpilot.selfdrive.controls.lib.drive_helpers import CONTROL_N, get_accel_from_plan
@@ -91,7 +92,8 @@ def get_max_accel(v_ego):
 
 def should_release_stop_for_lead_launch(CP, *, standstill: bool, v_ego: float,
                                         a_target: float, lead_source: str,
-                                        control_leads) -> bool:
+                                        control_leads, tuning=None,
+                                        stop_min_drel: float | None = None) -> bool:
   if (not bool(standstill) or
       float(a_target) <= 0.0 or
       lead_source not in ("lead0", "lead1")):
@@ -108,7 +110,22 @@ def should_release_stop_for_lead_launch(CP, *, standstill: bool, v_ego: float,
   lead_vrel = float(getattr(lead, "vRel", 0.0) or 0.0)
   lead_v = float(getattr(lead, "vLead", v_ego) or v_ego)
   lead_drel = float(getattr(lead, "dRel", 0.0) or 0.0)
-  if lead_drel < LEAD_LAUNCH_RELEASE_MIN_DREL_M:
+
+  # Arming gate (road 205-13 Event A): the legacy ABSOLUTE dRel gate made the
+  # release latency depend on where the stop happened to settle - a published
+  # 4.15 m stop needed the lead to open 0.85 m of slew-lagged published gap
+  # (~1.0 s of held -2.0) before release could even arm. Departure evidence is
+  # relative: arm once the published gap has RISEN LaunchReleaseDepartGateM
+  # above the minimum seen during THIS stop, capped by the absolute gate
+  # (whichever is smaller), with a hard 2.0 m floor so a release can never arm
+  # on top of a bumper. Depart-gate sentinel >= 99 restores the pure absolute
+  # gate (exact legacy arming).
+  abs_gate_m = float(getattr(tuning, "launch_release_min_drel_m", LEAD_LAUNCH_RELEASE_MIN_DREL_M))
+  depart_gate_m = float(getattr(tuning, "launch_release_depart_gate_m", 99.0))
+  arm_gate_m = abs_gate_m
+  if depart_gate_m < 99.0 and stop_min_drel is not None:
+    arm_gate_m = min(abs_gate_m, float(stop_min_drel) + depart_gate_m)
+  if lead_drel < max(2.0, arm_gate_m):
     return False
 
   lead_pullaway_speed = max(0.0, lead_vrel, lead_v - float(v_ego))
@@ -349,6 +366,9 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     self.output_a_target = 0.0
     self.output_should_stop = False
     self._lead_launch_release_counter = 0
+    # Minimum published control-lead dRel seen during the CURRENT stop; the
+    # departure-relative release arming gate measures gap RISE against it.
+    self._stop_min_lead_drel: float | None = None
     self._prev_mpc_source: str = ""
     self._cruise_pos_jerk_frames_left: int = 0
     self._cruise_pos_jerk_prev_a: float = 0.0
@@ -567,6 +587,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
       # Clip aEgo to cruise limits to prevent large accelerations when becoming active
       self.a_desired = np.clip(sm['carState'].aEgo, accel_clip[0], accel_clip[1])
       self._lead_launch_release_counter = 0
+      self._stop_min_lead_drel = None
 
     # Prevent divergence, smooth in current v_ego
     self.v_desired_filter.x = max(0.0, self.v_desired_filter.update(v_ego))
@@ -615,6 +636,25 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     action_t =  self.CP.longitudinalActuatorDelay + DT_MDL
     output_a_target_mpc, output_should_stop_mpc = get_accel_from_plan(self.v_desired_trajectory, self.a_desired_trajectory, CONTROL_N_T_IDX,
                                                                       action_t=action_t, vEgoStopping=self.CP.vEgoStopping)
+    launch_tuning = getattr(self.mpc, "_live_tune_cfg", None)
+    launch_tuning = launch_tuning if launch_tuning is not None else LeadResponseTuningConfig.defaults()
+    # Track the stop-settle gap for the departure-relative release gate: the
+    # minimum published control-lead dRel seen while stopped. Reset whenever
+    # the car is not at a standstill so each stop measures its own settle.
+    if bool(sm['carState'].standstill):
+      release_leads = getattr(self.mpc, "control_leads", ())
+      release_source = str(getattr(self.mpc, "source", ""))
+      release_idx = {"lead0": 0, "lead1": 1}.get(release_source)
+      if release_idx is not None and release_idx < len(release_leads):
+        release_lead = release_leads[release_idx]
+        if release_lead is not None and bool(getattr(release_lead, "status", False)):
+          release_drel = float(getattr(release_lead, "dRel", 0.0) or 0.0)
+          if release_drel > 0.0:
+            self._stop_min_lead_drel = release_drel if self._stop_min_lead_drel is None \
+              else min(self._stop_min_lead_drel, release_drel)
+    else:
+      self._stop_min_lead_drel = None
+
     lead_launch_release_ready = output_should_stop_mpc and should_release_stop_for_lead_launch(
       self.CP,
       standstill=sm['carState'].standstill,
@@ -622,6 +662,8 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
       a_target=output_a_target_mpc,
       lead_source=str(getattr(self.mpc, "source", "")),
       control_leads=getattr(self.mpc, "control_leads", ()),
+      tuning=launch_tuning,
+      stop_min_drel=self._stop_min_lead_drel,
     )
     if lead_launch_release_ready:
       self._lead_launch_release_counter += 1
@@ -694,6 +736,42 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     cruise_owned_accel_cap = getattr(self.mpc, "cruise_owned_accel_cap", None)
     if lead_source == "cruise" and cruise_owned_accel_cap is not None:
       output_a_target = min(output_a_target, float(cruise_owned_accel_cap))
+
+    # Launch-follow accel FLOOR (road 205-13 Event A): once the stop latch
+    # releases on a departing lead, the MPC's jerk-shaped ramp from standstill
+    # takes seconds to ASK for real accel (road: demand peaked +1.02 while the
+    # lead departed at +5 m/s and the driver pedaled) even though the launch
+    # clip raise already PERMITS ~2.3 - and the M1 slowdown ceiling's
+    # slew-limited RELEASE tail (a comfort mechanism) otherwise caps the
+    # whole launch at its ramp rate. Floor the demand at the existing
+    # low-speed launch-follow factor (scales by ego speed, lead speed,
+    # pullaway and gap surplus; exactly 0 unless the lead is genuinely
+    # pulling away) times a live-tunable ceiling. Applied AFTER the slowdown
+    # ceiling and only while the lead is NOT threatening (same predicate as
+    # the brake-release floor: no lead decel, no closing), so any real threat
+    # keeps the ceiling's authority untouched. shouldStop gates it off
+    # entirely; the factor's speed term fades it out by ~10 m/s ego.
+    # Rollback sentinel: LaunchFollowAccelFloorMaxMps2 = 0 disables the floor
+    # (exact legacy demand).
+    launch_floor_max = float(getattr(launch_tuning, "launch_follow_accel_floor_max_mps2", 0.0) or 0.0)
+    if (launch_floor_max > 0.0 and
+        not self.output_should_stop and
+        lead_source in ("lead0", "lead1")):
+      floor_idx = 0 if lead_source == "lead0" else 1
+      if floor_idx < len(control_leads):
+        floor_lead = control_leads[floor_idx]
+        lead_not_threatening = (
+          floor_lead is not None and bool(getattr(floor_lead, "status", False)) and
+          float(getattr(floor_lead, "aLeadK", 0.0) or 0.0) >= 0.0 and
+          float(getattr(floor_lead, "vRel", 0.0) or 0.0) >= 0.0)
+        if lead_not_threatening:
+          launch_factor = get_low_speed_launch_follow_factor(
+            v_ego, floor_lead, float(getattr(self.mpc, "current_t_follow", 0.0) or 0.0))
+          if launch_factor > 0.0:
+            # (The starting-state passthrough in longcontrol.py covers the
+            # sub-vEgoStarting window at >= startAccel; this floor owns the
+            # demand from there up as the factor grows with the departure.)
+            output_a_target = max(output_a_target, launch_factor * launch_floor_max)
 
     if lead_source in ("lead0", "lead1"):
       lead_idx = 0 if lead_source == "lead0" else 1

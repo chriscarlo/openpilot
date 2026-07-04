@@ -76,7 +76,14 @@ class LongControl:
       self.reset()
 
     elif self.long_control_state == LongCtrlState.starting:
-      output_accel = self.CP.startAccel
+      # Never command LESS than the plan while starting: on a launch behind a
+      # departing lead the planner's launch-follow floor can exceed the flat
+      # startAccel, and holding the smaller value through the standstill
+      # actuation dead zone (EV6: ~0.85 s of brake bleed + torque build) is
+      # part of what let the road 205-13 launch fall behind. With the launch
+      # floor disabled (its 0.0 sentinel) a_target sits below startAccel here
+      # and this reduces to the legacy constant exactly.
+      output_accel = max(self.CP.startAccel, a_target)
       self.reset()
 
     else:  # LongCtrlState.pid
