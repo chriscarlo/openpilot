@@ -296,7 +296,6 @@ def test_farrange_vlead_optimism_scenario_wiring() -> None:
   assert stop_row is not None, "ego never stopped inside the scenario window"
 
 
-@pytest.mark.xfail(strict=True, reason="CD8: far-range published-vLead optimism clamp not yet implemented (fix pending)")
 def test_farrange_stopped_traffic_stop_is_spread() -> None:
   result = _run()
 
@@ -323,7 +322,6 @@ def test_farrange_stopped_traffic_stop_is_spread() -> None:
   assert first_half_ok and peak_ok, physics
 
 
-@pytest.mark.xfail(strict=True, reason="CD8: LeadVLeadOptimismClampRangeM clamp not yet implemented (fix pending)")
 def test_vlead_optimism_clamp_knob_fix_vs_rollback() -> None:
   """CD8 fix-knob oracle (the NEW threshold's rollback sentinel).
 

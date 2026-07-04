@@ -133,6 +133,16 @@ class ModelLeadTrack:
   last_published_drel: float | None = None
   _step_guard_eval_t: float | None = None
   _step_guard_last_out: float | None = None
+  # CD8 far-range stopped-traffic vLead optimism clamp state. Recent RAW model
+  # vLead samples (v_ego + raw vRel) to detect a SUSTAINED monotonic decline (a
+  # stopping/decelerating lead), and a (time, internal-dRel) history so the
+  # position-derived vLead d(dRel)/dt + v_ego can be estimated over the WHOLE
+  # confirm window (endpoint slope) rather than a single fragile frame - a
+  # single-frame internal-dRel snap (filter innovation) cannot produce a garbage
+  # velocity that way. Publish-time clamp only; internal EMA state is untouched
+  # and the clamp only ever makes the published vLead SLOWER (more urgent).
+  raw_vlead_hist: deque = field(default_factory=lambda: deque(maxlen=8))
+  drel_hist: deque = field(default_factory=lambda: deque(maxlen=8))
 
   @classmethod
   def from_lead_dict(cls, identifier: int, lead_dict: dict[str, Any], now: float, lead_slot: int) -> "ModelLeadTrack":
@@ -324,6 +334,7 @@ class ModelLeadTrack:
     self.vRel = float(self.vRel + vrel_alpha * (raw_vrel - self.vRel))
     self.vLead = float(v_ego + self.vRel)
     self.vLeadK = self.vLead
+    self._apply_far_range_vlead_optimism_clamp(raw_vrel, v_ego, next_drel, now, cfg)
     self.aLeadK = float(self.aLeadK + accel_alpha * (raw_alead - self.aLeadK))
     self.aLeadTau = 0.3
     self.modelProb = float(self.modelProb + prob_alpha * (raw_prob - self.modelProb))
@@ -332,6 +343,118 @@ class ModelLeadTrack:
     self.age += 1
     self.missed = 0
     return self.get_RadarState(cfg)
+
+  def _apply_far_range_vlead_optimism_clamp(self, raw_vrel: float, v_ego: float,
+                                            next_drel: float, now: float,
+                                            cfg: LeadResponseTuningConfig) -> None:
+    """CD8 far-range stopped-traffic vLead optimism clamp (road 200-13 EDGE2).
+
+    While a far, newly-acquired lead is still stopping/slow, the model's
+    published vLead runs biased HIGH (road: ~+4 m/s vs position-derived truth),
+    so the kinematic stopping-need term (compute_lead_stopping_need_decel, which
+    uses vLead) computes a much smaller required decel than reality and the
+    cruise->lead handoff / braking starts late, forcing a concentrated hard stop.
+
+    When the RAW model lead velocity is declining monotonically across recent
+    frames (a stopping/decelerating lead) AND range is beyond a live-tunable far
+    threshold, publish min(model vLead, position-derived vLead), where the
+    position-derived velocity is estimated from the internal-filter dRel trend
+    (d(dRel)/dt + v_ego). This lets the car see the truth (a slower/stopping
+    lead) sooner, so the existing stopping-need handoff leg engages ~2 s earlier.
+
+    SAFETY: this is publish-time only (internal EMA state untouched, no feedback
+    lag) and STRICTLY one-directional - it only ever makes the published vLead
+    SLOWER / more urgent (min), never faster / less urgent. It is tightly guarded
+    so it does NOT fire on a genuinely moving/steady lead (raw vLead not
+    monotonically declining), on noise (a SUSTAINED decline over N frames is
+    required, not one frame), or on a near/normal follow (range below the far
+    threshold). Rollback sentinel: LeadVLeadOptimismClampRangeM = 1e9 (range
+    unreachable) OR LeadVLeadOptimismClampGain = 0 disables the clamp entirely.
+
+    NOTE ON aLeadTau: the published clamp lowers vLead but does NOT synthesize a
+    lead decel into aLeadK - the stopping-need trigger uses vLead directly (the
+    understated closure is what delayed the handoff), so correcting vLead is
+    sufficient and avoids fabricating a decel the model never measured.
+    """
+    far_range_m = float(getattr(cfg, 'lead_vlead_optimism_clamp_range_m', 1e9))
+    gain = float(getattr(cfg, 'lead_vlead_optimism_clamp_gain', 0.0))
+    confirm_frames = max(1, int(round(float(getattr(cfg, 'lead_vlead_optimism_clamp_confirm_frames', 3.0)))))
+
+    # Record the RAW model vLead (v_ego + raw vRel) so the monotonic-decline
+    # detector sees the model's own measurement stream, and the (time, internal
+    # dRel) so the windowed position-derivative can be taken. `now` is THIS
+    # frame's timestamp; self.last_t is not updated until after this method
+    # returns, so the current time must come from `now`.
+    raw_vlead = float(v_ego) + float(raw_vrel)
+    self.raw_vlead_hist.append(raw_vlead)
+    self.drel_hist.append((float(now), float(next_drel)))
+
+    # Disable sentinels: an unreachable far range OR a zero gain restores exact
+    # legacy publish (no clamp, no state effect beyond the cheap history above).
+    if far_range_m >= 1e9 or gain <= 0.0:
+      return
+    if float(self.dRel) < far_range_m:
+      return
+    # Sustained monotonic decline: require confirm_frames+1 samples that are
+    # each strictly (with a tiny noise deadband) lower than the previous. One
+    # noisy frame cannot chain this; a genuinely stopping lead does frame after
+    # frame. A steady/moving lead (flat or rising raw vLead) never qualifies.
+    hist = list(self.raw_vlead_hist)
+    if len(hist) < confirm_frames + 1:
+      return
+    recent = hist[-(confirm_frames + 1):]
+    declining = all((recent[i + 1] - recent[i]) < -0.05 for i in range(len(recent) - 1))
+    if not declining:
+      return
+
+    # Slow-lead gate on the MODEL's OWN reported vLead: the current raw vLead must
+    # itself be a genuinely slow/stopping lead (at/below slow_lead_frac * ego).
+    # This is the primary discriminator between CD8 (a real stopped lead the model
+    # reports at ~1-5 m/s while ego is much faster) and a fast steady lead
+    # suffering a transient vLead dip (CD6 vLeadK rollover: a 34 m/s lead dips to
+    # ~30 m/s, ratio ~0.92, and is excluded even though it is momentarily
+    # declining). It uses the model measurement directly, so it does not depend on
+    # the fragile internal-dRel slope.
+    slow_lead_frac = float(getattr(cfg, 'lead_vlead_optimism_clamp_slow_lead_frac', 0.5))
+    if raw_vlead > float(v_ego) * slow_lead_frac:
+      return
+
+    # Position-derived vLead from the internal-filter dRel trend, taken over the
+    # WHOLE confirm window (endpoint slope), NOT a single frame: a single-frame
+    # internal-dRel snap (filter innovation gate) would otherwise yield a garbage
+    # velocity. Needs a window that spans a real interval.
+    drel_pts = list(self.drel_hist)[-(confirm_frames + 1):]
+    if len(drel_pts) < confirm_frames + 1:
+      return
+    dt_pos = drel_pts[-1][0] - drel_pts[0][0]
+    if dt_pos <= 1e-3:
+      return
+    d_drel_dt = (drel_pts[-1][1] - drel_pts[0][1]) / dt_pos
+    # Physically sane clamp on the closure rate: a tracked forward lead's dRel
+    # cannot open/close faster than a modest bound around the ego closure, so a
+    # residual dRel discontinuity cannot fabricate an extreme position velocity.
+    d_drel_dt = float(np.clip(d_drel_dt, -float(v_ego) - 2.0, 2.0))
+    # A forward stopped-traffic lead's position-derived speed lives in [0, v_ego];
+    # clamp there so the target is always a real, non-negative slow-lead speed.
+    v_lead_pos = float(np.clip(float(v_ego) + d_drel_dt, 0.0, float(v_ego)))
+
+    # Position-derived slow-lead gate (defense-in-depth alongside the raw-vLead
+    # gate above): the position-derived velocity must ALSO be a real slow/stopping
+    # lead (at/below slow_lead_frac * ego). A 34 m/s lead whose gap holds has
+    # d(dRel)/dt ~0 so v_lead_pos ~v_ego (ratio ~1) and is excluded even across a
+    # transient vLead dip; a genuine stopped lead reads ~0.
+    if v_lead_pos > float(v_ego) * slow_lead_frac:
+      return
+
+    # Only ever make the published lead SLOWER / more urgent: blend the internal
+    # vLead toward the (lower) position-derived value by the gain, then take the
+    # min so a HIGHER position-derived estimate (noise) can never speed it up.
+    clamped_vlead = self.vLead + gain * (v_lead_pos - self.vLead)
+    new_vlead = min(self.vLead, clamped_vlead)
+    if new_vlead < self.vLead:
+      self.vLead = float(new_vlead)
+      self.vLeadK = float(new_vlead)
+      self.vRel = float(new_vlead - float(v_ego))
 
   def _update_fcw_corroboration(self, raw_drel: float, raw_vrel: float,
                                 cfg: LeadResponseTuningConfig) -> None:

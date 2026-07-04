@@ -1387,6 +1387,67 @@ LEAD_RESPONSE_TUNE_SPECS = (
                 "reading, exempt from the emergency-braking rate-limit rule. Rollback sentinel: 0.0 (or "
                 "ModelLeadStepGuardAbsM=0.0) disables the guard entirely.",
   ),
+  LeadResponseTuneSpec(
+    attr="lead_vlead_optimism_clamp_range_m",
+    key="Longitudinal.LiveTune.LeadVLeadOptimismClampRangeM",
+    cli_name="lead-vlead-optimism-clamp-range",
+    label="vlead_optimism_clamp_range",
+    default=55.0,
+    minimum=20.0,
+    maximum=1e9,
+    description="CD8 (radard, road 200-13 EDGE2): far-range (m) beyond which the published-vLead optimism clamp is armed. "
+                "While a far, newly-acquired lead is still stopping/slowing, the model's published vLead runs biased HIGH "
+                "(road ~+4 m/s vs position-derived truth), so the kinematic stopping-need handoff term underestimates the "
+                "required decel and braking starts late, forcing a concentrated hard stop. Beyond this range AND when the "
+                "RAW model vLead is declining monotonically for LeadVLeadOptimismClampConfirmFrames+1 frames (a stopping "
+                "lead), the published vLead is pulled toward the position-derived value d(dRel)/dt + v_ego (min only - it "
+                "only ever makes the lead SLOWER / more urgent, never faster). Publish-time only; internal filter state "
+                "untouched. Rollback sentinel: 1e9 (the spec maximum deliberately admits it) makes the range unreachable "
+                "and disables the clamp exactly (or set LeadVLeadOptimismClampGain=0).",
+  ),
+  LeadResponseTuneSpec(
+    attr="lead_vlead_optimism_clamp_gain",
+    key="Longitudinal.LiveTune.LeadVLeadOptimismClampGain",
+    cli_name="lead-vlead-optimism-clamp-gain",
+    label="vlead_optimism_clamp_gain",
+    default=1.0,
+    minimum=0.0,
+    maximum=1.0,
+    description="CD8 (radard): fraction of the way the published vLead is pulled from the optimistic model value toward "
+                "the position-derived d(dRel)/dt + v_ego estimate when the far-range optimism clamp fires. 1.0 = publish "
+                "the full position-derived (truth) velocity; the result is still min()'d against the model vLead so the "
+                "clamp can only ever LOWER the published vLead (bias toward earlier braking), never raise it. Rollback "
+                "sentinel: 0.0 disables the clamp entirely (exact legacy publish, alongside the range sentinel).",
+  ),
+  LeadResponseTuneSpec(
+    attr="lead_vlead_optimism_clamp_confirm_frames",
+    key="Longitudinal.LiveTune.LeadVLeadOptimismClampConfirmFrames",
+    cli_name="lead-vlead-optimism-clamp-confirm-frames",
+    label="vlead_optimism_clamp_confirm_frames",
+    default=3.0,
+    minimum=1.0,
+    maximum=6.0,
+    description="CD8 (radard): consecutive RAW-model-vLead decline frames required (this many decreasing steps, i.e. "
+                "this+1 samples) before the far-range optimism clamp arms, so a single noisy frame cannot trigger it - a "
+                "genuinely stopping/decelerating lead declines frame after frame, isolated noise does not. A flat or "
+                "rising raw vLead (a steady/moving/pulling-away lead) never qualifies, so the clamp is inert on normal "
+                "following. Raise to demand a longer sustained decline; 1 = a single decline step arms it.",
+  ),
+  LeadResponseTuneSpec(
+    attr="lead_vlead_optimism_clamp_slow_lead_frac",
+    key="Longitudinal.LiveTune.LeadVLeadOptimismClampSlowLeadFrac",
+    cli_name="lead-vlead-optimism-clamp-slow-lead-frac",
+    label="vlead_optimism_clamp_slow_lead_frac",
+    default=0.5,
+    minimum=0.0,
+    maximum=1.0,
+    description="CD8 (radard): the far-range vLead optimism clamp fires ONLY when the position-derived lead velocity is a "
+                "genuinely slow/stopping lead - at/below this fraction of ego speed - so it targets the stopped-traffic "
+                "approach and NOT a fast steady lead that suffered a transient perception vLead dip (a vLeadK rollover, "
+                "CD6 non-regression: a 34 m/s lead momentarily reading 31 m/s has ratio ~0.97 and is excluded, while a "
+                "stopping lead reads ~0). Raise toward 1.0 to admit any lead slower than ego (least restrictive); lower to "
+                "demand a more nearly-stopped lead. Only meaningful when the clamp is otherwise armed.",
+  ),
 )
 
 LEAD_RESPONSE_TUNE_SPECS_BY_ATTR = {spec.attr: spec for spec in LEAD_RESPONSE_TUNE_SPECS}
@@ -1515,6 +1576,10 @@ class LeadResponseTuningConfig:
   model_lead_assoc_y_raw_tol_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_assoc_y_raw_tol_m"].default
   model_lead_step_guard_abs_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_step_guard_abs_m"].default
   model_lead_step_guard_frac: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["model_lead_step_guard_frac"].default
+  lead_vlead_optimism_clamp_range_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_vlead_optimism_clamp_range_m"].default
+  lead_vlead_optimism_clamp_gain: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_vlead_optimism_clamp_gain"].default
+  lead_vlead_optimism_clamp_confirm_frames: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_vlead_optimism_clamp_confirm_frames"].default
+  lead_vlead_optimism_clamp_slow_lead_frac: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_vlead_optimism_clamp_slow_lead_frac"].default
 
   @classmethod
   def defaults(cls) -> LeadResponseTuningConfig:
