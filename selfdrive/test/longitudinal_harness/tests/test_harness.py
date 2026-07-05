@@ -509,6 +509,11 @@ def test_radard_perception_stage_lags_decelerating_lead() -> None:
   rollback_overrides = {
     "model_lead_filter_blend_tau_floor_s": "8.0",  # >= ModelLeadFilterTauS: blend off
     "model_lead_filter_lag_comp_s": "0.0",
+    # CD9 sentinel: the corroborated-closing governor also fast-tracks this
+    # closure (its whole point), so the exact-legacy lag characterization
+    # additionally requires it off. (Full key: this attr-style name predates
+    # the static FRIENDLY_PARAM_NAMES map and is not in it.)
+    "Longitudinal.LiveTune.ClosingGovernorMarginMps": "99.0",
   }
   initial_speed_mps, initial_accel_mps2, steps = build_synthetic_scenario("decelerating_lead", duration_s=10.0, dt_s=DT_MDL)
 

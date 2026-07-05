@@ -152,6 +152,7 @@ class ModelLeadTrack:
   closing_evidence: deque = field(default_factory=lambda: deque(maxlen=64))
   governor_hold_until_t: float = -1.0
   governor_closing_mps: float = 0.0
+  governor_active: bool = False
 
   @classmethod
   def from_lead_dict(cls, identifier: int, lead_dict: dict[str, Any], now: float, lead_slot: int) -> "ModelLeadTrack":
@@ -355,8 +356,10 @@ class ModelLeadTrack:
     self.vLead = float(v_ego + self.vRel)
     self.vLeadK = self.vLead
     self._apply_far_range_vlead_optimism_clamp(raw_vrel, v_ego, next_drel, now, cfg)
-    if governor_active:
-      self._apply_closing_governor_vlead_clamp(v_ego)
+    # CD9 clamp is PUBLISH-TIME ONLY (get_RadarState): mutating the tracker's
+    # vRel state here corrupted association (the assoc vRel gate compares track
+    # state to measurements) and fed the prediction, causing track-id churn.
+    self.governor_active = bool(governor_active)
     self.aLeadK = float(self.aLeadK + accel_alpha * (raw_alead - self.aLeadK))
     self.aLeadTau = 0.3
     self.modelProb = float(self.modelProb + prob_alpha * (raw_prob - self.modelProb))
@@ -458,18 +461,6 @@ class ModelLeadTrack:
       self.governor_closing_mps = float(max(0.0, min(pos_closing, vrel_closing + max(0.0, pos_trust))))
       return True
     return active
-
-  def _apply_closing_governor_vlead_clamp(self, v_ego: float) -> None:
-    # One-directional (more-urgent-only) publish clamp toward the corroborated
-    # closure. Runs AFTER the EMA writes and the CD8 far-range clamp; min()
-    # semantics mean it can only ever lower the published vLead further.
-    if self.governor_closing_mps <= 0.0:
-      return
-    target_vlead = max(0.0, float(v_ego) - self.governor_closing_mps)
-    if target_vlead < self.vLead:
-      self.vLead = float(target_vlead)
-      self.vLeadK = float(target_vlead)
-      self.vRel = float(target_vlead - float(v_ego))
 
   def _apply_far_range_vlead_optimism_clamp(self, raw_vrel: float, v_ego: float,
                                             next_drel: float, now: float,
@@ -683,12 +674,28 @@ class ModelLeadTrack:
     # genuine cut-in publishes its true close dRel with zero attenuation.
     if cfg is not None:
       published_drel = self._apply_step_guard(published_drel, cfg)
+
+    # CD9 corroborated-closing governor publish clamp (one-directional, publish
+    # only - internal EMA/association/prediction state untouched): while the
+    # governor is latched, the published vLead may not exceed the corroborated
+    # closure below the ego estimate. min() semantics: it can only ever make
+    # the published lead SLOWER / more urgent, never faster.
+    published_vrel = float(self.vRel)
+    published_vlead = float(self.vLead)
+    published_vleadk = float(self.vLeadK)
+    if self.governor_active and self.governor_closing_mps > 0.0:
+      v_ego_est = max(0.0, float(self.vLead) - float(self.vRel))
+      target_vlead = max(0.0, v_ego_est - float(self.governor_closing_mps))
+      if target_vlead < published_vlead:
+        published_vlead = target_vlead
+        published_vleadk = target_vlead
+        published_vrel = target_vlead - v_ego_est
     return {
       "dRel": published_drel,
       "yRel": float(self.yRel),
-      "vRel": float(self.vRel),
-      "vLead": float(self.vLead),
-      "vLeadK": float(self.vLeadK),
+      "vRel": published_vrel,
+      "vLead": published_vlead,
+      "vLeadK": published_vleadk,
       "aLeadK": float(self.aLeadK),
       "aLeadTau": float(self.aLeadTau),
       "fcw": False,

@@ -157,6 +157,11 @@ ROLLBACK_CLAMP_RANGE_M = 1e9
 def _vehicle_config_clamp(clamp_range_m: float):
   return resolve_ev6_vehicle_config(param_overrides={
     "Longitudinal.LiveTune.LeadVLeadOptimismClampRangeM": f"{clamp_range_m:g}",
+    # CD9 governor off in BOTH twins: it independently rescues this far-range
+    # closure (windowed position/decel corroboration), which would mask the
+    # CD8 rollback pathology. With it pinned off, the twins differ ONLY in the
+    # CD8 clamp knob, so the divergence isolates CD8's own mechanism.
+    "Longitudinal.LiveTune.ClosingGovernorMarginMps": "99.0",
   })
 
 

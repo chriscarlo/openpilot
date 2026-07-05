@@ -1,5 +1,21 @@
 # Road incidents 2026-07-04 — launch failure + near-collision (pinpointed for follow-up analysis)
 
+> **STATUS 2026-07-04 (same day): BOTH FIXED, harness-validated, pending road validation.**
+> - **Event B → CD9 corroborated-closing governor** (radard publish-side; commit `dd1cfec8` + publish-only
+>   clamp refinement). Full-rate rlog forensics confirmed the model was ON TIME (raw aLead −0.55 sustained
+>   from onset, raw dRel collapsing 4–6 m/s) and the published EMAs ate ~1.9 s. Oracle:
+>   `test_repro_closing_brake_lag.py` (onset delay 1.35→0.5 s, min THW 0.866→1.039 s, steady-noise
+>   companion green — the VRelTauS=0.60 damping is preserved). Knobs + sentinels:
+>   `ClosingGovernor*` in `docs/chauffeur/live_tunable_params.md`.
+> - **Event A → departure-relative stop release + launch-follow demand floor + starting passthrough**
+>   (commit `5fd9dd79`). Full-rate forensics: the absolute `dRel>=5.0` arming gate was the binding release
+>   lag (published settle 4.15 m → 0.85 m of slew-lagged gap to open); the launch demand was owned by the
+>   MPC standstill ramp under the M1 ceiling's release slew. Oracle: `test_repro_stop_launch_release.py`
+>   (release 0.95→0.65 s, peak demand +0.81→+1.34). Knobs + sentinels: `LaunchRelease*` /
+>   `LaunchFollowAccelFloorMaxMps2`.
+> - Also fixed en route: harness `cruiseState.standstill` fidelity (EV6 op-long hardwires False —
+>   stop→launch scenarios were unrepresentable before).
+
 Two reproducible-from-log failures captured on a live drive. Both are **evidenced from the
 full rlog** (not live-monitor guesses). rlogs are on this Mac at
 `realdata/00000205--63a5523547--<seg>/rlog.zst` (segments 4–15 pulled). Analysis scripts:
