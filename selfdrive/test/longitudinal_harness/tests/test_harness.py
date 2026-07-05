@@ -427,7 +427,7 @@ def test_default_ev6_config_matches_tici_no_radar_lka() -> None:
   assert vehicle.params["Longitudinal.LiveTune.LeadSlowdownStrength"] == "0.35"
   # MPC live-tune params seeded from the device dump, not the unseeded-Params
   # fallbacks (obstacle 4.0 / accel-change 200 / accel 0 / Kalman dRel OFF).
-  assert vehicle.metadata["livetuneSource"].endswith("device_livetune_snapshot_20260702.txt")
+  assert vehicle.metadata["livetuneSource"].endswith("device_livetune_snapshot_20260704.txt")
   assert vehicle.params["Longitudinal.LiveTune.ObstacleCost"] == "2.0"
   assert vehicle.params["Longitudinal.LiveTune.AccelChangeCost"] == "400.0"
   assert vehicle.params["Longitudinal.LiveTune.AccelCost"] == "1.0"
@@ -444,7 +444,7 @@ def test_livetune_snapshot_seeds_mpc_costs() -> None:
     planner = LongitudinalPlanner(vehicle.cp, init_v=30.0, init_a=0.0)
     _bind_planner_params(planner, HarnessParams(vehicle.params))
 
-    # Device dump values (docs/chauffeur/longitudinal/device_livetune_snapshot_20260702.txt),
+    # Device dump values (docs/chauffeur/longitudinal/device_livetune_snapshot_20260704.txt),
     # not the unseeded-Params fallbacks (obstacle 4.0 / accel-change 200 / accel 0 / Kalman OFF).
     assert planner.mpc._live_obstacle_cost == pytest.approx(2.0)
     assert planner.mpc._live_a_change_cost == pytest.approx(400.0)

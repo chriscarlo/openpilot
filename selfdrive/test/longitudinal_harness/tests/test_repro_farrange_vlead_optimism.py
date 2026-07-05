@@ -130,7 +130,14 @@ def _build_steps(vlead_bias: bool = True) -> list[StepInput]:
 
 @functools.lru_cache(maxsize=1)
 def _vehicle_config():
-  return resolve_ev6_vehicle_config()
+  # The device snapshot may carry the driver's live deltas (2026-07-04:
+  # ModelLeadFilterVRelTauS=0.60). CD8's spread-stop bounds were calibrated at
+  # the committed default - pin it so a snapshot re-dump cannot silently move
+  # the regression guard. (CD9's coverage of this scenario at the 0.60 device
+  # tune is validated separately by test_repro_closing_brake_lag.)
+  return resolve_ev6_vehicle_config(param_overrides={
+    "Longitudinal.LiveTune.ModelLeadFilterVRelTauS": "0.4",
+  })
 
 
 @functools.lru_cache(maxsize=1)
@@ -162,6 +169,9 @@ def _vehicle_config_clamp(clamp_range_m: float):
     # CD8 rollback pathology. With it pinned off, the twins differ ONLY in the
     # CD8 clamp knob, so the divergence isolates CD8's own mechanism.
     "Longitudinal.LiveTune.ClosingGovernorMarginMps": "99.0",
+    # Calibration tune of CD8's bounds (the device snapshot may carry the
+    # driver's live VRelTauS=0.60 delta).
+    "Longitudinal.LiveTune.ModelLeadFilterVRelTauS": "0.4",
   })
 
 

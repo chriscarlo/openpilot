@@ -110,8 +110,14 @@ def _build_steps(v0_mps: float) -> list[StepInput]:
 
 @functools.lru_cache(maxsize=len(EGO_V0_CASES_MPS))
 def _run(v0_mps: float) -> SimulationResult:
+  # The device snapshot may carry the driver's live deltas (2026-07-04:
+  # ModelLeadFilterVRelTauS=0.60). This mechanism's calm-approach bounds were
+  # calibrated at the committed default - pin it so a snapshot re-dump cannot
+  # silently move the regression guard.
   return run_harness(
-    vehicle_config=resolve_ev6_vehicle_config(),
+    vehicle_config=resolve_ev6_vehicle_config(param_overrides={
+      "Longitudinal.LiveTune.ModelLeadFilterVRelTauS": "0.4",
+    }),
     scenario_name=f"stop_slam_midband_noise_free_{v0_mps:g}",
     steps=_build_steps(v0_mps),
     initial_speed_mps=v0_mps,

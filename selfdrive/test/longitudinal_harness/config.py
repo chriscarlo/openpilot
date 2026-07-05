@@ -17,10 +17,13 @@ from opendbc.sunnypilot.car.hyundai.values import HyundaiFlagsSP, HyundaiSafetyF
 # not the radar-track default _LEAD_ACCEL_TAU=1.5 the legacy plant/harness hardcoded.
 EV6_MODEL_LEAD_A_LEAD_TAU_S = 0.3
 
-# Live-tune params dumped from the real device (2026-07-01, dongle CHAUFFEUR_DEV_e521630c).
+# Live-tune params dumped from the real device (2026-07-04 post CD9/Event-A deploy,
+# dongle CHAUFFEUR_DEV_e521630c; dumped via the Params API, not file cat - lazily
+# seeded keys read empty at the file level). Includes the driver's deliberate live
+# deltas: ModelLeadFilterVRelTauS=0.60, HandoffInsideDfPositiveCapMps2=10.0.
 # Drop in a newer dump by pointing resolve_ev6_vehicle_config(livetune_snapshot=...) at it.
 DEVICE_LIVETUNE_SNAPSHOT_PATH = (
-  Path(__file__).resolve().parents[3] / "docs" / "chauffeur" / "longitudinal" / "device_livetune_snapshot_20260702.txt"
+  Path(__file__).resolve().parents[3] / "docs" / "chauffeur" / "longitudinal" / "device_livetune_snapshot_20260704.txt"
 )
 
 

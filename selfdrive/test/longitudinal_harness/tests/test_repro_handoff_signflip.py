@@ -159,7 +159,16 @@ def _e1_steps() -> list[StepInput]:
 
 @functools.lru_cache(maxsize=1)
 def _vehicle_config():
-  return resolve_ev6_vehicle_config()
+  # The device snapshot may carry the driver's live deltas (2026-07-04:
+  # HandoffInsideDfPositiveCapMps2=10.0 - EDGE1 cap deliberately DISABLED on
+  # the car after it misfired on ghost model leads). This test validates the
+  # EDGE1 mechanism itself, so pin the cap at its committed default.
+  return resolve_ev6_vehicle_config(param_overrides={
+    "Longitudinal.LiveTune.HandoffInsideDfPositiveCapMps2": "0.1",
+    # Calibration tune of this file's frame-delta/divergence bounds (the
+    # device snapshot may carry the driver's live VRelTauS=0.60 delta).
+    "Longitudinal.LiveTune.ModelLeadFilterVRelTauS": "0.4",
+  })
 
 
 @functools.lru_cache(maxsize=1)
