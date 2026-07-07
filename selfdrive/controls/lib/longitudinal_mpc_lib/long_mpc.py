@@ -229,6 +229,13 @@ HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_CLOSING_MPS = 1.5
 HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_CLOSING_MAX_MPS = 4.0
 HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_GAP_SURPLUS_M = 20.0
 HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_OBSTACLE_MARGIN_M = 12.0
+HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_NEAR_GAP_SURPLUS_M = 8.0
+HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_TTC_HEADWAY_S = 7.5
+HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_LOW_SPEED_TTC_HEADWAY_S = 9.5
+HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_LOW_SPEED_MPS = 12.0
+HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_HIGH_SPEED_MPS = 25.0
+HYUNDAI_CRUISE_CAP_RAW_LEAD_MAX_PATH_ABS_M = 2.0
+HYUNDAI_CRUISE_CAP_RAW_LEAD_MAX_DREL_M = 120.0
 HYUNDAI_VIRTUAL_LEAD_DROPOUT_STABLE_MIN_S = 3.0
 HYUNDAI_VIRTUAL_LEAD_DROPOUT_HOLD_S = 0.75
 HYUNDAI_VIRTUAL_LEAD_DROPOUT_MAX_ABS_VREL_MPS = 0.35
@@ -1826,17 +1833,48 @@ class LongitudinalMpc:
         "pullaway_speed": 0.0,
         "closing_speed": 0.0,
         "obstacle_0": float(obstacle_0 if obstacle_0 is not None else 1e9),
+        "ttc_to_headway_s": 1e6,
       }
 
     gap_surplus = float(getattr(lead, 'dRel', 0.0) or 0.0) - get_headway_follow_distance(v_ego, t_follow)
     v_lead = float(getattr(lead, 'vLead', v_ego) or v_ego)
     v_rel = float(getattr(lead, 'vRel', 0.0) or 0.0)
+    closing_speed = float(max(0.0, v_ego - v_lead, -v_rel))
     return {
       "gap_surplus": float(gap_surplus),
       "pullaway_speed": float(max(0.0, v_lead - v_ego, v_rel)),
-      "closing_speed": float(max(0.0, v_ego - v_lead, -v_rel)),
+      "closing_speed": closing_speed,
       "obstacle_0": float(obstacle_0 if obstacle_0 is not None else 1e9),
+      "ttc_to_headway_s": LongitudinalMpc._time_to_headway(gap_surplus, closing_speed),
     }
+
+  @staticmethod
+  def _time_to_headway(gap_surplus_m: float, closing_speed_mps: float) -> float:
+    if gap_surplus_m <= 0.0:
+      return 0.0
+    if closing_speed_mps <= 1e-3:
+      return 1e6
+    return float(gap_surplus_m / closing_speed_mps)
+
+  @staticmethod
+  def _approach_reacquire_ttc_threshold(v_ego: float) -> float:
+    return float(np.interp(
+      float(v_ego),
+      [HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_LOW_SPEED_MPS,
+       HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_HIGH_SPEED_MPS],
+      [HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_LOW_SPEED_TTC_HEADWAY_S,
+       HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_TTC_HEADWAY_S],
+    ))
+
+  @staticmethod
+  def _is_plausible_cruise_cap_raw_lead(lead) -> bool:
+    if lead is None or not getattr(lead, 'status', False):
+      return False
+    d_rel = LongitudinalMpc._lead_attr(lead, "dRel", 1e9)
+    if d_rel <= 0.0 or d_rel > HYUNDAI_CRUISE_CAP_RAW_LEAD_MAX_DREL_M:
+      return False
+    d_path = LongitudinalMpc._lead_attr(lead, "dPath", LongitudinalMpc._lead_attr(lead, "yRel"))
+    return abs(d_path) <= HYUNDAI_CRUISE_CAP_RAW_LEAD_MAX_PATH_ABS_M
 
   @staticmethod
   def _is_hyundai_settled_follow(raw_lead, filtered_lead,
@@ -3101,12 +3139,19 @@ class LongitudinalMpc:
       raw_metrics["pullaway_speed"] <= queue_pullaway_cap
     )
     approach_obstacle_delta_m = raw_metrics["obstacle_0"] - float(cruise_obstacle[0])
+    approach_reacquire_ttc_threshold_s = self._approach_reacquire_ttc_threshold(float(self.x0[1]))
+    raw_ttc_to_headway_s = self._time_to_headway(raw_gap_surplus_for_release, raw_metrics["closing_speed"])
+    raw_near_target_for_reacquire = (
+      raw_gap_surplus_for_release <= HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_NEAR_GAP_SURPLUS_M or
+      raw_ttc_to_headway_s <= approach_reacquire_ttc_threshold_s
+    )
     approach_reacquire = (
       float(self.x0[1]) >= HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_MIN_SPEED and
       raw_metrics["closing_speed"] >= HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_CLOSING_MPS and
       raw_metrics["closing_speed"] <= HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_CLOSING_MAX_MPS and
       raw_gap_surplus_for_release <= HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_GAP_SURPLUS_M and
-      approach_obstacle_delta_m <= HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_OBSTACLE_MARGIN_M
+      approach_obstacle_delta_m <= HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_OBSTACLE_MARGIN_M and
+      raw_near_target_for_reacquire
     )
     # Stopping-need handoff (midband-slam fix): on this Hyundai AI-lead-stability
     # path the solver sees ONLY the active obstacle, so while cruise owns it a
@@ -3134,11 +3179,15 @@ class LongitudinalMpc:
       max(1.0, float(self.x0[1]) / stopping_need_ref_speed)
     )
     stopping_need_hold = stopping_need_decel_mps2 >= stopping_need_threshold_mps2
+    raw_obstacle_requires_owner = (
+      raw_metrics["obstacle_0"] <= (float(cruise_obstacle[0]) - HYUNDAI_VIRTUAL_LEAD_RAW_OBSTACLE_MARGIN_M) and
+      raw_near_target_for_reacquire
+    )
     raw_requires_owner = (
       low_speed_queue_hold or
       approach_reacquire or
       raw_gap_surplus_for_release <= HYUNDAI_VIRTUAL_LEAD_RETAIN_GAP_SURPLUS_M or
-      raw_metrics["obstacle_0"] <= (float(cruise_obstacle[0]) - HYUNDAI_VIRTUAL_LEAD_RAW_OBSTACLE_MARGIN_M) or
+      raw_obstacle_requires_owner or
       stopping_need_hold
     )
     release_ready = (
@@ -3168,6 +3217,14 @@ class LongitudinalMpc:
     active_mode = self._acc_obstacle_mode
     reason = "filtered_hold"
     stabilization_push_suppressed = False
+    far_closing_cruise_ok = (
+      active_mode == 'lead' and
+      raw_metrics["closing_speed"] >= HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_CLOSING_MPS and
+      raw_gap_surplus_for_release > HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_NEAR_GAP_SURPLUS_M and
+      raw_ttc_to_headway_s > approach_reacquire_ttc_threshold_s and
+      not low_speed_queue_hold and
+      not stopping_need_hold
+    )
     if raw_requires_owner:
       active_mode = 'lead'
       self._acc_obstacle_mode = 'lead'
@@ -3178,12 +3235,17 @@ class LongitudinalMpc:
         reason = "raw_gap_hold"
       elif approach_reacquire:
         reason = "approach_reacquire"
-      elif raw_metrics["obstacle_0"] <= (float(cruise_obstacle[0]) - HYUNDAI_VIRTUAL_LEAD_RAW_OBSTACLE_MARGIN_M):
+      elif raw_obstacle_requires_owner:
         reason = "raw_obstacle_hold"
       else:
         reason = "stopping_need_hold"
     elif active_mode == 'lead':
-      if immediate_release and raw_immediate_release_ready and release_agreement_ok:
+      if far_closing_cruise_ok:
+        active_mode = 'cruise'
+        self._acc_obstacle_mode = 'cruise'
+        self._reset_acc_obstacle_candidate()
+        reason = "far_closing_cruise"
+      elif immediate_release and raw_immediate_release_ready and release_agreement_ok:
         active_mode = 'cruise'
         self._acc_obstacle_mode = 'cruise'
         self._reset_acc_obstacle_candidate()
@@ -3255,6 +3317,11 @@ class LongitudinalMpc:
       "filtered_closing_mps": float(filtered_metrics["closing_speed"]),
       "approach_obstacle_delta_m": float(approach_obstacle_delta_m),
       "approach_reacquire": bool(approach_reacquire),
+      "approach_reacquire_ttc_threshold_s": float(approach_reacquire_ttc_threshold_s),
+      "raw_ttc_to_headway_s": float(raw_ttc_to_headway_s),
+      "raw_near_target_for_reacquire": bool(raw_near_target_for_reacquire),
+      "raw_obstacle_requires_owner": bool(raw_obstacle_requires_owner),
+      "far_closing_cruise_ok": bool(far_closing_cruise_ok),
       "low_speed_launch_factor": float(low_speed_launch_factor),
       "low_speed_queue_speed_cap_mps": float(queue_speed_cap),
       "low_speed_queue_vlead_cap_mps": float(queue_vlead_cap),
@@ -3619,13 +3686,25 @@ class LongitudinalMpc:
     # Update in ACC mode or ACC/e2e blend
     if self.mode == 'acc':
       lead_for_cruise_cap = None
+      lead_for_cruise_cap_source = None
       lead_for_cruise_obstacle = 1e9
       if control_lead0.status:
         lead_for_cruise_cap = control_lead0
+        lead_for_cruise_cap_source = "lead0_control"
         lead_for_cruise_obstacle = float(lead_0_obstacle[0])
       if control_lead1.status and float(lead_1_obstacle[0]) < lead_for_cruise_obstacle:
         lead_for_cruise_cap = control_lead1
+        lead_for_cruise_cap_source = "lead1_control"
         lead_for_cruise_obstacle = float(lead_1_obstacle[0])
+      if lead_for_cruise_cap is None:
+        for raw_source, raw_lead in (("lead0_raw_path", stabilized_lead0), ("lead1_raw_path", stabilized_lead1)):
+          if not self._is_plausible_cruise_cap_raw_lead(raw_lead):
+            continue
+          raw_drel = self._lead_attr(raw_lead, "dRel", 1e9)
+          if raw_drel < lead_for_cruise_obstacle:
+            lead_for_cruise_cap = raw_lead
+            lead_for_cruise_cap_source = raw_source
+            lead_for_cruise_obstacle = raw_drel
 
       personality_max_accel = self._get_gap_reclaim_personality_max_accel(float(v_ego))
       lead_present_cruise_cap = get_lead_present_cruise_accel_cap(
@@ -3759,6 +3838,10 @@ class LongitudinalMpc:
         self.acc_source_debug["adjacent_awareness_preview_applied"] = bool(self.adjacent_awareness_preview_debug.get("applied", False))
         self.acc_source_debug["adjacent_awareness_preview_slot"] = self.adjacent_awareness_preview_debug.get("slot")
         self.acc_source_debug["cruise_owned_accel_cap"] = None if cruise_owned_accel_cap is None else float(cruise_owned_accel_cap)
+        self.acc_source_debug["lead_present_cruise_accel_cap_source"] = lead_for_cruise_cap_source
+        self.acc_source_debug["lead_present_cruise_accel_cap_drel_m"] = (
+          None if lead_for_cruise_cap is None else self._lead_attr(lead_for_cruise_cap, "dRel", 0.0)
+        )
 
       self.gap_reclaim_accel_floor = self.get_gap_reclaim_floor()
       self.lead_keepup_accel_floor = self.get_lead_keepup_floor()

@@ -534,6 +534,60 @@ class TestHyundaiAiLeadStability:
     assert mpc.acc_source_debug["reason"] == "no_control_lead"
     assert mpc._classifier_demotion_hold_until_t is None
 
+  def test_demoted_raw_path_lead_caps_cruise_accel_without_holding_source(self):
+    mpc = _make_hyundai_mpc(v_ego=29.0, a_ego=0.0, time_fn=_MonotonicStub(step=0.1))
+
+    departing_path_lead = _make_lead(
+      d_rel=75.0,
+      y_rel=-8.0,
+      d_path=0.4,
+      v_lat=12.0,
+      v_rel=-2.0,
+      v_lead=27.0,
+      model_prob=0.97,
+    )
+    _run_update(mpc, departing_path_lead, _make_lead(status=False))
+
+    assert mpc.lead_role_debug["reasons"]["lead0"] == "raw_lateral_departure"
+    assert mpc.lead_role_debug["control_status"]["lead0"] is False
+    assert mpc.source == "cruise"
+    assert mpc.acc_source_debug["reason"] == "no_control_lead"
+    assert mpc.acc_source_debug["lead_present_cruise_accel_cap_source"] == "lead0_raw_path"
+    assert mpc.cruise_owned_accel_cap == pytest.approx(0.0)
+    assert mpc.params[0, 1] == pytest.approx(0.0)
+    assert mpc.last_cruise_response_model.max_accel_mps2 == pytest.approx(0.0)
+
+  def test_far_closing_lead_stays_cruise_owned_until_target_gap_approaches(self):
+    mpc = _make_hyundai_mpc(v_ego=28.5, a_ego=0.0, time_fn=_MonotonicStub(step=0.2))
+
+    _run_update_with_state(
+      mpc,
+      _make_lead(d_rel=65.5, y_rel=-0.24, d_path=0.40, v_lat=0.78,
+                 v_rel=-1.93, v_lead=26.57, model_prob=0.97),
+      _make_lead(status=False),
+      v_ego=28.5,
+    )
+
+    assert mpc.source == "cruise"
+    assert mpc.acc_source_debug["reason"] == "cruise_hold"
+    assert mpc.acc_source_debug["raw_obstacle_requires_owner"] is False
+    assert mpc.acc_source_debug["raw_near_target_for_reacquire"] is False
+    assert mpc.acc_source_debug["raw_ttc_to_headway_s"] > mpc.acc_source_debug["approach_reacquire_ttc_threshold_s"]
+    assert mpc.cruise_owned_accel_cap == pytest.approx(0.0)
+
+    _run_update_with_state(
+      mpc,
+      _make_lead(d_rel=51.6, y_rel=0.35, d_path=-0.04, v_lat=-2.04,
+                 v_rel=-4.27, v_lead=23.32, model_prob=0.97),
+      _make_lead(status=False),
+      v_ego=27.6,
+    )
+
+    assert mpc.source == "lead0"
+    assert mpc.acc_source_debug["reason"] == "raw_obstacle_hold"
+    assert mpc.acc_source_debug["raw_obstacle_requires_owner"] is True
+    assert mpc.acc_source_debug["raw_ttc_to_headway_s"] <= mpc.acc_source_debug["approach_reacquire_ttc_threshold_s"]
+
   def test_classifier_demotion_hold_releases_when_raw_radar_is_also_gone(self, monkeypatch):
     # Safety backstop: if the raw radarstate has no lead anywhere,
     # corroboration fails and the demotion hold must NOT engage — otherwise
@@ -1019,8 +1073,10 @@ class TestHyundaiAiLeadStability:
     _run_update(baseline_mpc, primary_lead, _make_lead(status=False), v_cruise=40.0)
     _run_update(preview_mpc, primary_lead, adjacent_lead, v_cruise=40.0)
 
-    assert baseline_mpc.source == "lead0"
-    assert preview_mpc.source == "lead0"
+    assert baseline_mpc.source == "cruise"
+    assert preview_mpc.source == "cruise"
+    assert baseline_mpc.cruise_owned_accel_cap == pytest.approx(0.0)
+    assert preview_mpc.cruise_owned_accel_cap == pytest.approx(0.0)
     assert preview_mpc.adjacent_awareness_preview_debug["active"] is True
     assert preview_mpc.adjacent_awareness_preview_debug["applied"] is True
     assert preview_mpc.adjacent_awareness_preview_debug["slot"] == "lead1"
