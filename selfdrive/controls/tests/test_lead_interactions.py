@@ -365,15 +365,23 @@ class TestLeadInteractionHeuristics:
 
     cap = get_lead_present_cruise_accel_cap(9.0, traffic_pullaway, 1.3, personality_max_accel=3.5)
 
-    assert 0.55 < cap < 1.20
+    assert 0.29 < cap <= 0.33
 
-  def test_lead_present_cruise_accel_cap_can_expand_for_far_open_gap(self):
+  def test_lead_present_cruise_accel_cap_stays_gentle_for_far_open_gap(self):
     far_pullaway = _make_lead(d_rel=60.0, v_lead=11.5, a_lead=0.2)
     setattr(far_pullaway, "vRel", 1.2)
 
     cap = get_lead_present_cruise_accel_cap(9.0, far_pullaway, 1.3, personality_max_accel=3.5)
 
-    assert cap > 1.5
+    assert 0.31 < cap <= 0.33
+
+  def test_lead_present_cruise_accel_cap_honors_reclaim_envelope_for_trace_pullaway(self):
+    trace_pullaway = _make_lead(d_rel=38.28, v_lead=16.36, a_lead=0.0)
+    setattr(trace_pullaway, "vRel", 2.06)
+
+    cap = get_lead_present_cruise_accel_cap(14.3, trace_pullaway, 1.3, personality_max_accel=3.5)
+
+    assert cap == pytest.approx(0.32)
 
   def test_lead_present_cruise_accel_cap_tightens_for_clearly_slower_leads(self):
     slow_lead = _make_lead(d_rel=100.0, v_lead=0.0, a_lead=0.0)

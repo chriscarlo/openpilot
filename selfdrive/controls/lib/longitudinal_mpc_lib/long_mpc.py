@@ -230,8 +230,12 @@ HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_CLOSING_MAX_MPS = 4.0
 HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_GAP_SURPLUS_M = 20.0
 HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_OBSTACLE_MARGIN_M = 12.0
 HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_NEAR_GAP_SURPLUS_M = 8.0
-HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_TTC_HEADWAY_S = 7.5
-HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_LOW_SPEED_TTC_HEADWAY_S = 9.5
+HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_TTC_HEADWAY_S = 4.5
+HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_LOW_SPEED_TTC_HEADWAY_S = 5.8
+HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_DECEL_TTC_HEADWAY_S = 7.5
+HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_LOW_SPEED_DECEL_TTC_HEADWAY_S = 9.5
+HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_DECEL_BLEND_BP = [0.15, 0.35]
+HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_DECEL_BLEND_V = [0.0, 1.0]
 HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_LOW_SPEED_MPS = 12.0
 HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_HIGH_SPEED_MPS = 25.0
 HYUNDAI_CRUISE_CAP_RAW_LEAD_MAX_PATH_ABS_M = 2.0
@@ -1259,7 +1263,12 @@ def get_lead_present_cruise_accel_cap(v_ego, lead, t_follow,
   pullaway_speed = max(0.0, v_lead - float(v_ego), v_rel)
 
   speed_cap = float(np.interp(float(v_ego), LEAD_PRESENT_CRUISE_SPEED_CAP_BP, LEAD_PRESENT_CRUISE_SPEED_CAP_V))
-  accel_cap = min(personality_cap, speed_cap)
+  gentle_reclaim_cap = max(
+    comfort_cap,
+    float(tuning.gap_reclaim_follow_max_accel),
+    float(tuning.lead_keepup_max_accel),
+  )
+  accel_cap = min(personality_cap, speed_cap, gentle_reclaim_cap)
   if accel_cap <= comfort_cap:
     return comfort_cap
 
@@ -1857,14 +1866,35 @@ class LongitudinalMpc:
     return float(gap_surplus_m / closing_speed_mps)
 
   @staticmethod
-  def _approach_reacquire_ttc_threshold(v_ego: float) -> float:
-    return float(np.interp(
+  def _approach_reacquire_ttc_threshold(v_ego: float, lead_decel_mps2: float = 0.0,
+                                        closing_speed_mps: float = 0.0) -> float:
+    steady_threshold = float(np.interp(
       float(v_ego),
       [HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_LOW_SPEED_MPS,
        HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_HIGH_SPEED_MPS],
       [HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_LOW_SPEED_TTC_HEADWAY_S,
        HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_TTC_HEADWAY_S],
     ))
+    decel_threshold = float(np.interp(
+      float(v_ego),
+      [HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_LOW_SPEED_MPS,
+       HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_HIGH_SPEED_MPS],
+      [HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_LOW_SPEED_DECEL_TTC_HEADWAY_S,
+       HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_DECEL_TTC_HEADWAY_S],
+    ))
+    decel_blend = float(np.interp(
+      max(0.0, float(lead_decel_mps2)),
+      HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_DECEL_BLEND_BP,
+      HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_DECEL_BLEND_V,
+    ))
+    fast_closing_blend = float(np.interp(
+      max(0.0, float(closing_speed_mps)),
+      [HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_CLOSING_MAX_MPS,
+       HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_CLOSING_MAX_MPS + 2.0],
+      [0.0, 1.0],
+    ))
+    urgency_blend = max(decel_blend, fast_closing_blend)
+    return float(steady_threshold + (decel_threshold - steady_threshold) * urgency_blend)
 
   @staticmethod
   def _is_plausible_cruise_cap_raw_lead(lead) -> bool:
@@ -3139,7 +3169,9 @@ class LongitudinalMpc:
       raw_metrics["pullaway_speed"] <= queue_pullaway_cap
     )
     approach_obstacle_delta_m = raw_metrics["obstacle_0"] - float(cruise_obstacle[0])
-    approach_reacquire_ttc_threshold_s = self._approach_reacquire_ttc_threshold(float(self.x0[1]))
+    raw_lead_decel_mps2 = max(0.0, -float(getattr(best_lead, 'aLeadK', 0.0) or 0.0))
+    approach_reacquire_ttc_threshold_s = self._approach_reacquire_ttc_threshold(
+      float(self.x0[1]), raw_lead_decel_mps2, raw_metrics["closing_speed"])
     raw_ttc_to_headway_s = self._time_to_headway(raw_gap_surplus_for_release, raw_metrics["closing_speed"])
     raw_near_target_for_reacquire = (
       raw_gap_surplus_for_release <= HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_NEAR_GAP_SURPLUS_M or
@@ -3318,6 +3350,7 @@ class LongitudinalMpc:
       "approach_obstacle_delta_m": float(approach_obstacle_delta_m),
       "approach_reacquire": bool(approach_reacquire),
       "approach_reacquire_ttc_threshold_s": float(approach_reacquire_ttc_threshold_s),
+      "approach_reacquire_lead_decel_mps2": float(raw_lead_decel_mps2),
       "raw_ttc_to_headway_s": float(raw_ttc_to_headway_s),
       "raw_near_target_for_reacquire": bool(raw_near_target_for_reacquire),
       "raw_obstacle_requires_owner": bool(raw_obstacle_requires_owner),
