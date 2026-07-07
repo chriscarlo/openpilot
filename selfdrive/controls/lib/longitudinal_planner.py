@@ -78,6 +78,8 @@ GAP_RECLAIM_FOLLOW_PULLAWAY_BP = [0.35, 1.25]
 GAP_RECLAIM_FOLLOW_PULLAWAY_V = [0.0, 1.0]
 GAP_RECLAIM_FOLLOW_PROJECT_HORIZON_S = 1.2
 GAP_RECLAIM_FOLLOW_MIN_GAP_DIV_M = 0.5
+LEAD_BRAKE_RELEASE_CLOSING_COAST_MIN_ALEAD_MPS2 = -0.15
+LEAD_BRAKE_RELEASE_CLOSING_COAST_BYPASS_DECEL_MPS2 = -0.25
 
 # Lookup table for turns
 # Allow higher total accel (lateral+longitudinal) at low speeds and taper with speed
@@ -258,10 +260,23 @@ def get_lead_brake_release_accel_floor(mpc, *, v_ego: float, lead_source: str, c
                       float(tuning.lead_brake_release_lead_decel_project_gain))
   debug["lead_decel_extra_mps2"] = float(lead_decel_extra)
   near_target_branch = False
+  release_reason = None
   if gap_error >= 0.0:
     if closing_speed > 0.0:
-      decel_needed = (closing_speed ** 2) / (2.0 * max(gap_error, 0.5)) + lead_decel_extra
-      release_floor = -min(decel_needed, brake_decel)
+      time_to_target_s = gap_error / max(closing_speed, 1e-3)
+      debug["time_to_target_s"] = float(time_to_target_s)
+      if (time_to_target_s > tuning.lead_brake_release_lookahead_s and
+          lead_accel >= LEAD_BRAKE_RELEASE_CLOSING_COAST_MIN_ALEAD_MPS2):
+        # If the equal-speed headway target is still several seconds away,
+        # do not spend the whole surplus feather-braking. Hold near coast and
+        # let the closing speed naturally reclaim the oversized gap; close or
+        # decelerating leads fall through to the kinematic brake floor below.
+        release_floor = tuning.lead_brake_release_coast_bias_mps2
+        release_reason = "closing_coast_window"
+      else:
+        decel_needed = (closing_speed ** 2) / (2.0 * max(gap_error, 0.5)) + lead_decel_extra
+        release_floor = -min(decel_needed, brake_decel)
+        release_reason = "closing_to_target"
     else:
       release_floor = tuning.lead_brake_release_coast_bias_mps2
       # Follow-regime gap reclaim (F2): once the vRel-aware target is
@@ -291,7 +306,8 @@ def get_lead_brake_release_accel_floor(mpc, *, v_ego: float, lead_source: str, c
           release_floor += (follow_cap - release_floor) * pullaway_ramp * overshoot_taper
           debug["follow_reclaim_taper"] = float(overshoot_taper)
           debug["follow_reclaim_pullaway_ramp"] = float(pullaway_ramp)
-    time_to_target_s = 0.0
+      release_reason = "gap_recovered"
+      time_to_target_s = 0.0
   elif (gap_error >= -tuning.lead_brake_release_near_target_margin_m and
         closing_speed <= tuning.lead_brake_release_near_target_max_closing_mps):
     # Near-target hold at the shallow near-target floor, but lower it by the
@@ -320,7 +336,9 @@ def get_lead_brake_release_accel_floor(mpc, *, v_ego: float, lead_source: str, c
     ))
 
   debug["active"] = True
-  if gap_error >= 0.0:
+  if release_reason is not None:
+    debug["reason"] = release_reason
+  elif gap_error >= 0.0:
     debug["reason"] = "closing_to_target" if closing_speed > 0.0 else "gap_recovered"
   elif near_target_branch:
     debug["reason"] = "near_target"
@@ -329,6 +347,18 @@ def get_lead_brake_release_accel_floor(mpc, *, v_ego: float, lead_source: str, c
   debug["floor_mps2"] = float(release_floor)
   debug["time_to_target_s"] = float(time_to_target_s)
   return float(release_floor), debug
+
+
+def should_apply_lead_brake_release_accel_floor(output_a_target: float,
+                                                release_floor: float | None,
+                                                release_debug: dict) -> bool:
+  if release_floor is None:
+    return False
+  if (str(release_debug.get("reason", "")) == "closing_coast_window" and
+      float(output_a_target) < LEAD_BRAKE_RELEASE_CLOSING_COAST_BYPASS_DECEL_MPS2):
+    release_debug["bypassed_by_brake_request"] = True
+    return False
+  return True
 
 
 def get_coast_accel(pitch):
@@ -717,7 +747,12 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     )
     self.lead_brake_release_accel_floor = float(lead_brake_release_floor or 0.0)
     self.lead_brake_release_debug = lead_brake_release_debug
-    if lead_brake_release_floor is not None and not self.output_should_stop:
+    if (not self.output_should_stop and
+        should_apply_lead_brake_release_accel_floor(
+          output_a_target,
+          lead_brake_release_floor,
+          lead_brake_release_debug,
+        )):
       output_a_target = max(output_a_target, float(lead_brake_release_floor))
       # The M1 kinematic slowdown ceiling must win over the release floor while
       # the lead is a corroborated threat: in the overlap state (lead

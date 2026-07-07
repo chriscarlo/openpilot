@@ -70,6 +70,9 @@ class LeadRoleClassifier:
   CENTER_DEMOTION_MAX_PATH_ABS_M = 3.2
   CENTER_DEMOTION_MAX_PATH_DELTA_M = 2.25
   CENTER_DEMOTION_MAX_DREL_DELTA_M = 6.0
+  RAW_LATERAL_DEPARTURE_MIN_SPEED_MPS = 12.0
+  RAW_LATERAL_DEPARTURE_Y_ABS_M = 6.0
+  RAW_LATERAL_DEPARTURE_VLAT_MPS = 6.0
 
   def __init__(self):
     self._params = Params()
@@ -156,8 +159,11 @@ class LeadRoleClassifier:
       "cutin_promoted": False,
       "grace_active": False,
       "grace_remaining_s": 0.0,
+      "skip_center_grace": False,
       "path_abs": None,
       "d_rel": None,
+      "raw_y_abs": None,
+      "v_lat_abs": None,
     }
     if not self._lead_valid(lead):
       info["reason"] = "invalid_or_missing"
@@ -166,9 +172,14 @@ class LeadRoleClassifier:
     path_offset = self._get_path_offset(lead)
     path_abs = abs(path_offset)
     d_rel = float(getattr(lead, "dRel", 0.0) or 0.0)
+    y_rel = float(getattr(lead, "yRel", 0.0) or 0.0)
     v_lat = float(getattr(lead, "vLat", 0.0) or 0.0)
+    raw_y_abs = abs(y_rel) if math.isfinite(y_rel) else 0.0
+    v_lat_abs = abs(v_lat) if math.isfinite(v_lat) else 0.0
     info["path_abs"] = path_abs
     info["d_rel"] = d_rel
+    info["raw_y_abs"] = raw_y_abs
+    info["v_lat_abs"] = v_lat_abs
 
     prev = self._slot_state.get(slot, {})
     prev_role = str(prev.get("role", self.INVALID))
@@ -189,6 +200,11 @@ class LeadRoleClassifier:
       role = self.CENTER_CONTROL
       info["reason"] = "gate_bypassed"
     else:
+      raw_lateral_departure = (
+        float(v_ego) >= self.RAW_LATERAL_DEPARTURE_MIN_SPEED_MPS
+        and raw_y_abs >= self.RAW_LATERAL_DEPARTURE_Y_ABS_M
+        and v_lat_abs >= self.RAW_LATERAL_DEPARTURE_VLAT_MPS
+      )
       center_enter_m = self._cfg["center_y_abs_min_m"]
       center_exit_m = self._cfg["center_y_abs_max_m"] + self._cfg["center_hyst_m"]
       in_center = path_abs <= (center_exit_m if prev_role == self.CENTER_CONTROL else center_enter_m)
@@ -203,7 +219,13 @@ class LeadRoleClassifier:
         in_center = True
         info["cutin_promoted"] = True
 
-      if in_center:
+      if raw_lateral_departure:
+        side_offset = y_rel if abs(y_rel) > 1e-3 else path_offset
+        role = self.ADJ_LEFT if side_offset > 0.0 else self.ADJ_RIGHT
+        info["reason"] = "raw_lateral_departure"
+        info["cutin_promoted"] = False
+        info["skip_center_grace"] = True
+      elif in_center:
         role = self.CENTER_CONTROL
         info["reason"] = "center_lane"
       else:
@@ -215,6 +237,8 @@ class LeadRoleClassifier:
   def _maybe_apply_center_demotion_grace(self, slot: int, lead: Any, role: str, info: dict[str, Any], *,
                                          other_role: str, dropped_slot: int | None, now: float) -> tuple[str, dict[str, Any]]:
     if role == self.CENTER_CONTROL or not self._lead_valid(lead):
+      return role, info
+    if bool(info.get("skip_center_grace", False)):
       return role, info
     if other_role == self.CENTER_CONTROL or dropped_slot == slot:
       return role, info

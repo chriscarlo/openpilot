@@ -70,6 +70,48 @@ class TestLeadRoleClassifier:
     assert ctrl0.status
     assert not ctrl1.status
 
+  def test_curve_lead_keeps_control_with_large_raw_yrel_but_low_vlat(self):
+    c = _make_classifier()
+    lead0 = _make_lead(y_rel=-8.0, d_path=0.2, v_lat=0.2)
+    lead1 = _make_lead(status=False)
+    ctrl0, ctrl1, dbg = c.classify(v_ego=30.0, lead0=lead0, lead1=lead1, now=1.0)
+
+    assert dbg["roles"]["lead0"] == LeadRoleClassifier.CENTER_CONTROL
+    assert dbg["reasons"]["lead0"] == "center_lane"
+    assert ctrl0.status
+    assert not ctrl1.status
+
+  def test_raw_lateral_departure_releases_control_even_if_path_stays_centered(self):
+    c = _make_classifier()
+    lead1 = _make_lead(status=False)
+
+    c.classify(v_ego=30.0, lead0=_make_lead(d_rel=70.0, y_rel=0.2, d_path=0.2, v_lat=0.0), lead1=lead1, now=1.0)
+    ctrl0, ctrl1, dbg = c.classify(
+      v_ego=30.0,
+      lead0=_make_lead(d_rel=70.0, y_rel=-8.0, d_path=0.2, v_lat=12.0),
+      lead1=lead1,
+      now=1.1,
+    )
+
+    assert dbg["roles"]["lead0"] == LeadRoleClassifier.ADJ_RIGHT
+    assert dbg["reasons"]["lead0"] == "raw_lateral_departure"
+    assert dbg["center_grace"]["lead0"]["active"] is False
+    assert not ctrl0.status
+    assert not ctrl1.status
+
+  def test_raw_lateral_departure_blocks_extreme_cutin_promotion(self):
+    c = _make_classifier()
+    lead0 = _make_lead(d_rel=50.0, y_rel=8.0, d_path=2.0, v_lat=-12.0, v_rel=-1.0)
+    lead1 = _make_lead(status=False)
+
+    ctrl0, ctrl1, dbg = c.classify(v_ego=30.0, lead0=lead0, lead1=lead1, now=1.0)
+
+    assert dbg["roles"]["lead0"] == LeadRoleClassifier.ADJ_LEFT
+    assert dbg["reasons"]["lead0"] == "raw_lateral_departure"
+    assert dbg["cutin_promoted"]["lead0"] is False
+    assert not ctrl0.status
+    assert not ctrl1.status
+
   def test_curve_adjacent_lead_stays_awareness_when_path_offset_is_large(self):
     c = _make_classifier()
     lead0 = _make_lead(y_rel=0.1, d_path=3.2)

@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 import sys
 
+import numpy as np
 import pytest
 
 from cereal import log
@@ -18,6 +19,10 @@ from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import (
   get_lead_approach_preview_buffer,
   should_start_cutin_settle_event,
 )
+from openpilot.selfdrive.controls.lib.longitudinal_planner import (
+  get_lead_brake_release_accel_floor,
+  should_apply_lead_brake_release_accel_floor,
+)
 from openpilot.selfdrive.controls.lib.longitudinal_live_tune import LeadResponseTuningConfig
 from openpilot.selfdrive.test.longitudinal_maneuvers.plant import Plant
 from openpilot.sunnypilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPlannerSP
@@ -29,6 +34,16 @@ def _make_lead(*, status=True, d_rel=60.0, v_lead=33.5, a_lead=0.0):
     dRel=d_rel,
     vLead=v_lead,
     aLeadK=a_lead,
+  )
+
+
+def _make_release_mpc(tuning=None, *, t_follow=1.5, min_accel=-4.0):
+  return SimpleNamespace(
+    vibe_controller=SimpleNamespace(is_follow_enabled=lambda: True),
+    _live_tune_cfg=LeadResponseTuningConfig.defaults() if tuning is None else tuning,
+    current_t_follow=t_follow,
+    params=np.array([[min_accel]], dtype=float),
+    x0=(0.0, 0.0, 0.0),
   )
 
 
@@ -113,6 +128,73 @@ def _planner_test_setup(monkeypatch):
 
 
 class TestLeadInteractionHeuristics:
+  def test_brake_release_coasts_when_steady_closing_target_is_far(self):
+    tuning = LeadResponseTuningConfig(
+      lead_brake_release_lookahead_s=2.0,
+      lead_brake_release_coast_bias_mps2=0.05,
+    )
+    mpc = _make_release_mpc(tuning, t_follow=1.5)
+    lead = _make_lead(d_rel=70.0, v_lead=27.0, a_lead=0.0)
+
+    floor, debug = get_lead_brake_release_accel_floor(
+      mpc,
+      v_ego=29.0,
+      lead_source="lead0",
+      control_leads=(lead, None),
+    )
+
+    assert debug["reason"] == "closing_coast_window"
+    assert debug["time_to_target_s"] > tuning.lead_brake_release_lookahead_s
+    assert floor == pytest.approx(tuning.lead_brake_release_coast_bias_mps2)
+
+  def test_brake_release_still_brakes_when_closing_target_is_near(self):
+    tuning = LeadResponseTuningConfig(lead_brake_release_lookahead_s=2.0)
+    mpc = _make_release_mpc(tuning, t_follow=1.5)
+    lead = _make_lead(d_rel=51.5, v_lead=27.0, a_lead=0.0)
+
+    floor, debug = get_lead_brake_release_accel_floor(
+      mpc,
+      v_ego=29.0,
+      lead_source="lead0",
+      control_leads=(lead, None),
+    )
+
+    assert debug["reason"] == "closing_to_target"
+    assert debug["time_to_target_s"] <= tuning.lead_brake_release_lookahead_s
+    assert floor < -0.5
+
+  def test_brake_release_coast_window_does_not_mask_decelerating_lead(self):
+    tuning = LeadResponseTuningConfig(
+      lead_brake_release_lookahead_s=2.0,
+      lead_brake_release_coast_bias_mps2=0.05,
+    )
+    mpc = _make_release_mpc(tuning, t_follow=1.5)
+    lead = _make_lead(d_rel=70.0, v_lead=27.0, a_lead=-0.3)
+
+    floor, debug = get_lead_brake_release_accel_floor(
+      mpc,
+      v_ego=29.0,
+      lead_source="lead0",
+      control_leads=(lead, None),
+    )
+
+    assert debug["reason"] == "closing_to_target"
+    assert debug["time_to_target_s"] > tuning.lead_brake_release_lookahead_s
+    assert floor < -0.3
+
+  def test_brake_release_coast_window_cannot_override_meaningful_brake_request(self):
+    debug = {"reason": "closing_coast_window"}
+
+    assert should_apply_lead_brake_release_accel_floor(-0.10, 0.05, debug)
+    assert not should_apply_lead_brake_release_accel_floor(-0.30, 0.05, debug)
+    assert debug["bypassed_by_brake_request"] is True
+
+  def test_brake_release_non_coast_floor_can_still_clip_brake_request(self):
+    debug = {"reason": "closing_to_target"}
+
+    assert should_apply_lead_brake_release_accel_floor(-0.30, -0.08, debug)
+    assert "bypassed_by_brake_request" not in debug
+
   def test_gap_reclaim_floor_only_appears_for_safe_pullaway(self):
     safe_pullaway = _make_lead(d_rel=58.0, v_lead=34.3, a_lead=0.2)
     slower_lead = _make_lead(d_rel=58.0, v_lead=32.8, a_lead=0.0)

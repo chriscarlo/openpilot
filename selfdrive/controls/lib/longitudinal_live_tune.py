@@ -294,7 +294,10 @@ LEAD_RESPONSE_TUNE_SPECS = (
     default=2.0,
     minimum=0.1,
     maximum=6.0,
-    description="Lookahead window for easing decel when an opening gap is projected to recover the Vibe headway target.",
+    description="Lookahead window for easing decel around the Vibe headway target. Opening gaps use it as the projected "
+                "recovery window; closing gaps that are still farther away than this from the equal-speed headway target "
+                "hold near coast instead of feather-braking across the entire surplus. Close targets and decelerating "
+                "leads still fall through to the kinematic brake floor.",
   ),
   LeadResponseTuneSpec(
     attr="lead_brake_release_min_pullaway_mps",

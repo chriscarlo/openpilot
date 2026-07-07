@@ -2004,6 +2004,14 @@ class LongitudinalMpc:
       self._classifier_demotion_hold_until_t = None
       return None, debug
 
+    source_key = str(self._hyundai_virtual_lead_source or "")
+    debug["source"] = source_key
+    role_reasons = self.lead_role_debug.get("reasons", {}) if isinstance(self.lead_role_debug, dict) else {}
+    if str(role_reasons.get(source_key, "")) == "raw_lateral_departure":
+      debug["reason"] = "raw_lateral_departure"
+      self._classifier_demotion_hold_until_t = None
+      return None, debug
+
     stable_age_s = (
       0.0 if self._hyundai_virtual_lead_stable_since_t is None
       else max(0.0, now - float(self._hyundai_virtual_lead_stable_since_t))

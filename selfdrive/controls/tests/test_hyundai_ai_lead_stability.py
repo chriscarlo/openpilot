@@ -505,6 +505,35 @@ class TestHyundaiAiLeadStability:
     assert demotion_debug["corroboration"]["dRel_delta_m"] <= 2.0
     assert mpc.acc_source_debug["source_transition_active"] is False
 
+  def test_raw_lateral_departure_bypasses_classifier_demotion_hold(self):
+    # The planner demotion backstop is only for brief classifier path spikes.
+    # If the classifier explicitly flags an extreme raw lateral departure, do
+    # not re-hold the previous virtual lead just because dRel still matches.
+    mpc = _make_hyundai_mpc(v_ego=29.0, a_ego=0.0, time_fn=_MonotonicStub(step=0.1))
+
+    stable_lead = _make_lead(d_rel=35.6, y_rel=0.2, d_path=0.2, v_lat=0.0, v_rel=0.0, v_lead=29.0, model_prob=0.97)
+    for _ in range(15):
+      _run_update(mpc, stable_lead, _make_lead(status=False))
+    assert mpc.source == "lead0"
+    assert mpc._hyundai_virtual_lead is not None
+
+    departing_lead = _make_lead(
+      d_rel=35.6,
+      y_rel=-8.0,
+      d_path=0.2,
+      v_lat=12.0,
+      v_rel=0.0,
+      v_lead=29.0,
+      model_prob=0.97,
+    )
+    _run_update(mpc, departing_lead, _make_lead(status=False))
+
+    assert mpc.lead_role_debug["reasons"]["lead0"] == "raw_lateral_departure"
+    assert mpc.lead_role_debug["control_status"]["lead0"] is False
+    assert mpc.source == "cruise"
+    assert mpc.acc_source_debug["reason"] == "no_control_lead"
+    assert mpc._classifier_demotion_hold_until_t is None
+
   def test_classifier_demotion_hold_releases_when_raw_radar_is_also_gone(self, monkeypatch):
     # Safety backstop: if the raw radarstate has no lead anywhere,
     # corroboration fails and the demotion hold must NOT engage — otherwise
