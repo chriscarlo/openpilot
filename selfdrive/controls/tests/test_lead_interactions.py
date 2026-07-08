@@ -1,3 +1,4 @@
+from dataclasses import replace
 from types import SimpleNamespace
 import sys
 
@@ -376,10 +377,43 @@ class TestLeadInteractionHeuristics:
     assert 0.31 < cap <= 0.33
 
   def test_lead_present_cruise_accel_cap_honors_reclaim_envelope_for_trace_pullaway(self):
+    # 2026-07-06 freeway trace t=61.6 surge row (pre-fix commanded +2.17): the
+    # far catch-up allowance grants only a small margin above the gentle cap
+    # here (partial speed gate at 14.3 m/s, ~1.0 s beyond target).
     trace_pullaway = _make_lead(d_rel=38.28, v_lead=16.36, a_lead=0.0)
     setattr(trace_pullaway, "vRel", 2.06)
 
     cap = get_lead_present_cruise_accel_cap(14.3, trace_pullaway, 1.3, personality_max_accel=3.5)
+
+    assert 0.32 < cap < 0.45
+
+  def test_lead_present_cruise_accel_cap_far_catchup_reaches_far_cap_at_freeway_speed(self):
+    # Post-bc6c853f9 gap: the flat gentle cap strands ego >1.5 s beyond target
+    # until the model loses the lead near ~120 m. Above the speed gate with a
+    # full surplus-time blend the ceiling must reach LeadPresentCruiseFarCapMps2.
+    far_freeway = _make_lead(d_rel=90.0, v_lead=25.5, a_lead=0.0)
+    setattr(far_freeway, "vRel", 0.5)
+
+    cap = get_lead_present_cruise_accel_cap(25.0, far_freeway, 1.3, personality_max_accel=3.5)
+
+    assert cap == pytest.approx(0.85)
+
+  def test_lead_present_cruise_accel_cap_far_catchup_coasts_once_closing(self):
+    # The far allowance must never turn into an approach: closing >= 1 m/s with
+    # no pullaway still hits the coast clamp regardless of surplus.
+    far_closing = _make_lead(d_rel=90.0, v_lead=23.0, a_lead=0.0)
+    setattr(far_closing, "vRel", -2.0)
+
+    cap = get_lead_present_cruise_accel_cap(25.0, far_closing, 1.3, personality_max_accel=3.5)
+
+    assert cap == pytest.approx(0.0)
+
+  def test_lead_present_cruise_accel_cap_far_cap_sentinel_restores_flat_gentle_cap(self):
+    tuning = replace(LeadResponseTuningConfig.defaults(), lead_present_cruise_far_cap_mps2=0.0)
+    far_freeway = _make_lead(d_rel=90.0, v_lead=25.5, a_lead=0.0)
+    setattr(far_freeway, "vRel", 0.5)
+
+    cap = get_lead_present_cruise_accel_cap(25.0, far_freeway, 1.3, tuning, personality_max_accel=3.5)
 
     assert cap == pytest.approx(0.32)
 

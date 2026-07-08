@@ -294,6 +294,15 @@ LEAD_PRESENT_CRUISE_CLOSING_TIGHTEN_V = [1.0, 0.65, 0.25, 0.10]
 LEAD_PRESENT_CRUISE_CLOSING_PROJECTION_S = 3.0
 LEAD_PRESENT_CRUISE_COAST_CLOSING_MPS = 1.0
 LEAD_PRESENT_CRUISE_COAST_ACCEL_CAP = 0.0
+# Far catch-up allowance (2026-07-06 freeway trace): with the flat gentle cap,
+# a lead pulling away leaves ego stranded >1.5 s beyond target until the model
+# loses the lead near ~100-120 m and the cap discontinuously vanishes. The
+# speed gate keeps city/traffic behavior identical to the flat gentle cap; the
+# surplus blend is in TIME beyond target so it is speed-consistent.
+LEAD_PRESENT_CRUISE_FAR_CAP_SPEED_BP = [12.0, 20.0]
+LEAD_PRESENT_CRUISE_FAR_CAP_SPEED_V = [0.0, 1.0]
+LEAD_PRESENT_CRUISE_FAR_SURPLUS_TIME_BP = [0.6, 1.6]
+LEAD_PRESENT_CRUISE_FAR_SURPLUS_TIME_V = [0.0, 1.0]
 
 # ---------------------------------------------------------------------------
 # Lead distance prediction-corrector filter
@@ -1268,7 +1277,19 @@ def get_lead_present_cruise_accel_cap(v_ego, lead, t_follow,
     float(tuning.gap_reclaim_follow_max_accel),
     float(tuning.lead_keepup_max_accel),
   )
-  accel_cap = min(personality_cap, speed_cap, gentle_reclaim_cap)
+  # gap_surplus is already closing-projected (3 s) and the pullaway/closing
+  # blends plus the coast clamp below still shape the final cap, so building
+  # closing speed sheds the far allowance well before any reacquire handoff.
+  # Rollback sentinel: LeadPresentCruiseFarCapMps2 at or below the gentle cap
+  # (e.g. 0) restores the flat gentle-cap behavior exactly.
+  far_cap = max(0.0, float(getattr(tuning, 'lead_present_cruise_far_cap_mps2', 0.0)))
+  far_extra = 0.0
+  if far_cap > gentle_reclaim_cap:
+    surplus_time_s = gap_surplus / max(float(v_ego), 1.0)
+    far_speed_blend = float(np.interp(float(v_ego), LEAD_PRESENT_CRUISE_FAR_CAP_SPEED_BP, LEAD_PRESENT_CRUISE_FAR_CAP_SPEED_V))
+    far_surplus_blend = float(np.interp(surplus_time_s, LEAD_PRESENT_CRUISE_FAR_SURPLUS_TIME_BP, LEAD_PRESENT_CRUISE_FAR_SURPLUS_TIME_V))
+    far_extra = (far_cap - gentle_reclaim_cap) * far_speed_blend * far_surplus_blend
+  accel_cap = min(personality_cap, speed_cap, gentle_reclaim_cap + far_extra)
   if accel_cap <= comfort_cap:
     return comfort_cap
 
@@ -3249,11 +3270,23 @@ class LongitudinalMpc:
     active_mode = self._acc_obstacle_mode
     reason = "filtered_hold"
     stabilization_push_suppressed = False
+    # Release-side hysteresis: releasing a still-closing lead uses the reacquire
+    # TTC threshold PLUS a gap, never the shared value. Raw TTC-to-headway
+    # frame jitter is ~2.5 s p90 on the no-radar path (2026-07-06 freeway
+    # trace), so equal thresholds in both directions churn ownership at the
+    # boundary (observed 0.1 s double-flips). The dead band
+    # (thr, thr + hysteresis] holds the current owner. Acquire-side thresholds
+    # are untouched, so handoffs can only get LATER, never earlier. Rollback
+    # sentinel: ApproachReleaseTtcHysteresisS = 0 restores the shared threshold.
+    far_closing_release_ttc_threshold_s = (
+      approach_reacquire_ttc_threshold_s +
+      max(0.0, float(self._live_tune_cfg.approach_release_ttc_hysteresis_s))
+    )
     far_closing_cruise_ok = (
       active_mode == 'lead' and
       raw_metrics["closing_speed"] >= HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_CLOSING_MPS and
       raw_gap_surplus_for_release > HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_NEAR_GAP_SURPLUS_M and
-      raw_ttc_to_headway_s > approach_reacquire_ttc_threshold_s and
+      raw_ttc_to_headway_s > far_closing_release_ttc_threshold_s and
       not low_speed_queue_hold and
       not stopping_need_hold
     )
@@ -3351,6 +3384,7 @@ class LongitudinalMpc:
       "approach_reacquire": bool(approach_reacquire),
       "approach_reacquire_ttc_threshold_s": float(approach_reacquire_ttc_threshold_s),
       "approach_reacquire_lead_decel_mps2": float(raw_lead_decel_mps2),
+      "far_closing_release_ttc_threshold_s": float(far_closing_release_ttc_threshold_s),
       "raw_ttc_to_headway_s": float(raw_ttc_to_headway_s),
       "raw_near_target_for_reacquire": bool(raw_near_target_for_reacquire),
       "raw_obstacle_requires_owner": bool(raw_obstacle_requires_owner),

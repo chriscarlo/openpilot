@@ -9,6 +9,7 @@ from openpilot.selfdrive.controls.lib.longitudinal_live_tune import build_lead_r
 from openpilot.selfdrive.controls.lib.longitudinal_planner import get_max_accel
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import (
   ACCEL_MAX,
+  STOP_DISTANCE,
   LongitudinalMpc,
   N,
   get_gap_reclaim_accel_floor,
@@ -605,6 +606,77 @@ class TestHyundaiAiLeadStability:
     assert mpc.acc_source_debug["raw_obstacle_requires_owner"] is False
     assert mpc.acc_source_debug["raw_gap_surplus_m"] > 20.0
     assert mpc.acc_source_debug["raw_ttc_to_headway_s"] > mpc.acc_source_debug["approach_reacquire_ttc_threshold_s"]
+
+  def test_far_closing_release_holds_ownership_inside_ttc_hysteresis_band(self):
+    # 2026-07-06 freeway trace: raw TTC-to-headway frame jitter is ~2.5 s p90,
+    # and the bc6c853f9 threshold split made release (far_closing_cruise) and
+    # reacquire share one TTC boundary — observed as 0.1 s ownership
+    # double-flips mid-approach. The release threshold must now sit a full
+    # hysteresis gap above the reacquire threshold, holding the current owner
+    # inside the dead band in BOTH directions.
+    mpc = _make_hyundai_mpc(v_ego=29.0, a_ego=0.0, time_fn=_MonotonicStub(step=0.2))
+
+    # Warmup frame to learn the effective follow gap, then place the lead by
+    # gap SURPLUS so TTC-to-headway = surplus / closing is exact by design.
+    def closing_lead(surplus_m):
+      d_rel = STOP_DISTANCE + mpc.current_t_follow * 29.0 + surplus_m
+      return _make_lead(d_rel=d_rel, y_rel=0.04, d_path=0.04, v_rel=-2.0, v_lead=27.0, model_prob=0.97)
+
+    _run_update_with_state(mpc, closing_lead(42.0), _make_lead(status=False), v_ego=29.0)
+
+    # Acquire: sustained closing approach inside the reacquire TTC threshold
+    # (surplus 8 m at closing 2 m/s -> TTC 4.0 s <= 4.5 s steady threshold).
+    for _ in range(8):
+      _run_update_with_state(mpc, closing_lead(8.0), _make_lead(status=False), v_ego=29.0)
+    assert mpc.source == "lead0"
+
+    # Dead band: TTC 6.0 s sits between the reacquire threshold (4.5 s) and
+    # release threshold (4.5 + 2.5 s) — lead ownership must hold.
+    _run_update_with_state(mpc, closing_lead(12.0), _make_lead(status=False), v_ego=29.0)
+    reacquire_thr = mpc.acc_source_debug["approach_reacquire_ttc_threshold_s"]
+    release_thr = mpc.acc_source_debug["far_closing_release_ttc_threshold_s"]
+    assert release_thr == pytest.approx(reacquire_thr + 2.5)
+    assert reacquire_thr < mpc.acc_source_debug["raw_ttc_to_headway_s"] <= release_thr
+    assert mpc.source == "lead0"
+    assert mpc.acc_source_debug["reason"] != "far_closing_cruise"
+
+    # Beyond the release threshold (TTC 9.0 s > 7.0 s) the still-closing lead
+    # genuinely releases to cruise.
+    _run_update_with_state(mpc, closing_lead(18.0), _make_lead(status=False), v_ego=29.0)
+    assert mpc.acc_source_debug["raw_ttc_to_headway_s"] > mpc.acc_source_debug["far_closing_release_ttc_threshold_s"]
+    assert mpc.source == "cruise"
+    assert mpc.acc_source_debug["reason"] == "far_closing_cruise"
+
+    # Back inside the dead band from the cruise side: no reacquire either —
+    # the band holds whichever side currently owns the obstacle.
+    _run_update_with_state(mpc, closing_lead(11.0), _make_lead(status=False), v_ego=29.0)
+    assert mpc.source == "cruise"
+    assert mpc.acc_source_debug["approach_reacquire"] is False
+
+  def test_far_closing_release_hysteresis_zero_sentinel_restores_shared_threshold(self):
+    params = Params()
+    params.put("Longitudinal.LiveTune.ApproachReleaseTtcHysteresisS", 0.0)
+    try:
+      mpc = _make_hyundai_mpc(v_ego=29.0, a_ego=0.0, time_fn=_MonotonicStub(step=0.2))
+
+      def closing_lead(surplus_m):
+        d_rel = STOP_DISTANCE + mpc.current_t_follow * 29.0 + surplus_m
+        return _make_lead(d_rel=d_rel, y_rel=0.04, d_path=0.04, v_rel=-2.0, v_lead=27.0, model_prob=0.97)
+
+      _run_update_with_state(mpc, closing_lead(42.0), _make_lead(status=False), v_ego=29.0)
+      for _ in range(8):
+        _run_update_with_state(mpc, closing_lead(8.0), _make_lead(status=False), v_ego=29.0)
+      assert mpc.source == "lead0"
+
+      # With the sentinel the same TTC 6.0 s frame that the hysteresis test
+      # holds through releases immediately (legacy shared-threshold behavior).
+      _run_update_with_state(mpc, closing_lead(12.0), _make_lead(status=False), v_ego=29.0)
+      assert mpc.acc_source_debug["far_closing_release_ttc_threshold_s"] == pytest.approx(
+        mpc.acc_source_debug["approach_reacquire_ttc_threshold_s"])
+      assert mpc.source == "cruise"
+      assert mpc.acc_source_debug["reason"] == "far_closing_cruise"
+    finally:
+      params.remove("Longitudinal.LiveTune.ApproachReleaseTtcHysteresisS")
 
   def test_classifier_demotion_hold_releases_when_raw_radar_is_also_gone(self, monkeypatch):
     # Safety backstop: if the raw radarstate has no lead anywhere,

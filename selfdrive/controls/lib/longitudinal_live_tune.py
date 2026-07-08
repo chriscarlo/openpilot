@@ -151,6 +151,20 @@ LEAD_RESPONSE_TUNE_SPECS = (
                 "taper (naive raise, diagnostic); use GapReclaimFollowMaxAccel = 0 to roll the whole raise back.",
   ),
   LeadResponseTuneSpec(
+    attr="lead_present_cruise_far_cap_mps2",
+    key="Longitudinal.LiveTune.LeadPresentCruiseFarCapMps2",
+    cli_name="lead-present-cruise-far-cap-mps2",
+    label="cruise_far_cap_mps2",
+    default=0.85,
+    minimum=0.0,
+    maximum=2.0,
+    description="Ceiling the lead-present cruise accel cap may grow toward when ego has fallen well beyond the "
+                "follow target at speed (surplus-TIME blend 0.6-1.6 s beyond target; zero authority below 12 m/s, "
+                "full by 20 m/s, so city/traffic keeps the flat gentle cap). Personality and speed caps still apply "
+                "on top, and the closing-tighten/coast clamps still zero it while closing. Rollback sentinel: any "
+                "value at or below the gentle reclaim cap (e.g. 0) restores the flat gentle-cap behavior exactly.",
+  ),
+  LeadResponseTuneSpec(
     attr="lead_keepup_strength",
     key="Longitudinal.LiveTune.LeadKeepUpStrength",
     cli_name="lead-keepup-strength",
@@ -696,6 +710,20 @@ LEAD_RESPONSE_TUNE_SPECS = (
                 "(ego-faster / negative-vRel) trend, so the planner stops spending headway accelerating into a sub-target "
                 "lead before lead0 latches. Not windowed. Rollback sentinel: a large value (e.g. 10 = the spec maximum) "
                 "disables the cap.",
+  ),
+  LeadResponseTuneSpec(
+    attr="approach_release_ttc_hysteresis_s",
+    key="Longitudinal.LiveTune.ApproachReleaseTtcHysteresisS",
+    cli_name="approach-release-ttc-hysteresis-s",
+    label="approach_release_ttc_hyst_s",
+    default=2.5,
+    minimum=0.0,
+    maximum=6.0,
+    description="Hysteresis gap (s) added above the approach-reacquire TTC threshold before a lead-owned, still-"
+                "closing follow may release to cruise (far_closing_cruise). Raw TTC-to-headway frame jitter is "
+                "~2.5 s p90 on the no-radar EV6 path (2026-07-06 freeway trace), so a shared threshold in both "
+                "directions churns ownership at the boundary. Acquire-side thresholds are untouched (handoffs can "
+                "only get later, never earlier). Rollback sentinel: 0 restores the shared-threshold behavior.",
   ),
   LeadResponseTuneSpec(
     attr="comfort_jerk_limit_mps3",
@@ -1615,6 +1643,7 @@ class LeadResponseTuningConfig:
   gap_reclaim_max_accel: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["gap_reclaim_max_accel"].default
   gap_reclaim_follow_max_accel: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["gap_reclaim_follow_max_accel"].default
   gap_reclaim_taper_gain: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["gap_reclaim_taper_gain"].default
+  lead_present_cruise_far_cap_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_present_cruise_far_cap_mps2"].default
   lead_keepup_strength: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_keepup_strength"].default
   lead_keepup_gap_min_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_keepup_gap_min_m"].default
   lead_keepup_max_accel: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_keepup_max_accel"].default
@@ -1665,6 +1694,7 @@ class LeadResponseTuningConfig:
   handoff_limit_window_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["handoff_limit_window_s"].default
   handoff_limit_max_delta_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["handoff_limit_max_delta_mps2"].default
   handoff_inside_df_positive_cap_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["handoff_inside_df_positive_cap_mps2"].default
+  approach_release_ttc_hysteresis_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["approach_release_ttc_hysteresis_s"].default
   comfort_jerk_limit_mps3: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["comfort_jerk_limit_mps3"].default
   comfort_jerk_bypass_decel_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["comfort_jerk_bypass_decel_mps2"].default
   lead_prob_enter: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_prob_enter"].default
