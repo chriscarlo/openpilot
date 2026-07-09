@@ -371,6 +371,8 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"Longitudinal.LiveTune.GapReclaimFollowMaxAccel", {PERSISTENT | BACKUP, FLOAT, "0.32"}},
     {"Longitudinal.LiveTune.GapReclaimTaperGain", {PERSISTENT | BACKUP, FLOAT, "2.0"}},
     {"Longitudinal.LiveTune.LeadPresentCruiseFarCapMps2", {PERSISTENT | BACKUP, FLOAT, "0.85"}},
+    {"Longitudinal.LiveTune.LeadPresentCruiseChaseGain", {PERSISTENT | BACKUP, FLOAT, "1.0"}},
+    {"Longitudinal.LiveTune.LeadPresentCruiseChaseTauS", {PERSISTENT | BACKUP, FLOAT, "3.0"}},
     {"Longitudinal.LiveTune.LeadKeepUpStrength", {PERSISTENT | BACKUP, FLOAT, "1.15"}},
     {"Longitudinal.LiveTune.LeadKeepUpGapMinM", {PERSISTENT | BACKUP, FLOAT, "0.10"}},
     {"Longitudinal.LiveTune.LeadKeepUpMaxAccel", {PERSISTENT | BACKUP, FLOAT, "0.22"}},

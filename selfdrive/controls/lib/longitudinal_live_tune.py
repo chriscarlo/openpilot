@@ -165,6 +165,35 @@ LEAD_RESPONSE_TUNE_SPECS = (
                 "value at or below the gentle reclaim cap (e.g. 0) restores the flat gentle-cap behavior exactly.",
   ),
   LeadResponseTuneSpec(
+    attr="lead_present_cruise_chase_gain",
+    key="Longitudinal.LiveTune.LeadPresentCruiseChaseGain",
+    cli_name="lead-present-cruise-chase-gain",
+    label="cruise_chase_gain",
+    default=1.0,
+    minimum=0.0,
+    maximum=3.0,
+    description="Gain K on the kinematic chase allowance of the lead-present cruise cap: the cap ceiling may rise by "
+                "K x (max(0, aLeadK) + pullaway / LeadPresentCruiseChaseTauS) above the gentle reclaim cap, combined "
+                "with the far catch-up allowance via max() (never summed). Third instance of the flat-cap defect class "
+                "(2026-07-08): a hard-launching lead triggers ownership release in ~2 s, the Event A launch floor is "
+                "lead-owned-only and fades by 10 m/s ego, and the flat gentle cap then strands the 4-12 m/s chase at "
+                "~0.32 m/s^2. Personality and the speed-shaped speed_cap still bound the result; pullaway blend, "
+                "closing_tighten, and the coast clamp still shape onset and kill it while closing. Rollback sentinel: "
+                "0 removes the allowance (flat gentle cap + far catch-up only).",
+  ),
+  LeadResponseTuneSpec(
+    attr="lead_present_cruise_chase_tau_s",
+    key="Longitudinal.LiveTune.LeadPresentCruiseChaseTauS",
+    cli_name="lead-present-cruise-chase-tau-s",
+    label="cruise_chase_tau_s",
+    default=3.0,
+    minimum=0.5,
+    maximum=10.0,
+    description="Time constant (s) for nulling the pullaway speed deficit in the kinematic chase allowance: the "
+                "pullaway term is pullaway / tau, so 3.0 means 'authority sized to close a speed deficit in ~3 s'. "
+                "Smaller = more eager chase; larger = lazier. The lead-accel matching term is not affected by tau.",
+  ),
+  LeadResponseTuneSpec(
     attr="lead_keepup_strength",
     key="Longitudinal.LiveTune.LeadKeepUpStrength",
     cli_name="lead-keepup-strength",
@@ -1674,6 +1703,8 @@ class LeadResponseTuningConfig:
   gap_reclaim_follow_max_accel: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["gap_reclaim_follow_max_accel"].default
   gap_reclaim_taper_gain: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["gap_reclaim_taper_gain"].default
   lead_present_cruise_far_cap_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_present_cruise_far_cap_mps2"].default
+  lead_present_cruise_chase_gain: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_present_cruise_chase_gain"].default
+  lead_present_cruise_chase_tau_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_present_cruise_chase_tau_s"].default
   lead_keepup_strength: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_keepup_strength"].default
   lead_keepup_gap_min_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_keepup_gap_min_m"].default
   lead_keepup_max_accel: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_keepup_max_accel"].default

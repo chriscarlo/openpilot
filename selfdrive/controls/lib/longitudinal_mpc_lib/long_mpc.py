@@ -1317,7 +1317,24 @@ def get_lead_present_cruise_accel_cap(v_ego, lead, t_follow,
     far_speed_blend = float(np.interp(float(v_ego), LEAD_PRESENT_CRUISE_FAR_CAP_SPEED_BP, LEAD_PRESENT_CRUISE_FAR_CAP_SPEED_V))
     far_surplus_blend = float(np.interp(surplus_time_s, LEAD_PRESENT_CRUISE_FAR_SURPLUS_TIME_BP, LEAD_PRESENT_CRUISE_FAR_SURPLUS_TIME_V))
     far_extra = (far_cap - gentle_reclaim_cap) * far_speed_blend * far_surplus_blend
-  accel_cap = min(personality_cap, speed_cap, gentle_reclaim_cap + far_extra)
+  # Kinematic chase allowance: keeping up with a lead that is genuinely getting
+  # away costs a_lead (match its acceleration) plus pullaway/tau (null the speed
+  # deficit over ChaseTauS). Deliberately NO ego-speed gate — the launch-follow
+  # floor is lead-owned-only and Event A's factor zeroes at 10 m/s ego, so after
+  # a hard-launching lead triggers the ownership release (~2 s at 2-3 m/s
+  # pullaway) the 4-12 m/s band would otherwise be stranded at the flat gentle
+  # cap. Surge duty at low speed belongs to the guards that stay: the
+  # speed-shaped speed_cap (0.7-1.3 below ~6 m/s), the pullaway-proportional
+  # blend below, closing_tighten, and the coast clamp. Combined with far_extra
+  # via max(), not sum, so surplus catch-up and pullaway chase never stack.
+  # Rollback sentinel: LeadPresentCruiseChaseGain = 0 removes the allowance.
+  chase_gain = max(0.0, float(getattr(tuning, 'lead_present_cruise_chase_gain', 0.0)))
+  chase_extra = 0.0
+  if chase_gain > 0.0 and pullaway_speed > 0.0:
+    chase_tau = max(0.5, float(getattr(tuning, 'lead_present_cruise_chase_tau_s', 3.0)))
+    lead_accel = max(0.0, float(getattr(lead, 'aLeadK', 0.0) or 0.0))
+    chase_extra = chase_gain * (lead_accel + pullaway_speed / chase_tau)
+  accel_cap = min(personality_cap, speed_cap, gentle_reclaim_cap + max(far_extra, chase_extra))
   if accel_cap <= comfort_cap:
     return comfort_cap
 

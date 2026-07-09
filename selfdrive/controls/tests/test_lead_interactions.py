@@ -361,31 +361,39 @@ class TestLeadInteractionHeuristics:
     assert sport_cap - comfort_cap < 0.10
 
   def test_lead_present_cruise_accel_cap_stays_moderate_in_traffic(self):
+    # Mild pullaway (0.8 m/s) in traffic gets a mild proportional chase
+    # (~0.47), not the pre-bc6c853f9 speed-cap surge and not the flat 0.32.
     traffic_pullaway = _make_lead(d_rel=28.0, v_lead=9.8, a_lead=0.1)
     setattr(traffic_pullaway, "vRel", 0.6)
 
     cap = get_lead_present_cruise_accel_cap(9.0, traffic_pullaway, 1.3, personality_max_accel=3.5)
 
-    assert 0.29 < cap <= 0.33
+    assert 0.42 < cap < 0.52
 
-  def test_lead_present_cruise_accel_cap_stays_gentle_for_far_open_gap(self):
+  def test_lead_present_cruise_accel_cap_chases_city_lead_running_away(self):
+    # 2026-07-08 seat report: a lead pulling hard away in the city band left
+    # ego stranded at the flat gentle cap ("aggravating... driver intervenes").
+    # Pullaway 2.5 m/s with the lead still accelerating now computes a full
+    # proportional chase (~1.35), bounded by speed_cap/personality.
     far_pullaway = _make_lead(d_rel=60.0, v_lead=11.5, a_lead=0.2)
     setattr(far_pullaway, "vRel", 1.2)
 
     cap = get_lead_present_cruise_accel_cap(9.0, far_pullaway, 1.3, personality_max_accel=3.5)
 
-    assert 0.31 < cap <= 0.33
+    assert cap == pytest.approx(1.353, abs=0.03)
 
   def test_lead_present_cruise_accel_cap_honors_reclaim_envelope_for_trace_pullaway(self):
-    # 2026-07-06 freeway trace t=61.6 surge row (pre-fix commanded +2.17): the
-    # far catch-up allowance grants only a small margin above the gentle cap
-    # here (partial speed gate at 14.3 m/s, ~1.0 s beyond target).
+    # 2026-07-06 freeway trace t=61.6 row (pre-fix commanded +2.17): with the
+    # kinematic chase the 2.06 m/s pullaway computes ~1.0 — proportional
+    # keep-up at less than half the pre-fix surge, not the flat 0.32 that
+    # stranded the chase. Seat preference shifted 2026-07-08: "I'd rather see
+    # it too eager there."
     trace_pullaway = _make_lead(d_rel=38.28, v_lead=16.36, a_lead=0.0)
     setattr(trace_pullaway, "vRel", 2.06)
 
     cap = get_lead_present_cruise_accel_cap(14.3, trace_pullaway, 1.3, personality_max_accel=3.5)
 
-    assert 0.32 < cap < 0.45
+    assert 0.95 < cap < 1.06
 
   def test_lead_present_cruise_accel_cap_far_catchup_reaches_far_cap_at_freeway_speed(self):
     # Post-bc6c853f9 gap: the flat gentle cap strands ego >1.5 s beyond target
@@ -408,12 +416,59 @@ class TestLeadInteractionHeuristics:
 
     assert cap == pytest.approx(0.0)
 
-  def test_lead_present_cruise_accel_cap_far_cap_sentinel_restores_flat_gentle_cap(self):
-    tuning = replace(LeadResponseTuningConfig.defaults(), lead_present_cruise_far_cap_mps2=0.0)
+  def test_lead_present_cruise_accel_cap_allowance_sentinels_restore_flat_gentle_cap(self):
+    tuning = replace(LeadResponseTuningConfig.defaults(),
+                     lead_present_cruise_far_cap_mps2=0.0,
+                     lead_present_cruise_chase_gain=0.0)
     far_freeway = _make_lead(d_rel=90.0, v_lead=25.5, a_lead=0.0)
     setattr(far_freeway, "vRel", 0.5)
 
     cap = get_lead_present_cruise_accel_cap(25.0, far_freeway, 1.3, tuning, personality_max_accel=3.5)
+
+    assert cap == pytest.approx(0.32)
+
+  def test_lead_present_cruise_accel_cap_chases_launching_lead_through_handoff_band(self):
+    # 2026-07-08 hole: Event A's launch floor is lead-owned-only and fades by
+    # 10 m/s ego, so after a hard launch triggers the ownership release the
+    # 4-12 m/s band was stranded at the flat 0.32. Ego 6 m/s behind a lead at
+    # 9 m/s still accelerating 1.5: required = 1.5 + 3/3 = 2.5, bounded by the
+    # speed-shaped speed_cap (1.3 at 6 m/s) -> full 1.3, not 0.32.
+    launcher = _make_lead(d_rel=17.8, v_lead=9.0, a_lead=1.5)
+    setattr(launcher, "vRel", 3.0)
+
+    cap = get_lead_present_cruise_accel_cap(6.0, launcher, 1.3, personality_max_accel=3.5)
+
+    assert cap == pytest.approx(1.3, abs=0.02)
+
+  def test_lead_present_cruise_accel_cap_chase_tracks_lead_acceleration(self):
+    soft = _make_lead(d_rel=23.0, v_lead=13.0, a_lead=0.0)
+    setattr(soft, "vRel", 3.0)
+    hard = _make_lead(d_rel=23.0, v_lead=13.0, a_lead=1.5)
+    setattr(hard, "vRel", 3.0)
+
+    cap_soft = get_lead_present_cruise_accel_cap(10.0, soft, 1.3, personality_max_accel=3.5)
+    cap_hard = get_lead_present_cruise_accel_cap(10.0, hard, 1.3, personality_max_accel=3.5)
+
+    assert cap_hard > cap_soft + 0.3
+
+  def test_lead_present_cruise_accel_cap_chase_tau_scales_pullaway_term(self):
+    lead = _make_lead(d_rel=23.0, v_lead=13.0, a_lead=0.0)
+    setattr(lead, "vRel", 3.0)
+    eager = get_lead_present_cruise_accel_cap(
+      10.0, lead, 1.3, replace(LeadResponseTuningConfig.defaults(), lead_present_cruise_chase_tau_s=3.0),
+      personality_max_accel=3.5)
+    lazy = get_lead_present_cruise_accel_cap(
+      10.0, lead, 1.3, replace(LeadResponseTuningConfig.defaults(), lead_present_cruise_chase_tau_s=6.0),
+      personality_max_accel=3.5)
+
+    assert eager > lazy + 0.3
+
+  def test_lead_present_cruise_accel_cap_chase_gain_zero_restores_launch_band_gentle_cap(self):
+    tuning = replace(LeadResponseTuningConfig.defaults(), lead_present_cruise_chase_gain=0.0)
+    launcher = _make_lead(d_rel=17.8, v_lead=9.0, a_lead=1.5)
+    setattr(launcher, "vRel", 3.0)
+
+    cap = get_lead_present_cruise_accel_cap(6.0, launcher, 1.3, tuning, personality_max_accel=3.5)
 
     assert cap == pytest.approx(0.32)
 
