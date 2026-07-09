@@ -16,6 +16,7 @@ from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import get_h
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import desired_follow_distance
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import (get_low_speed_launch_follow_factor,
                                                                             get_low_speed_launch_follow_max_accel)
+from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import compute_relatch_required_decel
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import T_IDXS as T_IDXS_MPC
 from openpilot.selfdrive.controls.lib.longitudinal_live_tune import LeadResponseTuningConfig
 from openpilot.selfdrive.controls.lib.drive_helpers import CONTROL_N, get_accel_from_plan
@@ -1096,10 +1097,13 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     # clamp is applied. If ANY threat signal is present, the blend is disarmed
     # and full braking passes THIS frame — no rate-limit ever delays real
     # braking. Ambiguity resolves toward MORE braking.
-    urgent_ttc = float(getattr(cfg, "cruise_relatch_urgent_ttc_s", 4.0) or 4.0)
-    urgent_closing = float(getattr(cfg, "cruise_relatch_urgent_closing_mps", 2.5) or 2.5)
-    bypass_decel = float(getattr(cfg, "cruise_relatch_bypass_decel_mps2", -1.5) or -1.5)
-    urgent_lead_decel = float(getattr(cfg, "cruise_relatch_urgent_lead_decel_mps2", -1.0) or -1.0)
+    # Plain getattr defaults (no `x or default`): every one of these knobs has an
+    # explicit 0-disables sentinel guarded below, and `0.0 or default` silently
+    # resurrects the default — the sentinel was unreachable through this read.
+    urgent_ttc = float(getattr(cfg, "cruise_relatch_urgent_ttc_s", 4.0))
+    urgent_closing = float(getattr(cfg, "cruise_relatch_urgent_closing_mps", 8.0))
+    bypass_decel = float(getattr(cfg, "cruise_relatch_bypass_decel_mps2", -1.5))
+    urgent_lead_decel = float(getattr(cfg, "cruise_relatch_urgent_lead_decel_mps2", -1.0))
 
     # Requested decel already at/below the bypass floor: let it through.
     if bypass_decel < 0.0 and self.output_a_target <= bypass_decel:
@@ -1110,6 +1114,27 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     if bool(getattr(lead_slot, "fcw", False)):
       return True, "fcw"
     closing = -float(getattr(lead_slot, "vRel", 0.0) or 0.0)
+    # Kinematic urgency: physics demanding at/beyond |bypass_decel| passes with
+    # full authority regardless of geometry — the same floor the requested-decel
+    # test honors, so "decels >= 1.5 m/s^2 are never gated" holds whether the MPC
+    # requests them or the approach kinematics demand them. This replaces the
+    # closing-alone test as the primary closing gate: acquiring a lead inherently
+    # means closing, so raw closing speed without a distance/surplus qualifier
+    # classified every routine freeway acquire (2.6-5.3 m/s at 12-21 s TTC on the
+    # 2026-07-08 traces) as a threat and voided the relatch clamp exactly where
+    # it was needed. Ego speed is recovered from the slot's own kinematics
+    # (vRel = vLead - vEgo by radard definition) so the predicate needs no new
+    # plumbing.
+    if bypass_decel < 0.0:
+      v_ego_slot = float(getattr(lead_slot, "vLead", 0.0) or 0.0) - float(getattr(lead_slot, "vRel", 0.0) or 0.0)
+      t_follow = float(getattr(self.mpc, "current_t_follow", 1.45) or 1.45)
+      required = compute_relatch_required_decel(v_ego_slot, lead_slot, t_follow, cfg)
+      if required >= -bypass_decel:
+        return True, "kinematic"
+    # Raw-closing backstop for sensor-odd cases the surplus math may not cover
+    # (default raised 2.5 -> 8.0 now that the kinematic test owns the routine
+    # range; crossing it is no longer a comfort cliff because the kinematic cap
+    # below has already opened proportional authority on the way there).
     if urgent_closing > 0.0 and closing >= urgent_closing:
       return True, "closing"
     d_rel = float(getattr(lead_slot, "dRel", 0.0) or 0.0)
@@ -1199,7 +1224,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
         # Transient flap: no lead object this frame. Do not disarm on absence;
         # keep the downward slew clamp. Still honor the requested-decel bypass so
         # a genuinely hard MPC brake is never throttled.
-        bypass_decel = float(getattr(cfg, "cruise_relatch_bypass_decel_mps2", -1.5) or -1.5)
+        bypass_decel = float(getattr(cfg, "cruise_relatch_bypass_decel_mps2", -1.5))
         bypassed = bypass_decel < 0.0 and self.output_a_target <= bypass_decel
         reason = "requested_decel" if bypassed else ""
       if bypassed:
@@ -1228,11 +1253,27 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
           if self.output_a_target > pos_ceiling:
             self.output_a_target = pos_ceiling
             clipped = True
-        # Large-TTC decel cap: while the blend is active on a non-urgent relatch
-        # the peak decel is capped (comfort braking toward a distant non-threat).
-        # The urgency bypass above already removed this under any threat.
-        if max_decel < 0.0 and self.output_a_target < max_decel:
-          self.output_a_target = max_decel
+        # Kinematic decel cap: while the blend is active on a non-urgent relatch,
+        # peak decel is bounded by the deeper of the flat comfort floor and
+        # K x the decel the approach kinematically requires. Continuous in the
+        # requirement — a routine far acquire gets the tiny flat floor, a real
+        # approach opens exactly proportional authority, and by the time any
+        # binary bypass threshold is crossed the cap has already converged to
+        # what the MPC wants, so no crossing produces a comfort cliff. The
+        # urgency bypass above already removed this entirely under any threat.
+        # Sentinel: CruiseRelatchKinematicHeadroom = 0 restores the flat cap.
+        neg_cap = max_decel
+        headroom = float(getattr(cfg, "cruise_relatch_kinematic_headroom", 0.0))
+        if neg_cap < 0.0 and headroom > 0.0 and lead_slot is not None:
+          v_ego_slot = float(getattr(lead_slot, "vLead", 0.0) or 0.0) - float(getattr(lead_slot, "vRel", 0.0) or 0.0)
+          t_follow = float(getattr(self.mpc, "current_t_follow", 1.45) or 1.45)
+          required = compute_relatch_required_decel(v_ego_slot, lead_slot, t_follow, cfg)
+          if math.isfinite(required):
+            neg_cap = min(neg_cap, -headroom * required)
+          else:
+            neg_cap = -float("inf")
+        if neg_cap < 0.0 and self.output_a_target < neg_cap:
+          self.output_a_target = neg_cap
           clipped = True
         debug = {"active": True, "frames_left": int(self._relatch_blend_frames_left),
                  "bypassed": False, "bypass_reason": "",

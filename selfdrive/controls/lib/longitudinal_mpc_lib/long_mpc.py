@@ -1223,6 +1223,34 @@ def compute_lead_stopping_need_decel(v_ego, lead,
   return float(required)
 
 
+def compute_relatch_required_decel(v_ego, lead, t_follow,
+                                   tuning: LeadResponseTuningConfig | None = None) -> float:
+  """Decel magnitude (m/s^2, positive) the current approach kinematically
+  demands: the larger of (a) shedding the closing speed within the gap surplus
+  above the follow target and (b) the stopping-need decel (stop STOP_DISTANCE
+  short, lead-stop-extended, oncoming-aware via compute_lead_stopping_need_decel).
+
+  This is the relatch path's urgency currency: gating and capping scale with
+  what physics requires instead of raw closing speed, so a 2-5 m/s freeway
+  approach with tens of meters of surplus reads as ~0.2-0.5 (comfort regime)
+  while the same closing speed inside the follow target reads as multiple
+  m/s^2 (full authority). Inside-target geometry makes the surplus floor bind,
+  so cut-ins and short gaps always compute a large requirement by construction.
+  """
+  if lead is None or not getattr(lead, 'status', False):
+    return 0.0
+  v_ego = float(v_ego)
+  d_rel = float(getattr(lead, 'dRel', 0.0) or 0.0)
+  v_lead_raw = _lead_float(lead, 'vLead', v_ego)
+  v_rel = _lead_float(lead, 'vRel', v_lead_raw - v_ego)
+  closing = max(0.0, v_ego - max(0.0, v_lead_raw), -v_rel)
+  match_required = 0.0
+  if closing > 0.0:
+    gap_surplus = d_rel - get_headway_follow_distance(v_ego, t_follow)
+    match_required = (closing ** 2) / (2.0 * max(gap_surplus, 0.5))
+  return float(max(match_required, compute_lead_stopping_need_decel(v_ego, lead, tuning)))
+
+
 def get_low_speed_launch_follow_factor(v_ego, lead, t_follow) -> float:
   if lead is None or not getattr(lead, 'status', False):
     return 0.0

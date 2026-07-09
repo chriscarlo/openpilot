@@ -635,10 +635,15 @@ LEAD_RESPONSE_TUNE_SPECS = (
     key="Longitudinal.LiveTune.CruiseRelatchUrgentClosingMps",
     cli_name="cruise-relatch-urgent-closing-mps",
     label="cruise_relatch_urgent_closing_mps",
-    default=2.5,
+    default=8.0,
     minimum=0.0,
     maximum=20.0,
-    description="Relatch closing speed (m/s) at/above which the blend AND large-TTC decel cap are bypassed.",
+    description="Raw-closing BACKSTOP (m/s) at/above which the blend AND kinematic decel cap are bypassed regardless of "
+                "geometry. Raised 2.5 -> 8.0 (2026-07-08): acquiring a lead inherently means closing, so a closing-alone "
+                "test at 2.5 classified every routine freeway acquire (2.6-5.3 m/s at 12-21 s TTC in the drive-home rlogs) "
+                "as urgent and voided the relatch clamp; the kinematic-required-decel bypass now owns the routine range "
+                "and this test only catches sensor-odd fast closes the surplus math may not cover. Not a comfort cliff: "
+                "the kinematic cap has already opened proportional authority before this fires.",
   ),
   LeadResponseTuneSpec(
     attr="cruise_relatch_bypass_decel_mps2",
@@ -648,7 +653,28 @@ LEAD_RESPONSE_TUNE_SPECS = (
     default=-1.5,
     minimum=-5.0,
     maximum=0.0,
-    description="Requested-decel (m/s^2) at/below which the relatch blend is bypassed (mirrors the flutter bypass). Full braking passes the arming frame.",
+    description="Decel floor (m/s^2) at/below which the relatch blend is bypassed — by a REQUESTED decel (mirrors the "
+                "flutter bypass; full braking passes the arming frame) or by the KINEMATICALLY REQUIRED decel of the "
+                "approach (compute_relatch_required_decel: closing shed within gap surplus, stopping-need extended). "
+                "One floor, two currencies: decels at/beyond it are never gated whether the MPC requests them or physics "
+                "demands them. 0 disables both bypass legs.",
+  ),
+  LeadResponseTuneSpec(
+    attr="cruise_relatch_kinematic_headroom",
+    key="Longitudinal.LiveTune.CruiseRelatchKinematicHeadroom",
+    cli_name="cruise-relatch-kinematic-headroom",
+    label="cruise_relatch_kinematic_headroom",
+    default=1.5,
+    minimum=0.0,
+    maximum=5.0,
+    description="Multiplier on the kinematically required decel that the relatch decel cap may open to: effective cap = "
+                "min(CruiseRelatchMaxDecelMps2, -headroom * required). Continuous in the requirement, so a routine far "
+                "acquire glides at the flat floor while a genuine approach gets exactly proportional braking with no "
+                "threshold cliff (2026-07-08 drive-home anchors: closing 2.72 at 14.7 m surplus -> cap -0.38; closing "
+                "4.16 at 21.7 m surplus -> cap -0.60, vs the observed -1.10/-1.99 full-authority brakes those events "
+                "actually got). Governs only the comfort band above CruiseRelatchBypassDecelMps2 — demands at/below "
+                "that floor bypass the blend entirely. Mirrors LeadSlowdownKinematicHeadroom's K x physics pattern. "
+                "Rollback sentinel: 0 disables the kinematic extension (flat cap only).",
   ),
   LeadResponseTuneSpec(
     attr="cruise_relatch_urgent_lead_decel_mps2",
@@ -665,10 +691,14 @@ LEAD_RESPONSE_TUNE_SPECS = (
     key="Longitudinal.LiveTune.CruiseRelatchMaxDecelMps2",
     cli_name="cruise-relatch-max-decel-mps2",
     label="cruise_relatch_max_decel_mps2",
-    default=-0.8,
+    default=-0.15,
     minimum=-5.0,
     maximum=0.0,
-    description="Cap on relatch peak decel (m/s^2) while the blend window is active on a non-urgent, large-TTC relatch. Removed by the urgency bypass. 0 = no cap.",
+    description="FLAT comfort floor of the relatch decel cap (m/s^2) while the blend window is active on a non-urgent "
+                "relatch; the kinematic extension (CruiseRelatchKinematicHeadroom) opens the cap beyond this in "
+                "proportion to what the approach physically requires. Lowered -0.8 -> -0.15 (2026-07-08): with the "
+                "kinematic extension carrying real approaches, the flat term only needs to cover the glide-in case. "
+                "Removed entirely by the urgency bypass. 0 = no cap.",
   ),
   LeadResponseTuneSpec(
     attr="handoff_limit_window_s",
@@ -1691,6 +1721,7 @@ class LeadResponseTuningConfig:
   cruise_relatch_bypass_decel_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cruise_relatch_bypass_decel_mps2"].default
   cruise_relatch_urgent_lead_decel_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cruise_relatch_urgent_lead_decel_mps2"].default
   cruise_relatch_max_decel_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cruise_relatch_max_decel_mps2"].default
+  cruise_relatch_kinematic_headroom: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cruise_relatch_kinematic_headroom"].default
   handoff_limit_window_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["handoff_limit_window_s"].default
   handoff_limit_max_delta_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["handoff_limit_max_delta_mps2"].default
   handoff_inside_df_positive_cap_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["handoff_inside_df_positive_cap_mps2"].default
