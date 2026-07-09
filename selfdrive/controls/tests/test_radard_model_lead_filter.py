@@ -729,3 +729,130 @@ class TestModelLeadCD4AssociationAndStepGuard:
       _cfg(model_lead_assoc_dpath_gate_m=3.0, model_lead_assoc_y_raw_tol_m=3.0)
     )
     assert jumped_legacy != settled_legacy  # legacy 3.0 m gate spawns a new id
+
+
+class TestOpeningGovernor:
+  """Opening governor (CD9's mirror): publish-time one-directional vRel relax
+  while the raw position window proves sustained opening. Anchored to the
+  2026-07-08 phantom-closing runs (published vRel <= -1.0 while raw dRel opened
+  >= 0.2 m/s, 22.3% of lead frames, runs up to 6.9 s)."""
+
+  NOW = 10.0
+
+  @staticmethod
+  def _cfg(**overrides):
+    # CD9 margin sentinel keeps the closing governor out of the way so these
+    # tests isolate the opening side.
+    base = {"closing_governor_margin_mps": 99.0}
+    base.update(overrides)
+    return dataclasses.replace(LeadResponseTuningConfig.defaults(), **base)
+
+  def _track(self, *, vrel_state=-2.0, drel_state=40.0, slope=0.7, raw_vrel=-0.4,
+             raw_alead=0.0, n_samples=14):
+    tr = ModelLeadTrack.from_lead_dict(
+      7, {"dRel": drel_state, "yRel": 0.0, "vRel": vrel_state, "vLead": 20.0 + vrel_state,
+          "aLeadK": 0.0, "modelProb": 0.9}, self.NOW - 1.0, 0)
+    tr.vRel = float(vrel_state)
+    tr.vLead = 20.0 + float(vrel_state)
+    tr.vLeadK = tr.vLead
+    tr.dRel = float(drel_state)
+    t0 = self.NOW - 0.55
+    for i in range(n_samples):
+      t = t0 + 0.55 * i / (n_samples - 1)
+      d = drel_state + slope * (t - self.NOW)
+      tr.closing_evidence.append((t, d, raw_vrel, raw_alead))
+    return tr
+
+  def test_phantom_closing_relax_arms_and_floors_publish(self):
+    # Trace anchor: published vRel ~-2 while position opens ~0.7 m/s.
+    tr = self._track()
+    cfg = self._cfg()
+    tr._update_opening_governor(self.NOW, False, cfg)
+    assert tr.opening_relax_vrel == pytest.approx(0.0)
+    rs = tr.get_RadarState(cfg)
+    assert rs["vRel"] == pytest.approx(0.0)
+    assert rs["vLead"] == pytest.approx(20.0)  # v_ego_est + relaxed vRel
+
+  def test_relax_stays_behind_position_evidence_by_trust_deficit(self):
+    tr = self._track(slope=0.25)
+    tr._update_opening_governor(self.NOW, False, self._cfg())
+    assert tr.opening_relax_vrel == pytest.approx(-0.05)
+    rs = tr.get_RadarState(self._cfg())
+    assert rs["vRel"] == pytest.approx(-0.05)
+
+  def test_relax_never_deepens_an_already_open_publish(self):
+    tr = self._track(vrel_state=0.5, slope=0.7)
+    tr._update_opening_governor(self.NOW, False, self._cfg())
+    rs = tr.get_RadarState(self._cfg())
+    assert rs["vRel"] == pytest.approx(0.5)  # max() semantics: never lowered
+
+  def test_raw_closing_veto_blocks_relax(self):
+    tr = self._track(raw_vrel=-1.5)
+    tr._update_opening_governor(self.NOW, False, self._cfg())
+    assert tr.opening_relax_vrel is None
+    assert tr.get_RadarState(self._cfg())["vRel"] == pytest.approx(-2.0)
+
+  def test_braking_lead_veto_blocks_relax(self):
+    tr = self._track(raw_alead=-0.5)
+    tr._update_opening_governor(self.NOW, False, self._cfg())
+    assert tr.opening_relax_vrel is None
+
+  def test_cd9_latch_and_hold_veto_relax(self):
+    tr = self._track()
+    tr._update_opening_governor(self.NOW, True, self._cfg())
+    assert tr.opening_relax_vrel is None
+    tr.governor_hold_until_t = self.NOW + 0.5
+    tr._update_opening_governor(self.NOW, False, self._cfg())
+    assert tr.opening_relax_vrel is None
+
+  def test_short_published_ttc_vetoes_relax(self):
+    tr = self._track(drel_state=8.0)  # closing 2.0 -> TTC 4 s < 6 s gate
+    tr._update_opening_governor(self.NOW, False, self._cfg())
+    assert tr.opening_relax_vrel is None
+
+  def test_slope_below_min_opening_blocks_relax(self):
+    tr = self._track(slope=0.1)
+    tr._update_opening_governor(self.NOW, False, self._cfg())
+    assert tr.opening_relax_vrel is None
+
+  def test_sparse_window_blocks_relax(self):
+    tr = self._track(n_samples=4)
+    tr._update_opening_governor(self.NOW, False, self._cfg())
+    assert tr.opening_relax_vrel is None
+
+  def test_trust_deficit_sentinel_disables_governor(self):
+    tr = self._track()
+    tr._update_opening_governor(self.NOW, False, self._cfg(opening_governor_trust_deficit_mps=99.0))
+    assert tr.opening_relax_vrel is None
+
+  def test_update_recomputes_relax_every_frame(self):
+    tr = self._track(raw_vrel=-1.5)  # veto condition present in evidence
+    tr.opening_relax_vrel = 0.0  # stale relax from a prior frame
+    cfg = self._cfg()
+    tr.update({"dRel": 40.0, "yRel": 0.0, "vRel": -1.5, "aLeadK": 0.0,
+               "modelProb": 0.9, "dPath": 0.0, "vLat": 0.0}, self.NOW + 0.05, 20.0, cfg, 0)
+    assert tr.opening_relax_vrel is None
+
+  def test_end_to_end_phantom_run_is_relaxed_via_update(self):
+    # Real closing approach, then the gap physically opens while raw vRel stays
+    # mildly pessimistic (the 21:01:51 trace shape). Published vRel must be
+    # lifted to parity instead of riding ~-1 for seconds.
+    cfg = self._cfg()
+    tr = ModelLeadTrack.from_lead_dict(
+      7, {"dRel": 46.0, "yRel": 0.0, "vRel": -2.0, "vLead": 18.0,
+          "aLeadK": 0.0, "modelProb": 0.9}, 0.0, 0)
+    now = 0.0
+    d = 46.0
+    for _ in range(12):  # closing phase
+      now += 0.05
+      d -= 2.0 * 0.05
+      tr.update({"dRel": d, "yRel": 0.0, "vRel": -2.0, "aLeadK": 0.0,
+                 "modelProb": 0.9, "dPath": 0.0, "vLat": 0.0}, now, 20.0, cfg, 0)
+    rs = None
+    for _ in range(16):  # opening phase with pessimistic raw vRel
+      now += 0.05
+      d += 0.7 * 0.05
+      rs = tr.update({"dRel": d, "yRel": 0.0, "vRel": -0.3, "aLeadK": 0.0,
+                      "modelProb": 0.9, "dPath": 0.0, "vLat": 0.0}, now, 20.0, cfg, 0)
+    assert tr.opening_relax_vrel is not None
+    assert rs["vRel"] > -0.05

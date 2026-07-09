@@ -59,6 +59,10 @@ MODEL_LEAD_FAST_VREL_TAU_S = 0.16
 MODEL_LEAD_LAT_TAU_S = 0.45
 MODEL_LEAD_ACCEL_TAU_S = 0.60
 MODEL_LEAD_PROB_TAU_S = 0.80
+# Opening governor: published-closing TTC below this vetoes any relax — near a
+# genuinely-closing lead the pipeline's pessimism stands, regardless of what
+# the position window claims.
+OPENING_GOVERNOR_MIN_PUBLISHED_TTC_S = 6.0
 MODEL_LEAD_CENTER_PATH_GATE_M = 2.6
 MODEL_LEAD_CUTIN_VLAT_MPS = 0.7
 LEAD_TRACK_PROB_DROPOUT_MIN_SPEED_MPS = 4.0
@@ -153,6 +157,10 @@ class ModelLeadTrack:
   governor_hold_until_t: float = -1.0
   governor_closing_mps: float = 0.0
   governor_active: bool = False
+  # Opening governor (CD9's mirror): publish-time one-directional vRel relax
+  # floor while the raw position window PROVES sustained opening that the
+  # closing-biased publish pipeline is contradicting. None = not armed.
+  opening_relax_vrel: float | None = None
 
   @classmethod
   def from_lead_dict(cls, identifier: int, lead_dict: dict[str, Any], now: float, lead_slot: int) -> "ModelLeadTrack":
@@ -281,6 +289,7 @@ class ModelLeadTrack:
     governor_active = self._update_closing_governor(now, raw_drel, raw_vrel, raw_alead, cfg)
     if governor_active and not fast_closing:
       urgency = 1.0
+    self._update_opening_governor(now, governor_active, cfg)
 
     if fast_closing:
       drel_alpha = max(0.65, _ema_alpha(dt_s, MODEL_LEAD_FAST_CLOSE_TAU_S))
@@ -461,6 +470,85 @@ class ModelLeadTrack:
       self.governor_closing_mps = float(max(0.0, min(pos_closing, vrel_closing + max(0.0, pos_trust))))
       return True
     return active
+
+  def _update_opening_governor(self, now: float, closing_governor_active: bool,
+                               cfg: LeadResponseTuningConfig) -> None:
+    """Opening governor: CD9's exact mirror (2026-07-08 phantom-closing runs).
+
+    The publish pipeline's safety asymmetry is deliberate — lag comp boosts
+    vRel closing-ward, CD9 clamps vLead slower-ward, fast recovery exists for
+    the CLOSING direction only (the opening recovery path is gated below
+    8 m/s ego and opening dRel is slew-clamped) — so above ~18 mph, opening
+    truth can only leak back through the slow main vRel EMA. Measured on the
+    2026-07-08 drive: 22.3% of lead-tracking frames published vRel <= -1.0
+    while the position stream showed the gap OPENING >= 0.2 m/s, in runs up to
+    6.9 s, with the planner braking through 27% of them — the felt "rides the
+    brakes until a 3 second gap" and most of the ~2 s follow floor (the MPC's
+    desired distance inflates quadratically with published closing speed).
+
+    While the SAME raw evidence window CD9 trusts proves a sustained opening
+    (k-endpoint mean slope of raw dRel), and nothing threatening is in the
+    window, the published vRel gets a one-directional relax FLOOR:
+
+      floor = min(pos_opening - TrustDeficitMps, 0.0)
+
+    max() semantics at publish: it can only ever make the published lead
+    FASTER / less urgent, and never past parity (0.0) — the mirror image of
+    CD9's min() clamp, with the same position-primacy rationale (CD9's own
+    road evidence showed the raw v-stream lying against the position stream).
+
+    Vetoes (any -> no relax; ambiguity resolves toward MORE braking):
+      - CD9 latched or holding (never fight the closing governor)
+      - windowed raw vRel mean shows closing beyond RawClosingVetoMps
+      - windowed raw aLead mean below -ALeadVetoMps2 (braking lead)
+      - published closing TTC under OPENING_GOVERNOR_MIN_PUBLISHED_TTC_S
+      - sparse window (same coverage demand as CD9)
+
+    Rollback sentinel: OpeningGovernorTrustDeficitMps >= 99 disables entirely
+    (exact prior publish).
+    """
+    self.opening_relax_vrel = None
+
+    trust_deficit = float(getattr(cfg, 'opening_governor_trust_deficit_mps', 99.0))
+    if trust_deficit >= 99.0:
+      return
+    if closing_governor_active or now <= self.governor_hold_until_t:
+      return
+    published_closing = max(0.0, -float(self.vRel))
+    if published_closing <= 1e-3:
+      return  # publish already agrees: nothing to relax
+    if published_closing > 1e-3 and (float(self.dRel) / published_closing) < OPENING_GOVERNOR_MIN_PUBLISHED_TTC_S:
+      return
+
+    window_s = max(0.2, float(getattr(cfg, 'closing_governor_window_s', 0.7)))
+    samples = [s for s in self.closing_evidence if (now - s[0]) <= window_s]
+    span = samples[-1][0] - samples[0][0] if len(samples) >= 2 else 0.0
+    if len(samples) < 8 or span < 0.5 * window_s:
+      return
+
+    raw_closing_veto = float(getattr(cfg, 'opening_governor_raw_closing_veto_mps', 1.0))
+    vrel_closing = -(sum(s[2] for s in samples) / len(samples))
+    if vrel_closing > raw_closing_veto:
+      return
+    alead_veto = float(getattr(cfg, 'opening_governor_alead_veto_mps2', 0.2))
+    alead_mean = sum(s[3] for s in samples) / len(samples)
+    if alead_mean < -alead_veto:
+      return
+
+    k = max(2, len(samples) // 4)
+    first_k, last_k = samples[:k], samples[-k:]
+    t_first = sum(s[0] for s in first_k) / k
+    t_last = sum(s[0] for s in last_k) / k
+    if (t_last - t_first) <= 1e-3:
+      return
+    d_first = sum(s[1] for s in first_k) / k
+    d_last = sum(s[1] for s in last_k) / k
+    pos_opening = (d_last - d_first) / (t_last - t_first)
+
+    min_opening = float(getattr(cfg, 'opening_governor_min_opening_mps', 0.2))
+    if pos_opening < min_opening:
+      return
+    self.opening_relax_vrel = float(min(pos_opening - trust_deficit, 0.0))
 
   def _apply_far_range_vlead_optimism_clamp(self, raw_vrel: float, v_ego: float,
                                             next_drel: float, now: float,
@@ -690,6 +778,19 @@ class ModelLeadTrack:
         published_vlead = target_vlead
         published_vleadk = target_vlead
         published_vrel = target_vlead - v_ego_est
+    # Opening governor publish relax (CD9's mirror, one-directional, publish
+    # only): while the raw position window PROVES sustained opening and no
+    # threat veto stands (see _update_opening_governor), the published vRel is
+    # floored at min(pos_opening - trust_deficit, 0.0). max() semantics: only
+    # ever makes the published lead FASTER / less urgent, never past parity.
+    # Mutually exclusive with the CD9 clamp by construction (CD9 latched or
+    # holding vetoes the relax before it arms).
+    relax_floor = self.opening_relax_vrel
+    if relax_floor is not None and published_vrel < relax_floor:
+      v_ego_est = max(0.0, float(self.vLead) - float(self.vRel))
+      published_vrel = float(relax_floor)
+      published_vlead = max(0.0, v_ego_est + published_vrel)
+      published_vleadk = published_vlead
     return {
       "dRel": published_drel,
       "yRel": float(self.yRel),
@@ -772,6 +873,9 @@ class ModelLeadTracker:
     for identifier, track in list(self._tracks.items()):
       if identifier not in self._updated_track_ids:
         track.missed += 1
+        # A missed frame means no fresh position evidence: never carry a stale
+        # opening relax onto a held/coasted publish (less-urgent direction).
+        track.opening_relax_vrel = None
       if track.missed > MODEL_LEAD_TRACK_MAX_MISSES:
         self._tracks.pop(identifier, None)
     self._frame_active = False

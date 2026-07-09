@@ -227,6 +227,19 @@ The governor (radard `ModelLeadTrack._update_closing_governor`) keeps a windowed
 | `ClosingGovernorHoldS` | 1.0 | 0.10–5.0 | Latch hold (s) past the last qualifying frame so the fast regime does not chatter mid-closure |
 | `ClosingGovernorALeadTauS` | 0.18 | 0.05–2.0 | `aLeadK` EMA tau while latched (replaces the 0.60 s constant that halved the published decel through the road event) |
 
+### Opening Governor (radard, CD9's mirror)
+
+The publish pipeline's safety asymmetry (lag comp boosts vRel closing-ward, CD9 clamps vLead slower-ward, fast recovery paths exist for the closing direction only — the open-recovery path is gated below 8 m/s ego and opening dRel is slew-clamped) means opening truth above ~18 mph can only leak back through the slow main vRel EMA. Measured on the 2026-07-08 drive: **22.3% of lead-tracking frames published `vRel` ≤ −1.0 while the raw position stream showed the gap OPENING ≥ 0.2 m/s**, in 111 sustained runs up to 6.9 s, with the planner braking through 27% of those frames. Felt as "rides the brakes until a ~3 s gap builds"; also most of the ~2 s follow floor, because the MPC's desired distance carries a `(vEgo²−vLead²)/2·COMFORT_BRAKE` term — a phantom 2 m/s closing adds ~17 m (~0.7 s) of desired gap at freeway speed.
+
+The opening governor watches the SAME raw evidence window CD9 trusts and, when the k-endpoint mean slope of raw dRel proves a sustained opening with no threat veto standing, floors the published `vRel` at `min(pos_opening − TrustDeficitMps, 0.0)` — one-directional (`max()` at publish: only ever less urgent), capped at parity, publish-time only (internal EMA/association state untouched). Exact mirror of CD9's `min()` clamp with the same position-primacy rationale. Vetoes (any → no relax): CD9 latched/holding, windowed raw vRel closing beyond `RawClosingVetoMps`, windowed raw aLead below −`ALeadVetoMps2`, published-closing TTC under 6 s (module constant `OPENING_GOVERNOR_MIN_PUBLISHED_TTC_S`), sparse window, missed frame (stale relax cleared on coasted publishes).
+
+| Param Key | Default | Range | Description |
+|---|---|---|---|
+| `OpeningGovernorTrustDeficitMps` | 0.3 | 0.0–100.0 | How far behind the position-proven opening rate the publish may stay: floor = min(pos_opening − this, 0). Master rollback sentinel: ≥ 99 disables the opening governor entirely |
+| `OpeningGovernorMinOpeningMps` | 0.2 | 0.05–5.0 | Windowed raw-dRel slope must show opening at/above this before any relax arms (matches the 2026-07-08 phantom-run detector) |
+| `OpeningGovernorRawClosingVetoMps` | 1.0 | 0.0–100.0 | Veto: windowed raw vRel mean closing beyond this blocks the relax (model's own velocity stream strongly disagrees → resolve toward braking) |
+| `OpeningGovernorALeadVetoMps2` | 0.2 | 0.0–100.0 | Veto: windowed raw lead accel mean below −this (braking lead) blocks the relax |
+
 ### Stop-Launch Release + Launch-Follow Demand Floor (Event A, planner/longcontrol)
 
 Event A (road 205-13 — the 2026-07-04 failed launch, driver pedaled): the stop latch held the full −2.0 stopAccel ~1.2 s after the lead visibly departed because the release's ABSOLUTE `dRel >= 5.0` arming gate made release latency depend on where the stop happened to settle (published 4.15 m that day → the lead had to open 0.85 m of slew-lagged published gap before arming); then the launch demand never exceeded +1.02 while the lead departed at +5 m/s — the MPC's jerk-shaped standstill ramp owned the launch window, the M1 slowdown ceiling's slew-limited release tail capped even that, and `get_low_speed_launch_follow_max_accel` only raises the permission CEILING, never the demand.

@@ -1640,6 +1640,55 @@ LEAD_RESPONSE_TUNE_SPECS = (
                 "an EMA of the model's own accel measurement, never fabricated.",
   ),
   LeadResponseTuneSpec(
+    attr="opening_governor_trust_deficit_mps",
+    key="Longitudinal.LiveTune.OpeningGovernorTrustDeficitMps",
+    cli_name="opening-governor-trust-deficit-mps",
+    label="opening_governor_trust_deficit",
+    default=0.3,
+    minimum=0.0,
+    maximum=100.0,
+    description="Opening governor (radard, CD9's mirror; 2026-07-08 phantom-closing runs: 22.3% of lead frames published "
+                "vRel <= -1.0 while raw position showed the gap OPENING, planner braking through 27% of them). While the "
+                "CD9 evidence window proves sustained opening and no threat veto stands, published vRel is floored at "
+                "min(pos_opening - this, 0.0): one-directional (less urgent only), never past parity, publish-time only. "
+                "How far behind the position-proven opening rate the publish may stay. Master rollback sentinel: >= 99 "
+                "disables the opening governor entirely (exact prior publish).",
+  ),
+  LeadResponseTuneSpec(
+    attr="opening_governor_min_opening_mps",
+    key="Longitudinal.LiveTune.OpeningGovernorMinOpeningMps",
+    cli_name="opening-governor-min-opening-mps",
+    label="opening_governor_min_opening",
+    default=0.2,
+    minimum=0.05,
+    maximum=5.0,
+    description="Opening governor: k-endpoint mean slope of the raw dRel window must show the gap opening at/above this "
+                "(m/s) before any relax arms. Matches the phantom-run detector threshold used on the 2026-07-08 traces.",
+  ),
+  LeadResponseTuneSpec(
+    attr="opening_governor_raw_closing_veto_mps",
+    key="Longitudinal.LiveTune.OpeningGovernorRawClosingVetoMps",
+    cli_name="opening-governor-raw-closing-veto-mps",
+    label="opening_governor_raw_closing_veto",
+    default=1.0,
+    minimum=0.0,
+    maximum=100.0,
+    description="Opening governor veto: if the windowed RAW vRel mean shows closing beyond this (m/s), the model's own "
+                "velocity stream strongly disagrees with the position stream and no relax arms (ambiguity resolves toward "
+                "more braking).",
+  ),
+  LeadResponseTuneSpec(
+    attr="opening_governor_alead_veto_mps2",
+    key="Longitudinal.LiveTune.OpeningGovernorALeadVetoMps2",
+    cli_name="opening-governor-alead-veto-mps2",
+    label="opening_governor_alead_veto",
+    default=0.2,
+    minimum=0.0,
+    maximum=100.0,
+    description="Opening governor veto: if the windowed raw lead accel mean is below -this (m/s^2), the lead is braking "
+                "and no relax arms — a braking lead's pessimistic publish stands even if the gap is momentarily opening.",
+  ),
+  LeadResponseTuneSpec(
     attr="launch_release_min_drel_m",
     key="Longitudinal.LiveTune.LaunchReleaseMinDrelM",
     cli_name="launch-release-min-drel",
@@ -1829,6 +1878,10 @@ class LeadResponseTuningConfig:
   closing_governor_pos_trust_excess_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["closing_governor_pos_trust_excess_mps"].default
   closing_governor_hold_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["closing_governor_hold_s"].default
   closing_governor_alead_tau_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["closing_governor_alead_tau_s"].default
+  opening_governor_trust_deficit_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["opening_governor_trust_deficit_mps"].default
+  opening_governor_min_opening_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["opening_governor_min_opening_mps"].default
+  opening_governor_raw_closing_veto_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["opening_governor_raw_closing_veto_mps"].default
+  opening_governor_alead_veto_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["opening_governor_alead_veto_mps2"].default
   launch_release_min_drel_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["launch_release_min_drel_m"].default
   launch_release_depart_gate_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["launch_release_depart_gate_m"].default
   launch_follow_accel_floor_max_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["launch_follow_accel_floor_max_mps2"].default
