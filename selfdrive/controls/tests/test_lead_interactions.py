@@ -129,7 +129,7 @@ def _planner_test_setup(monkeypatch):
 
 
 class TestLeadInteractionHeuristics:
-  def test_brake_release_coasts_when_steady_closing_target_is_far(self):
+  def test_brake_release_far_target_still_brakes_above_near_target_closing_limit(self):
     tuning = LeadResponseTuningConfig(
       lead_brake_release_lookahead_s=2.0,
       lead_brake_release_coast_bias_mps2=0.05,
@@ -144,9 +144,9 @@ class TestLeadInteractionHeuristics:
       control_leads=(lead, None),
     )
 
-    assert debug["reason"] == "closing_coast_window"
+    assert debug["reason"] == "closing_to_target"
     assert debug["time_to_target_s"] > tuning.lead_brake_release_lookahead_s
-    assert floor == pytest.approx(tuning.lead_brake_release_coast_bias_mps2)
+    assert floor < 0.0
 
   def test_brake_release_still_brakes_when_closing_target_is_near(self):
     tuning = LeadResponseTuningConfig(lead_brake_release_lookahead_s=2.0)
@@ -183,12 +183,11 @@ class TestLeadInteractionHeuristics:
     assert debug["time_to_target_s"] > tuning.lead_brake_release_lookahead_s
     assert floor < -0.3
 
-  def test_brake_release_coast_window_cannot_override_meaningful_brake_request(self):
+  def test_brake_release_coast_window_overrides_stale_mpc_brake_request(self):
     debug = {"reason": "closing_coast_window"}
 
     assert should_apply_lead_brake_release_accel_floor(-0.10, 0.05, debug)
-    assert not should_apply_lead_brake_release_accel_floor(-0.30, 0.05, debug)
-    assert debug["bypassed_by_brake_request"] is True
+    assert should_apply_lead_brake_release_accel_floor(-0.30, 0.05, debug)
 
   def test_brake_release_non_coast_floor_can_still_clip_brake_request(self):
     debug = {"reason": "closing_to_target"}

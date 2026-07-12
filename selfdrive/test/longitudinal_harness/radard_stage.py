@@ -67,6 +67,22 @@ class RadardPerceptionStage:
     self.radard.update(sm, self._empty_tracks)
     return self.radard.radar_state
 
+  def tracker_debug(self, radar_state, *, now_s: float) -> dict[str, dict[str, Any]]:
+    """Expose the real ModelLeadTracker governor state in harness traces."""
+    tracks = self.radard.model_lead_tracker.tracks
+    debug: dict[str, dict[str, Any]] = {}
+    for slot in ("leadOne", "leadTwo"):
+      lead = getattr(radar_state, slot)
+      track = tracks.get(int(lead.radarTrackId)) if lead.status else None
+      debug[slot] = {
+        "track_id": None if track is None else int(track.identifier),
+        "closing_governor_active": bool(track is not None and track.governor_active),
+        "closing_governor_hold_remaining_s": 0.0 if track is None else max(0.0, float(track.governor_hold_until_t) - float(now_s)),
+        "closing_governor_closing_mps": 0.0 if track is None else float(track.governor_closing_mps),
+        "opening_relax_vrel_mps": None if track is None or track.opening_relax_vrel is None else float(track.opening_relax_vrel),
+      }
+    return debug
+
   def _build_model_msg(self, raw_radar_state, measured_speed_mps: float):
     model = messaging.new_message("modelV2")
     position = log.XYZTData.new_message()

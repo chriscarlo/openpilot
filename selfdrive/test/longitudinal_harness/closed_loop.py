@@ -373,11 +373,22 @@ def run_harness(*,
     # available while a fresh model lead's prob is still ramping below the enter
     # band. Snapshot it here so _build_submaster can expose it on modelV2.leadsV3.
     raw_model_radar_state = radar_state
+    radard_tracker_debug = {
+      slot: {
+        "track_id": None,
+        "closing_governor_active": False,
+        "closing_governor_hold_remaining_s": 0.0,
+        "closing_governor_closing_mps": 0.0,
+        "opening_relax_vrel_mps": None,
+      }
+      for slot in ("leadOne", "leadTwo")
+    }
     if radard_stage is not None:
       # The raw fabricated leads become leadsV3-shaped measurements and the planner
       # sees only what the real radard pipeline would publish; ground truth for the
       # metrics keeps flowing from lead_tracks via _current_lead_meta below.
       radar_state = radard_stage.update(radar_state, now_s=step.t_s, measured_speed_mps=state.measured_speed_mps)
+      radard_tracker_debug = radard_stage.tracker_debug(radar_state, now_s=step.t_s)
     published_d_rel = {
       slot: (float(getattr(radar_state, slot).dRel) if getattr(radar_state, slot).status else None)
       for slot in ("leadOne", "leadTwo")
@@ -386,6 +397,16 @@ def run_harness(*,
     # stage when active): the aLeadK/vRel the MPC extrapolates with, plus the
     # tracker's FCW corroboration veto (radard.py _update_fcw_corroboration ->
     # fcwSuppressed -> long_mpc.py crash_cnt reset).
+    raw_lead_kinematics = {
+      slot: {
+        "d_rel_m": float(getattr(raw_model_radar_state, slot).dRel) if getattr(raw_model_radar_state, slot).status else None,
+        "v_rel_mps": float(getattr(raw_model_radar_state, slot).vRel) if getattr(raw_model_radar_state, slot).status else None,
+        "v_lead_mps": float(getattr(raw_model_radar_state, slot).vLead) if getattr(raw_model_radar_state, slot).status else None,
+        "a_lead_k_mps2": float(getattr(raw_model_radar_state, slot).aLeadK) if getattr(raw_model_radar_state, slot).status else None,
+        "model_prob": float(getattr(raw_model_radar_state, slot).modelProb) if getattr(raw_model_radar_state, slot).status else None,
+      }
+      for slot in ("leadOne", "leadTwo")
+    }
     published_lead_kinematics = {
       slot: {
         "v_rel_mps": float(getattr(radar_state, slot).vRel) if getattr(radar_state, slot).status else None,
@@ -518,6 +539,16 @@ def run_harness(*,
         "lead_two_measured_d_rel_m": lead_meta["leadTwo"]["measured_d_rel_m"],
         "lead_one_published_d_rel_m": published_d_rel["leadOne"],
         "lead_two_published_d_rel_m": published_d_rel["leadTwo"],
+        "lead_one_raw_d_rel_m": raw_lead_kinematics["leadOne"]["d_rel_m"],
+        "lead_two_raw_d_rel_m": raw_lead_kinematics["leadTwo"]["d_rel_m"],
+        "lead_one_raw_v_rel_mps": raw_lead_kinematics["leadOne"]["v_rel_mps"],
+        "lead_two_raw_v_rel_mps": raw_lead_kinematics["leadTwo"]["v_rel_mps"],
+        "lead_one_raw_v_lead_mps": raw_lead_kinematics["leadOne"]["v_lead_mps"],
+        "lead_two_raw_v_lead_mps": raw_lead_kinematics["leadTwo"]["v_lead_mps"],
+        "lead_one_raw_a_lead_k_mps2": raw_lead_kinematics["leadOne"]["a_lead_k_mps2"],
+        "lead_two_raw_a_lead_k_mps2": raw_lead_kinematics["leadTwo"]["a_lead_k_mps2"],
+        "lead_one_raw_model_prob": raw_lead_kinematics["leadOne"]["model_prob"],
+        "lead_two_raw_model_prob": raw_lead_kinematics["leadTwo"]["model_prob"],
         "lead_one_published_v_rel_mps": published_lead_kinematics["leadOne"]["v_rel_mps"],
         "lead_two_published_v_rel_mps": published_lead_kinematics["leadTwo"]["v_rel_mps"],
         "lead_one_published_v_lead_mps": published_lead_kinematics["leadOne"]["v_lead_mps"],
@@ -526,6 +557,8 @@ def run_harness(*,
         "lead_two_published_a_lead_k_mps2": published_lead_kinematics["leadTwo"]["a_lead_k_mps2"],
         "lead_one_fcw_suppressed": published_lead_kinematics["leadOne"]["fcw_suppressed"],
         "lead_two_fcw_suppressed": published_lead_kinematics["leadTwo"]["fcw_suppressed"],
+        "lead_one_radard_debug": dict(radard_tracker_debug["leadOne"]),
+        "lead_two_radard_debug": dict(radard_tracker_debug["leadTwo"]),
         "lead_one_a_lead_k_mps2": lead_meta["leadOne"]["a_lead_k_mps2"],
         "lead_two_a_lead_k_mps2": lead_meta["leadTwo"]["a_lead_k_mps2"],
         "lead_one_model_prob": lead_meta["leadOne"]["model_prob"],

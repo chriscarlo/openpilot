@@ -80,7 +80,6 @@ GAP_RECLAIM_FOLLOW_PULLAWAY_V = [0.0, 1.0]
 GAP_RECLAIM_FOLLOW_PROJECT_HORIZON_S = 1.2
 GAP_RECLAIM_FOLLOW_MIN_GAP_DIV_M = 0.5
 LEAD_BRAKE_RELEASE_CLOSING_COAST_MIN_ALEAD_MPS2 = -0.15
-LEAD_BRAKE_RELEASE_CLOSING_COAST_BYPASS_DECEL_MPS2 = -0.25
 
 # Lookup table for turns
 # Allow higher total accel (lateral+longitudinal) at low speeds and taper with speed
@@ -267,6 +266,7 @@ def get_lead_brake_release_accel_floor(mpc, *, v_ego: float, lead_source: str, c
       time_to_target_s = gap_error / max(closing_speed, 1e-3)
       debug["time_to_target_s"] = float(time_to_target_s)
       if (time_to_target_s > tuning.lead_brake_release_lookahead_s and
+          closing_speed <= tuning.lead_brake_release_near_target_max_closing_mps and
           lead_accel >= LEAD_BRAKE_RELEASE_CLOSING_COAST_MIN_ALEAD_MPS2):
         # If the equal-speed headway target is still several seconds away,
         # do not spend the whole surplus feather-braking. Hold near coast and
@@ -353,13 +353,7 @@ def get_lead_brake_release_accel_floor(mpc, *, v_ego: float, lead_source: str, c
 def should_apply_lead_brake_release_accel_floor(output_a_target: float,
                                                 release_floor: float | None,
                                                 release_debug: dict) -> bool:
-  if release_floor is None:
-    return False
-  if (str(release_debug.get("reason", "")) == "closing_coast_window" and
-      float(output_a_target) < LEAD_BRAKE_RELEASE_CLOSING_COAST_BYPASS_DECEL_MPS2):
-    release_debug["bypassed_by_brake_request"] = True
-    return False
-  return True
+  return release_floor is not None
 
 
 def get_coast_accel(pitch):
@@ -758,14 +752,15 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
       # The M1 kinematic slowdown ceiling must win over the release floor while
       # the lead is a corroborated threat: in the overlap state (lead
       # decelerating between the slowdown onset threshold and the release
-      # path's -0.75 m/s^2 gate, or any closing state) the kinematic bound may
-      # demand more braking than the floor would allow. Gate the re-clamp on
-      # the threat signals themselves so the ceiling's slew-limited RELEASE
-      # tail (a comfort mechanism, not a threat bound) cannot re-brake a
-      # recovered, opening gap below the bound release floor.
+      # path's -0.75 m/s^2 gate, or closure above the near-target limit) the
+      # kinematic bound may demand more braking than the floor would allow.
+      # Smaller lagged closing estimates are already safety-gated by the release
+      # floor's brake-authority calculation and must not reapply the ceiling's
+      # comfort-release tail to an otherwise recovered gap.
       lead_is_threatening = (
         float(lead_brake_release_debug.get("lead_accel_mps2") or 0.0) < 0.0 or
-        float(lead_brake_release_debug.get("closing_mps") or 0.0) > 0.0)
+        float(lead_brake_release_debug.get("closing_mps") or 0.0) >
+        float(getattr(self.mpc._live_tune_cfg, "lead_brake_release_near_target_max_closing_mps", 0.75)))
       if lead_slowdown_ceiling is not None and lead_is_threatening:
         output_a_target = min(output_a_target, float(lead_slowdown_ceiling))
 

@@ -314,19 +314,27 @@ class ModelLeadTrack:
       # that long), the internal state is wrong-too-close — e.g. a phantom
       # inward adoption — and must heal before standstill instead of ratcheting
       # against the still-closing prediction at the 1.2 m/s opening slew.
-      # Restricted to low ego speed (MaxEgoMps, 0 disables) where a wrongly
-      # optimistic dRel costs little stopping distance and the phantom-collapse
-      # ratchet does its damage.
+      # At low ego speed the repeated-distance corroboration is sufficient. At
+      # higher speed, recovery additionally requires a non-braking raw lead and
+      # a safe raw-side TTC. This closes the freeway failure mode where one
+      # adopted inward outlier left dRel 10-15 m wrong-too-close indefinitely,
+      # while preserving the pessimistic state for any nearby or braking threat.
       # MaxEgoMps > 0.0 guard makes the documented kill switch exact: with the
       # knob at 0.0, 'v_ego <= 0.0' would still arm the recovery at standstill,
       # so A/B isolation with OpenRecoveryMaxEgoMps=0 would not be bit-exact
       # legacy while stopped.
       open_recovery_required = max(1, int(round(float(cfg.model_lead_filter_open_recovery_confirm_frames))))
       open_recovery_max_ego_mps = float(cfg.model_lead_filter_open_recovery_max_ego_mps)
+      raw_closing_mps = max(0.0, -raw_vrel)
+      raw_ttc_s = raw_drel / max(raw_closing_mps, 0.1)
+      high_speed_recovery_safe = (
+        raw_alead >= -float(getattr(cfg, 'opening_governor_alead_veto_mps2', 0.2)) and
+        raw_ttc_s >= OPENING_GOVERNOR_MIN_PUBLISHED_TTC_S
+      )
       if (innovation_m > 0.0 and
           self.opening_confirm_frames >= open_recovery_required and
           open_recovery_max_ego_mps > 0.0 and
-          float(v_ego) <= open_recovery_max_ego_mps):
+          (float(v_ego) <= open_recovery_max_ego_mps or high_speed_recovery_safe)):
         recovery_alpha = _ema_alpha(dt_s, float(cfg.model_lead_filter_open_recovery_tau_s))
         drel_alpha = max(drel_alpha, recovery_alpha)
         open_step_max_m = max(open_step_max_m, recovery_alpha * innovation_m)
@@ -438,6 +446,21 @@ class ModelLeadTrack:
 
     min_closing = float(getattr(cfg, 'closing_governor_min_closing_mps', 0.30))
     vrel_closing = -(sum(s[2] for s in samples) / len(samples))
+    # The hold bridges brief evidence dropouts during a continuing closure, but
+    # it must not preserve a stale closing clamp after the SAME window has
+    # settled near parity. That was happening on-road and in the EV6 loop: raw
+    # vRel had recovered to roughly parity while the held governor continued
+    # publishing a 1.8 m/s closure, so the MPC braked an already-opening gap and
+    # drove ego below lead speed. Releasing here only removes the extra
+    # publish-side pessimism; the tracker's filtered state and every MPC safety
+    # path remain in force. A braking lead vetoes the early release.
+    opening_alead_veto = float(getattr(cfg, 'opening_governor_alead_veto_mps2', 0.2))
+    alead_mean = sum(s[3] for s in samples) / len(samples)
+    release_closing_max = 0.5 * min_closing
+    if vrel_closing <= release_closing_max and alead_mean >= -opening_alead_veto:
+      self.governor_hold_until_t = -1.0
+      self.governor_closing_mps = 0.0
+      return False
     if vrel_closing <= min_closing:
       return active
 
@@ -455,7 +478,6 @@ class ModelLeadTrack:
     armed_position = pos_closing > published_closing + margin and pos_closing > min_closing
 
     accel_onset = float(getattr(cfg, 'closing_governor_accel_onset_mps2', 99.0))
-    alead_mean = sum(s[3] for s in samples) / len(samples)
     armed_decel = accel_onset < 99.0 and alead_mean < -accel_onset
 
     if armed_position or armed_decel:

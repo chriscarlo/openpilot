@@ -514,15 +514,48 @@ class TestModelLeadFastCloseCorroborationAndOpenRecovery:
     for raw, drel, _ in rows:
       assert drel <= raw + 1e-6
 
-  def test_opening_recovery_does_not_engage_above_speed_gate(self):
+  def test_high_speed_opening_recovery_stays_blocked_for_short_raw_ttc(self):
     cfg = _cfg()
     open_slew_step_m = float(cfg.model_lead_filter_open_slew_max_mps) * DT_FRAME_S
-    # v_ego 12 > OpenRecoveryMaxEgoMps 8: recovery must never arm.
-    track, rows, d = self._collapse_then_truth(cfg, v_ego=12.0, truth_frames=30)
+    # Above OpenRecoveryMaxEgoMps, repeated farther measurements are not enough
+    # on their own: a short raw TTC keeps the pessimistic state and slew limit.
+    track, rows, d = self._collapse_then_truth(cfg, v_ego=12.0, truth_frames=30, collapse_m=22.0)
 
     for _raw, _drel, step in rows:
       assert step <= open_slew_step_m + 1e-6
     assert d - track.dRel > 8.0  # still wrong-too-close: slew-only recovery
+
+  def test_high_speed_opening_recovery_heals_safe_persistent_inward_collapse(self):
+    cfg = _cfg()
+    track = ModelLeadTrack.from_lead_dict(-1001, _lead_dict(45.0, -2.0, 24.0), 0.0, 0)
+    rows = []
+    t = 0.0
+    for _ in range(35):
+      t += DT_FRAME_S
+      predicted = track.predict_drel(t)
+      track.update(_lead_dict(60.0, -2.0, 24.0), t, 24.0, cfg, 0)
+      rows.append((60.0, track.dRel, track.dRel - predicted))
+
+    # Raw truth remains far away with a long TTC and no lead braking, so after
+    # four corroborating frames the freeway-speed state heals just like the
+    # low-speed path instead of retaining the false 12 m deficit indefinitely.
+    assert rows[3][2] > float(cfg.model_lead_filter_open_slew_max_mps) * DT_FRAME_S * 5.0
+    assert 60.0 - track.dRel < 2.5
+
+  def test_high_speed_opening_recovery_stays_blocked_for_braking_lead(self):
+    cfg = _cfg()
+    track = ModelLeadTrack.from_lead_dict(-1001, _lead_dict(40.0, -2.0, 24.0), 0.0, 0)
+    t = 0.0
+    for _ in range(3):
+      t += DT_FRAME_S
+      track.update(_lead_dict(28.0, -2.0, 24.0), t, 24.0, cfg, 0)
+    for _ in range(12):
+      t += DT_FRAME_S
+      predicted = track.predict_drel(t)
+      lead = _lead_dict(40.0, -2.0, 24.0)
+      lead["aLeadK"] = -0.5
+      track.update(lead, t, 24.0, cfg, 0)
+      assert track.dRel - predicted <= float(cfg.model_lead_filter_open_slew_max_mps) * DT_FRAME_S + 1e-6
 
   def test_open_recovery_max_ego_zero_is_exact_disable_even_at_standstill(self):
     # Kill switch: OpenRecoveryMaxEgoMps=0 must not arm at v_ego exactly 0.0
@@ -772,6 +805,31 @@ class TestOpeningGovernor:
     rs = tr.get_RadarState(cfg)
     assert rs["vRel"] == pytest.approx(0.0)
     assert rs["vLead"] == pytest.approx(20.0)  # v_ego_est + relaxed vRel
+
+  def test_stale_closing_hold_releases_when_window_is_near_parity(self):
+    tr = self._track(raw_vrel=-0.1, raw_alead=0.0)
+    tr.governor_hold_until_t = self.NOW + 1.0
+    tr.governor_closing_mps = 1.8
+
+    active = tr._update_closing_governor(
+      self.NOW, raw_drel=40.0, raw_vrel=-0.1, raw_alead=0.0, cfg=self._cfg(closing_governor_margin_mps=0.35),
+    )
+
+    assert not active
+    assert tr.governor_hold_until_t < self.NOW
+    assert tr.governor_closing_mps == 0.0
+
+  def test_stale_closing_hold_does_not_release_while_lead_is_braking(self):
+    tr = self._track(raw_vrel=-0.1, raw_alead=-0.5)
+    tr.governor_hold_until_t = self.NOW + 1.0
+    tr.governor_closing_mps = 1.8
+
+    active = tr._update_closing_governor(
+      self.NOW, raw_drel=40.0, raw_vrel=-0.1, raw_alead=-0.5, cfg=self._cfg(closing_governor_margin_mps=0.35),
+    )
+
+    assert active
+    assert tr.governor_closing_mps == pytest.approx(1.8)
 
   def test_relax_stays_behind_position_evidence_by_trust_deficit(self):
     tr = self._track(slope=0.25)

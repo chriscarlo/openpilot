@@ -53,9 +53,10 @@ class TestModelLeadFcwCorroborationVote:
   def test_phantom_divergence_is_suppressed_within_two_frames(self):
     # Collapsed internal state (filtered ~2 m) while the model keeps measuring
     # ~13 m: the one-way open-slew ratchet cannot heal it, and it must not be
-    # FCW-eligible. v_ego above the M2 open-recovery speed gate isolates the
-    # M3 veto from the M2 healing path.
-    cfg = _cfg()
+    # FCW-eligible. Disable M2 recovery to isolate the M3 veto.
+    # Isolate FCW corroboration from the independent high-speed wrong-too-close
+    # recovery path, which correctly heals this far / long-TTC track.
+    cfg = _cfg(model_lead_filter_open_recovery_max_ego_mps=0.0)
     track = ModelLeadTrack.from_lead_dict(-1001, _lead_dict(d_rel=2.0), 0.0, 0)
     states = [track.update(_lead_dict(d_rel=13.0), (i + 1) * DT, 12.0, cfg, 0) for i in range(4)]
     assert float(track.dRel) < 4.0, "test premise: filter must still be collapsed"
@@ -225,7 +226,9 @@ class TestRawKinematicFcwEscape:
     # away (raw 40 m closing 3 m/s, raw TTC ~13 s > 3.5 s), fails the TTC gate and
     # stays suppressed — the escape opens only for imminent raw threats, not any
     # closing at all.
-    cfg = _cfg()
+    # Isolate FCW corroboration from high-speed wrong-too-close recovery; this
+    # fixture intentionally requires the collapsed state to persist.
+    cfg = _cfg(model_lead_filter_open_recovery_max_ego_mps=0.0)
     track = ModelLeadTrack.from_lead_dict(-1001, _lead_dict(d_rel=2.0, v_ego=12.0), 0.0, 0)
     suppressed = []
     raw_d = 40.0
