@@ -508,6 +508,11 @@ def run_harness(*,
         "mpc_crash_cnt": float(getattr(planner.mpc, "crash_cnt", 0.0)),
         "fcw_visual_alert_active": bool(tick_t_s < fcw_alert_until_s),
         "planner_gap_reclaim_floor_mps2": float(getattr(planner.mpc, "gap_reclaim_accel_floor", 0.0) or 0.0),
+        "planner_lead_keepup_floor_mps2": float(getattr(planner.mpc, "lead_keepup_accel_floor", 0.0) or 0.0),
+        "planner_lead_slowdown_ceiling_mps2": (
+          None if getattr(planner.mpc, "lead_slowdown_accel_ceiling", None) is None
+          else float(planner.mpc.lead_slowdown_accel_ceiling)
+        ),
         "planner_cutin_settle_floor_mps2": float(getattr(planner.mpc, "cutin_settle_accel_floor", 0.0) or 0.0),
         "planner_lead_brake_release_floor_mps2": float(getattr(planner, "lead_brake_release_accel_floor", 0.0) or 0.0),
         "planner_lead_present_cruise_cap_mps2": float(getattr(planner.mpc, "lead_present_cruise_accel_cap", 0.0) or 0.0),

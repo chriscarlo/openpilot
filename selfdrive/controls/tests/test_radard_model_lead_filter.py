@@ -831,6 +831,42 @@ class TestOpeningGovernor:
     assert active
     assert tr.governor_closing_mps == pytest.approx(1.8)
 
+  def test_weak_nonbraking_position_slope_cannot_spend_position_trust(self):
+    # Rlog/soup-to-nuts shelf signature: position says ~2 m/s closing while
+    # the windowed raw velocity stream says only 0.4 and raw aLead is calm.
+    # The governor may arm, but it must not fabricate another 1.5 m/s closure
+    # from position noise alone.
+    tr = self._track(vrel_state=-0.2, drel_state=60.0, slope=-2.0, raw_vrel=-0.4)
+    cfg = self._cfg(closing_governor_margin_mps=0.75)
+
+    active = tr._update_closing_governor(
+      self.NOW, raw_drel=60.0, raw_vrel=-0.4, raw_alead=0.0, cfg=cfg,
+    )
+
+    assert active
+    tr.governor_active = active
+    assert tr.governor_closing_mps == pytest.approx(0.4)
+    assert tr.get_RadarState(cfg)["vRel"] == pytest.approx(-0.4)
+
+  @pytest.mark.parametrize("raw_vrel,raw_alead", [(-0.8, 0.0), (-0.4, -0.5)])
+  def test_strong_closure_or_lead_decel_preserves_position_trust(self, raw_vrel, raw_alead):
+    # Safety side of the split: either raw closure reaches the existing
+    # discrepancy margin or lead decel independently corroborates the threat.
+    # Position retains the full configured authority in both cases.
+    tr = self._track(vrel_state=-0.2, drel_state=60.0, slope=-2.0,
+                     raw_vrel=raw_vrel, raw_alead=raw_alead)
+    cfg = self._cfg(closing_governor_margin_mps=0.75)
+
+    active = tr._update_closing_governor(
+      self.NOW, raw_drel=60.0, raw_vrel=raw_vrel, raw_alead=raw_alead, cfg=cfg,
+    )
+
+    assert active
+    tr.governor_active = active
+    expected = min(2.0, -raw_vrel + cfg.closing_governor_pos_trust_excess_mps)
+    assert tr.governor_closing_mps == pytest.approx(expected)
+    assert tr.get_RadarState(cfg)["vRel"] == pytest.approx(-expected)
+
   def test_relax_stays_behind_position_evidence_by_trust_deficit(self):
     tr = self._track(slope=0.25)
     tr._update_opening_governor(self.NOW, False, self._cfg())

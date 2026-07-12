@@ -488,7 +488,23 @@ class ModelLeadTrack:
       # v-stream itself lied optimistic against the model's own position
       # stream), but never beyond it - a pure position phantom stays capped
       # near the gated vRel evidence.
-      pos_trust = float(getattr(cfg, 'closing_governor_pos_trust_excess_mps', 0.0))
+      # Position may lead the raw velocity stream by the configured allowance
+      # only when a second threat signal justifies it. The allowance was added
+      # for the road's genuinely braking lead (raw aLead already negative), but
+      # on a steady far follow, heavy-tail dRel slope noise repeatedly spent the
+      # full 1.5 m/s allowance against a weak, non-braking raw stream and
+      # fabricated a ~2 m/s published closure. Preserve position primacy when
+      # raw lead decel, strong raw closure, or a short position-derived
+      # collision TTC supplies the second threat signal; otherwise clamp to the
+      # windowed raw vRel closure and let the ordinary filtered state/MPC own it.
+      pos_collision_ttc_s = float(raw_drel) / max(pos_closing, 0.1)
+      position_trust_justified = (
+        float(raw_alead) < -float(getattr(cfg, 'opening_governor_alead_veto_mps2', 0.2)) or
+        alead_mean < -float(getattr(cfg, 'opening_governor_alead_veto_mps2', 0.2)) or
+        vrel_closing >= margin or
+        pos_collision_ttc_s <= OPENING_GOVERNOR_MIN_PUBLISHED_TTC_S
+      )
+      pos_trust = float(getattr(cfg, 'closing_governor_pos_trust_excess_mps', 0.0)) if position_trust_justified else 0.0
       self.governor_closing_mps = float(max(0.0, min(pos_closing, vrel_closing + max(0.0, pos_trust))))
       return True
     return active

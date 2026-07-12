@@ -454,6 +454,7 @@ class ResolvedVehicleConfig:
 
   def describe(self) -> dict[str, Any]:
     return {
+      "candidate": str(self.cp.carFingerprint),
       "topology": self.topology,
       "requestedControllerMode": self.requested_controller_mode,
       "resolvedControllerMode": self.resolved_controller_mode,
