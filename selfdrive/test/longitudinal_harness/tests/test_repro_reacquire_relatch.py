@@ -52,6 +52,8 @@ from __future__ import annotations
 
 import functools
 
+import pytest
+
 from openpilot.common.realtime import DT_MDL
 from selfdrive.test.longitudinal_harness.closed_loop import SimulationResult, run_harness
 from selfdrive.test.longitudinal_harness.config import resolve_ev6_vehicle_config
@@ -74,7 +76,9 @@ A_DROP_START_S = 4.0
 A_DROP_END_S = 6.8               # 2.8 s status drop -> reacquire ramp climbs to ~+0.65
 A_INITIAL_GAP_M = 45.0          # steady FOLLOW gap (lead0 is the MPC source pre-drop)
 A_RELATCH_GAP_M = 42.0          # SAME lead re-presented at 42 m mid-ramp
+A_RELATCH_EXPECTED_EGO_MPS = 28.25  # ego accelerates during the 2.8 s dropout
 A_RELATCH_VREL_MPS = -0.5       # road relatch closing ~-0.5 m/s
+A_RELATCH_LEAD_V_MPS = A_RELATCH_EXPECTED_EGO_MPS + A_RELATCH_VREL_MPS
 # True relatch geometry is non-threatening: TTC = 42 / 0.5 = 84 s (road ~100 s) >> 30 s.
 A_RELATCH_TRUE_TTC_S = A_RELATCH_GAP_M / abs(A_RELATCH_VREL_MPS)
 A_RELATCH_FLAP_S = 0.6          # brief Schmitt flap at relatch (road: flapping relatch)
@@ -118,11 +122,11 @@ def _build_steps_relatch(*, flap: bool = True) -> list[StepInput]:
       prob = 0.98
       if flap and tr < A_RELATCH_FLAP_S:
         prob = 0.98 if int(tr / 0.1) % 2 == 0 else 0.10
-      lead = LeadDirective(status=True, v_lead_mps=EGO_V0_MPS + A_RELATCH_VREL_MPS,
+      lead = LeadDirective(status=True, v_lead_mps=A_RELATCH_LEAD_V_MPS,
                            model_prob_target=prob,
                            d_rel_override_m=A_RELATCH_GAP_M if abs(t - A_DROP_END_S) < 1e-6 else None,
                            acquisition_reset=abs(t - A_DROP_END_S) < 1e-6)
-      note = "SAME lead relatched at 45 m / TTC 90 s mid-ramp"
+      note = "SAME lead relatched at 42 m / vRel -0.5 / TTC 84 s mid-ramp"
     steps.append(StepInput(t_s=t, cruise_speed_mps=CRUISE_SPEED_MPS, lead_one=lead, note=note))
   return steps
 
@@ -306,7 +310,11 @@ def test_relatch_scenario_wiring() -> None:
   latched = [row for row in post if row["lead_one_published_d_rel_m"] is not None
              and row["lead_one_model_prob"] >= 0.9]
   assert latched, "lead never relatched after the drop"
-  assert A_RELATCH_TRUE_TTC_S > 30.0, "part (a) requires relatch TTC > 30 s"
+  first_latched = latched[0]
+  actual_vrel = float(first_latched["lead_one_published_v_rel_mps"])
+  actual_ttc = float(first_latched["lead_one_published_d_rel_m"]) / max(-actual_vrel, 1e-3)
+  assert actual_vrel == pytest.approx(A_RELATCH_VREL_MPS, abs=0.15)
+  assert actual_ttc > 30.0, f"part (a) requires relatch TTC > 30 s, got {actual_ttc:.1f} s"
 
 
 def test_collapse_and_departure_both_exit_to_cruise() -> None:

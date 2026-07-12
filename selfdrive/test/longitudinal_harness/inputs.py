@@ -568,6 +568,10 @@ def _build_handoff(duration_s: float, dt_s: float) -> tuple[float, float, list[S
 
 def _build_handoff_previewable(duration_s: float, dt_s: float) -> tuple[float, float, list[StepInput]]:
   initial_speed = 35.0
+  # Keep lead A genuinely MPC-owning through the adjacent preview after the
+  # real radard filter. At the old 80 m start the least-cost source was cruise,
+  # so the fixture no longer exercised a lead0 -> lead1 handoff at all.
+  lead_one_start_gap_m = 60.0
   preview_start_t = 1.7
   handoff_t = 3.0
   overlap_s = 0.5
@@ -584,7 +588,7 @@ def _build_handoff_previewable(duration_s: float, dt_s: float) -> tuple[float, f
         status=True,
         v_lead_mps=32.0,
         model_prob_target=1.0,
-        d_rel_override_m=80.0 if idx == 0 else None,
+        d_rel_override_m=lead_one_start_gap_m if idx == 0 else None,
         acquisition_reset=idx == 0,
       )
       lead_two = LeadDirective()
@@ -637,6 +641,7 @@ def _build_handoff_previewable(duration_s: float, dt_s: float) -> tuple[float, f
 
 def _build_handoff_previewable_early_deficit(duration_s: float, dt_s: float) -> tuple[float, float, list[StepInput]]:
   initial_speed = 35.0
+  lead_one_start_gap_m = 60.0
   preview_start_t = 1.0
   handoff_t = 3.0
   overlap_s = 0.5
@@ -653,7 +658,7 @@ def _build_handoff_previewable_early_deficit(duration_s: float, dt_s: float) -> 
         status=True,
         v_lead_mps=32.0,
         model_prob_target=1.0,
-        d_rel_override_m=80.0 if idx == 0 else None,
+        d_rel_override_m=lead_one_start_gap_m if idx == 0 else None,
         acquisition_reset=idx == 0,
       )
       lead_two = LeadDirective()
@@ -706,6 +711,7 @@ def _build_handoff_previewable_early_deficit(duration_s: float, dt_s: float) -> 
 
 def _build_handoff_previewable_cruise_release(duration_s: float, dt_s: float) -> tuple[float, float, list[StepInput]]:
   initial_speed = 35.0
+  lead_one_start_gap_m = 60.0
   preview_start_t = 1.0
   late_release_t = 2.0
   handoff_t = 3.0
@@ -723,7 +729,7 @@ def _build_handoff_previewable_cruise_release(duration_s: float, dt_s: float) ->
         status=True,
         v_lead_mps=32.0,
         model_prob_target=1.0,
-        d_rel_override_m=80.0 if idx == 0 else None,
+        d_rel_override_m=lead_one_start_gap_m if idx == 0 else None,
         acquisition_reset=idx == 0,
       )
       lead_two = LeadDirective()
@@ -736,7 +742,7 @@ def _build_handoff_previewable_cruise_release(duration_s: float, dt_s: float) ->
         status=True,
         v_lead_mps=33.5 if t_s >= late_release_t else 32.0,
         model_prob_target=1.0,
-        d_rel_override_m=64.0 if abs(t_s - late_release_t) < (dt_s * 0.5) else None,
+        d_rel_override_m=lead_one_start_gap_m if abs(t_s - late_release_t) < (dt_s * 0.5) else None,
         y_rel_m=0.25 * progress,
         d_path_m=0.25 * progress,
         v_lat_mps=0.12,

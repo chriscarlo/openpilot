@@ -37,10 +37,9 @@ reads verbatim as `lead.aLeadK` - i.e. exactly the shallow decel that keeps the
 The rollback-knob twin isolates the mechanism: raising
 Longitudinal.LiveTune.LeadBrakeReleaseLeadDecelMinMps2 from the shipped -0.75 to
 -0.20 (the documented interim mitigation direction) trips the lead-decel veto the
-instant the lead begins braking, so the floor never activates on the
-decelerating lead; the MPC then brakes unclamped and keeps min gap >= 4.0 m with
-zero floor-clip ticks, while the shipped (floor-active) run clips the MPC brake
-above its own demand for 80 ticks and lets the gap collapse below 4.0 m.
+moment filtered aLeadK crosses -0.20, so the floor cannot bind after the veto is
+actually satisfied; the MPC then keeps min gap >= 4.0 m. The prior test counted
+the EMA ramp between 0 and -0.20 as though the veto had already fired.
 
 Full tici-fidelity loop: device controller mode + radard perception stage,
 noise off to isolate the mechanism.
@@ -72,8 +71,8 @@ LEAD_STOP_V_MPS = 0.0
 
 # Rollback knob (the floor's documented lead-decel veto): the shipped value is
 # -0.75 (floor stays active on this -0.5 lead). Raising it toward zero trips the
-# veto and disables the floor on any visibly-braking lead. -0.20 gives a clean
-# twin: the veto engages the instant the lead begins braking.
+# veto and disables the floor once filtered aLeadK reaches that threshold.
+# -0.20 gives a clean twin while retaining the real radard EMA crossing delay.
 FLOOR_VETO_ROLLBACK_MPS2 = -0.20
 SHIPPED_FLOOR_VETO_MPS2 = -0.75  # LeadBrakeReleaseLeadDecelMinMps2 default
 
@@ -239,17 +238,16 @@ def test_release_floor_scenario_wiring() -> None:
   # below can never silently pass on a scenario that no longer exercises CD1.
   shipped_active = _floor_active_rows(shipped.trace)
   assert shipped_active, "release floor never activated in the shipped run (scenario no longer exercises CD1)"
-  # ...and it reaches the exact branch CD1 lived in: the release floor arms in
-  # the closing_to_target branch while the lead is visibly decelerating (this is
-  # the code the fix touches). Pre-fix the floor there clipped the MPC brake;
-  # post-fix the CD1 fix's lead-decel term sizes the floor deeper than the MPC
-  # demand so it no longer binds — but the branch is still entered, so the
-  # behavioral test below is never vacuous.
-  cd1_branch_active = [row for row in shipped_active
-                       if row["t_s"] >= DECEL_START_S
-                       and row["planner_lead_brake_release_debug"].get("reason") == "closing_to_target"
-                       and (row["planner_lead_brake_release_debug"].get("lead_accel_mps2") or 0.0) < -0.2]
-  assert cd1_branch_active, "release floor never armed in the CD1 closing branch on the decelerating lead"
+  # ...and it reaches one of the exact CD1 projection branches while the lead is
+  # visibly decelerating. With real radard timing, the filtered aLead crosses
+  # -0.2 just after gap_error enters near_target; requiring closing_to_target
+  # specifically made the old validity guard impossible despite exercising the
+  # same lead-decel projection term.
+  cd1_projection_active = [row for row in shipped_active
+                           if row["t_s"] >= DECEL_START_S
+                           and row["planner_lead_brake_release_debug"].get("reason") in ("closing_to_target", "near_target")
+                           and (row["planner_lead_brake_release_debug"].get("lead_accel_mps2") or 0.0) < -0.2]
+  assert cd1_projection_active, "release floor never armed in a CD1 lead-decel projection branch"
 
   # SCENARIO-VALIDITY GUARD #2: every release guard the road reported as
   # satisfied is satisfied here too. The lead-decel veto NEVER trips in the
@@ -328,7 +326,7 @@ def test_control_release_floor_does_not_clip_stopping_lead_brake() -> None:
 
 
 def test_project_gain_knob_fix_vs_rollback() -> None:
-  """CD1 fix-knob oracle (the NEW threshold's rollback sentinel).
+  """CD1 projection-gain oracle at the current post-M1 composition.
 
   The `test_rollback_knob_restores_unclamped_braking` twin above exercises the
   OLDER LeadBrakeReleaseLeadDecelMinMps2 veto (disables the floor entirely). The
@@ -340,15 +338,17 @@ def test_project_gain_knob_fix_vs_rollback() -> None:
     gain = 1.0 (the fix): the lead's own decel is added to the required ego decel,
       sizing the floor DEEPER than the MPC's ramping brake, so it never clips the
       brake above the demand and the gap holds >= 4.0 m.
-    gain = 0.0 (rollback sentinel): the pre-fix instantaneous-closing floor is
-      restored bit-for-bit — the floor clips the MPC brake above its demand while
-      the lead decelerates and the gap collapses to ~3.35 m (the pathology).
+    gain = 0.0 (rollback sentinel): the pre-fix instantaneous-closing floor
+      candidate is restored bit-for-bit. The later M1 threat ceiling retains
+      final authority, but the shallower candidate still changes the integrated
+      trajectory and collapses the gap below 4 m.
 
-  The floor-off veto-rollback run is the unclamped-MPC-demand proxy for the
-  clip-above-demand measurement (identical kinematics, floor disabled)."""
+  The later M1 threat ceiling now correctly wins over this release floor on a
+  braking lead, so final-output equality with the floor is no longer a valid
+  binding oracle. Measure the floor candidate itself, then retain the physical
+  minimum-gap comparison between matched gain twins."""
   fix = _run_project_gain(FIX_PROJECT_GAIN)
   rollback = _run_project_gain(ROLLBACK_PROJECT_GAIN)
-  demand = _run(FLOOR_VETO_ROLLBACK_MPS2)  # floor-off unclamped-demand proxy
   m_fix = _measure(fix)
   m_roll = _measure(rollback)
 
@@ -364,26 +364,34 @@ def test_project_gain_knob_fix_vs_rollback() -> None:
                     and (row["planner_lead_brake_release_debug"].get("lead_accel_mps2") or 0.0) < -0.2]
     assert decel_active, "floor should stay armed on the decelerating lead at the shipped -0.75 veto"
 
-  fix_clips = _floor_clip_on_decel_above_demand(fix.trace, demand.trace)
-  roll_clips = _floor_clip_on_decel_above_demand(rollback.trace, demand.trace)
+  projected_rows = []
+  for row_fix, row_roll in zip(fix.trace, rollback.trace, strict=True):
+    dbg_fix = row_fix["planner_lead_brake_release_debug"]
+    dbg_roll = row_roll["planner_lead_brake_release_debug"]
+    if (dbg_fix.get("active") and dbg_roll.get("active") and
+        (dbg_fix.get("lead_accel_mps2") or 0.0) < -0.2):
+      projected_rows.append((row_fix, row_roll))
+  assert projected_rows, "projection-gain twins never reached the decelerating-lead floor branch"
+
+  floor_separation = max(
+    row_roll["planner_lead_brake_release_floor_mps2"] - row_fix["planner_lead_brake_release_floor_mps2"]
+    for row_fix, row_roll in projected_rows
+  )
 
   physics = (
     f"CD1 projection-gain knob (LeadBrakeReleaseLeadDecelProjectGain) at the shipped "
     f"{SHIPPED_FLOOR_VETO_MPS2} veto, lead brakes {TRUE_DECEL_MPS2} m/s^2 to a stop:\n"
-    f"  gain={FIX_PROJECT_GAIN} (fix):      min gap {m_fix['min_true_gap_m']:.2f} m, "
-    f"clip-above-demand ticks {len(fix_clips)}\n"
-    f"  gain={ROLLBACK_PROJECT_GAIN} (rollback): min gap {m_roll['min_true_gap_m']:.2f} m, "
-    f"clip-above-demand ticks {len(roll_clips)} (pre-fix pathology; road collapsed to 1.13 m)"
+    f"  gain={FIX_PROJECT_GAIN} (fix):      min gap {m_fix['min_true_gap_m']:.2f} m\n"
+    f"  gain={ROLLBACK_PROJECT_GAIN} (rollback): min gap {m_roll['min_true_gap_m']:.2f} m "
+    f"(pre-fix pathology; road collapsed to 1.13 m)\n"
+    f"  maximum rollback-minus-fix floor separation: {floor_separation:.3f} m/s^2"
   )
 
-  # The fix: zero clip-above-demand ticks and the gap holds at/above the floor.
-  assert len(fix_clips) == 0, physics
+  # The fix adds the lead-decel term to the candidate and holds the true gap.
+  assert floor_separation > 0.15, physics
   assert m_fix["min_true_gap_m"] >= MIN_TRUE_GAP_FLOOR_M, physics
 
-  # The rollback sentinel restores the pre-fix pathology: the floor clips the MPC
-  # brake above its own demand while the lead decelerates, and the gap collapses
-  # below the floor the fix holds.
-  assert len(roll_clips) > 0, physics
+  # The rollback sentinel removes that projected decel and restores the smaller gap.
   assert m_roll["min_true_gap_m"] < MIN_TRUE_GAP_FLOOR_M, physics
 
   # And the fix is strictly safer than its own rollback: deeper minimum gap.
@@ -403,7 +411,8 @@ def test_rollback_knob_restores_unclamped_braking() -> None:
 
   # No floor-clip ticks while the lead decelerates in the rollback run.
   rollback_decel_clips = [row for row in _floor_clip_rows(rollback.trace)
-                          if (row["planner_lead_brake_release_debug"].get("lead_accel_mps2") or 0.0) < 0.0]
+                          if (row["planner_lead_brake_release_debug"].get("lead_accel_mps2") or 0.0)
+                          < FLOOR_VETO_ROLLBACK_MPS2]
   assert not rollback_decel_clips, (
     f"rollback run still clipped the brake on a decelerating lead "
     f"(first at t={rollback_decel_clips[0]['t_s']:.2f}s)"

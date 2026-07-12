@@ -55,4 +55,11 @@ Focused acceptance:
 
 Unit coverage for the trust split is in `selfdrive/controls/tests/test_radard_model_lead_filter.py`.
 
-The full harness suite currently has eight pre-existing failures that reproduce with this fix disabled: three stale preview-source assumptions, one sign-flip fixture that no longer creates its claimed source transition through real radard, three release-floor fixtures that no longer enter their claimed rollback branches, and one relatch fixture whose stated 84 s TTC premise is no longer true after the ego accelerates during dropout. They are not acceptance evidence for or against this governor change and must be repaired as separate scenario-validity work rather than weakened in place.
+The eight scenario-validity failures found during the first full run were corrected without loosening their behavioral limits:
+
+- preview handoffs now start lead A at 60 m, keeping it genuinely `lead0`-owned through real radard before lead B reveals;
+- the sign-flip fixture injects the raw 5.5 m/s dip required for radard to publish the road-sized ~3.5 m/s rollover, and disables the separate EDGE1 cap only in that CD6-isolation twin;
+- the relatch lead now accounts for ego's dropout acceleration, producing an actual published -0.49 m/s relatch at ~42 m (>80 s TTC) instead of the accidental -1.74 m/s / ~24 s approach;
+- release-floor tests now measure the projection-floor candidate before the later M1 threat ceiling, which correctly has final authority, and apply the rollback veto only after filtered `aLeadK` actually crosses its configured threshold.
+
+Final full harness result: **152 passed, 0 failed**.

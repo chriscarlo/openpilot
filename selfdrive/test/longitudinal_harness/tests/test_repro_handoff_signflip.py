@@ -28,11 +28,11 @@ SIGN-FLIP scenario (road 200-6):
   34 m/s (cruise pulling hard, aTarget ~+0.56 like the road's +0.58), a lead
   cruising at the set speed ~70 m ahead (dRel > target_gap + 15 m; the true gap
   holds ~99 m the whole run - the lead never actually closes). At t=6.0 s the
-  perception vRel dips 3.5 m/s over 0.8 s and recovers (the road's vLeadK rollover:
-  the vRel EMA momentarily reports the lead braking hard while the distance
-  evidence says nothing changed). The rollover briefly makes the lead0 obstacle
-  win, forcing a cruise->lead0->cruise source transition, and the single-frame
-  cruise-side dive slams aTarget negative.
+  raw perception vRel dips 5.5 m/s over 0.8 s and recovers; the real radard EMA
+  attenuates that to the road's ~3.5 m/s published vLeadK rollover while the
+  distance evidence says nothing changed. The rollover briefly makes the lead0
+  obstacle win, forcing a cruise->lead0->cruise source transition, and the
+  single-frame cruise-side dive slams aTarget negative.
 
   The injection is faithful to the device pipeline: the harness raw lead's
   measured vRel becomes leadsV3.v = v_ego + vRel (radard_stage.py _fill_lead_v3
@@ -72,7 +72,7 @@ SF_GAP0_M = 70.0                 # OUTSIDE the follow envelope (dRel > target_ga
 SF_LEAD_PROB = 0.97             # road: continuous vision track, never dropped
 SF_DROP_START_S = 6.0
 SF_DROP_DUR_S = 0.8             # <2 s (road: vLeadK dropped 2.5-2.7 m/s in <2 s)
-SF_DROP_DV_MPS = 3.5           # perception vRel dip magnitude -> vLeadK rollover
+SF_DROP_DV_MPS = 5.5           # raw dip -> ~3.5 m/s published vLeadK rollover after real radard
 
 # Desired-behavior bounds (task spec, road-derived).
 SF_MAX_ONE_FRAME_DELTA_A_MPS2 = 0.4   # road: single-frame |delta aTarget| 0.8-2.7
@@ -158,7 +158,18 @@ def _e1_steps() -> list[StepInput]:
 
 
 @functools.lru_cache(maxsize=1)
-def _vehicle_config():
+def _signflip_vehicle_config():
+  # Isolate CD6. The road/device snapshot deliberately disables EDGE1 after it
+  # misfired on ghost model leads; enabling it here makes the synthetic vRel
+  # rollover trigger that separate positive-accel cap before the source flips.
+  return resolve_ev6_vehicle_config(param_overrides={
+    "Longitudinal.LiveTune.HandoffInsideDfPositiveCapMps2": "10.0",
+    "Longitudinal.LiveTune.ModelLeadFilterVRelTauS": "0.4",
+  })
+
+
+@functools.lru_cache(maxsize=1)
+def _edge1_vehicle_config():
   # The device snapshot may carry the driver's live deltas (2026-07-04:
   # HandoffInsideDfPositiveCapMps2=10.0 - EDGE1 cap deliberately DISABLED on
   # the car after it misfired on ghost model leads). This test validates the
@@ -174,7 +185,7 @@ def _vehicle_config():
 @functools.lru_cache(maxsize=1)
 def _run_signflip() -> SimulationResult:
   return run_harness(
-    vehicle_config=_vehicle_config(),
+    vehicle_config=_signflip_vehicle_config(),
     scenario_name="handoff_signflip",
     steps=_sf_steps(),
     initial_speed_mps=SF_EGO_V0_MPS,
@@ -187,7 +198,7 @@ def _run_signflip() -> SimulationResult:
 @functools.lru_cache(maxsize=1)
 def _run_edge1() -> SimulationResult:
   return run_harness(
-    vehicle_config=_vehicle_config(),
+    vehicle_config=_edge1_vehicle_config(),
     scenario_name="handoff_edge1_cruise_into_lead",
     steps=_e1_steps(),
     initial_speed_mps=E1_EGO_V0_MPS,
