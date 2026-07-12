@@ -291,7 +291,7 @@ def run_harness(*,
                 noise_profile: str = "realistic",
                 seed: int = 42,
                 noise_seeds: NoiseSeeds | None = None,
-                perception_filter: str = "direct") -> SimulationResult:
+                perception_filter: str = "auto") -> SimulationResult:
   planner_dt_s = DT_MDL
   control_dt_s = DT_CTRL
   profile = NOISE_PROFILES[noise_profile]

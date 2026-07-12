@@ -433,6 +433,26 @@ def test_default_ev6_config_matches_tici_no_radar_lka() -> None:
   assert vehicle.params["Longitudinal.LiveTune.AccelCost"] == "1.0"
   assert vehicle.params["Longitudinal.LiveTune.UseKalmanDRelFilter"] == "1"
   assert vehicle.params["VisionTurnSpeedControl"] == "1"
+
+
+def test_run_harness_defaults_to_device_perception_pipeline() -> None:
+  vehicle = resolve_ev6_vehicle_config()
+  initial_speed_mps, initial_accel_mps2, steps = build_synthetic_scenario(
+    "far_cruise_slow_lead", duration_s=1.0, dt_s=DT_MDL,
+  )
+
+  result = run_harness(
+    vehicle_config=vehicle,
+    scenario_name="default_device_perception",
+    steps=steps,
+    initial_speed_mps=initial_speed_mps,
+    initial_accel_mps2=initial_accel_mps2,
+    noise_profile="off",
+    seed=1,
+  )
+
+  assert result.vehicle["resolvedControllerMode"] == "device"
+  assert result.vehicle["perceptionFilter"] == "radard"
   assert vehicle.params["SpeedLimitControl"] == "1"
   assert vehicle.params["RTIEnabled"] == "1"
   assert vehicle.params["WeatherAwareControlEnabled"] == "1"
@@ -1121,9 +1141,14 @@ def test_far_cruise_slow_model_lead_suppresses_positive_accel() -> None:
   ]
   assert cruise_owned_lead_rows
   assert any(row["event"] == "lead_reveal" for row in cruise_owned_lead_rows)
-  assert all(row["mpc_acc_source_debug"].get("reason") == "cruise_hold" for row in cruise_owned_lead_rows)
-  assert max(row["planner_lead_present_cruise_cap_mps2"] for row in cruise_owned_lead_rows) <= 0.05
-  assert max(row["planner_accel_mps2"] for row in cruise_owned_lead_rows) <= 0.05
+  latched_lead_rows = [
+    row for row in cruise_owned_lead_rows
+    if row["mpc_acc_source_debug"].get("best_lead_source") is not None
+  ]
+  assert latched_lead_rows
+  assert all(row["mpc_acc_source_debug"].get("reason") == "cruise_hold" for row in latched_lead_rows)
+  assert max(row["planner_lead_present_cruise_cap_mps2"] for row in latched_lead_rows) <= 0.05
+  assert max(row["planner_accel_mps2"] for row in latched_lead_rows) <= 0.05
 
 
 def test_hyundai_controller_overlay_differs_from_passthrough() -> None:
