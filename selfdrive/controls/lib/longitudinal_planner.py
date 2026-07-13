@@ -498,8 +498,6 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     # the previous frame's final output (the same value published last frame).
     self._comfort_jerk_prev_a: float = 0.0
     self._comfort_jerk_prev_src: str = ""
-    self._comfort_upward_slew_frames: int = 0
-    self._comfort_upward_prev_owner: str = ""
     self.comfort_jerk_debug: dict = {
       "active": False,
       "bypassed": False,
@@ -1537,8 +1535,8 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     # discrete floors can jump on one noisy vRel frame (+0.05 -> +0.22 m/s^2 in
     # the road capture), which feels like a throttle tap on the EV6 before the
     # downward envelope walks it back. Only micro-corrections under the configured
-    # positive-delta ceiling qualify, and their allowed jerk ramps quickly on a
-    # persistent request. Ordinary MPC, continuous gap-reclaim, large recovery,
+    # positive-delta ceiling qualify, and every qualifying frame uses the same
+    # configured jerk bound. Ordinary MPC, continuous gap-reclaim, large recovery,
     # and launch acceleration remain free, so genuine pullaway response is not
     # blunted.
     #
@@ -1567,8 +1565,6 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     if jerk_limit <= 0.0 or max_step >= _COMFORT_JERK_DISABLE_STEP_MPS2:
       self.comfort_jerk_debug = {"active": False, "bypassed": False, "bypass_reason": "",
                                  "gated_reason": "disabled", "max_step_mps2": float(max_step), "clipped": False}
-      self._comfort_upward_slew_frames = 0
-      self._comfort_upward_prev_owner = ""
       self._comfort_jerk_prev_a = float(self.output_a_target)
       return
 
@@ -1588,8 +1584,6 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     if gated_reason:
       self.comfort_jerk_debug = {"active": False, "bypassed": False, "bypass_reason": "",
                                  "gated_reason": gated_reason, "max_step_mps2": float(max_step), "clipped": False}
-      self._comfort_upward_slew_frames = 0
-      self._comfort_upward_prev_owner = ""
       self._comfort_jerk_prev_a = float(self.output_a_target)
       return
 
@@ -1618,8 +1612,6 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     if bypassed:
       self.comfort_jerk_debug = {"active": True, "bypassed": True, "bypass_reason": reason or "urgent",
                                  "gated_reason": "", "max_step_mps2": float(max_step), "clipped": False}
-      self._comfort_upward_slew_frames = 0
-      self._comfort_upward_prev_owner = ""
     else:
       # Bound every benign DOWNWARD comfort-braking onset. Bound an UPWARD move
       # only when a discrete lead-follow comfort floor owns it; all other positive
@@ -1628,36 +1620,19 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
       if delta < -max_step:
         self.output_a_target = self._comfort_jerk_prev_a - max_step
         clipped = True
-        self._comfort_upward_slew_frames = 0
-        self._comfort_upward_prev_owner = ""
       elif delta > max_step and bool(self._comfort_upward_floor_owner):
-        if self._comfort_upward_floor_owner != self._comfort_upward_prev_owner:
-          self._comfort_upward_slew_frames = 0
         upward_eligible = upward_max_delta > 0.0 and delta <= upward_max_delta
-        # First frame uses the user's existing comfort-jerk knob. A persistent
-        # floor request gains two additional base-jerk increments each frame,
-        # reaching full authority quickly without adding another tune surface.
-        allowed_upward_jerk = jerk_limit * (1.0 + 2.0 * self._comfort_upward_slew_frames)
-        upward_step = allowed_upward_jerk * dt
-        if upward_eligible and delta > upward_step:
-          self.output_a_target = self._comfort_jerk_prev_a + upward_step
-          self._comfort_upward_slew_frames += 1
-          self._comfort_upward_prev_owner = self._comfort_upward_floor_owner
+        if upward_eligible:
+          self.output_a_target = self._comfort_jerk_prev_a + max_step
           clipped = True
-        else:
-          # A large recovery demand is not a comfort micro-correction; pass it
-          # immediately. A persistent small floor demand reaches full authority
-          # after the rapidly growing jerk allowance catches it.
-          self._comfort_upward_slew_frames = 0
-          self._comfort_upward_prev_owner = ""
-      else:
-        self._comfort_upward_slew_frames = 0
-        self._comfort_upward_prev_owner = ""
+        # A large recovery demand is not a comfort micro-correction and passes
+        # immediately. A persistent small floor demand advances by exactly the
+        # configured comfort-jerk step on every frame until it is satisfied.
       self.comfort_jerk_debug = {"active": True, "bypassed": False, "bypass_reason": "",
                                  "gated_reason": "", "max_step_mps2": float(max_step), "clipped": bool(clipped),
                                  "upward_floor_owner": str(self._comfort_upward_floor_owner),
                                  "upward_max_delta_mps2": float(upward_max_delta),
-                                 "upward_slew_frames": int(self._comfort_upward_slew_frames)}
+                                 "upward_step_mps2": float(max_step)}
 
     self._comfort_jerk_prev_a = float(self.output_a_target)
 

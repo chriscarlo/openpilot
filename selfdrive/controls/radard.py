@@ -63,6 +63,14 @@ MODEL_LEAD_PROB_TAU_S = 0.80
 # genuinely-closing lead the pipeline's pessimism stands, regardless of what
 # the position window claims.
 OPENING_GOVERNOR_MIN_PUBLISHED_TTC_S = 6.0
+# A held opening correction may bridge mild model-velocity pessimism, but a
+# genuinely fast current closure always wins independently of live veto knobs.
+OPENING_GOVERNOR_HARD_CLOSING_MPS = MODEL_LEAD_STRONG_CLOSING_MPS
+# A position-only CD9 latch is considered weak only while its windowed velocity
+# evidence remains below this fixed ceiling. This classification is deliberately
+# not live-tunable: permissive diagnostic values must never turn a sustained
+# closure into an opening-governor comfort case.
+OPENING_GOVERNOR_WEAK_CLOSING_MAX_MPS = 1.0
 MODEL_LEAD_CENTER_PATH_GATE_M = 2.6
 MODEL_LEAD_CUTIN_VLAT_MPS = 0.7
 LEAD_TRACK_PROB_DROPOUT_MIN_SPEED_MPS = 4.0
@@ -157,10 +165,29 @@ class ModelLeadTrack:
   governor_hold_until_t: float = -1.0
   governor_closing_mps: float = 0.0
   governor_active: bool = False
+  governor_reason: str = "inactive"
+  governor_threat_corroborated: bool = False
   # Opening governor (CD9's mirror): publish-time one-directional vRel relax
   # floor while the raw position window PROVES sustained opening that the
-  # closing-biased publish pipeline is contradicting. None = not armed.
+  # closing-biased publish pipeline is contradicting. The separate hold state
+  # bridges short proof-window dropouts without feeding the published result
+  # back into its own deadline. None = not armed.
   opening_relax_vrel: float | None = None
+  opening_relax_hold_vrel: float | None = None
+  opening_relax_hold_until_t: float = -1.0
+  opening_last_raw_proof_t: float = -1.0
+  opening_relax_held: bool = False
+  # Longer raw-position history used only as a bridge veto. The 0.6 s CD9
+  # evidence deque is destructively trimmed and can reverse on high-frequency
+  # x noise; this independent horizon distinguishes that local reversal from a
+  # genuinely closing gap. It never arms or refreshes the hold by itself.
+  opening_position_evidence: deque = field(default_factory=lambda: deque(maxlen=64))
+  opening_long_position_slope_mps: float | None = None
+  opening_bridge_position_safe: bool = False
+  # Samples at/before this identity/threat boundary cannot establish a new
+  # opening hold. Closing evidence remains intact for CD9 safety; only the
+  # less-urgent opening proof must be earned again on fresh frames.
+  opening_evidence_epoch_t: float = -1.0
 
   @classmethod
   def from_lead_dict(cls, identifier: int, lead_dict: dict[str, Any], now: float, lead_slot: int) -> "ModelLeadTrack":
@@ -183,6 +210,16 @@ class ModelLeadTrack:
   def predict_drel(self, now: float) -> float:
     dt_s = float(np.clip(float(now) - self.last_t, 0.0, 1.0))
     return float(max(0.0, self.dRel + self.vRel * dt_s))
+
+  def _clear_opening_relax(self, *, rearm_after_t: float | None = None) -> None:
+    """Clear every less-urgent opening-governor state atomically."""
+    self.opening_relax_vrel = None
+    self.opening_relax_hold_vrel = None
+    self.opening_relax_hold_until_t = -1.0
+    self.opening_last_raw_proof_t = -1.0
+    self.opening_relax_held = False
+    if rearm_after_t is not None:
+      self.opening_evidence_epoch_t = max(self.opening_evidence_epoch_t, float(rearm_after_t))
 
   def _fast_closing_supported(self, raw_drel: float, raw_vrel: float, raw_dpath: float,
                               raw_vlat: float, innovation_m: float, v_ego: float,
@@ -267,6 +304,12 @@ class ModelLeadTrack:
     raw_dpath = _finite_float(lead_dict.get("dPath", raw_yrel), raw_yrel)
     raw_vlat = _finite_float(lead_dict.get("vLat"), self.vLat)
 
+    # A slot/identity transition must earn fresh raw opening proof. Association
+    # may legitimately preserve the physical track, but a less-urgent hold must
+    # never transfer across a reordered lead hypothesis.
+    if self.last_slot >= 0 and int(lead_slot) != self.last_slot:
+      self._clear_opening_relax(rearm_after_t=now)
+
     dt_s = float(np.clip(float(now) - self.last_t, 0.0, 0.25))
     predicted_drel = self.predict_drel(now)
     innovation_m = raw_drel - predicted_drel
@@ -289,7 +332,11 @@ class ModelLeadTrack:
     governor_active = self._update_closing_governor(now, raw_drel, raw_vrel, raw_alead, cfg)
     if governor_active and not fast_closing:
       urgency = 1.0
-    self._update_opening_governor(now, governor_active, cfg)
+    self._update_opening_governor(
+      now, governor_active, cfg,
+      raw_drel=raw_drel, raw_vrel=raw_vrel, raw_alead=raw_alead,
+      raw_dpath=raw_dpath, raw_vlat=raw_vlat, v_ego=v_ego,
+    )
 
     if fast_closing:
       drel_alpha = max(0.65, _ema_alpha(dt_s, MODEL_LEAD_FAST_CLOSE_TAU_S))
@@ -425,11 +472,14 @@ class ModelLeadTrack:
     disables the sustained-decel arm path only.
     """
     self.closing_evidence.append((float(now), float(raw_drel), float(raw_vrel), float(raw_alead)))
+    self.opening_position_evidence.append((float(now), float(raw_drel)))
 
     margin = float(getattr(cfg, 'closing_governor_margin_mps', 99.0))
     if margin >= 99.0:
       self.governor_hold_until_t = -1.0
       self.governor_closing_mps = 0.0
+      self.governor_reason = "disabled"
+      self.governor_threat_corroborated = False
       return False
 
     window_s = max(0.2, float(getattr(cfg, 'closing_governor_window_s', 0.7)))
@@ -442,10 +492,22 @@ class ModelLeadTrack:
     # Demand real coverage of the window (missed/dropped frames leave holes):
     # a sparse window must not arm the fast regime.
     if len(samples) < 8 or span < 0.5 * window_s:
+      if not active:
+        self.governor_reason = "inactive"
+        self.governor_threat_corroborated = False
       return active
 
     min_closing = float(getattr(cfg, 'closing_governor_min_closing_mps', 0.30))
     vrel_closing = -(sum(s[2] for s in samples) / len(samples))
+    # A weak, position-only latch may start while velocity evidence is calm,
+    # then outlive the arm condition as the same dense window develops a real
+    # closure. Upgrade that already-active latch before any early return. This
+    # ceiling is deliberately fixed: a permissive opening raw-closing tune
+    # must never let a previously earned opening hold mask sustained closure.
+    if (active and not self.governor_threat_corroborated and
+        vrel_closing > OPENING_GOVERNOR_WEAK_CLOSING_MAX_MPS):
+      self.governor_threat_corroborated = True
+      self.governor_reason = "velocity_corroborated"
     # The hold bridges brief evidence dropouts during a continuing closure, but
     # it must not preserve a stale closing clamp after the SAME window has
     # settled near parity. That was happening on-road and in the EV6 loop: raw
@@ -456,10 +518,25 @@ class ModelLeadTrack:
     # path remain in force. A braking lead vetoes the early release.
     opening_alead_veto = float(getattr(cfg, 'opening_governor_alead_veto_mps2', 0.2))
     alead_mean = sum(s[3] for s in samples) / len(samples)
+    raw_closing = max(0.0, -float(raw_vrel))
+    raw_collision_ttc_s = float(raw_drel) / max(raw_closing, 0.1)
+    current_braking = float(raw_alead) < -opening_alead_veto
+    current_short_ttc = raw_closing > min_closing and raw_collision_ttc_s <= OPENING_GOVERNOR_MIN_PUBLISHED_TTC_S
+    current_fast_close = raw_closing >= OPENING_GOVERNOR_HARD_CLOSING_MPS
+    if active and (current_braking or current_short_ttc or current_fast_close):
+      self.governor_threat_corroborated = True
+      if current_braking:
+        self.governor_reason = "current_braking"
+      elif current_short_ttc:
+        self.governor_reason = "short_raw_ttc"
+      else:
+        self.governor_reason = "fast_close"
     release_closing_max = 0.5 * min_closing
     if vrel_closing <= release_closing_max and alead_mean >= -opening_alead_veto:
       self.governor_hold_until_t = -1.0
       self.governor_closing_mps = 0.0
+      self.governor_reason = "inactive"
+      self.governor_threat_corroborated = False
       return False
     if vrel_closing <= min_closing:
       return active
@@ -504,8 +581,6 @@ class ModelLeadTrack:
       max_pos_trust = max(0.0, float(getattr(cfg, 'closing_governor_pos_trust_excess_mps', 0.0)))
       recent_alead_decel = len(samples) >= 2 and all(s[3] < -opening_alead_veto for s in samples[-2:])
       braking_corroborated = alead_mean < -opening_alead_veto or recent_alead_decel
-      raw_closing = max(0.0, -float(raw_vrel))
-      raw_collision_ttc_s = float(raw_drel) / max(raw_closing, 0.1)
       short_raw_ttc = raw_closing > min_closing and raw_collision_ttc_s <= OPENING_GOVERNOR_MIN_PUBLISHED_TTC_S
       if braking_corroborated or short_raw_ttc:
         pos_trust = max_pos_trust
@@ -520,11 +595,41 @@ class ModelLeadTrack:
                                       max(0.0, -float(raw_alead) - opening_alead_veto))
         pos_trust = min(max_pos_trust, max(velocity_trust, unconfirmed_alead_trust))
       self.governor_closing_mps = float(max(0.0, min(pos_closing, vrel_closing + max(0.0, pos_trust))))
+      threat_corroborated = bool(
+        armed_decel or braking_corroborated or current_braking or short_raw_ttc or
+        current_fast_close or vrel_closing > OPENING_GOVERNOR_WEAK_CLOSING_MAX_MPS
+      )
+      # Corroboration is sticky for the whole CD9 hold. A real braking onset may
+      # recover its current aLead on later frames, but the opening side must not
+      # reinterpret that recovery as permission to override the active threat.
+      self.governor_threat_corroborated = bool(
+        (active and self.governor_threat_corroborated) or threat_corroborated
+      )
+      if self.governor_threat_corroborated:
+        if armed_decel or braking_corroborated:
+          self.governor_reason = "lead_braking"
+        elif short_raw_ttc:
+          self.governor_reason = "short_raw_ttc"
+        elif current_fast_close:
+          self.governor_reason = "fast_close"
+        else:
+          self.governor_reason = "velocity_corroborated"
+      else:
+        self.governor_reason = "position_only_weak"
       return True
+    if not active:
+      self.governor_reason = "inactive"
+      self.governor_threat_corroborated = False
     return active
 
   def _update_opening_governor(self, now: float, closing_governor_active: bool,
-                               cfg: LeadResponseTuningConfig) -> None:
+                               cfg: LeadResponseTuningConfig, *,
+                               raw_drel: float | None = None,
+                               raw_vrel: float | None = None,
+                               raw_alead: float | None = None,
+                               raw_dpath: float | None = None,
+                               raw_vlat: float | None = None,
+                               v_ego: float | None = None) -> None:
     """Opening governor: CD9's exact mirror (2026-07-08 phantom-closing runs).
 
     The publish pipeline's safety asymmetry is deliberate — lag comp boosts
@@ -550,41 +655,154 @@ class ModelLeadTrack:
     road evidence showed the raw v-stream lying against the position stream).
 
     Vetoes (any -> no relax; ambiguity resolves toward MORE braking):
-      - CD9 latched or holding (never fight the closing governor)
+      - threat-corroborated CD9 latched or holding
       - windowed raw vRel mean shows closing beyond RawClosingVetoMps
       - windowed raw aLead mean below -ALeadVetoMps2 (braking lead)
       - published closing TTC under OPENING_GOVERNOR_MIN_PUBLISHED_TTC_S
       - sparse window (same coverage demand as CD9)
 
-    Rollback sentinel: OpeningGovernorTrustDeficitMps >= 99 disables entirely
-    (exact prior publish).
+    OpeningGovernorHoldS extends an earned correction across a short proof
+    dropout only while a longer raw-position trend remains non-closing. A weak,
+    position-only CD9 latch may coexist with that already-earned hold, but can
+    neither create nor refresh it. Current braking, fast/short-TTC closure,
+    oncoming/lateral/near threats, misses, and identity changes clear all
+    less-urgent state immediately.
+
+    Rollback sentinels: OpeningGovernorTrustDeficitMps >= 99 disables entirely;
+    OpeningGovernorHoldS = 0 restores exact per-frame behavior.
     """
     self.opening_relax_vrel = None
+    self.opening_relax_held = False
 
     trust_deficit = float(getattr(cfg, 'opening_governor_trust_deficit_mps', 99.0))
     if trust_deficit >= 99.0:
+      self._clear_opening_relax()
       return
-    if closing_governor_active or now <= self.governor_hold_until_t:
-      return
+
+    hold_s = float(getattr(cfg, 'opening_governor_hold_s', 0.0))
+    legacy_per_frame = hold_s <= 0.0
+    closing_governor_engaged = bool(closing_governor_active or now <= self.governor_hold_until_t)
+    if legacy_per_frame:
+      # Exact rollback: no retained state, and any CD9 latch has the historical
+      # unconditional precedence over a same-frame opening proof.
+      self.opening_relax_hold_vrel = None
+      self.opening_relax_hold_until_t = -1.0
+      self.opening_last_raw_proof_t = -1.0
+      if closing_governor_engaged:
+        return
+
+    samples_all = list(self.closing_evidence)
+    last_sample = samples_all[-1] if samples_all else (float(now), float(self.dRel), float(self.vRel), float(self.aLeadK))
+    current_drel = max(0.0, float(last_sample[1] if raw_drel is None else raw_drel))
+    current_vrel = float(last_sample[2] if raw_vrel is None else raw_vrel)
+    current_alead = float(last_sample[3] if raw_alead is None else raw_alead)
+    current_dpath = float(self.dPath if raw_dpath is None else raw_dpath)
+    current_vlat = float(self.vLat if raw_vlat is None else raw_vlat)
+    current_vego = max(0.0, float(self.vLead - self.vRel if v_ego is None else v_ego))
+
+    if not legacy_per_frame:
+      alead_veto = float(getattr(cfg, 'opening_governor_alead_veto_mps2', 0.2))
+      # Tuning may make the ordinary window veto more conservative, but it may
+      # not disable the same-frame braking escape used by the held state.
+      hard_alead_veto = min(max(0.0, alead_veto), 0.2)
+      raw_closing = max(0.0, -current_vrel)
+      raw_ttc_s = current_drel / max(raw_closing, 0.1)
+      raw_vlead = current_vego + current_vrel
+      near_threat = current_drel <= max(10.0, 0.55 * current_vego)
+      lateral_threat = bool(
+        abs(current_vlat) >= MODEL_LEAD_CUTIN_VLAT_MPS or
+        abs(current_dpath - float(self.dPath)) >= MODEL_LEAD_DUPLICATE_PATH_GATE_M
+      )
+      current_hard_threat = bool(
+        current_alead < -hard_alead_veto or
+        raw_closing >= OPENING_GOVERNOR_HARD_CLOSING_MPS or
+        (raw_closing > 0.3 and raw_ttc_s <= OPENING_GOVERNOR_MIN_PUBLISHED_TTC_S) or
+        raw_vlead < 0.0 or lateral_threat or near_threat or
+        (closing_governor_engaged and self.governor_threat_corroborated)
+      )
+      if current_hard_threat:
+        self._clear_opening_relax(rearm_after_t=now)
+        return
+
     published_closing = max(0.0, -float(self.vRel))
     if published_closing <= 1e-3:
-      return  # publish already agrees: nothing to relax
+      if legacy_per_frame:
+        return  # publish already agrees: nothing to relax
     if published_closing > 1e-3 and (float(self.dRel) / published_closing) < OPENING_GOVERNOR_MIN_PUBLISHED_TTC_S:
+      if not legacy_per_frame:
+        self._clear_opening_relax(rearm_after_t=now)
       return
 
     window_s = max(0.2, float(getattr(cfg, 'closing_governor_window_s', 0.7)))
-    samples = [s for s in self.closing_evidence if (now - s[0]) <= window_s]
+    samples = [
+      s for s in self.closing_evidence
+      if (now - s[0]) <= window_s and (legacy_per_frame or s[0] > self.opening_evidence_epoch_t)
+    ]
     span = samples[-1][0] - samples[0][0] if len(samples) >= 2 else 0.0
-    if len(samples) < 8 or span < 0.5 * window_s:
-      return
+    dense_window = len(samples) >= 8 and span >= 0.5 * window_s
+
+    # A deadline alone is not enough to retain a less-urgent publish. Bridge a
+    # noisy short-window dropout only while a longer RAW-position trend remains
+    # non-closing. This history cannot arm or extend the hold; it can only end
+    # one early. The route-232 oscillation stays positive on this horizon, while
+    # the braking-lead twin's genuine closure turns it negative before onset.
+    long_window_s = min(1.5, max(1.0, hold_s + 0.25))
+    long_samples = [
+      s for s in self.opening_position_evidence
+      if (now - s[0]) <= long_window_s and s[0] > self.opening_evidence_epoch_t
+    ]
+    long_span = long_samples[-1][0] - long_samples[0][0] if len(long_samples) >= 2 else 0.0
+    self.opening_long_position_slope_mps = None
+    self.opening_bridge_position_safe = False
+    if len(long_samples) >= 8 and long_span >= 0.5:
+      long_k = max(2, len(long_samples) // 4)
+      long_first, long_last = long_samples[:long_k], long_samples[-long_k:]
+      long_t_first = sum(s[0] for s in long_first) / long_k
+      long_t_last = sum(s[0] for s in long_last) / long_k
+      if (long_t_last - long_t_first) > 1e-3:
+        long_d_first = sum(s[1] for s in long_first) / long_k
+        long_d_last = sum(s[1] for s in long_last) / long_k
+        self.opening_long_position_slope_mps = float(
+          (long_d_last - long_d_first) / (long_t_last - long_t_first)
+        )
+        self.opening_bridge_position_safe = self.opening_long_position_slope_mps >= -0.05
 
     raw_closing_veto = float(getattr(cfg, 'opening_governor_raw_closing_veto_mps', 1.0))
-    vrel_closing = -(sum(s[2] for s in samples) / len(samples))
-    if vrel_closing > raw_closing_veto:
+    vrel_closing = -(sum(s[2] for s in samples) / len(samples)) if samples else 0.0
+    if dense_window and vrel_closing > raw_closing_veto:
+      if not legacy_per_frame:
+        self._clear_opening_relax(rearm_after_t=now)
       return
     alead_veto = float(getattr(cfg, 'opening_governor_alead_veto_mps2', 0.2))
-    alead_mean = sum(s[3] for s in samples) / len(samples)
-    if alead_mean < -alead_veto:
+    alead_mean = sum(s[3] for s in samples) / len(samples) if samples else 0.0
+    if dense_window and alead_mean < -alead_veto:
+      if not legacy_per_frame:
+        self._clear_opening_relax(rearm_after_t=now)
+      return
+
+    hold_active = bool(
+      not legacy_per_frame and self.opening_relax_hold_vrel is not None and
+      now <= self.opening_relax_hold_until_t
+    )
+    if closing_governor_engaged:
+      # A weak position-only CD9 latch may coexist only with a hold that was
+      # already earned. It cannot arm or refresh one, and CD9 automatically
+      # regains publish precedence at the absolute raw-proof deadline.
+      if hold_active and not self.governor_threat_corroborated and self.opening_bridge_position_safe:
+        self.opening_relax_vrel = float(min(self.opening_relax_hold_vrel, 0.0))
+        self.opening_relax_held = True
+      else:
+        self._clear_opening_relax(
+          rearm_after_t=now if self.governor_threat_corroborated else None,
+        )
+      return
+
+    if not dense_window:
+      if hold_active and self.opening_bridge_position_safe:
+        self.opening_relax_vrel = float(min(self.opening_relax_hold_vrel, 0.0))
+        self.opening_relax_held = True
+      elif not legacy_per_frame:
+        self._clear_opening_relax()
       return
 
     k = max(2, len(samples) // 4)
@@ -599,8 +817,23 @@ class ModelLeadTrack:
 
     min_opening = float(getattr(cfg, 'opening_governor_min_opening_mps', 0.2))
     if pos_opening < min_opening:
+      if hold_active and self.opening_bridge_position_safe:
+        self.opening_relax_vrel = float(min(self.opening_relax_hold_vrel, 0.0))
+        self.opening_relax_held = True
+      elif not legacy_per_frame:
+        self._clear_opening_relax()
       return
-    self.opening_relax_vrel = float(min(pos_opening - trust_deficit, 0.0))
+    proof_floor = float(min(pos_opening - trust_deficit, 0.0))
+    self.opening_relax_vrel = proof_floor
+    if not legacy_per_frame:
+      if hold_active and self.opening_relax_hold_vrel is not None:
+        # Retain the least-pessimistic floor earned inside this uninterrupted
+        # proof episode; all threat exits above still revoke it immediately.
+        proof_floor = max(proof_floor, float(self.opening_relax_hold_vrel))
+      self.opening_relax_vrel = float(min(proof_floor, 0.0))
+      self.opening_relax_hold_vrel = self.opening_relax_vrel
+      self.opening_relax_hold_until_t = float(now) + min(max(0.0, hold_s), 1.5)
+      self.opening_last_raw_proof_t = float(now)
 
   def _apply_far_range_vlead_optimism_clamp(self, raw_vrel: float, v_ego: float,
                                             next_drel: float, now: float,
@@ -927,7 +1160,7 @@ class ModelLeadTracker:
         track.missed += 1
         # A missed frame means no fresh position evidence: never carry a stale
         # opening relax onto a held/coasted publish (less-urgent direction).
-        track.opening_relax_vrel = None
+        track._clear_opening_relax(rearm_after_t=track.last_t)
       if track.missed > MODEL_LEAD_TRACK_MAX_MISSES:
         self._tracks.pop(identifier, None)
     self._frame_active = False

@@ -79,7 +79,17 @@ class RadardPerceptionStage:
         "closing_governor_active": bool(track is not None and track.governor_active),
         "closing_governor_hold_remaining_s": 0.0 if track is None else max(0.0, float(track.governor_hold_until_t) - float(now_s)),
         "closing_governor_closing_mps": 0.0 if track is None else float(track.governor_closing_mps),
+        "closing_governor_reason": "inactive" if track is None else str(track.governor_reason),
+        "closing_governor_threat_corroborated": bool(track is not None and track.governor_threat_corroborated),
         "opening_relax_vrel_mps": None if track is None or track.opening_relax_vrel is None else float(track.opening_relax_vrel),
+        "opening_relax_held": bool(track is not None and track.opening_relax_held),
+        "opening_relax_hold_remaining_s": 0.0 if track is None else max(0.0, float(track.opening_relax_hold_until_t) - float(now_s)),
+        "opening_last_raw_proof_age_s": (
+          None if track is None or track.opening_last_raw_proof_t < 0.0
+          else max(0.0, float(now_s) - float(track.opening_last_raw_proof_t))
+        ),
+        "opening_long_position_slope_mps": None if track is None else track.opening_long_position_slope_mps,
+        "opening_bridge_position_safe": bool(track is not None and track.opening_bridge_position_safe),
       }
     return debug
 

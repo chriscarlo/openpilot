@@ -34,8 +34,6 @@ def _make_stub(*, prev_a: float = 0.0, owner: str = "", source: str = "lead0",
     _comfort_jerk_prev_a=prev_a,
     _comfort_jerk_prev_src=source,
     _comfort_upward_floor_owner=owner,
-    _comfort_upward_slew_frames=0,
-    _comfort_upward_prev_owner="",
     _flutter_mode_active=False,
     handoff_limit_debug={"active": False, "clipped": False},
     relatch_blend_debug={"active": False},
@@ -91,15 +89,16 @@ def test_live_keepup_raise_cannot_expand_micro_recovery_ceiling() -> None:
   assert stub.comfort_jerk_debug["clipped"] is False
 
 
-def test_persistent_micro_floor_rollon_ramps_to_full_authority_quickly() -> None:
+def test_persistent_micro_floor_rollon_uses_constant_comfort_jerk() -> None:
   stub, leads = _make_stub(owner="lead_keepup")
   outputs = []
-  for _ in range(4):
+  for _ in range(11):
     stub.output_a_target = 0.22
     stub._apply_comfort_jerk_envelope("lead0", leads)
     outputs.append(stub.output_a_target)
 
-  assert outputs == pytest.approx([0.02, 0.08, 0.18, 0.22])
+  assert outputs == pytest.approx([0.02 * i for i in range(1, 12)])
+  assert stub.comfort_jerk_debug["upward_step_mps2"] == pytest.approx(COMFORT_JERK * DT)
 
 
 def test_benign_downward_step_remains_comfort_slewed() -> None:

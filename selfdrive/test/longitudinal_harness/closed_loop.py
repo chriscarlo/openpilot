@@ -379,7 +379,14 @@ def run_harness(*,
         "closing_governor_active": False,
         "closing_governor_hold_remaining_s": 0.0,
         "closing_governor_closing_mps": 0.0,
+        "closing_governor_reason": "inactive",
+        "closing_governor_threat_corroborated": False,
         "opening_relax_vrel_mps": None,
+        "opening_relax_held": False,
+        "opening_relax_hold_remaining_s": 0.0,
+        "opening_last_raw_proof_age_s": None,
+        "opening_long_position_slope_mps": None,
+        "opening_bridge_position_safe": False,
       }
       for slot in ("leadOne", "leadTwo")
     }

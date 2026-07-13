@@ -800,11 +800,11 @@ LEAD_RESPONSE_TUNE_SPECS = (
                 "comfort_jerk_limit_mps3 * dt (0.8 m/s^3 * 0.05 s = 0.04 m/s^2/frame) so a single noisy vRel frame under "
                 "a benign steady LEAD follow cannot step-change aTarget hard into a brake (road: -0.31 -> -1.00 in "
                 "0.15 s, ~4.6 m/s^3) - the felt unnecessary-braking blip. SELECTIVELY BIDIRECTIONAL: the same bound "
-                "applies to the FIRST frame of an UPWARD micro-move only when the discrete lead-keepup or lead-brake-release "
+                "applies to EVERY frame of an UPWARD micro-move only when the discrete lead-keepup or lead-brake-release "
                 "floor provably raised and still owns the final pre-envelope target (road: +0.05 -> +0.22 in 50 ms). "
                 "Only the small span from the near-target regen floor to the configured keep-up ceiling qualifies; larger "
-                "recovery demands pass immediately. Consecutive frames progressively open authority from this same comfort "
-                "jerk value. Ordinary MPC, continuous gap-reclaim, and low-speed launch acceleration stay free, preserving "
+                "recovery demands pass immediately. Persistent floor demand advances by the same constant comfort-jerk "
+                "step each frame. Ordinary MPC, continuous gap-reclaim, and low-speed launch acceleration stay free, preserving "
                 "prompt genuine pullaway response. "
                 "SCOPE-GATED "
                 "to the steady-lead-follow regime: engages only when a lead0/lead1 source owns control with NO source "
@@ -1701,6 +1701,19 @@ LEAD_RESPONSE_TUNE_SPECS = (
                 "(m/s) before any relax arms. Matches the phantom-run detector threshold used on the 2026-07-08 traces.",
   ),
   LeadResponseTuneSpec(
+    attr="opening_governor_hold_s",
+    key="Longitudinal.LiveTune.OpeningGovernorHoldS",
+    cli_name="opening-governor-hold-s",
+    label="opening_governor_hold",
+    default=1.0,
+    minimum=0.0,
+    maximum=1.5,
+    description="Opening governor: absolute hold (s) from the most recent dense RAW-position opening proof. Bridges "
+                "brief proof-window dropouts without letting published/filtered state refresh its own deadline. Current "
+                "braking, short TTC, fast close, oncoming/lateral/near threats, missed frames, and identity changes clear "
+                "it immediately. 0.0 restores exact per-frame legacy behavior (rollback sentinel).",
+  ),
+  LeadResponseTuneSpec(
     attr="opening_governor_raw_closing_veto_mps",
     key="Longitudinal.LiveTune.OpeningGovernorRawClosingVetoMps",
     cli_name="opening-governor-raw-closing-veto-mps",
@@ -1917,6 +1930,7 @@ class LeadResponseTuningConfig:
   closing_governor_alead_tau_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["closing_governor_alead_tau_s"].default
   opening_governor_trust_deficit_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["opening_governor_trust_deficit_mps"].default
   opening_governor_min_opening_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["opening_governor_min_opening_mps"].default
+  opening_governor_hold_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["opening_governor_hold_s"].default
   opening_governor_raw_closing_veto_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["opening_governor_raw_closing_veto_mps"].default
   opening_governor_alead_veto_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["opening_governor_alead_veto_mps2"].default
   launch_release_min_drel_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["launch_release_min_drel_m"].default

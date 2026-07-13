@@ -102,6 +102,10 @@ def _vehicle_config(model_decel_floor_mps2: float):
     "Longitudinal.LiveTune.HandoffLimitMaxDeltaMps2": f"{ROAD_HANDOFF_MAX_DELTA_MPS2:g}",
     "Longitudinal.LiveTune.HandoffInsideDfPositiveCapMps2": "10.0",
     "Longitudinal.LiveTune.ModelLeadFilterVRelTauS": "0.4",
+    # Isolate the downstream aLead-amplifier fix/rollback. The opening-governor
+    # integration oracle separately verifies that the new default can remove
+    # this false-closing input before it reaches CD3.
+    "Longitudinal.LiveTune.OpeningGovernorHoldS": "0",
   })
 
 

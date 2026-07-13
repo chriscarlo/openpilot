@@ -158,6 +158,11 @@ ROLLBACK_COMFORT_JERK_MPS3 = 50.0    # rollback sentinel: envelope disabled
 def _vehicle_config_jerk(jerk_limit: float):
   return resolve_ev6_vehicle_config(param_overrides={
     "Longitudinal.LiveTune.ComfortJerkLimitMps3": f"{jerk_limit:g}",
+    # Isolate the planner envelope's own fix/rollback oracle. The separate
+    # opening-governor full-path test covers the integrated default; retaining
+    # its correction here can remove the exact floor edge this fixture is meant
+    # to feed into CD7 before the planner ever sees it.
+    "Longitudinal.LiveTune.OpeningGovernorHoldS": "0",
   })
 
 

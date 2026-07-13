@@ -794,7 +794,16 @@ class TestOpeningGovernor:
       t = t0 + 0.55 * i / (n_samples - 1)
       d = drel_state + slope * (t - self.NOW)
       tr.closing_evidence.append((t, d, raw_vrel, raw_alead))
+      tr.opening_position_evidence.append((t, d))
     return tr
+
+  @staticmethod
+  def _replace_evidence(tr, *, now, drel, slope, raw_vrel=-0.4, raw_alead=0.0, n_samples=14):
+    tr.closing_evidence.clear()
+    t0 = now - 0.55
+    for i in range(n_samples):
+      t = t0 + 0.55 * i / (n_samples - 1)
+      tr.closing_evidence.append((t, drel + slope * (t - now), raw_vrel, raw_alead))
 
   def test_phantom_closing_relax_arms_and_floors_publish(self):
     # Trace anchor: published vRel ~-2 while position opens ~0.7 m/s.
@@ -805,6 +814,183 @@ class TestOpeningGovernor:
     rs = tr.get_RadarState(cfg)
     assert rs["vRel"] == pytest.approx(0.0)
     assert rs["vLead"] == pytest.approx(20.0)  # v_ego_est + relaxed vRel
+
+  def test_opening_hold_bridges_ambiguous_raw_position_window(self):
+    tr = self._track()
+    cfg = self._cfg()
+    tr._update_opening_governor(self.NOW, False, cfg)
+    deadline = tr.opening_relax_hold_until_t
+
+    now = self.NOW + 0.2
+    self._replace_evidence(tr, now=now, drel=40.0, slope=0.1)
+    tr._update_opening_governor(now, False, cfg, raw_drel=40.0, raw_vrel=-0.4,
+                                raw_alead=0.0, raw_dpath=0.0, raw_vlat=0.0, v_ego=20.0)
+
+    assert tr.opening_relax_vrel == pytest.approx(0.0)
+    assert tr.opening_relax_held
+    assert tr.opening_relax_hold_until_t == pytest.approx(deadline)
+
+  def test_opening_hold_zero_restores_per_frame_rollback(self):
+    tr = self._track()
+    cfg = self._cfg(opening_governor_hold_s=0.0)
+    tr._update_opening_governor(self.NOW, False, cfg)
+    assert tr.opening_relax_vrel == pytest.approx(0.0)
+
+    now = self.NOW + 0.2
+    self._replace_evidence(tr, now=now, drel=40.0, slope=0.1)
+    tr._update_opening_governor(now, False, cfg)
+
+    assert tr.opening_relax_vrel is None
+    assert tr.opening_relax_hold_vrel is None
+
+  def test_opening_hold_survives_only_weak_position_governor_until_deadline(self):
+    tr = self._track(vrel_state=-0.2, drel_state=60.0)
+    cfg = self._cfg(closing_governor_margin_mps=0.75)
+    tr._update_opening_governor(self.NOW, False, cfg)
+    deadline = tr.opening_relax_hold_until_t
+
+    now = self.NOW + 0.05
+    self._replace_evidence(tr, now=now, drel=60.0, slope=-2.0)
+    active = tr._update_closing_governor(
+      now, raw_drel=60.0, raw_vrel=-0.4, raw_alead=0.0, cfg=cfg,
+    )
+    tr.governor_active = active
+    tr._update_opening_governor(now, active, cfg, raw_drel=60.0, raw_vrel=-0.4,
+                                raw_alead=0.0, raw_dpath=0.0, raw_vlat=0.0, v_ego=20.0)
+
+    assert active
+    assert tr.governor_reason == "position_only_weak"
+    assert not tr.governor_threat_corroborated
+    assert tr.opening_relax_vrel == pytest.approx(0.0)
+    assert tr.get_RadarState(cfg)["vRel"] == pytest.approx(0.0)
+
+    expired = deadline + 1e-3
+    tr._update_opening_governor(expired, True, cfg, raw_drel=60.0, raw_vrel=-0.4,
+                                raw_alead=0.0, raw_dpath=0.0, raw_vlat=0.0, v_ego=20.0)
+    assert tr.opening_relax_vrel is None
+    assert tr.get_RadarState(cfg)["vRel"] == pytest.approx(-tr.governor_closing_mps)
+
+  def test_active_weak_governor_upgrades_when_velocity_window_turns_closing(self):
+    tr = self._track(vrel_state=-0.2, drel_state=60.0)
+    cfg = self._cfg(
+      closing_governor_margin_mps=0.75,
+      opening_governor_raw_closing_veto_mps=99.0,
+    )
+    tr._update_opening_governor(self.NOW, False, cfg)
+    assert tr.opening_relax_hold_vrel is not None
+
+    weak_now = self.NOW + 0.05
+    self._replace_evidence(tr, now=weak_now, drel=60.0, slope=-2.0)
+    assert tr._update_closing_governor(
+      weak_now, raw_drel=60.0, raw_vrel=-0.4, raw_alead=0.0, cfg=cfg,
+    )
+    assert tr.governor_reason == "position_only_weak"
+    assert not tr.governor_threat_corroborated
+
+    # The position arm disappears, but a dense raw-velocity window now proves
+    # sustained closure. The fixed safety ceiling must override the permissive
+    # tunable veto and revoke the opening hold in this same frame.
+    closing_now = weak_now + 0.05
+    self._replace_evidence(
+      tr, now=closing_now, drel=60.0, slope=0.0, raw_vrel=-1.2,
+    )
+    active = tr._update_closing_governor(
+      closing_now, raw_drel=60.0, raw_vrel=-1.2, raw_alead=0.0, cfg=cfg,
+    )
+    assert active
+    assert tr.governor_reason == "velocity_corroborated"
+    assert tr.governor_threat_corroborated
+
+    tr._update_opening_governor(
+      closing_now, active, cfg, raw_drel=60.0, raw_vrel=-1.2,
+      raw_alead=0.0, raw_dpath=0.0, raw_vlat=0.0, v_ego=20.0,
+    )
+    assert tr.opening_relax_vrel is None
+    assert tr.opening_relax_hold_vrel is None
+
+  def test_weak_position_governor_cannot_create_opening_hold(self):
+    tr = self._track(vrel_state=-0.2, drel_state=60.0, slope=-2.0)
+    cfg = self._cfg(closing_governor_margin_mps=0.75)
+    active = tr._update_closing_governor(
+      self.NOW, raw_drel=60.0, raw_vrel=-0.4, raw_alead=0.0, cfg=cfg,
+    )
+    tr._update_opening_governor(self.NOW, active, cfg, raw_drel=60.0, raw_vrel=-0.4,
+                                raw_alead=0.0, raw_dpath=0.0, raw_vlat=0.0, v_ego=20.0)
+
+    assert active
+    assert tr.governor_reason == "position_only_weak"
+    assert tr.opening_relax_vrel is None
+    assert tr.opening_relax_hold_vrel is None
+
+  def test_correlated_closing_governor_stays_authoritative_through_hold(self):
+    tr = self._track(vrel_state=-0.2, drel_state=60.0, slope=-2.0, raw_alead=-0.5)
+    cfg = self._cfg(closing_governor_margin_mps=0.75)
+    assert tr._update_closing_governor(
+      self.NOW, raw_drel=60.0, raw_vrel=-0.4, raw_alead=-0.5, cfg=cfg,
+    )
+    assert tr.governor_threat_corroborated
+
+    now = self.NOW + 0.05
+    self._replace_evidence(tr, now=now, drel=60.0, slope=-2.0, raw_alead=0.0)
+    active = tr._update_closing_governor(
+      now, raw_drel=60.0, raw_vrel=-0.4, raw_alead=0.0, cfg=cfg,
+    )
+
+    assert active
+    assert tr.governor_threat_corroborated
+    assert tr.governor_reason != "position_only_weak"
+    tr._update_opening_governor(now, active, cfg)
+    assert tr.opening_relax_vrel is None
+
+  def test_miss_and_slot_change_clear_hold_and_require_fresh_proof(self):
+    cfg = self._cfg()
+
+    missed = self._track()
+    missed._update_opening_governor(self.NOW, False, cfg)
+    tracker = ModelLeadTracker(params=_NoParams())
+    tracker._tracks[missed.identifier] = missed
+    tracker.begin_frame(self.NOW + 0.05)
+    tracker.end_frame()
+    assert missed.opening_relax_hold_vrel is None
+    assert missed.opening_evidence_epoch_t >= missed.last_t
+
+    reordered = self._track()
+    reordered._update_opening_governor(self.NOW, False, cfg)
+    rs = reordered.update(
+      {"dRel": 40.0, "yRel": 0.0, "vRel": -0.4, "aLeadK": 0.0,
+       "modelProb": 0.9, "dPath": 0.0, "vLat": 0.0},
+      self.NOW + 0.05, 20.0, cfg, 1,
+    )
+    assert reordered.opening_relax_hold_vrel is None
+    assert reordered.opening_evidence_epoch_t == pytest.approx(self.NOW + 0.05)
+    assert rs["vRel"] < -0.05
+
+  @pytest.mark.parametrize(
+    "raw_drel,raw_vrel,raw_alead,raw_vlat,v_ego",
+    [
+      (40.0, -0.4, -0.5, 0.0, 20.0),  # one current braking sample
+      (18.0, -4.0, 0.0, 0.0, 20.0),   # short raw TTC / fast close
+      (60.0, -1.0, 0.0, 0.0, 0.5),   # negative raw vLead (oncoming)
+      (40.0, -0.4, 0.0, 0.8, 20.0),  # same-track lateral migration
+    ],
+  )
+  def test_current_threat_clears_opening_hold_same_frame(self, raw_drel, raw_vrel, raw_alead,
+                                                         raw_vlat, v_ego):
+    tr = self._track()
+    cfg = self._cfg(opening_governor_raw_closing_veto_mps=100.0,
+                    opening_governor_alead_veto_mps2=100.0)
+    tr._update_opening_governor(self.NOW, False, cfg)
+    assert tr.opening_relax_hold_vrel is not None
+
+    tr._update_opening_governor(
+      self.NOW + 0.05, False, cfg,
+      raw_drel=raw_drel, raw_vrel=raw_vrel, raw_alead=raw_alead,
+      raw_dpath=0.0, raw_vlat=raw_vlat, v_ego=v_ego,
+    )
+
+    assert tr.opening_relax_vrel is None
+    assert tr.opening_relax_hold_vrel is None
+    assert tr.opening_relax_hold_until_t < self.NOW
 
   def test_stale_closing_hold_releases_when_window_is_near_parity(self):
     tr = self._track(raw_vrel=-0.1, raw_alead=0.0)
