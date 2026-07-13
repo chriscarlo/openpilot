@@ -1607,12 +1607,27 @@ LEAD_RESPONSE_TUNE_SPECS = (
     minimum=0.0,
     maximum=100.0,
     description="CD9 (radard): how far (m/s) the position-derived closure may LEAD the windowed raw-vRel closing evidence "
-                "in the governor's publish clamp: clamp closure = min(position closure, vRel closure + this). The road "
-                "event's raw v-stream itself ran ~+1.5-2.3 m/s optimistic against the model's own position stream, so a "
-                "pure min(pos, vRel) cap republished most of the lie; the position slope was the truth-teller. This bounds "
-                "how much the clamp trusts position beyond what velocity corroborates - a pure position phantom with "
-                "minimal vRel agreement is still capped near the (gated) vRel evidence. 0.0 = strict min(pos, vRel) "
-                "(most conservative).",
+                "in the governor's publish clamp. Full authority requires independent corroboration from sustained raw "
+                "lead decel or a short TTC computed from current raw vRel; otherwise authority grows continuously only by "
+                "the windowed raw-vRel closure above ClosingGovernorMarginMps. The road event's raw v-stream itself ran "
+                "~+1.5-2.3 m/s optimistic against the model's own position stream, so the independently corroborated path "
+                "must retain position authority, while a pure position phantom with calm vRel/aLead remains capped at the "
+                "velocity evidence. 0.0 = strict min(position closure, vRel closure) (most conservative).",
+  ),
+  LeadResponseTuneSpec(
+    attr="closing_governor_unconfirmed_alead_trust_mps",
+    key="Longitudinal.LiveTune.ClosingGovernorUnconfirmedALeadTrustMps",
+    cli_name="closing-governor-unconfirmed-alead-trust",
+    label="closing_governor_unconfirmed_alead_trust",
+    default=0.41,
+    minimum=0.0,
+    maximum=1.5,
+    description="CD9 (radard): maximum position-closure authority (m/s) contributed by one unconfirmed current raw-aLead "
+                "sample before a second consecutive braking sample or the braking window mean grants full position trust. "
+                "The contribution grows only by raw decel magnitude beyond OpeningGovernorALeadVetoMps2 and remains capped "
+                "by ClosingGovernorPosTrustExcessMps. The 0.41 default is the smallest rounded value that preserves the "
+                "road-braking 1.00 s THW harness floor; 0.0 disables this one-frame bridge while retaining all confirmed "
+                "governor paths (rollback sentinel).",
   ),
   LeadResponseTuneSpec(
     attr="closing_governor_hold_s",
@@ -1876,6 +1891,7 @@ class LeadResponseTuningConfig:
   closing_governor_window_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["closing_governor_window_s"].default
   closing_governor_accel_onset_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["closing_governor_accel_onset_mps2"].default
   closing_governor_pos_trust_excess_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["closing_governor_pos_trust_excess_mps"].default
+  closing_governor_unconfirmed_alead_trust_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["closing_governor_unconfirmed_alead_trust_mps"].default
   closing_governor_hold_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["closing_governor_hold_s"].default
   closing_governor_alead_tau_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["closing_governor_alead_tau_s"].default
   opening_governor_trust_deficit_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["opening_governor_trust_deficit_mps"].default

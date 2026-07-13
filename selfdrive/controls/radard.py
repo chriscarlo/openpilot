@@ -488,23 +488,37 @@ class ModelLeadTrack:
       # v-stream itself lied optimistic against the model's own position
       # stream), but never beyond it - a pure position phantom stays capped
       # near the gated vRel evidence.
-      # Position may lead the raw velocity stream by the configured allowance
-      # only when a second threat signal justifies it. The allowance was added
-      # for the road's genuinely braking lead (raw aLead already negative), but
-      # on a steady far follow, heavy-tail dRel slope noise repeatedly spent the
-      # full 1.5 m/s allowance against a weak, non-braking raw stream and
-      # fabricated a ~2 m/s published closure. Preserve position primacy when
-      # raw lead decel, strong raw closure, or a short position-derived
-      # collision TTC supplies the second threat signal; otherwise clamp to the
-      # windowed raw vRel closure and let the ordinary filtered state/MPC own it.
-      pos_collision_ttc_s = float(raw_drel) / max(pos_closing, 0.1)
-      position_trust_justified = (
-        float(raw_alead) < -float(getattr(cfg, 'opening_governor_alead_veto_mps2', 0.2)) or
-        alead_mean < -float(getattr(cfg, 'opening_governor_alead_veto_mps2', 0.2)) or
-        vrel_closing >= margin or
-        pos_collision_ttc_s <= OPENING_GOVERNOR_MIN_PUBLISHED_TTC_S
-      )
-      pos_trust = float(getattr(cfg, 'closing_governor_pos_trust_excess_mps', 0.0)) if position_trust_justified else 0.0
+      # Position may lead the windowed velocity stream only by independently
+      # corroborated authority. A TTC derived from this same dRel slope is not
+      # independent: the captured EV6 raw-x collapse produced both a 7.16 m/s
+      # position closure and a 5.99 s "collision" TTC while raw vRel/aLead were
+      # calm, spending the full +1.5 m/s allowance from one noisy signal.
+      #
+      # Sustained lead braking and a short TTC from the CURRENT raw velocity
+      # retain the full allowance. A single raw-aLead frame is not enough: the
+      # road corpus has isolated threshold crossings, so acceleration must be
+      # confirmed by the window mean or two consecutive model-cadence samples.
+      # Otherwise windowed velocity corroboration earns position excess
+      # continuously, one-for-one above MarginMps and capped by the tune.
+      # This removes the binary full-trust cliff at vrel_closing == margin.
+      max_pos_trust = max(0.0, float(getattr(cfg, 'closing_governor_pos_trust_excess_mps', 0.0)))
+      recent_alead_decel = len(samples) >= 2 and all(s[3] < -opening_alead_veto for s in samples[-2:])
+      braking_corroborated = alead_mean < -opening_alead_veto or recent_alead_decel
+      raw_closing = max(0.0, -float(raw_vrel))
+      raw_collision_ttc_s = float(raw_drel) / max(raw_closing, 0.1)
+      short_raw_ttc = raw_closing > min_closing and raw_collision_ttc_s <= OPENING_GOVERNOR_MIN_PUBLISHED_TTC_S
+      if braking_corroborated or short_raw_ttc:
+        pos_trust = max_pos_trust
+      else:
+        velocity_trust = max(0.0, vrel_closing - max(0.0, margin))
+        # Before the second decel sample arrives, aLead may contribute only its
+        # continuous magnitude beyond the veto, never the full tuned allowance.
+        # Isolated near-threshold corpus crossings therefore add only a small,
+        # bounded amount while a real -0.7 m/s^2 onset is not ignored for 50 ms.
+        unconfirmed_alead_cap = max(0.0, float(getattr(cfg, 'closing_governor_unconfirmed_alead_trust_mps', 0.0)))
+        unconfirmed_alead_trust = min(unconfirmed_alead_cap,
+                                      max(0.0, -float(raw_alead) - opening_alead_veto))
+        pos_trust = min(max_pos_trust, max(velocity_trust, unconfirmed_alead_trust))
       self.governor_closing_mps = float(max(0.0, min(pos_closing, vrel_closing + max(0.0, pos_trust))))
       return True
     return active

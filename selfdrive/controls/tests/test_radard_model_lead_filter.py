@@ -848,11 +848,124 @@ class TestOpeningGovernor:
     assert tr.governor_closing_mps == pytest.approx(0.4)
     assert tr.get_RadarState(cfg)["vRel"] == pytest.approx(-0.4)
 
-  @pytest.mark.parametrize("raw_vrel,raw_alead", [(-0.8, 0.0), (-0.4, -0.5)])
-  def test_strong_closure_or_lead_decel_preserves_position_trust(self, raw_vrel, raw_alead):
-    # Safety side of the split: either raw closure reaches the existing
-    # discrepancy margin or lead decel independently corroborates the threat.
-    # Position retains the full configured authority in both cases.
+  def test_captured_raw_x_collapse_position_ttc_cannot_spend_full_trust(self):
+    # 23:16:51.876 capture fingerprint: raw x collapsed with a 7.16 m/s
+    # position slope and 5.99 s position TTC, while raw/windowed vRel showed
+    # only 0.46 m/s closure and raw aLead remained calm. Position TTC is made
+    # from the same x collapse, so it is not independent corroboration.
+    tr = self._track(vrel_state=-0.35, drel_state=42.9, slope=-7.16,
+                     raw_vrel=-0.46, raw_alead=0.02)
+    cfg = self._cfg(closing_governor_margin_mps=0.75)
+
+    active = tr._update_closing_governor(
+      self.NOW, raw_drel=42.9, raw_vrel=-0.46, raw_alead=0.02, cfg=cfg,
+    )
+
+    assert active
+    assert tr.governor_closing_mps == pytest.approx(0.46)
+
+  def test_isolated_current_raw_alead_does_not_spend_full_position_trust(self):
+    # A single raw-aLead threshold crossing is not debounced corroboration.
+    # The corpus contains seven isolated crossings, so this frame receives
+    # only bounded magnitude-based bridge authority, never the full +1.5.
+    tr = self._track(vrel_state=-0.35, drel_state=42.9, slope=-7.16,
+                     raw_vrel=-0.46, raw_alead=0.02)
+    cfg = self._cfg(closing_governor_margin_mps=0.75)
+
+    active = tr._update_closing_governor(
+      self.NOW, raw_drel=42.9, raw_vrel=-0.46, raw_alead=-0.5, cfg=cfg,
+    )
+
+    assert active
+    assert tr.governor_closing_mps == pytest.approx(0.76)
+    assert tr.governor_closing_mps < 0.46 + cfg.closing_governor_pos_trust_excess_mps
+
+  def test_unconfirmed_current_raw_alead_authority_is_capped(self):
+    tr = self._track(vrel_state=-0.35, drel_state=42.9, slope=-7.16,
+                     raw_vrel=-0.46, raw_alead=0.02)
+    cfg = self._cfg(closing_governor_margin_mps=0.75)
+
+    active = tr._update_closing_governor(
+      self.NOW, raw_drel=42.9, raw_vrel=-0.46, raw_alead=-1.0, cfg=cfg,
+    )
+
+    assert active
+    assert tr.governor_closing_mps == pytest.approx(0.87)
+
+  def test_unconfirmed_current_raw_alead_authority_has_rollback_sentinel(self):
+    tr = self._track(vrel_state=-0.35, drel_state=42.9, slope=-7.16,
+                     raw_vrel=-0.46, raw_alead=0.02)
+    cfg = self._cfg(
+      closing_governor_margin_mps=0.75,
+      closing_governor_unconfirmed_alead_trust_mps=0.0,
+    )
+
+    active = tr._update_closing_governor(
+      self.NOW, raw_drel=42.9, raw_vrel=-0.46, raw_alead=-1.0, cfg=cfg,
+    )
+
+    assert active
+    assert tr.governor_closing_mps == pytest.approx(0.46)
+
+  def test_sustained_raw_alead_preserves_full_trust_after_one_frame_confirmation(self):
+    # Paired safety twin: the same x-collapse/weak-vRel fingerprint with two
+    # consecutive braking samples (50 ms at model cadence) gets full authority.
+    tr = self._track(vrel_state=-0.35, drel_state=42.9, slope=-7.16,
+                     raw_vrel=-0.46, raw_alead=0.02)
+    cfg = self._cfg(closing_governor_margin_mps=0.75)
+
+    assert tr._update_closing_governor(
+      self.NOW, raw_drel=42.9, raw_vrel=-0.46, raw_alead=-0.5, cfg=cfg,
+    )
+    assert tr.governor_closing_mps == pytest.approx(0.76)
+    active = tr._update_closing_governor(
+      self.NOW + 0.05, raw_drel=42.9 - 7.16 * 0.05,
+      raw_vrel=-0.46, raw_alead=-0.5, cfg=cfg,
+    )
+
+    assert active
+    expected = min(7.16, 0.46 + cfg.closing_governor_pos_trust_excess_mps)
+    assert tr.governor_closing_mps == pytest.approx(expected)
+
+  def test_windowed_closure_margin_has_no_full_position_trust_cliff(self):
+    # The current >= 0.75 rule jumps from no excess to the full +1.5 m/s for
+    # a 0.02 m/s evidence change. Authority must instead grow continuously.
+    cfg = self._cfg(closing_governor_margin_mps=0.75)
+
+    outputs = []
+    for raw_vrel in (-0.74, -0.76):
+      tr = self._track(vrel_state=-0.2, drel_state=60.0, slope=-4.0,
+                       raw_vrel=raw_vrel, raw_alead=0.0)
+      assert tr._update_closing_governor(
+        self.NOW, raw_drel=60.0, raw_vrel=raw_vrel, raw_alead=0.0, cfg=cfg,
+      )
+      outputs.append(tr.governor_closing_mps)
+
+    assert outputs == pytest.approx([0.74, 0.77])
+    assert outputs[1] - outputs[0] < 0.05
+
+  def test_short_raw_velocity_ttc_preserves_full_position_trust(self):
+    # Current raw vRel is independent of the position slope. A genuinely short
+    # raw-velocity TTC must retain the full safety allowance even before the
+    # window mean catches up.
+    tr = self._track(vrel_state=-0.2, drel_state=40.0, slope=-6.0,
+                     raw_vrel=-0.4, raw_alead=0.0)
+    cfg = self._cfg(closing_governor_margin_mps=2.0)
+
+    active = tr._update_closing_governor(
+      self.NOW, raw_drel=40.0, raw_vrel=-8.0, raw_alead=0.0, cfg=cfg,
+    )
+
+    assert active
+    samples = list(tr.closing_evidence)
+    windowed_closing = -(sum(s[2] for s in samples) / len(samples))
+    expected = min(6.0, windowed_closing + cfg.closing_governor_pos_trust_excess_mps)
+    assert tr.governor_closing_mps == pytest.approx(expected)
+
+  @pytest.mark.parametrize("raw_vrel,raw_alead,expected", [(-0.8, 0.0, 0.85), (-0.4, -0.5, 1.9)])
+  def test_velocity_trust_is_continuous_while_lead_decel_preserves_full_trust(self, raw_vrel, raw_alead, expected):
+    # Velocity evidence earns only continuous excess above MarginMps;
+    # sustained braking aLead retains the full configured authority.
     tr = self._track(vrel_state=-0.2, drel_state=60.0, slope=-2.0,
                      raw_vrel=raw_vrel, raw_alead=raw_alead)
     cfg = self._cfg(closing_governor_margin_mps=0.75)
@@ -863,7 +976,6 @@ class TestOpeningGovernor:
 
     assert active
     tr.governor_active = active
-    expected = min(2.0, -raw_vrel + cfg.closing_governor_pos_trust_excess_mps)
     assert tr.governor_closing_mps == pytest.approx(expected)
     assert tr.get_RadarState(cfg)["vRel"] == pytest.approx(-expected)
 

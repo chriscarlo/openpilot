@@ -318,6 +318,8 @@ def test_closing_brake_leads_the_closure() -> None:
 
 FIX_GOVERNOR_MARGIN = "0.75"        # committed default (governor armed)
 ROLLBACK_GOVERNOR_MARGIN = "99.0"   # >= 99 sentinel: governor disabled, exact legacy publish
+FIX_UNCONFIRMED_ALEAD_TRUST = "0.41"
+ROLLBACK_UNCONFIRMED_ALEAD_TRUST = "0.0"
 
 
 @functools.lru_cache(maxsize=2)
@@ -372,6 +374,39 @@ def test_governor_margin_knob_fix_vs_rollback() -> None:
   # And the fix is strictly safer than its own rollback on the headline metrics.
   assert fix["min_thw_s"] > roll["min_thw_s"], physics
   assert fix["vrel_optimism_at_1s_mps"] < roll["vrel_optimism_at_1s_mps"], physics
+
+
+@functools.lru_cache(maxsize=2)
+def _run_unconfirmed_alead_trust(trust_mps: str) -> SimulationResult:
+  cfg = resolve_ev6_vehicle_config(param_overrides={
+    **DRIVE_LIVETUNE_OVERRIDES,
+    "Longitudinal.LiveTune.ClosingGovernorMarginMps": FIX_GOVERNOR_MARGIN,
+    "Longitudinal.LiveTune.ClosingGovernorUnconfirmedALeadTrustMps": trust_mps,
+  })
+  return run_harness(
+    vehicle_config=cfg,
+    scenario_name=f"closing_brake_lag_unconfirmed_alead_trust_{trust_mps}",
+    steps=_build_steps(decel=True, duration_s=DURATION_S),
+    initial_speed_mps=EGO_V0_MPS,
+    noise_profile="ev6_measured",
+    seed=42,
+    perception_filter="auto",
+  )
+
+
+def test_unconfirmed_alead_trust_knob_preserves_braking_floor() -> None:
+  """The bounded one-frame bridge is necessary and independently reversible."""
+  fix = _measure(_run_unconfirmed_alead_trust(FIX_UNCONFIRMED_ALEAD_TRUST))
+  roll = _measure(_run_unconfirmed_alead_trust(ROLLBACK_UNCONFIRMED_ALEAD_TRUST))
+
+  physics = " ".join((
+    f"unconfirmed aLead trust {FIX_UNCONFIRMED_ALEAD_TRUST}: onset {fix['brake_onset_delay_s']}s,",
+    f"min THW {fix['min_thw_s']}s; rollback {ROLLBACK_UNCONFIRMED_ALEAD_TRUST}:",
+    f"onset {roll['brake_onset_delay_s']}s, min THW {roll['min_thw_s']}s",
+  ))
+  assert fix["min_thw_s"] is not None and fix["min_thw_s"] >= MIN_THW_FLOOR_S, physics
+  assert roll["min_thw_s"] is not None and roll["min_thw_s"] < MIN_THW_FLOOR_S, physics
+  assert fix["brake_onset_delay_s"] < roll["brake_onset_delay_s"], physics
 
 
 def test_steady_follow_noise_stays_calm() -> None:
