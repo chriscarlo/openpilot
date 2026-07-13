@@ -32,6 +32,7 @@ description: Edit, debug, troubleshoot, iterate, and polish the Sunnypilot VTSC 
 
 - Confirm `VTSCRallyCoPilotHUDEnabled` is enabled.
 - If `MapCurvatures` is absent after the `chriscarlo/mapd` migration, verify `third_party/mapd/mapd` is the chauffeur-bake binary, not a stale ignored pfeifer executable: `python3 -c "from openpilot.sunnypilot.mapd.mapd_installer import MapdInstallManager; MapdInstallManager._verify_installed_binary('third_party/mapd/mapd')"`
+- Finalized device updates clean ignored checkout files, including `third_party/mapd/mapd`. A healthy install caches the verified release under the persistent OSM root and restores it before checking network state; if both copies are absent, install the release while connectivity is available so the cache can be seeded.
 - Confirm the producer is publishing: `curvePreviewValid` true and `curvePreviewTiles` non-empty.
 - Confirm HUD gating is passing: `curveMaxCurvature` is above `KAPPA_SHOW_MIN`/`KAPPA_HOLD_MIN` in `hud.cc`.
 - Confirm fade-in isn’t stuck: `vtsc_copilot_alpha_` rises above `0.01`.

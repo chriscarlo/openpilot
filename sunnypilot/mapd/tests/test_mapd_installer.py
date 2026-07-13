@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import stat
+from pathlib import Path
 from types import SimpleNamespace
 
 from openpilot.sunnypilot.mapd import mapd_installer
@@ -38,6 +39,12 @@ class FakeSubMaster:
   def __getitem__(self, key):
     assert key == "deviceState"
     return self.device_state
+
+
+class MeteredSubMaster(FakeSubMaster):
+  def __init__(self, services):
+    super().__init__(services)
+    self.device_state.networkMetered = True
 
 
 def write_fake_mapd(path, *, chauffeur_markers: bool):
@@ -173,6 +180,48 @@ def test_ensure_mapd_installed_keeps_matching_valid_binary(monkeypatch, tmp_path
 
   assert mapd_installer.ensure_mapd_installed(params, DummyReporter())
   assert calls == []
+  cache = mapd_installer.get_persistent_binary_cache_path(mapd_installer.DEFAULT_VERSION)
+  mapd_installer.MapdInstallManager._verify_installed_binary(cache)
+
+
+def test_ensure_mapd_installed_restores_persistent_cache_while_offline(monkeypatch, tmp_path):
+  binary_dir = tmp_path / "checkout" / "third_party" / "mapd"
+  binary_dir.mkdir(parents=True)
+  binary = binary_dir / "mapd"
+  mapd_root = tmp_path / "persistent-osm"
+  cache_dir = mapd_root / mapd_installer._PERSISTENT_BINARY_CACHE_DIR
+  cache_dir.mkdir(parents=True)
+  params = DummyParams({"MapdVersion": mapd_installer.DEFAULT_VERSION})
+
+  monkeypatch.setattr(mapd_installer, "MAPD_PATH", str(binary))
+  monkeypatch.setattr(mapd_installer, "MAPD_BIN_DIR", str(binary_dir))
+  monkeypatch.setattr(mapd_installer.Paths, "mapd_root", staticmethod(lambda: str(mapd_root)))
+  monkeypatch.setattr(mapd_installer.messaging, "SubMaster", MeteredSubMaster)
+  cache = mapd_installer.get_persistent_binary_cache_path(mapd_installer.DEFAULT_VERSION)
+  write_fake_mapd(Path(cache), chauffeur_markers=True)
+
+  assert mapd_installer.ensure_mapd_installed(params, DummyReporter())
+  mapd_installer.MapdInstallManager._verify_installed_binary(str(binary))
+
+
+def test_ensure_mapd_installed_rejects_invalid_cache_while_offline(monkeypatch, tmp_path):
+  binary_dir = tmp_path / "checkout" / "third_party" / "mapd"
+  binary_dir.mkdir(parents=True)
+  binary = binary_dir / "mapd"
+  mapd_root = tmp_path / "persistent-osm"
+  cache_dir = mapd_root / mapd_installer._PERSISTENT_BINARY_CACHE_DIR
+  cache_dir.mkdir(parents=True)
+  params = DummyParams({"MapdVersion": mapd_installer.DEFAULT_VERSION})
+
+  monkeypatch.setattr(mapd_installer, "MAPD_PATH", str(binary))
+  monkeypatch.setattr(mapd_installer, "MAPD_BIN_DIR", str(binary_dir))
+  monkeypatch.setattr(mapd_installer.Paths, "mapd_root", staticmethod(lambda: str(mapd_root)))
+  monkeypatch.setattr(mapd_installer.messaging, "SubMaster", MeteredSubMaster)
+  cache = mapd_installer.get_persistent_binary_cache_path(mapd_installer.DEFAULT_VERSION)
+  write_fake_mapd(Path(cache), chauffeur_markers=False)
+
+  assert not mapd_installer.ensure_mapd_installed(params, DummyReporter())
+  assert not binary.exists()
 
 
 def test_mapd_ready_rejects_stale_binary_before_native_launch(monkeypatch, tmp_path):

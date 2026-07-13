@@ -5,6 +5,7 @@ Copyright (c) 2021-, Haibin Wen, sunnypilot, and a number of other contributors.
 This file is part of sunnypilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 """
+import hashlib
 import logging
 import os
 import stat
@@ -46,6 +47,7 @@ _REQUIRED_MAPD_BINARY_MARKERS = (
   b"MapPreCurveSpeeds",
   b"MapTilesSigmoidHash",
 )
+_PERSISTENT_BINARY_CACHE_DIR = "binaries"
 
 
 def _clean_override(raw_value: str | bytes | None) -> str:
@@ -77,6 +79,12 @@ def update_installed_version(version: str, params: Params = None) -> None:
   params.put("MapdVersion", version)
 
 
+def get_persistent_binary_cache_path(version: str) -> str:
+  """Return a path outside the update-swapped checkout for one mapd release."""
+  version_key = hashlib.sha256(version.encode("utf-8")).hexdigest()[:16]
+  return os.path.join(Paths.mapd_root(), _PERSISTENT_BINARY_CACHE_DIR, f"mapd-{version_key}")
+
+
 class MapdInstallManager:
   def __init__(self, spinner_ref: _StatusReporter, params: Params | None = None):
     self._spinner = spinner_ref
@@ -93,6 +101,7 @@ class MapdInstallManager:
     # return False forever — the exact state that silently kills MapCurvatures
     # and takes the VTSC HUD with it.
     self._verify_installed_binary(MAPD_PATH)
+    self._cache_installed_binary(target_version)
     update_installed_version(target_version, self._params)
 
   @staticmethod
@@ -127,12 +136,43 @@ class MapdInstallManager:
       return True
     return self.get_installed_version() != get_target_version(self._params)
 
+  def _copy_verified_binary(self, source: str, destination: str) -> None:
+    self._verify_installed_binary(source)
+    destination_path = Path(destination)
+    temp_path = destination_path.with_name(destination_path.name + ".tmp")
+    if temp_path.exists():
+      temp_path.unlink()
+    self._safe_write_and_set_executable(temp_path, Path(source).read_bytes())
+    self._verify_installed_binary(str(temp_path))
+    temp_path.replace(destination_path)
+
+  def _cache_installed_binary(self, version: str) -> None:
+    cache_path = get_persistent_binary_cache_path(version)
+    try:
+      self._verify_installed_binary(cache_path)
+      return
+    except (FileNotFoundError, OSError):
+      pass
+    self._copy_verified_binary(MAPD_PATH, cache_path)
+
+  def restore_cached_binary(self, version: str) -> bool:
+    cache_path = get_persistent_binary_cache_path(version)
+    try:
+      self._copy_verified_binary(cache_path, MAPD_PATH)
+      self._spinner.update(f"Restored mapd [{version}] from persistent cache.")
+      return True
+    except (FileNotFoundError, OSError):
+      return False
+
   @staticmethod
   def ensure_directories_exist() -> None:
     if not os.path.exists(Paths.mapd_root()):
       os.makedirs(Paths.mapd_root())
     if not os.path.exists(MAPD_BIN_DIR):
       os.makedirs(MAPD_BIN_DIR)
+    cache_dir = os.path.join(Paths.mapd_root(), _PERSISTENT_BINARY_CACHE_DIR)
+    if not os.path.exists(cache_dir):
+      os.makedirs(cache_dir)
 
   @staticmethod
   def _safe_write_and_set_executable(file_path: Path, content: bytes) -> None:
@@ -250,10 +290,21 @@ def ensure_mapd_installed(params: Params | None = None,
   try:
     manager._verify_installed_binary(MAPD_PATH)
     if installed_version == target_version:
+      try:
+        manager._cache_installed_binary(target_version)
+      except OSError as e:
+        reporter.update(f"Could not refresh persistent mapd cache: {e}")
       return True
     reporter.update(f"Installed mapd version [{installed_version or 'unset'}] != target [{target_version}]; downloading.")
   except (FileNotFoundError, OSError):
     pass  # Fall through to download path.
+
+  # Updates deliberately clean ignored files from the checkout, including the
+  # release binary. Restore the last verified copy from persistent OSM storage
+  # before consulting network state so an offline boot still starts mapd.
+  if manager.restore_cached_binary(target_version):
+    update_installed_version(target_version, params)
+    return True
 
   # deviceState may not be available super-early in boot; tolerate the SubMaster
   # attempt and fall back to "not metered".
