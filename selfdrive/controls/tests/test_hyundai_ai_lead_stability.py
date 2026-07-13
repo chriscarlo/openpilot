@@ -1,3 +1,4 @@
+from dataclasses import replace
 from types import SimpleNamespace
 
 import numpy as np
@@ -810,6 +811,118 @@ class TestHyundaiAiLeadStability:
     assert mpc.last_cruise_response_model is not None
     assert mpc.last_cruise_response_model.max_accel_mps2 > first_cap + 0.20
 
+  @staticmethod
+  def _run_low_speed_persistent_lead_release(*, release_a_lead: float,
+                                             urgent_lead_decel: float | None = None) -> LongitudinalMpc:
+    mpc = _make_hyundai_mpc(v_ego=6.0, a_ego=1.0, time_fn=_MonotonicStub(step=0.2))
+    absent = _make_lead(status=False)
+    queue_lead = _make_lead(
+      d_rel=10.0, y_rel=0.04, d_path=0.04, v_rel=0.0,
+      v_lead=6.0, a_lead=0.0, model_prob=0.98, radar_track_id=7,
+    )
+    for _ in range(16):
+      _run_update_with_state(mpc, queue_lead, absent, v_ego=6.0, a_ego=1.0, v_cruise=19.0)
+    assert mpc.source == "lead0"
+    assert mpc.acc_source_debug["reason"] == "low_speed_queue_hold"
+    if urgent_lead_decel is not None:
+      mpc._live_tune_cfg = replace(
+        mpc._live_tune_cfg,
+        cruise_relatch_urgent_lead_decel_mps2=urgent_lead_decel,
+      )
+      mpc._last_live_tune_refresh_t = float("inf")
+
+    departing_lead = _make_lead(
+      d_rel=25.0, y_rel=0.04, d_path=0.04, v_rel=3.0,
+      v_lead=9.0, a_lead=release_a_lead, model_prob=0.98, radar_track_id=7,
+    )
+    _run_update_with_state(mpc, departing_lead, absent, v_ego=6.0, a_ego=1.0, v_cruise=19.0)
+    assert mpc.source == "cruise"
+    assert mpc.acc_source_debug["reason"] == "filtered_pullaway_immediate"
+    return mpc
+
+  def test_persistent_benign_departing_lead_uses_live_cap_not_dropout_cap(self):
+    mpc = self._run_low_speed_persistent_lead_release(release_a_lead=0.0)
+
+    assert mpc.acc_source_debug["source_transition_accel_cap"] == pytest.approx(0.3)
+    assert mpc.acc_source_debug["source_transition_live_lead_braking_guard"] is False
+    assert mpc.acc_source_debug["source_transition_composed_accel_cap"] == pytest.approx(1.3)
+    assert mpc.cruise_owned_accel_cap == pytest.approx(1.3)
+    assert mpc.last_cruise_response_model.max_accel_mps2 == pytest.approx(1.3)
+    assert mpc.params[0, 1] == pytest.approx(1.3)
+
+  def test_persistent_departing_but_braking_lead_retains_transition_cap(self):
+    # Positive vRel is not permission to chase a lead already braking hard.
+    # Stopping-need is deliberately below its 0.8 threshold in this geometry;
+    # this oracle therefore proves the explicit braking guard owns the result.
+    mpc = self._run_low_speed_persistent_lead_release(release_a_lead=-1.0)
+
+    assert mpc.acc_source_debug["stopping_need_decel_mps2"] < mpc.acc_source_debug["stopping_need_threshold_mps2"]
+    assert mpc.acc_source_debug["source_transition_accel_cap"] == pytest.approx(0.3)
+    assert mpc.acc_source_debug["source_transition_live_lead_braking_guard"] is True
+    assert mpc.acc_source_debug["source_transition_composed_accel_cap"] == pytest.approx(0.3)
+    assert mpc.cruise_owned_accel_cap == pytest.approx(0.3)
+    assert mpc.last_cruise_response_model.max_accel_mps2 == pytest.approx(0.3)
+    assert mpc.params[0, 1] == pytest.approx(0.3)
+
+  def test_zero_urgent_lead_decel_sentinel_does_not_classify_coasting_as_braking(self):
+    mpc = self._run_low_speed_persistent_lead_release(
+      release_a_lead=0.0,
+      urgent_lead_decel=0.0,
+    )
+
+    assert mpc.acc_source_debug["source_transition_live_lead_match"] is True
+    assert mpc.acc_source_debug["source_transition_live_lead_braking_guard"] is False
+    assert mpc.acc_source_debug["source_transition_composed_accel_cap"] == pytest.approx(1.3)
+
+  def test_different_surviving_lead_cannot_cancel_released_lead_transition_cap(self):
+    mpc = _make_hyundai_mpc(v_ego=6.0, a_ego=1.0, time_fn=_MonotonicStub(step=0.2))
+    absent = _make_lead(status=False)
+    queue_lead = _make_lead(
+      d_rel=10.0, y_rel=0.04, d_path=0.04, v_rel=0.0,
+      v_lead=6.0, a_lead=0.0, model_prob=0.98, radar_track_id=7,
+    )
+    for _ in range(16):
+      _run_update_with_state(mpc, queue_lead, absent, v_ego=6.0, a_ego=1.0, v_cruise=19.0)
+    other_lead = _make_lead(
+      d_rel=25.0, y_rel=0.04, d_path=0.04, v_rel=3.0,
+      v_lead=9.0, a_lead=0.0, model_prob=0.98, radar_track_id=8,
+    )
+    for _ in range(4):
+      _run_update_with_state(mpc, absent, other_lead, v_ego=6.0, a_ego=1.0, v_cruise=19.0)
+
+    assert mpc.source == "cruise"
+    assert mpc.acc_source_debug["source_transition_from"] == "lead0"
+    assert mpc.acc_source_debug["lead_present_cruise_accel_cap_source"] == "lead1_control"
+    assert mpc.acc_source_debug["source_transition_live_lead_match"] is False
+    assert mpc.acc_source_debug["source_transition_accel_cap"] == pytest.approx(0.3)
+    assert mpc.acc_source_debug["source_transition_composed_accel_cap"] == pytest.approx(0.3)
+    assert mpc.cruise_owned_accel_cap == pytest.approx(0.3)
+
+  def test_same_slot_replacement_cannot_self_certify_as_released_lead(self):
+    mpc = _make_hyundai_mpc(v_ego=6.0, a_ego=1.0, time_fn=_MonotonicStub(step=0.2))
+    absent = _make_lead(status=False)
+    queue_lead = _make_lead(
+      d_rel=10.0, y_rel=0.04, d_path=0.04, v_rel=0.0,
+      v_lead=6.0, a_lead=0.0, model_prob=0.98, radar_track_id=7,
+    )
+    for _ in range(16):
+      _run_update_with_state(mpc, queue_lead, absent, v_ego=6.0, a_ego=1.0, v_cruise=19.0)
+
+    replacement = _make_lead(
+      d_rel=25.0, y_rel=0.04, d_path=0.04, v_rel=3.0,
+      v_lead=9.0, a_lead=0.0, model_prob=0.98, radar_track_id=8,
+    )
+    _run_update_with_state(mpc, replacement, absent, v_ego=6.0, a_ego=1.0, v_cruise=19.0)
+
+    assert mpc.source == "cruise"
+    assert mpc.acc_source_debug["source_transition_from"] == "lead0"
+    assert mpc.acc_source_debug["source_transition_track_id"] == 7
+    assert mpc.acc_source_debug["lead_present_cruise_accel_cap_source"] == "lead0_control"
+    assert mpc.acc_source_debug["source_transition_live_lead_match"] is False
+    assert mpc.acc_source_debug["source_transition_accel_cap"] == pytest.approx(0.3)
+    assert mpc.acc_source_debug["source_transition_composed_accel_cap"] == pytest.approx(0.3)
+    assert mpc.cruise_owned_accel_cap == pytest.approx(0.3)
+
   def test_cutin_promotion_reaches_virtual_duplicate_lead(self, monkeypatch):
     monotonic = _MonotonicStub(step=0.2)
     monkeypatch.setattr(
@@ -1131,13 +1244,9 @@ class TestHyundaiAiLeadStability:
     assert mpc.lead_approach_preview[0] >= 5.9
     assert mpc.source == "lead0"
 
-  def test_adjacent_awareness_preview_lowers_obstacle_before_control_handoff(self, monkeypatch):
-    monkeypatch.setattr(
-      "openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc.time.monotonic",
-      _MonotonicStub(step=0.1),
-    )
-    baseline_mpc = _make_hyundai_mpc(v_ego=34.73, a_ego=0.0)
-    preview_mpc = _make_hyundai_mpc(v_ego=34.73, a_ego=0.0)
+  def test_adjacent_awareness_preview_lowers_obstacle_before_control_handoff(self):
+    baseline_mpc = _make_hyundai_mpc(v_ego=34.73, a_ego=0.0, time_fn=_MonotonicStub(step=0.1))
+    preview_mpc = _make_hyundai_mpc(v_ego=34.73, a_ego=0.0, time_fn=_MonotonicStub(step=0.1))
 
     primary_lead = _make_lead(
       d_rel=73.55,
@@ -1148,21 +1257,49 @@ class TestHyundaiAiLeadStability:
       v_lead=32.0,
       a_lead=0.0,
       model_prob=1.0,
+      radar_track_id=-1001,
     )
-    adjacent_lead = _make_lead(
-      d_rel=80.0,
-      y_rel=1.8,
-      d_path=1.8,
-      v_lat=-0.8,
+    adjacent_lead_prime_0 = _make_lead(
+      d_rel=81.0,
+      y_rel=1.9,
+      d_path=1.9,
+      v_lat=-0.5,
       v_rel=-12.73,
       v_lead=22.0,
       a_lead=0.0,
       model_prob=0.92,
+      radar_track_id=-1002,
+    )
+    adjacent_lead_prime = _make_lead(
+      d_rel=80.0,
+      y_rel=1.85,
+      d_path=1.85,
+      v_lat=-0.5,
+      v_rel=-12.73,
+      v_lead=22.0,
+      a_lead=0.0,
+      model_prob=0.92,
+      radar_track_id=-1002,
+    )
+    adjacent_lead = _make_lead(
+      d_rel=79.0,
+      y_rel=1.8,
+      d_path=1.8,
+      v_lat=-0.5,
+      v_rel=-12.73,
+      v_lead=22.0,
+      a_lead=0.0,
+      model_prob=0.92,
+      radar_track_id=-1002,
     )
 
     for mpc in (baseline_mpc, preview_mpc):
       _run_update(mpc, primary_lead, _make_lead(status=False), v_cruise=40.0)
 
+    _run_update(baseline_mpc, primary_lead, _make_lead(status=False), v_cruise=40.0)
+    _run_update(preview_mpc, primary_lead, adjacent_lead_prime_0, v_cruise=40.0)
+    _run_update(baseline_mpc, primary_lead, _make_lead(status=False), v_cruise=40.0)
+    _run_update(preview_mpc, primary_lead, adjacent_lead_prime, v_cruise=40.0)
     _run_update(baseline_mpc, primary_lead, _make_lead(status=False), v_cruise=40.0)
     _run_update(preview_mpc, primary_lead, adjacent_lead, v_cruise=40.0)
 
@@ -1173,8 +1310,127 @@ class TestHyundaiAiLeadStability:
     assert preview_mpc.adjacent_awareness_preview_debug["active"] is True
     assert preview_mpc.adjacent_awareness_preview_debug["applied"] is True
     assert preview_mpc.adjacent_awareness_preview_debug["slot"] == "lead1"
+    assert preview_mpc.adjacent_awareness_preview_debug["toward_center_hist_mps"] == pytest.approx(0.5)
+    assert preview_mpc.adjacent_awareness_preview_debug["toward_center_hist_confirm_frames"] >= 2
+    assert preview_mpc.adjacent_awareness_preview_debug["history_identity_match"] is True
     assert preview_mpc.lead_approach_preview_debug["lead1"]["active"] is False
     assert float(preview_mpc.params[0, 2]) < float(baseline_mpc.params[0, 2]) - 3.0
+
+  def test_adjacent_awareness_preview_requires_observed_path_convergence(self):
+    mpc = _make_hyundai_mpc(v_ego=34.73, a_ego=0.0, time_fn=_MonotonicStub(step=0.1))
+    primary_lead = _make_lead(
+      d_rel=73.55,
+      y_rel=0.0,
+      d_path=0.0,
+      v_lat=0.15,
+      v_rel=-2.73,
+      v_lead=32.0,
+      model_prob=1.0,
+      radar_track_id=-1001,
+    )
+    parallel_adjacent = _make_lead(
+      d_rel=80.0,
+      y_rel=1.8,
+      d_path=1.8,
+      v_lat=-0.5,
+      v_rel=-12.73,
+      v_lead=22.0,
+      model_prob=0.92,
+      radar_track_id=-1002,
+    )
+
+    _run_update(mpc, primary_lead, _make_lead(status=False), v_cruise=40.0)
+    _run_update(mpc, primary_lead, parallel_adjacent, v_cruise=40.0)
+    _run_update(mpc, primary_lead, parallel_adjacent, v_cruise=40.0)
+
+    assert mpc.lead_role_debug["roles"]["lead1"] == "adjacent_awareness_left"
+    assert mpc.lead_role_debug["toward_center_mps"]["lead1"] == pytest.approx(0.5)
+    assert mpc.lead_role_debug["toward_center_model_mps"]["lead1"] == pytest.approx(0.5)
+    assert mpc.lead_role_debug["toward_center_hist_mps"]["lead1"] == pytest.approx(0.0)
+    assert mpc.adjacent_awareness_preview_debug["active"] is False
+    assert mpc.adjacent_awareness_preview_debug["applied"] is False
+
+    converging_adjacent = _make_lead(
+      d_rel=79.0,
+      y_rel=1.75,
+      d_path=1.75,
+      v_lat=-0.5,
+      v_rel=-12.73,
+      v_lead=22.0,
+      model_prob=0.92,
+      radar_track_id=-1002,
+    )
+    _run_update(mpc, primary_lead, converging_adjacent, v_cruise=40.0)
+
+    assert mpc.adjacent_awareness_preview_debug["active"] is False
+    assert mpc.lead_role_debug["toward_center_hist_confirm_frames"]["lead1"] == 1
+
+    converging_adjacent_2 = _make_lead(
+      d_rel=78.0,
+      y_rel=1.70,
+      d_path=1.70,
+      v_lat=-0.5,
+      v_rel=-12.73,
+      v_lead=22.0,
+      model_prob=0.92,
+      radar_track_id=-1002,
+    )
+    _run_update(mpc, primary_lead, converging_adjacent_2, v_cruise=40.0)
+
+    assert mpc.lead_role_debug["roles"]["lead1"] == "adjacent_awareness_left"
+    assert mpc.lead_role_debug["toward_center_hist_mps"]["lead1"] == pytest.approx(0.5)
+    assert mpc.adjacent_awareness_preview_debug["active"] is True
+    assert mpc.adjacent_awareness_preview_debug["applied"] is True
+    assert mpc.adjacent_awareness_preview_debug["toward_center_hist_mps"] == pytest.approx(0.5)
+    assert mpc.adjacent_awareness_preview_debug["toward_center_model_mps"] == pytest.approx(0.5)
+    assert mpc.adjacent_awareness_preview_debug["toward_center_hist_confirm_frames"] >= 2
+    assert mpc.adjacent_awareness_preview_debug["history_identity_match"] is True
+
+  def test_adjacent_awareness_preview_rejects_jitter_and_same_slot_replacement(self):
+    mpc = _make_hyundai_mpc(v_ego=34.73, a_ego=0.0, time_fn=_MonotonicStub(step=0.1))
+    primary_lead = _make_lead(
+      d_rel=73.55, y_rel=0.0, d_path=0.0, v_lat=0.15,
+      v_rel=-2.73, v_lead=32.0, model_prob=1.0, radar_track_id=-1001,
+    )
+
+    _run_update(mpc, primary_lead, _make_lead(status=False), v_cruise=40.0)
+    _run_update(
+      mpc, primary_lead,
+      _make_lead(d_rel=80.0, y_rel=2.45, d_path=2.45, v_lat=0.0,
+                 v_rel=-12.73, v_lead=22.0, model_prob=0.92, radar_track_id=-1002),
+      v_cruise=40.0,
+    )
+    _run_update(
+      mpc, primary_lead,
+      _make_lead(d_rel=79.8, y_rel=2.41, d_path=2.41, v_lat=0.0,
+                 v_rel=-12.73, v_lead=22.0, model_prob=0.92, radar_track_id=-1002),
+      v_cruise=40.0,
+    )
+
+    assert mpc.lead_role_debug["history_identity_match"]["lead1"] is True
+    assert mpc.lead_role_debug["toward_center_hist_mps"]["lead1"] == pytest.approx(0.4)
+    assert mpc.lead_role_debug["toward_center_hist_confirm_frames"]["lead1"] == 1
+    assert mpc.adjacent_awareness_preview_debug["active"] is False
+
+    _run_update(
+      mpc, primary_lead,
+      _make_lead(d_rel=79.6, y_rel=2.45, d_path=2.45, v_lat=0.0,
+                 v_rel=-12.73, v_lead=22.0, model_prob=0.92, radar_track_id=-1002),
+      v_cruise=40.0,
+    )
+    _run_update(
+      mpc, primary_lead,
+      _make_lead(d_rel=79.4, y_rel=1.80, d_path=1.80, v_lat=0.0,
+                 v_rel=-12.73, v_lead=22.0, model_prob=0.92, radar_track_id=-1003),
+      v_cruise=40.0,
+    )
+
+    assert mpc.lead_role_debug["history_identity_match"]["lead1"] is False
+    assert mpc.lead_role_debug["toward_center_hist_mps"]["lead1"] > 6.0
+    assert mpc.lead_role_debug["toward_center_observed_mps"]["lead1"] == 0.0
+    assert mpc.lead_role_debug["toward_center_hist_confirm_frames"]["lead1"] == 0
+    assert mpc.adjacent_awareness_preview_debug["active"] is False
+    assert mpc.adjacent_awareness_preview_debug["applied"] is False
 
   def test_low_speed_hostile_new_lead_still_gets_acquire_preview(self, monkeypatch):
     monkeypatch.setattr(

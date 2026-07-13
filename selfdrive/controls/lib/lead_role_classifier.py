@@ -73,6 +73,7 @@ class LeadRoleClassifier:
   RAW_LATERAL_DEPARTURE_MIN_SPEED_MPS = 12.0
   RAW_LATERAL_DEPARTURE_Y_ABS_M = 6.0
   RAW_LATERAL_DEPARTURE_VLAT_MPS = 6.0
+  OBSERVED_CONVERGENCE_MIN_DELTA_M = 0.01
 
   def __init__(self):
     self._params = Params()
@@ -93,8 +94,10 @@ class LeadRoleClassifier:
     }
     # slot state keyed by lead slot index (0/1)
     self._slot_state: dict[int, dict[str, Any]] = {
-      0: {"role": self.INVALID, "y_abs": None, "t": None, "center_hold_until_t": None, "center_path_abs": None, "center_d_rel": None},
-      1: {"role": self.INVALID, "y_abs": None, "t": None, "center_hold_until_t": None, "center_path_abs": None, "center_d_rel": None},
+      0: {"role": self.INVALID, "y_abs": None, "t": None, "track_id": None, "toward_center_confirm_frames": 0,
+          "center_hold_until_t": None, "center_path_abs": None, "center_d_rel": None},
+      1: {"role": self.INVALID, "y_abs": None, "t": None, "track_id": None, "toward_center_confirm_frames": 0,
+          "center_hold_until_t": None, "center_path_abs": None, "center_d_rel": None},
     }
 
   @staticmethod
@@ -156,6 +159,11 @@ class LeadRoleClassifier:
     info: dict[str, Any] = {
       "reason": "-",
       "toward_center_mps": 0.0,
+      "toward_center_hist_mps": 0.0,
+      "toward_center_observed_mps": 0.0,
+      "toward_center_model_mps": 0.0,
+      "toward_center_hist_confirm_frames": 0,
+      "history_identity_match": False,
       "cutin_promoted": False,
       "grace_active": False,
       "grace_remaining_s": 0.0,
@@ -185,16 +193,36 @@ class LeadRoleClassifier:
     prev_role = str(prev.get("role", self.INVALID))
     prev_y_abs = prev.get("y_abs")
     prev_t = prev.get("t")
+    try:
+      raw_track_id = int(getattr(lead, "radarTrackId", -1))
+    except (TypeError, ValueError):
+      raw_track_id = -1
+    track_id = raw_track_id if raw_track_id != -1 else None
+    history_identity_match = track_id is not None and track_id == prev.get("track_id")
 
     toward_center_hist_mps = 0.0
     if prev_y_abs is not None and prev_t is not None:
       dt = max(now - float(prev_t), 1e-3)
       toward_center_hist_mps = max(0.0, (float(prev_y_abs) - path_abs) / dt)
+    toward_center_observed_mps = 0.0
+    toward_center_hist_confirm_frames = 0
+    if history_identity_match and prev_y_abs is not None and prev_t is not None:
+      dt = max(now - float(prev_t), 1e-3)
+      inward_delta_m = float(prev_y_abs) - path_abs
+      toward_center_observed_mps = max(0.0, inward_delta_m / dt)
+      if inward_delta_m >= self.OBSERVED_CONVERGENCE_MIN_DELTA_M:
+        toward_center_hist_confirm_frames = int(prev.get("toward_center_confirm_frames", 0)) + 1
     toward_center_model_mps = 0.0
     if math.isfinite(v_lat) and path_abs > 1e-3:
       toward_center_model_mps = max(0.0, -v_lat * math.copysign(1.0, path_offset))
     toward_center_mps = max(toward_center_hist_mps, toward_center_model_mps)
     info["toward_center_mps"] = toward_center_mps
+    info["toward_center_hist_mps"] = toward_center_hist_mps
+    info["toward_center_observed_mps"] = toward_center_observed_mps
+    info["toward_center_model_mps"] = toward_center_model_mps
+    info["toward_center_hist_confirm_frames"] = toward_center_hist_confirm_frames
+    info["history_identity_match"] = history_identity_match
+    info["track_id"] = track_id
 
     if not gate_active:
       role = self.CENTER_CONTROL
@@ -276,6 +304,8 @@ class LeadRoleClassifier:
         "role": self.INVALID,
         "y_abs": None,
         "t": None,
+        "track_id": None,
+        "toward_center_confirm_frames": 0,
         "center_hold_until_t": None,
         "center_path_abs": None,
         "center_d_rel": None,
@@ -287,6 +317,8 @@ class LeadRoleClassifier:
       "role": role,
       "y_abs": info.get("path_abs"),
       "t": now,
+      "track_id": info.get("track_id"),
+      "toward_center_confirm_frames": int(info.get("toward_center_hist_confirm_frames", 0)),
       "center_hold_until_t": None,
       "center_path_abs": None,
       "center_d_rel": None,
@@ -371,6 +403,26 @@ class LeadRoleClassifier:
       "toward_center_mps": {
         "lead0": float(info0["toward_center_mps"]),
         "lead1": float(info1["toward_center_mps"]),
+      },
+      "toward_center_hist_mps": {
+        "lead0": float(info0["toward_center_hist_mps"]),
+        "lead1": float(info1["toward_center_hist_mps"]),
+      },
+      "toward_center_observed_mps": {
+        "lead0": float(info0["toward_center_observed_mps"]),
+        "lead1": float(info1["toward_center_observed_mps"]),
+      },
+      "toward_center_model_mps": {
+        "lead0": float(info0["toward_center_model_mps"]),
+        "lead1": float(info1["toward_center_model_mps"]),
+      },
+      "toward_center_hist_confirm_frames": {
+        "lead0": int(info0["toward_center_hist_confirm_frames"]),
+        "lead1": int(info1["toward_center_hist_confirm_frames"]),
+      },
+      "history_identity_match": {
+        "lead0": bool(info0["history_identity_match"]),
+        "lead1": bool(info1["history_identity_match"]),
       },
       "cutin_promoted": {
         "lead0": bool(info0["cutin_promoted"]),

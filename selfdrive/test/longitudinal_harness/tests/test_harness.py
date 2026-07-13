@@ -710,11 +710,64 @@ def test_handoff_previewable_exposes_adjacent_lead_before_reveal() -> None:
   assert len(preview_rows) >= int(len(prereveal_rows) * 0.55)
   assert all(row["planner_source"] == "lead0" for row in prereveal_rows)
   assert all(row["mpc_adjacent_awareness_preview_debug"].get("applied", False) for row in preview_rows)
+  assert all(row["mpc_adjacent_awareness_preview_debug"].get("toward_center_hist_mps", 0.0) > 0.0 for row in preview_rows)
+  assert all(row["mpc_adjacent_awareness_preview_debug"].get("toward_center_hist_confirm_frames", 0) >= 2 for row in preview_rows)
+  assert all(row["mpc_adjacent_awareness_preview_debug"].get("history_identity_match", False) for row in preview_rows)
   assert any(row["planner_accel_mps2"] < -0.5 for row in prereveal_rows)
   assert all(0.0 < row["mpc_adjacent_awareness_preview_debug"].get("applied_blend", 0.0) < 1.0 for row in preview_rows)
   assert prereveal_rows[-1]["lead_two_true_d_rel_m"] is not None
   assert preview_rows[0]["mpc_adjacent_awareness_preview_debug"]["slot"] == "lead1"
   assert 0.0 < result.summary["handoffPrerevealSpeedLossMps"] < 1.3
+
+
+def test_parallel_adjacent_lead_cannot_apply_hidden_preview_without_observed_convergence() -> None:
+  vehicle = _resolve_preview_handoff_vehicle()
+
+  def run_case(*, include_parallel_adjacent: bool):
+    initial_speed_mps, initial_accel_mps2, steps = build_synthetic_scenario(
+      "handoff_previewable", duration_s=4.0, dt_s=DT_MDL,
+    )
+    adjacent_idx = 0
+    for step in steps:
+      if 1.7 <= step.t_s < 3.0:
+        if include_parallel_adjacent and step.lead_two.status:
+          step.lead_two.y_rel_m = 2.45
+          # Alternate a small inward/outward dPath error. Each inward sample is
+          # large enough to clear the instantaneous 0.35 m/s gate at model
+          # cadence, but never supplies two consecutive convergence frames.
+          step.lead_two.d_path_m = 2.40 if adjacent_idx % 2 else 2.45
+          step.lead_two.v_lat_mps = -0.5
+          adjacent_idx += 1
+        else:
+          step.lead_two = LeadDirective()
+    return run_harness(
+      vehicle_config=vehicle,
+      scenario_name="parallel_adjacent_no_handoff" if include_parallel_adjacent else "parallel_adjacent_baseline",
+      steps=steps,
+      initial_speed_mps=initial_speed_mps,
+      initial_accel_mps2=initial_accel_mps2,
+      noise_profile="off",
+      seed=19,
+    )
+
+  baseline = run_case(include_parallel_adjacent=False)
+  parallel = run_case(include_parallel_adjacent=True)
+  baseline_rows = [row for row in baseline.trace if 1.7 <= row["t_s"] < 3.0]
+  parallel_rows = [row for row in parallel.trace if 1.7 <= row["t_s"] < 3.0]
+
+  assert baseline_rows and len(parallel_rows) == len(baseline_rows)
+  assert all(row["lead_two_status"] for row in parallel_rows)
+  assert all(row["planner_source"] == "lead0" for row in parallel_rows)
+  assert all(row["mpc_lead_role_debug"]["roles"]["lead1"] == "adjacent_awareness_left" for row in parallel_rows)
+  assert all(row["mpc_lead_role_debug"]["toward_center_model_mps"]["lead1"] == pytest.approx(0.5) for row in parallel_rows)
+  assert max(row["mpc_lead_role_debug"]["toward_center_hist_mps"]["lead1"] for row in parallel_rows) >= 0.35
+  assert max(row["mpc_lead_role_debug"]["toward_center_hist_confirm_frames"]["lead1"] for row in parallel_rows) <= 1
+  assert all(not row["mpc_adjacent_awareness_preview_debug"].get("active", False) for row in parallel_rows)
+  assert all(not row["mpc_adjacent_awareness_preview_debug"].get("applied", False) for row in parallel_rows)
+  assert [row["planner_accel_mps2"] for row in parallel_rows] == pytest.approx(
+    [row["planner_accel_mps2"] for row in baseline_rows], abs=1e-9,
+  )
+  assert parallel_rows[-1]["v_ego_true_mps"] == pytest.approx(baseline_rows[-1]["v_ego_true_mps"], abs=1e-9)
 
 
 def test_handoff_previewable_early_deficit_strengthens_prereveal_signal() -> None:

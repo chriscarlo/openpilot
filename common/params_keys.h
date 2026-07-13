@@ -481,6 +481,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"Longitudinal.LiveTune.LeadAccelCorrSettleTauMult", {PERSISTENT | BACKUP, FLOAT, "2.0"}},
     {"Longitudinal.LiveTune.LeadAccelCorrMaxDtS", {PERSISTENT | BACKUP, FLOAT, "0.5"}},
     {"Longitudinal.LiveTune.LeadAccelCorrAmplifyGain", {PERSISTENT | BACKUP, FLOAT, "1.0"}},
+    {"Longitudinal.LiveTune.LeadAccelCorrAmplifyModelDecelMinMps2", {PERSISTENT | BACKUP, FLOAT, "0.10"}},
     {"Longitudinal.LiveTune.LeadAccelCorrAmplifyDeadbandMps2", {PERSISTENT | BACKUP, FLOAT, "0.35"}},
     {"Longitudinal.LiveTune.LeadAccelCorrAmplifyCapMps2", {PERSISTENT | BACKUP, FLOAT, "2.0"}},
     {"Longitudinal.LiveTune.LeadStabilizerTrendTauS", {PERSISTENT | BACKUP, FLOAT, "0.20"}},

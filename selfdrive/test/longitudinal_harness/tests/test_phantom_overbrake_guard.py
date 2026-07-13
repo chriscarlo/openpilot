@@ -33,7 +33,11 @@ JITTER_ACCEL_AMP_MPS2 = 0.3
 JITTER_PERIOD_S = 10.0
 # Brief flickers well inside PhantomLeadHoldS=0.80 so the phantom (not unlatch)
 # owns each window; ev6_measured adds its own random prob dropouts on top.
-FLICKER_STARTS_S = (6.0, 11.0, 16.0)
+# Keep the explicit windows on a lead-owned portion of every seeded noisy run.
+# 11.0 s overlapped an ev6_measured random dropout after a legitimate
+# filtered_pullaway_immediate release; 8.0 s remains lead-owned and holds the
+# measured -0.15 m/s^2 decel through all eight phantom frames on every seed.
+FLICKER_STARTS_S = (6.0, 8.0, 16.0)
 FLICKER_DURATION_S = 0.4
 SEEDS = (11, 42, 777)
 # Bounds on what the new defaults may add over the legacy decay-to-zero phantom.

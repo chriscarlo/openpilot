@@ -88,6 +88,7 @@ LAUNCH_ACCEL_WITHIN_S = 1.25       # ...measured within this window after releas
 MIN_V_AT_ONSET_PLUS_3P5_MPS = 1.8
 MIN_TRUE_GAP_M = 3.5               # launch must never eat into the stopped gap
 MAX_LAUNCH_PLANNER_ACCEL_MPS2 = 2.6  # comfort containment: below ACCEL_MAX, no slam-launch
+MAX_DEPARTURE_HANDOFF_DROP_MPS2 = 0.40
 
 
 def _lead_speed(t_s: float) -> float:
@@ -148,6 +149,17 @@ def _release_t(trace: list[dict]) -> float | None:
   # First stop-release AFTER the launch (the latch must be engaged pre-launch).
   return next((row["t_s"] for row in trace
                if row["t_s"] >= LAUNCH_T_S and not row["planner_should_stop"]), None)
+
+
+def _departing_lead_handoff(trace: list[dict]) -> tuple[dict, dict] | None:
+  rows = trace[::5]
+  return next(((prev, row) for prev, row in zip(rows[:-1], rows[1:], strict=False)
+               if prev["planner_source"] in ("lead0", "lead1")
+               and row["planner_source"] == "cruise"
+               and row["lead_one_raw_v_rel_mps"] is not None
+               and row["lead_one_raw_v_rel_mps"] > 0.5
+               and row["lead_one_published_v_rel_mps"] is not None
+               and row["lead_one_published_v_rel_mps"] > 0.5), None)
 
 
 def _measure(result: SimulationResult) -> dict:
@@ -246,6 +258,31 @@ def test_stop_release_and_launch_track_departing_lead() -> None:
     f"  relatched after release: {m['relatched']}, min true gap {m['min_true_gap_m']} m"
   )
   assert release_ok and launch_ok and progress_ok and no_relatch, physics
+
+
+def test_departing_lead_release_does_not_turn_launch_into_braking() -> None:
+  """A valid pulling-away lead may release MPC ownership without a brake tap.
+
+  The road event was +2.142 -> -1.193 m/s^2 in one 50 ms planner cycle while
+  the lead remained valid at 28.8 m, vRel +6.62 m/s, and aLeadK +1.74 m/s^2.
+  Pre-fix this full radard/planner/controller scenario reproduced the same
+  composition failure at t=9.15 s: +1.530 -> -0.886 m/s^2.
+  """
+  handoff = _departing_lead_handoff(_run().trace)
+  assert handoff is not None, "scenario never released a pulling-away lead to cruise"
+  prev, row = handoff
+
+  delta = row["planner_accel_mps2"] - prev["planner_accel_mps2"]
+  physics = (
+    f"pulling-away lead release at t={row['t_s']:.2f}s: source "
+    f"{prev['planner_source']} -> {row['planner_source']}, raw/published vRel "
+    f"{row['lead_one_raw_v_rel_mps']:+.3f}/{row['lead_one_published_v_rel_mps']:+.3f} m/s, "
+    f"dRel {row['lead_one_published_d_rel_m']:.2f} m; planner aTarget "
+    f"{prev['planner_accel_mps2']:+.3f} -> {row['planner_accel_mps2']:+.3f} m/s^2 "
+    f"(delta {delta:+.3f}, road +2.142 -> -1.193; pre-fix harness +1.530 -> -0.886)"
+  )
+  assert row["planner_accel_mps2"] >= 0.0, physics
+  assert delta >= -MAX_DEPARTURE_HANDOFF_DROP_MPS2, physics
 
 
 ROLLBACK_LAUNCH_OVERRIDES = {

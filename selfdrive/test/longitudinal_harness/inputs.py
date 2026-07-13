@@ -568,6 +568,8 @@ def _build_handoff(duration_s: float, dt_s: float) -> tuple[float, float, list[S
 
 def _build_handoff_previewable(duration_s: float, dt_s: float) -> tuple[float, float, list[StepInput]]:
   initial_speed = 35.0
+  lead_one_track_id = -1101
+  lead_two_track_id = -1102
   # Keep lead A genuinely MPC-owning through the adjacent preview after the
   # real radard filter. At the old 80 m start the least-cost source was cruise,
   # so the fixture no longer exercised a lead0 -> lead1 handoff at all.
@@ -588,6 +590,7 @@ def _build_handoff_previewable(duration_s: float, dt_s: float) -> tuple[float, f
         status=True,
         v_lead_mps=32.0,
         model_prob_target=1.0,
+        radar_track_id=lead_one_track_id,
         d_rel_override_m=lead_one_start_gap_m if idx == 0 else None,
         acquisition_reset=idx == 0,
       )
@@ -601,6 +604,7 @@ def _build_handoff_previewable(duration_s: float, dt_s: float) -> tuple[float, f
         status=True,
         v_lead_mps=32.0,
         model_prob_target=1.0,
+        radar_track_id=lead_one_track_id,
         y_rel_m=0.20 * progress,
         d_path_m=0.20 * progress,
         v_lat_mps=0.10,
@@ -609,6 +613,7 @@ def _build_handoff_previewable(duration_s: float, dt_s: float) -> tuple[float, f
         status=True,
         v_lead_mps=22.0,
         model_prob_target=0.80,
+        radar_track_id=lead_two_track_id,
         d_rel_override_m=lead_two_start_gap_m if abs(t_s - preview_start_t) < (dt_s * 0.5) else None,
         y_rel_m=lead_two_path_m,
         d_path_m=lead_two_path_m,
@@ -618,11 +623,14 @@ def _build_handoff_previewable(duration_s: float, dt_s: float) -> tuple[float, f
       event = None
       note = "lead B adjacent awareness preview"
     elif t_s < handoff_t + overlap_s:
-      lead_one = LeadDirective(status=True, v_lead_mps=32.0, model_prob_target=0.98, y_rel_m=1.6, d_path_m=1.6, v_lat_mps=0.7)
+      lead_one = LeadDirective(status=True, v_lead_mps=32.0, model_prob_target=0.98,
+                               y_rel_m=1.6, d_path_m=1.6, v_lat_mps=0.7,
+                               radar_track_id=lead_one_track_id)
       lead_two = LeadDirective(
         status=True,
         v_lead_mps=22.0,
         model_prob_target=1.0,
+        radar_track_id=lead_two_track_id,
         d_rel_override_m=50.0 if abs(t_s - handoff_t) < (dt_s * 0.5) else None,
         y_rel_m=0.15,
         d_path_m=0.15,
@@ -632,7 +640,8 @@ def _build_handoff_previewable(duration_s: float, dt_s: float) -> tuple[float, f
       note = "lead A exits, lead B handoff"
     else:
       lead_one = LeadDirective()
-      lead_two = LeadDirective(status=True, v_lead_mps=22.0, model_prob_target=1.0)
+      lead_two = LeadDirective(status=True, v_lead_mps=22.0, model_prob_target=1.0,
+                               radar_track_id=lead_two_track_id)
       event = None
       note = "following lead B"
     timeline.append(StepInput(t_s=t_s, cruise_speed_mps=40.0, lead_one=lead_one, lead_two=lead_two, event=event, note=note))
@@ -641,6 +650,8 @@ def _build_handoff_previewable(duration_s: float, dt_s: float) -> tuple[float, f
 
 def _build_handoff_previewable_early_deficit(duration_s: float, dt_s: float) -> tuple[float, float, list[StepInput]]:
   initial_speed = 35.0
+  lead_one_track_id = -1201
+  lead_two_track_id = -1202
   lead_one_start_gap_m = 60.0
   preview_start_t = 1.0
   handoff_t = 3.0
@@ -658,6 +669,7 @@ def _build_handoff_previewable_early_deficit(duration_s: float, dt_s: float) -> 
         status=True,
         v_lead_mps=32.0,
         model_prob_target=1.0,
+        radar_track_id=lead_one_track_id,
         d_rel_override_m=lead_one_start_gap_m if idx == 0 else None,
         acquisition_reset=idx == 0,
       )
@@ -671,6 +683,7 @@ def _build_handoff_previewable_early_deficit(duration_s: float, dt_s: float) -> 
         status=True,
         v_lead_mps=32.0,
         model_prob_target=1.0,
+        radar_track_id=lead_one_track_id,
         y_rel_m=0.25 * progress,
         d_path_m=0.25 * progress,
         v_lat_mps=0.12,
@@ -679,6 +692,7 @@ def _build_handoff_previewable_early_deficit(duration_s: float, dt_s: float) -> 
         status=True,
         v_lead_mps=20.0,
         model_prob_target=0.84,
+        radar_track_id=lead_two_track_id,
         d_rel_override_m=lead_two_start_gap_m if abs(t_s - preview_start_t) < (dt_s * 0.5) else None,
         y_rel_m=lead_two_path_m,
         d_path_m=lead_two_path_m,
@@ -688,11 +702,14 @@ def _build_handoff_previewable_early_deficit(duration_s: float, dt_s: float) -> 
       event = None
       note = "lead B earlier adjacent deficit preview"
     elif t_s < handoff_t + overlap_s:
-      lead_one = LeadDirective(status=True, v_lead_mps=32.0, model_prob_target=0.98, y_rel_m=1.6, d_path_m=1.6, v_lat_mps=0.7)
+      lead_one = LeadDirective(status=True, v_lead_mps=32.0, model_prob_target=0.98,
+                               y_rel_m=1.6, d_path_m=1.6, v_lat_mps=0.7,
+                               radar_track_id=lead_one_track_id)
       lead_two = LeadDirective(
         status=True,
         v_lead_mps=20.0,
         model_prob_target=1.0,
+        radar_track_id=lead_two_track_id,
         d_rel_override_m=44.0 if abs(t_s - handoff_t) < (dt_s * 0.5) else None,
         y_rel_m=0.12,
         d_path_m=0.12,
@@ -702,7 +719,8 @@ def _build_handoff_previewable_early_deficit(duration_s: float, dt_s: float) -> 
       note = "lead A exits, lead B earlier deficit handoff"
     else:
       lead_one = LeadDirective()
-      lead_two = LeadDirective(status=True, v_lead_mps=20.0, model_prob_target=1.0)
+      lead_two = LeadDirective(status=True, v_lead_mps=20.0, model_prob_target=1.0,
+                               radar_track_id=lead_two_track_id)
       event = None
       note = "following earlier deficit lead B"
     timeline.append(StepInput(t_s=t_s, cruise_speed_mps=40.0, lead_one=lead_one, lead_two=lead_two, event=event, note=note))
@@ -711,6 +729,8 @@ def _build_handoff_previewable_early_deficit(duration_s: float, dt_s: float) -> 
 
 def _build_handoff_previewable_cruise_release(duration_s: float, dt_s: float) -> tuple[float, float, list[StepInput]]:
   initial_speed = 35.0
+  lead_one_track_id = -1301
+  lead_two_track_id = -1302
   lead_one_start_gap_m = 60.0
   preview_start_t = 1.0
   late_release_t = 2.0
@@ -729,6 +749,7 @@ def _build_handoff_previewable_cruise_release(duration_s: float, dt_s: float) ->
         status=True,
         v_lead_mps=32.0,
         model_prob_target=1.0,
+        radar_track_id=lead_one_track_id,
         d_rel_override_m=lead_one_start_gap_m if idx == 0 else None,
         acquisition_reset=idx == 0,
       )
@@ -742,6 +763,7 @@ def _build_handoff_previewable_cruise_release(duration_s: float, dt_s: float) ->
         status=True,
         v_lead_mps=33.5 if t_s >= late_release_t else 32.0,
         model_prob_target=1.0,
+        radar_track_id=lead_one_track_id,
         d_rel_override_m=lead_one_start_gap_m if abs(t_s - late_release_t) < (dt_s * 0.5) else None,
         y_rel_m=0.25 * progress,
         d_path_m=0.25 * progress,
@@ -752,6 +774,7 @@ def _build_handoff_previewable_cruise_release(duration_s: float, dt_s: float) ->
         status=True,
         v_lead_mps=20.0,
         model_prob_target=0.84,
+        radar_track_id=lead_two_track_id,
         d_rel_override_m=lead_two_start_gap_m if abs(t_s - preview_start_t) < (dt_s * 0.5) else None,
         y_rel_m=lead_two_path_m,
         d_path_m=lead_two_path_m,
@@ -761,11 +784,14 @@ def _build_handoff_previewable_cruise_release(duration_s: float, dt_s: float) ->
       event = None
       note = "lead B preview, lead A late pullaway release"
     elif t_s < handoff_t + overlap_s:
-      lead_one = LeadDirective(status=True, v_lead_mps=33.5, model_prob_target=0.98, y_rel_m=1.6, d_path_m=1.6, v_lat_mps=0.7)
+      lead_one = LeadDirective(status=True, v_lead_mps=33.5, model_prob_target=0.98,
+                               y_rel_m=1.6, d_path_m=1.6, v_lat_mps=0.7,
+                               radar_track_id=lead_one_track_id)
       lead_two = LeadDirective(
         status=True,
         v_lead_mps=20.0,
         model_prob_target=1.0,
+        radar_track_id=lead_two_track_id,
         d_rel_override_m=44.0 if abs(t_s - handoff_t) < (dt_s * 0.5) else None,
         y_rel_m=0.12,
         d_path_m=0.12,
@@ -775,7 +801,8 @@ def _build_handoff_previewable_cruise_release(duration_s: float, dt_s: float) ->
       note = "lead A exits after late cruise release, lead B handoff"
     else:
       lead_one = LeadDirective()
-      lead_two = LeadDirective(status=True, v_lead_mps=20.0, model_prob_target=1.0)
+      lead_two = LeadDirective(status=True, v_lead_mps=20.0, model_prob_target=1.0,
+                               radar_track_id=lead_two_track_id)
       event = None
       note = "following release-triggered lead B"
     timeline.append(StepInput(t_s=t_s, cruise_speed_mps=40.0, lead_one=lead_one, lead_two=lead_two, event=event, note=note))

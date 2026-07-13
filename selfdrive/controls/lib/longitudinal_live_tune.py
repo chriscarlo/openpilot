@@ -737,8 +737,9 @@ LEAD_RESPONSE_TUNE_SPECS = (
     default=0.40,
     minimum=0.0,
     maximum=1.0,
-    description="CD6 (road 200-6): duration (s) a SYMMETRIC per-frame delta clamp on the planner output is armed after any "
-                "cruise<->lead source transition, so a vLeadK-rollover handoff cannot sign-flip aTarget in a single frame. "
+    description="CD6 (road 200-6/22d): duration (s) a SYMMETRIC per-frame delta clamp on the planner output is armed "
+                "after a cruise<->lead transition, a cruise-cap collapse, or first cap appearance for an all-opening "
+                "lead set, so a handoff/cap edge cannot sign-flip aTarget or cut throttle in one frame. "
                 "The upward (accel-increasing) leg always applies (limiting acceleration is always safe); the downward "
                 "(braking) leg is bypassed under the shared relatch urgency signal (fast-close / short-TTC / FCW / "
                 "requested hard decel) so emergency braking is never delayed. Rollback sentinel: 0 disables the windowed "
@@ -753,8 +754,9 @@ LEAD_RESPONSE_TUNE_SPECS = (
     minimum=0.0,
     maximum=2.0,
     description="CD6: maximum |output_a_target - prev_a| (m/s^2) allowed per frame while the handoff limiter window is "
-                "active (comfortably under the oracle's 0.4 one-frame bound). Symmetric bound; the downward leg is "
-                "urgency-bypassed. Only meaningful when HandoffLimitWindowS > 0.",
+                "active (comfortably under the oracle's 0.4 one-frame bound). Symmetric bound, including a benign "
+                "positive-accel reduction; the downward leg is urgency-bypassed. Only meaningful when "
+                "HandoffLimitWindowS > 0.",
   ),
   LeadResponseTuneSpec(
     attr="handoff_inside_df_positive_cap_mps2",
@@ -1339,6 +1341,19 @@ LEAD_RESPONSE_TUNE_SPECS = (
                 "model aLeadK; never fabricates decel from a coasting report.",
   ),
   LeadResponseTuneSpec(
+    attr="lead_accel_corr_amplify_model_decel_min_mps2",
+    key="Longitudinal.LiveTune.LeadAccelCorrAmplifyModelDecelMinMps2",
+    cli_name="lead-accel-corr-amplify-model-decel-min",
+    label="lead_accel_corr_amplify_model_decel_min",
+    default=0.10,
+    minimum=0.0,
+    maximum=1.0,
+    description="Minimum model-reported braking magnitude (m/s^2) required before the vLead-trend amplifier may "
+                "deepen aLeadK. Rejects near-zero sign noise (road 22d: -0.017/-0.04 amplified into transient brake "
+                "taps) while preserving the -0.48..-0.54 CD3 underreport case. 0 restores the pre-gate any-negative-"
+                "report behavior.",
+  ),
+  LeadResponseTuneSpec(
     attr="lead_accel_corr_amplify_deadband_mps2",
     key="Longitudinal.LiveTune.LeadAccelCorrAmplifyDeadbandMps2",
     cli_name="lead-accel-corr-amplify-deadband",
@@ -1347,8 +1362,7 @@ LEAD_RESPONSE_TUNE_SPECS = (
     minimum=0.0,
     maximum=3.0,
     description="The vLead trend must be this many m/s^2 MORE negative than the model aLeadK before amplify engages. "
-                "Rejects the finite-difference jitter of a steady/lightly-braking lead (ev6_measured vRel noise + prob "
-                "dropouts) so amplify cannot chatter aLeadK on a non-threat.",
+                "Rejects finite-difference jitter after the independent model-decel-magnitude gate passes.",
   ),
   LeadResponseTuneSpec(
     attr="lead_accel_corr_amplify_cap_mps2",
@@ -1871,6 +1885,7 @@ class LeadResponseTuningConfig:
   lead_accel_corr_settle_tau_mult: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_accel_corr_settle_tau_mult"].default
   lead_accel_corr_max_dt_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_accel_corr_max_dt_s"].default
   lead_accel_corr_amplify_gain: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_accel_corr_amplify_gain"].default
+  lead_accel_corr_amplify_model_decel_min_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_accel_corr_amplify_model_decel_min_mps2"].default
   lead_accel_corr_amplify_deadband_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_accel_corr_amplify_deadband_mps2"].default
   lead_accel_corr_amplify_cap_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_accel_corr_amplify_cap_mps2"].default
   lead_stabilizer_trend_tau_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_stabilizer_trend_tau_s"].default

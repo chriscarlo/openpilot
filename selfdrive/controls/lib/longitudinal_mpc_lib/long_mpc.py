@@ -411,6 +411,7 @@ LEAD_ACCEL_CORR_MAX_DT_S = 0.5
 # rejects steady/lightly-braking finite-difference jitter; cap bounds how far a
 # single noisy trend sample can deepen aLeadK in one frame.
 LEAD_ACCEL_CORR_AMPLIFY_GAIN = 0.0
+LEAD_ACCEL_CORR_AMPLIFY_MODEL_DECEL_MIN_MPS2 = 0.10
 LEAD_ACCEL_CORR_AMPLIFY_DEADBAND_MPS2 = 0.35
 LEAD_ACCEL_CORR_AMPLIFY_CAP_MPS2 = 2.0
 
@@ -1646,6 +1647,7 @@ class LongitudinalMpc:
     self._last_raw_radar_leads: tuple = (None, None)
     self._lead_to_cruise_transition_t = None
     self._lead_to_cruise_transition_source = None
+    self._lead_to_cruise_transition_track_id = None
     # Close-range lead memory: safety cap on cruise accel when a lead was
     # recently visible nearby, even if the model is currently flickering.
     self._close_lead_last_seen_t: float | None = None
@@ -1846,8 +1848,24 @@ class LongitudinalMpc:
       path_abs_m = abs(float(entry.get("dPath", self._lead_attr(raw_lead, "dPath", self._lead_attr(raw_lead, "yRel"))) or 0.0))
       toward_center_gate_mps = CUTIN_SETTLE_DETECT_TOWARD_CENTER_MIN_MPS
       toward_center_mps = float(lead_role_debug.get("toward_center_mps", {}).get(slot_key, 0.0) or 0.0)
+      toward_center_hist_mps = float(lead_role_debug.get("toward_center_hist_mps", {}).get(slot_key, 0.0) or 0.0)
+      toward_center_observed_mps = float(lead_role_debug.get("toward_center_observed_mps", {}).get(slot_key, 0.0) or 0.0)
+      toward_center_model_mps = float(lead_role_debug.get("toward_center_model_mps", {}).get(slot_key, 0.0) or 0.0)
+      toward_center_hist_confirm_frames = int(
+        lead_role_debug.get("toward_center_hist_confirm_frames", {}).get(slot_key, 0) or 0
+      )
+      history_identity_match = bool(lead_role_debug.get("history_identity_match", {}).get(slot_key, False))
       model_prob = float(np.clip(getattr(raw_lead, 'modelProb', 0.0) or 0.0, 0.0, 1.0))
-      if path_abs_m > center_exit_m or toward_center_mps < toward_center_gate_mps or model_prob <= 0.0:
+      # Awareness-only preview can affect longitudinal control without changing
+      # the selected lead source. Do not let a model vLat prediction by itself
+      # create that hidden authority: require observed path-relative convergence
+      # from the same physical track for two consecutive frames.
+      # The identity gate prevents same-slot replacement from fabricating motion;
+      # confirmation rejects a single 2-4 cm lateral jitter sample. Genuine
+      # cut-ins retain preview after roughly 0.1 s at the 20 Hz model cadence.
+      if (path_abs_m > center_exit_m or not history_identity_match or
+          toward_center_observed_mps < toward_center_gate_mps or
+          toward_center_hist_confirm_frames < 2 or model_prob <= 0.0):
         continue
 
       preview_buffer_raw, preview_debug = compute_lead_approach_preview(
@@ -1881,6 +1899,11 @@ class LongitudinalMpc:
           "role": role,
           "path_abs_m": float(path_abs_m),
           "toward_center_mps": float(toward_center_mps),
+          "toward_center_hist_mps": float(toward_center_hist_mps),
+          "toward_center_observed_mps": float(toward_center_observed_mps),
+          "toward_center_model_mps": float(toward_center_model_mps),
+          "toward_center_hist_confirm_frames": int(toward_center_hist_confirm_frames),
+          "history_identity_match": bool(history_identity_match),
           "toward_center_gate_mps": float(toward_center_gate_mps),
           "model_prob": float(model_prob),
           "confidence_scale": float(model_prob),
@@ -2780,9 +2803,11 @@ class LongitudinalMpc:
     # truthful decel instead of a barely-moving lead.
     #
     # Safety-shaped gates (why this cannot fabricate phantom braking):
-    #  - lead.aLeadK < 0: the MODEL must already report braking. A coasting or
-    #    accelerating model report is never overridden into decel; the trend
-    #    can only DEEPEN an already-reported brake, never invent one.
+    #  - lead.aLeadK < -model_decel_min: the MODEL must report a meaningful brake, not
+    #    merely cross zero on quantization/noise. Road 22d showed -0.017/-0.04
+    #    reports being amplified to -1.6..-1.9 by the same noisy vLead derivative,
+    #    fabricating two brake taps. The known CD3 truth-deficit case reports
+    #    -0.48..-0.54 and remains eligible at the default 0.10 floor.
     #  - corr_a_meas_lp < lead.aLeadK - deadband: the kinematic trend must be
     #    meaningfully MORE negative than the model. The deadband rejects the
     #    finite-difference jitter of a steady/lightly-braking lead (ev6_measured
@@ -2796,11 +2821,15 @@ class LongitudinalMpc:
     # bound-only behavior exactly (kill switch).
     amplify_gain = float(getattr(cfg, 'lead_accel_corr_amplify_gain',
                                  LEAD_ACCEL_CORR_AMPLIFY_GAIN))
+    amplify_model_decel_min = float(getattr(
+      cfg, 'lead_accel_corr_amplify_model_decel_min_mps2',
+      LEAD_ACCEL_CORR_AMPLIFY_MODEL_DECEL_MIN_MPS2,
+    ))
     amplify_deadband = float(getattr(cfg, 'lead_accel_corr_amplify_deadband_mps2',
                                      LEAD_ACCEL_CORR_AMPLIFY_DEADBAND_MPS2))
     amplify_cap = float(getattr(cfg, 'lead_accel_corr_amplify_cap_mps2',
                                 LEAD_ACCEL_CORR_AMPLIFY_CAP_MPS2))
-    if (amplify_gain > 0.0 and settled and lead.aLeadK < 0.0 and
+    if (amplify_gain > 0.0 and settled and lead.aLeadK < -amplify_model_decel_min and
         float(state.corr_a_meas_lp) < float(lead.aLeadK) - amplify_deadband):
       # Never pull past the measured trend, and never deepen by more than the
       # per-frame cap below the current aLeadK (bounds a single noisy trend
@@ -3714,6 +3743,13 @@ class LongitudinalMpc:
     now = float(self._time_fn())
     self._refresh_live_tune(now)
     prev_source = self.source
+    prev_source_track_id = None
+    prev_source_idx = {'lead0': 0, 'lead1': 1}.get(prev_source)
+    if prev_source_idx is not None and prev_source_idx < len(self.control_leads):
+      prev_source_lead = self.control_leads[prev_source_idx]
+      if prev_source_lead is not None and bool(getattr(prev_source_lead, 'status', False)):
+        track_id = int(getattr(prev_source_lead, 'radarTrackId', -1) or -1)
+        prev_source_track_id = track_id if track_id != -1 else None
 
     # Get following distance
     if self.vibe_controller.is_follow_enabled():
@@ -3879,9 +3915,14 @@ class LongitudinalMpc:
       if prev_source in ('lead0', 'lead1') and self.source == 'cruise':
         self._lead_to_cruise_transition_t = now
         self._lead_to_cruise_transition_source = prev_source
+        # Identity must come from the PREVIOUS source-owned frame. Reading the
+        # current slot here lets a same-slot track replacement self-certify as
+        # the "released" lead and cancel the conservative transition cap.
+        self._lead_to_cruise_transition_track_id = prev_source_track_id
       elif self.source != 'cruise':
         self._lead_to_cruise_transition_t = None
         self._lead_to_cruise_transition_source = None
+        self._lead_to_cruise_transition_track_id = None
         # Clear close-lead memory once we're stably on a lead — no longer needed
         if self._close_lead_last_seen_t is not None:
           self._close_lead_last_seen_t = None
@@ -3902,10 +3943,46 @@ class LongitudinalMpc:
       # recently seen nearby, apply the safety cap as a backstop.
       if self.source == 'cruise' and close_lead_memory_active and transition_accel_cap is None:
         transition_accel_cap = CLOSE_LEAD_MEMORY_ACCEL_CAP
+      persistent_lead_matches_release = False
+      persistent_lead_braking = False
       if self.source == 'cruise' and transition_accel_cap is not None:
-        capped_max_accel = float(transition_accel_cap)
-        if lead_present_cruise_cap is not None:
-          capped_max_accel = min(capped_max_accel, float(lead_present_cruise_cap))
+        # The low lead->cruise transition ramp is a lost-lead/dropout guard. If
+        # the same released track is still valid and opening, its live cruise cap
+        # already supplies the appropriate distance/closing constraint. Taking min(live, transition)
+        # here used to reset a pulling-away launch from ~2 m/s^2 to ~0.3 m/s^2;
+        # actuator-delay compensation then turned that trajectory discontinuity
+        # into an immediate braking command even though the lead was accelerating
+        # away. Preserve the dropout ramp when there is no valid lead cap, and
+        # conservatively compose it with a persistent lead that is already
+        # braking hard even if that lead's filtered vRel is still positive.
+        urgent_lead_decel = float(getattr(
+          self._live_tune_cfg, "cruise_relatch_urgent_lead_decel_mps2", -1.0,
+        ))
+        selected_track_id = int(getattr(lead_for_cruise_cap, "radarTrackId", -1) or -1) \
+          if lead_for_cruise_cap is not None else -1
+        persistent_lead_matches_release = bool(
+          lead_for_cruise_cap is not None and
+          lead_for_cruise_cap_source == f"{self._lead_to_cruise_transition_source}_control" and
+          self._lead_to_cruise_transition_track_id is not None and
+          selected_track_id == self._lead_to_cruise_transition_track_id and
+          float(getattr(lead_for_cruise_cap, "vRel", 0.0) or 0.0) >= 0.0
+        )
+        persistent_lead_braking = bool(
+          urgent_lead_decel < 0.0 and persistent_lead_matches_release and
+          float(getattr(lead_for_cruise_cap, "aLeadK", 0.0) or 0.0) <= urgent_lead_decel
+        )
+        if lead_present_cruise_cap is None:
+          capped_max_accel = float(transition_accel_cap)
+        elif not persistent_lead_matches_release or persistent_lead_braking:
+          # A still-opening lead can begin hard braking before vRel reverses.
+          # A different surviving lead also cannot prove that the released lead
+          # is safely departing. Retain the conservative transition/close-memory
+          # cap until same-track opening evidence exists and any threat resolves;
+          # the live chase cap deliberately credits positive vRel and otherwise
+          # permits ~1.3 m/s^2 in this exact low-speed geometry.
+          capped_max_accel = min(float(transition_accel_cap), float(lead_present_cruise_cap))
+        else:
+          capped_max_accel = float(lead_present_cruise_cap)
         cruise_owned_accel_cap = float(capped_max_accel)
         response_model = self.get_cruise_response_model(v_ego, planner_accel_limits=(ACCEL_MIN, capped_max_accel))
         self.last_cruise_response_model = response_model
@@ -3924,21 +4001,36 @@ class LongitudinalMpc:
             (now - float(self._lead_to_cruise_transition_t)) >= HYUNDAI_LEAD_TO_CRUISE_TRANSITION_RAMP_S):
         self._lead_to_cruise_transition_t = None
         self._lead_to_cruise_transition_source = None
+        self._lead_to_cruise_transition_track_id = None
 
       if self.mode == 'acc' and self.source == 'cruise' and self.acc_source_debug:
         transition_active = bool(self._lead_to_cruise_transition_t is not None and transition_accel_cap is not None)
         transition_elapsed_s = None if self._lead_to_cruise_transition_t is None else max(0.0, now - float(self._lead_to_cruise_transition_t))
         self.acc_source_debug["source_transition_active"] = transition_active
         self.acc_source_debug["source_transition_from"] = self._lead_to_cruise_transition_source
+        self.acc_source_debug["source_transition_track_id"] = self._lead_to_cruise_transition_track_id
         self.acc_source_debug["source_transition_elapsed_s"] = transition_elapsed_s
         self.acc_source_debug["close_lead_memory_active"] = bool(close_lead_memory_active)
         self.acc_source_debug["close_lead_memory_drel"] = float(self._close_lead_last_drel) if close_lead_memory_active else None
         self.acc_source_debug["source_transition_accel_cap"] = None if transition_accel_cap is None else float(transition_accel_cap)
+        self.acc_source_debug["source_transition_composed_accel_cap"] = (
+          None if transition_accel_cap is None else float(cruise_owned_accel_cap)
+        )
+        self.acc_source_debug["source_transition_live_lead_braking_guard"] = bool(
+          transition_accel_cap is not None and persistent_lead_braking
+        )
+        self.acc_source_debug["source_transition_live_lead_match"] = bool(
+          transition_accel_cap is not None and persistent_lead_matches_release
+        )
       elif self.acc_source_debug:
         self.acc_source_debug["source_transition_active"] = False
         self.acc_source_debug["source_transition_from"] = None
+        self.acc_source_debug["source_transition_track_id"] = None
         self.acc_source_debug["source_transition_elapsed_s"] = None
         self.acc_source_debug["source_transition_accel_cap"] = None
+        self.acc_source_debug["source_transition_composed_accel_cap"] = None
+        self.acc_source_debug["source_transition_live_lead_braking_guard"] = False
+        self.acc_source_debug["source_transition_live_lead_match"] = False
       if self.source == 'cruise' and cruise_owned_accel_cap is not None:
         self.cruise_owned_accel_cap = float(cruise_owned_accel_cap)
         self.params[:,1] = np.minimum(self.params[:,1], float(cruise_owned_accel_cap))
@@ -4099,6 +4191,11 @@ class LongitudinalMpc:
           "reasons": lead_role_debug.get("reasons", {}),
           "cutin_promoted": lead_role_debug.get("cutin_promoted", {}),
           "toward_center_mps": lead_role_debug.get("toward_center_mps", {}),
+          "toward_center_hist_mps": lead_role_debug.get("toward_center_hist_mps", {}),
+          "toward_center_observed_mps": lead_role_debug.get("toward_center_observed_mps", {}),
+          "toward_center_model_mps": lead_role_debug.get("toward_center_model_mps", {}),
+          "toward_center_hist_confirm_frames": lead_role_debug.get("toward_center_hist_confirm_frames", {}),
+          "history_identity_match": lead_role_debug.get("history_identity_match", {}),
           "duplicate_pair": bool(lead_role_debug.get("duplicate_pair", False)),
           "dropped_slot": lead_role_debug.get("dropped_slot", None),
           "control_status": lead_role_debug.get("control_status", {}),
@@ -4109,6 +4206,7 @@ class LongitudinalMpc:
           },
           "lead_handoff_danger": self.lead_handoff_danger_debug,
           "lead_preview": self.lead_approach_preview_debug,
+          "adjacent_awareness_preview": self.adjacent_awareness_preview_debug,
           "source_hysteresis": self.acc_source_debug,
           "filtered_virtual_lead": self.hyundai_virtual_lead_debug,
           "virtual_duplicate": lead_role_debug.get("virtual_duplicate", {"active": False}),

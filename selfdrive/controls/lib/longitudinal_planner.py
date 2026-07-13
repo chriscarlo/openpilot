@@ -1318,38 +1318,44 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     # like a fast-closing obstacle, the MPC's cruise-owned accel cap COLLAPSES from
     # a high value to ~0 in one frame and slams the cruise output negative — one to
     # a few frames BEFORE the source LABEL flips to lead0. Arming only on the label
-    # flip misses that dive. The precise, narrow signal is that sudden cap collapse:
-    # a large single-frame DROP in cruise_owned_accel_cap. This distinguishes the
-    # rollover slam (cap 0.86 -> 0.0) from a far slow lead the MPC is legitimately
-    # and steadily suppressing (cap already ~0, no collapse — must NOT arm, or the
-    # legitimate suppression to ~0 would be held positive). Only meaningful while
-    # cruise owns the source.
+    # flip misses that dive. A separate road/harness edge occurs when the cap first
+    # APPEARS for a genuinely opening lead: actuator-delay compensation can turn
+    # the new capped trajectory into a one-frame brake tap even though the lead is
+    # pulling away. Arm that first-appearance edge only when a valid control lead
+    # is non-closing; closing acquisitions retain immediate raw authority.
     cur_cruise_cap = getattr(self.mpc, "cruise_owned_accel_cap", None)
+    valid_control_leads = [lead for lead in control_leads
+                           if lead is not None and bool(getattr(lead, "status", False))]
     cap_collapsed = False
     if (lead_source == "cruise" and cur_cruise_cap is not None and
         self._handoff_prev_cruise_cap is not None and
         self._handoff_prev_cruise_cap - float(cur_cruise_cap) > _HANDOFF_CAP_COLLAPSE_DROP_MPS2):
       cap_collapsed = True
+    opening_cap_appeared = bool(
+      lead_source == "cruise" and cur_cruise_cap is not None and
+      self._handoff_prev_cruise_cap is None and
+      bool(valid_control_leads) and
+      all(float(getattr(lead, "vRel", 0.0) or 0.0) >= 0.0
+          for lead in valid_control_leads)
+    )
 
-    if (real_flip or cap_collapsed) and window_s > 0.0 and max_delta > 0.0:
+    if (real_flip or cap_collapsed or opening_cap_appeared) and window_s > 0.0 and max_delta > 0.0:
       self._handoff_limit_frames_left = int(math.ceil(window_s / dt))
     self._handoff_prev_cruise_cap = None if cur_cruise_cap is None else float(cur_cruise_cap)
 
     # The lead whose threat state governs the DOWNWARD-leg bypass: the source-owned
-    # slot when a lead owns the source, else (cruise-side dive) the closest closing
-    # control lead. Passing the real lead (not None) matters — _relatch_urgency_bypass
+    # slot first when a lead owns the source, followed by every other valid
+    # control lead. Passing the real leads (not None) matters — _relatch_urgency_bypass
     # returns "no_lead_obj" (an unconditional bypass) for None, which would let the
-    # pre-handoff cruise dive through unclamped. With the real lead its FCW / TTC /
-    # closing / lead-decel tests plus the requested-decel floor still bypass any
-    # genuine emergency braking.
-    urgency_lead = self._lead_owned_slot(lead_source, control_leads)
-    if urgency_lead is None:
-      for lead in control_leads:
-        if lead is None or not bool(getattr(lead, "status", False)):
-          continue
-        if float(getattr(lead, "vRel", 0.0) or 0.0) < 0.0 or (v_ego - float(getattr(lead, "vLead", 0.0) or 0.0)) > 0.1:
-          urgency_lead = lead
-          break
+    # pre-handoff cruise dive or pulling-away lead release through unclamped. With
+    # the real lead its FCW / TTC / closing / lead-decel tests plus the requested-
+    # decel floor still bypass any genuine emergency braking. A true dropout has no
+    # lead and deliberately takes the no_lead_obj bypass, preserving its low cap.
+    urgency_leads = list(valid_control_leads)
+    owned_lead = self._lead_owned_slot(lead_source, control_leads)
+    if owned_lead is not None and owned_lead in urgency_leads:
+      urgency_leads.remove(owned_lead)
+      urgency_leads.insert(0, owned_lead)
 
     down_bypassed = False
     bypass_reason = ""
@@ -1361,15 +1367,23 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
         # UPWARD (accel-increasing) leg — ALWAYS applies (limiting accel is safe).
         self.output_a_target = self._handoff_prev_a + max_delta
         windowed_clipped = True
-      elif delta < -max_delta and target < 0.0:
-        # DOWNWARD (braking) leg. The CD6 defect is a SIGN FLIP into braking, so
-        # only bound the descent once the target actually enters braking territory
-        # (target < 0). A drop that merely REDUCES positive accel toward a floor
-        # (e.g. the MPC's own lead-present cruise-accel cap suppressing accel to ~0
-        # as a far slow lead appears) is legitimate comfort behavior — never a felt
-        # slam — and passes unclamped. Braking under the shared relatch urgency
-        # signal is bypassed so genuine emergency braking is never delayed.
-        bypassed, reason = self._relatch_urgency_bypass(urgency_lead, cfg)
+      elif delta < -max_delta:
+        # DOWNWARD leg: bound both a sign-flip into braking and a sudden throttle
+        # cut while a valid non-threatening lead opens. The latter is perceptible
+        # on the EV6 and was the stop-launch let-off even after its false negative
+        # command was removed. The shared urgency predicate bypasses this bound for
+        # genuine braking, including a missing lead/dropout, FCW, short TTC, hard
+        # requested decel, fast/kinematic closing, or a braking lead.
+        # Any valid control lead may require immediate braking. Checking only
+        # the closest/source-owned slot lets an opening lead mask a second FCW,
+        # braking, or kinematically urgent lead. No valid lead deliberately
+        # evaluates the no_lead_obj path, retaining full dropout authority.
+        bypassed, reason = False, ""
+        candidates = urgency_leads if urgency_leads else (None,)
+        for candidate in candidates:
+          bypassed, reason = self._relatch_urgency_bypass(candidate, cfg)
+          if bypassed:
+            break
         down_bypassed = bool(bypassed)
         bypass_reason = reason
         if not bypassed:
@@ -1436,6 +1450,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
       "frames_left": int(self._handoff_limit_frames_left),
       "down_bypassed": bool(down_bypassed),
       "bypass_reason": str(bypass_reason),
+      "opening_cap_appeared": bool(opening_cap_appeared),
       "edge1_capped": bool(edge1_capped),
       "clipped": bool(windowed_clipped or edge1_capped),
     }

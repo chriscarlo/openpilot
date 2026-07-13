@@ -123,6 +123,11 @@ def _build_steps() -> list[StepInput]:
 def _vehicle_config(floor_veto_mps2: float):
   return resolve_ev6_vehicle_config(param_overrides={
     "Longitudinal.LiveTune.LeadBrakeReleaseLeadDecelMinMps2": f"{floor_veto_mps2:g}",
+    # CD1 is a continuous-lead brake-release mechanism. The harness starts with
+    # an unseeded radard acquisition; isolate that synthetic startup edge from
+    # the unrelated handoff smoother so the road-derived near-target geometry
+    # is established before the lead begins decelerating.
+    "Longitudinal.LiveTune.HandoffLimitWindowS": "0",
   })
 
 
@@ -146,6 +151,7 @@ def _vehicle_config_project_gain(project_gain: float):
   return resolve_ev6_vehicle_config(param_overrides={
     "Longitudinal.LiveTune.LeadBrakeReleaseLeadDecelMinMps2": f"{SHIPPED_FLOOR_VETO_MPS2:g}",
     "Longitudinal.LiveTune.LeadBrakeReleaseLeadDecelProjectGain": f"{project_gain:g}",
+    "Longitudinal.LiveTune.HandoffLimitWindowS": "0",
   })
 
 
@@ -224,6 +230,9 @@ def test_release_floor_scenario_wiring() -> None:
   for result in (shipped, rollback):
     assert result.vehicle["resolvedControllerMode"] == "device"
     assert result.vehicle["perceptionFilter"] == "radard"
+    assert not any(row["planner_handoff_limit_debug"].get("active") for row in result.trace), (
+      "CD1 fixture must remain isolated from the synthetic startup handoff limiter"
+    )
 
   # Corroborated continuous track (road: continuous vision track through the
   # tap): the published lead exists on every settled planner step.

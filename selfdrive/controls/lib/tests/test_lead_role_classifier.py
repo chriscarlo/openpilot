@@ -170,6 +170,28 @@ class TestLeadRoleClassifier:
     assert dbg["roles"]["lead0"] == LeadRoleClassifier.CENTER_CONTROL
     assert ctrl0.status is True
 
+  def test_observed_convergence_resets_on_same_slot_track_replacement(self):
+    c = _make_classifier()
+    lead1 = _make_lead(status=False)
+
+    c.classify(
+      v_ego=30.0,
+      lead0=_make_lead(d_rel=80.0, y_rel=2.45, d_path=2.45, v_lat=0.0, track_id=-1001),
+      lead1=lead1,
+      now=1.0,
+    )
+    _ctrl0, _ctrl1, dbg = c.classify(
+      v_ego=30.0,
+      lead0=_make_lead(d_rel=79.8, y_rel=1.80, d_path=1.80, v_lat=0.0, track_id=-1002),
+      lead1=lead1,
+      now=1.1,
+    )
+
+    assert dbg["history_identity_match"]["lead0"] is False
+    assert dbg["toward_center_hist_mps"]["lead0"] > 6.0
+    assert dbg["toward_center_observed_mps"]["lead0"] == 0.0
+    assert dbg["toward_center_hist_confirm_frames"]["lead0"] == 0
+
   def test_cutin_promotion_can_use_path_relative_vlat_without_history(self):
     c = _make_classifier()
     lead0 = _make_lead(d_rel=43.0, y_rel=3.3, d_path=3.3, v_lat=-1.0, v_rel=-1.5)

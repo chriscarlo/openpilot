@@ -65,6 +65,34 @@ def _make_stub(cfg=None, *, output_a=0.0, dt=0.05):
   return stub
 
 
+def _make_handoff_stub(*, output_a=-0.8, prev_a=1.5):
+  cfg = _make_cfg()
+  stub = SimpleNamespace(
+    output_a_target=output_a,
+    dt=0.05,
+    mpc=SimpleNamespace(
+      _live_tune_cfg=cfg,
+      current_t_follow=T_FOLLOW,
+      cruise_owned_accel_cap=0.3,
+    ),
+    _handoff_prev_src="lead0",
+    _handoff_prev_cruise_cap=None,
+    _handoff_limit_frames_left=0,
+    _handoff_prev_a=prev_a,
+    _handoff_edge1_active=False,
+    _handoff_edge1_prev_out=prev_a,
+    handoff_limit_debug={},
+  )
+  stub._relatch_urgency_bypass = types.MethodType(
+    LongitudinalPlanner._relatch_urgency_bypass, stub,
+  )
+  stub._lead_owned_slot = LongitudinalPlanner._lead_owned_slot
+  stub._apply_handoff_transition_limit = types.MethodType(
+    LongitudinalPlanner._apply_handoff_transition_limit, stub,
+  )
+  return stub
+
+
 class TestComputeRelatchRequiredDecel:
   def test_trace_routine_far_close_requires_little(self):
     # 17:04:30 acquire analog: closing 2.72 at 14.7 m surplus.
@@ -138,6 +166,36 @@ class TestRelatchUrgencyBypassKinematic:
     lead = _lead(closing=4.16, surplus_m=5.0)
     bypassed, _ = stub._relatch_urgency_bypass(lead, stub.mpc._live_tune_cfg)
     assert not bypassed
+
+
+class TestHandoffMultiLeadUrgency:
+  @pytest.mark.parametrize(("threat", "reason"), (
+    (_lead(closing=2.0, surplus_m=20.0, fcw=True, track_id=8), "fcw"),
+    (_lead(closing=4.16, surplus_m=5.0, track_id=9), "kinematic"),
+    (_lead(closing=0.5, surplus_m=60.0, a_lead=-1.2, track_id=10), "lead_decel"),
+  ))
+  def test_opening_lead_cannot_mask_second_urgent_lead(self, threat, reason):
+    stub = _make_handoff_stub()
+    closer_opening = _lead(closing=-1.0, surplus_m=-10.0, track_id=7)
+
+    stub._apply_handoff_transition_limit(
+      "cruise", (closer_opening, threat), model_leads=(), v_ego=V_EGO,
+    )
+
+    assert stub.output_a_target == pytest.approx(-0.8)
+    assert stub.handoff_limit_debug["down_bypassed"] is True
+    assert stub.handoff_limit_debug["bypass_reason"] == reason
+    assert stub.handoff_limit_debug["clipped"] is False
+
+  def test_true_lead_dropout_retains_raw_downward_authority(self):
+    stub = _make_handoff_stub()
+
+    stub._apply_handoff_transition_limit("cruise", (), model_leads=(), v_ego=V_EGO)
+
+    assert stub.output_a_target == pytest.approx(-0.8)
+    assert stub.handoff_limit_debug["down_bypassed"] is True
+    assert stub.handoff_limit_debug["bypass_reason"] == "no_lead_obj"
+    assert stub.handoff_limit_debug["clipped"] is False
 
 
 def _run_blend_frames(stub, lead, demand, n):

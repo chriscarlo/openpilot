@@ -28,6 +28,9 @@ def _make_mpc(acquire_frames: float = 1.0, release_frames: float = 1.0,
               phantom_hold_s: float = 0.0, stable_frames: float = 1.0,
               decel_hold_factor: float = 1.0, decel_trend_gain: float = 1.0,
               accel_corr_margin: float | None = None,
+              accel_corr_amplify_gain: float | None = None,
+              accel_corr_amplify_model_min: float | None = None,
+              accel_corr_amplify_deadband: float | None = None,
               v_ego: float = 26.0) -> LongitudinalMpc:
   """Build a minimal mpc-like stub that has just the attrs _stabilize_raw_leads needs.
   accel_corr_margin=None leaves the cfg attr absent (legacy passthrough: the
@@ -42,6 +45,12 @@ def _make_mpc(acquire_frames: float = 1.0, release_frames: float = 1.0,
   )
   if accel_corr_margin is not None:
     cfg.lead_accel_corr_margin_mps2 = accel_corr_margin
+  if accel_corr_amplify_gain is not None:
+    cfg.lead_accel_corr_amplify_gain = accel_corr_amplify_gain
+  if accel_corr_amplify_model_min is not None:
+    cfg.lead_accel_corr_amplify_model_decel_min_mps2 = accel_corr_amplify_model_min
+  if accel_corr_amplify_deadband is not None:
+    cfg.lead_accel_corr_amplify_deadband_mps2 = accel_corr_amplify_deadband
   stub = SimpleNamespace(
     _live_tune_cfg=cfg,
     _lead_stability_state=[_LeadStabilityState(), _LeadStabilityState()],
@@ -355,3 +364,44 @@ class TestLeadAccelCorrBound:
       _make_raw_lead(status=True, dRel=40.0, vRel=-1.0, vLead=25.0, aLeadK=-3.0),
       _make_raw_lead(status=False), now=2.0)
     assert out0.aLeadK == pytest.approx(-3.0)
+
+  @staticmethod
+  def _run_deepening_trend(model_a_lead_k: float, model_min: float):
+    mpc = _make_mpc(
+      accel_corr_margin=0.5,
+      accel_corr_amplify_gain=1.0,
+      accel_corr_amplify_model_min=model_min,
+      accel_corr_amplify_deadband=0.35,
+    )
+    t = 1.0
+    v_lead = 26.0
+    out0 = None
+    for _ in range(20):
+      v_lead -= 1.8 * 0.05
+      out0, _ = mpc._stabilize_raw_leads(
+        _make_raw_lead(status=True, dRel=82.0, vRel=v_lead - 26.0,
+                       vLead=v_lead, aLeadK=model_a_lead_k),
+        _make_raw_lead(status=False), now=t,
+      )
+      t += 0.05
+    return out0, mpc._lead_stability_state[0]
+
+  def test_tiny_negative_model_accel_is_not_amplified_by_noisy_vlead_trend(self):
+    # Road 22d taps: model aLead was merely -0.017/-0.04 while the derivative
+    # low-pass reached -1.6..-1.9. That is sign noise, not independent evidence
+    # for replacing the model report with a hard lead-decel estimate.
+    out0, state = self._run_deepening_trend(-0.04, model_min=0.10)
+    assert state.corr_a_meas_lp < -1.0
+    assert out0.aLeadK == pytest.approx(-0.04)
+
+  def test_meaningful_underreported_model_brake_still_amplifies(self):
+    # CD3 road truth-deficit: model -0.48..-0.54 plus trend -1.7..-1.9 is
+    # corroborated braking and must retain the safety amplification.
+    out0, state = self._run_deepening_trend(-0.54, model_min=0.10)
+    assert state.corr_a_meas_lp < -1.0
+    assert out0.aLeadK < -1.0
+
+  def test_zero_model_floor_restores_any_negative_report_amplification(self):
+    out0, state = self._run_deepening_trend(-0.04, model_min=0.0)
+    assert state.corr_a_meas_lp < -1.0
+    assert out0.aLeadK < -1.0
