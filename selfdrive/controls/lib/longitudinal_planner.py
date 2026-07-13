@@ -62,6 +62,11 @@ _HANDOFF_CAP_COLLAPSE_DROP_MPS2 = 0.3
 # sentinel (e.g. 50 m/s^3 * 0.05 s = 2.5 m/s^2/frame) disables the envelope
 # without touching any real single-frame move (the whole accel range is ~[-4, 2]).
 _COMFORT_JERK_DISABLE_STEP_MPS2 = 2.0
+# Selective positive comfort shaping is never allowed to retain more than this
+# much of a floor-owned recovery demand. This is a safety/availability ceiling,
+# not a feel knob: larger moves pass immediately even if a user raises the
+# keep-up floor live-tune range.
+_COMFORT_UPWARD_MICRO_MAX_DELTA_MPS2 = 0.30
 
 LON_MPC_STEP = 0.2  # first step is 0.2s
 A_CRUISE_MAX_VALS = [1.6, 1.2, 0.8, 0.6]
@@ -484,12 +489,17 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     # The truly-FINAL limiter (runs after the CD6 handoff limiter). While NO
     # hazard/urgency gate is active, it bounds |output_a_target - prev_a| per frame
     # to ComfortJerkLimitMps3 * dt so a single noisy vRel frame under a benign
-    # steady follow cannot step-change aTarget hard. Symmetric when benign; fully
-    # bypassed under any hazard/urgency signal (the shared _relatch_urgency_bypass)
-    # so real braking is NEVER rate-limited. Anchors on the previous frame's final
-    # output (the same value published last frame).
+    # steady follow cannot step-change aTarget hard. The downward leg is bounded
+    # generally; the upward leg is bounded only when a discrete lead-follow
+    # comfort floor (lead-keepup or brake-release) owns the rise, leaving ordinary
+    # MPC/reclaim/launch acceleration untouched.
+    # Fully bypassed under any hazard/urgency signal (the shared
+    # _relatch_urgency_bypass) so real braking is NEVER rate-limited. Anchors on
+    # the previous frame's final output (the same value published last frame).
     self._comfort_jerk_prev_a: float = 0.0
     self._comfort_jerk_prev_src: str = ""
+    self._comfort_upward_slew_frames: int = 0
+    self._comfort_upward_prev_owner: str = ""
     self.comfort_jerk_debug: dict = {
       "active": False,
       "bypassed": False,
@@ -500,6 +510,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     }
     self.lead_brake_release_accel_floor = 0.0
     self.lead_brake_release_debug = {"active": False, "reason": "init"}
+    self._comfort_upward_floor_owner: str = ""
     # Observability for the cruise-reacquire jerk ramp (read-only; does not
     # affect behavior). Lets the longitudinal harness prove whether the ramp is
     # escalating above its jerk floor and how far into the window it is.
@@ -713,24 +724,34 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
 
     gap_reclaim_floor = float(getattr(self.mpc, 'gap_reclaim_accel_floor', 0.0) or 0.0)
     lead_keepup_floor = float(getattr(self.mpc, 'lead_keepup_accel_floor', 0.0) or 0.0)
+    comfort_upward_floor_owner = ""
     if (lead_keepup_floor > 0.0 and
         not self.output_should_stop and
         output_a_target >= -0.12):
+      output_before_keepup_floor = float(output_a_target)
       output_a_target = max(output_a_target, lead_keepup_floor)
+      if output_a_target > output_before_keepup_floor + 1e-9:
+        comfort_upward_floor_owner = "lead_keepup"
     if (gap_reclaim_floor > 0.0 and
         not bool(getattr(self.mpc, 'use_upstream_gap_reclaim', False)) and
         not self.output_should_stop and
         output_a_target >= -0.05):
       output_a_target = max(output_a_target, gap_reclaim_floor)
+      if gap_reclaim_floor >= output_a_target - 1e-9:
+        comfort_upward_floor_owner = ""
 
     cutin_settle_floor = float(getattr(self.mpc, 'cutin_settle_accel_floor', 0.0) or 0.0)
     if (bool(getattr(self.mpc, 'cutin_settle_active', False)) and
         not self.output_should_stop):
       output_a_target = max(output_a_target, cutin_settle_floor)
+      if cutin_settle_floor >= output_a_target - 1e-9:
+        comfort_upward_floor_owner = ""
 
     lead_slowdown_ceiling = getattr(self.mpc, 'lead_slowdown_accel_ceiling', None)
     if lead_slowdown_ceiling is not None:
       output_a_target = min(output_a_target, float(lead_slowdown_ceiling))
+      if float(lead_slowdown_ceiling) <= output_a_target + 1e-9:
+        comfort_upward_floor_owner = ""
 
     lead_source = str(getattr(self.mpc, "source", ""))
     control_leads = getattr(self.mpc, "control_leads", ())
@@ -742,13 +763,18 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     )
     self.lead_brake_release_accel_floor = float(lead_brake_release_floor or 0.0)
     self.lead_brake_release_debug = lead_brake_release_debug
+    lead_brake_release_floor_raised = False
     if (not self.output_should_stop and
         should_apply_lead_brake_release_accel_floor(
           output_a_target,
           lead_brake_release_floor,
           lead_brake_release_debug,
         )):
+      output_before_release_floor = float(output_a_target)
       output_a_target = max(output_a_target, float(lead_brake_release_floor))
+      lead_brake_release_floor_raised = output_a_target > output_before_release_floor + 1e-9
+      if lead_brake_release_floor_raised:
+        comfort_upward_floor_owner = "brake_release"
       # The M1 kinematic slowdown ceiling must win over the release floor while
       # the lead is a corroborated threat: in the overlap state (lead
       # decelerating between the slowdown onset threshold and the release
@@ -763,10 +789,14 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
         float(getattr(self.mpc._live_tune_cfg, "lead_brake_release_near_target_max_closing_mps", 0.75)))
       if lead_slowdown_ceiling is not None and lead_is_threatening:
         output_a_target = min(output_a_target, float(lead_slowdown_ceiling))
+        if float(lead_slowdown_ceiling) <= output_a_target + 1e-9:
+          comfort_upward_floor_owner = ""
 
     cruise_owned_accel_cap = getattr(self.mpc, "cruise_owned_accel_cap", None)
     if lead_source == "cruise" and cruise_owned_accel_cap is not None:
       output_a_target = min(output_a_target, float(cruise_owned_accel_cap))
+      if float(cruise_owned_accel_cap) <= output_a_target + 1e-9:
+        comfort_upward_floor_owner = ""
 
     # Launch-follow accel FLOOR (road 205-13 Event A): once the stop latch
     # releases on a departing lead, the MPC's jerk-shaped ramp from standstill
@@ -802,7 +832,12 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
             # (The starting-state passthrough in longcontrol.py covers the
             # sub-vEgoStarting window at >= startAccel; this floor owns the
             # demand from there up as the factor grows with the departure.)
-            output_a_target = max(output_a_target, launch_factor * launch_floor_max)
+            launch_follow_floor = launch_factor * launch_floor_max
+            output_a_target = max(output_a_target, launch_follow_floor)
+            if launch_follow_floor >= output_a_target - 1e-9:
+              # Launch authority wins ties too: a coincidentally equal keep-up
+              # floor must not cause CD7 to blunt a deliberate low-speed launch.
+              comfort_upward_floor_owner = ""
 
     if lead_source in ("lead0", "lead1"):
       lead_idx = 0 if lead_source == "lead0" else 1
@@ -818,7 +853,17 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     for idx in range(2):
       accel_clip[idx] = np.clip(accel_clip[idx], self.prev_accel_clip[idx] - 0.05, self.prev_accel_clip[idx] + 0.05)
     self._planner_output_accel_limits = (float(accel_clip[0]), float(accel_clip[1]))
+    output_before_planner_clip = float(output_a_target)
     self.output_a_target = np.clip(output_a_target, accel_clip[0], accel_clip[1])
+    # Ownership is intentionally evaluated after every competing floor/ceiling
+    # and the planner accel clip. CD7 may smooth an UPWARD step only when one of
+    # the selected discrete comfort floors actually raised the demand and still
+    # owns the final pre-CD7 value. Continuous MPC/gap-reclaim and the dedicated
+    # low-speed launch floor remain bit-identical.
+    if abs(float(self.output_a_target) - output_before_planner_clip) > 1e-9:
+      comfort_upward_floor_owner = ""
+    self._comfort_upward_floor_owner = comfort_upward_floor_owner
+    self.lead_brake_release_debug["output_bound"] = self._comfort_upward_floor_owner == "brake_release"
     self.prev_accel_clip = accel_clip
 
     # Published-radarState snapshot of the source-owned slot for exit-cause
@@ -1485,13 +1530,17 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     # requested hard decel). So genuine braking and cut-in response pass THIS frame
     # unmodified; only the benign steady-follow comfort-brake blip is graded.
     #
-    # ASYMMETRIC (down-leg only): the bound applies ONLY to the DOWNWARD
+    # SELECTIVELY BIDIRECTIONAL: the bound always applies to the DOWNWARD
     # (comfort-braking-onset) move - the road's headline defect (a sudden unnecessary
-    # brake, 200-10: -0.31 -> -1.00) and the safety-relevant felt jerk. The UPWARD
-    # leg (brake-RELEASE and re-accel toward a followed lead) is always-safe and must
-    # stay fast, so it is left free (matching CD5's relatch blend and the flutter
-    # clamp). This is what keeps the legitimate managed release/re-accel moves from
-    # being blunted while still killing the felt comfort-brake blip.
+    # brake, 200-10: -0.31 -> -1.00). It applies to an UPWARD move only when the
+    # lead-keepup or lead-brake-release floor demonstrably owns that rise. Those
+    # discrete floors can jump on one noisy vRel frame (+0.05 -> +0.22 m/s^2 in
+    # the road capture), which feels like a throttle tap on the EV6 before the
+    # downward envelope walks it back. Only micro-corrections under the configured
+    # positive-delta ceiling qualify, and their allowed jerk ramps quickly on a
+    # persistent request. Ordinary MPC, continuous gap-reclaim, large recovery,
+    # and launch acceleration remain free, so genuine pullaway response is not
+    # blunted.
     #
     # It only grades the ONSET of the sustained downward move (a step into a brake):
     # once the output holds the value for a couple frames prev_a catches up and
@@ -1499,6 +1548,14 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     cfg = getattr(self.mpc, "_live_tune_cfg", None)
     jerk_limit = float(getattr(cfg, "comfort_jerk_limit_mps3", 0.0) or 0.0)
     bypass_decel = float(getattr(cfg, "comfort_jerk_bypass_decel_mps2", -1.5) or -1.5)
+    # A floor-owned positive move is a comfort micro-correction only across the
+    # actual small floor span: from the near-target regen floor to the keep-up
+    # ceiling. Anything larger is a real recovery demand and passes immediately.
+    upward_max_delta = min(
+      _COMFORT_UPWARD_MICRO_MAX_DELTA_MPS2,
+      max(0.0, float(getattr(cfg, "lead_keepup_max_accel", 0.0) or 0.0)) +
+      abs(min(0.0, float(getattr(cfg, "lead_brake_release_near_target_floor_mps2", 0.0) or 0.0))),
+    )
     dt = float(max(self.dt, 1e-3))
     max_step = jerk_limit * dt
 
@@ -1510,6 +1567,8 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     if jerk_limit <= 0.0 or max_step >= _COMFORT_JERK_DISABLE_STEP_MPS2:
       self.comfort_jerk_debug = {"active": False, "bypassed": False, "bypass_reason": "",
                                  "gated_reason": "disabled", "max_step_mps2": float(max_step), "clipped": False}
+      self._comfort_upward_slew_frames = 0
+      self._comfort_upward_prev_owner = ""
       self._comfort_jerk_prev_a = float(self.output_a_target)
       return
 
@@ -1529,6 +1588,8 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     if gated_reason:
       self.comfort_jerk_debug = {"active": False, "bypassed": False, "bypass_reason": "",
                                  "gated_reason": gated_reason, "max_step_mps2": float(max_step), "clipped": False}
+      self._comfort_upward_slew_frames = 0
+      self._comfort_upward_prev_owner = ""
       self._comfort_jerk_prev_a = float(self.output_a_target)
       return
 
@@ -1557,20 +1618,46 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     if bypassed:
       self.comfort_jerk_debug = {"active": True, "bypassed": True, "bypass_reason": reason or "urgent",
                                  "gated_reason": "", "max_step_mps2": float(max_step), "clipped": False}
+      self._comfort_upward_slew_frames = 0
+      self._comfort_upward_prev_owner = ""
     else:
-      # ASYMMETRIC (down-leg only): bound only the DOWNWARD (comfort-braking-onset)
-      # move - the road's headline CD7 defect (a sudden unnecessary brake blip,
-      # 200-10: -0.31 -> -1.00) and the safety-relevant felt jerk. The UPWARD leg
-      # (brake-RELEASE and re-accel toward a followed lead) is always-safe (it only
-      # ever reduces braking / matches a lead) and must stay fast, so it is left
-      # free - matching the CD5 relatch blend and flutter clamp precedent, and so
-      # the legitimate managed release/re-accel moves are never blunted.
+      # Bound every benign DOWNWARD comfort-braking onset. Bound an UPWARD move
+      # only when a discrete lead-follow comfort floor owns it; all other positive
+      # demand (MPC/continuous reclaim/launch) remains bit-identically free.
       delta = self.output_a_target - self._comfort_jerk_prev_a
       if delta < -max_step:
         self.output_a_target = self._comfort_jerk_prev_a - max_step
         clipped = True
+        self._comfort_upward_slew_frames = 0
+        self._comfort_upward_prev_owner = ""
+      elif delta > max_step and bool(self._comfort_upward_floor_owner):
+        if self._comfort_upward_floor_owner != self._comfort_upward_prev_owner:
+          self._comfort_upward_slew_frames = 0
+        upward_eligible = upward_max_delta > 0.0 and delta <= upward_max_delta
+        # First frame uses the user's existing comfort-jerk knob. A persistent
+        # floor request gains two additional base-jerk increments each frame,
+        # reaching full authority quickly without adding another tune surface.
+        allowed_upward_jerk = jerk_limit * (1.0 + 2.0 * self._comfort_upward_slew_frames)
+        upward_step = allowed_upward_jerk * dt
+        if upward_eligible and delta > upward_step:
+          self.output_a_target = self._comfort_jerk_prev_a + upward_step
+          self._comfort_upward_slew_frames += 1
+          self._comfort_upward_prev_owner = self._comfort_upward_floor_owner
+          clipped = True
+        else:
+          # A large recovery demand is not a comfort micro-correction; pass it
+          # immediately. A persistent small floor demand reaches full authority
+          # after the rapidly growing jerk allowance catches it.
+          self._comfort_upward_slew_frames = 0
+          self._comfort_upward_prev_owner = ""
+      else:
+        self._comfort_upward_slew_frames = 0
+        self._comfort_upward_prev_owner = ""
       self.comfort_jerk_debug = {"active": True, "bypassed": False, "bypass_reason": "",
-                                 "gated_reason": "", "max_step_mps2": float(max_step), "clipped": bool(clipped)}
+                                 "gated_reason": "", "max_step_mps2": float(max_step), "clipped": bool(clipped),
+                                 "upward_floor_owner": str(self._comfort_upward_floor_owner),
+                                 "upward_max_delta_mps2": float(upward_max_delta),
+                                 "upward_slew_frames": int(self._comfort_upward_slew_frames)}
 
     self._comfort_jerk_prev_a = float(self.output_a_target)
 

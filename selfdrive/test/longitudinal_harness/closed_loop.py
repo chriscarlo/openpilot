@@ -576,6 +576,7 @@ def run_harness(*,
         "planner_cruise_reacquire_debug": _to_builtin(getattr(planner, "cruise_reacquire_debug", {})),
         "planner_relatch_blend_debug": _to_builtin(getattr(planner, "relatch_blend_debug", {})),
         "planner_handoff_limit_debug": _to_builtin(getattr(planner, "handoff_limit_debug", {})),
+        "planner_comfort_jerk_debug": _to_builtin(getattr(planner, "comfort_jerk_debug", {})),
         "mpc_adjacent_awareness_preview_debug": _to_builtin(getattr(planner.mpc, "adjacent_awareness_preview_debug", {})),
         "mpc_hyundai_virtual_lead_debug": _to_builtin(getattr(planner.mpc, "hyundai_virtual_lead_debug", {})),
       })

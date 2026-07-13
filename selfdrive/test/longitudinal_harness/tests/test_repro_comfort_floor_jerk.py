@@ -51,7 +51,7 @@ import pytest
 from openpilot.common.realtime import DT_MDL
 from selfdrive.test.longitudinal_harness.closed_loop import SimulationResult, run_harness
 from selfdrive.test.longitudinal_harness.config import resolve_ev6_vehicle_config
-from selfdrive.test.longitudinal_harness.inputs import LeadDirective, StepInput
+from selfdrive.test.longitudinal_harness.inputs import LeadDirective, StepInput, build_synthetic_scenario
 
 DURATION_S = 60.0
 EGO_V0_MPS = 30.0                 # road ~30 m/s steady cruise
@@ -78,13 +78,26 @@ SETTLE_S = 8.0
 # The oracle targets the DOWNWARD comfort-BRAKE one-frame jerk - the road's
 # headline CD7 defect (200-10: aTarget stepped -0.31 -> -1.00, a sudden unnecessary
 # BRAKE) and the safety-relevant felt jerk (an unexpected brake blip on a benign
-# steady follow). The envelope is deliberately ASYMMETRIC (down-leg only), matching
-# the CD5 relatch blend / flutter clamp precedent: the UPWARD leg (brake-RELEASE and
-# re-accel toward a followed lead) is always-safe and must stay fast, so it is left
-# free. So the bounded quantity is the worst one-frame DECREASE in aTarget.
+# steady follow). The original oracle measures the general DOWNWARD leg. The
+# selectively bidirectional follow-up below separately measures UPWARD moves only
+# when a discrete lead-follow comfort floor proves it owns the final target;
+# ordinary MPC/reclaim/launch acceleration remains free.
 MAX_ONE_FRAME_JERK_MPS3 = 1.0    # road step ~4.6 m/s^3 down; benign comfort bound ~1.0
 MAX_SIGN_REVERSALS_PER_60S = 2   # road 200-9 tap1: a 0.86 m/s^2 reversal on a benign track
 REVERSAL_AMPLITUDE_MPS2 = 0.5    # only count reversals whose full swing exceeds this
+
+# Follow-up comfort contract: the existing CD7 envelope intentionally leaves
+# ordinary upward accel free.  The upward moves that are NOT ordinary raw-MPC
+# authority are discrete brake-release / lead-keepup FLOORS replacing a smaller
+# raw target.  On this
+# deterministic trace the floor toggles -0.05 -> +0.05 in one 50 ms frame when
+# noisy vRel credit crosses the recovered-gap boundary, then immediately walks
+# back down.  It is the exact small throttle-roll-on / lift-off pulse reported on
+# the EV6.  Bound only an upward move whose planner debug proves that the
+# discrete floor still owns the FINAL output; raw MPC, continuous gap-reclaim,
+# and launch acceleration remain untouched.
+MAX_FLOOR_UPWARD_JERK_MPS3 = 1.0
+MIN_FLOOR_ROLLBACK_JERK_MPS3 = 1.5
 
 # Scenario-validity floors (benign kinematics; asserted unconditionally).
 MIN_TRUE_GAP_FLOOR_M = 20.0      # steady follow: the gap must never collapse
@@ -186,8 +199,8 @@ def _worst_one_frame_jerk(rows: list[dict]) -> tuple[float, float, float, float]
 def _worst_downward_jerk(rows: list[dict]) -> tuple[float, float, float, float]:
   """Largest single-frame DECREASE in aTarget / dt (m/s^3) - the comfort-BRAKE
   one-frame jerk (the road's headline CD7 defect, a sudden unnecessary brake blip
-  on a benign steady follow). Only the downward leg is bounded by the envelope;
-  the upward (brake-release / re-accel) leg is always-safe and left free."""
+  on a benign steady follow). The downward leg is always bounded in the benign
+  steady-follow scope; selective upward floor ownership is tested separately."""
   worst = (0.0, None, 0.0, 0.0)
   for a, b in zip(rows[:-1], rows[1:], strict=False):
     drop = a["planner_accel_mps2"] - b["planner_accel_mps2"]  # positive when braking harder
@@ -197,6 +210,45 @@ def _worst_downward_jerk(rows: list[dict]) -> tuple[float, float, float, float]:
     if jerk > worst[0]:
       worst = (jerk, b["t_s"], a["planner_accel_mps2"], b["planner_accel_mps2"])
   return worst
+
+
+def _release_floor_micro_rollon(result: SimulationResult) -> tuple[dict, dict]:
+  """The unique near-target -> recovered-gap floor toggle in this trace.
+
+  This is selected by mechanism, not timestamp, so the oracle fails if scenario
+  evolution stops exercising the vRel-credit branch it is meant to cover.
+  """
+  candidates: list[tuple[dict, dict]] = []
+  for prev, row in zip(_post_settle_rows(result)[:-1], _post_settle_rows(result)[1:], strict=False):
+    prev_release = prev["planner_lead_brake_release_debug"]
+    release = row["planner_lead_brake_release_debug"]
+    if (prev_release.get("reason") == "near_target" and
+        release.get("reason") == "gap_recovered"):
+      candidates.append((prev, row))
+
+  assert len(candidates) == 1, (
+    f"expected one near_target->gap_recovered release-floor toggle, got "
+    f"{[(a['t_s'], b['t_s']) for a, b in candidates]}")
+  return candidates[0]
+
+
+def _keepup_floor_micro_rollon(fix: SimulationResult, rollback: SimulationResult) -> tuple[dict, dict, dict, dict]:
+  """Strongest rollback pulse at a fix-frame proven to be keep-up-floor-owned."""
+  fix_rows = _post_settle_rows(fix)
+  roll_by_t = {row["t_s"]: row for row in _post_settle_rows(rollback)}
+  candidates: list[tuple[float, dict, dict, dict, dict]] = []
+  for fix_prev, fix_row in zip(fix_rows[:-1], fix_rows[1:], strict=False):
+    comfort = fix_row["planner_comfort_jerk_debug"]
+    if comfort.get("upward_floor_owner") != "lead_keepup" or not comfort.get("clipped", False):
+      continue
+    roll_row = roll_by_t[fix_row["t_s"]]
+    roll_prev = roll_by_t[fix_prev["t_s"]]
+    rollback_jerk = (roll_row["planner_accel_mps2"] - roll_prev["planner_accel_mps2"]) / DT_MDL
+    candidates.append((rollback_jerk, fix_prev, fix_row, roll_prev, roll_row))
+
+  assert candidates, "scenario never produced a CD7-clipped lead-keepup-owned upward pulse"
+  _, fix_prev, fix_row, roll_prev, roll_row = max(candidates, key=lambda item: item[0])
+  return fix_prev, fix_row, roll_prev, roll_row
 
 
 def _sign_reversals(rows: list[dict], amplitude: float) -> int:
@@ -383,3 +435,139 @@ def test_comfort_jerk_limit_knob_fix_vs_rollback() -> None:
 
   # And the fix is strictly smoother than its own rollback.
   assert fix_jerk < roll_jerk, physics
+
+
+def test_release_floor_owned_upward_rollon_uses_comfort_jerk_limit() -> None:
+  """A tiny release-floor roll-on is comfort authority, not urgent accel.
+
+  The production change guarded by this oracle must expose
+  ``output_bound`` in ``lead_brake_release_debug`` only when the
+  release floor raised the raw target and survived every later planner layer as
+  the final-output owner.  CD7 may then reuse its existing live jerk limit for
+  this upward move.  No other upward move is authorized to be clamped.
+
+  The 50 m/s^3 rollback twin is otherwise identical and must retain the current
+  +0.10 m/s^2 / 50 ms pulse, proving that the existing live knob owns the fix.
+  """
+  fix = _run_jerk(FIX_COMFORT_JERK_MPS3)
+  rollback = _run_jerk(ROLLBACK_COMFORT_JERK_MPS3)
+  fix_prev, fix_row = _release_floor_micro_rollon(fix)
+  roll_prev, roll_row = _release_floor_micro_rollon(rollback)
+
+  # Mechanism pins: steady single-source lead follow, no handoff/relatch work,
+  # no real lead braking, and an optimistic vRel-credit jump alone moves the
+  # release floor from the near-target regen floor to the positive coast floor.
+  for prev, row in ((fix_prev, fix_row), (roll_prev, roll_row)):
+    assert prev["planner_source"] == row["planner_source"] == "lead0"
+    assert not row["planner_handoff_limit_debug"].get("active", False)
+    assert not row["planner_handoff_limit_debug"].get("clipped", False)
+    assert not row["planner_relatch_blend_debug"].get("active", False)
+    assert abs(row["lead_one_published_a_lead_k_mps2"]) <= 0.05
+
+    prev_release = prev["planner_lead_brake_release_debug"]
+    release = row["planner_lead_brake_release_debug"]
+    assert prev_release["floor_mps2"] == pytest.approx(-0.05, abs=1e-9)
+    assert release["floor_mps2"] == pytest.approx(0.05, abs=1e-9)
+    assert prev_release["vrel_credit_m"] == pytest.approx(0.0, abs=1e-9)
+    assert release["vrel_credit_m"] >= 3.0
+    assert release.get("output_bound", False) is True, (
+      "planner must prove the release floor, not raw MPC/keep-up/reclaim/launch, "
+      "owns the final upward target before CD7 may clamp it")
+
+  fix_jerk = (fix_row["planner_accel_mps2"] - fix_prev["planner_accel_mps2"]) / DT_MDL
+  roll_jerk = (roll_row["planner_accel_mps2"] - roll_prev["planner_accel_mps2"]) / DT_MDL
+  physics = (
+    "lead-brake-release floor-owned upward roll-on, near_target -> gap_recovered:\n"
+    f"  fix limit={FIX_COMFORT_JERK_MPS3}: {fix_prev['planner_accel_mps2']:+.3f} -> "
+    f"{fix_row['planner_accel_mps2']:+.3f} m/s^2 ({fix_jerk:.2f} m/s^3; "
+    f"bound {MAX_FLOOR_UPWARD_JERK_MPS3})\n"
+    f"  rollback limit={ROLLBACK_COMFORT_JERK_MPS3}: "
+    f"{roll_prev['planner_accel_mps2']:+.3f} -> {roll_row['planner_accel_mps2']:+.3f} m/s^2 "
+    f"({roll_jerk:.2f} m/s^3; expected >= {MIN_FLOOR_ROLLBACK_JERK_MPS3})"
+  )
+  assert fix_jerk <= MAX_FLOOR_UPWARD_JERK_MPS3, physics
+  assert roll_jerk >= MIN_FLOOR_ROLLBACK_JERK_MPS3, physics
+  assert fix_jerk < roll_jerk, physics
+
+
+def test_keepup_floor_owned_upward_rollon_uses_comfort_jerk_limit() -> None:
+  """The same narrow envelope covers a discrete keep-up-floor throttle tap.
+
+  This does not authorize smoothing ordinary MPC, continuous gap-reclaim, or
+  launch accel: the production owner string must prove ``lead_keepup`` supplied
+  the final pre-CD7 target, while the brake-release floor explicitly did not.
+  """
+  fix = _run_jerk(FIX_COMFORT_JERK_MPS3)
+  rollback = _run_jerk(ROLLBACK_COMFORT_JERK_MPS3)
+  fix_prev, fix_row, roll_prev, roll_row = _keepup_floor_micro_rollon(fix, rollback)
+
+  comfort = fix_row["planner_comfort_jerk_debug"]
+  assert comfort.get("upward_floor_owner") == "lead_keepup"
+  assert comfort.get("clipped", False) is True
+  assert fix_row["planner_lead_brake_release_debug"].get("output_bound", False) is False
+  assert fix_prev["planner_source"] == fix_row["planner_source"] == "lead0"
+  assert not fix_row["planner_handoff_limit_debug"].get("active", False)
+  assert not fix_row["planner_relatch_blend_debug"].get("active", False)
+  assert abs(fix_row["lead_one_published_a_lead_k_mps2"]) <= 0.05
+  assert fix_row["planner_lead_keepup_floor_mps2"] > fix_row["planner_lead_brake_release_floor_mps2"]
+
+  fix_jerk = (fix_row["planner_accel_mps2"] - fix_prev["planner_accel_mps2"]) / DT_MDL
+  roll_jerk = (roll_row["planner_accel_mps2"] - roll_prev["planner_accel_mps2"]) / DT_MDL
+  physics = (
+    "lead-keepup-floor-owned upward roll-on:\n"
+    f"  fix t={fix_row['t_s']:.2f}s: {fix_prev['planner_accel_mps2']:+.3f} -> "
+    f"{fix_row['planner_accel_mps2']:+.3f} m/s^2 ({fix_jerk:.2f} m/s^3; "
+    f"bound {MAX_FLOOR_UPWARD_JERK_MPS3})\n"
+    f"  rollback: {roll_prev['planner_accel_mps2']:+.3f} -> "
+    f"{roll_row['planner_accel_mps2']:+.3f} m/s^2 ({roll_jerk:.2f} m/s^3)"
+  )
+  assert fix_jerk <= MAX_FLOOR_UPWARD_JERK_MPS3, physics
+  assert roll_jerk >= MIN_FLOOR_ROLLBACK_JERK_MPS3, physics
+  assert fix_jerk < roll_jerk, physics
+
+
+def test_continuous_gap_reclaim_does_not_inherit_keepup_floor_ownership() -> None:
+  """A stronger continuous reclaim request must remain outside selective CD7."""
+  vehicle = resolve_ev6_vehicle_config(topology="lfa", controller_mode="passthrough")
+  initial_v, initial_a, steps = build_synthetic_scenario(
+    "pullaway_close", duration_s=8.0, dt_s=DT_MDL,
+  )
+  result = run_harness(
+    vehicle_config=vehicle,
+    scenario_name="comfort_owner_continuous_reclaim",
+    steps=steps,
+    initial_speed_mps=initial_v,
+    initial_accel_mps2=initial_a,
+    noise_profile="off",
+    seed=9,
+  )
+  reclaim_rows = [
+    row for row in _planner_rows(result)
+    if row["planner_gap_reclaim_floor_mps2"] > row["planner_lead_keepup_floor_mps2"]
+    and row["planner_gap_reclaim_floor_mps2"] > 0.5
+  ]
+  assert reclaim_rows, "scenario never exercised continuous reclaim above the keep-up floor"
+  assert all(row["planner_comfort_jerk_debug"].get("upward_floor_owner", "") == ""
+             for row in reclaim_rows)
+  assert max(row["planner_accel_mps2"] for row in reclaim_rows) > 0.5
+
+
+def test_low_speed_launch_does_not_inherit_follow_floor_ownership() -> None:
+  """The dedicated launch floor and its urgent release path keep full authority."""
+  from selfdrive.test.longitudinal_harness.tests.test_repro_stop_launch_release import (
+    LAUNCH_ACCEL_WITHIN_S,
+    _release_t,
+    _run as run_launch,
+  )
+
+  result = run_launch()
+  release_t = _release_t(result.trace)
+  assert release_t is not None
+  launch_rows = [
+    row for row in _planner_rows(result)
+    if release_t <= row["t_s"] <= release_t + LAUNCH_ACCEL_WITHIN_S
+  ]
+  assert launch_rows
+  assert all(row["planner_comfort_jerk_debug"].get("upward_floor_owner", "") == ""
+             for row in launch_rows)
+  assert max(row["planner_accel_mps2"] for row in launch_rows) >= 1.0
