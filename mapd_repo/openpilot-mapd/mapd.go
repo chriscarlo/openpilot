@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"flag"
+	"math"
 	"os"
 	"time"
 
@@ -14,16 +15,29 @@ import (
 )
 
 type State struct {
-	Data       []uint8
-	CurrentWay CurrentWay
-	NextWays   []NextWayResult
-	Position   Position
+	Data               []uint8
+	CurrentWay         CurrentWay
+	NextWays           []NextWayResult
+	Position           Position
+	Route              DirectionalRoute
+	WholeCurveEstimate WholeCurveEstimate
 }
 
 type Position struct {
 	Latitude  float64 `json:"latitude"`
 	Longitude float64 `json:"longitude"`
 	Bearing   float64 `json:"bearing"`
+}
+
+const (
+	persistentPositionMaximumAge = 30 * 24 * time.Hour
+	persistentPositionFutureSlop = 5 * time.Minute
+)
+
+type positionPayload struct {
+	Latitude  *float64 `json:"latitude"`
+	Longitude *float64 `json:"longitude"`
+	Bearing   *float64 `json:"bearing"`
 }
 
 type NextSpeedLimit struct {
@@ -81,13 +95,59 @@ func readPosition(persistent bool) (Position, error) {
 		path = LAST_GPS_POSITION_PERSIST
 	}
 
-	pos := Position{}
 	coordinates, err := GetParam(path)
 	if err != nil {
-		return pos, errors.Wrap(err, "could not read coordinates param")
+		return Position{}, errors.Wrap(err, "could not read coordinates param")
 	}
-	err = json.Unmarshal(coordinates, &pos)
-	return pos, errors.Wrap(err, "could not unmarshal coordinates")
+	return decodePosition(coordinates)
+}
+
+func decodePosition(data []byte) (Position, error) {
+	var payload positionPayload
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return Position{}, errors.Wrap(err, "could not unmarshal coordinates")
+	}
+	if payload.Latitude == nil || payload.Longitude == nil || payload.Bearing == nil {
+		return Position{}, errors.New("position requires latitude, longitude, and bearing")
+	}
+	latitude, longitude, bearing := *payload.Latitude, *payload.Longitude, *payload.Bearing
+	if math.IsNaN(latitude) || math.IsInf(latitude, 0) || latitude < -90 || latitude > 90 {
+		return Position{}, errors.New("position latitude is invalid")
+	}
+	if math.IsNaN(longitude) || math.IsInf(longitude, 0) || longitude < -180 || longitude > 180 {
+		return Position{}, errors.New("position longitude is invalid")
+	}
+	if math.IsNaN(bearing) || math.IsInf(bearing, 0) || bearing < 0 || bearing >= 360 {
+		return Position{}, errors.New("position bearing is invalid")
+	}
+	return Position{Latitude: latitude, Longitude: longitude, Bearing: bearing}, nil
+}
+
+func seedLastGPSPositionFromPersistent(persistentPath, memoryPath string, now time.Time) (Position, error) {
+	info, err := os.Stat(persistentPath)
+	if err != nil {
+		return Position{}, errors.Wrap(err, "could not stat persistent position")
+	}
+	age := now.Sub(info.ModTime())
+	if age > persistentPositionMaximumAge || age < -persistentPositionFutureSlop {
+		return Position{}, errors.Errorf("persistent position age %s is outside startup limits", age)
+	}
+	data, err := os.ReadFile(persistentPath)
+	if err != nil {
+		return Position{}, errors.Wrap(err, "could not read persistent position")
+	}
+	position, err := decodePosition(data)
+	if err != nil {
+		return Position{}, errors.Wrap(err, "persistent position is invalid")
+	}
+	canonical, err := json.Marshal(position)
+	if err != nil {
+		return Position{}, errors.Wrap(err, "could not marshal validated startup position")
+	}
+	if err := PutParam(memoryPath, canonical); err != nil {
+		return Position{}, errors.Wrap(err, "could not seed memory position")
+	}
+	return position, nil
 }
 
 func loop(state *State) {
@@ -100,6 +160,9 @@ func loop(state *State) {
 			state.NextWays = []NextWayResult{}
 			state.CurrentWay = CurrentWay{}
 			state.Position = Position{}
+			state.Route = DirectionalRoute{}
+			state.WholeCurveEstimate = WholeCurveEstimate{}
+			_ = PutParam(MAP_WHOLE_CURVE_PROFILE, []byte{'{', '}'})
 		}
 	}()
 
@@ -138,6 +201,7 @@ func loop(state *State) {
 		logwe(errors.Wrap(err, "could not read current position"))
 		return
 	}
+	state.Position = pos
 	offline := readOffline(state.Data)
 
 	// ------------- Find current and next ways ------------
@@ -152,6 +216,15 @@ func loop(state *State) {
 
 	state.NextWays, err = NextWays(pos, state.CurrentWay, offline, state.CurrentWay.OnWay.IsForward)
 	logde(errors.Wrap(err, "could not get next way"))
+
+	previousRoute := state.Route
+	route, routeErr := BuildDirectionalRoute(state.CurrentWay, state.NextWays, previousRoute, pos)
+	if routeErr != nil {
+		state.Route = DirectionalRoute{}
+		logde(errors.Wrap(routeErr, "could not build ordered directional route"))
+	} else {
+		state.Route = route
+	}
 
 	curvatures, err := GetStateCurvatures(state)
 	logde(errors.Wrap(err, "could not get curvatures from current state"))
@@ -169,6 +242,28 @@ func loop(state *State) {
 	logde(errors.Wrap(err, "could not marshal target velocities"))
 	err = PutParam(MAP_TARGET_VELOCITIES, data)
 	logwe(errors.Wrap(err, "could not write curvatures"))
+
+	// The new profile remains a separate, versioned geometry product. The
+	// controller owns all sigmoid/Q speed conversion and can fall back to the
+	// unchanged legacy MapCurvatures stream independently.
+	if routeErr == nil {
+		profile, estimate, profileErr := BuildWholeCurveProfile(state.Route, pos, state.WholeCurveEstimate, time.Now())
+		logde(errors.Wrap(profileErr, "could not build whole-curve profile"))
+		if profileErr == nil {
+			state.WholeCurveEstimate = estimate
+			data, profileErr = json.Marshal(profile)
+			logde(errors.Wrap(profileErr, "could not marshal whole-curve profile"))
+		}
+		if profileErr == nil {
+			profileErr = PutParam(MAP_WHOLE_CURVE_PROFILE, data)
+			logwe(errors.Wrap(profileErr, "could not write whole-curve profile"))
+		} else {
+			_ = PutParam(MAP_WHOLE_CURVE_PROFILE, []byte{'{', '}'})
+		}
+	} else {
+		state.WholeCurveEstimate = WholeCurveEstimate{}
+		_ = PutParam(MAP_WHOLE_CURVE_PROFILE, []byte{'{', '}'})
+	}
 
 	// -----------------  Sigmoid-baked speeds (schema v1+) ---------------
 	// Gate on the loaded tile's schemaVersion. Pre-bake tiles emit empty,
@@ -356,7 +451,16 @@ func main() {
 	physMin := flag.Float64("phys-min-lat", defSig.MinLat, "PHYSICS_MIN_LAT_ACCEL")
 	physMax := flag.Float64("phys-max-lat", defSig.MaxLat, "PHYSICS_MAX_LAT_ACCEL")
 	maxSpeedDefault := flag.Float64("max-speed-default", defSig.MaxSpeedDefault, "MAX_SPEED_DEFAULT in m/s for curvature_to_speed")
+	buildInfo := flag.Bool("build-info", false, "Print immutable mapd build metadata as JSON and exit")
+	version := flag.Bool("version", false, "Print immutable mapd version metadata as JSON and exit")
 	flag.Parse()
+	if *buildInfo || *version {
+		if err := WriteMapdBuildInfo(os.Stdout); err != nil {
+			log.Error().Err(err).Msg("could not write mapd build metadata")
+			os.Exit(1)
+		}
+		return
+	}
 	if *generatePtr {
 		sigCfg := SigmoidCfg{
 			A:               *physA,
@@ -375,7 +479,7 @@ func main() {
 	ResetParams()
 	state := State{}
 
-	pos, err := readPosition(true)
+	pos, err := seedLastGPSPositionFromPersistent(LAST_GPS_POSITION_PERSIST, LAST_GPS_POSITION, time.Now())
 	logde(err)
 	if err == nil {
 		state.Data, err = FindWaysAroundLocation(pos.Latitude, pos.Longitude)

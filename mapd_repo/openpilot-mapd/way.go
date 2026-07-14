@@ -7,7 +7,7 @@ import (
 	"github.com/pkg/errors"
 )
 
-var MIN_WAY_DIST = 500 // meters. how many meters to look ahead before stopping gathering next ways.
+var MIN_WAY_DIST = int(RouteLookaheadMeters) // meters of selected route context requested ahead of ego.
 
 type OnWayResult struct {
 	OnWay     bool
@@ -265,10 +265,12 @@ func MatchingWays(currentWay Way, offline Offline, matchNode Coordinates) ([]Way
 }
 
 type NextWayResult struct {
-	Way           Way
-	IsForward     bool
-	StartPosition Coordinates
-	EndPosition   Coordinates
+	Way            Way
+	IsForward      bool
+	StartPosition  Coordinates
+	EndPosition    Coordinates
+	CandidateCount int
+	Ambiguous      bool
 }
 
 func NextIsForward(nextWay Way, matchNode Coordinates) bool {
@@ -320,6 +322,11 @@ func NextWay(way Way, offline Offline, isForward bool) (NextWayResult, error) {
 	if len(matchingWays) == 0 {
 		return NextWayResult{StartPosition: matchNode}, nil
 	}
+	// Legacy mapd chooses a deterministic continuation even at a fork. Preserve
+	// that behavior for MapCurvatures, but expose the uncertainty so the new
+	// whole-curve profile can fail closed instead of treating a guessed branch
+	// as authoritative geometry.
+	candidateCount := viableContinuationCount(matchingWays, matchNode, matchBearingNode)
 
 	// first return if one of the next connecting ways has the same name
 	name, _ := way.Name()
@@ -353,10 +360,12 @@ func NextWay(way Way, offline Offline, isForward bool) (NextWayResult, error) {
 
 				start, end := GetWayStartEnd(mWay, isForward)
 				return NextWayResult{
-					Way:           mWay,
-					StartPosition: start,
-					EndPosition:   end,
-					IsForward:     isForward,
+					Way:            mWay,
+					StartPosition:  start,
+					EndPosition:    end,
+					IsForward:      isForward,
+					CandidateCount: candidateCount,
+					Ambiguous:      continuationSelectionAmbiguous(way, mWay, matchingWays, matchNode, matchBearingNode),
 				}, nil
 			}
 		}
@@ -394,10 +403,12 @@ func NextWay(way Way, offline Offline, isForward bool) (NextWayResult, error) {
 
 				start, end := GetWayStartEnd(mWay, isForward)
 				return NextWayResult{
-					Way:           mWay,
-					StartPosition: start,
-					EndPosition:   end,
-					IsForward:     isForward,
+					Way:            mWay,
+					StartPosition:  start,
+					EndPosition:    end,
+					IsForward:      isForward,
+					CandidateCount: candidateCount,
+					Ambiguous:      continuationSelectionAmbiguous(way, mWay, matchingWays, matchNode, matchBearingNode),
 				}, nil
 			}
 		}
@@ -477,10 +488,12 @@ func NextWay(way Way, offline Offline, isForward bool) (NextWayResult, error) {
 			nextIsForward := NextIsForward(minCurvWay, matchNode)
 			start, end := GetWayStartEnd(minCurvWay, nextIsForward)
 			return NextWayResult{
-				Way:           minCurvWay,
-				StartPosition: start,
-				EndPosition:   end,
-				IsForward:     nextIsForward,
+				Way:            minCurvWay,
+				StartPosition:  start,
+				EndPosition:    end,
+				IsForward:      nextIsForward,
+				CandidateCount: candidateCount,
+				Ambiguous:      continuationSelectionAmbiguous(way, minCurvWay, matchingWays, matchNode, matchBearingNode),
 			}, nil
 		}
 	}
@@ -517,11 +530,128 @@ func NextWay(way Way, offline Offline, isForward bool) (NextWayResult, error) {
 	nextIsForward := NextIsForward(minCurvWay, matchNode)
 	start, end := GetWayStartEnd(minCurvWay, nextIsForward)
 	return NextWayResult{
-		Way:           minCurvWay,
-		StartPosition: start,
-		EndPosition:   end,
-		IsForward:     nextIsForward,
+		Way:            minCurvWay,
+		StartPosition:  start,
+		EndPosition:    end,
+		IsForward:      nextIsForward,
+		CandidateCount: candidateCount,
+		Ambiguous:      continuationSelectionAmbiguous(way, minCurvWay, matchingWays, matchNode, matchBearingNode),
 	}, nil
+}
+
+func viableContinuationCount(candidates []Way, matchNode, matchBearingNode Coordinates) int {
+	count := 0
+	for _, candidate := range candidates {
+		nodes, err := candidate.Nodes()
+		if err != nil || nodes.Len() < 2 {
+			continue
+		}
+		isForward := NextIsForward(candidate, matchNode)
+		if !isForward && candidate.OneWay() {
+			continue
+		}
+		bearingNode := nodes.At(1)
+		if !isForward {
+			bearingNode = nodes.At(nodes.Len() - 2)
+		}
+		curvature, _, _ := GetCurvature(
+			matchBearingNode.Latitude(), matchBearingNode.Longitude(),
+			matchNode.Latitude(), matchNode.Longitude(),
+			bearingNode.Latitude(), bearingNode.Longitude(),
+		)
+		if wholeCurveIsFinite(curvature) && math.Abs(curvature) <= 0.1 {
+			count++
+		}
+	}
+	return count
+}
+
+const continuationCurvatureTieTolerance = 0.0005
+
+// continuationSelectionAmbiguous distinguishes an ordinary intersection from
+// an unresolved route fork. A unique name/ref continuation is authoritative;
+// geometry is only ambiguous when the selected priority class still contains
+// multiple choices, or the straightest fallback is effectively tied.
+func continuationSelectionAmbiguous(current, selected Way, candidates []Way, matchNode, matchBearingNode Coordinates) bool {
+	currentName, _ := current.Name()
+	selectedName, _ := selected.Name()
+	currentRef, _ := current.Ref()
+	selectedRef, _ := selected.Ref()
+	viable := make([]Way, 0, len(candidates))
+	for _, candidate := range candidates {
+		if _, ok := continuationCurvature(candidate, matchNode, matchBearingNode); ok {
+			viable = append(viable, candidate)
+		}
+	}
+	if currentName != "" && selectedName == currentName {
+		matches := 0
+		for _, candidate := range viable {
+			name, _ := candidate.Name()
+			if name == currentName {
+				matches++
+			}
+		}
+		return matches > 1
+	}
+	if currentRef != "" && refsShareComponent(currentRef, selectedRef) {
+		matches := 0
+		for _, candidate := range viable {
+			reference, _ := candidate.Ref()
+			if refsShareComponent(currentRef, reference) {
+				matches++
+			}
+		}
+		return matches > 1
+	}
+	selectedCurvature, ok := continuationCurvature(selected, matchNode, matchBearingNode)
+	if !ok {
+		return true
+	}
+	ties := 0
+	for _, candidate := range viable {
+		curvature, ok := continuationCurvature(candidate, matchNode, matchBearingNode)
+		if ok && math.Abs(math.Abs(curvature)-math.Abs(selectedCurvature)) <= continuationCurvatureTieTolerance {
+			ties++
+		}
+	}
+	return ties > 1
+}
+
+func refsShareComponent(first, second string) bool {
+	if first == "" || second == "" {
+		return false
+	}
+	components := make(map[string]struct{})
+	for _, component := range strings.Split(first, ";") {
+		components[strings.TrimSpace(component)] = struct{}{}
+	}
+	for _, component := range strings.Split(second, ";") {
+		if _, ok := components[strings.TrimSpace(component)]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func continuationCurvature(candidate Way, matchNode, matchBearingNode Coordinates) (float64, bool) {
+	nodes, err := candidate.Nodes()
+	if err != nil || nodes.Len() < 2 {
+		return 0, false
+	}
+	isForward := NextIsForward(candidate, matchNode)
+	if !isForward && candidate.OneWay() {
+		return 0, false
+	}
+	bearingNode := nodes.At(1)
+	if !isForward {
+		bearingNode = nodes.At(nodes.Len() - 2)
+	}
+	curvature, _, _ := GetCurvature(
+		matchBearingNode.Latitude(), matchBearingNode.Longitude(),
+		matchNode.Latitude(), matchNode.Longitude(),
+		bearingNode.Latitude(), bearingNode.Longitude(),
+	)
+	return curvature, wholeCurveIsFinite(curvature) && math.Abs(curvature) <= 0.1
 }
 
 func DistanceToEndOfWay(pos Position, way Way, isForward bool) (float64, error) {
