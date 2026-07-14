@@ -9,12 +9,13 @@ from openpilot.system.manager.process import PythonProcess, NativeProcess, Daemo
 from openpilot.system.hardware.hw import Paths
 
 from openpilot.sunnypilot.mapd import MAPD_PATH
-from openpilot.sunnypilot.mapd.mapd_installer import MapdInstallManager
+from openpilot.sunnypilot.mapd.mapd_installer import MapdInstallManager, get_target_release
 
 from sunnypilot.models.helpers import get_active_model_runner
 from sunnypilot.sunnylink.utils import sunnylink_need_register, sunnylink_ready, use_sunnylink_uploader
 
 WEBCAM = os.getenv("USE_WEBCAM") is not None
+_MAPD_READY_IDENTITY_CACHE = None
 
 def driverview(started: bool, params: Params, CP: car.CarParams) -> bool:
   return started or params.get_bool("IsDriverViewEnabled")
@@ -92,14 +93,45 @@ def is_stock_model(started, params, CP: car.CarParams) -> bool:
 
 def mapd_ready(started: bool, params: Params, CP: car.CarParams) -> bool:
   # The native mapd process is launched via `bash -c "$MAPD_PATH > /dev/null 2>&1"`,
-  # which hides missing/invalid binary errors. Gate launch on the same binary
-  # verifier mapd_manager uses so a stale ignored pfeifer binary does not start
-  # before mapd_manager replaces it with the chauffeur-bake release.
+  # which hides missing/invalid binary errors. Gate launch on the immutable
+  # release manifest, raw ELF identity markers, and the binary's own build-info
+  # response. Cache only an unchanged inode identity so manager polling does not
+  # execute the binary every tick.
+  global _MAPD_READY_IDENTITY_CACHE
   if not os.path.exists(Paths.mapd_root()):
+    _MAPD_READY_IDENTITY_CACHE = None
     return False
   try:
-    MapdInstallManager._verify_installed_binary(MAPD_PATH)
-  except (FileNotFoundError, OSError):
+    release = get_target_release(params)
+    installed_version = params.get("MapdVersion")
+    if isinstance(installed_version, bytes):
+      installed_version = installed_version.decode("utf-8", errors="ignore")
+    if str(installed_version or "").strip() != release.version:
+      _MAPD_READY_IDENTITY_CACHE = None
+      return False
+
+    binary_stat = os.lstat(MAPD_PATH)
+    identity = (
+      MAPD_PATH,
+      binary_stat.st_dev,
+      binary_stat.st_ino,
+      binary_stat.st_size,
+      binary_stat.st_mtime_ns,
+      binary_stat.st_ctime_ns,
+      release.version,
+      release.release_id,
+      release.build_id,
+      release.sha256,
+      release.capability,
+    )
+    if identity == _MAPD_READY_IDENTITY_CACHE:
+      return True
+
+    MapdInstallManager._verify_installed_binary(MAPD_PATH, release)
+    MapdInstallManager._verify_runtime_build_info(MAPD_PATH, release)
+    _MAPD_READY_IDENTITY_CACHE = identity
+  except (FileNotFoundError, OSError, ValueError):
+    _MAPD_READY_IDENTITY_CACHE = None
     return False
   return True
 

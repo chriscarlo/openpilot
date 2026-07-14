@@ -4,6 +4,7 @@ import math
 import json
 import os
 import hashlib
+import re
 from dataclasses import dataclass
 from enum import IntEnum
 
@@ -160,6 +161,62 @@ OCCL_VMIN_NUDGE_MPS = 0.50
 
 # ===== Map lookahead helpers =====
 EARTH_R_M = 6371007.2
+MAP_WHOLE_CURVE_ESTIMATOR_VERSION = "whole-curve-v1"
+MAP_WHOLE_CURVE_PROFILE_MAX_AGE_S = 3.0
+MAP_WHOLE_CURVE_PROFILE_FUTURE_TOLERANCE_S = 1.0
+MAP_WHOLE_CURVE_PROFILE_MAX_BYTES = 512 * 1024
+MAP_WHOLE_CURVE_PROFILE_MAX_POINTS = 512
+MAP_WHOLE_CURVE_PROFILE_MAX_EVENTS = 128
+# 1.2 km forward coverage plus retained predecessor/rollover context and a
+# small endpoint overshoot from strict 5 m resampling.
+MAP_WHOLE_CURVE_PROFILE_MAX_DISTANCE_M = 1600.0
+MAP_WHOLE_CURVE_PROFILE_MAX_EGO_DISTANCE_M = 75.0
+MAP_WHOLE_CURVE_PROFILE_HORIZON_M = 1200.0
+_MAP_WHOLE_CURVE_EVENT_ID_RE = re.compile(r"(?:[0-9a-f]{20}-[ab])?")
+_MAP_WHOLE_CURVE_FLAG_RE = re.compile(r"[A-Za-z0-9_.:-]{1,96}")
+
+
+@dataclass(frozen=True)
+class MapWholeCurvePoint:
+  latitude: float
+  longitude: float
+  distance_m: float
+  curvature: float
+  event_id: str = ""
+  confidence: float | str | None = None
+  flags: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class MapWholeCurveProfile:
+  generated_at_unix_ms: float
+  route_fingerprint: str
+  generation: int
+  points: tuple[MapWholeCurvePoint, ...]
+  events: tuple[dict, ...]
+
+
+def _round_half_away_from_zero_scaled(value: float, scale: float) -> int:
+  """Cross-language integer quantization used by the whole-curve fingerprint."""
+  value_f = float(value)
+  if not math.isfinite(value_f):
+    raise ValueError("non-finite fingerprint value")
+  magnitude = int(math.floor(abs(value_f) * float(scale) + 0.5))
+  return -magnitude if value_f < 0.0 else magnitude
+
+
+def _compute_map_whole_curve_route_fingerprint(generation: int,
+                                                points: tuple[MapWholeCurvePoint, ...] | list[MapWholeCurvePoint]) -> str:
+  """Hash the exact ordered route/control profile using the Go/Swift v1 contract."""
+  digest = hashlib.sha256()
+  digest.update(f"MapWholeCurveProfile|{MAP_WHOLE_CURVE_ESTIMATOR_VERSION}|{int(generation)}\n".encode("utf-8"))
+  for point in points:
+    lat_e7 = _round_half_away_from_zero_scaled(point.latitude, 1e7)
+    lon_e7 = _round_half_away_from_zero_scaled(point.longitude, 1e7)
+    distance_mm = _round_half_away_from_zero_scaled(point.distance_m, 1e3)
+    curvature_e9 = _round_half_away_from_zero_scaled(point.curvature, 1e9)
+    digest.update(f"{lat_e7},{lon_e7},{distance_mm},{curvature_e9},{point.event_id}\n".encode("utf-8"))
+  return digest.hexdigest()
 
 def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
   lat1, lon1, lat2, lon2 = map(math.radians, (lat1, lon1, lat2, lon2))
@@ -813,15 +870,21 @@ _DEBUG = False
 MAX_SPEED_DEFAULT = 70.0  # m/s, fallback for straight roads (overridden by param)
 SPEED_INCREASE_FACTOR = 1.0  # Global multiplier on target speeds (overridden by param)
 
-# Physics sigmoid tunables (overridden by params)
-# Keep the sub-50 mph portion close to the existing curve while lifting the high-speed sweeper
-# shoulder around k≈0.0046 1/m into the upper-60s/low-70s mph band.
-PHYSICS_A = -2.125961
-PHYSICS_B = -1601.225452
-PHYSICS_C = 0.007637
-PHYSICS_D = 4.478000
-PHYSICS_MIN_LAT_ACCEL = 2.3520
-PHYSICS_MAX_LAT_ACCEL = 4.4780
+# Schema-v1 MapPreCurveSpeeds were baked from one raw OSM vertex while the
+# parallel MapCurvatures stream is a route-context, arc-weighted average.  Do
+# not combine those two different curvature semantics.  Re-enable only after
+# mapd publishes an estimator-versioned speed stream derived from the exact
+# same curvature samples.
+MAP_PRECURVE_SPEEDS_ESTIMATOR_ALIGNED = False
+
+# Physics sigmoid tunables (overridden by params). These source defaults are
+# the source-rounded values from the persisted whole-curve production tune.
+PHYSICS_A = -1.658965
+PHYSICS_B = -1395.055546
+PHYSICS_C = 0.005397
+PHYSICS_D = 4.107103
+PHYSICS_MIN_LAT_ACCEL = 2.4481
+PHYSICS_MAX_LAT_ACCEL = 4.1071
 
 # Low-speed bias (applied as +Δ mph under a taper)
 LOW_SPEED_BIAS_MPH = 5.0         # +speed boost at tight curves (tapers to 0 by END_MPH)
@@ -1264,6 +1327,16 @@ class VisionTurnController:
     self._map_curv_cache_raw = None
     self._map_curv_cache = []
     self._map_curv_last_ts = 0.0
+    # Versioned route-level whole-curve profile. This stays separate from the
+    # legacy MapCurvatures cache so its ~5 m / ~1.2 km representation is never
+    # decimated to the legacy 160-point / 800 m path.
+    self._map_whole_curve_cache_raw = None
+    self._map_whole_curve_cache: MapWholeCurveProfile | None = None
+    self._map_whole_curve_cache_rejection: str | None = None
+    self._map_whole_curve_last_ts = 0.0
+    self._map_whole_curve_reason = "missing"
+    self._map_profile_source = "none"
+    self._map_lookahead_enabled_prev = False
     # Sigmoid-baked per-curvature speeds from mapd (schema v1+ tiles).
     # Cached at the same 5 Hz as MapCurvatures; nil/empty list means
     # "fall back to live curvature_to_speed". Hash compared per-tick.
@@ -1910,6 +1983,10 @@ class VisionTurnController:
         'vis_horizon_s': vis_h, 'tail_frac': tail_frac, 's_tail': s_tail, 'early_no_raise': enr,
         'map_tail_active': map_active, 'map_tail_cap': map_cap, 'map_tail_start_m': map_start, 'map_tail_coverage': map_cov,
         'map_tail_reason': map_reason, 'map_tail_compute_reason': map_compute_reason,
+        'map_profile_source': str(getattr(self, '_map_profile_source', 'none') or 'none'),
+        'map_whole_curve_reason': str(getattr(self, '_map_whole_curve_reason', 'missing') or 'missing'),
+        'map_whole_curve_generation': int(getattr(getattr(self, '_map_whole_curve_cache', None), 'generation', 0) or 0),
+        'map_whole_curve_fingerprint': str(getattr(getattr(self, '_map_whole_curve_cache', None), 'route_fingerprint', '') or ''),
         'comfort_decel': comfort, 'max_adaptive_decel': max_adapt, 'decel_cmd': decel_cmd, 'jerk_cmd': jerk_cmd, 'a_cmd': a_cmd,
         # New fields for quick triage on road
         'active_cap': active_cap, 'vtsc_cmd': vtsc_cmd,
@@ -2314,6 +2391,17 @@ class VisionTurnController:
       abs_curvature_meters,
       low_speed_sigmoid_scale=self._low_speed_calibration_scale(abs_curvature_meters),
     ))
+
+  @staticmethod
+  def _whole_curve_speed(abs_curvature_meters: float) -> float:
+    """Apply live source-rounded sigmoid/Q without learned calibration.
+
+    MapWholeCurveProfile publishes curvature, never a baked/final speed. The
+    profile therefore remains responsive to the six live physics Params and
+    source Q/EQ curve while deliberately staying outside the learned VTSC
+    calibration subsystem.
+    """
+    return float(curvature_to_speed(abs(float(abs_curvature_meters)), low_speed_sigmoid_scale=1.0))
 
   def _read_lateral_feedback(self, sm) -> dict | None:
     controls_state = _sm_get_optional(sm, 'controlsState')
@@ -3455,7 +3543,10 @@ class VisionTurnController:
     self._clear_winding_behavior_profile()
     self._map_tail_reason = "toggle_off"
     try:
-      if self._get_bool_param('MTSCLookaheadEnabled', False):
+      map_lookahead_enabled = bool(self._get_bool_param('MTSCLookaheadEnabled', False))
+      map_lookahead_falling_edge = bool(self._map_lookahead_enabled_prev and not map_lookahead_enabled)
+      self._map_lookahead_enabled_prev = map_lookahead_enabled
+      if map_lookahead_enabled:
         self._map_tail_reason = "enabled_no_cap"
         map_tail_span = start_span(SPAN_MAP_TAIL_CAP)
         try:
@@ -3563,11 +3654,8 @@ class VisionTurnController:
             self._map_holdover_cap = None
             self._map_holdover_candidate = None
       else:
-        # Ensure HUD preview does not persist when map lookahead is disabled.
-        self._map_strategy_state.reset()
-        self._turn_visible_sticky = False
-        self._clear_curve_preview()
-        self._clear_winding_road_context()
+        self._clear_map_lookahead_state(clear_latched_output=map_lookahead_falling_edge)
+        self._map_tail_reason = "toggle_off"
     except Exception:
       self._map_strategy_state.reset()
       self._turn_visible_sticky = False
@@ -4589,8 +4677,18 @@ class VisionTurnController:
       if not raw:
         return None
       obj = json.loads(raw if isinstance(raw, str) else raw.decode('utf-8'))
-      lat = float(obj.get('latitude', 0.0))
-      lon = float(obj.get('longitude', 0.0))
+      if not isinstance(obj, dict):
+        return None
+      latitude = obj.get('latitude')
+      longitude = obj.get('longitude')
+      if isinstance(latitude, bool) or isinstance(longitude, bool):
+        return None
+      lat = float(latitude)
+      lon = float(longitude)
+      if not math.isfinite(lat) or not math.isfinite(lon):
+        return None
+      if not -90.0 <= lat <= 90.0 or not -180.0 <= lon <= 180.0:
+        return None
       if lat == 0.0 and lon == 0.0:
         return None
       bearing = obj.get('bearing', None)
@@ -4602,6 +4700,8 @@ class VisionTurnController:
         bearing_f = None
       if bearing_f is not None and not math.isfinite(bearing_f):
         bearing_f = None
+      if bearing_f is not None:
+        bearing_f %= 360.0
       return (lat, lon, bearing_f)
     except Exception:
       return None
@@ -4611,6 +4711,241 @@ class VisionTurnController:
     if pose is None:
       return None
     return (float(pose[0]), float(pose[1]))
+
+  @staticmethod
+  def _whole_curve_number(value, field: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+      raise ValueError(f"{field}_not_number")
+    value_f = float(value)
+    if not math.isfinite(value_f):
+      raise ValueError(f"{field}_not_finite")
+    return value_f
+
+  @staticmethod
+  def _check_map_whole_curve_profile_freshness(generated_at_unix_ms: float, now_s: float) -> None:
+    age_s = float(now_s) - float(generated_at_unix_ms) / 1000.0
+    if age_s < -MAP_WHOLE_CURVE_PROFILE_FUTURE_TOLERANCE_S:
+      raise ValueError("timestamp_in_future")
+    if age_s > MAP_WHOLE_CURVE_PROFILE_MAX_AGE_S:
+      raise ValueError("stale")
+
+  @classmethod
+  def _validate_whole_curve_event_value(cls, value, field: str, depth: int = 0) -> None:
+    if depth > 4:
+      raise ValueError(f"{field}_too_deep")
+    if value is None or isinstance(value, (str, bool)):
+      if isinstance(value, str) and len(value) > 256:
+        raise ValueError(f"{field}_string_too_long")
+      return
+    if isinstance(value, (int, float)):
+      cls._whole_curve_number(value, field)
+      return
+    if isinstance(value, list):
+      if len(value) > MAP_WHOLE_CURVE_PROFILE_MAX_POINTS:
+        raise ValueError(f"{field}_list_too_long")
+      for index, item in enumerate(value):
+        cls._validate_whole_curve_event_value(item, f"{field}_{index}", depth + 1)
+      return
+    if isinstance(value, dict):
+      if len(value) > 64 or not all(isinstance(key, str) and len(key) <= 96 for key in value):
+        raise ValueError(f"{field}_invalid_object")
+      for key, item in value.items():
+        cls._validate_whole_curve_event_value(item, f"{field}_{key}", depth + 1)
+      return
+    raise ValueError(f"{field}_invalid_type")
+
+  @classmethod
+  def _parse_map_whole_curve_profile(cls, raw_json: str, gps_pose: tuple[float, float, float | None],
+                                     *, now_s: float | None = None) -> MapWholeCurveProfile:
+    try:
+      payload = json.loads(raw_json)
+    except Exception as exc:
+      raise ValueError("malformed_json") from exc
+    if not isinstance(payload, dict):
+      raise ValueError("root_not_object")
+    if payload.get("estimatorVersion") != MAP_WHOLE_CURVE_ESTIMATOR_VERSION:
+      raise ValueError("version_mismatch")
+
+    generated_at_ms = cls._whole_curve_number(payload.get("generatedAtUnixMillis"), "generated_at")
+    now = float(time.time() if now_s is None else now_s)
+    cls._check_map_whole_curve_profile_freshness(generated_at_ms, now)
+
+    generation = payload.get("generation")
+    if isinstance(generation, bool) or not isinstance(generation, int) or generation < 0:
+      raise ValueError("invalid_generation")
+    route_fingerprint = payload.get("routeFingerprint")
+    if (not isinstance(route_fingerprint, str) or len(route_fingerprint) != 64 or
+        route_fingerprint != route_fingerprint.lower() or
+        any(ch not in "0123456789abcdef" for ch in route_fingerprint)):
+      raise ValueError("invalid_fingerprint")
+    fatal_ambiguity = payload.get("fatalAmbiguity")
+    if not isinstance(fatal_ambiguity, bool):
+      raise ValueError("invalid_fatal_ambiguity")
+    if fatal_ambiguity:
+      raise ValueError("fatal_ambiguity")
+
+    raw_points = payload.get("points")
+    if not isinstance(raw_points, list) or not (3 <= len(raw_points) <= MAP_WHOLE_CURVE_PROFILE_MAX_POINTS):
+      raise ValueError("invalid_point_count")
+    points: list[MapWholeCurvePoint] = []
+    previous_distance = -1.0
+    previous_point: MapWholeCurvePoint | None = None
+    allowed_point_keys = {"latitude", "longitude", "distanceMeters", "curvature", "eventID", "confidence", "flags"}
+    for index, item in enumerate(raw_points):
+      if not isinstance(item, dict) or not {"latitude", "longitude", "distanceMeters", "curvature"}.issubset(item):
+        raise ValueError(f"point_{index}_invalid_object")
+      if any(not isinstance(key, str) or key not in allowed_point_keys for key in item):
+        raise ValueError(f"point_{index}_unknown_field")
+      latitude = cls._whole_curve_number(item["latitude"], f"point_{index}_latitude")
+      longitude = cls._whole_curve_number(item["longitude"], f"point_{index}_longitude")
+      distance_m = cls._whole_curve_number(item["distanceMeters"], f"point_{index}_distance")
+      curvature = cls._whole_curve_number(item["curvature"], f"point_{index}_curvature")
+      if not -90.0 <= latitude <= 90.0 or not -180.0 <= longitude <= 180.0:
+        raise ValueError(f"point_{index}_coordinate_range")
+      if not 0.0 <= distance_m <= MAP_WHOLE_CURVE_PROFILE_MAX_DISTANCE_M:
+        raise ValueError(f"point_{index}_distance_range")
+      if abs(curvature) > 1.0:
+        raise ValueError(f"point_{index}_curvature_range")
+
+      event_id = item.get("eventID", "")
+      if event_id is None:
+        event_id = ""
+      if not isinstance(event_id, str) or _MAP_WHOLE_CURVE_EVENT_ID_RE.fullmatch(event_id) is None:
+        raise ValueError(f"point_{index}_invalid_event_id")
+      confidence = item.get("confidence")
+      if confidence is not None:
+        if isinstance(confidence, str):
+          if confidence not in {"high", "review", "low"}:
+            raise ValueError(f"point_{index}_confidence_value")
+        else:
+          confidence = cls._whole_curve_number(confidence, f"point_{index}_confidence")
+          if not 0.0 <= confidence <= 1.0:
+            raise ValueError(f"point_{index}_confidence_range")
+      raw_flags = item.get("flags", [])
+      if not isinstance(raw_flags, list) or len(raw_flags) > 16:
+        raise ValueError(f"point_{index}_invalid_flags")
+      flags: list[str] = []
+      for flag in raw_flags:
+        if not isinstance(flag, str) or _MAP_WHOLE_CURVE_FLAG_RE.fullmatch(flag) is None:
+          raise ValueError(f"point_{index}_invalid_flag")
+        flags.append(flag)
+
+      point = MapWholeCurvePoint(latitude, longitude, distance_m, curvature, event_id, confidence, tuple(flags))
+      if index == 0:
+        if distance_m > 0.01:
+          raise ValueError("first_distance_not_zero")
+      else:
+        distance_delta = distance_m - previous_distance
+        if not 0.05 < distance_delta <= 25.0:
+          raise ValueError(f"point_{index}_nonmonotonic_distance")
+        assert previous_point is not None
+        geometry_delta = _haversine_m(previous_point.latitude, previous_point.longitude, latitude, longitude)
+        if not math.isfinite(geometry_delta) or geometry_delta <= 0.05:
+          raise ValueError(f"point_{index}_duplicate_coordinate")
+        if abs(geometry_delta - distance_delta) > max(1.0, 0.20 * distance_delta):
+          raise ValueError(f"point_{index}_distance_mismatch")
+      points.append(point)
+      previous_distance = distance_m
+      previous_point = point
+
+    expected_fingerprint = _compute_map_whole_curve_route_fingerprint(generation, points)
+    if route_fingerprint != expected_fingerprint:
+      raise ValueError("fingerprint_mismatch")
+
+    raw_events = payload.get("events")
+    if not isinstance(raw_events, list) or len(raw_events) > MAP_WHOLE_CURVE_PROFILE_MAX_EVENTS:
+      raise ValueError("invalid_events")
+    point_event_ids = {point.event_id for point in points if point.event_id}
+    events: list[dict] = []
+    seen_event_ids: set[str] = set()
+    for index, event in enumerate(raw_events):
+      if not isinstance(event, dict):
+        raise ValueError(f"event_{index}_not_object")
+      cls._validate_whole_curve_event_value(event, f"event_{index}")
+      event_id = event.get("eventID", event.get("id"))
+      if "eventID" in event and "id" in event and event.get("eventID") != event.get("id"):
+        raise ValueError(f"event_{index}_conflicting_id")
+      if not isinstance(event_id, str) or _MAP_WHOLE_CURVE_EVENT_ID_RE.fullmatch(event_id) is None or not event_id:
+        raise ValueError(f"event_{index}_invalid_id")
+      if event_id in seen_event_ids or event_id not in point_event_ids:
+        raise ValueError(f"event_{index}_id_mismatch")
+      seen_event_ids.add(event_id)
+      for key in ("startIndex", "endIndex", "apexIndex"):
+        if key in event:
+          value = event[key]
+          if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value < len(points):
+            raise ValueError(f"event_{index}_{key}_range")
+      if "startIndex" in event and "endIndex" in event and int(event["startIndex"]) > int(event["endIndex"]):
+        raise ValueError(f"event_{index}_boundary_order")
+      if "apexIndex" in event and "startIndex" in event and "endIndex" in event and not (
+          int(event["startIndex"]) <= int(event["apexIndex"]) <= int(event["endIndex"])):
+        raise ValueError(f"event_{index}_apex_range")
+      if "controllingCurvature" in event:
+        controlling = cls._whole_curve_number(event["controllingCurvature"], f"event_{index}_controlling_curvature")
+        if not 0.0 < abs(controlling) <= 1.0:
+          raise ValueError(f"event_{index}_controlling_curvature_range")
+      if "physicalID" in event:
+        physical_id = event["physicalID"]
+        if (not isinstance(physical_id, str) or len(physical_id) != 20 or
+            any(ch not in "0123456789abcdef" for ch in physical_id)):
+          raise ValueError(f"event_{index}_invalid_physical_id")
+      events.append(dict(event))
+    if seen_event_ids != point_event_ids:
+      raise ValueError("event_point_set_mismatch")
+
+    return MapWholeCurveProfile(
+      generated_at_unix_ms=generated_at_ms,
+      route_fingerprint=route_fingerprint,
+      generation=generation,
+      points=tuple(points),
+      events=tuple(events),
+    )
+
+  def _load_map_whole_curve_profile(self, gps_pose: tuple[float, float, float | None]) -> MapWholeCurveProfile | None:
+    now = float(time.time())
+    self._map_whole_curve_last_ts = now
+    raw_bytes: bytes | None = None
+    try:
+      raw = self._mem_params.get("MapWholeCurveProfile") or self._params.get("MapWholeCurveProfile")
+      if not raw:
+        self._map_whole_curve_reason = "missing"
+        self._map_whole_curve_cache_raw = None
+        self._map_whole_curve_cache = None
+        self._map_whole_curve_cache_rejection = None
+        return None
+      raw_bytes = raw if isinstance(raw, bytes) else str(raw).encode("utf-8")
+      if raw_bytes == self._map_whole_curve_cache_raw:
+        if self._map_whole_curve_cache is None:
+          self._map_whole_curve_reason = self._map_whole_curve_cache_rejection or "rejected_cached"
+          return None
+        try:
+          self._check_map_whole_curve_profile_freshness(self._map_whole_curve_cache.generated_at_unix_ms, now)
+        except ValueError as exc:
+          self._map_whole_curve_reason = f"rejected_{exc}"
+          return None
+        self._map_whole_curve_reason = "accepted"
+        return self._map_whole_curve_cache
+      if len(raw_bytes) > MAP_WHOLE_CURVE_PROFILE_MAX_BYTES:
+        raise ValueError("profile_too_large")
+      raw_json = raw_bytes.decode("utf-8", errors="strict")
+      profile = self._parse_map_whole_curve_profile(raw_json, gps_pose, now_s=now)
+      self._map_whole_curve_cache_raw = raw_bytes
+      self._map_whole_curve_cache = profile
+      self._map_whole_curve_cache_rejection = None
+      self._map_whole_curve_reason = "accepted"
+      return profile
+    except Exception as exc:
+      raw_reason = str(exc) or exc.__class__.__name__
+      reason = re.sub(r"[^A-Za-z0-9_.:-]+", "_", raw_reason)[:96]
+      rejection = f"rejected_{reason}"
+      self._map_whole_curve_reason = rejection
+      # A malformed/stale exact payload cannot become valid without changing,
+      # so cache its rejection too. A future timestamp can age into the allowed
+      # window, so leave that one eligible for a cheap retry.
+      self._map_whole_curve_cache_raw = raw_bytes if raw_bytes is not None and raw_reason != "timestamp_in_future" else None
+      self._map_whole_curve_cache = None
+      self._map_whole_curve_cache_rejection = rejection if self._map_whole_curve_cache_raw is not None else None
+      return None
 
   def _load_map_curvatures(self) -> list[tuple[float, float, float]]:
     """Return list of (lat, lon, curvature) from mapd Params, decimated to ~160 points."""
@@ -4666,6 +5001,9 @@ class VisionTurnController:
     Caller treats None as "use live sigmoid for this batch". Length-mismatch
     against the curvatures list is the caller's responsibility.
     """
+    if not MAP_PRECURVE_SPEEDS_ESTIMATOR_ALIGNED:
+      return None
+
     now = time.time()
     if (now - self._map_pre_curve_speeds_last_ts) < 0.2 and self._map_pre_curve_speeds_cache:
       # Cache is recent. Re-check hash on every call so a tuner edit that
@@ -4738,6 +5076,42 @@ class VisionTurnController:
     target_speed_mps = clip(target_speed_mps, 0.0, MAX_SPEED_DEFAULT)
     q = _q_curve_multiplier(kappa)
     return clip(target_speed_mps * q, 0.0, MAX_SPEED_DEFAULT)
+
+  def _clear_map_lookahead_state(self, *, clear_latched_output: bool) -> None:
+    """Remove every map-owned constraint; optionally clear a falling-edge hold.
+
+    The generic VTSC hold/release state must not be cleared on every disabled
+    tick because vision-only VTSC still uses it. It is cleared exactly on the
+    Map Lookahead true->false edge so a map-derived cap cannot survive the
+    driver-facing kill switch for even one planner update.
+    """
+    self._map_strategy_state.reset()
+    self._turn_visible_sticky = False
+    self._map_tail_candidate = None
+    self._map_tail_active = False
+    self._map_tail_last_cap = None
+    self._map_tail_advisory_cap = None
+    self._map_tail_strategic_cap = None
+    self._map_tail_last_start = 0.0
+    self._map_tail_last_coverage = 0.0
+    self._map_tail_anchor_dist_m = 0.0
+    self._map_tail_anchor_k = 0.0
+    self._map_tail_anchor_vsafe = 0.0
+    self._map_tail_anchor_index = -1
+    self._map_holdover_cap = None
+    self._map_holdover_candidate = None
+    self._map_holdover_ts = 0.0
+    self._visible_mainline_counterevidence_since = 0.0
+    self._map_profile_source = "none"
+    self._clear_curve_preview()
+    self._clear_winding_road_context()
+    if clear_latched_output:
+      self._v_turn_hold_until = 0.0
+      self._v_turn_hold_min = float(INF_SPEED)
+      self._v_turn_release_shape_active = False
+      self._map_whole_curve_cache_raw = None
+      self._map_whole_curve_cache = None
+      self._map_whole_curve_cache_rejection = None
 
   def _clear_curve_preview(self, *, reset_visible_mainline_counterevidence: bool = True) -> None:
     self._curve_preview_valid = False
@@ -5549,6 +5923,7 @@ class VisionTurnController:
     self._map_tail_anchor_vsafe = 0.0
     self._map_tail_anchor_index = -1
     self._map_tail_compute_reason = "unknown"
+    self._map_profile_source = "none"
     self._clear_winding_behavior_profile()
     self._clear_winding_road_context()
     gps_pose = self._get_last_gps_pose()
@@ -5568,27 +5943,75 @@ class VisionTurnController:
       except Exception:
         pass
     lat0, lon0, bearing_deg = gps_pose
-    pts = self._load_map_curvatures()
+    whole_profile = self._load_map_whole_curve_profile(gps_pose)
+    use_whole_profile = whole_profile is not None
+    if use_whole_profile:
+      assert whole_profile is not None
+      profile_points = list(whole_profile.points)
+      # Preserve the signed route output for fingerprinting/diagnostics, but
+      # speed physics always uses curvature magnitude for either turn direction.
+      pts = [(point.latitude, point.longitude, abs(point.curvature)) for point in profile_points]
+      self._map_profile_source = MAP_WHOLE_CURVE_ESTIMATOR_VERSION
+    else:
+      profile_points = []
+      pts = self._load_map_curvatures()
+      self._map_profile_source = "legacy_map_curvatures" if len(pts) >= 3 else "none"
     if len(pts) < 3:
-      self._map_tail_compute_reason = "no_map_curvatures"
+      if self._map_whole_curve_reason.startswith("rejected_"):
+        self._map_tail_compute_reason = f"whole_curve_{self._map_whole_curve_reason}"
+      else:
+        self._map_tail_compute_reason = "no_map_curvatures"
       self._clear_curve_preview()
       return (None, 0.0, 0.0)
 
-    # Find nearest index to ego
+    # Find nearest index to ego.
     try:
-      dists = [ _haversine_m(lat0, lon0, p[0], p[1]) for p in pts ]
+      dists = [_haversine_m(lat0, lon0, p[0], p[1]) for p in pts]
       i0 = int(np.argmin(dists))
+      nearest_distance = float(dists[i0])
     except Exception:
       i0 = 0
+      nearest_distance = float("inf") if use_whole_profile else 0.0
 
-    # Build forward along-track distances from nearest point
-    s_list = [0.0]
-    for i in range(i0, len(pts)-1):
-      s_list.append(s_list[-1] + _haversine_m(pts[i][0], pts[i][1], pts[i+1][0], pts[i+1][1]))
-    # Remove duplicate 0 entry alignment
-    if len(s_list) > 0:
-      s_list = s_list[1:]
-    k_list = [max(0.0, pts[j][2]) for j in range(i0+1, len(pts))]
+    # GPS proximity is intentionally checked here, not in the cached parser:
+    # this is the one route scan already required to choose i0 each tick. A
+    # cached profile therefore cannot remain active after ego leaves its route.
+    if use_whole_profile and (
+        nearest_distance > MAP_WHOLE_CURVE_PROFILE_MAX_EGO_DISTANCE_M or
+        i0 > len(pts) - 3):
+      if nearest_distance > MAP_WHOLE_CURVE_PROFILE_MAX_EGO_DISTANCE_M:
+        self._map_whole_curve_reason = "rejected_route_not_near_ego"
+      else:
+        self._map_whole_curve_reason = "rejected_insufficient_forward_context"
+      use_whole_profile = False
+      profile_points = []
+      pts = self._load_map_curvatures()
+      self._map_profile_source = "legacy_map_curvatures" if len(pts) >= 3 else "none"
+      if len(pts) < 3:
+        self._map_tail_compute_reason = f"whole_curve_{self._map_whole_curve_reason}"
+        self._clear_curve_preview()
+        return (None, 0.0, 0.0)
+      try:
+        dists = [_haversine_m(lat0, lon0, p[0], p[1]) for p in pts]
+        i0 = int(np.argmin(dists))
+      except Exception:
+        i0 = 0
+
+    if use_whole_profile:
+      # Consume the estimator's verified cumulative route distances directly;
+      # this retains strict ~5 m sampling and predecessor context through a
+      # current-way rollover.
+      base_distance = float(profile_points[i0].distance_m)
+      s_list = [float(point.distance_m - base_distance) for point in profile_points[i0 + 1:]]
+      k_list = [abs(float(point.curvature)) for point in profile_points[i0 + 1:]]
+    else:
+      # Legacy MapCurvatures has no cumulative-distance field.
+      s_list = [0.0]
+      for i in range(i0, len(pts)-1):
+        s_list.append(s_list[-1] + _haversine_m(pts[i][0], pts[i][1], pts[i+1][0], pts[i+1][1]))
+      if len(s_list) > 0:
+        s_list = s_list[1:]
+      k_list = [max(0.0, pts[j][2]) for j in range(i0+1, len(pts))]
     if not s_list or not k_list:
       self._map_tail_compute_reason = "insufficient_map_points"
       self._clear_curve_preview()
@@ -5626,8 +6049,9 @@ class VisionTurnController:
       except Exception:
         self._curve_preview_branch_stubs = []
 
-    # Limit horizon to ~800 m
-    S_MAX = 800.0
+    # Keep the legacy cap horizon unchanged; the versioned whole-curve profile
+    # carries the full production 1.2 km route context.
+    S_MAX = MAP_WHOLE_CURVE_PROFILE_HORIZON_M if use_whole_profile else 800.0
     L = len(s_list)
     cut = L
     for idx, s in enumerate(s_list):
@@ -5638,12 +6062,13 @@ class VisionTurnController:
     k_list = k_list[:cut]
     abs_indices = list(range(i0 + 1, len(pts)))[:cut]
 
-    # Compute vsafe from curvature. Prefer the per-node speeds baked into
-    # mapd tiles (schema v1+) when their sigmoidHash matches our runtime
-    # sigmoid; fall back per-batch otherwise. Live-tuned PHYSICS_* changes
-    # the runtime hash, which forces fallback automatically.
-    baked = self._load_map_pre_curve_speeds()
-    if baked is not None and len(baked) == len(k_list):
+    # Whole-curve publishes curvature, never final speed. Apply the current
+    # source-rounded sigmoid and Q/EQ data at runtime without learned
+    # calibration. Legacy data retains its established baked/live fallback.
+    baked = None if use_whole_profile else self._load_map_pre_curve_speeds()
+    if use_whole_profile:
+      vsafe = [self._whole_curve_speed(k) for k in k_list]
+    elif baked is not None and len(baked) == len(k_list):
       try:
         # Skip baked path when low-speed calibration is non-trivially active —
         # the bake captures scale=1.0 and the calibration only matters at

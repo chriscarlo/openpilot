@@ -6,12 +6,16 @@ This file is part of sunnypilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 """
 import hashlib
+import json
 import logging
 import os
 import stat
+import struct
+import subprocess
 import time
 import traceback
 import requests
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol
 from urllib.request import urlopen
@@ -39,14 +43,33 @@ class _CloudlogStatusReporter:
   def close(self) -> None:
     pass
 
-DEFAULT_VERSION = 'chauffeur-bake-v1'
+@dataclass(frozen=True)
+class MapdReleaseSpec:
+  version: str
+  release_id: str
+  build_id: str
+  sha256: str
+  capability: str
+  binary_url: str
+
+
+# Immutable Linux ARM64 release identity. A new artifact must use a new version
+# and source build ID; never replace the asset behind this tuple.
+DEFAULT_VERSION = 'chauffeur-whole-curve-v1'
 DEFAULT_BINARY_URL_TEMPLATE = "https://github.com/chriscarlo/mapd/releases/download/{version}/mapd"
 VERSION = DEFAULT_VERSION
-_REQUIRED_MAPD_BINARY_MARKERS = (
-  b"phys-a",
-  b"MapPreCurveSpeeds",
-  b"MapTilesSigmoidHash",
+MAP_WHOLE_CURVE_CAPABILITY = "MapWholeCurveProfile:whole-curve-v1"
+DEFAULT_RELEASE = MapdReleaseSpec(
+  version=DEFAULT_VERSION,
+  release_id=DEFAULT_VERSION,
+  build_id="99e7bb6c75f21977919108a456627aedbfc30070",
+  sha256="6236d99e5f62744541634f1b3e36ca2eec8d2a6b529eef80cb6639137874ffdb",
+  capability=MAP_WHOLE_CURVE_CAPABILITY,
+  binary_url=DEFAULT_BINARY_URL_TEMPLATE.format(version=DEFAULT_VERSION),
 )
+ELFCLASS64 = 2
+ELFDATA2LSB = 1
+EM_AARCH64 = 183
 _PERSISTENT_BINARY_CACHE_DIR = "binaries"
 
 
@@ -72,6 +95,33 @@ def get_target_binary_url(version: str, params: Params | None = None) -> str:
   return DEFAULT_BINARY_URL_TEMPLATE.format(version=version)
 
 
+def _validate_release_spec(release: MapdReleaseSpec) -> None:
+  if not release.version or not release.release_id or not release.build_id or not release.capability:
+    raise ValueError("mapd release identity is incomplete")
+  if (len(release.sha256) != 64 or release.sha256 != release.sha256.lower() or
+      any(ch not in "0123456789abcdef" for ch in release.sha256)):
+    raise ValueError(f"mapd release {release.version!r} has an invalid SHA-256")
+  if not release.binary_url:
+    raise ValueError(f"mapd release {release.version!r} has no binary URL")
+  if release.sha256 == "0" * 64 or release.build_id.startswith("REPLACE_WITH_"):
+    raise ValueError(f"mapd release {release.version!r} has not been bound to a production artifact")
+
+
+def get_release_spec(version: str) -> MapdReleaseSpec:
+  if version != DEFAULT_RELEASE.version:
+    raise ValueError(f"untrusted mapd release version {version!r}; no immutable release spec is registered")
+  _validate_release_spec(DEFAULT_RELEASE)
+  return DEFAULT_RELEASE
+
+
+def get_target_release(params: Params | None = None) -> MapdReleaseSpec:
+  params = params or Params()
+  version = get_target_version(params)
+  release = get_release_spec(version)
+  binary_url = get_target_binary_url(version, params)
+  return replace(release, binary_url=binary_url)
+
+
 def update_installed_version(version: str, params: Params = None) -> None:
   if params is None:
     params = Params()
@@ -79,10 +129,16 @@ def update_installed_version(version: str, params: Params = None) -> None:
   params.put("MapdVersion", version)
 
 
-def get_persistent_binary_cache_path(version: str) -> str:
-  """Return a path outside the update-swapped checkout for one mapd release."""
-  version_key = hashlib.sha256(version.encode("utf-8")).hexdigest()[:16]
-  return os.path.join(Paths.mapd_root(), _PERSISTENT_BINARY_CACHE_DIR, f"mapd-{version_key}")
+def get_persistent_binary_cache_path(release: MapdReleaseSpec | str) -> str:
+  """Return an identity-keyed path outside the update-swapped checkout."""
+  release_spec = get_release_spec(release) if isinstance(release, str) else release
+  _validate_release_spec(release_spec)
+  version_key = hashlib.sha256(release_spec.version.encode("utf-8")).hexdigest()[:16]
+  return os.path.join(
+    Paths.mapd_root(),
+    _PERSISTENT_BINARY_CACHE_DIR,
+    f"mapd-{version_key}-{release_spec.sha256[:16]}",
+  )
 
 
 class MapdInstallManager:
@@ -92,24 +148,43 @@ class MapdInstallManager:
 
   def download(self) -> None:
     self.ensure_directories_exist()
-    target_version = get_target_version(self._params)
-    self._download_file(get_target_binary_url(target_version, self._params))
+    release = get_target_release(self._params)
+    self._download_file(release.binary_url, release)
     # Only commit MapdVersion AFTER the download has fully succeeded and the
     # binary on disk passes integrity checks. Otherwise a silent download
     # failure (network, 404, truncated tarball) would leave
     # MapdVersion=<target> with no binary, and download_needed() would
     # return False forever — the exact state that silently kills MapCurvatures
     # and takes the VTSC HUD with it.
-    self._verify_installed_binary(MAPD_PATH)
-    self._cache_installed_binary(target_version)
-    update_installed_version(target_version, self._params)
+    self._verify_installed_binary(MAPD_PATH, release)
+    try:
+      self._cache_installed_binary(release)
+    except OSError as exc:
+      # The active binary is already exact and atomically installed. Persistent
+      # cache refresh is important for offline update recovery, but a storage
+      # failure must not leave MapdVersion falsely stale and force a download
+      # loop on every boot.
+      self._spinner.update(f"Could not refresh persistent mapd cache: {exc}")
+    update_installed_version(release.version, self._params)
 
   @staticmethod
-  def _verify_installed_binary(path: str) -> None:
-    """Raise if the file at `path` isn't the expected chauffeur mapd binary."""
+  def _required_binary_markers(release: MapdReleaseSpec) -> tuple[bytes, ...]:
+    return (
+      f"MapdReleaseID:{release.release_id}".encode(),
+      f"MapdBuildID:{release.build_id}".encode(),
+      release.capability.encode("utf-8"),
+    )
+
+  @staticmethod
+  def _verify_installed_binary(path: str, release: MapdReleaseSpec | None = None) -> None:
+    """Verify the exact immutable Linux ARM64 mapd release without running it."""
+    release = release or get_release_spec(DEFAULT_VERSION)
+    _validate_release_spec(release)
     if not os.path.exists(path):
       raise FileNotFoundError(f"mapd binary not found at {path} after download")
-    st = os.stat(path)
+    st = os.lstat(path)
+    if not stat.S_ISREG(st.st_mode):
+      raise OSError(f"mapd binary at {path} is not a regular file")
     # Static arm64 mapd is ~9 MB; anything under 1 MB is a truncated or
     # HTML error page written in place of the binary.
     if st.st_size < 1_000_000:
@@ -118,48 +193,97 @@ class MapdInstallManager:
       raise OSError(f"mapd binary at {path} is not executable")
     with open(path, 'rb') as fp:
       content = fp.read()
-    magic = content[:4]
-    if magic != b'\x7fELF':
-      raise OSError(f"mapd binary at {path} is not an ELF executable (magic={magic!r})")
-    missing_markers = [marker.decode('utf-8') for marker in _REQUIRED_MAPD_BINARY_MARKERS if marker not in content]
+    if content[:4] != b'\x7fELF':
+      raise OSError(f"mapd binary at {path} is not an ELF executable (magic={content[:4]!r})")
+    if len(content) < 20 or content[4] != ELFCLASS64 or content[5] != ELFDATA2LSB:
+      raise OSError(f"mapd binary at {path} is not a little-endian ELF64 executable")
+    machine = struct.unpack_from("<H", content, 18)[0]
+    if machine != EM_AARCH64:
+      raise OSError(f"mapd binary at {path} has ELF machine {machine}, expected Linux ARM64 ({EM_AARCH64})")
+    actual_sha256 = hashlib.sha256(content).hexdigest()
+    if actual_sha256 != release.sha256:
+      raise OSError(
+        f"mapd binary at {path} has SHA-256 {actual_sha256}, expected {release.sha256} for {release.version}"
+      )
+    missing_markers = [
+      marker.decode('utf-8')
+      for marker in MapdInstallManager._required_binary_markers(release)
+      if marker not in content
+    ]
     if missing_markers:
-      raise OSError(f"mapd binary at {path} is not the chauffeur-bake mapd build; missing markers: {', '.join(missing_markers)}")
+      raise OSError(f"mapd binary at {path} is missing immutable identity/capability markers: {', '.join(missing_markers)}")
+
+  @staticmethod
+  def _verify_runtime_build_info(path: str, release: MapdReleaseSpec | None = None) -> dict:
+    """Execute the already hash-verified ARM64 binary and verify its identity JSON."""
+    release = release or get_release_spec(DEFAULT_VERSION)
+    _validate_release_spec(release)
+    try:
+      result = subprocess.run(
+        [path, "--build-info"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=3.0,
+      )
+    except (OSError, subprocess.SubprocessError) as exc:
+      raise OSError(f"could not execute mapd --build-info: {exc}") from exc
+    if result.returncode != 0:
+      raise OSError(f"mapd --build-info failed with exit {result.returncode}: {result.stderr.strip()}")
+    try:
+      info = json.loads(result.stdout)
+    except Exception as exc:
+      raise OSError("mapd --build-info did not return valid JSON") from exc
+    if not isinstance(info, dict):
+      raise OSError("mapd --build-info did not return an object")
+    if info.get("releaseID") != release.release_id:
+      raise OSError(f"mapd release ID {info.get('releaseID')!r} != expected {release.release_id!r}")
+    if info.get("buildID") != release.build_id:
+      raise OSError(f"mapd build ID {info.get('buildID')!r} != expected {release.build_id!r}")
+    capabilities = info.get("capabilities")
+    if not isinstance(capabilities, list) or not all(isinstance(capability, str) for capability in capabilities):
+      raise OSError("mapd capabilities are malformed")
+    if release.capability not in capabilities:
+      raise OSError(f"mapd is missing required capability {release.capability!r}")
+    return info
 
   def check_and_download(self) -> None:
     if self.download_needed():
       self.download()
 
   def download_needed(self) -> bool:
+    release = get_target_release(self._params)
     try:
-      self._verify_installed_binary(MAPD_PATH)
+      self._verify_installed_binary(MAPD_PATH, release)
     except (FileNotFoundError, OSError):
       return True
-    return self.get_installed_version() != get_target_version(self._params)
+    return self.get_installed_version() != release.version
 
-  def _copy_verified_binary(self, source: str, destination: str) -> None:
-    self._verify_installed_binary(source)
+  def _copy_verified_binary(self, source: str, destination: str, release: MapdReleaseSpec) -> None:
+    self._verify_installed_binary(source, release)
     destination_path = Path(destination)
     temp_path = destination_path.with_name(destination_path.name + ".tmp")
     if temp_path.exists():
       temp_path.unlink()
     self._safe_write_and_set_executable(temp_path, Path(source).read_bytes())
-    self._verify_installed_binary(str(temp_path))
+    self._verify_installed_binary(str(temp_path), release)
     temp_path.replace(destination_path)
+    self._fsync_directory(destination_path.parent)
 
-  def _cache_installed_binary(self, version: str) -> None:
-    cache_path = get_persistent_binary_cache_path(version)
+  def _cache_installed_binary(self, release: MapdReleaseSpec) -> None:
+    cache_path = get_persistent_binary_cache_path(release)
     try:
-      self._verify_installed_binary(cache_path)
+      self._verify_installed_binary(cache_path, release)
       return
     except (FileNotFoundError, OSError):
       pass
-    self._copy_verified_binary(MAPD_PATH, cache_path)
+    self._copy_verified_binary(MAPD_PATH, cache_path, release)
 
-  def restore_cached_binary(self, version: str) -> bool:
-    cache_path = get_persistent_binary_cache_path(version)
+  def restore_cached_binary(self, release: MapdReleaseSpec) -> bool:
+    cache_path = get_persistent_binary_cache_path(release)
     try:
-      self._copy_verified_binary(cache_path, MAPD_PATH)
-      self._spinner.update(f"Restored mapd [{version}] from persistent cache.")
+      self._copy_verified_binary(cache_path, MAPD_PATH, release)
+      self._spinner.update(f"Restored mapd [{release.version}] from persistent cache.")
       return True
     except (FileNotFoundError, OSError):
       return False
@@ -183,17 +307,33 @@ class MapdInstallManager:
     current_permissions = stat.S_IMODE(os.lstat(file_path).st_mode)
     os.chmod(file_path, current_permissions | stat.S_IEXEC)
 
-  def _download_file(self, url: str, num_retries=5) -> None:
+  @staticmethod
+  def _fsync_directory(path: Path) -> None:
+    directory_fd = os.open(path, os.O_RDONLY)
+    try:
+      os.fsync(directory_fd)
+    finally:
+      os.close(directory_fd)
+
+  def _download_file(self, url: str, release: MapdReleaseSpec, num_retries=5) -> None:
+    """Download, fully verify, then atomically activate an immutable release."""
+    _validate_release_spec(release)
     temp_file = Path(MAPD_PATH + ".tmp")
     download_timeout = 60
     last_exception: Exception | None = None
     for cnt in range(num_retries):
       try:
+        if temp_file.exists():
+          temp_file.unlink()
         response = requests.get(url, stream=True, timeout=download_timeout)
         response.raise_for_status()
         self._safe_write_and_set_executable(temp_file, response.content)
-        # No exceptions encountered. Safe to replace original file.
+        # The active binary remains untouched until every static identity check
+        # passes. This preserves a known-good release on a corrupt/HTML/foreign
+        # architecture response.
+        self._verify_installed_binary(str(temp_file), release)
         temp_file.replace(MAPD_PATH)
+        self._fsync_directory(temp_file.parent)
         return
       except requests.exceptions.ReadTimeout as e:
         last_exception = e
@@ -202,6 +342,10 @@ class MapdInstallManager:
       except requests.exceptions.RequestException as e:
         last_exception = e
         self._spinner.update(f"RequestException caught: {e}. Retrying download... [{cnt}]")
+        time.sleep(0.5)
+      except (OSError, ValueError) as e:
+        last_exception = e
+        self._spinner.update(f"Downloaded mapd failed immutable release verification: {e}. Retrying... [{cnt}]")
         time.sleep(0.5)
 
     # Delete temp file if the process was not successful.
@@ -245,9 +389,10 @@ class MapdInstallManager:
         return
 
       if self.wait_for_internet_connection(return_on_failure=True):
-        target_version = get_target_version(self._params)
-        binary_url = get_target_binary_url(target_version, self._params)
-        self._spinner.update(f"Downloading mapd [{self.get_installed_version()}] => [{target_version}] from [{binary_url}].")
+        release = get_target_release(self._params)
+        self._spinner.update(
+          f"Downloading mapd [{self.get_installed_version()}] => [{release.version}] from [{release.binary_url}]."
+        )
         time.sleep(0.1)
         self.check_and_download()
       self._spinner.close()
@@ -284,26 +429,33 @@ def ensure_mapd_installed(params: Params | None = None,
   reporter = reporter or _CloudlogStatusReporter()
   manager = MapdInstallManager(reporter, params)
   manager.ensure_directories_exist()
-  target_version = get_target_version(params)
+  try:
+    release = get_target_release(params)
+  except (ValueError, KeyError) as exc:
+    reporter.update(f"mapd release configuration rejected: {exc}")
+    return False
   installed_version = _clean_override(params.get("MapdVersion"))
 
   try:
-    manager._verify_installed_binary(MAPD_PATH)
-    if installed_version == target_version:
-      try:
-        manager._cache_installed_binary(target_version)
-      except OSError as e:
-        reporter.update(f"Could not refresh persistent mapd cache: {e}")
-      return True
-    reporter.update(f"Installed mapd version [{installed_version or 'unset'}] != target [{target_version}]; downloading.")
+    manager._verify_installed_binary(MAPD_PATH, release)
+    try:
+      manager._cache_installed_binary(release)
+    except OSError as e:
+      reporter.update(f"Could not refresh persistent mapd cache: {e}")
+    if installed_version != release.version:
+      reporter.update(
+        f"Exact mapd release is installed; repairing MapdVersion [{installed_version or 'unset'}] => [{release.version}]."
+      )
+      update_installed_version(release.version, params)
+    return True
   except (FileNotFoundError, OSError):
     pass  # Fall through to download path.
 
   # Updates deliberately clean ignored files from the checkout, including the
   # release binary. Restore the last verified copy from persistent OSM storage
   # before consulting network state so an offline boot still starts mapd.
-  if manager.restore_cached_binary(target_version):
-    update_installed_version(target_version, params)
+  if manager.restore_cached_binary(release):
+    update_installed_version(release.version, params)
     return True
 
   # deviceState may not be available super-early in boot; tolerate the SubMaster
@@ -319,8 +471,9 @@ def ensure_mapd_installed(params: Params | None = None,
     return False
 
   try:
-    binary_url = get_target_binary_url(target_version, params)
-    reporter.update(f"Downloading mapd [{manager.get_installed_version()}] => [{target_version}] from [{binary_url}].")
+    reporter.update(
+      f"Downloading mapd [{manager.get_installed_version()}] => [{release.version}] from [{release.binary_url}]."
+    )
     manager.download()
     return True
   except Exception as e:

@@ -8,6 +8,7 @@ import json
 import math
 import os
 import platform
+import time
 
 from openpilot.common.params import Params
 from openpilot.common.swaglog import cloudlog
@@ -17,6 +18,14 @@ from openpilot.sunnypilot.mapd.road_geometry import (
     OfflineRoadGeometryExtractor, OSMRoadGeometryExtractor, RoadGeometryCache, RoadSegment
 )
 from openpilot.system.hardware.hw import Paths
+
+
+# LastGPSPosition is persistent so mapd can bootstrap after a restart, but GPS
+# arrives continuously. Bound disk writes while still refreshing the restart
+# anchor during a drive and periodically while stationary.
+LAST_GPS_PERSIST_MIN_INTERVAL_S = 300.0
+LAST_GPS_PERSIST_MAX_INTERVAL_S = 1800.0
+LAST_GPS_PERSIST_MIN_DISTANCE_M = 1000.0
 
 
 class OsmMapData(BaseMapData):
@@ -34,6 +43,8 @@ class OsmMapData(BaseMapData):
     self.road_geometry_failure_reason: str | None = None
     self.local_map_health_issue: str | None = None
     self._missing_context_cycles = 0
+    self._last_persisted_gps_monotonic: float | None = None
+    self._last_persisted_gps_position: Coordinate | None = None
 
     # Initialize road geometry extractor
     self._initialize_road_geometry()
@@ -73,32 +84,117 @@ class OsmMapData(BaseMapData):
       cloudlog.error(self.road_geometry_failure_reason)
       self.road_geometry_extractor = None
 
-  def update_location(self) -> None:
-    if self.last_position is None or self.last_altitude is None:
-      return
-
-    # openpilot-mapd expects LastGPSPosition to include `bearing` (degrees) to
-    # disambiguate direction on one-way roads. Without it, mapd can fail to match
-    # the current way and MTSC/MapCurvatures can stay empty (`[]`).
+  @staticmethod
+  def _valid_coordinate(latitude, longitude) -> tuple[float, float] | None:
     try:
-      bearing_deg = self.extract_bearing_deg(self.sm[self.gps_location_service])
+      if isinstance(latitude, bool) or isinstance(longitude, bool):
+        return None
+      latitude_f = float(latitude)
+      longitude_f = float(longitude)
+    except (TypeError, ValueError, OverflowError):
+      return None
+    if not math.isfinite(latitude_f) or not math.isfinite(longitude_f):
+      return None
+    if not -90.0 <= latitude_f <= 90.0 or not -180.0 <= longitude_f <= 180.0:
+      return None
+    if latitude_f == 0.0 and longitude_f == 0.0:
+      return None
+    return latitude_f, longitude_f
+
+  def _validated_live_gps_payload(self) -> dict | None:
+    """Return a real, newly received GPS fix suitable for Params publication."""
+    service = self.gps_location_service
+    try:
+      # Requiring all three SubMaster states prevents startup defaults, stale
+      # messages, and invalid cereal messages from becoming a restart anchor.
+      if (self.sm.updated[service] is not True or
+          self.sm.valid[service] is not True or
+          self.sm.alive[service] is not True):
+        return None
+      gps = self.sm[service]
+      if getattr(gps, "hasFix", False) is not True:
+        return None
     except Exception:
-      bearing_deg = 0.0
+      return None
 
-    # Avoid serializing NaN/Inf into params JSON. Go's json parser rejects these.
-    if not math.isfinite(bearing_deg):
-      bearing_deg = float(getattr(self, 'last_bearing', 0.0) or 0.0)
+    coordinate = self._valid_coordinate(getattr(gps, "latitude", None), getattr(gps, "longitude", None))
+    if coordinate is None:
+      return None
+    latitude, longitude = coordinate
+
+    # openpilot-mapd expects bearing degrees to disambiguate direction on
+    # one-way roads. extract_bearing_deg also derives it from velocity when an
+    # explicit bearing is unavailable.
+    bearing_deg = self.extract_bearing_deg(gps)
     if not math.isfinite(bearing_deg):
       bearing_deg = 0.0
+    bearing_deg %= 360.0
 
-    params = {
-      "latitude": self.last_position.latitude,
-      "longitude": self.last_position.longitude,
-      "altitude": self.last_altitude,
+    payload = {
+      "latitude": latitude,
+      "longitude": longitude,
       "bearing": bearing_deg,
     }
+    try:
+      altitude = getattr(gps, "altitude", None)
+      if not isinstance(altitude, bool):
+        altitude_f = float(altitude)
+        if math.isfinite(altitude_f):
+          payload["altitude"] = altitude_f
+    except (TypeError, ValueError, OverflowError):
+      pass
+    return payload
 
-    self.mem_params.put("LastGPSPosition", json.dumps(params))
+  def _should_persist_gps(self, position: Coordinate, now_monotonic: float) -> bool:
+    if self._last_persisted_gps_monotonic is None or self._last_persisted_gps_position is None:
+      return True
+
+    elapsed_s = now_monotonic - self._last_persisted_gps_monotonic
+    if elapsed_s < LAST_GPS_PERSIST_MIN_INTERVAL_S:
+      return False
+    if elapsed_s >= LAST_GPS_PERSIST_MAX_INTERVAL_S:
+      return True
+
+    try:
+      moved_m = self._last_persisted_gps_position.distance_to(position)
+    except Exception:
+      return False
+    return math.isfinite(moved_m) and moved_m >= LAST_GPS_PERSIST_MIN_DISTANCE_M
+
+  def _publish_validated_gps(self, payload: dict) -> None:
+    serialized = json.dumps(payload, separators=(",", ":"), allow_nan=False)
+    position = Coordinate(payload["latitude"], payload["longitude"])
+
+    # Shared-memory publication remains live on tici and never touches flash.
+    # On Darwin mem_params aliases persistent Params, so the throttled write
+    # below is the only publication path.
+    if self.mem_params is not self.params:
+      self.mem_params.put("LastGPSPosition", serialized)
+
+    now_monotonic = time.monotonic()
+    if not self._should_persist_gps(position, now_monotonic):
+      return
+    try:
+      self.params.put_nonblocking("LastGPSPosition", serialized)
+    except Exception as e:
+      cloudlog.error(f"Failed to persist validated LastGPSPosition: {e}")
+      return
+    self._last_persisted_gps_monotonic = now_monotonic
+    self._last_persisted_gps_position = position
+
+  def update_location(self) -> None:
+    payload = self._validated_live_gps_payload()
+    if payload is not None:
+      self.last_position = Coordinate(payload["latitude"], payload["longitude"])
+      self.last_altitude = payload.get("altitude")
+      self.last_bearing = payload["bearing"]
+      self._publish_validated_gps(payload)
+
+    if (self.last_position is None or self.last_altitude is None or
+        self._valid_coordinate(self.last_position.latitude, self.last_position.longitude) is None):
+      self.road_geometry_valid = False
+      self._update_local_map_health_issue()
+      return
 
     # Update road geometry information, but never let geometry failures break
     # legacy mapd behavior.

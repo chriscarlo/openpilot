@@ -11,6 +11,7 @@ from cereal import log
 import sunnypilot.selfdrive.controls.lib.vtsc_map_strategy as map_strategy
 from sunnypilot.selfdrive.controls.lib.vision_turn_controller import (
   curvature_to_speed,
+  VisionTurnController,
   SEVERE_OVERSHOOT_SPEED_SCALE_MIN,
   VISIBLE_MAINLINE_RELAX_DWELL_S,
   VTURN_HOLD_S,
@@ -33,6 +34,11 @@ from .harness import Step, simulate_sequence, simulate_sequence_trace, mk_vtsc_w
 
 
 WINDING_PROFILE_FIXTURE = Path(__file__).with_name("fixtures") / "winding_road_profiles" / "eldorado_representatives.json"
+
+
+def test_raw_tile_baked_speeds_stay_disabled_until_curvature_estimators_match():
+  controller = object.__new__(VisionTurnController)
+  assert controller._load_map_pre_curve_speeds() is None
 
 
 def _load_winding_profile_fixture():
@@ -617,9 +623,12 @@ def test_driver_override_learning_reaches_material_relax_after_three_short_burst
 
   snap = simulate_sequence(steps=steps, vtsc=mk_vtsc_with_params(), v0_mps=v0, v_cruise_mps=v_cruise, dt=0.05)
 
-  assert float(snap['low_speed_calibration_override_state']) > 0.025
-  assert float(snap['low_speed_calibration_state']) > 0.025
-  assert float(snap['low_speed_calibration_scale']) > 1.025
+  # The persisted whole-curve production tune starts from a tighter low-speed
+  # envelope, so the same three brief overrides produce a smaller—but still
+  # clearly material—bounded relaxation signal.
+  assert float(snap['low_speed_calibration_override_state']) > 0.015
+  assert float(snap['low_speed_calibration_state']) > 0.015
+  assert float(snap['low_speed_calibration_scale']) > 1.015
   assert str(snap['low_speed_calibration_reason']) == 'relax_override'
 
 
@@ -1004,10 +1013,10 @@ def test_low_confidence_visible_curve_tracks_visible_cap_without_occlusion_state
   assert bool(snap['occl_positive_margin']) is False
   assert float(snap['vtsc_cmd']) < v_cruise - 1.0
   assert str(snap['active_cap']) == 'visible'
-  # Under the retuned source sigmoid, the visible-curve cap itself now asks for decel here.
-  # The invariant we care about is that the controller stays on the visible path without any
-  # occlusion-state takeover or bypass behavior.
-  assert float(snap['decel_cmd']) < -0.1
+  # The exact final acceleration depends on whether the simulated ego has
+  # already reached the retuned cap. The invariant here is visible-path
+  # ownership without occlusion takeover or a positive acceleration request.
+  assert float(snap['decel_cmd']) <= 0.0
 
 
 def test_severe_occlusion_reacquisition_adds_nudge():

@@ -17,7 +17,11 @@ from types import SimpleNamespace
 
 import capnp
 
-from openpilot.sunnypilot.mapd.live_map_data.osm_map_data import OsmMapData
+from openpilot.sunnypilot.mapd.live_map_data.osm_map_data import (
+    LAST_GPS_PERSIST_MAX_INTERVAL_S,
+    LAST_GPS_PERSIST_MIN_INTERVAL_S,
+    OsmMapData,
+)
 from openpilot.sunnypilot.mapd.road_geometry import OfflineRoadGeometryExtractor
 from openpilot.sunnypilot.navd.helpers import Coordinate
 
@@ -35,6 +39,7 @@ def _make_mock_params():
     params.get.side_effect = _get
     params.get_bool.return_value = False
     params.put.return_value = None
+    params.put_nonblocking.return_value = None
     params.put_bool.return_value = None
     return params
 
@@ -126,6 +131,36 @@ class TestMapdIntegration(unittest.TestCase):
         self.params_patcher_base.stop()
         self.params_patcher_osm.stop()
 
+    @staticmethod
+    def _set_live_gps(
+        map_data: OsmMapData,
+        *,
+        latitude=38.73152,
+        longitude=-120.78821,
+        altitude=1012.5,
+        bearing=274.83,
+        v_ned=(0.0, 0.0, 0.0),
+        has_fix=True,
+        updated=True,
+        valid=True,
+        alive=True,
+    ):
+        gps_msg = SimpleNamespace(
+            latitude=latitude,
+            longitude=longitude,
+            altitude=altitude,
+            bearingDeg=bearing,
+            bearing=bearing,
+            vNED=v_ned,
+            hasFix=has_fix,
+        )
+        map_data.sm = MagicMock()
+        map_data.sm.updated = {map_data.gps_location_service: updated}
+        map_data.sm.valid = {map_data.gps_location_service: valid}
+        map_data.sm.alive = {map_data.gps_location_service: alive}
+        map_data.sm.__getitem__.return_value = gps_msg
+        return gps_msg
+
     def test_osm_map_data_initialization(self):
         """Test that OsmMapData initializes without errors."""
         try:
@@ -177,16 +212,9 @@ class TestMapdIntegration(unittest.TestCase):
     def test_update_location_writes_last_gps_with_bearing(self):
         """LastGPSPosition should include bearing for mapd one-way matching."""
         map_data = OsmMapData()
+        map_data.params = MagicMock()
         map_data.mem_params = MagicMock()
-
-        map_data.last_position = Coordinate(38.73152, -120.78821)
-        map_data.last_altitude = 1012.5
-
-        # Mock GPS feed with bearing from cereal gpsLocation service
-        gps_msg = MagicMock()
-        gps_msg.bearingDeg = 274.83
-        map_data.sm = MagicMock()
-        map_data.sm.__getitem__.return_value = gps_msg
+        self._set_live_gps(map_data)
 
         # Isolate this test from road geometry extractor side effects
         with patch.object(map_data, "_update_road_geometry", return_value=None):
@@ -202,24 +230,92 @@ class TestMapdIntegration(unittest.TestCase):
         self.assertAlmostEqual(payload.get("longitude"), -120.78821, places=5)
         self.assertAlmostEqual(payload.get("altitude"), 1012.5, places=1)
         self.assertAlmostEqual(payload.get("bearing"), 274.83, places=2)
+        map_data.params.put_nonblocking.assert_called_once_with("LastGPSPosition", args[1])
 
     def test_update_location_uses_velocity_heading_when_bearing_is_invalid(self):
         """Fallback to motion-derived heading when gps bearingDeg is invalid."""
         map_data = OsmMapData()
+        map_data.params = MagicMock()
         map_data.mem_params = MagicMock()
-
-        map_data.last_position = Coordinate(38.64373, -121.18564)
-        map_data.last_altitude = 23.4
-
-        gps_msg = SimpleNamespace(bearingDeg=math.nan, bearing=math.nan, vNED=[0.0, -12.0, 0.0])
-        map_data.sm = MagicMock()
-        map_data.sm.__getitem__.return_value = gps_msg
+        self._set_live_gps(
+            map_data,
+            latitude=38.64373,
+            longitude=-121.18564,
+            altitude=23.4,
+            bearing=math.nan,
+            v_ned=(0.0, -12.0, 0.0),
+        )
 
         with patch.object(map_data, "_update_road_geometry", return_value=None):
             map_data.update_location()
 
         payload = json.loads(map_data.mem_params.put.call_args[0][1])
         self.assertAlmostEqual(payload.get("bearing"), 270.0, places=1)
+
+    def test_last_gps_persistence_rejects_invalid_or_synthetic_fixes(self):
+        invalid_fixes = [
+            {"latitude": math.nan},
+            {"latitude": math.inf},
+            {"longitude": math.nan},
+            {"longitude": -math.inf},
+            {"latitude": 91.0},
+            {"longitude": -181.0},
+            {"latitude": 0.0, "longitude": 0.0},
+            {"has_fix": False},
+            {"updated": False},
+            {"valid": False},
+            {"alive": False},
+        ]
+
+        for overrides in invalid_fixes:
+            with self.subTest(overrides=overrides):
+                map_data = OsmMapData()
+                map_data.params = MagicMock()
+                map_data.mem_params = MagicMock()
+                self._set_live_gps(map_data, **overrides)
+
+                with patch.object(map_data, "_update_road_geometry", return_value=None):
+                    map_data.update_location()
+
+                map_data.mem_params.put.assert_not_called()
+                map_data.params.put_nonblocking.assert_not_called()
+
+    def test_last_gps_persistence_is_time_and_movement_throttled(self):
+        map_data = OsmMapData()
+        map_data.params = MagicMock()
+        map_data.mem_params = MagicMock()
+        gps_msg = self._set_live_gps(map_data, latitude=38.0, longitude=-121.0)
+        clock = [100.0]
+
+        with patch(
+            "openpilot.sunnypilot.mapd.live_map_data.osm_map_data.time.monotonic",
+            side_effect=lambda: clock[0],
+        ), patch.object(map_data, "_update_road_geometry", return_value=None):
+            map_data.update_location()
+            self.assertEqual(map_data.params.put_nonblocking.call_count, 1)
+
+            # Movement cannot defeat the minimum interval.
+            clock[0] += 1.0
+            gps_msg.latitude = 38.02
+            map_data.update_location()
+            self.assertEqual(map_data.params.put_nonblocking.call_count, 1)
+
+            # Once the minimum interval passes, small movement remains
+            # throttled but meaningful movement refreshes the restart anchor.
+            clock[0] = 100.0 + LAST_GPS_PERSIST_MIN_INTERVAL_S + 1.0
+            gps_msg.latitude = 38.001
+            map_data.update_location()
+            self.assertEqual(map_data.params.put_nonblocking.call_count, 1)
+            gps_msg.latitude = 38.02
+            map_data.update_location()
+            self.assertEqual(map_data.params.put_nonblocking.call_count, 2)
+
+            # A stationary fix is still refreshed at the bounded maximum age.
+            clock[0] += LAST_GPS_PERSIST_MAX_INTERVAL_S
+            map_data.update_location()
+            self.assertEqual(map_data.params.put_nonblocking.call_count, 3)
+
+        self.assertEqual(map_data.mem_params.put.call_count, 5)
 
     def test_offline_tile_geometry_populates_road_name_and_speed_limit(self):
         """Offline Cap'n Proto tiles should provide road geometry without a SQLite DB."""

@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
 
+import hashlib
+import json
 import stat
+import struct
+import subprocess
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from openpilot.sunnypilot.mapd import mapd_installer
 
@@ -47,206 +54,341 @@ class MeteredSubMaster(FakeSubMaster):
     self.device_state.networkMetered = True
 
 
-def write_fake_mapd(path, *, chauffeur_markers: bool):
-  markers = b" ".join(mapd_installer._REQUIRED_MAPD_BINARY_MARKERS) if chauffeur_markers else b"legacy-pfeifer-mapd"
-  content = b"\x7fELF" + b"\0" * 128 + markers
-  content += b"\0" * max(0, 1_000_000 - len(content))
+class FakeResponse:
+  def __init__(self, content: bytes):
+    self.content = content
+
+  def raise_for_status(self):
+    pass
+
+
+def make_release_and_binary(*, machine=mapd_installer.EM_AARCH64,
+                            release_marker=True, build_marker=True,
+                            capability_marker=True):
+  release = mapd_installer.MapdReleaseSpec(
+    version=mapd_installer.DEFAULT_VERSION,
+    release_id="chauffeur-whole-curve-v1",
+    build_id="test-build-20260713",
+    sha256="f" * 64,
+    capability=mapd_installer.MAP_WHOLE_CURVE_CAPABILITY,
+    binary_url="https://example.test/chauffeur-whole-curve-v1/mapd",
+  )
+  header = bytearray(256)
+  header[:4] = b"\x7fELF"
+  header[4] = mapd_installer.ELFCLASS64
+  header[5] = mapd_installer.ELFDATA2LSB
+  header[6] = 1
+  struct.pack_into("<H", header, 18, machine)
+  markers = []
+  if release_marker:
+    markers.append(f"MapdReleaseID:{release.release_id}".encode())
+  if build_marker:
+    markers.append(f"MapdBuildID:{release.build_id}".encode())
+  if capability_marker:
+    markers.append(release.capability.encode())
+  content = bytes(header) + b"\0" + b"\0".join(markers)
+  content += b"\0" * max(0, 1_000_128 - len(content))
+  release = replace(release, sha256=hashlib.sha256(content).hexdigest())
+  return release, content
+
+
+def write_binary(path: Path, content: bytes):
+  path.parent.mkdir(parents=True, exist_ok=True)
   path.write_bytes(content)
   path.chmod(path.stat().st_mode | stat.S_IEXEC)
 
 
-def test_target_version_defaults(monkeypatch):
+@pytest.fixture(autouse=True)
+def trusted_release(monkeypatch):
   monkeypatch.delenv("SP_MAPD_RELEASE_VERSION", raising=False)
+  monkeypatch.delenv("SP_MAPD_BINARY_URL", raising=False)
+  release, content = make_release_and_binary()
+  monkeypatch.setattr(mapd_installer, "DEFAULT_RELEASE", release)
+  return release, content
+
+
+def configure_install_paths(monkeypatch, tmp_path):
+  binary_dir = tmp_path / "checkout" / "third_party" / "mapd"
+  mapd_root = tmp_path / "persistent-osm"
+  monkeypatch.setattr(mapd_installer, "MAPD_PATH", str(binary_dir / "mapd"))
+  monkeypatch.setattr(mapd_installer, "MAPD_BIN_DIR", str(binary_dir))
+  monkeypatch.setattr(mapd_installer.Paths, "mapd_root", staticmethod(lambda: str(mapd_root)))
+  return binary_dir / "mapd", mapd_root
+
+
+def test_target_version_defaults():
   assert mapd_installer.get_target_version(DummyParams({})) == mapd_installer.DEFAULT_VERSION
 
 
-def test_target_version_param_override(monkeypatch):
-  monkeypatch.delenv("SP_MAPD_RELEASE_VERSION", raising=False)
+def test_unregistered_target_version_is_rejected():
   params = DummyParams({"MapdReleaseVersion": b"v9.9.9"})
-  assert mapd_installer.get_target_version(params) == "v9.9.9"
+  with pytest.raises(ValueError, match="untrusted mapd release"):
+    mapd_installer.get_target_release(params)
 
 
-def test_target_version_env_override_wins(monkeypatch):
-  monkeypatch.setenv("SP_MAPD_RELEASE_VERSION", "v8.8.8")
-  params = DummyParams({"MapdReleaseVersion": b"v9.9.9"})
-  assert mapd_installer.get_target_version(params) == "v8.8.8"
+def test_target_binary_url_override_preserves_immutable_identity(trusted_release):
+  release, _ = trusted_release
+  params = DummyParams({"MapdBinaryUrl": "https://maps.example.test/releases/{version}/mapd"})
+
+  target = mapd_installer.get_target_release(params)
+
+  assert target.binary_url == f"https://maps.example.test/releases/{release.version}/mapd"
+  assert replace(target, binary_url=release.binary_url) == release
 
 
-def test_target_binary_url_defaults(monkeypatch):
-  monkeypatch.delenv("SP_MAPD_BINARY_URL", raising=False)
-  assert mapd_installer.get_target_binary_url("v1.2.3", DummyParams({})) == \
-    "https://github.com/chriscarlo/mapd/releases/download/v1.2.3/mapd"
+def test_unbound_production_release_is_rejected(monkeypatch):
+  placeholder = replace(
+    mapd_installer.DEFAULT_RELEASE,
+    build_id="REPLACE_WITH_FINAL_MAPD_BUILD_ID",
+    sha256="0" * 64,
+  )
+  monkeypatch.setattr(mapd_installer, "DEFAULT_RELEASE", placeholder)
+
+  with pytest.raises(ValueError, match="production artifact"):
+    mapd_installer.get_target_release(DummyParams({}))
 
 
-def test_target_binary_url_param_override_supports_version_template(monkeypatch):
-  monkeypatch.delenv("SP_MAPD_BINARY_URL", raising=False)
-  params = DummyParams({"MapdBinaryUrl": "https://maps.example.com/releases/{version}/mapd"})
-  assert mapd_installer.get_target_binary_url("v1.2.3", params) == \
-    "https://maps.example.com/releases/v1.2.3/mapd"
-
-
-def test_target_binary_url_env_override_wins(monkeypatch):
-  monkeypatch.setenv("SP_MAPD_BINARY_URL", "https://env.example.com/mapd-{version}")
-  params = DummyParams({"MapdBinaryUrl": "https://param.example.com/mapd-{version}"})
-  assert mapd_installer.get_target_binary_url("v1.2.3", params) == "https://env.example.com/mapd-v1.2.3"
-
-
-def test_verify_installed_binary_accepts_chauffeur_build_markers(tmp_path):
+def test_verify_installed_binary_accepts_exact_linux_arm64_release(tmp_path, trusted_release):
+  release, content = trusted_release
   binary = tmp_path / "mapd"
-  write_fake_mapd(binary, chauffeur_markers=True)
+  write_binary(binary, content)
 
-  mapd_installer.MapdInstallManager._verify_installed_binary(str(binary))
+  mapd_installer.MapdInstallManager._verify_installed_binary(str(binary), release)
 
 
-def test_verify_installed_binary_rejects_stale_pfeifer_build(tmp_path):
+def test_verify_installed_binary_rejects_wrong_digest(tmp_path, trusted_release):
+  release, content = trusted_release
   binary = tmp_path / "mapd"
-  write_fake_mapd(binary, chauffeur_markers=False)
+  write_binary(binary, content)
 
-  try:
-    mapd_installer.MapdInstallManager._verify_installed_binary(str(binary))
-  except OSError as e:
-    assert "not the chauffeur-bake mapd build" in str(e)
-    assert "MapPreCurveSpeeds" in str(e)
-  else:
-    raise AssertionError("stale mapd binary passed chauffeur-bake verification")
+  with pytest.raises(OSError, match="SHA-256"):
+    mapd_installer.MapdInstallManager._verify_installed_binary(
+      str(binary), replace(release, sha256="1" * 64)
+    )
 
 
-def test_download_needed_rejects_current_version_with_stale_binary(monkeypatch, tmp_path):
+def test_verify_installed_binary_rejects_wrong_architecture(tmp_path):
+  release, content = make_release_and_binary(machine=62)
   binary = tmp_path / "mapd"
-  write_fake_mapd(binary, chauffeur_markers=False)
-  monkeypatch.setattr(mapd_installer, "MAPD_PATH", str(binary))
+  write_binary(binary, content)
 
-  manager = mapd_installer.MapdInstallManager(DummyReporter())
-  manager._params = DummyParams({"MapdVersion": mapd_installer.DEFAULT_VERSION})
-
-  assert manager.download_needed()
+  with pytest.raises(OSError, match="expected Linux ARM64"):
+    mapd_installer.MapdInstallManager._verify_installed_binary(str(binary), release)
 
 
-def test_ensure_mapd_installed_downloads_invalid_binary_even_when_prebuilt(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+  ("missing_marker", "expected"),
+  (("release", "MapdReleaseID"), ("build", "MapdBuildID"), ("capability", "MapWholeCurveProfile")),
+)
+def test_verify_installed_binary_rejects_missing_identity_marker(tmp_path, missing_marker, expected):
+  release, content = make_release_and_binary(
+    release_marker=missing_marker != "release",
+    build_marker=missing_marker != "build",
+    capability_marker=missing_marker != "capability",
+  )
   binary = tmp_path / "mapd"
-  mapd_root = tmp_path / "osm"
-  write_fake_mapd(binary, chauffeur_markers=False)
+  write_binary(binary, content)
+
+  with pytest.raises(OSError, match=expected):
+    mapd_installer.MapdInstallManager._verify_installed_binary(str(binary), release)
+
+
+def test_verify_runtime_build_info_accepts_exact_identity(monkeypatch, trusted_release):
+  release, _ = trusted_release
+  info = {
+    "releaseID": release.release_id,
+    "buildID": release.build_id,
+    "capabilities": ["legacy", release.capability],
+  }
+  monkeypatch.setattr(
+    subprocess,
+    "run",
+    lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=json.dumps(info), stderr=""),
+  )
+
+  assert mapd_installer.MapdInstallManager._verify_runtime_build_info("/mapd", release) == info
+
+
+@pytest.mark.parametrize(
+  ("info_update", "expected"),
+  (
+    ({"releaseID": "wrong"}, "release ID"),
+    ({"buildID": "wrong"}, "build ID"),
+    ({"capabilities": []}, "required capability"),
+  ),
+)
+def test_verify_runtime_build_info_rejects_wrong_identity(monkeypatch, trusted_release, info_update, expected):
+  release, _ = trusted_release
+  info = {
+    "releaseID": release.release_id,
+    "buildID": release.build_id,
+    "capabilities": [release.capability],
+  }
+  info.update(info_update)
+  monkeypatch.setattr(
+    subprocess,
+    "run",
+    lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=json.dumps(info), stderr=""),
+  )
+
+  with pytest.raises(OSError, match=expected):
+    mapd_installer.MapdInstallManager._verify_runtime_build_info("/mapd", release)
+
+
+def test_invalid_download_never_replaces_active_binary(monkeypatch, tmp_path, trusted_release):
+  release, _ = trusted_release
+  binary, _ = configure_install_paths(monkeypatch, tmp_path)
+  old_content = b"known-active-binary"
+  write_binary(binary, old_content)
+  monkeypatch.setattr(mapd_installer.requests, "get", lambda *args, **kwargs: FakeResponse(b"not-a-mapd-release"))
+  monkeypatch.setattr(mapd_installer.time, "sleep", lambda *_: None)
+  manager = mapd_installer.MapdInstallManager(DummyReporter(), DummyParams({}))
+
+  with pytest.raises(RuntimeError, match="failed after 1 retries"):
+    manager._download_file(release.binary_url, release, num_retries=1)
+
+  assert binary.read_bytes() == old_content
+  assert not Path(f"{binary}.tmp").exists()
+
+
+def test_terminal_download_failure_does_not_stamp_version(monkeypatch, tmp_path):
+  binary, _ = configure_install_paths(monkeypatch, tmp_path)
+  old_content = b"known-active-binary"
+  write_binary(binary, old_content)
+  params = DummyParams({"MapdVersion": "known-old-release"})
+  monkeypatch.setattr(
+    mapd_installer.requests,
+    "get",
+    lambda *args, **kwargs: (_ for _ in ()).throw(mapd_installer.requests.exceptions.ConnectionError("offline")),
+  )
+  monkeypatch.setattr(mapd_installer.time, "sleep", lambda *_: None)
+
+  with pytest.raises(RuntimeError, match="failed after 5 retries"):
+    mapd_installer.MapdInstallManager(DummyReporter(), params).download()
+
+  assert params.get("MapdVersion") == "known-old-release"
+  assert binary.read_bytes() == old_content
+
+
+def test_successful_download_atomically_installs_caches_and_stamps(monkeypatch, tmp_path, trusted_release):
+  release, content = trusted_release
+  binary, _ = configure_install_paths(monkeypatch, tmp_path)
+  write_binary(binary, b"old-active")
+  params = DummyParams({"MapdVersion": "old-release"})
+  monkeypatch.setattr(mapd_installer.requests, "get", lambda *args, **kwargs: FakeResponse(content))
+
+  mapd_installer.MapdInstallManager(DummyReporter(), params).download()
+
+  assert params.get("MapdVersion") == release.version
+  mapd_installer.MapdInstallManager._verify_installed_binary(str(binary), release)
+  cache = mapd_installer.get_persistent_binary_cache_path(release)
+  mapd_installer.MapdInstallManager._verify_installed_binary(cache, release)
+
+
+def test_ensure_exact_binary_repairs_version_without_download(monkeypatch, tmp_path, trusted_release):
+  release, content = trusted_release
+  binary, _ = configure_install_paths(monkeypatch, tmp_path)
+  write_binary(binary, content)
+  params = DummyParams({"MapdVersion": "stale-param"})
   calls = []
-
-  def fake_download(self):
-    calls.append("download")
-    write_fake_mapd(binary, chauffeur_markers=True)
-
-  monkeypatch.setattr(mapd_installer, "MAPD_PATH", str(binary))
-  monkeypatch.setattr(mapd_installer, "MAPD_BIN_DIR", str(tmp_path))
-  monkeypatch.setattr(mapd_installer.Paths, "mapd_root", staticmethod(lambda: str(mapd_root)))
-  monkeypatch.setattr(mapd_installer, "is_prebuilt", lambda: True)
-  monkeypatch.setattr(mapd_installer.messaging, "SubMaster", FakeSubMaster)
-  monkeypatch.setattr(mapd_installer.MapdInstallManager, "download", fake_download)
-
-  assert mapd_installer.ensure_mapd_installed(DummyParams({}), DummyReporter())
-  assert calls == ["download"]
-
-
-def test_ensure_mapd_installed_downloads_when_target_version_changes(monkeypatch, tmp_path):
-  binary = tmp_path / "mapd"
-  mapd_root = tmp_path / "osm"
-  write_fake_mapd(binary, chauffeur_markers=True)
-  params = DummyParams({"MapdVersion": "old-mapd-release"})
-  calls = []
-
-  def fake_download(self):
-    calls.append(self._params)
-    write_fake_mapd(binary, chauffeur_markers=True)
-    mapd_installer.update_installed_version(mapd_installer.get_target_version(self._params), self._params)
-
-  monkeypatch.setattr(mapd_installer, "MAPD_PATH", str(binary))
-  monkeypatch.setattr(mapd_installer, "MAPD_BIN_DIR", str(tmp_path))
-  monkeypatch.setattr(mapd_installer.Paths, "mapd_root", staticmethod(lambda: str(mapd_root)))
-  monkeypatch.setattr(mapd_installer.messaging, "SubMaster", FakeSubMaster)
-  monkeypatch.setattr(mapd_installer.MapdInstallManager, "download", fake_download)
-
-  assert mapd_installer.ensure_mapd_installed(params, DummyReporter())
-  assert calls == [params]
-  assert params.get("MapdVersion") == mapd_installer.DEFAULT_VERSION
-
-
-def test_ensure_mapd_installed_keeps_matching_valid_binary(monkeypatch, tmp_path):
-  binary = tmp_path / "mapd"
-  mapd_root = tmp_path / "osm"
-  write_fake_mapd(binary, chauffeur_markers=True)
-  params = DummyParams({"MapdVersion": mapd_installer.DEFAULT_VERSION})
-  calls = []
-
-  monkeypatch.setattr(mapd_installer, "MAPD_PATH", str(binary))
-  monkeypatch.setattr(mapd_installer, "MAPD_BIN_DIR", str(tmp_path))
-  monkeypatch.setattr(mapd_installer.Paths, "mapd_root", staticmethod(lambda: str(mapd_root)))
   monkeypatch.setattr(mapd_installer.MapdInstallManager, "download", lambda self: calls.append("download"))
 
   assert mapd_installer.ensure_mapd_installed(params, DummyReporter())
   assert calls == []
-  cache = mapd_installer.get_persistent_binary_cache_path(mapd_installer.DEFAULT_VERSION)
-  mapd_installer.MapdInstallManager._verify_installed_binary(cache)
+  assert params.get("MapdVersion") == release.version
+  mapd_installer.MapdInstallManager._verify_installed_binary(
+    mapd_installer.get_persistent_binary_cache_path(release), release
+  )
 
 
-def test_ensure_mapd_installed_restores_persistent_cache_while_offline(monkeypatch, tmp_path):
-  binary_dir = tmp_path / "checkout" / "third_party" / "mapd"
-  binary_dir.mkdir(parents=True)
-  binary = binary_dir / "mapd"
-  mapd_root = tmp_path / "persistent-osm"
-  cache_dir = mapd_root / mapd_installer._PERSISTENT_BINARY_CACHE_DIR
-  cache_dir.mkdir(parents=True)
-  params = DummyParams({"MapdVersion": mapd_installer.DEFAULT_VERSION})
-
-  monkeypatch.setattr(mapd_installer, "MAPD_PATH", str(binary))
-  monkeypatch.setattr(mapd_installer, "MAPD_BIN_DIR", str(binary_dir))
-  monkeypatch.setattr(mapd_installer.Paths, "mapd_root", staticmethod(lambda: str(mapd_root)))
+def test_ensure_restores_exact_persistent_cache_while_offline(monkeypatch, tmp_path, trusted_release):
+  release, content = trusted_release
+  binary, _ = configure_install_paths(monkeypatch, tmp_path)
+  params = DummyParams({"MapdVersion": release.version})
   monkeypatch.setattr(mapd_installer.messaging, "SubMaster", MeteredSubMaster)
-  cache = mapd_installer.get_persistent_binary_cache_path(mapd_installer.DEFAULT_VERSION)
-  write_fake_mapd(Path(cache), chauffeur_markers=True)
+  cache = Path(mapd_installer.get_persistent_binary_cache_path(release))
+  write_binary(cache, content)
 
   assert mapd_installer.ensure_mapd_installed(params, DummyReporter())
-  mapd_installer.MapdInstallManager._verify_installed_binary(str(binary))
+  mapd_installer.MapdInstallManager._verify_installed_binary(str(binary), release)
 
 
-def test_ensure_mapd_installed_rejects_invalid_cache_while_offline(monkeypatch, tmp_path):
-  binary_dir = tmp_path / "checkout" / "third_party" / "mapd"
-  binary_dir.mkdir(parents=True)
-  binary = binary_dir / "mapd"
-  mapd_root = tmp_path / "persistent-osm"
-  cache_dir = mapd_root / mapd_installer._PERSISTENT_BINARY_CACHE_DIR
-  cache_dir.mkdir(parents=True)
-  params = DummyParams({"MapdVersion": mapd_installer.DEFAULT_VERSION})
-
-  monkeypatch.setattr(mapd_installer, "MAPD_PATH", str(binary))
-  monkeypatch.setattr(mapd_installer, "MAPD_BIN_DIR", str(binary_dir))
-  monkeypatch.setattr(mapd_installer.Paths, "mapd_root", staticmethod(lambda: str(mapd_root)))
+def test_ensure_rejects_wrong_digest_cache_while_offline(monkeypatch, tmp_path, trusted_release):
+  release, content = trusted_release
+  binary, _ = configure_install_paths(monkeypatch, tmp_path)
+  params = DummyParams({"MapdVersion": release.version})
   monkeypatch.setattr(mapd_installer.messaging, "SubMaster", MeteredSubMaster)
-  cache = mapd_installer.get_persistent_binary_cache_path(mapd_installer.DEFAULT_VERSION)
-  write_fake_mapd(Path(cache), chauffeur_markers=False)
+  cache = Path(mapd_installer.get_persistent_binary_cache_path(release))
+  write_binary(cache, content[:-1] + b"x")
 
   assert not mapd_installer.ensure_mapd_installed(params, DummyReporter())
   assert not binary.exists()
 
 
-def test_mapd_ready_rejects_stale_binary_before_native_launch(monkeypatch, tmp_path):
+def test_mapd_ready_rejects_version_mismatch_before_launch(monkeypatch, tmp_path, trusted_release):
   from openpilot.system.manager import process_config
 
+  release, content = trusted_release
   binary = tmp_path / "mapd"
   mapd_root = tmp_path / "osm"
   mapd_root.mkdir()
-  write_fake_mapd(binary, chauffeur_markers=False)
-
+  write_binary(binary, content)
+  runtime_calls = []
   monkeypatch.setattr(process_config, "MAPD_PATH", str(binary))
   monkeypatch.setattr(process_config.Paths, "mapd_root", staticmethod(lambda: str(mapd_root)))
+  monkeypatch.setattr(process_config, "_MAPD_READY_IDENTITY_CACHE", None)
+  monkeypatch.setattr(
+    process_config.MapdInstallManager,
+    "_verify_runtime_build_info",
+    lambda *args: runtime_calls.append(args),
+  )
 
-  assert process_config.mapd_ready(False, DummyParams({}), SimpleNamespace()) is False
+  assert process_config.mapd_ready(False, DummyParams({"MapdVersion": "wrong"}), SimpleNamespace()) is False
+  assert runtime_calls == []
+  assert release.version != "wrong"
 
 
-def test_mapd_ready_accepts_chauffeur_binary(monkeypatch, tmp_path):
+def test_mapd_ready_rejects_failed_runtime_identity(monkeypatch, tmp_path, trusted_release):
   from openpilot.system.manager import process_config
 
+  release, content = trusted_release
   binary = tmp_path / "mapd"
   mapd_root = tmp_path / "osm"
   mapd_root.mkdir()
-  write_fake_mapd(binary, chauffeur_markers=True)
-
+  write_binary(binary, content)
   monkeypatch.setattr(process_config, "MAPD_PATH", str(binary))
   monkeypatch.setattr(process_config.Paths, "mapd_root", staticmethod(lambda: str(mapd_root)))
+  monkeypatch.setattr(process_config, "_MAPD_READY_IDENTITY_CACHE", None)
+  monkeypatch.setattr(
+    process_config.MapdInstallManager,
+    "_verify_runtime_build_info",
+    lambda *args: (_ for _ in ()).throw(OSError("wrong build ID")),
+  )
 
-  assert process_config.mapd_ready(False, DummyParams({}), SimpleNamespace()) is True
+  assert process_config.mapd_ready(
+    False, DummyParams({"MapdVersion": release.version}), SimpleNamespace()
+  ) is False
+
+
+def test_mapd_ready_accepts_exact_release_and_caches_unchanged_identity(monkeypatch, tmp_path, trusted_release):
+  from openpilot.system.manager import process_config
+
+  release, content = trusted_release
+  binary = tmp_path / "mapd"
+  mapd_root = tmp_path / "osm"
+  mapd_root.mkdir()
+  write_binary(binary, content)
+  runtime_calls = []
+  monkeypatch.setattr(process_config, "MAPD_PATH", str(binary))
+  monkeypatch.setattr(process_config.Paths, "mapd_root", staticmethod(lambda: str(mapd_root)))
+  monkeypatch.setattr(process_config, "_MAPD_READY_IDENTITY_CACHE", None)
+  monkeypatch.setattr(
+    process_config.MapdInstallManager,
+    "_verify_runtime_build_info",
+    lambda *args: runtime_calls.append(args) or {},
+  )
+  params = DummyParams({"MapdVersion": release.version})
+
+  assert process_config.mapd_ready(False, params, SimpleNamespace()) is True
+  assert process_config.mapd_ready(False, params, SimpleNamespace()) is True
+  assert len(runtime_calls) == 1

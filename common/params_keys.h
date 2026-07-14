@@ -274,12 +274,12 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"VisionTurnSpeedControlLowSpeedLearnedHighEndMph", {PERSISTENT | BACKUP, FLOAT, "40.0"}},
 
     // VTSC Physics Model
-    {"VisionTurnSpeedControlPhysicsBaseline", {PERSISTENT | BACKUP, FLOAT, "3.144734"}},
-    {"VisionTurnSpeedControlPhysicsAmplitude", {PERSISTENT | BACKUP, FLOAT, "-1.1751"}},
-    {"VisionTurnSpeedControlPhysicsSteepness", {PERSISTENT | BACKUP, FLOAT, "-2000.0"}},
-    {"VisionTurnSpeedControlPhysicsCenter", {PERSISTENT | BACKUP, FLOAT, "0.004778"}},
-    {"VisionTurnSpeedControlPhysicsMinLatAccel", {PERSISTENT | BACKUP, FLOAT, "1.8"}},
-    {"VisionTurnSpeedControlPhysicsMaxLatAccel", {PERSISTENT | BACKUP, FLOAT, "3.12"}},
+    {"VisionTurnSpeedControlPhysicsBaseline", {PERSISTENT | BACKUP, FLOAT, "4.107103"}},
+    {"VisionTurnSpeedControlPhysicsAmplitude", {PERSISTENT | BACKUP, FLOAT, "-1.658965"}},
+    {"VisionTurnSpeedControlPhysicsSteepness", {PERSISTENT | BACKUP, FLOAT, "-1395.055546"}},
+    {"VisionTurnSpeedControlPhysicsCenter", {PERSISTENT | BACKUP, FLOAT, "0.005397"}},
+    {"VisionTurnSpeedControlPhysicsMinLatAccel", {PERSISTENT | BACKUP, FLOAT, "2.4481"}},
+    {"VisionTurnSpeedControlPhysicsMaxLatAccel", {PERSISTENT | BACKUP, FLOAT, "4.1071"}},
 
     // VTSC expert overrides (applied only when VTSCExpertModeEnabled=1)
     {"VTSC.Expert.FreewayCurvEps", {PERSISTENT | BACKUP, FLOAT, "0.00001"}},
@@ -643,6 +643,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     // mapd + MTSC
     {"MapAdvisorySpeedLimit", {CLEAR_ON_ONROAD_TRANSITION, FLOAT}},
     {"MapCurvatures", {CLEAR_ON_ONROAD_TRANSITION, STRING}},
+    {"MapWholeCurveProfile", {CLEAR_ON_ONROAD_TRANSITION, JSON}},
     {"MapHazard", {CLEAR_ON_ONROAD_TRANSITION, STRING}},
     {"MapdBinaryUrl", {PERSISTENT, STRING, ""}},
     {"MapdReleaseVersion", {PERSISTENT, STRING, ""}},
