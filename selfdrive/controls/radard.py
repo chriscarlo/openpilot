@@ -71,6 +71,15 @@ OPENING_GOVERNOR_HARD_CLOSING_MPS = MODEL_LEAD_STRONG_CLOSING_MPS
 # not live-tunable: permissive diagnostic values must never turn a sustained
 # closure into an opening-governor comfort case.
 OPENING_GOVERNOR_WEAK_CLOSING_MAX_MPS = 1.0
+# A held CD9 clamp may reconcile to calm current velocity only after a robust
+# longer position horizon independently agrees the closure is mild. The
+# original braking-lead road case closed 2.4-6 m/s on position; today's steady
+# lead false-closing plateaus stayed at or below ~1.1 m/s on this horizon.
+CLOSING_GOVERNOR_RECOVERY_POSITION_WINDOW_S = 1.25
+CLOSING_GOVERNOR_RECOVERY_MAX_POSITION_CLOSING_MPS = 1.25
+CLOSING_GOVERNOR_RECOVERY_MIN_POSITION_SPAN_S = 1.0
+CLOSING_GOVERNOR_RECOVERY_MIN_POSITION_SAMPLES = 16
+CLOSING_GOVERNOR_RECOVERY_MAX_SAMPLE_GAP_S = 0.075
 MODEL_LEAD_CENTER_PATH_GATE_M = 2.6
 MODEL_LEAD_CUTIN_VLAT_MPS = 0.7
 LEAD_TRACK_PROB_DROPOUT_MIN_SPEED_MPS = 4.0
@@ -85,6 +94,10 @@ LEAD_TRACK_PROB_DROPOUT_URGENT_TTC_S = 8.0
 # (ModelLeadFcwCorrobWindow) is clamped to this; history is seeded all-True so
 # a freshly acquired track (a genuine sudden cut-in) is never suppressed.
 MODEL_LEAD_FCW_CORROB_HIST_LEN = 8
+
+# Version zero is the Cap'n Proto default and therefore means no producer-side
+# replay contract was emitted.
+_REPLAY_INPUTS_VERSION = 1
 
 
 def _finite_float(value: Any, default: float = 0.0) -> float:
@@ -167,6 +180,9 @@ class ModelLeadTrack:
   governor_active: bool = False
   governor_reason: str = "inactive"
   governor_threat_corroborated: bool = False
+  governor_calm_recovery_mode: bool = False
+  governor_calm_recovery_applied: bool = False
+  governor_recovery_position_closing_mps: float | None = None
   # Opening governor (CD9's mirror): publish-time one-directional vRel relax
   # floor while the raw position window PROVES sustained opening that the
   # closing-biased publish pipeline is contradicting. The separate hold state
@@ -309,6 +325,7 @@ class ModelLeadTrack:
     # never transfer across a reordered lead hypothesis.
     if self.last_slot >= 0 and int(lead_slot) != self.last_slot:
       self._clear_opening_relax(rearm_after_t=now)
+      self.opening_position_evidence.clear()
 
     dt_s = float(np.clip(float(now) - self.last_t, 0.0, 0.25))
     predicted_drel = self.predict_drel(now)
@@ -473,6 +490,8 @@ class ModelLeadTrack:
     """
     self.closing_evidence.append((float(now), float(raw_drel), float(raw_vrel), float(raw_alead)))
     self.opening_position_evidence.append((float(now), float(raw_drel)))
+    self.governor_calm_recovery_applied = False
+    self.governor_recovery_position_closing_mps = None
 
     margin = float(getattr(cfg, 'closing_governor_margin_mps', 99.0))
     if margin >= 99.0:
@@ -480,6 +499,7 @@ class ModelLeadTrack:
       self.governor_closing_mps = 0.0
       self.governor_reason = "disabled"
       self.governor_threat_corroborated = False
+      self.governor_calm_recovery_mode = False
       return False
 
     window_s = max(0.2, float(getattr(cfg, 'closing_governor_window_s', 0.7)))
@@ -492,6 +512,7 @@ class ModelLeadTrack:
     # Demand real coverage of the window (missed/dropped frames leave holes):
     # a sparse window must not arm the fast regime.
     if len(samples) < 8 or span < 0.5 * window_s:
+      self.governor_calm_recovery_mode = False
       if not active:
         self.governor_reason = "inactive"
         self.governor_threat_corroborated = False
@@ -525,18 +546,98 @@ class ModelLeadTrack:
     current_fast_close = raw_closing >= OPENING_GOVERNOR_HARD_CLOSING_MPS
     if active and (current_braking or current_short_ttc or current_fast_close):
       self.governor_threat_corroborated = True
+      self.governor_calm_recovery_mode = False
       if current_braking:
         self.governor_reason = "current_braking"
       elif current_short_ttc:
         self.governor_reason = "short_raw_ttc"
       else:
         self.governor_reason = "fast_close"
+
+    # A model-velocity burst can earn a legitimate closing hold, then recover
+    # while that stale clamp remains frozen for up to one second. Reconcile only
+    # an ALREADY-ACTIVE hold after two actual consecutive calm measurements and
+    # a dense, full one-second position history agree the closure is mild. Using
+    # the measured samples themselves (rather than a mutable counter) makes a
+    # miss or scheduler gap fail closed. The base filtered track and the earned
+    # hold deadline stay intact. The evidence defines a ceiling on CD9's EXTRA
+    # one-directional clamp; the ordinary filtered vRel path remains live and
+    # can still publish a stronger closure as current evidence rises.
+    long_position_closing: float | None = None
+    long_samples = [
+      sample for sample in self.opening_position_evidence
+      if (now - sample[0]) <= CLOSING_GOVERNOR_RECOVERY_POSITION_WINDOW_S
+    ]
+    long_span = long_samples[-1][0] - long_samples[0][0] if len(long_samples) >= 2 else 0.0
+    long_gaps = [b[0] - a[0] for a, b in zip(long_samples, long_samples[1:], strict=False)]
+    long_dense = bool(
+      len(long_samples) >= CLOSING_GOVERNOR_RECOVERY_MIN_POSITION_SAMPLES and
+      long_span >= CLOSING_GOVERNOR_RECOVERY_MIN_POSITION_SPAN_S and
+      long_gaps and max(long_gaps) <= 2.0 * CLOSING_GOVERNOR_RECOVERY_MAX_SAMPLE_GAP_S
+    )
+    if long_dense:
+      long_k = max(2, len(long_samples) // 4)
+      long_first, long_last = long_samples[:long_k], long_samples[-long_k:]
+      long_t_first = sum(sample[0] for sample in long_first) / long_k
+      long_t_last = sum(sample[0] for sample in long_last) / long_k
+      if (long_t_last - long_t_first) > 1e-3:
+        long_d_first = sum(sample[1] for sample in long_first) / long_k
+        long_d_last = sum(sample[1] for sample in long_last) / long_k
+        long_position_closing = max(0.0, -(long_d_last - long_d_first) / (long_t_last - long_t_first))
+
+    # Recovery's acceleration veto is never weakenable past the fixed 0.2 m/s²
+    # safety boundary, even if an opening-governor tune is made permissive.
+    recovery_alead_veto = min(max(0.0, opening_alead_veto), 0.2)
+    recent_samples = samples[-2:]
+    consecutive_measured = bool(
+      len(recent_samples) == 2 and
+      1e-3 < (recent_samples[1][0] - recent_samples[0][0]) <= CLOSING_GOVERNOR_RECOVERY_MAX_SAMPLE_GAP_S
+    )
+
+    def calm_recovery_sample(sample: tuple[float, float, float, float]) -> bool:
+      _, sample_drel, sample_vrel, sample_alead = sample
+      sample_closing = max(0.0, -float(sample_vrel))
+      sample_ttc_s = float(sample_drel) / max(sample_closing, 0.1)
+      return bool(
+        float(sample_alead) >= -recovery_alead_veto and
+        sample_closing < OPENING_GOVERNOR_HARD_CLOSING_MPS and
+        sample_ttc_s > OPENING_GOVERNOR_MIN_PUBLISHED_TTC_S
+      )
+
+    calm_recovery = bool(
+      active and
+      self.governor_threat_corroborated and
+      consecutive_measured and
+      all(calm_recovery_sample(sample) for sample in recent_samples) and
+      alead_mean >= -recovery_alead_veto and
+      long_position_closing is not None and
+      long_position_closing <= CLOSING_GOVERNOR_RECOVERY_MAX_POSITION_CLOSING_MPS
+    )
+    recovery_closing = None if long_position_closing is None else max(raw_closing, float(long_position_closing))
+    enters_recovery = bool(
+      calm_recovery and recovery_closing is not None and
+      self.governor_closing_mps > recovery_closing + 1e-3
+    )
+    if calm_recovery and recovery_closing is not None and (self.governor_calm_recovery_mode or enters_recovery):
+      # Once reconciliation starts, stale CD9 authority may only decay while
+      # the calm cross-signal contract remains true. Raising this extra clamp
+      # to chase a noisy-but-subcritical raw vRel recreated braking in route
+      # 422; the base filtered vRel already handles that current measurement.
+      self.governor_closing_mps = min(self.governor_closing_mps, recovery_closing)
+      self.governor_reason = "calm_recovery_capped"
+      self.governor_calm_recovery_mode = True
+      self.governor_calm_recovery_applied = True
+      self.governor_recovery_position_closing_mps = float(long_position_closing)
+      return True
+    self.governor_calm_recovery_mode = False
+
     release_closing_max = 0.5 * min_closing
     if vrel_closing <= release_closing_max and alead_mean >= -opening_alead_veto:
       self.governor_hold_until_t = -1.0
       self.governor_closing_mps = 0.0
       self.governor_reason = "inactive"
       self.governor_threat_corroborated = False
+      self.governor_calm_recovery_mode = False
       return False
     if vrel_closing <= min_closing:
       return active
@@ -620,6 +721,7 @@ class ModelLeadTrack:
     if not active:
       self.governor_reason = "inactive"
       self.governor_threat_corroborated = False
+      self.governor_calm_recovery_mode = False
     return active
 
   def _update_opening_governor(self, now: float, closing_governor_active: bool,
@@ -1086,6 +1188,7 @@ class ModelLeadTrack:
       "aLeadTau": float(self.aLeadTau),
       "fcw": False,
       "fcwSuppressed": bool(self.fcw_suppressed),
+      "closingGovernorRecovery": bool(self.governor_calm_recovery_mode),
       "modelProb": float(self.modelProb),
       "status": True,
       "radar": False,
@@ -1158,6 +1261,9 @@ class ModelLeadTracker:
     for identifier, track in list(self._tracks.items()):
       if identifier not in self._updated_track_ids:
         track.missed += 1
+        track.governor_calm_recovery_mode = False
+        track.governor_calm_recovery_applied = False
+        track.governor_recovery_position_closing_mps = None
         # A missed frame means no fresh position evidence: never carry a stale
         # opening relax onto a held/coasted publish (less-urgent direction).
         track._clear_opening_relax(rearm_after_t=track.last_t)
@@ -1709,6 +1815,12 @@ class RadarD:
     self.radar_state.mdMonoTime = sm.logMonoTime['modelV2']
     self.radar_state.radarErrors = rr.errors
     self.radar_state.carStateMonoTime = sm.logMonoTime['carState']
+    replay_inputs = self.radar_state.replayInputs
+    replay_inputs.valid = True
+    replay_inputs.version = _REPLAY_INPUTS_VERSION
+    replay_inputs.modelV2MonoTimeNs = sm.logMonoTime['modelV2']
+    replay_inputs.carStateMonoTimeNs = sm.logMonoTime['carState']
+    replay_inputs.liveTracksMonoTimeNs = sm.logMonoTime['liveTracks']
 
     if len(sm['modelV2'].velocity.x):
       model_v_ego = sm['modelV2'].velocity.x[0]
@@ -1725,16 +1837,39 @@ class RadarD:
                           prob_enter=self._lead_prob_enter, prob_exit=self._lead_prob_exit,
                           model_lead_tracker=self.model_lead_tracker,
                           lead_slot=0, now=self.current_time)
+      self._populate_governor_replay_debug(replay_inputs.leadOneGovernor, lead_one)
       lead_two = get_lead(self.v_ego, self.ready, self.tracks, leads_v3[1], model_v_ego,
                           self.CP, self.CP_SP, sm['modelV2'], low_speed_override=False,
                           prev_latched=self._lead_latched[1],
                           prob_enter=self._lead_prob_enter, prob_exit=self._lead_prob_exit,
                           model_lead_tracker=self.model_lead_tracker,
                           lead_slot=1, now=self.current_time)
+      self._populate_governor_replay_debug(replay_inputs.leadTwoGovernor, lead_two)
       self.radar_state.leadOne = lead_one
       self.radar_state.leadTwo = lead_two
       self._lead_latched = [bool(lead_one.get("status", False)), bool(lead_two.get("status", False))]
       self.model_lead_tracker.end_frame()
+
+  def _populate_governor_replay_debug(self, debug, lead: dict[str, Any]) -> None:
+    """Snapshot the exact model-track governor state used for this lead."""
+    radar_track_id = int(lead.get("radarTrackId", -1)) if lead.get("status", False) else -1
+    track = self.model_lead_tracker.tracks.get(radar_track_id)
+    debug.radarTrackId = radar_track_id
+    if track is None:
+      debug.valid = False
+      return
+
+    debug.valid = True
+    debug.active = bool(track.governor_active)
+    debug.closingMps = float(track.governor_closing_mps)
+    debug.holdRemainingS = max(0.0, float(track.governor_hold_until_t) - self.current_time)
+    debug.reason = str(track.governor_reason)
+    debug.threatCorroborated = bool(track.governor_threat_corroborated)
+    debug.calmRecoveryMode = bool(track.governor_calm_recovery_mode)
+    debug.calmRecoveryApplied = bool(track.governor_calm_recovery_applied)
+    if track.governor_recovery_position_closing_mps is not None:
+      debug.recoveryPositionClosingMps = float(track.governor_recovery_position_closing_mps)
+      debug.recoveryPositionClosingValid = True
 
   def _maybe_refresh_lead_prob_thresholds(self) -> None:
     if (self.current_time - self._last_prob_refresh_t) < self.LEAD_PROB_REFRESH_S:

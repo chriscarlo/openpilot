@@ -439,3 +439,55 @@ def test_amplify_gain_knob_fix_vs_rollback() -> None:
   # road-derived metrics (larger THW headroom, larger TTC margin).
   assert m_fix["min_thw_s"] > m_roll["min_thw_s"], physics
   assert m_fix["min_ttc_s"] > m_roll["min_ttc_s"], physics
+
+
+def test_recovery_taint_immediately_before_genuine_brake_preserves_cd3_safety(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  """A calm-recovery epoch immediately before a real brake must not make CD3
+  miss its established onset/THW contract while fresh correlation re-settles."""
+  from openpilot.selfdrive.controls.radard import ModelLeadTrack
+
+  original_get_radar_state = ModelLeadTrack.get_RadarState
+  marked_frames = 0
+
+  def get_radar_state_with_pre_brake_recovery(self, cfg=None):
+    nonlocal marked_frames
+    out = original_get_radar_state(self, cfg)
+    if DECEL_START_S - 1.0 <= float(self.last_t) < DECEL_START_S:
+      out["closingGovernorRecovery"] = True
+      marked_frames += 1
+    return out
+
+  monkeypatch.setattr(ModelLeadTrack, "get_RadarState", get_radar_state_with_pre_brake_recovery)
+  result = run_harness(
+    vehicle_config=_vehicle_config_amplify(FIX_AMPLIFY_GAIN),
+    scenario_name="lead_decel_deficit_pre_brake_recovery_taint",
+    steps=_build_steps(REPORTED_ACCEL_RATIO),
+    initial_speed_mps=EGO_V0_MPS,
+    noise_profile="off",
+    seed=42,
+    perception_filter="auto",
+  )
+  measured = _measure(result)
+  first_amplified = next(
+    (
+      row for row in result.trace[::5]
+      if row["t_s"] >= DECEL_START_S
+      and row["mpc_acc_source_debug"].get("approach_reacquire_lead_decel_mps2", 0.0) >= 1.0
+    ),
+    None,
+  )
+  deep_ttc_window = _deep_ttc_window(result.trace)
+
+  assert marked_frames > 0
+  assert measured["brake_onset_delay_s"] is not None
+  assert measured["brake_onset_delay_s"] <= MAX_ONSET_DELAY_S
+  assert measured["min_thw_s"] >= MIN_THW_FLOOR_S
+  assert not deep_ttc_window or measured["fcw_in_window_count"] > 0
+  assert first_amplified is not None
+  # Recovery deliberately discards the shaped derivative history; the normal
+  # 2*tau contract therefore resumes CD3 after one fresh ~0.6 s epoch. The
+  # model/governor paths keep the absolute onset and THW/TTC safety bounds green
+  # during that bounded re-settle.
+  assert first_amplified["t_s"] <= DECEL_START_S + 0.65

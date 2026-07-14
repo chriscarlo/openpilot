@@ -17,6 +17,12 @@ def build_parser() -> argparse.ArgumentParser:
   parser.add_argument("--topology", choices=("lka", "lfa"), default="lka")
   parser.add_argument("--controller-mode", choices=("auto", "device", "passthrough", "shaped"), default="device")
   parser.add_argument("--perception-filter", choices=("auto", "direct", "radard"), default="auto")
+  parser.add_argument(
+    "--ego-replay-mode",
+    choices=("auto", "recorded", "plant"),
+    default="auto",
+    help="Use recorded ego motion when present, or force recorded/closed-loop plant replay",
+  )
   parser.add_argument("--hyundai-tuning-mode", choices=("off", "dynamic", "predictive"), default=None)
   parser.add_argument("--noise", choices=tuple(NOISE_PROFILES.keys()), default="realistic")
   parser.add_argument("--duration", type=float, default=12.0)
@@ -49,6 +55,9 @@ def main(argv: list[str] | None = None) -> int:
       hyundai_tuning_mode=hyundai_tuning_mode,
       snapshot_vehicle=bundle.vehicle,
       snapshot_params=bundle.params,
+      # Snapshot mode is capture-backed. Keep explicit --override values, but
+      # never blend in the unrelated July-4 developer-device tune dump.
+      livetune_snapshot=None,
     )
     steps = bundle.timeline
     initial_speed_mps = bundle.initial_speed_mps
@@ -75,6 +84,7 @@ def main(argv: list[str] | None = None) -> int:
     seed=args.seed,
     noise_seeds=noise_seeds,
     perception_filter=args.perception_filter,
+    ego_replay_mode=args.ego_replay_mode,
   )
 
   print(json.dumps(result.summary, indent=2, sort_keys=True))

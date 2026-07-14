@@ -39,6 +39,9 @@ class LeadDirective:
   acquisition_reset: bool = False
   # Per-step override of the vehicle config's aLeadTau (EV6 runtime publishes 0.3).
   a_lead_tau_s: float | None = None
+  # Route replays already carry the model's exact per-frame probability. Synthetic
+  # scenarios leave this false so acquisition still gets the production-like ramp.
+  exact_model_prob: bool = False
 
   @classmethod
   def from_json(cls, payload: dict[str, Any] | None) -> LeadDirective:
@@ -61,6 +64,57 @@ class StepInput:
   pitch_rad: float = 0.0
   force_decel: bool = False
   experimental_mode: bool = False
+  # Optional recorded-input fidelity fields. When present, the harness feeds the
+  # logged ego state and raw modelV2 payload to RadarD/planner while retaining the
+  # closed-loop plant as a separate counterfactual output.
+  recorded_v_ego_mps: float | None = None
+  recorded_a_ego_mps2: float | None = None
+  long_active: bool | None = None
+  personality: int | None = None
+  raw_model: dict[str, Any] | None = None
+  # Exact service clocks captured from the RadarD input association. These are
+  # deliberately separate: RadarD uses the maximum clock as its current time,
+  # while publishing the modelV2 and carState clocks back on radarState.
+  recorded_model_v2_log_mono_time_ns: int | None = None
+  recorded_car_state_log_mono_time_ns: int | None = None
+  recorded_live_tracks_log_mono_time_ns: int | None = None
+  # Per-service association evidence. ``exact`` is never inferred from the
+  # mere presence of a timestamp; route extraction must state how each clock
+  # and payload was associated.
+  radard_service_association_status: str | None = None
+  radard_service_association_provenance: dict[str, Any] = field(default_factory=dict)
+  radard_gate_eligible: bool = False
+  replay_warmup_status: str | None = None
+  replay_warmup_reason: str | None = None
+  # The RadarD publication produced for this recorded frame, and the publication
+  # the asynchronous planner actually consumed.  A planner target may name the
+  # current frame or an earlier frame; keeping both clocks is what lets replay
+  # reproduce current/previous/current scheduling races without consulting the
+  # recorded planner output as an oracle.
+  recorded_radar_state_log_mono_time_ns: int | None = None
+  recorded_longitudinal_plan_log_mono_time_ns: int | None = None
+  recorded_longitudinal_plan_solver_execution_time_s: float | None = None
+  planner_radar_state_log_mono_time_ns: int | None = None
+  planner_radar_state_candidates_ns: list[int] = field(default_factory=list)
+  planner_radar_resolution: str | None = None
+  # Exact planner-side snapshots are intentionally separate from the RadarD
+  # inputs above. The two daemons can consume different carState publications
+  # on the same model cycle.
+  recorded_planner_inputs: dict[str, Any] = field(default_factory=dict)
+  recorded_planner_service_log_mono_time_ns: dict[str, int] = field(default_factory=dict)
+  planner_service_association_provenance: dict[str, Any] = field(default_factory=dict)
+  # Exact MPC-boundary cruise context.  ``cruise_speed_mps`` remains the raw
+  # carState set speed; this optional value is only substituted after the real
+  # SLC/VTSC/RTI/weather update has run.
+  recorded_effective_cruise_mps: float | None = None
+  recorded_effective_cruise_limiter: str | None = None
+  recorded_effective_cruise_provenance: str | None = None
+  recorded_effective_cruise_status: str | None = None
+  planner_context_status: str | None = None
+  planner_context_reason: str | None = None
+  recorded_gas_pressed: bool | None = None
+  param_updates: dict[str, str] = field(default_factory=dict)
+  replay_reference: dict[str, Any] = field(default_factory=dict)
 
   @classmethod
   def from_json(cls, payload: dict[str, Any]) -> StepInput:
@@ -74,6 +128,88 @@ class StepInput:
       pitch_rad=float(payload.get("pitchRad", 0.0)),
       force_decel=bool(payload.get("forceDecel", False)),
       experimental_mode=bool(payload.get("experimentalMode", False)),
+      recorded_v_ego_mps=(None if payload.get("recordedVEgoMps") is None else float(payload["recordedVEgoMps"])),
+      recorded_a_ego_mps2=(None if payload.get("recordedAEgoMps2") is None else float(payload["recordedAEgoMps2"])),
+      long_active=(None if payload.get("longActive") is None else bool(payload["longActive"])),
+      personality=(None if payload.get("personality") is None else int(payload["personality"])),
+      raw_model=payload.get("rawModel"),
+      recorded_model_v2_log_mono_time_ns=(
+        None if payload.get("recordedModelV2LogMonoTimeNs") is None
+        else int(payload["recordedModelV2LogMonoTimeNs"])
+      ),
+      recorded_car_state_log_mono_time_ns=(
+        None if payload.get("recordedCarStateLogMonoTimeNs") is None
+        else int(payload["recordedCarStateLogMonoTimeNs"])
+      ),
+      recorded_live_tracks_log_mono_time_ns=(
+        None if payload.get("recordedLiveTracksLogMonoTimeNs") is None
+        else int(payload["recordedLiveTracksLogMonoTimeNs"])
+      ),
+      radard_service_association_status=(
+        None if payload.get("radardServiceAssociationStatus") is None
+        else str(payload["radardServiceAssociationStatus"])
+      ),
+      radard_service_association_provenance=dict(payload.get("radardServiceAssociationProvenance", {})),
+      radard_gate_eligible=bool(payload.get("radardGateEligible", False)),
+      replay_warmup_status=(
+        None if payload.get("replayWarmupStatus") is None else str(payload["replayWarmupStatus"])
+      ),
+      replay_warmup_reason=(
+        None if payload.get("replayWarmupReason") is None else str(payload["replayWarmupReason"])
+      ),
+      recorded_radar_state_log_mono_time_ns=(
+        None if payload.get("recordedRadarStateLogMonoTimeNs") is None
+        else int(payload["recordedRadarStateLogMonoTimeNs"])
+      ),
+      recorded_longitudinal_plan_log_mono_time_ns=(
+        None if payload.get("recordedLongitudinalPlanLogMonoTimeNs") is None
+        else int(payload["recordedLongitudinalPlanLogMonoTimeNs"])
+      ),
+      recorded_longitudinal_plan_solver_execution_time_s=(
+        None if payload.get("recordedLongitudinalPlanSolverExecutionTimeS") is None
+        else float(payload["recordedLongitudinalPlanSolverExecutionTimeS"])
+      ),
+      planner_radar_state_log_mono_time_ns=(
+        None if payload.get("plannerRadarStateLogMonoTimeNs") is None
+        else int(payload["plannerRadarStateLogMonoTimeNs"])
+      ),
+      planner_radar_state_candidates_ns=[int(value) for value in payload.get("plannerRadarStateCandidatesNs", [])],
+      planner_radar_resolution=(
+        None if payload.get("plannerRadarResolution") is None else str(payload["plannerRadarResolution"])
+      ),
+      recorded_planner_inputs=dict(payload.get("recordedPlannerInputs", {})),
+      recorded_planner_service_log_mono_time_ns={
+        str(key): int(value)
+        for key, value in payload.get("recordedPlannerServiceLogMonoTimeNs", {}).items()
+      },
+      planner_service_association_provenance=dict(payload.get("plannerServiceAssociationProvenance", {})),
+      recorded_effective_cruise_mps=(
+        None if payload.get("recordedEffectiveCruiseMps") is None
+        else float(payload["recordedEffectiveCruiseMps"])
+      ),
+      recorded_effective_cruise_limiter=(
+        None if payload.get("recordedEffectiveCruiseLimiter") is None
+        else str(payload["recordedEffectiveCruiseLimiter"])
+      ),
+      recorded_effective_cruise_provenance=(
+        None if payload.get("recordedEffectiveCruiseProvenance") is None
+        else str(payload["recordedEffectiveCruiseProvenance"])
+      ),
+      recorded_effective_cruise_status=(
+        None if payload.get("recordedEffectiveCruiseStatus") is None
+        else str(payload["recordedEffectiveCruiseStatus"])
+      ),
+      planner_context_status=(
+        None if payload.get("plannerContextStatus") is None else str(payload["plannerContextStatus"])
+      ),
+      planner_context_reason=(
+        None if payload.get("plannerContextReason") is None else str(payload["plannerContextReason"])
+      ),
+      recorded_gas_pressed=(
+        None if payload.get("recordedGasPressed") is None else bool(payload["recordedGasPressed"])
+      ),
+      param_updates={str(key): str(value) for key, value in payload.get("paramUpdates", {}).items()},
+      replay_reference=dict(payload.get("replayReference", {})),
     )
 
   def to_json(self) -> dict[str, Any]:
@@ -87,6 +223,37 @@ class StepInput:
       "pitchRad": self.pitch_rad,
       "forceDecel": self.force_decel,
       "experimentalMode": self.experimental_mode,
+      "recordedVEgoMps": self.recorded_v_ego_mps,
+      "recordedAEgoMps2": self.recorded_a_ego_mps2,
+      "longActive": self.long_active,
+      "personality": self.personality,
+      "rawModel": self.raw_model,
+      "recordedModelV2LogMonoTimeNs": self.recorded_model_v2_log_mono_time_ns,
+      "recordedCarStateLogMonoTimeNs": self.recorded_car_state_log_mono_time_ns,
+      "recordedLiveTracksLogMonoTimeNs": self.recorded_live_tracks_log_mono_time_ns,
+      "radardServiceAssociationStatus": self.radard_service_association_status,
+      "radardServiceAssociationProvenance": self.radard_service_association_provenance,
+      "radardGateEligible": self.radard_gate_eligible,
+      "replayWarmupStatus": self.replay_warmup_status,
+      "replayWarmupReason": self.replay_warmup_reason,
+      "recordedRadarStateLogMonoTimeNs": self.recorded_radar_state_log_mono_time_ns,
+      "recordedLongitudinalPlanLogMonoTimeNs": self.recorded_longitudinal_plan_log_mono_time_ns,
+      "recordedLongitudinalPlanSolverExecutionTimeS": self.recorded_longitudinal_plan_solver_execution_time_s,
+      "plannerRadarStateLogMonoTimeNs": self.planner_radar_state_log_mono_time_ns,
+      "plannerRadarStateCandidatesNs": self.planner_radar_state_candidates_ns,
+      "plannerRadarResolution": self.planner_radar_resolution,
+      "recordedPlannerInputs": self.recorded_planner_inputs,
+      "recordedPlannerServiceLogMonoTimeNs": self.recorded_planner_service_log_mono_time_ns,
+      "plannerServiceAssociationProvenance": self.planner_service_association_provenance,
+      "recordedEffectiveCruiseMps": self.recorded_effective_cruise_mps,
+      "recordedEffectiveCruiseLimiter": self.recorded_effective_cruise_limiter,
+      "recordedEffectiveCruiseProvenance": self.recorded_effective_cruise_provenance,
+      "recordedEffectiveCruiseStatus": self.recorded_effective_cruise_status,
+      "plannerContextStatus": self.planner_context_status,
+      "plannerContextReason": self.planner_context_reason,
+      "recordedGasPressed": self.recorded_gas_pressed,
+      "paramUpdates": self.param_updates,
+      "replayReference": self.replay_reference,
     }
 
 
@@ -99,6 +266,52 @@ class SnapshotBundle:
   initial_speed_mps: float
   initial_accel_mps2: float = 0.0
   name: str = ""
+
+
+_XYZT_FIELDS = ("x", "y", "z", "t", "xStd", "yStd", "zStd")
+_LEAD_V3_FIELDS = ("prob", "probTime", "t", "x", "xStd", "y", "yStd", "v", "vStd", "a", "aStd")
+
+
+def serialize_model_frame(model_msg) -> dict[str, Any]:
+  """Serialize the model fields consumed by RadarD and longitudinal planning.
+
+  This deliberately avoids ``to_dict()`` so route snapshots stay bounded and do
+  not silently grow whenever unrelated model schema fields are added.
+  """
+  def series_payload(series) -> dict[str, list[float]]:
+    return {
+      field_name: [float(value) for value in getattr(series, field_name)]
+      for field_name in _XYZT_FIELDS
+      if len(getattr(series, field_name))
+    }
+
+  leads = []
+  for lead in model_msg.leadsV3:
+    payload: dict[str, Any] = {}
+    for field_name in _LEAD_V3_FIELDS:
+      value = getattr(lead, field_name)
+      if field_name in ("prob", "probTime"):
+        payload[field_name] = float(value)
+      elif len(value):
+        payload[field_name] = [float(item) for item in value]
+    leads.append(payload)
+
+  disengage = model_msg.meta.disengagePredictions
+  return {
+    "position": series_payload(model_msg.position),
+    "velocity": series_payload(model_msg.velocity),
+    "acceleration": series_payload(model_msg.acceleration),
+    "action": {
+      "desiredCurvature": float(model_msg.action.desiredCurvature),
+      "desiredAcceleration": float(model_msg.action.desiredAcceleration),
+      "shouldStop": bool(model_msg.action.shouldStop),
+    },
+    "disengagePredictions": {
+      "t": [float(value) for value in disengage.t],
+      "gasPressProbs": [float(value) for value in disengage.gasPressProbs],
+    },
+    "leadsV3": leads,
+  }
 
 
 BASE_SCENARIO_NAMES = (

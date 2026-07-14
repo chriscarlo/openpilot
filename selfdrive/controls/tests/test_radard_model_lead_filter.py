@@ -9,9 +9,12 @@ import pytest
 from opendbc.car.hyundai.values import HyundaiFlags
 from openpilot.selfdrive.controls.lib.longitudinal_live_tune import LeadResponseTuningConfig
 from openpilot.selfdrive.controls.radard import (
+  CLOSING_GOVERNOR_RECOVERY_MAX_POSITION_CLOSING_MPS,
   KalmanParams,
   ModelLeadTrack,
   ModelLeadTracker,
+  OPENING_GOVERNOR_HARD_CLOSING_MPS,
+  OPENING_GOVERNOR_MIN_PUBLISHED_TTC_S,
   RADAR_TO_CAMERA,
   Track,
   get_lead,
@@ -762,6 +765,465 @@ class TestModelLeadCD4AssociationAndStepGuard:
       _cfg(model_lead_assoc_dpath_gate_m=3.0, model_lead_assoc_y_raw_tol_m=3.0)
     )
     assert jumped_legacy != settled_legacy  # legacy 3.0 m gate spawns a new id
+
+
+class TestClosingGovernorCalmRecovery:
+  """Fail-closed contract for reconciling a stale CD9 closing hold."""
+
+  NOW = 10.0
+  DREL_M = 100.0
+
+  @staticmethod
+  def _cfg(**overrides):
+    base = {
+      "closing_governor_margin_mps": 0.75,
+      # Keep the ordinary decel arm from refreshing the deadline in veto
+      # tests; recovery's fixed braking veto remains independently active.
+      "closing_governor_accel_onset_mps2": 99.0,
+    }
+    base.update(overrides)
+    return dataclasses.replace(LeadResponseTuningConfig.defaults(), **base)
+
+  @classmethod
+  def _track(cls, *, active=True, closing_mps=1.8, drel_m=None, threat_corroborated=True):
+    drel = cls.DREL_M if drel_m is None else float(drel_m)
+    tr = ModelLeadTrack.from_lead_dict(
+      7,
+      {
+        "dRel": drel,
+        "yRel": 0.0,
+        "vRel": -2.0,
+        "vLead": 18.0,
+        "aLeadK": 0.0,
+        "modelProb": 0.9,
+      },
+      cls.NOW - 1.3,
+      0,
+    )
+    tr.vRel = -2.0
+    tr.vLead = 18.0
+    tr.vLeadK = 18.0
+    tr.dRel = drel
+    tr.governor_hold_until_t = cls.NOW + 1.0 if active else cls.NOW - 0.01
+    tr.governor_closing_mps = float(closing_mps)
+    tr.governor_threat_corroborated = bool(threat_corroborated)
+    tr.governor_reason = "latched"
+    return tr
+
+  @classmethod
+  def _seed_histories(
+    cls,
+    tr,
+    *,
+    now=None,
+    drel_m=None,
+    position_closing_mps=0.6,
+    raw_closing_mps=0.4,
+    recent_gap_s=0.05,
+    previous_raw_closing_mps=None,
+    window_alead_mps2=0.0,
+    previous_alead_mps2=None,
+    position_times=None,
+  ):
+    now = cls.NOW if now is None else float(now)
+    drel = cls.DREL_M if drel_m is None else float(drel_m)
+    tr.closing_evidence.clear()
+    tr.opening_position_evidence.clear()
+
+    if position_times is None:
+      position_times = [
+        now - 1.25 + 0.05 * i
+        for i in range(26)
+        if now - 1.25 + 0.05 * i <= now - recent_gap_s + 1e-9
+      ]
+    for sample_t in position_times:
+      sample_drel = drel + float(position_closing_mps) * (now - float(sample_t))
+      tr.opening_position_evidence.append((float(sample_t), sample_drel))
+
+    closing_times = [
+      now - 0.60 + 0.05 * i
+      for i in range(13)
+      if now - 0.60 + 0.05 * i <= now - recent_gap_s + 1e-9
+    ]
+    for idx, sample_t in enumerate(closing_times):
+      is_last = idx == len(closing_times) - 1
+      sample_closing = (
+        float(previous_raw_closing_mps)
+        if is_last and previous_raw_closing_mps is not None
+        else float(raw_closing_mps)
+      )
+      sample_alead = (
+        float(previous_alead_mps2)
+        if is_last and previous_alead_mps2 is not None
+        else float(window_alead_mps2)
+      )
+      sample_drel = drel + float(position_closing_mps) * (now - float(sample_t))
+      tr.closing_evidence.append((float(sample_t), sample_drel, -sample_closing, sample_alead))
+
+  @staticmethod
+  def _update(tr, *, now, drel_m, raw_closing_mps, raw_alead_mps2=0.0, cfg=None):
+    return tr._update_closing_governor(
+      float(now),
+      raw_drel=float(drel_m),
+      raw_vrel=-float(raw_closing_mps),
+      raw_alead=float(raw_alead_mps2),
+      cfg=cfg if cfg is not None else TestClosingGovernorCalmRecovery._cfg(),
+    )
+
+  def test_active_hold_recovers_only_after_two_calm_frames_and_full_position_span(self):
+    tr = self._track()
+    self._seed_histories(tr, previous_raw_closing_mps=2.5)
+    deadline = tr.governor_hold_until_t
+
+    # Only the current frame is calm; the immediately preceding measured frame
+    # is exactly at the fixed fast-close boundary and cannot establish recovery.
+    assert self._update(
+      tr, now=self.NOW, drel_m=self.DREL_M, raw_closing_mps=0.4,
+    )
+    assert not tr.governor_calm_recovery_applied
+    assert tr.governor_closing_mps == pytest.approx(1.8)
+    assert tr.governor_hold_until_t == pytest.approx(deadline)
+
+    # The next 20 Hz sample supplies the second calm measurement. The retained
+    # 1.25 s position history still spans a full second after window trimming.
+    now = self.NOW + 0.05
+    drel = self.DREL_M - 0.6 * 0.05
+    assert self._update(tr, now=now, drel_m=drel, raw_closing_mps=0.4)
+    assert tr.governor_calm_recovery_applied
+    assert tr.governor_reason == "calm_recovery_capped"
+    assert tr.governor_recovery_position_closing_mps == pytest.approx(0.6)
+    assert tr.governor_closing_mps == pytest.approx(0.6)
+    assert tr.governor_hold_until_t == pytest.approx(deadline)
+    assert tr.get_RadarState(self._cfg())["closingGovernorRecovery"] is True
+
+  def test_recovery_provenance_clears_on_safety_veto(self):
+    tr = self._track()
+    self._seed_histories(tr, raw_closing_mps=0.4, position_closing_mps=0.6)
+    assert self._update(
+      tr, now=self.NOW, drel_m=self.DREL_M, raw_closing_mps=0.4,
+    )
+    assert tr.get_RadarState(self._cfg())["closingGovernorRecovery"] is True
+
+    # Current braking exits recovery immediately; the published field follows
+    # the behavior state rather than the logging-only replay debug payload.
+    assert self._update(
+      tr, now=self.NOW + 0.05, drel_m=self.DREL_M - 0.03,
+      raw_closing_mps=0.4, raw_alead_mps2=-0.21,
+    )
+    assert tr.governor_calm_recovery_mode is False
+    assert tr.get_RadarState(self._cfg())["closingGovernorRecovery"] is False
+
+  def test_slot_transition_clears_position_history_before_recovery(self):
+    tr = self._track()
+    self._seed_histories(tr, raw_closing_mps=0.4, position_closing_mps=0.6)
+    assert len(tr.opening_position_evidence) > 16
+
+    tr.update(
+      {
+        "dRel": self.DREL_M,
+        "yRel": 0.0,
+        "vRel": -0.4,
+        "vLead": 19.6,
+        "aLeadK": 0.0,
+        "modelProb": 0.9,
+        "dPath": 0.0,
+        "vLat": 0.0,
+      },
+      self.NOW,
+      v_ego=20.0,
+      cfg=self._cfg(),
+      lead_slot=1,
+    )
+    assert len(tr.opening_position_evidence) == 1
+    assert tr.opening_position_evidence[0][0] == pytest.approx(self.NOW)
+    assert tr.governor_calm_recovery_mode is False
+    assert tr.governor_calm_recovery_applied is False
+    assert tr.governor_closing_mps == pytest.approx(1.8)
+
+  @pytest.mark.parametrize(
+    "raw_closing_mps,position_closing_mps,expected_mps",
+    [
+      (0.9, 0.4, 0.9),
+      (0.4, 0.8, 0.8),
+    ],
+  )
+  def test_recovery_entry_replaces_clamp_with_exact_max_of_raw_and_long_position(
+    self, raw_closing_mps, position_closing_mps, expected_mps,
+  ):
+    tr = self._track()
+    self._seed_histories(
+      tr,
+      raw_closing_mps=raw_closing_mps,
+      position_closing_mps=position_closing_mps,
+    )
+    deadline = tr.governor_hold_until_t
+
+    assert self._update(
+      tr,
+      now=self.NOW,
+      drel_m=self.DREL_M,
+      raw_closing_mps=raw_closing_mps,
+    )
+    assert tr.governor_calm_recovery_applied
+    assert tr.governor_recovery_position_closing_mps == pytest.approx(position_closing_mps)
+    assert tr.governor_closing_mps == pytest.approx(expected_mps)
+    assert tr.governor_hold_until_t == pytest.approx(deadline)
+
+  def test_recovery_mode_never_raises_extra_clamp_when_current_raw_closing_rises(self):
+    tr = self._track()
+    self._seed_histories(tr, raw_closing_mps=0.4, position_closing_mps=0.6)
+    deadline = tr.governor_hold_until_t
+
+    assert self._update(
+      tr, now=self.NOW, drel_m=self.DREL_M, raw_closing_mps=0.4,
+    )
+    assert tr.governor_calm_recovery_mode
+    assert tr.governor_closing_mps == pytest.approx(0.6)
+
+    # Route-422 adversarial shape: current raw closing rises to 1.69 m/s while
+    # the robust position history stays mild. The base filter consumes that raw
+    # measurement; calm recovery must not raise CD9's stale extra clamp.
+    now = self.NOW + 0.05
+    assert self._update(
+      tr,
+      now=now,
+      drel_m=self.DREL_M - 0.6 * 0.05,
+      raw_closing_mps=1.69,
+    )
+    assert tr.governor_calm_recovery_mode
+    assert tr.governor_calm_recovery_applied
+    assert tr.governor_recovery_position_closing_mps == pytest.approx(0.6)
+    assert tr.governor_closing_mps == pytest.approx(0.6)
+    assert tr.governor_hold_until_t == pytest.approx(deadline)
+
+  def test_inactive_hold_cannot_enter_calm_recovery(self):
+    tr = self._track(active=False)
+    self._seed_histories(tr)
+    deadline = tr.governor_hold_until_t
+
+    active = self._update(
+      tr, now=self.NOW, drel_m=self.DREL_M, raw_closing_mps=0.4,
+    )
+
+    assert not active
+    assert not tr.governor_calm_recovery_applied
+    assert tr.governor_recovery_position_closing_mps is None
+    assert tr.governor_closing_mps == pytest.approx(1.8)
+    assert tr.governor_hold_until_t == pytest.approx(deadline)
+
+  def test_active_but_uncorroborated_hold_cannot_enter_calm_recovery(self):
+    tr = self._track(threat_corroborated=False)
+    self._seed_histories(tr)
+
+    assert self._update(
+      tr, now=self.NOW, drel_m=self.DREL_M, raw_closing_mps=0.4,
+    )
+    assert not tr.governor_calm_recovery_mode
+    assert not tr.governor_calm_recovery_applied
+    assert tr.governor_closing_mps == pytest.approx(1.8)
+
+  def test_missed_model_frame_vetoes_recovery_on_the_next_measurement(self):
+    tr = self._track()
+    self._seed_histories(tr)
+    tr.governor_calm_recovery_mode = True
+    tr.governor_calm_recovery_applied = True
+    tracker = ModelLeadTracker(params=_NoParams())
+    tracker._tracks[tr.identifier] = tr
+    tracker.begin_frame(self.NOW)
+    tracker.end_frame()
+    assert tr.missed == 1
+    assert not tr.governor_calm_recovery_mode
+    assert not tr.governor_calm_recovery_applied
+
+    now = self.NOW + 0.05
+    active = self._update(
+      tr,
+      now=now,
+      drel_m=self.DREL_M - 0.6 * 0.05,
+      raw_closing_mps=0.4,
+    )
+
+    assert active
+    assert not tr.governor_calm_recovery_applied
+    assert tr.governor_recovery_position_closing_mps is None
+    assert tr.governor_closing_mps == pytest.approx(1.8)
+
+  @pytest.mark.parametrize("veto", ("current_braking", "short_ttc", "fast_close", "position"))
+  def test_any_safety_veto_exits_existing_recovery_mode(self, veto):
+    tr = self._track(closing_mps=0.6)
+    tr.governor_calm_recovery_mode = True
+    if veto == "current_braking":
+      drel_m, raw_closing_mps, raw_alead_mps2, position_closing_mps = self.DREL_M, 0.4, -0.21, 0.6
+    elif veto == "short_ttc":
+      drel_m, raw_closing_mps, raw_alead_mps2, position_closing_mps = 2.4, 0.4, 0.0, 0.1
+    elif veto == "fast_close":
+      drel_m, raw_closing_mps, raw_alead_mps2, position_closing_mps = self.DREL_M, 2.5, 0.0, 0.6
+    else:
+      drel_m, raw_closing_mps, raw_alead_mps2, position_closing_mps = self.DREL_M, 0.4, 0.0, 1.251
+    self._seed_histories(
+      tr,
+      drel_m=drel_m,
+      raw_closing_mps=raw_closing_mps,
+      position_closing_mps=position_closing_mps,
+    )
+
+    assert self._update(
+      tr,
+      now=self.NOW,
+      drel_m=drel_m,
+      raw_closing_mps=raw_closing_mps,
+      raw_alead_mps2=raw_alead_mps2,
+    )
+    assert not tr.governor_calm_recovery_mode
+    assert not tr.governor_calm_recovery_applied
+
+  @pytest.mark.parametrize("history_shape", ("position_gap", "sparse", "short_span"))
+  def test_position_history_gap_sparse_or_short_span_vetoes_recovery(self, history_shape):
+    tr = self._track()
+    full_times = [self.NOW - 1.25 + 0.05 * i for i in range(25)]
+    if history_shape == "position_gap":
+      position_times = [
+        sample_t for sample_t in full_times
+        if not self.NOW - 0.65 <= sample_t <= self.NOW - 0.55
+      ]
+    elif history_shape == "sparse":
+      position_times = list(np.linspace(self.NOW - 1.25, self.NOW - 0.05, 14))
+    else:
+      position_times = [self.NOW - 0.95 + 0.05 * i for i in range(19)]
+    self._seed_histories(tr, position_times=position_times)
+
+    assert self._update(
+      tr, now=self.NOW, drel_m=self.DREL_M, raw_closing_mps=0.4,
+    )
+    assert not tr.governor_calm_recovery_applied
+    assert tr.governor_recovery_position_closing_mps is None
+    assert tr.governor_closing_mps == pytest.approx(1.8)
+
+  @pytest.mark.parametrize("braking_location", ("current", "window"))
+  def test_current_or_windowed_braking_vetoes_recovery(self, braking_location):
+    tr = self._track()
+    if braking_location == "current":
+      self._seed_histories(tr)
+      current_alead = -0.21
+    else:
+      # The two current samples are calm, but the complete 0.6 s evidence
+      # window remains just beyond the fixed braking boundary.
+      self._seed_histories(
+        tr,
+        window_alead_mps2=-0.25,
+        previous_alead_mps2=0.0,
+      )
+      current_alead = 0.0
+
+    cfg = self._cfg(opening_governor_alead_veto_mps2=100.0)
+    assert self._update(
+      tr,
+      now=self.NOW,
+      drel_m=self.DREL_M,
+      raw_closing_mps=0.4,
+      raw_alead_mps2=current_alead,
+      cfg=cfg,
+    )
+    assert not tr.governor_calm_recovery_applied
+    assert tr.governor_recovery_position_closing_mps is None
+    assert tr.governor_closing_mps == pytest.approx(1.8)
+
+  @pytest.mark.parametrize(
+    "drel_m,expected_recovery",
+    [
+      (2.4, False),       # exactly 6.0 s raw TTC: fail closed
+      (2.4004, True),     # 6.001 s raw TTC: strictly beyond the veto
+    ],
+  )
+  def test_raw_ttc_boundary_is_strictly_greater_than_six_seconds(self, drel_m, expected_recovery):
+    assert OPENING_GOVERNOR_MIN_PUBLISHED_TTC_S == pytest.approx(6.0)
+    tr = self._track(drel_m=drel_m)
+    self._seed_histories(
+      tr,
+      drel_m=drel_m,
+      position_closing_mps=0.1,
+      raw_closing_mps=0.4,
+    )
+
+    assert self._update(
+      tr, now=self.NOW, drel_m=drel_m, raw_closing_mps=0.4,
+    )
+    assert tr.governor_calm_recovery_applied is expected_recovery
+    assert tr.governor_closing_mps == pytest.approx(0.4 if expected_recovery else 1.8)
+
+  @pytest.mark.parametrize(
+    "raw_closing_mps,expected_recovery",
+    [
+      (2.49, True),
+      (2.50, False),
+    ],
+  )
+  def test_raw_fast_close_boundary_2p49_vs_2p50(self, raw_closing_mps, expected_recovery):
+    assert OPENING_GOVERNOR_HARD_CLOSING_MPS == pytest.approx(2.5)
+    tr = self._track(closing_mps=3.0)
+    self._seed_histories(
+      tr,
+      position_closing_mps=0.5,
+      raw_closing_mps=raw_closing_mps,
+    )
+
+    assert self._update(
+      tr,
+      now=self.NOW,
+      drel_m=self.DREL_M,
+      raw_closing_mps=raw_closing_mps,
+    )
+    assert tr.governor_calm_recovery_applied is expected_recovery
+    assert tr.governor_closing_mps == pytest.approx(raw_closing_mps if expected_recovery else 3.0)
+
+  @pytest.mark.parametrize(
+    "position_closing_mps,expected_recovery",
+    [
+      (1.25, True),
+      (1.251, False),
+    ],
+  )
+  def test_long_position_boundary_1p25_vs_1p251(self, position_closing_mps, expected_recovery):
+    assert CLOSING_GOVERNOR_RECOVERY_MAX_POSITION_CLOSING_MPS == pytest.approx(1.25)
+    tr = self._track()
+    self._seed_histories(
+      tr,
+      position_closing_mps=position_closing_mps,
+      raw_closing_mps=0.4,
+    )
+
+    assert self._update(
+      tr, now=self.NOW, drel_m=self.DREL_M, raw_closing_mps=0.4,
+    )
+    assert tr.governor_calm_recovery_applied is expected_recovery
+    assert tr.governor_closing_mps == pytest.approx(position_closing_mps if expected_recovery else 1.8)
+
+  def test_first_braking_onset_vetoes_recovery_before_window_or_position_can_catch_up(self):
+    tr = self._track()
+    self._seed_histories(
+      tr,
+      position_closing_mps=0.2,
+      raw_closing_mps=0.4,
+      window_alead_mps2=0.0,
+    )
+    deadline = tr.governor_hold_until_t
+
+    # Adversarial onset-lag shape: all historical evidence looks calm and the
+    # long position estimator has not reacted, but the current raw aLead is the
+    # first braking sample. Current evidence must win immediately.
+    assert self._update(
+      tr,
+      now=self.NOW,
+      drel_m=self.DREL_M,
+      raw_closing_mps=0.4,
+      raw_alead_mps2=-0.21,
+      cfg=self._cfg(),
+    )
+    assert not tr.governor_calm_recovery_applied
+    assert tr.governor_reason == "current_braking"
+    assert tr.governor_threat_corroborated
+    assert tr.governor_closing_mps == pytest.approx(1.8)
+    assert tr.governor_hold_until_t == pytest.approx(deadline)
 
 
 class TestOpeningGovernor:

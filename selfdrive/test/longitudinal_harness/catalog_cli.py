@@ -24,7 +24,10 @@ def build_parser() -> argparse.ArgumentParser:
   index_routes = subparsers.add_parser("index-routes", help="Scan local EV6 route roots and index matching routes")
   index_routes.add_argument("--root", action="append", default=[], help="Route root to scan")
 
-  extract = subparsers.add_parser("extract-episodes", help="Extract EV6 approach/pullaway/cutin/handoff/dropout episodes")
+  extract = subparsers.add_parser(
+    "extract-episodes",
+    help="Extract EV6 approach/pullaway/cutin/handoff/dropout/false-closing episodes",
+  )
   extract.add_argument("--route-key", action="append", default=[], help="Restrict extraction to one or more route keys")
   extract.add_argument("--bundle-root", type=Path, default=Path(".cache/longitudinal_harness/snapshots"))
 

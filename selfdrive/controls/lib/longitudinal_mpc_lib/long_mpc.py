@@ -325,12 +325,12 @@ class _StabilizedLead:
   it's looking at a raw capnp reader or a phantom-extrapolated snapshot."""
   __slots__ = ('status', 'dRel', 'yRel', 'vRel', 'vLead', 'aLeadK', 'modelProb',
                'dPath', 'vLat', 'aLeadTau', 'aRel', 'vLeadK', 'fcw',
-               'fcwSuppressed', 'radar', 'radarTrackId')
+               'fcwSuppressed', 'closingGovernorRecovery', 'radar', 'radarTrackId')
 
   def __init__(self, status=False, dRel=0.0, yRel=0.0, vRel=0.0, vLead=0.0,
                 aLeadK=0.0, modelProb=0.0, dPath=0.0, vLat=0.0, aLeadTau=0.0,
-                aRel=0.0, vLeadK=0.0, fcw=False, fcwSuppressed=False, radar=False,
-                radarTrackId=-1):
+                aRel=0.0, vLeadK=0.0, fcw=False, fcwSuppressed=False,
+                closingGovernorRecovery=False, radar=False, radarTrackId=-1):
     self.status = bool(status)
     self.dRel = float(dRel)
     self.yRel = float(yRel)
@@ -345,6 +345,7 @@ class _StabilizedLead:
     self.vLeadK = float(vLeadK)
     self.fcw = bool(fcw)
     self.fcwSuppressed = bool(fcwSuppressed)
+    self.closingGovernorRecovery = bool(closingGovernorRecovery)
     self.radar = bool(radar)
     self.radarTrackId = int(radarTrackId)
 
@@ -376,6 +377,7 @@ class _StabilizedLead:
       vLeadK=cls._safe_attr(rd, 'vLeadK'),
       fcw=bool(getattr(rd, 'fcw', False)),
       fcwSuppressed=bool(getattr(rd, 'fcwSuppressed', False)),
+      closingGovernorRecovery=bool(getattr(rd, 'closingGovernorRecovery', False)),
       radar=bool(getattr(rd, 'radar', False)),
       radarTrackId=int(getattr(rd, 'radarTrackId', -1) or -1),
     )
@@ -2743,6 +2745,19 @@ class LongitudinalMpc:
       return False
 
     fresh = raw_valid and not self._lead_stability_phantom_slots[slot]
+    # RadarD's calm-recovery mode deliberately reshapes published vLead/vRel to
+    # unwind a stale CD9 closing clamp. Its finite difference is therefore not
+    # independent evidence that the physical lead is braking. Reset before the
+    # stale/phantom early return too: a held recovery-tainted lead must not
+    # preserve correlation from before the shaped epoch. Once the bit clears,
+    # the existing settle contract requires fresh, unshaped same-track history.
+    if bool(getattr(lead, 'closingGovernorRecovery', False)):
+      state.corr_meas_t = None
+      state.corr_meas_v = 0.0
+      state.corr_a_meas_lp = 0.0
+      state.corr_settled_s = 0.0
+      state.corr_track_id = None
+      return False
     if not fresh:
       # No fresh measurement (phantom hold / stale latch): freeze the low-pass
       # (a decay toward zero would fabricate corroboration) and never clamp.
@@ -2807,7 +2822,10 @@ class LongitudinalMpc:
     #    merely cross zero on quantization/noise. Road 22d showed -0.017/-0.04
     #    reports being amplified to -1.6..-1.9 by the same noisy vLead derivative,
     #    fabricating two brake taps. The known CD3 truth-deficit case reports
-    #    -0.48..-0.54 and remains eligible at the default 0.10 floor.
+    #    -0.48..-0.54 and remains eligible at the default 0.10 floor. RadarD's
+    #    closingGovernorRecovery provenance reset separately prevents its
+    #    publish-shaped vLead history from corroborating the 2026-07-13
+    #    route-406 weak -0.122 report.
     #  - corr_a_meas_lp < lead.aLeadK - deadband: the kinematic trend must be
     #    meaningfully MORE negative than the model. The deadband rejects the
     #    finite-difference jitter of a steady/lightly-braking lead (ev6_measured
@@ -2964,6 +2982,7 @@ class LongitudinalMpc:
           vLeadK=state.last_valid.vLeadK,
           fcw=state.last_valid.fcw,
           fcwSuppressed=bool(getattr(state.last_valid, 'fcwSuppressed', False)),
+          closingGovernorRecovery=bool(getattr(state.last_valid, 'closingGovernorRecovery', False)),
           radar=state.last_valid.radar,
           radarTrackId=state.last_valid.radarTrackId,
         )

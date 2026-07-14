@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .catalog import open_catalog, record_snapshot_bundle, record_sweep_result
-from .closed_loop import SimulationResult, run_harness
+from .closed_loop import run_harness
 from .config import FRIENDLY_PARAM_NAMES, NOISE_PROFILES, NoiseSeeds, resolve_ev6_vehicle_config
 from .inputs import CANONICAL_LEAD_PROFILE_NAMES, SCENARIO_NAMES, build_synthetic_scenario, load_snapshot_bundle
 
@@ -182,6 +182,7 @@ def run_sweep(*,
           hyundai_tuning_mode=hyundai_tuning_mode,
           snapshot_vehicle=bundle.vehicle,
           snapshot_params=bundle.params,
+          livetune_snapshot=None,
         )
       else:
         vehicle_config = resolve_ev6_vehicle_config(

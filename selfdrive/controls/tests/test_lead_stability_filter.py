@@ -6,7 +6,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from openpilot.selfdrive.controls.lib.longitudinal_live_tune import LeadResponseTuningConfig
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import (
   LongitudinalMpc,
   _LeadStabilityState,
@@ -16,11 +15,12 @@ from openpilot.selfdrive.controls.radard import _is_lead_prob_accepted
 
 def _make_raw_lead(status=True, dRel=40.0, yRel=0.0, vRel=-1.0, vLead=25.0,
                    aLeadK=0.0, modelProb=0.9, dPath=0.0, vLat=0.0, aLeadTau=0.0,
-                   aRel=0.0) -> SimpleNamespace:
+                   aRel=0.0, closingGovernorRecovery=False) -> SimpleNamespace:
   return SimpleNamespace(
     status=status, dRel=dRel, yRel=yRel, vRel=vRel, vLead=vLead,
     aLeadK=aLeadK, modelProb=modelProb, dPath=dPath, vLat=vLat,
     aLeadTau=aLeadTau, aRel=aRel,
+    closingGovernorRecovery=closingGovernorRecovery,
   )
 
 
@@ -393,6 +393,68 @@ class TestLeadAccelCorrBound:
     out0, state = self._run_deepening_trend(-0.04, model_min=0.10)
     assert state.corr_a_meas_lp < -1.0
     assert out0.aLeadK == pytest.approx(-0.04)
+
+  def test_governor_recovery_resets_correlation_and_requires_fresh_settling(self):
+    mpc = _make_mpc(
+      accel_corr_margin=0.5,
+      accel_corr_amplify_gain=1.0,
+      accel_corr_amplify_model_min=0.10,
+      accel_corr_amplify_deadband=0.35,
+    )
+    _, t = self._settle(mpc, v_lead=26.0)
+
+    # Establish a settled, strongly negative derivative that would amplify a
+    # meaningful model brake in the absence of provenance.
+    v_lead = 26.0
+    for _ in range(14):
+      v_lead -= 1.8 * 0.05
+      out0, _ = mpc._stabilize_raw_leads(
+        _make_raw_lead(vRel=v_lead - 26.0, vLead=v_lead, aLeadK=-0.54),
+        _make_raw_lead(status=False), now=t,
+      )
+      t += 0.05
+    state = mpc._lead_stability_state[0]
+    assert state.corr_settled_s >= 0.6
+    assert state.corr_a_meas_lp < -1.0
+    assert out0.aLeadK < -1.0
+
+    # Recovery-shaped velocity is not independent corroboration. Preserve the
+    # model's own braking report, but clear all derivative history.
+    recovered, _ = mpc._stabilize_raw_leads(
+      _make_raw_lead(vRel=v_lead - 26.0, vLead=v_lead, aLeadK=-0.54,
+                     closingGovernorRecovery=True),
+      _make_raw_lead(status=False), now=t,
+    )
+    t += 0.05
+    assert recovered.aLeadK == pytest.approx(-0.54)
+    assert state.corr_meas_t is None
+    assert state.corr_a_meas_lp == 0.0
+    assert state.corr_settled_s == 0.0
+    assert state.corr_track_id is None
+
+    # The first unshaped frame seeds a new baseline; fewer than 0.6 seconds of
+    # fresh history cannot reactivate CD3 even with a deep derivative.
+    for _ in range(11):
+      v_lead -= 1.8 * 0.05
+      out0, _ = mpc._stabilize_raw_leads(
+        _make_raw_lead(vRel=v_lead - 26.0, vLead=v_lead, aLeadK=-0.54),
+        _make_raw_lead(status=False), now=t,
+      )
+      t += 0.05
+    assert state.corr_settled_s < 0.6
+    assert out0.aLeadK == pytest.approx(-0.54)
+
+    # After a complete fresh settling epoch, genuine corroborated braking may
+    # amplify again.
+    for _ in range(4):
+      v_lead -= 1.8 * 0.05
+      out0, _ = mpc._stabilize_raw_leads(
+        _make_raw_lead(vRel=v_lead - 26.0, vLead=v_lead, aLeadK=-0.54),
+        _make_raw_lead(status=False), now=t,
+      )
+      t += 0.05
+    assert state.corr_settled_s >= 0.6
+    assert out0.aLeadK < -1.0
 
   def test_meaningful_underreported_model_brake_still_amplifies(self):
     # CD3 road truth-deficit: model -0.48..-0.54 plus trend -1.7..-1.9 is

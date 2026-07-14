@@ -1,15 +1,19 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from bisect import bisect_left, bisect_right
+from dataclasses import dataclass, field, replace
+import hashlib
 import json
 import math
 from pathlib import Path
 import re
+import warnings
 from typing import Any
 
 from openpilot.tools.lib.logreader import LogReader
 
 from opendbc.car.hyundai.values import HyundaiFlags, HyundaiSafetyFlags
+from openpilot.selfdrive.controls.radard import add_path_relative_lead_metrics, get_RadarState_from_vision
 
 from .catalog import (
   clear_route_extractions,
@@ -24,10 +28,11 @@ from .catalog import (
   upsert_route,
   upsert_segment,
 )
-from .inputs import LeadDirective, SnapshotBundle, StepInput, write_snapshot_bundle
+from .config import captured_param_manifest, DEFAULT_PARAM_VALUES
+from .inputs import LeadDirective, SnapshotBundle, StepInput, serialize_model_frame, write_snapshot_bundle
 
 
-EXTRACTOR_VERSION = "ev6_v3"
+EXTRACTOR_VERSION = "ev6_v9_replay_inputs_v1"
 DEFAULT_ROUTE_ROOTS = (
   Path(".cache/commaCar"),
   Path(".cache/commaAdb"),
@@ -42,6 +47,7 @@ WINDOWS_BY_TYPE = {
   "cutin": (-2.0, 4.0),
   "handoff": (-2.0, 4.0),
   "dropout": (-2.0, 4.0),
+  "false_closing": (-15.0, 5.0),
 }
 COOLDOWN_BY_TYPE_S = {
   "approach": 6.0,
@@ -49,6 +55,7 @@ COOLDOWN_BY_TYPE_S = {
   "cutin": 5.0,
   "handoff": 5.0,
   "dropout": 4.0,
+  "false_closing": 5.0,
 }
 SUPPRESSION_BY_TYPE_S = {
   "approach": 10.0,
@@ -56,7 +63,27 @@ SUPPRESSION_BY_TYPE_S = {
   "cutin": 8.0,
   "handoff": 6.0,
   "dropout": 6.0,
+  "false_closing": 6.0,
 }
+MAX_EXACT_REPLAY_FRAME_GAP_S = 0.075
+RADARD_DEPENDENCY_WARMUP_S = 15.0
+LONGITUDINAL_PLAN_SP_PAIR_MAX_NS = 20_000_000
+MPH_TO_MPS = 0.44704
+PLANNER_REPLAY_INPUTS_VERSION = 1
+RADARD_REPLAY_INPUTS_VERSION = 1
+
+
+class EpisodeNotReplayableError(ValueError):
+  """A detected episode lacks required recorded dependencies for faithful replay."""
+PLANNER_CRITICAL_SERVICES = (
+  "carState",
+  "controlsState",
+  "carControl",
+  "selfdriveState",
+  "modelV2",
+  "radarState",
+)
+PARAM_CHANGE_NEAR_MARGIN_NS = 75_000_000
 
 
 @dataclass(frozen=True)
@@ -100,6 +127,70 @@ class RouteLeadFrame:
 
 
 @dataclass(frozen=True)
+class CachedCarState:
+  v_ego_mps: float
+  a_ego_mps2: float
+  v_cruise_kph: float
+  gas_pressed: bool
+  standstill: bool
+
+
+@dataclass(frozen=True)
+class CachedLongitudinalPlanSP:
+  log_mono_time_ns: int
+  slc_active: bool
+  slc_state: str
+  slc_speed_limit_mps: float
+  slc_speed_limit_offset_mps: float
+  vtsc_state: str
+  vtsc_velocity_mps: float
+  object_hazard_active: bool
+  replay_inputs_valid: bool = False
+  replay_inputs_version: int = 0
+  replay_effective_cruise_mps: float = 0.0
+  replay_plan_log_mono_time_ns: int = 0
+  replay_input_clocks_ns: dict[str, int] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class CachedLongitudinalPlan:
+  log_mono_time_ns: int
+  model_mono_time_ns: int
+  solver_execution_time_s: float
+  radar_state_mono_time_ns: int
+  v_cruise_deprecated_mps: float
+  a_target_mps2: float
+  source: str
+  plan_sp: CachedLongitudinalPlanSP | None = None
+
+
+@dataclass(frozen=True)
+class PlannerRadarAssociation:
+  target_log_mono_time_ns: int | None
+  candidate_log_mono_times_ns: tuple[int, ...]
+  resolution: str
+  reason: str
+
+
+@dataclass(frozen=True)
+class EffectiveCruiseContext:
+  speed_mps: float | None
+  limiter: str | None
+  provenance: str | None
+  status: str
+  reason: str
+
+
+@dataclass(frozen=True)
+class PlannerContextResolution:
+  status: str
+  reason: str
+  inputs: dict[str, Any]
+  service_log_mono_time_ns: dict[str, int]
+  service_provenance: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class EpisodeFrame:
   route_key: str
   seg_idx: int
@@ -115,6 +206,37 @@ class EpisodeFrame:
   pitch_rad: float
   lead_one: RouteLeadFrame
   lead_two: RouteLeadFrame
+  raw_lead_one: RouteLeadFrame | None
+  raw_lead_two: RouteLeadFrame | None
+  raw_model: dict[str, Any] | None
+  model_v2_log_mono_time_ns: int | None
+  car_state_log_mono_time_ns: int | None
+  live_tracks_log_mono_time_ns: int | None
+  radard_service_association_status: str
+  radard_service_association_provenance: dict[str, Any]
+  radard_gate_eligible: bool
+  radar_state_log_mono_time_ns: int
+  longitudinal_plan_log_mono_time_ns: int | None
+  longitudinal_plan_solver_execution_time_s: float | None
+  planner_radar_state_log_mono_time_ns: int | None
+  planner_radar_state_candidates_ns: tuple[int, ...]
+  planner_radar_resolution: str
+  planner_radar_reason: str
+  planner_inputs: dict[str, Any]
+  planner_service_log_mono_time_ns: dict[str, int]
+  planner_service_association_provenance: dict[str, Any]
+  recorded_effective_cruise_mps: float | None
+  recorded_effective_cruise_limiter: str | None
+  recorded_effective_cruise_provenance: str | None
+  recorded_effective_cruise_status: str
+  planner_context_status: str
+  planner_context_reason: str
+  gas_pressed: bool
+  personality: int
+  planner_accel_mps2: float | None
+  planner_source: str | None
+  params_snapshot: dict[str, str]
+  param_updates: dict[str, str]
 
 
 @dataclass
@@ -123,6 +245,7 @@ class RouteScanResult:
   metadata: RouteMetadata
   observed_params: dict[str, str]
   frames: list[EpisodeFrame]
+  service_join_diagnostics: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -143,7 +266,9 @@ class EpisodeCandidate:
 
   @property
   def episode_key(self) -> str:
-    return f"route{self.route_id}:{self.route_key}:{self.episode_type}:{int(round(self.t_start_s * 1000.0))}:{int(round(self.t_end_s * 1000.0))}:{EXTRACTOR_VERSION}"
+    start_ms = int(round(self.t_start_s * 1000.0))
+    end_ms = int(round(self.t_end_s * 1000.0))
+    return f"route{self.route_id}:{self.route_key}:{self.episode_type}:{start_ms}:{end_ms}:{EXTRACTOR_VERSION}"
 
 
 def index_ev6_routes(conn, roots: list[str | Path] | None = None) -> list[dict[str, Any]]:
@@ -253,12 +378,19 @@ def read_route_metadata(segments: list[DiscoveredSegment]) -> RouteMetadata | No
 
   first_segment = segments[0]
   car_params = None
+  car_params_sp = None
+  init_provenance: dict[str, Any] | None = None
   for segment in segments:
     for msg in LogReader(str(segment.rlog_path)):
-      if msg.which() == "carParams":
+      if msg.which() == "initData" and init_provenance is None:
+        init_provenance = _extract_init_provenance(msg.initData)
+      elif msg.which() == "carParams" and car_params is None:
         car_params = msg.carParams
+      elif msg.which() == "carParamsSP" and car_params_sp is None:
+        car_params_sp = msg.carParamsSP
+      if car_params is not None and car_params_sp is not None and init_provenance is not None:
         break
-    if car_params is not None:
+    if car_params is not None and car_params_sp is not None and init_provenance is not None:
       break
 
   if car_params is None:
@@ -273,6 +405,22 @@ def read_route_metadata(segments: list[DiscoveredSegment]) -> RouteMetadata | No
     safety_param = int(car_params.safetyParamDEPRECATED)
 
   topology = infer_topology(car_params.flags, safety_param)
+  notes_json: dict[str, Any] = {
+    "flags": int(car_params.flags),
+    "pcmCruise": bool(car_params.pcmCruise),
+    "longitudinalActuatorDelay": float(car_params.longitudinalActuatorDelay),
+    "vEgoStopping": float(car_params.vEgoStopping),
+    "vEgoStarting": float(car_params.vEgoStarting),
+    "stoppingDecelRate": float(car_params.stoppingDecelRate),
+    "startAccel": float(car_params.startAccel),
+    "startingState": bool(car_params.startingState),
+    **(init_provenance or {}),
+  }
+  if car_params_sp is not None:
+    notes_json.update({
+      "spFlags": int(car_params_sp.flags),
+      "spSafetyParam": int(car_params_sp.safetyParam),
+    })
   return RouteMetadata(
     source_root=str(first_segment.source_root),
     route_key=first_segment.route_key,
@@ -284,7 +432,7 @@ def read_route_metadata(segments: list[DiscoveredSegment]) -> RouteMetadata | No
     safety_param=safety_param,
     segment_count=len(segments),
     first_segment_path=str(first_segment.rlog_path),
-    notes_json={"flags": int(car_params.flags)},
+    notes_json=notes_json,
   )
 
 
@@ -306,43 +454,1253 @@ def infer_topology(flags: int, safety_param: int | None) -> str | None:
   return "lfa"
 
 
-def load_route_scan(conn, route_row) -> RouteScanResult:
+@dataclass(frozen=True)
+class RouteReplayIndex:
+  car_state_by_mono_time: dict[int, CachedCarState]
+  planner_inputs_by_service: dict[str, dict[int, dict[str, Any]]]
+  live_tracks_mono_times: tuple[int, ...]
+  radar_state_mono_times: tuple[int, ...]
+  plans_by_model_mono_time: dict[int, CachedLongitudinalPlan]
+  param_change_mono_times_ns: tuple[int, ...]
+  rti_zero_threats_proven: bool
+  rti_state_count: int
+  planner_input_mono_times_by_service: dict[str, tuple[int, ...]] = field(default_factory=dict)
+  conflicting_input_mono_times_by_service: dict[str, tuple[int, ...]] = field(default_factory=dict)
+  identical_duplicate_counts_by_service: dict[str, int] = field(default_factory=dict)
+
+
+def _enum_name(value: Any) -> str:
+  text = str(value)
+  return text.rsplit(".", 1)[-1]
+
+
+def _has_planner_replay_inputs_v1(plan: CachedLongitudinalPlan | None) -> bool:
+  return bool(
+    plan is not None and
+    plan.plan_sp is not None and
+    plan.plan_sp.replay_inputs_valid and
+    plan.plan_sp.replay_inputs_version == PLANNER_REPLAY_INPUTS_VERSION and
+    plan.plan_sp.replay_plan_log_mono_time_ns == plan.log_mono_time_ns and
+    int(plan.plan_sp.replay_input_clocks_ns.get("modelV2", 0)) == plan.model_mono_time_ns
+  )
+
+
+def _pair_longitudinal_plans_with_sp(
+  plans: list[CachedLongitudinalPlan],
+  plan_sp_messages: list[CachedLongitudinalPlanSP],
+) -> list[CachedLongitudinalPlan]:
+  """Pair a plan only when exactly one SP publication fits its writer window."""
+  paired: list[CachedLongitudinalPlan] = []
+  sorted_plans = sorted(plans, key=lambda entry: entry.log_mono_time_ns)
+  sorted_sp = sorted(plan_sp_messages, key=lambda entry: entry.log_mono_time_ns)
+  sp_times = [entry.log_mono_time_ns for entry in sorted_sp]
+  for plan_idx, plan in enumerate(sorted_plans):
+    start_ns = int(plan.log_mono_time_ns)
+    end_ns = start_ns + LONGITUDINAL_PLAN_SP_PAIR_MAX_NS
+    next_plan_time_ns = (
+      int(sorted_plans[plan_idx + 1].log_mono_time_ns)
+      if plan_idx + 1 < len(sorted_plans) else None
+    )
+    left = bisect_left(sp_times, start_ns)
+    right = bisect_right(sp_times, end_ns)
+    if next_plan_time_ns is not None:
+      # A same-clock SP belongs to the next plan, never the previous one.
+      right = min(right, bisect_left(sp_times, next_plan_time_ns))
+    candidates = sorted_sp[left:right]
+    # Duplicate/competing SP publications are indistinguishable in legacy logger
+    # order. Refuse to attach either, because a guessed v1 writer contract would
+    # otherwise make the downstream exactness checks fail open.
+    plan_sp = candidates[0] if len(candidates) == 1 else None
+    paired.append(replace(plan, plan_sp=plan_sp))
+  return paired
+
+
+def resolve_planner_radar_association(
+  plan: CachedLongitudinalPlan,
+  radar_state_mono_times: list[int] | tuple[int, ...],
+  conflicting_radar_state_mono_times: list[int] | tuple[int, ...] = (),
+) -> PlannerRadarAssociation:
+  """Resolve the RadarD publication available to plannerd without output oracles.
+
+  New logs carry an exact pointer in LongitudinalPlanSP.replayInputs. Deprecated
+  longitudinalPlan fields are diagnostics only. Legacy logs can only be called unique when
+  publication timing leaves one possible input: the last publication before the
+  model poll plus publications that could have completed before solver start.
+  """
+  # RouteReplayIndex already owns a sorted, unique tuple. Preserve that fast
+  # path: this resolver runs once per plan across routes with >100k frames.
+  radar_times = (
+    radar_state_mono_times
+    if isinstance(radar_state_mono_times, tuple)
+    else tuple(sorted(set(int(value) for value in radar_state_mono_times)))
+  )
+  conflicting_radar_times = frozenset(int(value) for value in conflicting_radar_state_mono_times)
+  if _has_planner_replay_inputs_v1(plan):
+    assert plan.plan_sp is not None
+    pointer = int(plan.plan_sp.replay_input_clocks_ns.get("radarState", 0))
+    if pointer <= 0:
+      return PlannerRadarAssociation(
+        None,
+        (),
+        "missing",
+        "LongitudinalPlanSP.replayInputs v1 records no received radarState publication",
+      )
+    if pointer in conflicting_radar_times:
+      return PlannerRadarAssociation(
+        None,
+        (pointer,),
+        "conflict",
+        f"v1 replay radarState clock {pointer} has conflicting duplicate payloads",
+      )
+    pointer_idx = bisect_left(radar_times, pointer)
+    if pointer_idx < len(radar_times) and radar_times[pointer_idx] == pointer:
+      return PlannerRadarAssociation(
+        pointer,
+        (pointer,),
+        "exact",
+        "LongitudinalPlanSP.replayInputs v1 exact radarState clock",
+      )
+    return PlannerRadarAssociation(
+      pointer,
+      (),
+      "missing",
+      f"v1 replay radarState clock {pointer} is absent from the loaded route",
+    )
+
+  model_time_ns = int(plan.model_mono_time_ns)
+  solver_time_s = float(plan.solver_execution_time_s)
+  solver_ns = 0 if not math.isfinite(solver_time_s) else max(0, int(round(solver_time_s * 1e9)))
+  solver_start_ns = int(plan.log_mono_time_ns) - solver_ns
+
+  model_idx = bisect_left(radar_times, model_time_ns)
+  baseline = radar_times[model_idx - 1] if model_idx > 0 else None
+  candidates: list[int] = []
+  if baseline is not None:
+    candidates.append(baseline)
+  solver_end_idx = bisect_right(radar_times, solver_start_ns, lo=model_idx)
+  later_candidates = list(radar_times[model_idx:solver_end_idx])
+  candidates.extend(later_candidates)
+  candidates = sorted(set(candidates))
+  conflicting_candidates = tuple(candidate for candidate in candidates if candidate in conflicting_radar_times)
+  if conflicting_candidates:
+    return PlannerRadarAssociation(
+      None,
+      tuple(candidates),
+      "conflict",
+      f"legacy timing candidates include conflicting duplicate radarState payloads at {list(conflicting_candidates)}",
+    )
+  if baseline is None:
+    return PlannerRadarAssociation(
+      None,
+      tuple(candidates),
+      "missing",
+      "legacy/default replay contract has no predecessor radar publication before model poll; segment-boundary input is unknown",
+    )
+  if len(candidates) == 1:
+    return PlannerRadarAssociation(
+      candidates[0],
+      tuple(candidates),
+      "legacy_timing_unique",
+      "legacy publication timing leaves one candidate; deprecated pointer is not proof",
+    )
+  if len(candidates) > 1:
+    return PlannerRadarAssociation(
+      None,
+      tuple(candidates),
+      "legacy_ambiguous",
+      "legacy timing permits multiple publications; planner output was not used to choose",
+    )
+  return PlannerRadarAssociation(None, (), "missing", "no radar publication was available by solver start")
+
+
+def _param_bool(params: dict[str, str], key: str) -> bool | None:
+  if key not in params:
+    return None
+  value = str(params[key]).strip().lower()
+  if value in ("1", "true", "yes", "on"):
+    return True
+  if value in ("0", "false", "no", "off", ""):
+    return False
+  return None
+
+
+def derive_effective_cruise_context(
+  *,
+  plan: CachedLongitudinalPlan | None,
+  raw_cruise_mps: float,
+  force_decel: bool,
+  long_active: bool,
+  gas_pressed: bool,
+  params: dict[str, str],
+  rti_zero_threats_proven: bool,
+) -> EffectiveCruiseContext:
+  """Read a v1 writer cap or conservatively derive a non-gating legacy cap."""
+  if _has_planner_replay_inputs_v1(plan):
+    assert plan is not None and plan.plan_sp is not None
+    speed_mps = float(plan.plan_sp.replay_effective_cruise_mps)
+    if not math.isfinite(speed_mps) or speed_mps < 0.0:
+      return EffectiveCruiseContext(
+        None,
+        None,
+        "LongitudinalPlanSP.replayInputs.effectiveCruiseMps",
+        "unscorable",
+        "v1 writer contract contains an invalid effective cruise cap",
+      )
+    return EffectiveCruiseContext(
+      speed_mps,
+      "writerContractV1",
+      "LongitudinalPlanSP.replayInputs.effectiveCruiseMps",
+      "exact",
+      "v1 planner producer recorded the final MPC-boundary cap in m/s",
+    )
+  if force_decel:
+    return EffectiveCruiseContext(
+      0.0,
+      "forceDecel",
+      "controlsState.forceDecel",
+      "legacy_derived",
+      "legacy forceDecel deterministically derives zero, but no v1 writer contract exists",
+    )
+  if plan is None:
+    return EffectiveCruiseContext(None, None, None, "unscorable", "missing longitudinalPlan for model frame")
+  if plan.plan_sp is None:
+    return EffectiveCruiseContext(
+      None,
+      None,
+      None,
+      "unscorable",
+      "no one-to-one longitudinalPlanSP publication within 20 ms",
+    )
+
+  plan_sp = plan.plan_sp
+  if plan_sp.object_hazard_active:
+    return EffectiveCruiseContext(
+      None,
+      None,
+      None,
+      "unscorable",
+      "object hazard was active but its planner input state was not captured",
+    )
+
+  candidates: list[tuple[str, float, str]] = [
+    ("rawCruise", float(raw_cruise_mps), "carState.vCruise"),
+  ]
+  if plan_sp.slc_active:
+    slc_cap = float(plan_sp.slc_speed_limit_mps + plan_sp.slc_speed_limit_offset_mps)
+    candidates.append((
+      "speedLimitControl",
+      slc_cap,
+      "paired longitudinalPlanSP.slc.speedLimit+speedLimitOffset",
+    ))
+
+  vtsc_enabled = _param_bool(params, "VisionTurnSpeedControl")
+  if vtsc_enabled is None:
+    return EffectiveCruiseContext(None, None, None, "unscorable", "missing VisionTurnSpeedControl parameter")
+  if vtsc_enabled and long_active:
+    if gas_pressed:
+      return EffectiveCruiseContext(
+        None,
+        None,
+        None,
+        "unscorable",
+        "VTSC enabled while gasPressed; published velocity applicability is not provable",
+      )
+    if not math.isfinite(plan_sp.vtsc_velocity_mps) or plan_sp.vtsc_velocity_mps <= 0.0:
+      return EffectiveCruiseContext(
+        None,
+        None,
+        None,
+        "unscorable",
+        "VTSC enabled and longActive but paired publication has no usable velocity",
+      )
+    # The enum's disabled value is not used as proof of inactivity. Treat the
+    # published velocity as a candidate whenever the controller can apply.
+    candidates.append((
+      "visionTurnSpeedControl",
+      float(plan_sp.vtsc_velocity_mps),
+      f"paired longitudinalPlanSP.visionTurnSpeedControl.velocity(state={plan_sp.vtsc_state})",
+    ))
+
+  rti_enabled = _param_bool(params, "RTIEnabled")
+  if rti_enabled is None:
+    return EffectiveCruiseContext(None, None, None, "unscorable", "missing RTIEnabled parameter")
+  if rti_enabled and not rti_zero_threats_proven:
+    return EffectiveCruiseContext(
+      None,
+      None,
+      None,
+      "unscorable",
+      "RTI enabled without route-wide zero-threat proof",
+    )
+
+  weather_enabled = _param_bool(params, "WeatherAwareControlEnabled")
+  if weather_enabled is None:
+    return EffectiveCruiseContext(None, None, None, "unscorable", "missing WeatherAwareControlEnabled parameter")
+  selected = min(candidates, key=lambda candidate: candidate[1])
+  proof_parts = [candidate[2] for candidate in candidates]
+  if rti_enabled:
+    proof_parts.append("all logged rtiStateSP publications contained zero threats")
+  if weather_enabled:
+    reductions_mph: list[float] = []
+    for key, default_mph in (
+      ("WeatherSpeedReductionLight", 5.0),
+      ("WeatherSpeedReductionModerate", 10.0),
+      ("WeatherSpeedReductionHeavy", 15.0),
+    ):
+      try:
+        reductions_mph.append(float(params.get(key, default_mph)))
+      except (TypeError, ValueError):
+        return EffectiveCruiseContext(None, None, None, "unscorable", f"invalid {key} parameter")
+    weather_floor_mps = max(2.24, float(raw_cruise_mps) - max(reductions_mph) * MPH_TO_MPS)
+    if weather_floor_mps < selected[1] - 1e-6:
+      return EffectiveCruiseContext(
+        None,
+        None,
+        None,
+        "unscorable",
+        f"weather could undercut selected cap (floor {weather_floor_mps:.6f} < {selected[1]:.6f} m/s)",
+      )
+    proof_parts.append(f"weather configured floor {weather_floor_mps:.6f} m/s cannot undercut selected cap")
+
+  return EffectiveCruiseContext(
+    selected[1],
+    selected[0],
+    "; ".join(proof_parts),
+    "legacy_derived",
+    f"legacy paired publications derive {selected[0]}; no v1 writer contract exists",
+  )
+
+
+def resolve_planner_context(
+  *,
+  plan: CachedLongitudinalPlan | None,
+  replay_index: RouteReplayIndex,
+  radar_association: PlannerRadarAssociation,
+  effective_cruise: EffectiveCruiseContext,
+  params_snapshot: dict[str, str],
+) -> PlannerContextResolution:
+  """Join the v1 writer clocks to exact planner inputs without output inference."""
+  if plan is None:
+    return PlannerContextResolution(
+      "unscorable", "missing longitudinalPlan for model frame", {}, {}, {}
+    )
+
+  param_manifest = captured_param_manifest(params_snapshot)
+  plan_sp = plan.plan_sp
+  if not _has_planner_replay_inputs_v1(plan):
+    if plan_sp is not None and plan_sp.replay_inputs_valid:
+      if plan_sp.replay_inputs_version != PLANNER_REPLAY_INPUTS_VERSION:
+        reason = f"unsupported LongitudinalPlanSP.replayInputs version {plan_sp.replay_inputs_version}"
+      elif plan_sp.replay_plan_log_mono_time_ns != plan.log_mono_time_ns:
+        reason = (
+          "LongitudinalPlanSP.replayInputs longitudinalPlan pointer mismatch: "
+          f"{plan_sp.replay_plan_log_mono_time_ns} != {plan.log_mono_time_ns}"
+        )
+      else:
+        reason = (
+          "LongitudinalPlanSP.replayInputs modelV2 pointer mismatch: "
+          f"{int(plan_sp.replay_input_clocks_ns.get('modelV2', 0))} != {plan.model_mono_time_ns}"
+        )
+      return PlannerContextResolution("unscorable", reason, {}, {}, {
+        "contract": {
+          "status": "unsupported" if plan_sp.replay_inputs_version != PLANNER_REPLAY_INPUTS_VERSION else "mismatch",
+          "reason": reason,
+        },
+      })
+
+    # Legacy logs predate the writer-side clock contract. For non-gating
+    # diagnostics, use only information available before the triggering model
+    # publication: the model payload at modelMonoTime and the latest publication
+    # of each other core service at or before that clock. This is deterministic
+    # and output-independent, but it cannot prove what SubMaster consumed when
+    # services raced the model poll, so every association remains inferred.
+    model_clock = int(plan.model_mono_time_ns)
+    inputs: dict[str, Any] = {}
+    clocks: dict[str, int] = {}
+    provenance: dict[str, Any] = {
+      "contract": {
+        "status": "inferred",
+        "reason": "legacy/schema-default planner inputs; diagnostic latest-at-or-before-model join",
+      },
+    }
+    failures: list[str] = []
+    for service in PLANNER_CRITICAL_SERVICES:
+      if service == "radarState":
+        if radar_association.target_log_mono_time_ns is not None:
+          radar_clock = int(radar_association.target_log_mono_time_ns)
+          if radar_clock in replay_index.conflicting_input_mono_times_by_service.get(service, ()):
+            provenance[service] = {
+              "status": "conflict",
+              "clockNs": radar_clock,
+              "reason": "route contains conflicting duplicate radarState payloads at this clock",
+            }
+            failures.append("radarState diagnostic payload has conflicting duplicates")
+          else:
+            clocks[service] = radar_clock
+            provenance[service] = {
+              "status": "inferred",
+              "clockNs": radar_clock,
+              "reason": f"legacy {radar_association.resolution} timing association; not a writer pointer",
+            }
+        else:
+          provenance[service] = {
+            "status": (
+              "conflict" if radar_association.resolution == "conflict"
+              else "ambiguous" if radar_association.candidate_log_mono_times_ns
+              else "missing"
+            ),
+            "candidateClocksNs": list(radar_association.candidate_log_mono_times_ns),
+            "reason": radar_association.reason,
+          }
+          if radar_association.resolution == "conflict":
+            failures.append("radarState diagnostic association has conflicting duplicate payloads")
+        continue
+
+      snapshots = replay_index.planner_inputs_by_service.get(service, {})
+      service_times = replay_index.planner_input_mono_times_by_service.get(service)
+      if service_times is None:
+        # Synthetic/unit-test indexes may omit the precomputed route-wide keys.
+        service_times = tuple(sorted(int(clock) for clock in snapshots))
+      if service == "modelV2":
+        clock = model_clock if model_clock in snapshots else None
+        join_reason = "legacy longitudinalPlan.modelMonoTime exact modelV2 payload join"
+      else:
+        service_idx = bisect_right(service_times, model_clock) - 1
+        clock = int(service_times[service_idx]) if service_idx >= 0 else None
+        join_reason = "legacy latest publication at or before modelMonoTime; SubMaster race remains unknown"
+
+      if clock is not None and clock in replay_index.conflicting_input_mono_times_by_service.get(service, ()):
+        provenance[service] = {
+          "status": "conflict",
+          "clockNs": clock,
+          "cutoffClockNs": model_clock,
+          "reason": f"recorded {service} clock has conflicting duplicate payloads",
+        }
+        failures.append(f"{service} diagnostic payload has conflicting duplicates")
+        continue
+      if clock is None or clock <= 0 or clock not in snapshots:
+        provenance[service] = {
+          "status": "missing",
+          "cutoffClockNs": model_clock,
+          "reason": f"no recorded {service} payload satisfies the legacy diagnostic join",
+        }
+        failures.append(f"{service} diagnostic payload is missing")
+        continue
+      clocks[service] = clock
+      inputs[service] = dict(snapshots[clock])
+      provenance[service] = {
+        "status": "inferred",
+        "clockNs": clock,
+        "cutoffClockNs": model_clock,
+        "reason": join_reason,
+      }
+
+    plan_time_ns = int(plan.log_mono_time_ns)
+    warmup_ns = int(round(RADARD_DEPENDENCY_WARMUP_S * 1e9))
+    change_start_idx = bisect_right(replay_index.param_change_mono_times_ns, plan_time_ns - warmup_ns)
+    change_end_idx = bisect_right(
+      replay_index.param_change_mono_times_ns,
+      plan_time_ns + PARAM_CHANGE_NEAR_MARGIN_NS,
+    )
+    nearby_param_changes = replay_index.param_change_mono_times_ns[change_start_idx:change_end_idx]
+    if not param_manifest["complete"]:
+      provenance["params"] = {
+        **param_manifest,
+        "status": "incomplete",
+        "reason": f"captured parameter manifest is missing {len(param_manifest['missingKeys'])} replay-relevant values",
+      }
+      failures.append("captured parameter manifest is incomplete")
+    elif nearby_param_changes:
+      provenance["params"] = {
+        **param_manifest,
+        "status": "unstable",
+        "changeClocksNs": list(nearby_param_changes),
+        "reason": (
+          f"legacy parameter change occurred within the {RADARD_DEPENDENCY_WARMUP_S:.1f} s dependency window"
+        ),
+      }
+      failures.append("captured legacy parameters were not stable through dependency warmup")
+    else:
+      provenance["params"] = {
+        **param_manifest,
+        "status": "inferred",
+        "reason": "captured legacy parameter snapshot; no writer-side planner clock contract",
+      }
+    if effective_cruise.speed_mps is None:
+      failures.append(
+        f"effective cruise context is {effective_cruise.status}: {effective_cruise.reason}"
+      )
+
+    reason = (
+      "legacy diagnostic core inputs joined at or before modelMonoTime; asynchronous consumption remains unproven"
+      if not failures else "; ".join(failures)
+    )
+    return PlannerContextResolution(
+      "legacy_derived" if not failures else "unscorable",
+      reason,
+      inputs,
+      clocks,
+      provenance,
+    )
+
+  assert plan_sp is not None
+  clocks = {
+    service: int(clock)
+    for service, clock in plan_sp.replay_input_clocks_ns.items()
+  }
+  inputs: dict[str, Any] = {}
+  provenance: dict[str, Any] = {
+    "contract": {
+      "status": "exact",
+      "version": plan_sp.replay_inputs_version,
+      "reason": "LongitudinalPlanSP.replayInputs v1 producer contract",
+    },
+  }
+  for service, clock in clocks.items():
+    if service not in PLANNER_CRITICAL_SERVICES:
+      provenance[service] = {
+        "status": "recorded_clock" if clock > 0 else "absent",
+        "clockNs": clock,
+        "reason": "optional v1 planner service clock; payload not required for core exactness",
+      }
+  failures: list[str] = []
+
+  for service in PLANNER_CRITICAL_SERVICES:
+    clock = int(clocks.get(service, 0))
+    if clock <= 0:
+      provenance[service] = {"status": "missing", "clockNs": clock, "reason": "v1 clock is zero"}
+      failures.append(f"{service} clock is zero")
+      continue
+
+    if service == "radarState":
+      if clock in replay_index.conflicting_input_mono_times_by_service.get(service, ()):
+        provenance[service] = {
+          "status": "conflict",
+          "clockNs": clock,
+          "reason": "route contains conflicting duplicate radarState payloads at this clock",
+        }
+        failures.append(f"radarState target {clock} has conflicting duplicate payloads")
+      elif radar_association.resolution != "exact" or radar_association.target_log_mono_time_ns != clock:
+        provenance[service] = {
+          "status": "missing",
+          "clockNs": clock,
+          "reason": radar_association.reason,
+        }
+        failures.append(f"radarState target {clock} is not exactly joined")
+      else:
+        provenance[service] = {
+          "status": "exact",
+          "clockNs": clock,
+          "reason": "v1 clock joined to recorded radarState publication",
+        }
+      continue
+
+    if service == "modelV2" and int(plan.model_mono_time_ns) != clock:
+      provenance[service] = {
+        "status": "mismatch",
+        "clockNs": clock,
+        "builtInClockNs": int(plan.model_mono_time_ns),
+        "reason": "v1 modelV2 clock disagrees with longitudinalPlan.modelMonoTime",
+      }
+      failures.append("modelV2 v1/built-in clock mismatch")
+      continue
+
+    if clock in replay_index.conflicting_input_mono_times_by_service.get(service, ()):
+      provenance[service] = {
+        "status": "conflict",
+        "clockNs": clock,
+        "reason": f"recorded {service} target has conflicting duplicate payloads",
+      }
+      failures.append(f"{service} target {clock} has conflicting duplicate payloads")
+      continue
+
+    snapshot = replay_index.planner_inputs_by_service.get(service, {}).get(clock)
+    if snapshot is None:
+      provenance[service] = {
+        "status": "missing",
+        "clockNs": clock,
+        "reason": f"recorded {service} target is absent from the loaded route",
+      }
+      failures.append(f"{service} target {clock} is missing")
+      continue
+    inputs[service] = dict(snapshot)
+    provenance[service] = {
+      "status": "exact",
+      "clockNs": clock,
+      "reason": f"v1 clock exact route-wide {service} join",
+    }
+
+  if effective_cruise.status != "exact" or effective_cruise.speed_mps is None:
+    failures.append(f"effective cruise writer contract is {effective_cruise.status}")
+
+  if plan_sp.object_hazard_active:
+    object_clock = int(plan_sp.replay_input_clocks_ns.get("objectHazardStateSP", 0))
+    provenance["objectHazardStateSP"] = {
+      "status": "missing_payload",
+      "clockNs": object_clock,
+      "reason": "active object hazard payload is not serialized by the v1 replay harness",
+    }
+    failures.append("active object hazard state is not exactly replayed")
+
+  plan_time_ns = int(plan.log_mono_time_ns)
+  warmup_ns = int(round(RADARD_DEPENDENCY_WARMUP_S * 1e9))
+  change_start_idx = bisect_right(replay_index.param_change_mono_times_ns, plan_time_ns - warmup_ns)
+  change_end_idx = bisect_right(
+    replay_index.param_change_mono_times_ns,
+    plan_time_ns + PARAM_CHANGE_NEAR_MARGIN_NS,
+  )
+  nearby_param_changes = replay_index.param_change_mono_times_ns[change_start_idx:change_end_idx]
+  if not param_manifest["complete"]:
+    provenance["params"] = {
+      **param_manifest,
+      "status": "incomplete",
+      "reason": f"captured parameter manifest is missing {len(param_manifest['missingKeys'])} replay-relevant values",
+    }
+    failures.append("captured parameter manifest is incomplete")
+  elif nearby_param_changes:
+    provenance["params"] = {
+      **param_manifest,
+      "status": "unstable",
+      "changeClocksNs": list(nearby_param_changes),
+      "reason": f"parameter change occurred within the {RADARD_DEPENDENCY_WARMUP_S:.1f} s dependency window",
+    }
+    failures.append("captured parameters were not stable through dependency warmup")
+  else:
+    provenance["params"] = {
+      **param_manifest,
+      "status": "exact",
+      "reason": f"captured parameters stable for at least {RADARD_DEPENDENCY_WARMUP_S:.1f} s",
+    }
+
+  if failures:
+    return PlannerContextResolution("unscorable", "; ".join(failures), inputs, clocks, provenance)
+  return PlannerContextResolution(
+    "exact",
+    "v1 writer contract; all critical planner clocks joined; captured parameters stable",
+    inputs,
+    clocks,
+    provenance,
+  )
+
+
+def _record_route_core_payload(
+  *,
+  service: str,
+  mono_time_ns: int,
+  payload: dict[str, Any],
+  payloads_by_service: dict[str, dict[int, dict[str, Any]]],
+  fingerprints_by_service: dict[str, dict[int, str]],
+  conflicts_by_service: dict[str, set[int]],
+  identical_duplicate_counts: dict[str, int],
+  retain_payload: bool = True,
+) -> str:
+  """Keep one payload per service clock and classify duplicate publications.
+
+  Logger segment overlap can repeat a byte-equivalent publication. That is a
+  safe route-wide join. Two different payloads carrying the same service clock
+  are not order-resolvable, so retain the first only for diagnostics and mark
+  the clock conflicting for every exactness decision.
+  """
+  service_payloads = payloads_by_service.setdefault(service, {})
+  service_fingerprints = fingerprints_by_service.setdefault(service, {})
+  service_conflicts = conflicts_by_service.setdefault(service, set())
+  fingerprint = json.dumps(payload, allow_nan=True, separators=(",", ":"), sort_keys=True)
+  previous_fingerprint = service_fingerprints.get(mono_time_ns)
+  if previous_fingerprint is None:
+    if retain_payload:
+      service_payloads[mono_time_ns] = payload
+    service_fingerprints[mono_time_ns] = fingerprint
+    return "new"
+  if previous_fingerprint == fingerprint:
+    identical_duplicate_counts[service] = identical_duplicate_counts.get(service, 0) + 1
+    return "identical_duplicate"
+  service_conflicts.add(mono_time_ns)
+  return "conflicting_duplicate"
+
+
+def _cache_route_replay_inputs(segment_rows) -> RouteReplayIndex:
+  """Index logged replay inputs independent of logger event ordering."""
+  car_state_by_mono_time: dict[int, CachedCarState] = {}
+  planner_inputs_by_service: dict[str, dict[int, dict[str, Any]]] = {
+    service: {} for service in (*PLANNER_CRITICAL_SERVICES, "liveTracks")
+  }
+  fingerprints_by_service: dict[str, dict[int, str]] = {
+    service: {} for service in planner_inputs_by_service
+  }
+  conflicts_by_service: dict[str, set[int]] = {
+    service: set() for service in planner_inputs_by_service
+  }
+  identical_duplicate_counts: dict[str, int] = {}
+  plans: list[CachedLongitudinalPlan] = []
+  plan_sp_messages: list[CachedLongitudinalPlanSP] = []
+  cached_params: dict[str, str] = {}
+  param_change_mono_times_ns: list[int] = []
+  rti_state_count = 0
+  rti_zero_threats_proven = True
+  for segment_row in segment_rows:
+    for msg in LogReader(segment_row["rlog_path"]):
+      which = msg.which()
+      mono_time_ns = int(msg.logMonoTime)
+      if which == "initData":
+        cached_params.update(_extract_init_params(msg.initData))
+      elif which == "carControlSP":
+        updates = {str(param.key): str(param.value) for param in msg.carControlSP.params}
+        if any(cached_params.get(key) != value for key, value in updates.items()):
+          param_change_mono_times_ns.append(mono_time_ns)
+        cached_params.update(updates)
+      elif which == "carState":
+        cached = CachedCarState(
+          v_ego_mps=float(msg.carState.vEgo),
+          a_ego_mps2=float(msg.carState.aEgo),
+          v_cruise_kph=float(msg.carState.vCruise),
+          gas_pressed=bool(msg.carState.gasPressed),
+          standstill=bool(msg.carState.standstill),
+        )
+        payload = {
+          "vEgoMps": cached.v_ego_mps,
+          "aEgoMps2": cached.a_ego_mps2,
+          "vCruiseKph": cached.v_cruise_kph,
+          "gasPressed": cached.gas_pressed,
+          "standstill": cached.standstill,
+        }
+        duplicate_status = _record_route_core_payload(
+          service="carState",
+          mono_time_ns=mono_time_ns,
+          payload=payload,
+          payloads_by_service=planner_inputs_by_service,
+          fingerprints_by_service=fingerprints_by_service,
+          conflicts_by_service=conflicts_by_service,
+          identical_duplicate_counts=identical_duplicate_counts,
+        )
+        if duplicate_status == "new":
+          car_state_by_mono_time[mono_time_ns] = cached
+      elif which == "controlsState":
+        _record_route_core_payload(
+          service="controlsState",
+          mono_time_ns=mono_time_ns,
+          payload={
+            "longControlState": int(msg.controlsState.longControlState.raw),
+            "forceDecel": bool(msg.controlsState.forceDecel),
+          },
+          payloads_by_service=planner_inputs_by_service,
+          fingerprints_by_service=fingerprints_by_service,
+          conflicts_by_service=conflicts_by_service,
+          identical_duplicate_counts=identical_duplicate_counts,
+        )
+      elif which == "carControl":
+        _record_route_core_payload(
+          service="carControl",
+          mono_time_ns=mono_time_ns,
+          payload={
+            "longActive": bool(msg.carControl.longActive),
+            "orientationNED": [float(value) for value in msg.carControl.orientationNED],
+          },
+          payloads_by_service=planner_inputs_by_service,
+          fingerprints_by_service=fingerprints_by_service,
+          conflicts_by_service=conflicts_by_service,
+          identical_duplicate_counts=identical_duplicate_counts,
+        )
+      elif which == "selfdriveState":
+        _record_route_core_payload(
+          service="selfdriveState",
+          mono_time_ns=mono_time_ns,
+          payload={
+            "enabled": bool(msg.selfdriveState.enabled),
+            "experimentalMode": bool(msg.selfdriveState.experimentalMode),
+            "personality": int(msg.selfdriveState.personality.raw),
+          },
+          payloads_by_service=planner_inputs_by_service,
+          fingerprints_by_service=fingerprints_by_service,
+          conflicts_by_service=conflicts_by_service,
+          identical_duplicate_counts=identical_duplicate_counts,
+        )
+      elif which == "modelV2":
+        raw_model = serialize_model_frame(msg.modelV2)
+        raw_model["logMonoTimeNs"] = mono_time_ns
+        _record_route_core_payload(
+          service="modelV2",
+          mono_time_ns=mono_time_ns,
+          payload={"rawModel": raw_model},
+          payloads_by_service=planner_inputs_by_service,
+          fingerprints_by_service=fingerprints_by_service,
+          conflicts_by_service=conflicts_by_service,
+          identical_duplicate_counts=identical_duplicate_counts,
+        )
+      elif which == "liveTracks":
+        _record_route_core_payload(
+          service="liveTracks",
+          mono_time_ns=mono_time_ns,
+          payload=msg.liveTracks.to_dict(),
+          payloads_by_service=planner_inputs_by_service,
+          fingerprints_by_service=fingerprints_by_service,
+          conflicts_by_service=conflicts_by_service,
+          identical_duplicate_counts=identical_duplicate_counts,
+          retain_payload=False,
+        )
+      elif which == "radarState":
+        _record_route_core_payload(
+          service="radarState",
+          mono_time_ns=mono_time_ns,
+          payload=msg.radarState.to_dict(),
+          payloads_by_service=planner_inputs_by_service,
+          fingerprints_by_service=fingerprints_by_service,
+          conflicts_by_service=conflicts_by_service,
+          identical_duplicate_counts=identical_duplicate_counts,
+          retain_payload=False,
+        )
+      elif which == "longitudinalPlan":
+        plans.append(CachedLongitudinalPlan(
+          log_mono_time_ns=mono_time_ns,
+          model_mono_time_ns=int(msg.longitudinalPlan.modelMonoTime),
+          solver_execution_time_s=float(msg.longitudinalPlan.solverExecutionTime),
+          radar_state_mono_time_ns=int(msg.longitudinalPlan.radarStateMonoTimeDEPRECATED),
+          v_cruise_deprecated_mps=float(msg.longitudinalPlan.vCruiseDEPRECATED),
+          a_target_mps2=float(msg.longitudinalPlan.aTarget),
+          source=str(msg.longitudinalPlan.longitudinalPlanSource),
+        ))
+      elif which == "longitudinalPlanSP":
+        replay_inputs = msg.longitudinalPlanSP.replayInputs
+        plan_sp_messages.append(CachedLongitudinalPlanSP(
+          log_mono_time_ns=mono_time_ns,
+          slc_active=bool(msg.longitudinalPlanSP.slc.active),
+          slc_state=_enum_name(msg.longitudinalPlanSP.slc.state),
+          slc_speed_limit_mps=float(msg.longitudinalPlanSP.slc.speedLimit),
+          slc_speed_limit_offset_mps=float(msg.longitudinalPlanSP.slc.speedLimitOffset),
+          vtsc_state=_enum_name(msg.longitudinalPlanSP.visionTurnSpeedControl.state),
+          vtsc_velocity_mps=float(msg.longitudinalPlanSP.visionTurnSpeedControl.velocity),
+          object_hazard_active=bool(msg.longitudinalPlanSP.objectHazardControl.active),
+          replay_inputs_valid=bool(replay_inputs.valid),
+          replay_inputs_version=int(replay_inputs.version),
+          replay_effective_cruise_mps=float(replay_inputs.effectiveCruiseMps),
+          replay_plan_log_mono_time_ns=int(replay_inputs.longitudinalPlanMonoTimeNs),
+          replay_input_clocks_ns={
+            "radarState": int(replay_inputs.radarStateMonoTimeNs),
+            "carState": int(replay_inputs.carStateMonoTimeNs),
+            "carControl": int(replay_inputs.carControlMonoTimeNs),
+            "controlsState": int(replay_inputs.controlsStateMonoTimeNs),
+            "selfdriveState": int(replay_inputs.selfdriveStateMonoTimeNs),
+            "liveParameters": int(replay_inputs.liveParametersMonoTimeNs),
+            "modelV2": int(replay_inputs.modelV2MonoTimeNs),
+            "liveMapDataSP": int(replay_inputs.liveMapDataSPMonoTimeNs),
+            "carStateSP": int(replay_inputs.carStateSPMonoTimeNs),
+            "rtiStateSP": int(replay_inputs.rtiStateSPMonoTimeNs),
+            "objectHazardStateSP": int(replay_inputs.objectHazardStateSPMonoTimeNs),
+            "gpsLocation": int(replay_inputs.gpsLocationMonoTimeNs),
+            "gpsLocationExternal": int(replay_inputs.gpsLocationExternalMonoTimeNs),
+          },
+        ))
+      elif which == "rtiStateSP":
+        rti_state_count += 1
+        rti_zero_threats_proven = bool(
+          rti_zero_threats_proven and
+          len(msg.rtiStateSP.threats) == 0 and
+          not bool(msg.rtiStateSP.threatAhead) and
+          float(msg.rtiStateSP.recommendedSpeed) <= 0.0
+        )
+
+  paired_plans = _pair_longitudinal_plans_with_sp(plans, plan_sp_messages)
+  plans_by_model_mono_time: dict[int, CachedLongitudinalPlan] = {}
+  ambiguous_plan_model_clocks: set[int] = set()
+  for plan in paired_plans:
+    model_clock = int(plan.model_mono_time_ns)
+    if model_clock <= 0 or model_clock in ambiguous_plan_model_clocks:
+      continue
+    if model_clock in plans_by_model_mono_time:
+      plans_by_model_mono_time.pop(model_clock, None)
+      ambiguous_plan_model_clocks.add(model_clock)
+      continue
+    plans_by_model_mono_time[model_clock] = plan
+  return RouteReplayIndex(
+    car_state_by_mono_time=car_state_by_mono_time,
+    planner_inputs_by_service=planner_inputs_by_service,
+    live_tracks_mono_times=tuple(sorted(fingerprints_by_service["liveTracks"])),
+    radar_state_mono_times=tuple(sorted(fingerprints_by_service["radarState"])),
+    plans_by_model_mono_time=plans_by_model_mono_time,
+    param_change_mono_times_ns=tuple(sorted(set(param_change_mono_times_ns))),
+    rti_zero_threats_proven=bool(rti_state_count > 0 and rti_zero_threats_proven),
+    rti_state_count=rti_state_count,
+    planner_input_mono_times_by_service={
+      service: tuple(sorted(snapshots))
+      for service, snapshots in planner_inputs_by_service.items()
+    },
+    conflicting_input_mono_times_by_service={
+      service: tuple(sorted(clocks))
+      for service, clocks in conflicts_by_service.items()
+      if clocks
+    },
+    identical_duplicate_counts_by_service=dict(sorted(identical_duplicate_counts.items())),
+  )
+
+
+def load_route_scan(conn, route_row, *, strict_service_joins: bool = False) -> RouteScanResult:
   segment_rows = get_route_segments(conn, int(route_row["route_id"]))
+  replay_index = _cache_route_replay_inputs(segment_rows)
+  car_state_by_mono_time = replay_index.car_state_by_mono_time
+  live_tracks_mono_times = replay_index.live_tracks_mono_times
   observed_params: dict[str, str] = {}
+  pending_param_updates: dict[str, str] = {}
   latest_car_state = None
+  latest_car_state_log_mono_time_ns: int | None = None
+  orphan_car_state_references: list[dict[str, int]] = []
+  radar_state_count = 0
   latest_controls_state = None
   latest_selfdrive_state = None
   latest_car_control = None
+  latest_model = None
+  model_by_mono_time: dict[int, tuple[Any, dict[str, Any]]] = {}
+  processed_radar_state_mono_times: set[int] = set()
   first_radar_time = None
   frames: list[EpisodeFrame] = []
 
   for segment_row in segment_rows:
     for msg in LogReader(segment_row["rlog_path"]):
       which = msg.which()
-      if which == "carControlSP":
-        observed_params.update({param.key: param.value for param in msg.carControlSP.params})
+      if which == "initData":
+        _merge_param_updates(observed_params, pending_param_updates, _extract_init_params(msg.initData))
+      elif which == "carControlSP":
+        _merge_param_updates(
+          observed_params,
+          pending_param_updates,
+          {str(param.key): str(param.value) for param in msg.carControlSP.params},
+        )
       elif which == "carState":
-        latest_car_state = msg.carState
+        latest_car_state_log_mono_time_ns = int(msg.logMonoTime)
+        latest_car_state = car_state_by_mono_time[latest_car_state_log_mono_time_ns]
       elif which == "controlsState":
         latest_controls_state = msg.controlsState
       elif which == "selfdriveState":
         latest_selfdrive_state = msg.selfdriveState
       elif which == "carControl":
         latest_car_control = msg.carControl
+      elif which == "modelV2":
+        model_payload = serialize_model_frame(msg.modelV2)
+        model_payload["logMonoTimeNs"] = int(msg.logMonoTime)
+        model_clock_ns = int(msg.logMonoTime)
+        if model_clock_ns not in model_by_mono_time:
+          model_by_mono_time[model_clock_ns] = (msg.modelV2, model_payload)
+        latest_model = model_by_mono_time[model_clock_ns]
+        while len(model_by_mono_time) > 200:
+          model_by_mono_time.pop(next(iter(model_by_mono_time)))
       elif which == "radarState":
-        if latest_car_state is None or latest_controls_state is None or latest_selfdrive_state is None or latest_car_control is None:
+        radar_state_count += 1
+        radar_state_clock_ns = int(msg.logMonoTime)
+        if radar_state_clock_ns in processed_radar_state_mono_times:
           continue
+        processed_radar_state_mono_times.add(radar_state_clock_ns)
+        radar_publication_conflict = bool(
+          radar_state_clock_ns in replay_index.conflicting_input_mono_times_by_service.get("radarState", ())
+        )
+        # Route-relative time is anchored to the first recorded radar publish,
+        # even if that boundary frame references a carState outside the pulled
+        # segment and must be excluded from exact replay.
         if first_radar_time is None:
           first_radar_time = int(msg.logMonoTime)
+        radar_replay_inputs = msg.radarState.replayInputs
+        radar_replay_valid = bool(radar_replay_inputs.valid)
+        radar_replay_version = int(radar_replay_inputs.version)
+        radar_replay_v1 = bool(radar_replay_valid and radar_replay_version == RADARD_REPLAY_INPUTS_VERSION)
+        built_in_car_state_clock = int(msg.radarState.carStateMonoTime)
+        built_in_model_clock = int(msg.radarState.mdMonoTime)
+        if radar_replay_v1:
+          radar_car_state_mono_time = int(radar_replay_inputs.carStateMonoTimeNs)
+          car_clock_matches = radar_car_state_mono_time == built_in_car_state_clock
+          frame_car_state = car_state_by_mono_time.get(radar_car_state_mono_time)
+          frame_car_state_mono_time_ns = radar_car_state_mono_time
+          if radar_car_state_mono_time in replay_index.conflicting_input_mono_times_by_service.get("carState", ()):
+            car_state_association = {
+              "status": "conflict",
+              "clockNs": radar_car_state_mono_time,
+              "reason": "RadarState.replayInputs v1 carState target has conflicting duplicate payloads",
+            }
+          elif not car_clock_matches:
+            car_state_association = {
+              "status": "mismatch",
+              "clockNs": radar_car_state_mono_time,
+              "builtInClockNs": built_in_car_state_clock,
+              "reason": "RadarState.replayInputs carState clock disagrees with carStateMonoTime",
+            }
+          elif radar_car_state_mono_time <= 0:
+            car_state_association = {
+              "status": "missing",
+              "clockNs": radar_car_state_mono_time,
+              "reason": "RadarState.replayInputs v1 carState clock is zero",
+            }
+          elif frame_car_state is None:
+            car_state_association = {
+              "status": "missing",
+              "clockNs": radar_car_state_mono_time,
+              "reason": "RadarState.replayInputs v1 carState target is absent from the loaded route",
+            }
+          else:
+            car_state_association = {
+              "status": "exact",
+              "clockNs": radar_car_state_mono_time,
+              "reason": "RadarState.replayInputs v1 exact route-wide carState join",
+            }
+          if frame_car_state is None:
+            frame_car_state = latest_car_state
+        else:
+          radar_car_state_mono_time = built_in_car_state_clock
+          if radar_car_state_mono_time > 0:
+            frame_car_state = car_state_by_mono_time.get(radar_car_state_mono_time)
+            if frame_car_state is None:
+              diagnostic = {
+                "radarStateLogMonoTimeNs": int(msg.logMonoTime),
+                "carStateLogMonoTimeNs": radar_car_state_mono_time,
+                "segment": int(segment_row["seg_idx"]),
+              }
+              orphan_car_state_references.append(diagnostic)
+              if strict_service_joins:
+                raise ValueError(
+                  f"radarState at {int(msg.logMonoTime)} references carStateMonoTime={radar_car_state_mono_time}, "
+                  "but that exact carState is missing from the loaded route"
+                )
+              continue
+            frame_car_state_mono_time_ns = radar_car_state_mono_time
+            if radar_car_state_mono_time in replay_index.conflicting_input_mono_times_by_service.get("carState", ()):
+              car_state_association = {
+                "status": "conflict",
+                "clockNs": radar_car_state_mono_time,
+                "reason": "legacy radarState.carStateMonoTime target has conflicting duplicate payloads",
+              }
+            else:
+              car_state_association = {
+                "status": "exact",
+                "reason": "legacy radarState.carStateMonoTime exact route-wide join",
+              }
+          else:
+            frame_car_state = latest_car_state
+            frame_car_state_mono_time_ns = latest_car_state_log_mono_time_ns
+            car_state_association = {
+              "status": "inferred" if frame_car_state is not None else "missing",
+              "reason": "legacy zero carStateMonoTime; latest logger-order carState fallback",
+            }
+
+        if frame_car_state is None or latest_controls_state is None or latest_selfdrive_state is None or latest_car_control is None:
+          continue
+        model_record = None
+        model_mono_time = (
+          int(radar_replay_inputs.modelV2MonoTimeNs) if radar_replay_v1 else built_in_model_clock
+        )
+        if model_mono_time > 0:
+          model_record = model_by_mono_time.get(model_mono_time)
+        # A nonzero mdMonoTime is an exact association contract. Falling back to
+        # a nearby frame when that model is missing silently pairs RadarD output
+        # with the wrong perception input and defeats recorded replay fidelity.
+        if model_record is None and not radar_replay_v1 and model_mono_time <= 0 and latest_model is not None:
+          latest_model_time = int(latest_model[1].get("logMonoTimeNs", 0))
+          if abs(int(msg.logMonoTime) - latest_model_time) <= 150_000_000:
+            model_record = latest_model
+
+        raw_lead_one = None
+        raw_lead_two = None
+        raw_model = None
+        frame_model_v2_mono_time_ns = None
+        if model_record is not None:
+          model_msg, raw_model = model_record
+          frame_model_v2_mono_time_ns = (
+            model_mono_time if radar_replay_v1 else int(raw_model.get("logMonoTimeNs", 0)) or None
+          )
+          raw_lead_one = _lead_from_model(model_msg, 0, frame_car_state.v_ego_mps)
+          raw_lead_two = _lead_from_model(model_msg, 1, frame_car_state.v_ego_mps)
+        elif radar_replay_v1:
+          frame_model_v2_mono_time_ns = model_mono_time
+        if model_mono_time in replay_index.conflicting_input_mono_times_by_service.get("modelV2", ()):
+          model_association = {
+            "status": "conflict",
+            "clockNs": model_mono_time,
+            "reason": "associated modelV2 clock has conflicting duplicate payloads",
+          }
+        elif radar_replay_v1 and model_mono_time != built_in_model_clock:
+          model_association = {
+            "status": "mismatch",
+            "clockNs": model_mono_time,
+            "builtInClockNs": built_in_model_clock,
+            "reason": "RadarState.replayInputs modelV2 clock disagrees with mdMonoTime",
+          }
+        elif radar_replay_v1 and model_mono_time > 0 and model_record is not None:
+          model_association = {
+            "status": "exact",
+            "clockNs": model_mono_time,
+            "reason": "RadarState.replayInputs v1 exact route-wide modelV2 join",
+          }
+        elif radar_replay_v1 and model_mono_time <= 0:
+          model_association = {
+            "status": "missing",
+            "clockNs": model_mono_time,
+            "reason": "RadarState.replayInputs v1 modelV2 clock is zero",
+          }
+        elif radar_replay_v1:
+          model_association = {
+            "status": "missing",
+            "clockNs": model_mono_time,
+            "reason": "RadarState.replayInputs v1 modelV2 target is absent from the loaded route",
+          }
+        elif model_mono_time > 0 and model_record is not None:
+          model_association = {
+            "status": "exact",
+            "reason": "legacy radarState.mdMonoTime exact modelV2 join",
+          }
+        elif model_record is not None:
+          model_association = {
+            "status": "inferred",
+            "reason": "legacy zero mdMonoTime; bounded latest modelV2 fallback",
+          }
+        else:
+          model_association = {
+            "status": "missing",
+            "reason": "no modelV2 payload associated with radarState",
+          }
+
+        radar_unavailable_proven = bool(route_row["radar_unavailable"])
+        if radar_replay_v1:
+          frame_live_tracks_mono_time_ns = int(radar_replay_inputs.liveTracksMonoTimeNs)
+          if frame_live_tracks_mono_time_ns == 0:
+            live_tracks_association = {
+              "status": "exact",
+              "clockNs": 0,
+              "reason": "RadarState.replayInputs v1 explicitly records liveTracks not yet received",
+              "emptyPayloadValid": True,
+            }
+          elif frame_live_tracks_mono_time_ns in replay_index.conflicting_input_mono_times_by_service.get("liveTracks", ()):
+            live_tracks_association = {
+              "status": "conflict",
+              "clockNs": frame_live_tracks_mono_time_ns,
+              "reason": "RadarState.replayInputs v1 liveTracks target has conflicting duplicate payloads",
+              "emptyPayloadValid": False,
+            }
+          elif frame_live_tracks_mono_time_ns not in live_tracks_mono_times:
+            live_tracks_association = {
+              "status": "missing",
+              "clockNs": frame_live_tracks_mono_time_ns,
+              "reason": "RadarState.replayInputs v1 liveTracks target is absent from the loaded route",
+              "emptyPayloadValid": False,
+            }
+          else:
+            live_tracks_association = {
+              "status": "exact",
+              "clockNs": frame_live_tracks_mono_time_ns,
+              "reason": "RadarState.replayInputs v1 exact route-wide liveTracks join",
+              "emptyPayloadValid": radar_unavailable_proven,
+              "payloadStatus": "empty_radarless" if radar_unavailable_proven else "not_serialized",
+            }
+        else:
+          available_cutoff_clocks = [
+            clock for clock in (frame_model_v2_mono_time_ns, frame_car_state_mono_time_ns)
+            if clock is not None
+          ]
+          service_clock_cutoff_ns = max(available_cutoff_clocks, default=0)
+          live_tracks_idx = bisect_right(live_tracks_mono_times, service_clock_cutoff_ns) - 1
+          frame_live_tracks_mono_time_ns = live_tracks_mono_times[live_tracks_idx] if live_tracks_idx >= 0 else None
+          if frame_live_tracks_mono_time_ns is None:
+            live_tracks_association = {
+              "status": "missing",
+              "reason": "no liveTracks publication precedes the inferred RadarD input cutoff",
+              "emptyPayloadValid": radar_unavailable_proven,
+            }
+          elif radar_unavailable_proven:
+            live_tracks_association = {
+              "status": "inferred",
+              "reason": "schema-default log; consumed liveTracks clock is timing-inferred",
+              "emptyPayloadValid": True,
+            }
+          else:
+            live_tracks_association = {
+              "status": "missing",
+              "reason": "radar-capable capture requires serialized liveTracks payload; empty substitution is invalid",
+              "emptyPayloadValid": False,
+            }
+        service_associations = {
+          "modelV2": model_association,
+          "carState": car_state_association,
+          "liveTracks": live_tracks_association,
+          "capture": {
+            "radarUnavailable": radar_unavailable_proven,
+            "reason": "CarParams.radarUnavailable from the indexed route",
+          },
+          "contract": {
+            "status": (
+              "exact" if radar_replay_v1 else
+              "unsupported" if radar_replay_valid else
+              "inferred"
+            ),
+            "valid": radar_replay_valid,
+            "version": radar_replay_version,
+            "reason": (
+              "RadarState.replayInputs v1" if radar_replay_v1 else
+              f"unsupported RadarState.replayInputs version {radar_replay_version}" if radar_replay_valid else
+              "schema-default/legacy RadarState; liveTracks must be inferred"
+            ),
+          },
+          "radarStatePublication": {
+            "status": "conflict" if radar_publication_conflict else "unique",
+            "clockNs": radar_state_clock_ns,
+            "reason": (
+              "route contains conflicting duplicate radarState payloads at this clock"
+              if radar_publication_conflict else
+              "one unique payload after accepting identical route-overlap duplicates"
+            ),
+          },
+        }
+        service_statuses = [
+          str(model_association["status"]),
+          str(car_state_association["status"]),
+          str(live_tracks_association["status"]),
+          str(service_associations["radarStatePublication"]["status"]),
+        ]
+        radard_service_status = (
+          "conflict" if "conflict" in service_statuses
+          else "mismatch" if "mismatch" in service_statuses
+          else "unsupported" if radar_replay_valid and not radar_replay_v1
+          else "missing" if "missing" in service_statuses
+          else "inferred" if "inferred" in service_statuses
+          else "exact"
+        )
+        radard_gate_eligible = bool(
+          radard_service_status == "exact" and live_tracks_association.get("emptyPayloadValid") is True
+        )
+
         t_s = (int(msg.logMonoTime) - first_radar_time) / 1e9
+        frame_param_updates = dict(pending_param_updates)
+        pending_param_updates.clear()
+        frame_params_snapshot = dict(observed_params)
+        raw_cruise_mps = (
+          frame_car_state.v_cruise_kph / 3.6
+          if frame_car_state.v_cruise_kph > 0.0 else frame_car_state.v_ego_mps
+        )
+        plan = replay_index.plans_by_model_mono_time.get(model_mono_time)
+        if plan is None:
+          planner_radar = PlannerRadarAssociation(None, (), "missing", "missing longitudinalPlan for model frame")
+        else:
+          planner_radar = resolve_planner_radar_association(
+            plan,
+            replay_index.radar_state_mono_times,
+            replay_index.conflicting_input_mono_times_by_service.get("radarState", ()),
+          )
+        effective_cruise = derive_effective_cruise_context(
+          plan=plan,
+          raw_cruise_mps=raw_cruise_mps,
+          force_decel=bool(latest_controls_state.forceDecel),
+          long_active=bool(latest_car_control.longActive),
+          gas_pressed=frame_car_state.gas_pressed,
+          params=frame_params_snapshot,
+          rti_zero_threats_proven=replay_index.rti_zero_threats_proven,
+        )
+        planner_context = resolve_planner_context(
+          plan=plan,
+          replay_index=replay_index,
+          radar_association=planner_radar,
+          effective_cruise=effective_cruise,
+          params_snapshot=frame_params_snapshot,
+        )
         frames.append(EpisodeFrame(
           route_key=str(route_row["route_key"]),
           seg_idx=int(segment_row["seg_idx"]),
           log_mono_time=int(msg.logMonoTime),
           t_s=t_s,
-          v_ego_mps=float(latest_car_state.vEgo),
-          a_ego_mps2=float(latest_car_state.aEgo),
-          cruise_speed_mps=float(latest_car_state.vCruise) / 3.6 if float(latest_car_state.vCruise) > 0.0 else float(latest_car_state.vEgo),
+          v_ego_mps=frame_car_state.v_ego_mps,
+          a_ego_mps2=frame_car_state.a_ego_mps2,
+          cruise_speed_mps=raw_cruise_mps,
           long_active=bool(latest_car_control.longActive),
           long_control_state=str(latest_controls_state.longControlState),
           force_decel=bool(latest_controls_state.forceDecel),
@@ -350,6 +1708,37 @@ def load_route_scan(conn, route_row) -> RouteScanResult:
           pitch_rad=float(latest_car_control.orientationNED[1]) if len(latest_car_control.orientationNED) > 1 else 0.0,
           lead_one=_lead_from_message(msg.radarState.leadOne),
           lead_two=_lead_from_message(msg.radarState.leadTwo),
+          raw_lead_one=raw_lead_one,
+          raw_lead_two=raw_lead_two,
+          raw_model=raw_model,
+          model_v2_log_mono_time_ns=frame_model_v2_mono_time_ns,
+          car_state_log_mono_time_ns=frame_car_state_mono_time_ns,
+          live_tracks_log_mono_time_ns=frame_live_tracks_mono_time_ns,
+          radard_service_association_status=radard_service_status,
+          radard_service_association_provenance=service_associations,
+          radard_gate_eligible=radard_gate_eligible,
+          radar_state_log_mono_time_ns=int(msg.logMonoTime),
+          longitudinal_plan_log_mono_time_ns=None if plan is None else plan.log_mono_time_ns,
+          longitudinal_plan_solver_execution_time_s=None if plan is None else plan.solver_execution_time_s,
+          planner_radar_state_log_mono_time_ns=planner_radar.target_log_mono_time_ns,
+          planner_radar_state_candidates_ns=planner_radar.candidate_log_mono_times_ns,
+          planner_radar_resolution=planner_radar.resolution,
+          planner_radar_reason=planner_radar.reason,
+          planner_inputs=planner_context.inputs,
+          planner_service_log_mono_time_ns=planner_context.service_log_mono_time_ns,
+          planner_service_association_provenance=planner_context.service_provenance,
+          recorded_effective_cruise_mps=effective_cruise.speed_mps,
+          recorded_effective_cruise_limiter=effective_cruise.limiter,
+          recorded_effective_cruise_provenance=effective_cruise.provenance,
+          recorded_effective_cruise_status=effective_cruise.status,
+          planner_context_status=planner_context.status,
+          planner_context_reason=planner_context.reason,
+          gas_pressed=frame_car_state.gas_pressed,
+          personality=int(latest_selfdrive_state.personality.raw),
+          planner_accel_mps2=None if plan is None else plan.a_target_mps2,
+          planner_source=None if plan is None else plan.source,
+          params_snapshot=frame_params_snapshot,
+          param_updates=frame_param_updates,
         ))
 
   metadata = RouteMetadata(
@@ -365,7 +1754,50 @@ def load_route_scan(conn, route_row) -> RouteScanResult:
     first_segment_path=str(route_row["first_segment_path"]),
     notes_json=_decode_json_column(route_row["notes_json"]),
   )
-  return RouteScanResult(route_id=int(route_row["route_id"]), metadata=metadata, observed_params=observed_params, frames=frames)
+  exact_runs = split_exact_replay_runs(frames)
+  radard_association_counts: dict[str, int] = {}
+  for frame in frames:
+    status = frame.radard_service_association_status
+    radard_association_counts[status] = radard_association_counts.get(status, 0) + 1
+  exact_car_state_join_count = sum(
+    isinstance(frame.radard_service_association_provenance.get("carState"), dict) and
+    frame.radard_service_association_provenance["carState"].get("status") == "exact"
+    for frame in frames
+  )
+  service_join_diagnostics = {
+    "radarStateFrameCount": radar_state_count,
+    "uniqueRadarStatePublicationCount": len(processed_radar_state_mono_times),
+    "exactCarStateJoinCount": exact_car_state_join_count,
+    "droppedMissingCarStateJoinCount": len(orphan_car_state_references),
+    "missingCarStateJoinExamples": orphan_car_state_references[:20],
+    "exactContiguousRunCount": len(exact_runs),
+    "longestExactContiguousRunFrameCount": max((len(run) for run in exact_runs), default=0),
+    "longestExactContiguousRunDurationS": max(
+      (run[-1].t_s - run[0].t_s for run in exact_runs),
+      default=0.0,
+    ),
+    "radardServiceAssociationStatusCounts": radard_association_counts,
+    "radardGateEligibleFrameCount": sum(1 for frame in frames if frame.radard_gate_eligible),
+    "coreInputConflictingDuplicateClocks": {
+      service: list(clocks)
+      for service, clocks in replay_index.conflicting_input_mono_times_by_service.items()
+    },
+    "coreInputIdenticalDuplicateCounts": dict(replay_index.identical_duplicate_counts_by_service),
+  }
+  if orphan_car_state_references:
+    warnings.warn(
+      f"Dropped {len(orphan_car_state_references)}/{radar_state_count} radarState frames from route "
+      f"{route_row['route_key']}: their nonzero carStateMonoTime has no exact logged carState",
+      RuntimeWarning,
+      stacklevel=2,
+    )
+  return RouteScanResult(
+    route_id=int(route_row["route_id"]),
+    metadata=metadata,
+    observed_params=observed_params,
+    frames=frames,
+    service_join_diagnostics=service_join_diagnostics,
+  )
 
 
 def extract_ev6_episodes(conn,
@@ -380,7 +1812,18 @@ def extract_ev6_episodes(conn,
     clear_route_extractions(conn, scan.route_id)
     candidates = detect_episode_candidates(scan)
     for candidate in candidates:
-      bundle_path = write_episode_bundle(scan, candidate, bundle_root_path)
+      try:
+        bundle_path = write_episode_bundle(scan, candidate, bundle_root_path)
+      except EpisodeNotReplayableError as exc:
+        recorded.append({
+          "routeId": scan.route_id,
+          "episodeKey": candidate.episode_key,
+          "episodeType": candidate.episode_type,
+          "status": "not_evaluated",
+          "reason": str(exc),
+          "confidence": candidate.confidence,
+        })
+        continue
       episode_id = upsert_episode(conn, EpisodeCatalogRecord(
         route_id=scan.route_id,
         episode_key=candidate.episode_key,
@@ -405,54 +1848,323 @@ def extract_ev6_episodes(conn,
         "episodeType": candidate.episode_type,
         "bundlePath": str(bundle_path),
         "confidence": candidate.confidence,
+        "status": "recorded",
       })
   conn.commit()
   return recorded
 
 
 def detect_episode_candidates(scan: RouteScanResult) -> list[EpisodeCandidate]:
-  frames = scan.frames
-  if not frames:
+  if not scan.frames:
     return []
 
   candidates: list[EpisodeCandidate] = []
-  candidates.extend(_detect_cutin(scan))
-  candidates.extend(_detect_handoff(scan))
-  candidates.extend(_detect_dropout(scan))
-  candidates.extend(_detect_pullaway(scan))
-  candidates.extend(_detect_approach(scan))
+  # Missing exact carState joins are dropped by load_route_scan. Run every
+  # temporal detector on uninterrupted spans only, so a sparse set of surviving
+  # frames cannot masquerade as a continuous recorded replay window.
+  for frames in split_exact_replay_runs(scan.frames):
+    run_scan = replace(scan, frames=frames)
+    candidates.extend(_detect_false_closing(run_scan))
+    candidates.extend(_detect_cutin(run_scan))
+    candidates.extend(_detect_handoff(run_scan))
+    candidates.extend(_detect_dropout(run_scan))
+    candidates.extend(_detect_pullaway(run_scan))
+    candidates.extend(_detect_approach(run_scan))
   candidates = _dedupe_candidates(candidates)
   candidates.sort(key=lambda candidate: (candidate.t_start_s, candidate.episode_type))
   return candidates
 
 
+def split_exact_replay_runs(frames: list[EpisodeFrame]) -> list[list[EpisodeFrame]]:
+  if not frames:
+    return []
+  runs: list[list[EpisodeFrame]] = [[frames[0]]]
+  for frame in frames[1:]:
+    previous = runs[-1][-1]
+    if 0.0 < frame.t_s - previous.t_s <= MAX_EXACT_REPLAY_FRAME_GAP_S:
+      runs[-1].append(frame)
+    else:
+      runs.append([frame])
+  return runs
+
+
+def _detect_false_closing(scan: RouteScanResult) -> list[EpisodeCandidate]:
+  """Find sustained raw-model recovery contradicted by pessimistic RadarD output."""
+  candidates = []
+  last_event_t = -math.inf
+  evidence_frames = 10  # 0.5 s at model/radard rate
+  for idx in range(20, len(scan.frames) - evidence_frames):
+    frame = scan.frames[idx]
+    if frame.t_s - last_event_t < COOLDOWN_BY_TYPE_S["false_closing"]:
+      continue
+    window = scan.frames[idx:idx + evidence_frames]
+    qualifying = [sample for sample in window if _is_false_closing_sample(sample)]
+    if len(qualifying) < 3:
+      continue
+
+    track_ids = [sample.lead_one.radar_track_id for sample in window if sample.lead_one.status]
+    if not track_ids:
+      continue
+    dominant_track_id = max(set(track_ids), key=track_ids.count)
+    if dominant_track_id == -1 or track_ids.count(dominant_track_id) < int(math.ceil(0.8 * len(track_ids))):
+      continue
+
+    worst = max(
+      qualifying,
+      key=lambda sample: float(sample.raw_lead_one.v_rel_mps) - float(sample.lead_one.v_rel_mps),
+    )
+    closing_excess = float(worst.raw_lead_one.v_rel_mps) - float(worst.lead_one.v_rel_mps)
+    min_planner_accel = min(
+      float(sample.planner_accel_mps2)
+      for sample in window
+      if sample.planner_accel_mps2 is not None
+    )
+    confidence = min(1.0, 0.55 + min(0.30, closing_excess / 8.0) + min(0.15, len(qualifying) / 20.0))
+    candidates.append(_make_candidate(scan, idx, "false_closing", confidence, {
+      "rawVRelMps": worst.raw_lead_one.v_rel_mps,
+      "publishedVRelMps": worst.lead_one.v_rel_mps,
+      "publishedClosingExcessMps": closing_excess,
+      "minPlannerAccelMps2": min_planner_accel,
+      "radarTrackId": dominant_track_id,
+      "evidenceFrameCount": len(qualifying),
+    }, rank_score=(closing_excess * 4.0) + max(0.0, -min_planner_accel) + len(qualifying)))
+    last_event_t = frame.t_s
+  return candidates
+
+
+def _is_false_closing_sample(frame: EpisodeFrame) -> bool:
+  raw = frame.raw_lead_one
+  published = frame.lead_one
+  if (
+    raw is None or not raw.status or raw.v_rel_mps is None or raw.a_lead_k_mps2 is None or
+    not published.status or published.v_rel_mps is None or
+    frame.planner_accel_mps2 is None or not frame.long_active
+  ):
+    return False
+  return bool(
+    raw.model_prob >= 0.85 and
+    raw.v_rel_mps >= -1.0 and
+    raw.a_lead_k_mps2 >= -0.5 and
+    published.v_rel_mps <= -1.25 and
+    (raw.v_rel_mps - published.v_rel_mps) >= 1.0 and
+    frame.planner_accel_mps2 <= -0.30
+  )
+
+
 def write_episode_bundle(scan: RouteScanResult, candidate: EpisodeCandidate, bundle_root: Path) -> Path:
   episode_root = bundle_root / f"route_{scan.route_id}_{scan.metadata.route_key}" / f"{candidate.episode_type}_{int(round(candidate.event_t_s * 1000.0)):09d}"
+  candidate_first_publish_ns = candidate.frames[0].radar_state_log_mono_time_ns
+  candidate_first_idx = next(
+    idx for idx, frame in enumerate(scan.frames)
+    if frame.radar_state_log_mono_time_ns == candidate_first_publish_ns
+  )
+  dependency_start_idx = candidate_first_idx
+  while dependency_start_idx > 0:
+    previous = scan.frames[dependency_start_idx - 1]
+    current = scan.frames[dependency_start_idx]
+    if not (0.0 < current.t_s - previous.t_s <= MAX_EXACT_REPLAY_FRAME_GAP_S):
+      break
+    if candidate.frames[0].t_s - previous.t_s > RADARD_DEPENDENCY_WARMUP_S:
+      break
+    dependency_start_idx -= 1
+  dependency_frames = scan.frames[dependency_start_idx:candidate_first_idx]
+  candidate_publish_times = {frame.radar_state_log_mono_time_ns for frame in candidate.frames}
+  scan_frames_by_publish_time = {frame.radar_state_log_mono_time_ns: frame for frame in scan.frames}
+  scheduler_seed_frames: list[EpisodeFrame] = []
+  for frame in candidate.frames:
+    if frame.planner_radar_resolution not in ("exact", "legacy_timing_unique"):
+      continue
+    target_ns = frame.planner_radar_state_log_mono_time_ns
+    if target_ns is None or target_ns in candidate_publish_times:
+      continue
+    seed_frame = scan_frames_by_publish_time.get(target_ns)
+    if seed_frame is None:
+      raise EpisodeNotReplayableError(
+        f"planner radar target {target_ns} for {candidate.episode_key} is outside the loaded route; " +
+        "pull one more pre-roll segment before building this snapshot"
+      )
+    scheduler_seed_frames.append(seed_frame)
+  bundle_frames = sorted(
+    {
+      frame.radar_state_log_mono_time_ns: frame
+      for frame in [*dependency_frames, *scheduler_seed_frames, *candidate.frames]
+    }.values(),
+    key=lambda frame: frame.log_mono_time,
+  )
+  dependency_frame_times = {frame.radar_state_log_mono_time_ns for frame in dependency_frames}
+  scheduler_seed_times = {
+    frame.radar_state_log_mono_time_ns
+    for frame in scheduler_seed_frames
+    if frame.radar_state_log_mono_time_ns not in candidate_publish_times
+  }
+  warmup_ready_t_s = bundle_frames[0].t_s + RADARD_DEPENDENCY_WARMUP_S
+  raw_frame_complete = [
+    frame.raw_model is not None and frame.raw_lead_one is not None and frame.raw_lead_two is not None
+    for frame in bundle_frames
+  ]
+  if any(raw_frame_complete) and not all(raw_frame_complete):
+    missing_count = len(raw_frame_complete) - sum(raw_frame_complete)
+    message = f"partial raw-model coverage for {candidate.episode_key}: {missing_count}/{len(raw_frame_complete)} frames are incomplete"
+    raise EpisodeNotReplayableError(message)
+  raw_replay = bool(raw_frame_complete) and all(raw_frame_complete)
+  exact_live_tracks_not_received = all(
+    frame.live_tracks_log_mono_time_ns == 0 and
+    isinstance(frame.radard_service_association_provenance.get("liveTracks"), dict) and
+    frame.radard_service_association_provenance["liveTracks"].get("status") == "exact"
+    for frame in bundle_frames
+  )
+  if raw_replay and not scan.metadata.radar_unavailable and not exact_live_tracks_not_received:
+    raise EpisodeNotReplayableError(
+      f"raw RadarD replay for {candidate.episode_key} cannot substitute empty liveTracks on a radar-capable capture " +
+      "without an exact v1 zero clock"
+    )
+  required_service_clocks_complete = [
+    frame.model_v2_log_mono_time_ns is not None and frame.model_v2_log_mono_time_ns > 0 and
+    frame.car_state_log_mono_time_ns is not None and frame.car_state_log_mono_time_ns > 0
+    for frame in bundle_frames
+  ]
+  if raw_replay and not all(required_service_clocks_complete):
+    missing_count = len(required_service_clocks_complete) - sum(required_service_clocks_complete)
+    raise EpisodeNotReplayableError(
+      f"partial required RadarD service-clock coverage for {candidate.episode_key}: " +
+      f"{missing_count}/{len(required_service_clocks_complete)} frames are incomplete"
+    )
   timeline = []
   prev_status = {"leadOne": False, "leadTwo": False}
   event_marked = False
-  for frame in candidate.frames:
-    lead_one = _directive_from_frame(frame.lead_one, not prev_status["leadOne"] and frame.lead_one.status)
-    lead_two = _directive_from_frame(frame.lead_two, not prev_status["leadTwo"] and frame.lead_two.status)
+  for frame_idx, frame in enumerate(bundle_frames):
+    source_lead_one = frame.raw_lead_one if raw_replay else frame.lead_one
+    source_lead_two = frame.raw_lead_two if raw_replay else frame.lead_two
+    assert source_lead_one is not None and source_lead_two is not None
+    lead_one = _directive_from_frame(
+      source_lead_one,
+      not prev_status["leadOne"] and source_lead_one.status,
+      exact_model_prob=raw_replay,
+    )
+    lead_two = _directive_from_frame(
+      source_lead_two,
+      not prev_status["leadTwo"] and source_lead_two.status,
+      exact_model_prob=raw_replay,
+    )
     event_name = None
     if not event_marked and frame.t_s >= candidate.event_t_s:
       event_name = _event_name_for_episode(candidate.episode_type)
       event_marked = True
+    scheduler_seed = frame.radar_state_log_mono_time_ns in scheduler_seed_times
+    dependency_warmup = frame.radar_state_log_mono_time_ns in dependency_frame_times
+    warmup_ready = frame.t_s + 1e-9 >= warmup_ready_t_s
+    replay_warmup_status = "ready" if warmup_ready else "warmup"
+    replay_warmup_reason = (
+      f"RadarD/planner dependency history is at least {RADARD_DEPENDENCY_WARMUP_S:.1f} s"
+      if warmup_ready else
+      f"advancing dependency state; only {max(0.0, frame.t_s - bundle_frames[0].t_s):.3f}/"
+      f"{RADARD_DEPENDENCY_WARMUP_S:.1f} s elapsed"
+    )
+    radard_gate_eligible = bool(frame.radard_gate_eligible and warmup_ready and not scheduler_seed)
+    replay_reference = _replay_reference_from_frame(frame) if raw_replay else {}
+    if scheduler_seed:
+      replay_reference["plannerRadarResolution"] = "missing"
+      replay_reference["plannerRadarResolutionReason"] = "scheduler seed frame; predecessor intentionally outside episode"
+      if isinstance(replay_reference.get("longitudinalPlan"), dict):
+        replay_reference["longitudinalPlan"]["radarStateLogMonoTimeNs"] = None
+        replay_reference["longitudinalPlan"]["radarStateCandidatesNs"] = []
+        replay_reference["longitudinalPlan"]["radarResolution"] = "missing"
+        replay_reference["longitudinalPlan"]["radarResolutionReason"] = (
+          "scheduler seed frame; predecessor intentionally outside episode"
+        )
+    replay_reference["replayWarmupStatus"] = replay_warmup_status
+    replay_reference["replayWarmupReason"] = replay_warmup_reason
+    replay_reference["radardGateEligible"] = radard_gate_eligible
+    if not radard_gate_eligible:
+      if "radarState" in replay_reference:
+        replay_reference["radarStateDiagnostic"] = replay_reference.pop("radarState")
+      blocked_reason = (
+        replay_warmup_reason if not warmup_ready
+        else f"RadarD service association is {frame.radard_service_association_status}, not explicit exact"
+      )
+      replay_reference["plannerRadarResolution"] = "unscorable"
+      replay_reference["plannerRadarResolutionReason"] = blocked_reason
+      if isinstance(replay_reference.get("longitudinalPlan"), dict):
+        replay_reference["longitudinalPlan"]["radarResolution"] = "unscorable"
+        replay_reference["longitudinalPlan"]["radarResolutionReason"] = blocked_reason
     timeline.append(StepInput(
-      t_s=float(frame.t_s - candidate.frames[0].t_s),
+      t_s=float(frame.t_s - bundle_frames[0].t_s),
       cruise_speed_mps=frame.cruise_speed_mps,
       lead_one=lead_one,
       lead_two=lead_two,
       event=event_name,
-      note=f"{scan.metadata.route_key}:{candidate.episode_type}",
+      note=(
+        f"{scan.metadata.route_key}:{candidate.episode_type}" +
+        (":dependency_warmup" if dependency_warmup else "") +
+        (":scheduler_seed" if scheduler_seed else "")
+      ),
       pitch_rad=frame.pitch_rad,
       force_decel=frame.force_decel,
       experimental_mode=frame.experimental_mode,
+      recorded_v_ego_mps=frame.v_ego_mps if raw_replay else None,
+      recorded_a_ego_mps2=frame.a_ego_mps2 if raw_replay else None,
+      long_active=frame.long_active if raw_replay else None,
+      personality=frame.personality if raw_replay else None,
+      raw_model=frame.raw_model if raw_replay else None,
+      recorded_model_v2_log_mono_time_ns=frame.model_v2_log_mono_time_ns if raw_replay else None,
+      recorded_car_state_log_mono_time_ns=frame.car_state_log_mono_time_ns if raw_replay else None,
+      recorded_live_tracks_log_mono_time_ns=frame.live_tracks_log_mono_time_ns if raw_replay else None,
+      radard_service_association_status=frame.radard_service_association_status if raw_replay else None,
+      radard_service_association_provenance=(
+        dict(frame.radard_service_association_provenance) if raw_replay else {}
+      ),
+      radard_gate_eligible=radard_gate_eligible if raw_replay else False,
+      replay_warmup_status=replay_warmup_status if raw_replay else None,
+      replay_warmup_reason=replay_warmup_reason if raw_replay else None,
+      recorded_radar_state_log_mono_time_ns=frame.radar_state_log_mono_time_ns if raw_replay else None,
+      recorded_longitudinal_plan_log_mono_time_ns=frame.longitudinal_plan_log_mono_time_ns if raw_replay else None,
+      recorded_longitudinal_plan_solver_execution_time_s=(
+        frame.longitudinal_plan_solver_execution_time_s if raw_replay else None
+      ),
+      planner_radar_state_log_mono_time_ns=(
+        None if scheduler_seed or not raw_replay else frame.planner_radar_state_log_mono_time_ns
+      ),
+      planner_radar_state_candidates_ns=(
+        [] if scheduler_seed or not raw_replay else list(frame.planner_radar_state_candidates_ns)
+      ),
+      planner_radar_resolution=("missing" if scheduler_seed and raw_replay else frame.planner_radar_resolution if raw_replay else None),
+      recorded_planner_inputs=dict(frame.planner_inputs) if raw_replay else {},
+      recorded_planner_service_log_mono_time_ns=(
+        dict(frame.planner_service_log_mono_time_ns) if raw_replay else {}
+      ),
+      planner_service_association_provenance=(
+        dict(frame.planner_service_association_provenance) if raw_replay else {}
+      ),
+      recorded_effective_cruise_mps=frame.recorded_effective_cruise_mps if raw_replay else None,
+      recorded_effective_cruise_limiter=frame.recorded_effective_cruise_limiter if raw_replay else None,
+      recorded_effective_cruise_provenance=frame.recorded_effective_cruise_provenance if raw_replay else None,
+      recorded_effective_cruise_status=frame.recorded_effective_cruise_status if raw_replay else None,
+      planner_context_status=frame.planner_context_status if raw_replay else None,
+      planner_context_reason=frame.planner_context_reason if raw_replay else None,
+      recorded_gas_pressed=frame.gas_pressed if raw_replay else None,
+      # The first frame's parameter snapshot is the bundle baseline; only later
+      # deltas belong in the timeline.
+      param_updates={} if frame_idx == 0 else dict(frame.param_updates),
+      replay_reference=replay_reference,
     ))
-    prev_status["leadOne"] = frame.lead_one.status
-    prev_status["leadTwo"] = frame.lead_two.status
+    prev_status["leadOne"] = source_lead_one.status
+    prev_status["leadTwo"] = source_lead_two.status
 
-  if not scan.metadata.radar_unavailable and int(scan.observed_params.get("HyundaiLongitudinalTuning", "0")) != 0:
+  episode_params = dict(bundle_frames[0].params_snapshot or scan.observed_params)
+  association_status_counts: dict[str, int] = {}
+  for step in timeline:
+    status = step.radard_service_association_status or "missing"
+    association_status_counts[status] = association_status_counts.get(status, 0) + 1
+  ready_steps = [step for step in timeline if step.replay_warmup_status == "ready"]
+  gate_eligible_steps = [step for step in ready_steps if step.radard_gate_eligible]
+  bundle_radard_gate_eligible = bool(ready_steps and len(gate_eligible_steps) == len(ready_steps))
+  bundle_radard_service_status = (
+    "conflict" if association_status_counts.get("conflict", 0) else
+    "missing" if association_status_counts.get("missing", 0) else
+    "inferred" if association_status_counts.get("inferred", 0) else
+    "exact" if association_status_counts.get("exact", 0) else "missing"
+  )
+  if not scan.metadata.radar_unavailable and int(episode_params.get("HyundaiLongitudinalTuning", "0")) != 0:
     controller_mode = "shaped"
   else:
     # radar-unavailable routes always ran the CarController's no-radar EMA stage
@@ -466,24 +2178,62 @@ def write_episode_bundle(scan: RouteScanResult, candidate: EpisodeCandidate, bun
       "episodeType": candidate.episode_type,
       "topology": scan.metadata.topology,
       "controllerMode": controller_mode,
-      # Snapshot timelines record radarState as published on device, i.e. already
-      # radard-filtered; replaying them through the radard stage would double-filter.
-      "perceptionFilter": "direct",
+      # Raw-aware bundles replay captured modelV2 through real RadarD. Legacy logs
+      # without modelV2 retain the published-radarState direct fallback.
+      "perceptionFilter": "radard" if raw_replay else "direct",
+      "egoReplayMode": "recorded" if raw_replay else "plant",
+      "rawModelReplay": raw_replay,
+      "radardServiceAssociationStatusCounts": association_status_counts,
+      "radardServiceAssociationStatus": bundle_radard_service_status,
+      "radardServiceAssociationProvenance": {
+        "representativeFrame": dict(candidate.frames[0].radard_service_association_provenance),
+        "requirement": "modelV2, carState, and liveTracks associations must all be explicit exact",
+      },
+      "radardGateEligible": bundle_radard_gate_eligible,
+      "radardGateEligibleFrameCount": len(gate_eligible_steps),
+      "radardReadyFrameCount": len(ready_steps),
+      "radardDependencyWarmupS": RADARD_DEPENDENCY_WARMUP_S,
+      "dependencyHistoryS": max(0.0, candidate.frames[0].t_s - bundle_frames[0].t_s),
+      "liveTracksPayloadMode": (
+        "empty_not_received" if raw_replay and exact_live_tracks_not_received else
+        "empty_radarless" if raw_replay else
+        "published_radar_state_direct"
+      ),
+      "warmupS": max(0.0, candidate.event_t_s - bundle_frames[0].t_s),
+      "paramSource": "initData+carControlSP" if any(key.startswith("Longitudinal.LiveTune.") for key in episode_params) else "carControlSP-partial",
+      "paramManifest": captured_param_manifest(episode_params),
       "openpilotLongitudinalControl": scan.metadata.openpilot_longitudinal,
       "radarUnavailable": scan.metadata.radar_unavailable,
       "safetyParam": scan.metadata.safety_param,
       "sourceRoot": scan.metadata.source_root,
-      "segStart": candidate.seg_start,
+      "segStart": bundle_frames[0].seg_idx,
       "segEnd": candidate.seg_end,
-      "tStartS": candidate.t_start_s,
+      "tStartS": bundle_frames[0].t_s,
+      "evaluationTStartS": candidate.t_start_s,
       "tEndS": candidate.t_end_s,
       "confidence": candidate.confidence,
       "metrics": candidate.metrics,
+      "cpFlags": scan.metadata.notes_json.get("flags"),
+      "pcmCruise": scan.metadata.notes_json.get("pcmCruise"),
+      "spFlags": scan.metadata.notes_json.get("spFlags"),
+      "spSafetyParam": scan.metadata.notes_json.get("spSafetyParam"),
+      "longitudinalActuatorDelay": scan.metadata.notes_json.get("longitudinalActuatorDelay"),
+      "vEgoStopping": scan.metadata.notes_json.get("vEgoStopping"),
+      "vEgoStarting": scan.metadata.notes_json.get("vEgoStarting"),
+      "stoppingDecelRate": scan.metadata.notes_json.get("stoppingDecelRate"),
+      "startAccel": scan.metadata.notes_json.get("startAccel"),
+      "startingState": scan.metadata.notes_json.get("startingState"),
+      "gitCommit": scan.metadata.notes_json.get("gitCommit"),
+      "gitBranch": scan.metadata.notes_json.get("gitBranch"),
+      "gitRemote": scan.metadata.notes_json.get("gitRemote"),
+      "gitDirty": scan.metadata.notes_json.get("gitDirty"),
+      "gitDiffEmpty": scan.metadata.notes_json.get("gitDiffEmpty"),
+      "gitDiffSha256": scan.metadata.notes_json.get("gitDiffSha256"),
     },
-    params=dict(scan.observed_params),
+    params=episode_params,
     timeline=timeline,
-    initial_speed_mps=candidate.frames[0].v_ego_mps,
-    initial_accel_mps2=candidate.frames[0].a_ego_mps2,
+    initial_speed_mps=bundle_frames[0].v_ego_mps,
+    initial_accel_mps2=bundle_frames[0].a_ego_mps2,
     name=f"{scan.metadata.route_key}_{candidate.episode_type}",
   )
   write_snapshot_bundle(bundle, episode_root)
@@ -731,6 +2481,8 @@ def summarize_episode_frames(frames: list[EpisodeFrame]) -> dict[str, Any]:
   primary_gaps = []
   lead_switch_count = 0
   prev_slot = None
+  source_transition_count = 0
+  prev_source = None
   for frame in frames:
     slot, lead = _primary_lead_with_slot(frame)
     if lead is not None and lead.d_rel_m is not None:
@@ -739,11 +2491,16 @@ def summarize_episode_frames(frames: list[EpisodeFrame]) -> dict[str, Any]:
       lead_switch_count += 1
     if slot is not None:
       prev_slot = slot
+    if frame.planner_source is not None and prev_source is not None and frame.planner_source != prev_source:
+      source_transition_count += 1
+    if frame.planner_source is not None:
+      prev_source = frame.planner_source
   return {
     "minGapM": min(primary_gaps) if primary_gaps else None,
     "maxGapM": max(primary_gaps) if primary_gaps else None,
     "leadSwitchCount": lead_switch_count,
     "sourceEventCount": lead_switch_count + 1,
+    "plannerSourceTransitionCount": source_transition_count,
   }
 
 
@@ -835,7 +2592,32 @@ def _lead_from_message(lead_msg) -> RouteLeadFrame:
   )
 
 
-def _directive_from_frame(lead: RouteLeadFrame, acquisition_reset: bool) -> LeadDirective:
+def _lead_from_model(model_msg, slot: int, v_ego_mps: float) -> RouteLeadFrame | None:
+  if len(model_msg.leadsV3) <= slot:
+    return None
+  lead_msg = model_msg.leadsV3[slot]
+  if not len(lead_msg.x) or not len(lead_msg.v) or not len(lead_msg.a):
+    return None
+  model_v_ego = float(model_msg.velocity.x[0]) if len(model_msg.velocity.x) else float(v_ego_mps)
+  lead_dict = get_RadarState_from_vision(lead_msg, float(v_ego_mps), model_v_ego)
+  add_path_relative_lead_metrics(lead_dict, model_msg, lead_msg)
+  return RouteLeadFrame(
+    status=bool(float(lead_msg.prob) > 0.0),
+    d_rel_m=float(lead_dict["dRel"]),
+    v_rel_mps=float(lead_dict["vRel"]),
+    v_lead_mps=float(lead_dict["vLead"]),
+    a_lead_k_mps2=float(lead_dict["aLeadK"]),
+    v_lead_k_mps=float(lead_dict["vLeadK"]),
+    model_prob=float(lead_msg.prob),
+    y_rel_m=float(lead_dict["yRel"]),
+    d_path_m=float(lead_dict["dPath"]),
+    v_lat_mps=float(lead_dict["vLat"]),
+    radar=False,
+    radar_track_id=-1,
+  )
+
+
+def _directive_from_frame(lead: RouteLeadFrame, acquisition_reset: bool, *, exact_model_prob: bool = False) -> LeadDirective:
   return LeadDirective(
     status=lead.status,
     v_lead_mps=lead.v_lead_mps or 0.0,
@@ -851,7 +2633,61 @@ def _directive_from_frame(lead: RouteLeadFrame, acquisition_reset: bool) -> Lead
     radar=lead.radar,
     radar_track_id=lead.radar_track_id,
     acquisition_reset=acquisition_reset,
+    exact_model_prob=exact_model_prob,
   )
+
+
+def _lead_reference(lead: RouteLeadFrame) -> dict[str, Any]:
+  return {
+    "status": lead.status,
+    "dRelM": lead.d_rel_m,
+    "vRelMps": lead.v_rel_mps,
+    "vLeadMps": lead.v_lead_mps,
+    "aLeadKMps2": lead.a_lead_k_mps2,
+    "modelProb": lead.model_prob,
+    "radarTrackId": lead.radar_track_id,
+  }
+
+
+def _replay_reference_from_frame(frame: EpisodeFrame) -> dict[str, Any]:
+  return {
+    "logMonoTimeNs": frame.log_mono_time,
+    "radardServiceAssociationStatus": frame.radard_service_association_status,
+    "radardServiceAssociationProvenance": dict(frame.radard_service_association_provenance),
+    "radardGateEligible": frame.radard_gate_eligible,
+    "plannerRadarResolution": frame.planner_radar_resolution,
+    "plannerRadarResolutionReason": frame.planner_radar_reason,
+    "plannerContextStatus": frame.planner_context_status,
+    "plannerContextReason": frame.planner_context_reason,
+    "serviceLogMonoTimeNs": {
+      "modelV2": frame.model_v2_log_mono_time_ns,
+      "carState": frame.car_state_log_mono_time_ns,
+      "liveTracks": frame.live_tracks_log_mono_time_ns,
+    },
+    "plannerServiceLogMonoTimeNs": dict(frame.planner_service_log_mono_time_ns),
+    "plannerServiceAssociationProvenance": dict(frame.planner_service_association_provenance),
+    "radarState": {
+      "logMonoTimeNs": frame.radar_state_log_mono_time_ns,
+      "leadOne": _lead_reference(frame.lead_one),
+      "leadTwo": _lead_reference(frame.lead_two),
+    },
+    "longitudinalPlan": {
+      "logMonoTimeNs": frame.longitudinal_plan_log_mono_time_ns,
+      "solverExecutionTimeS": frame.longitudinal_plan_solver_execution_time_s,
+      "aTargetMps2": frame.planner_accel_mps2,
+      "source": frame.planner_source,
+      "radarStateLogMonoTimeNs": frame.planner_radar_state_log_mono_time_ns,
+      "radarStateCandidatesNs": list(frame.planner_radar_state_candidates_ns),
+      "radarResolution": frame.planner_radar_resolution,
+      "radarResolutionReason": frame.planner_radar_reason,
+      "effectiveCruiseMps": frame.recorded_effective_cruise_mps,
+      "effectiveCruiseLimiter": frame.recorded_effective_cruise_limiter,
+      "effectiveCruiseProvenance": frame.recorded_effective_cruise_provenance,
+      "effectiveCruiseStatus": frame.recorded_effective_cruise_status,
+      "contextStatus": frame.planner_context_status,
+      "contextReason": frame.planner_context_reason,
+    },
+  }
 
 
 def _event_name_for_episode(episode_type: str) -> str:
@@ -861,6 +2697,7 @@ def _event_name_for_episode(episode_type: str) -> str:
     "handoff": "handoff_reveal",
     "dropout": "dropout_start",
     "approach": "approach_start",
+    "false_closing": "false_closing_start",
   }.get(episode_type, episode_type)
 
 
@@ -889,6 +2726,73 @@ def _guess_neighbor_log(rlog_path: Path, prefix: str) -> Path | None:
     if candidate.exists():
       return candidate
   return None
+
+
+def _extract_init_params(init_data) -> dict[str, str]:
+  params: dict[str, str] = {}
+  for entry in init_data.params.entries:
+    key = str(entry.key)
+    if not _is_replay_param(key):
+      continue
+    try:
+      value = bytes(entry.value).decode("utf-8")
+    except (UnicodeDecodeError, TypeError, ValueError):
+      continue
+    if "\x00" in value or len(value) > 10_000:
+      continue
+    params[key] = value
+  return params
+
+
+def _extract_init_provenance(init_data) -> dict[str, Any]:
+  provenance: dict[str, Any] = {
+    "gitCommit": str(init_data.gitCommit),
+    "gitBranch": str(init_data.gitBranch),
+    "gitRemote": str(init_data.gitRemote),
+    "gitDirty": bool(init_data.dirty),
+  }
+  git_diff: bytes | None = None
+  for entry in init_data.params.entries:
+    if str(entry.key) != "GitDiff":
+      continue
+    try:
+      git_diff = bytes(entry.value)
+    except (TypeError, ValueError):
+      git_diff = None
+    break
+  if git_diff is not None:
+    provenance["gitDiffEmpty"] = len(git_diff) == 0
+    provenance["gitDiffSha256"] = hashlib.sha256(git_diff).hexdigest()
+  return provenance
+
+
+def _is_replay_param(key: str) -> bool:
+  return bool(
+    key in DEFAULT_PARAM_VALUES or
+    key.startswith(("Longitudinal.LiveTune.", "LongTuning", "VibeTune.")) or
+    key.startswith(("VisionTurnSpeedControl", "SpeedLimit", "RTI", "Weather")) or
+    key in {
+      "AccelPersonality",
+      "LongitudinalPersonality",
+      "HyundaiLongitudinalTuning",
+      "VibePersonalityEnabled",
+      "VibeFollowPersonalityEnabled",
+      "VibeAccelPersonalityEnabled",
+      "DynamicExperimentalControl",
+      "ExperimentalMode",
+      "IsMetric",
+      "ObjectHazardEnabled",
+    }
+  )
+
+
+def _merge_param_updates(current: dict[str, str], pending: dict[str, str], updates: dict[str, str]) -> None:
+  for key, value in updates.items():
+    text_value = str(value)
+    if current.get(key) == text_value:
+      continue
+    current[key] = text_value
+    pending[key] = text_value
 
 
 def _decode_json_column(value: Any) -> dict[str, Any]:

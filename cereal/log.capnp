@@ -735,9 +735,39 @@ struct RadarState @0x9a185389d6fdd05f {
   mdMonoTime @6 :UInt64;
   carStateMonoTime @11 :UInt64;
   radarErrors @13 :Car.RadarData.Error;
+  replayInputs @14 :ReplayInputs;
 
   leadOne @3 :LeadData;
   leadTwo @4 :LeadData;
+
+  # Versioned, logging-only clocks for the exact SubMaster snapshots consumed
+  # by RadarD. In particular, liveTracks participates in currentTime even when
+  # the vehicle reports radarUnavailable.
+  struct ReplayInputs {
+    valid @0 :Bool;       # true only when the producer populated this payload
+    version @1 :UInt16;   # version 1 is the layout below
+    modelV2MonoTimeNs @2 :UInt64;
+    carStateMonoTimeNs @3 :UInt64;
+    liveTracksMonoTimeNs @4 :UInt64;
+    leadOneGovernor @5 :GovernorDebug;
+    leadTwoGovernor @6 :GovernorDebug;
+
+    # Exact publish-side governor state associated with the corresponding
+    # RadarState lead. valid=false for radar-backed/non-model tracks.
+    struct GovernorDebug {
+      valid @0 :Bool;
+      radarTrackId @1 :Int32 = -1;
+      active @2 :Bool;
+      closingMps @3 :Float32;
+      holdRemainingS @4 :Float32;
+      reason @5 :Text;
+      threatCorroborated @6 :Bool;
+      calmRecoveryMode @7 :Bool;
+      calmRecoveryApplied @8 :Bool;
+      recoveryPositionClosingMps @9 :Float32;
+      recoveryPositionClosingValid @10 :Bool;
+    }
+  }
 
   struct LeadData {
     dRel @0 :Float32;
@@ -760,6 +790,11 @@ struct RadarState @0x9a185389d6fdd05f {
     # Consumers treat this as a veto on FCW/crash escalation only; default
     # False preserves legacy behavior for producers that never set it.
     fcwSuppressed @16 :Bool;
+    # True while RadarD is reconciling a stale closing-governor clamp. During
+    # this mode vLead/vRel are deliberately publish-shaped, so consumers must
+    # not treat their finite difference as independent physical evidence.
+    # Default False preserves producers that do not implement the governor.
+    closingGovernorRecovery @17 :Bool;
 
     aLeadDEPRECATED @5 :Float32;
   }

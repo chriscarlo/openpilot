@@ -491,6 +491,20 @@ def test_livetune_snapshot_accepts_dropin_dump(tmp_path: Path) -> None:
   assert "livetuneSource" not in unseeded.metadata
 
 
+def test_snapshot_replay_uses_recorded_params_and_explicit_overrides_without_july4_backfill() -> None:
+  vehicle = resolve_ev6_vehicle_config(
+    snapshot_params={"Longitudinal.LiveTune.ModelLeadFilterVRelTauS": "0.77"},
+    param_overrides={"Longitudinal.LiveTune.HandoffInsideDfPositiveCapMps2": "8.5"},
+    livetune_snapshot=None,
+  )
+
+  assert "livetuneSource" not in vehicle.metadata
+  assert vehicle.params["Longitudinal.LiveTune.ModelLeadFilterVRelTauS"] == "0.77"
+  assert vehicle.params["Longitudinal.LiveTune.HandoffInsideDfPositiveCapMps2"] == "8.5"
+  assert "Longitudinal.LiveTune.ClosingGovernorHoldS" not in vehicle.params
+  assert vehicle.param_override_keys == frozenset({"Longitudinal.LiveTune.HandoffInsideDfPositiveCapMps2"})
+
+
 def test_device_mode_runs_hyundai_no_radar_ema_stage_at_50hz() -> None:
   initial_speed_mps, initial_accel_mps2, steps = build_synthetic_scenario("approach", duration_s=2.0, dt_s=DT_MDL)
   result = run_harness(
@@ -799,7 +813,6 @@ def test_handoff_previewable_early_deficit_strengthens_prereveal_signal() -> Non
   deficit_reveal_t = next(row["t_s"] for row in deficit_result.trace if row["event"] == "handoff_reveal")
   base_prereveal_rows = [row for row in base_result.trace if row["t_s"] < base_reveal_t and row["lead_two_status"]]
   deficit_prereveal_rows = [row for row in deficit_result.trace if row["t_s"] < deficit_reveal_t and row["lead_two_status"]]
-  base_preview_rows = [row for row in base_prereveal_rows if row["mpc_adjacent_awareness_preview_debug"].get("active", False)]
   deficit_preview_rows = [row for row in deficit_prereveal_rows if row["mpc_adjacent_awareness_preview_debug"].get("active", False)]
 
   base_summary = summarize_trace(base_result.trace, vehicle=base_result.vehicle, scenario_name="handoff_previewable", noise_profile="off")

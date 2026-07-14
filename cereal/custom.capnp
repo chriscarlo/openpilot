@@ -135,6 +135,30 @@ struct LongitudinalPlanSP @0xf35cc4560bbf6ec2 {
   visionTurnSpeedControl @3 :VisionTurnSpeedControl;
   accelPersonality @4 :AccelerationPersonality;
   objectHazardControl @5 :ObjectHazardControl;
+  replayInputs @6 :ReplayInputs;
+
+  # Versioned, logging-only snapshot of the exact message clocks and effective
+  # cruise cap consumed by one planner update. Zero clocks mean that optional
+  # service was not present in the producer's SubMaster.
+  struct ReplayInputs {
+    valid @0 :Bool;       # true only when the producer populated this payload
+    version @1 :UInt16;   # version 1 is the layout below
+    radarStateMonoTimeNs @2 :UInt64;
+    effectiveCruiseMps @3 :Float32;
+    carStateMonoTimeNs @4 :UInt64;
+    carControlMonoTimeNs @5 :UInt64;
+    controlsStateMonoTimeNs @6 :UInt64;
+    selfdriveStateMonoTimeNs @7 :UInt64;
+    liveParametersMonoTimeNs @8 :UInt64;
+    modelV2MonoTimeNs @9 :UInt64;
+    liveMapDataSPMonoTimeNs @10 :UInt64;
+    carStateSPMonoTimeNs @11 :UInt64;
+    rtiStateSPMonoTimeNs @12 :UInt64;
+    objectHazardStateSPMonoTimeNs @13 :UInt64;
+    gpsLocationMonoTimeNs @14 :UInt64;
+    gpsLocationExternalMonoTimeNs @15 :UInt64;
+    longitudinalPlanMonoTimeNs @16 :UInt64;  # envelope clock of the paired longitudinalPlan publication
+  }
 
   struct DynamicExperimentalControl {
     state @0 :DynamicExperimentalControlState;

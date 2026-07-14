@@ -68,6 +68,26 @@ _COMFORT_JERK_DISABLE_STEP_MPS2 = 2.0
 # keep-up floor live-tune range.
 _COMFORT_UPWARD_MICRO_MAX_DELTA_MPS2 = 0.30
 
+# Increment whenever the non-deprecated LongitudinalPlanSP replay-input
+# contract changes incompatibly. Version zero remains the Cap'n Proto default
+# and therefore cannot be mistaken for telemetry emitted by this producer.
+_REPLAY_INPUTS_VERSION = 1
+_REPLAY_INPUT_CLOCK_FIELDS = (
+  ("radarStateMonoTimeNs", "radarState"),
+  ("carStateMonoTimeNs", "carState"),
+  ("carControlMonoTimeNs", "carControl"),
+  ("controlsStateMonoTimeNs", "controlsState"),
+  ("selfdriveStateMonoTimeNs", "selfdriveState"),
+  ("liveParametersMonoTimeNs", "liveParameters"),
+  ("modelV2MonoTimeNs", "modelV2"),
+  ("liveMapDataSPMonoTimeNs", "liveMapDataSP"),
+  ("carStateSPMonoTimeNs", "carStateSP"),
+  ("rtiStateSPMonoTimeNs", "rtiStateSP"),
+  ("objectHazardStateSPMonoTimeNs", "objectHazardStateSP"),
+  ("gpsLocationMonoTimeNs", "gpsLocation"),
+  ("gpsLocationExternalMonoTimeNs", "gpsLocationExternal"),
+)
+
 LON_MPC_STEP = 0.2  # first step is 0.2s
 A_CRUISE_MAX_VALS = [1.6, 1.2, 0.8, 0.6]
 A_CRUISE_MAX_BP = [0., 10.0, 25., 40.]
@@ -95,6 +115,35 @@ _A_TOTAL_MAX_BP = [0., 20., 40.]
 
 def get_max_accel(v_ego):
   return np.interp(v_ego, A_CRUISE_MAX_BP, A_CRUISE_MAX_VALS)
+
+
+def _submaster_log_mono_time_ns(sm, service: str) -> int:
+  """Return the exact SubMaster-held service clock, or zero if unsubscribed."""
+  try:
+    return int(sm.logMonoTime[service])
+  except (AttributeError, KeyError, TypeError, ValueError):
+    return 0
+
+
+class _ReplayInputsPubMaster:
+  """Decorate only longitudinalPlanSP publication with replay telemetry."""
+
+  def __init__(self, pm, sm, effective_cruise_mps: float, longitudinal_plan_mono_time_ns: int) -> None:
+    self._pm = pm
+    self._sm = sm
+    self._effective_cruise_mps = effective_cruise_mps
+    self._longitudinal_plan_mono_time_ns = longitudinal_plan_mono_time_ns
+
+  def send(self, service: str, msg) -> None:
+    if service == "longitudinalPlanSP":
+      replay_inputs = msg.longitudinalPlanSP.replayInputs
+      replay_inputs.valid = True
+      replay_inputs.version = _REPLAY_INPUTS_VERSION
+      replay_inputs.effectiveCruiseMps = float(self._effective_cruise_mps)
+      replay_inputs.longitudinalPlanMonoTimeNs = int(self._longitudinal_plan_mono_time_ns)
+      for field, source_service in _REPLAY_INPUT_CLOCK_FIELDS:
+        setattr(replay_inputs, field, _submaster_log_mono_time_ns(self._sm, source_service))
+    self._pm.send(service, msg)
 
 
 def should_release_stop_for_lead_launch(CP, *, standstill: bool, v_ego: float,
@@ -389,6 +438,12 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     self.fcw = False
     self.dt = dt
     self.allow_throttle = True
+    # Replay-fidelity telemetry. This is the final speed cap presented to the
+    # MPC after SLC/VTSC/RTI/weather/object-hazard and force-decel processing.
+    # It is published in LongitudinalPlanSP.replayInputs and mirrored through
+    # the wire-compatible vCruiseDEPRECATED field. It does not participate in
+    # planning decisions.
+    self.effective_v_cruise_mps = 0.0
 
     self.a_desired = init_a
     self.v_desired_filter = FirstOrderFilter(init_v, 2.0, self.dt)
@@ -636,10 +691,14 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
 
     # Get new v_cruise from Speed Limit Control
     self._planner_output_accel_limits = (float(accel_clip[0]), float(accel_clip[1]))
-    v_cruise = LongitudinalPlannerSP.update_v_cruise(self, sm, self.v_desired_filter.x, self.a_desired, v_cruise)
+    # Dispatch through the inherited method so the longitudinal replay harness
+    # can provide a recorded MPC-boundary cap without globally monkeypatching
+    # planner code. Production resolves to LongitudinalPlannerSP unchanged.
+    v_cruise = self.update_v_cruise(sm, self.v_desired_filter.x, self.a_desired, v_cruise)
 
     if force_slow_decel:
       v_cruise = 0.0
+    self.effective_v_cruise_mps = float(v_cruise)
 
     self.mpc.set_weights(prev_accel_constraint, personality=sm['selfdriveState'].personality)
     self.mpc.set_cur_state(self.v_desired_filter.x, self.a_desired)
@@ -1654,7 +1713,6 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
       self._flutter_clamp_prev_a = float(self.output_a_target)
       return
 
-    now_s = float(self.dt) * 0.0  # per-frame pseudo-time; use frame count / 1/dt
     # We don't have a wall clock here — use dt-based virtual time tracked via len
     max_frames = max(1, int(math.ceil(window_s / max(self.dt, 1e-3))))
 
@@ -1700,7 +1758,13 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
 
     longitudinalPlan = plan_send.longitudinalPlan
     longitudinalPlan.modelMonoTime = sm.logMonoTime['modelV2']
-    longitudinalPlan.processingDelay = (plan_send.logMonoTime / 1e9) - sm.logMonoTime['modelV2']
+    longitudinalPlan.processingDelay = (plan_send.logMonoTime - sm.logMonoTime['modelV2']) / 1e9
+    # These deprecated fields remain on the wire and had no current producer.
+    # Preserve the exact planner inputs for deterministic rlog replay without a
+    # schema migration: the SubMaster-held RadarD publication and the effective
+    # cruise cap passed to the MPC on this cycle.
+    longitudinalPlan.radarStateMonoTimeDEPRECATED = sm.logMonoTime['radarState']
+    longitudinalPlan.vCruiseDEPRECATED = float(self.effective_v_cruise_mps)
     longitudinalPlan.solverExecutionTime = self.mpc.solve_time
 
     longitudinalPlan.speeds = self.v_desired_trajectory.tolist()
@@ -1718,4 +1782,8 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
 
     pm.send('longitudinalPlan', plan_send)
 
-    self.publish_longitudinal_plan_sp(sm, pm)
+    # The SP publisher lives in the inherited planner. Decorate its PubMaster
+    # so this producer can append a versioned replay snapshot without changing
+    # any controller or planning behavior.
+    replay_pm = _ReplayInputsPubMaster(pm, sm, self.effective_v_cruise_mps, int(plan_send.logMonoTime))
+    self.publish_longitudinal_plan_sp(sm, replay_pm)

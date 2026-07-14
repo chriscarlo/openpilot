@@ -8,8 +8,7 @@ import numpy as np
 
 from cereal import log, messaging
 from opendbc.car.hyundai.interface import CarInterface
-from opendbc.car.interfaces import ACCEL_MAX, ACCEL_MIN
-from opendbc.car.structs import CarControl, CarControlSP
+from opendbc.car.structs import CarControl
 
 _VisualAlert = CarControl.HUDControl.VisualAlert
 from openpilot.common.gps import get_gps_location_service
@@ -25,8 +24,15 @@ from openpilot.selfdrive.controls.radard import _LEAD_ACCEL_TAU
 from openpilot.selfdrive.modeld.constants import ModelConstants
 from openpilot.sunnypilot.selfdrive.controls.lib.vision_turn_params import update_vtsc_params
 
-from .config import NOISE_PROFILES, NoiseProfile, NoiseSeeds, ResolvedVehicleConfig
-from .inputs import LeadDirective, SnapshotBundle, StepInput
+from .config import (
+  build_cc_sp_params,
+  exact_replay_param_manifest,
+  NOISE_PROFILES,
+  NoiseProfile,
+  NoiseSeeds,
+  ResolvedVehicleConfig,
+)
+from .inputs import LeadDirective, StepInput
 from .metrics import summarize_trace
 
 
@@ -291,16 +297,36 @@ def run_harness(*,
                 noise_profile: str = "realistic",
                 seed: int = 42,
                 noise_seeds: NoiseSeeds | None = None,
-                perception_filter: str = "auto") -> SimulationResult:
+                perception_filter: str = "auto",
+                ego_replay_mode: str = "auto") -> SimulationResult:
   planner_dt_s = DT_MDL
   control_dt_s = DT_CTRL
   profile = NOISE_PROFILES[noise_profile]
   if perception_filter not in ("direct", "radard", "auto"):
     raise ValueError(f"unsupported perception_filter '{perception_filter}'")
+  if ego_replay_mode not in ("auto", "recorded", "plant"):
+    raise ValueError(f"unsupported ego_replay_mode '{ego_replay_mode}'")
   if perception_filter == "auto":
     # Follow the config's declared fidelity (legacy direct constructions predate
     # the field and always fabricated radarState directly).
     perception_filter = str(getattr(vehicle_config, "perception_filter", "direct"))
+  has_any_recorded_ego = any(
+    step.recorded_v_ego_mps is not None or step.recorded_a_ego_mps2 is not None
+    for step in steps
+  )
+  has_complete_recorded_ego = bool(steps) and all(
+    step.recorded_v_ego_mps is not None and step.recorded_a_ego_mps2 is not None
+    for step in steps
+  )
+  declared_ego_replay_mode = str(vehicle_config.metadata.get("egoReplayMode", "auto"))
+  if declared_ego_replay_mode not in ("auto", "recorded", "plant"):
+    raise ValueError(f"unsupported snapshot egoReplayMode '{declared_ego_replay_mode}'")
+  resolved_ego_replay_mode = declared_ego_replay_mode if ego_replay_mode == "auto" else ego_replay_mode
+  if resolved_ego_replay_mode == "auto":
+    resolved_ego_replay_mode = "recorded" if has_any_recorded_ego else "plant"
+  use_recorded_ego = resolved_ego_replay_mode == "recorded"
+  if use_recorded_ego and not has_complete_recorded_ego:
+    raise ValueError("ego_replay_mode='recorded' requires recorded ego fields (vEgo and aEgo) on every timeline frame")
   control_ticks_per_step = max(1, int(round(planner_dt_s / control_dt_s)))
   seeds = noise_seeds or NoiseSeeds.from_base(seed)
   noise_streams = NoiseStreams.from_seeds(seeds)
@@ -313,9 +339,56 @@ def run_harness(*,
   planner.mpc._time_fn = lambda: sim_time_s[0]
   harness_params = HarnessParams(vehicle_config.params)
   _bind_planner_params(planner, harness_params)
+  planner_cruise_context: dict[str, Any] = {
+    "step": None,
+    "generated_mps": None,
+    "applied_mps": None,
+    "override_delta_mps": None,
+  }
+  real_update_v_cruise = planner.update_v_cruise
+
+  def replay_update_v_cruise(sm, v_ego: float, a_ego: float, raw_v_cruise: float) -> float:
+    # Always execute the real overlay stack first so stateful controllers keep
+    # evolving exactly as they would outside replay. Only the final MPC-boundary
+    # return value is substituted, and only under an exact recorded contract.
+    generated = float(real_update_v_cruise(sm, v_ego, a_ego, raw_v_cruise))
+    planner_cruise_context["generated_mps"] = generated
+    planner_cruise_context["applied_mps"] = generated
+    planner_cruise_context["override_delta_mps"] = None
+    context_step = planner_cruise_context["step"]
+    cap_status = None if context_step is None else (
+      context_step.recorded_effective_cruise_status or context_step.planner_context_status
+    )
+    if context_step is not None and cap_status in ("exact", "legacy_derived"):
+      if context_step.recorded_effective_cruise_mps is None:
+        raise ValueError(f"recorded effective cruise status '{cap_status}' requires recordedEffectiveCruiseMps")
+      applied = float(context_step.recorded_effective_cruise_mps)
+      planner_cruise_context["applied_mps"] = applied
+      planner_cruise_context["override_delta_mps"] = applied - generated
+      return applied
+    return generated
+
+  # The production planner deliberately dispatches through this inherited
+  # method; assigning the bound replay seam on this instance leaves production
+  # behavior and every other planner instance untouched.
+  planner.update_v_cruise = replay_update_v_cruise
 
   radard_stage = None
   if perception_filter == "radard":
+    has_recorded_raw_model = any(step.raw_model is not None for step in steps)
+    explicit_not_received = all(
+      step.raw_model is None or (
+        step.recorded_live_tracks_log_mono_time_ns == 0 and
+        isinstance(step.radard_service_association_provenance.get("liveTracks"), dict) and
+        step.radard_service_association_provenance["liveTracks"].get("status") == "exact"
+      )
+      for step in steps
+    )
+    if has_recorded_raw_model and not bool(vehicle_config.cp.radarUnavailable) and not explicit_not_received:
+      raise ValueError(
+        "recorded raw-model replay cannot substitute empty liveTracks on a radar-capable capture " +
+        "without an exact v1 zero clock"
+      )
     from openpilot.selfdrive.test.longitudinal_harness.radard_stage import RadardPerceptionStage
     radard_stage = RadardPerceptionStage(vehicle_config.cp, vehicle_config.cp_sp, harness_params)
 
@@ -362,10 +435,43 @@ def run_harness(*,
   FCW_ALERT_DURATION_S = 2.0
   fcw_alert_until_s = -1.0
   control_tick = 0
+  radar_state_cache: dict[int, Any] = {}
 
   for step in steps:
     sim_time_s[0] = float(step.t_s)
-    radar_state, _ = _build_radar_state(lead_tracks, step, state, profile, planner_dt_s, noise_streams, a_lead_tau_s)
+    planner_cruise_context.update({
+      "step": step,
+      "generated_mps": None,
+      "applied_mps": None,
+      "override_delta_mps": None,
+    })
+    if step.param_updates:
+      recorded_updates = {
+        str(key): str(value)
+        for key, value in step.param_updates.items()
+        if str(key) not in vehicle_config.param_override_keys
+      }
+      if recorded_updates:
+        harness_params.params.update(recorded_updates)
+        vehicle_config.params.update(recorded_updates)
+        vehicle_config.cc_sp_params = build_cc_sp_params(vehicle_config.params)
+
+    # Recorded-input replay deliberately decouples the road inputs from the
+    # counterfactual plant. The plant still reports what these commands would do,
+    # but its motion is never fed back into RadarD/planner when recorded ego exists.
+    input_state = state
+    if use_recorded_ego:
+      assert step.recorded_v_ego_mps is not None and step.recorded_a_ego_mps2 is not None
+      input_state = VehiclePlantState(
+        time_s=state.time_s,
+        true_distance_m=state.true_distance_m,
+        true_speed_mps=float(step.recorded_v_ego_mps),
+        true_accel_mps2=float(step.recorded_a_ego_mps2),
+        measured_speed_mps=float(step.recorded_v_ego_mps),
+        measured_accel_mps2=float(step.recorded_a_ego_mps2),
+      )
+
+    radar_state, _ = _build_radar_state(lead_tracks, step, input_state, profile, planner_dt_s, noise_streams, a_lead_tau_s)
     # The RAW fabricated leads (pre-radard) are the model output that in production
     # arrives as modelV2.leadsV3 — before the radard Schmitt latch. The planner
     # publishes control off the radard-filtered radarState, but it also receives
@@ -381,6 +487,7 @@ def run_harness(*,
         "closing_governor_closing_mps": 0.0,
         "closing_governor_reason": "inactive",
         "closing_governor_threat_corroborated": False,
+        "closing_governor_calm_recovery_count": 0,
         "opening_relax_vrel_mps": None,
         "opening_relax_held": False,
         "opening_relax_hold_remaining_s": 0.0,
@@ -390,12 +497,127 @@ def run_harness(*,
       }
       for slot in ("leadOne", "leadTwo")
     }
+    radard_service_log_mono_time_ns = {
+      "modelV2": None,
+      "carState": None,
+      "liveTracks": None,
+    }
     if radard_stage is not None:
       # The raw fabricated leads become leadsV3-shaped measurements and the planner
       # sees only what the real radard pipeline would publish; ground truth for the
       # metrics keeps flowing from lead_tracks via _current_lead_meta below.
-      radar_state = radard_stage.update(radar_state, now_s=step.t_s, measured_speed_mps=state.measured_speed_mps)
-      radard_tracker_debug = radard_stage.tracker_debug(radar_state, now_s=step.t_s)
+      radar_state = radard_stage.update(
+        radar_state,
+        now_s=step.t_s,
+        measured_speed_mps=input_state.measured_speed_mps,
+        raw_model=step.raw_model,
+        model_v2_log_mono_time_ns=step.recorded_model_v2_log_mono_time_ns,
+        car_state_log_mono_time_ns=step.recorded_car_state_log_mono_time_ns,
+        # RadarState.replayInputs v1 uses zero to mean liveTracks was explicitly
+        # not yet received. RadardPerceptionStage represents that exact state as
+        # None and installs a zero SubMaster clock internally.
+        live_tracks_log_mono_time_ns=(
+          None if step.recorded_live_tracks_log_mono_time_ns == 0
+          else step.recorded_live_tracks_log_mono_time_ns
+        ),
+      )
+      radard_tracker_debug = radard_stage.tracker_debug(radar_state)
+      radard_service_log_mono_time_ns = dict(radard_stage.last_service_log_mono_time_ns)
+    recorded_radar_publish_ns = step.recorded_radar_state_log_mono_time_ns
+    if recorded_radar_publish_ns is not None:
+      recorded_radar_publish_ns = int(recorded_radar_publish_ns)
+      if recorded_radar_publish_ns <= 0:
+        raise ValueError("recordedRadarStateLogMonoTimeNs must be positive")
+      if recorded_radar_publish_ns in radar_state_cache:
+        raise ValueError(f"duplicate recorded RadarD publication clock {recorded_radar_publish_ns}")
+      radar_state_cache[recorded_radar_publish_ns] = radar_state
+
+    scheduler_resolution = step.planner_radar_resolution
+    scheduler_scorable = scheduler_resolution == "exact"
+    planner_radar_state = radar_state
+    planner_radar_input_ns = recorded_radar_publish_ns
+    if scheduler_resolution in ("exact", "legacy_timing_unique"):
+      target_ns = step.planner_radar_state_log_mono_time_ns
+      if target_ns is None:
+        raise ValueError(f"planner radar resolution '{scheduler_resolution}' requires an exact target clock")
+      target_ns = int(target_ns)
+      if target_ns not in radar_state_cache:
+        raise ValueError(
+          f"planner radar target {target_ns} is not in the generated RadarD cache; "
+          "the snapshot is missing required pre-roll or names an unavailable publication"
+        )
+      planner_radar_state = radar_state_cache[target_ns]
+      planner_radar_input_ns = target_ns
+    elif scheduler_resolution == "missing" and step.planner_radar_state_log_mono_time_ns is not None:
+      raise ValueError(
+        f"explicit planner radar target {int(step.planner_radar_state_log_mono_time_ns)} is missing from the route"
+      )
+    elif scheduler_resolution not in (None, "legacy_ambiguous", "missing"):
+      raise ValueError(f"unsupported planner radar resolution '{scheduler_resolution}'")
+
+    service_provenance = step.radard_service_association_provenance
+    explicit_service_exact = bool(
+      step.radard_service_association_status == "exact" and
+      all(
+        isinstance(service_provenance.get(service), dict) and
+        service_provenance[service].get("status") == "exact"
+        for service in ("modelV2", "carState", "liveTracks")
+      ) and
+      isinstance(service_provenance.get("contract"), dict) and
+      service_provenance["contract"].get("status") == "exact" and
+      service_provenance["contract"].get("version") == 1 and
+      service_provenance["liveTracks"].get("emptyPayloadValid") is True
+    )
+    warmup_ready = step.replay_warmup_status == "ready"
+    radard_gate_eligible = bool(step.radard_gate_eligible and explicit_service_exact and warmup_ready)
+    planner_service_provenance = step.planner_service_association_provenance
+    params_provenance = planner_service_provenance.get("params")
+    planner_critical_exact = bool(
+      step.planner_context_status == "exact" and
+      all(
+        isinstance(planner_service_provenance.get(service), dict) and
+        planner_service_provenance[service].get("status") == "exact"
+        for service in ("carState", "controlsState", "carControl", "selfdriveState", "modelV2", "radarState")
+      ) and
+      exact_replay_param_manifest(params_provenance)
+    )
+    context_scorable = planner_critical_exact
+    planner_fidelity_scorable = bool(scheduler_scorable and context_scorable and radard_gate_eligible)
+    replay_reference = dict(step.replay_reference)
+    scheduler_reason = (
+      replay_reference.get("plannerRadarResolutionReason") or
+      (
+        replay_reference.get("longitudinalPlan", {}).get("radarResolutionReason")
+        if isinstance(replay_reference.get("longitudinalPlan"), dict) else None
+      )
+    )
+    reported_scheduler_status = scheduler_resolution or "untracked"
+    if not radard_gate_eligible and step.raw_model is not None:
+      reported_scheduler_status = "unscorable"
+      scheduler_reason = (
+        step.replay_warmup_reason if not warmup_ready
+        else f"RadarD service association is {step.radard_service_association_status or 'untracked'}, not explicit exact"
+      )
+    replay_reference["radardServiceAssociationStatus"] = step.radard_service_association_status or "untracked"
+    replay_reference["radardServiceAssociationProvenance"] = dict(service_provenance)
+    replay_reference["radardGateEligible"] = radard_gate_eligible
+    replay_reference["replayWarmupStatus"] = step.replay_warmup_status or "untracked"
+    replay_reference["replayWarmupReason"] = step.replay_warmup_reason
+    if not radard_gate_eligible and "radarState" in replay_reference:
+      replay_reference["radarStateDiagnostic"] = replay_reference.pop("radarState")
+    replay_reference["plannerRadarResolution"] = reported_scheduler_status
+    replay_reference["plannerRadarResolutionReason"] = scheduler_reason
+    replay_reference["plannerContextStatus"] = step.planner_context_status or "untracked"
+    replay_reference["plannerContextReason"] = step.planner_context_reason
+    replay_reference["plannerServiceLogMonoTimeNs"] = dict(step.recorded_planner_service_log_mono_time_ns)
+    replay_reference["plannerServiceAssociationProvenance"] = dict(planner_service_provenance)
+    replay_reference["plannerFidelity"] = {
+      "scorable": planner_fidelity_scorable,
+      "schedulerStatus": reported_scheduler_status,
+      "schedulerReason": scheduler_reason,
+      "contextStatus": step.planner_context_status or "untracked",
+      "contextReason": step.planner_context_reason,
+    }
     published_d_rel = {
       slot: (float(getattr(radar_state, slot).dRel) if getattr(radar_state, slot).status else None)
       for slot in ("leadOne", "leadTwo")
@@ -423,10 +645,17 @@ def run_harness(*,
       }
       for slot in ("leadOne", "leadTwo")
     }
-    sm = _build_submaster(step, state, radar_state, long_control.long_control_state,
-                          bool(vehicle_config.cp.openpilotLongitudinalControl),
+    step_long_active = bool(vehicle_config.cp.openpilotLongitudinalControl) if step.long_active is None else bool(step.long_active)
+    sm = _build_submaster(step, input_state, planner_radar_state, long_control.long_control_state,
+                          step_long_active,
                           raw_model_radar_state=raw_model_radar_state,
-                          measured_speed_mps=state.measured_speed_mps)
+                          measured_speed_mps=input_state.measured_speed_mps,
+                          raw_model=step.raw_model)
+    sm.logMonoTime["radarState"] = int(planner_radar_input_ns or 0)
+    if "modelV2" not in step.recorded_planner_service_log_mono_time_ns:
+      sm.logMonoTime["modelV2"] = int(step.recorded_model_v2_log_mono_time_ns or 0)
+    if "carState" not in step.recorded_planner_service_log_mono_time_ns:
+      sm.logMonoTime["carState"] = int(step.recorded_car_state_log_mono_time_ns or 0)
     planner.update(sm)
     planner_accel = float(planner.output_a_target)
     planner_source = str(getattr(planner.mpc, "source", ""))
@@ -439,17 +668,17 @@ def run_harness(*,
       fcw_alert_until_s = float(step.t_s) + FCW_ALERT_DURATION_S
 
     for control_idx in range(control_ticks_per_step):
-      long_active = bool(vehicle_config.cp.openpilotLongitudinalControl)
-      accel_limits = CarInterface.get_pid_accel_limits(vehicle_config.cp, state.measured_speed_mps, step.cruise_speed_mps)
+      long_active = step_long_active
+      accel_limits = CarInterface.get_pid_accel_limits(vehicle_config.cp, input_state.measured_speed_mps, step.cruise_speed_mps)
       # EV6 CAN-FD fidelity: with openpilot longitudinal, carstate hardwires
       # cruiseState.standstill=False (opendbc hyundai carstate CAN-FD branch), so
       # LongControl's starting_condition is never blocked at a stop. Fabricating
       # standstill from v<0.01 here pinned the state machine in `stopping` forever
       # and made stop->launch scenarios unrepresentable.
-      cruise_standstill = (not bool(vehicle_config.cp.openpilotLongitudinalControl)) and state.true_speed_mps < 0.01
+      cruise_standstill = (not bool(vehicle_config.cp.openpilotLongitudinalControl)) and input_state.true_speed_mps < 0.01
       cs_loc = SimpleNamespace(
-        vEgo=state.measured_speed_mps,
-        aEgo=state.measured_accel_mps2,
+        vEgo=input_state.measured_speed_mps,
+        aEgo=input_state.measured_accel_mps2,
         brakePressed=False,
         cruiseState=SimpleNamespace(standstill=cruise_standstill),
       )
@@ -471,8 +700,8 @@ def run_harness(*,
           CC_SP.leadOne = radar_state.leadOne
           CC_SP.leadTwo = radar_state.leadTwo
           CS = SimpleNamespace(
-            out=SimpleNamespace(vEgo=state.measured_speed_mps, aEgo=state.measured_accel_mps2),
-            aBasis=state.measured_accel_mps2,
+            out=SimpleNamespace(vEgo=input_state.measured_speed_mps, aEgo=input_state.measured_accel_mps2),
+            aBasis=input_state.measured_accel_mps2,
           )
           hyundai_controller.update(CC, CC_SP, CS)
         controller_accel = float(hyundai_controller.actual_accel)
@@ -536,6 +765,42 @@ def run_harness(*,
         "measured_accel_mps2": measured_accel,
         "v_ego_true_mps": state.true_speed_mps,
         "v_ego_measured_mps": state.measured_speed_mps,
+        "planner_input_v_ego_mps": float(sm["carState"].vEgo),
+        "planner_input_a_ego_mps2": float(sm["carState"].aEgo),
+        "recorded_input_replay": bool(use_recorded_ego),
+        "replay_reference": replay_reference,
+        "radard_model_v2_log_mono_time_ns": radard_service_log_mono_time_ns["modelV2"],
+        "radard_car_state_log_mono_time_ns": radard_service_log_mono_time_ns["carState"],
+        "radard_live_tracks_log_mono_time_ns": radard_service_log_mono_time_ns["liveTracks"],
+        "radard_service_association_status": step.radard_service_association_status or "untracked",
+        "radard_service_association_provenance": dict(service_provenance),
+        "radard_explicit_service_associations": explicit_service_exact,
+        "radard_gate_eligible": radard_gate_eligible,
+        "replay_warmup_status": step.replay_warmup_status or "untracked",
+        "replay_warmup_reason": step.replay_warmup_reason,
+        "recorded_radar_state_log_mono_time_ns": recorded_radar_publish_ns,
+        "planner_radar_state_log_mono_time_ns": planner_radar_input_ns,
+        "planner_radar_target_log_mono_time_ns": step.planner_radar_state_log_mono_time_ns,
+        "planner_radar_candidates_ns": list(step.planner_radar_state_candidates_ns),
+        "planner_radar_resolution": scheduler_resolution or "untracked",
+        "planner_reported_radar_resolution": reported_scheduler_status,
+        "planner_scheduler_scorable": bool(scheduler_scorable),
+        "planner_context_status": step.planner_context_status or "untracked",
+        "planner_context_reason": step.planner_context_reason,
+        "planner_context_scorable": bool(context_scorable),
+        "planner_critical_inputs_exact": bool(planner_critical_exact),
+        "planner_service_log_mono_time_ns": dict(step.recorded_planner_service_log_mono_time_ns),
+        "planner_service_association_provenance": dict(planner_service_provenance),
+        "planner_fidelity_scorable": planner_fidelity_scorable,
+        "planner_raw_cruise_mps": float(step.cruise_speed_mps),
+        "planner_generated_effective_cruise_mps": planner_cruise_context["generated_mps"],
+        "planner_recorded_effective_cruise_mps": step.recorded_effective_cruise_mps,
+        "planner_applied_effective_cruise_mps": planner_cruise_context["applied_mps"],
+        "planner_effective_cruise_override_delta_mps": planner_cruise_context["override_delta_mps"],
+        "planner_effective_cruise_limiter": step.recorded_effective_cruise_limiter,
+        "planner_effective_cruise_provenance": step.recorded_effective_cruise_provenance,
+        "planner_effective_cruise_status": step.recorded_effective_cruise_status,
+        "recorded_gas_pressed": step.recorded_gas_pressed,
         "has_any_lead": bool(active_leads),
         "active_lead_speed_mps": active_lead_speed,
         "has_control_lead": control_lead_speed is not None,
@@ -590,6 +855,7 @@ def run_harness(*,
 
   vehicle_description = vehicle_config.describe()
   vehicle_description["perceptionFilter"] = perception_filter
+  vehicle_description["egoReplayMode"] = "recorded" if use_recorded_ego else "plant"
   vehicle_description["noiseProfile"] = profile.name
   vehicle_description["noiseSeeds"] = seeds.as_dict()
   summary = summarize_trace(trace, vehicle=vehicle_description, scenario_name=scenario_name, noise_profile=profile.name)
@@ -597,58 +863,82 @@ def run_harness(*,
 
 
 def _build_submaster(step: StepInput, state: VehiclePlantState, radar_state, long_control_state, long_active: bool,
-                     *, raw_model_radar_state=None, measured_speed_mps: float = 0.0) -> SubMasterStub:
+                     *, raw_model_radar_state=None, measured_speed_mps: float = 0.0,
+                     raw_model: dict[str, Any] | None = None) -> SubMasterStub:
+  planner_inputs = step.recorded_planner_inputs
+  recorded_car_state = planner_inputs.get("carState", {})
+  recorded_controls_state = planner_inputs.get("controlsState", {})
+  recorded_selfdrive_state = planner_inputs.get("selfdriveState", {})
+  recorded_car_control = planner_inputs.get("carControl", {})
+  recorded_model = planner_inputs.get("modelV2", {})
+
   radar = messaging.new_message("radarState")
   radar.radarState = radar_state
   control = messaging.new_message("controlsState")
-  control.controlsState.longControlState = long_control_state
-  control.controlsState.forceDecel = step.force_decel
+  control.controlsState.longControlState = int(recorded_controls_state.get("longControlState", long_control_state))
+  control.controlsState.forceDecel = bool(recorded_controls_state.get("forceDecel", step.force_decel))
   ss = messaging.new_message("selfdriveState")
-  ss.selfdriveState.enabled = True
-  ss.selfdriveState.experimentalMode = step.experimental_mode
-  ss.selfdriveState.personality = int(log.LongitudinalPersonality.standard)
+  ss.selfdriveState.enabled = bool(recorded_selfdrive_state.get("enabled", True))
+  ss.selfdriveState.experimentalMode = bool(
+    recorded_selfdrive_state.get("experimentalMode", step.experimental_mode)
+  )
+  ss.selfdriveState.personality = int(
+    recorded_selfdrive_state.get(
+      "personality",
+      log.LongitudinalPersonality.standard if step.personality is None else step.personality,
+    )
+  )
   car_state = messaging.new_message("carState")
-  car_state.carState.vEgo = float(state.measured_speed_mps)
-  car_state.carState.aEgo = float(state.measured_accel_mps2)
-  car_state.carState.standstill = bool(state.true_speed_mps < 0.01)
-  car_state.carState.vCruise = float(step.cruise_speed_mps * 3.6)
+  car_state.carState.vEgo = float(recorded_car_state.get("vEgoMps", state.measured_speed_mps))
+  car_state.carState.aEgo = float(recorded_car_state.get("aEgoMps2", state.measured_accel_mps2))
+  car_state.carState.standstill = bool(recorded_car_state.get("standstill", state.true_speed_mps < 0.01))
+  car_state.carState.vCruise = float(recorded_car_state.get("vCruiseKph", step.cruise_speed_mps * 3.6))
+  car_state.carState.gasPressed = bool(recorded_car_state.get(
+    "gasPressed",
+    step.recorded_gas_pressed if step.recorded_gas_pressed is not None else False,
+  ))
   car_control = messaging.new_message("carControl")
-  car_control.carControl.orientationNED = [0.0, float(step.pitch_rad), 0.0]
-  car_control.carControl.longActive = bool(long_active)
+  orientation_ned = recorded_car_control.get("orientationNED", [0.0, float(step.pitch_rad), 0.0])
+  car_control.carControl.orientationNED = [float(value) for value in orientation_ned]
+  car_control.carControl.longActive = bool(recorded_car_control.get("longActive", long_active))
 
-  model = messaging.new_message("modelV2")
-  position = log.XYZTData.new_message()
-  velocity = log.XYZTData.new_message()
-  acceleration = log.XYZTData.new_message()
-  position.x = [float(x) for x in (state.measured_speed_mps + 0.5) * np.array(ModelConstants.T_IDXS)]
-  velocity.x = [float(x) for x in (state.measured_speed_mps + 0.5) * np.ones_like(ModelConstants.T_IDXS)]
-  velocity.x[0] = float(state.measured_speed_mps)
-  acceleration.x = [float(x) for x in np.zeros_like(ModelConstants.T_IDXS)]
-  model.modelV2.position = position
-  model.modelV2.velocity = velocity
-  model.modelV2.acceleration = acceleration
-  model.modelV2.action.desiredAcceleration = float(state.measured_accel_mps2 + 0.1)
-  model.modelV2.meta.disengagePredictions.gasPressProbs = [1.0 for _ in range(6)]
-  # modelV2.leadsV3: the raw MODEL lead output (pre-radard, prob still ramping),
-  # exactly what modeld publishes in production. The planner reads radard-filtered
-  # radarState for control, but ALSO receives this raw model lead — the only lead
-  # signal available before the Schmitt enter latch. Fill it from the raw
-  # fabricated leads (mirrors radard_stage._fill_lead_v3, which inverts
-  # get_RadarState_from_vision) so the planner sees the same measurement radard did.
-  if raw_model_radar_state is not None:
-    from openpilot.selfdrive.test.longitudinal_harness.radard_stage import _fill_lead_v3
-    leads_v3 = model.modelV2.init("leadsV3", 2)
-    for slot, raw_lead in enumerate((raw_model_radar_state.leadOne, raw_model_radar_state.leadTwo)):
-      _fill_lead_v3(leads_v3[slot], raw_lead, model_v_ego=float(measured_speed_mps))
+  planner_raw_model = recorded_model.get("rawModel", raw_model)
+  if planner_raw_model is not None:
+    from openpilot.selfdrive.test.longitudinal_harness.radard_stage import build_model_message
+    model = build_model_message(planner_raw_model)
+  else:
+    model = messaging.new_message("modelV2")
+    position = log.XYZTData.new_message()
+    velocity = log.XYZTData.new_message()
+    acceleration = log.XYZTData.new_message()
+    position.x = [float(x) for x in (state.measured_speed_mps + 0.5) * np.array(ModelConstants.T_IDXS)]
+    velocity.x = [float(x) for x in (state.measured_speed_mps + 0.5) * np.ones_like(ModelConstants.T_IDXS)]
+    velocity.x[0] = float(state.measured_speed_mps)
+    acceleration.x = [float(x) for x in np.zeros_like(ModelConstants.T_IDXS)]
+    model.modelV2.position = position
+    model.modelV2.velocity = velocity
+    model.modelV2.acceleration = acceleration
+    model.modelV2.action.desiredAcceleration = float(state.measured_accel_mps2 + 0.1)
+    model.modelV2.meta.disengagePredictions.gasPressProbs = [1.0 for _ in range(6)]
+    # modelV2.leadsV3: the raw MODEL lead output (pre-radard, prob still ramping),
+    # exactly what modeld publishes in production. Fill it from fabricated leads
+    # only when no recorded model payload is available.
+    if raw_model_radar_state is not None:
+      from openpilot.selfdrive.test.longitudinal_harness.radard_stage import _fill_lead_v3
+      leads_v3 = model.modelV2.init("leadsV3", 2)
+      for slot, raw_lead in enumerate((raw_model_radar_state.leadOne, raw_model_radar_state.leadTwo)):
+        _fill_lead_v3(leads_v3[slot], raw_lead, model_v_ego=float(measured_speed_mps))
 
   live_parameters = messaging.new_message("liveParameters")
   car_state_sp = messaging.new_message("carStateSP")
   live_map_data_sp = messaging.new_message("liveMapDataSP")
   gps_location = messaging.new_message("gpsLocation")
+  gps_location_external = messaging.new_message("gpsLocationExternal")
   selfdrive_state_sp = messaging.new_message("selfdriveStateSP")
   rti_state_sp = messaging.new_message("rtiStateSP")
+  object_hazard_state_sp = messaging.new_message("objectHazardStateSP")
 
-  return SubMasterStub(
+  sm = SubMasterStub(
     {
       "radarState": radar.radarState,
       "carState": car_state.carState,
@@ -660,8 +950,10 @@ def _build_submaster(step: StepInput, state: VehiclePlantState, radar_state, lon
       "carStateSP": car_state_sp.carStateSP,
       "liveMapDataSP": live_map_data_sp.liveMapDataSP,
       "gpsLocation": gps_location.gpsLocation,
+      "gpsLocationExternal": gps_location_external.gpsLocationExternal,
       "selfdriveStateSP": selfdrive_state_sp.selfdriveStateSP,
       "rtiStateSP": rti_state_sp.rtiStateSP,
+      "objectHazardStateSP": object_hazard_state_sp.objectHazardStateSP,
     },
     valid_overrides={
       "radarState": True,
@@ -672,6 +964,10 @@ def _build_submaster(step: StepInput, state: VehiclePlantState, radar_state, lon
       "modelV2": True,
     },
   )
+  for service, clock_ns in step.recorded_planner_service_log_mono_time_ns.items():
+    if service in sm.logMonoTime:
+      sm.logMonoTime[service] = int(clock_ns)
+  return sm
 
 
 def _build_radar_state(lead_tracks: dict[str, LeadTrackState],
@@ -775,7 +1071,9 @@ def _build_lead(slot_name: str,
     elif float(noise_streams.prob.random()) < noise_profile.prob_dropout_rate_hz * dt_s:
       track.dropout_remaining_s = max(0.0, noise_profile.prob_dropout_duration_s - dt_s)
       target_prob = 0.0
-  if target_prob > 0.0 and track.acquisition_age_s < 0.25:
+  if directive.exact_model_prob:
+    track.model_prob = target_prob
+  elif target_prob > 0.0 and track.acquisition_age_s < 0.25:
     track.model_prob = min(target_prob, max(track.model_prob, (track.acquisition_age_s + dt_s) / 0.25))
   else:
     track.model_prob = target_prob

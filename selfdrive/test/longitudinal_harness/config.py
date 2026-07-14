@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -8,9 +9,10 @@ from opendbc.car import gen_empty_fingerprint, structs
 from opendbc.car.hyundai.hyundaicanfd import CanBus
 from opendbc.car.hyundai.interface import CarInterface
 from opendbc.car.hyundai.radar_interface import RADAR_START_ADDR
-from opendbc.car.hyundai.values import CAR, HyundaiFlags
+from opendbc.car.hyundai.values import CAR
 from opendbc.sunnypilot.car.hyundai.longitudinal.helpers import LongitudinalTuningType
 from opendbc.sunnypilot.car.hyundai.values import HyundaiFlagsSP, HyundaiSafetyFlagsSP
+from openpilot.selfdrive.controls.lib.longitudinal_live_tune import LEAD_RESPONSE_TUNE_SPECS
 
 # The EV6's only lead source is vision: radard publishes aLeadTau=0.3 on every model
 # lead (selfdrive/controls/radard.py ModelLeadTrack.update / get_RadarState_from_vision),
@@ -317,6 +319,48 @@ DEFAULT_PARAM_VALUES = {
   "WeatherAwareControlEnabled": "1",
 }
 
+# Exact route replay needs every behavior-affecting parameter value, not merely
+# a non-empty subset. Keep the capture manifest tied to the runtime tune specs
+# so adding a new planner/RadarD knob automatically makes older captures
+# explicitly unscorable instead of silently borrowing a current default.
+REPLAY_PARAM_DEFAULT_VALUES = {
+  **DEFAULT_PARAM_VALUES,
+  **{spec.key: str(spec.default) for spec in LEAD_RESPONSE_TUNE_SPECS},
+  "WeatherSpeedReductionLight": "5.0",
+  "WeatherSpeedReductionModerate": "10.0",
+  "WeatherSpeedReductionHeavy": "15.0",
+  "ObjectHazardEnabled": "1",
+}
+REPLAY_PARAM_MANIFEST_KEYS = frozenset(REPLAY_PARAM_DEFAULT_VALUES)
+
+
+def captured_param_manifest(params: Mapping[str, Any]) -> dict[str, Any]:
+  """Describe whether all replay-relevant parameter values were captured."""
+  captured_keys = set(params)
+  missing_keys = sorted(REPLAY_PARAM_MANIFEST_KEYS - captured_keys)
+  return {
+    "complete": not missing_keys,
+    "requiredKeyCount": len(REPLAY_PARAM_MANIFEST_KEYS),
+    "capturedRequiredKeyCount": len(REPLAY_PARAM_MANIFEST_KEYS & captured_keys),
+    "missingKeys": missing_keys,
+  }
+
+
+def exact_replay_param_manifest(provenance: Any) -> bool:
+  """Return true only for a current, complete, internally consistent manifest."""
+  if not isinstance(provenance, Mapping):
+    return False
+  required_count = provenance.get("requiredKeyCount")
+  captured_count = provenance.get("capturedRequiredKeyCount")
+  return bool(
+    provenance.get("status") == "exact" and
+    provenance.get("complete") is True and
+    provenance.get("missingKeys") == [] and
+    isinstance(required_count, int) and not isinstance(required_count, bool) and
+    required_count == len(REPLAY_PARAM_MANIFEST_KEYS) and
+    captured_count == required_count
+  )
+
 
 @dataclass(frozen=True)
 class NoiseProfile:
@@ -452,6 +496,9 @@ class ResolvedVehicleConfig:
   # "direct" fabricates radarState from directives (legacy), "radard" routes the
   # leads through the real radard pipeline (Schmitt latch + ModelLeadTracker).
   perception_filter: str = "direct"
+  # Explicit CLI/sweep overrides remain authoritative when a recorded timeline
+  # later replays device-side parameter changes.
+  param_override_keys: frozenset[str] = field(default_factory=frozenset)
   metadata: dict[str, Any] = field(default_factory=dict)
 
   def describe(self) -> dict[str, Any]:
@@ -546,14 +593,17 @@ def resolve_ev6_vehicle_config(*,
     raise ValueError(f"unsupported perception_filter '{perception_filter}'")
 
   fingerprint, car_fw = build_synthetic_ev6_inputs(topology)
+  explicit_param_overrides = normalize_param_overrides(param_overrides)
+  explicit_override_keys = set(explicit_param_overrides)
   params = dict(DEFAULT_PARAM_VALUES)
   if livetune_snapshot is not None:
     params.update(normalize_param_overrides(load_livetune_snapshot(livetune_snapshot)))
   params.update(normalize_param_overrides(snapshot_params))
-  params.update(normalize_param_overrides(param_overrides))
+  params.update(explicit_param_overrides)
 
   if hyundai_tuning_mode is not None:
     params["HyundaiLongitudinalTuning"] = str(int(hyundai_tuning_mode))
+    explicit_override_keys.add("HyundaiLongitudinalTuning")
 
   if snapshot_vehicle and snapshot_vehicle.get("controllerMode") and controller_mode == "auto":
     controller_mode = str(snapshot_vehicle["controllerMode"])
@@ -565,9 +615,15 @@ def resolve_ev6_vehicle_config(*,
   CP_SP.flags |= HyundaiFlagsSP.LONGITUDINAL_MAIN_CRUISE_TOGGLEABLE.value
   CP_SP.safetyParam |= HyundaiSafetyFlagsSP.LONG_MAIN_CRUISE_TOGGLEABLE
 
-  if snapshot_vehicle and "spFlags" in snapshot_vehicle:
+  if snapshot_vehicle and snapshot_vehicle.get("cpFlags") is not None:
+    CP.flags = int(snapshot_vehicle["cpFlags"])
+  if snapshot_vehicle and snapshot_vehicle.get("openpilotLongitudinalControl") is not None:
+    CP.openpilotLongitudinalControl = bool(snapshot_vehicle["openpilotLongitudinalControl"])
+  if snapshot_vehicle and snapshot_vehicle.get("pcmCruise") is not None:
+    CP.pcmCruise = bool(snapshot_vehicle["pcmCruise"])
+  if snapshot_vehicle and snapshot_vehicle.get("spFlags") is not None:
     CP_SP.flags = int(snapshot_vehicle["spFlags"])
-  if snapshot_vehicle and "spSafetyParam" in snapshot_vehicle:
+  if snapshot_vehicle and snapshot_vehicle.get("spSafetyParam") is not None:
     CP_SP.safetyParam = int(snapshot_vehicle["spSafetyParam"])
 
   if controller_mode == "shaped" and int(params.get("HyundaiLongitudinalTuning", "0")) == LongitudinalTuningType.OFF:
@@ -581,6 +637,21 @@ def resolve_ev6_vehicle_config(*,
     CP.radarUnavailable = bool(snapshot_vehicle["radarUnavailable"])
 
   _apply_hyundai_tuning(CP, CP_SP, params)
+  # A route snapshot records the CarParams values that were actually active on
+  # device. Apply them after tune initialization so replay cannot drift back to
+  # a synthetic/default EV6 actuator or stop-state configuration.
+  if snapshot_vehicle:
+    for field_name in (
+      "longitudinalActuatorDelay",
+      "vEgoStopping",
+      "vEgoStarting",
+      "stoppingDecelRate",
+      "startAccel",
+    ):
+      if snapshot_vehicle.get(field_name) is not None:
+        setattr(CP, field_name, float(snapshot_vehicle[field_name]))
+    if snapshot_vehicle.get("startingState") is not None:
+      CP.startingState = bool(snapshot_vehicle["startingState"])
 
   if controller_mode == "device":
     # tici fidelity: the real EV6 CarController always routes actuators.accel through
@@ -644,5 +715,6 @@ def resolve_ev6_vehicle_config(*,
     plant_config=plant_config,
     a_lead_tau_s=float(a_lead_tau_s),
     perception_filter=perception_filter,
+    param_override_keys=frozenset(explicit_override_keys),
     metadata=metadata,
   )

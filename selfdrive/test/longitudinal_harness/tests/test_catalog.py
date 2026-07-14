@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
+
+import pytest
 
 from cereal import messaging
 
@@ -18,10 +21,62 @@ from selfdrive.test.longitudinal_harness.catalog import (
 from selfdrive.test.longitudinal_harness.catalog_cli import main as catalog_main
 from selfdrive.test.longitudinal_harness.ingest import main as ingest_main
 from selfdrive.test.longitudinal_harness.route_extract import extract_ev6_episodes, index_ev6_routes
+from selfdrive.test.longitudinal_harness import route_extract
 from selfdrive.test.longitudinal_harness.sweep import enumerate_candidates, run_sweep
 
 
 FIXTURE_DIR = Path(__file__).resolve().parents[1] / "testdata" / "ev6_lka_snapshot"
+
+
+def test_extract_ev6_episodes_rejects_one_unreplayable_candidate_without_aborting_corpus(
+  monkeypatch: pytest.MonkeyPatch,
+  tmp_path: Path,
+) -> None:
+  bad = SimpleNamespace(
+    episode_key="bad",
+    episode_type="false_closing",
+    confidence=1.0,
+  )
+  good = SimpleNamespace(
+    episode_key="good",
+    episode_type="approach",
+    confidence=0.9,
+    seg_start=1,
+    seg_end=1,
+    t_start_s=1.0,
+    t_end_s=2.0,
+    metrics={"sourceEventCount": 1},
+    notes_json={},
+  )
+  scan = SimpleNamespace(route_id=7)
+  conn = SimpleNamespace(commit=lambda: None)
+  monkeypatch.setattr(route_extract, "get_route_rows", lambda *args, **kwargs: [{}])
+  monkeypatch.setattr(route_extract, "load_route_scan", lambda *args, **kwargs: scan)
+  monkeypatch.setattr(route_extract, "clear_route_extractions", lambda *args, **kwargs: None)
+  monkeypatch.setattr(route_extract, "detect_episode_candidates", lambda *args, **kwargs: [bad, good])
+
+  def write_bundle(scan_arg, candidate, root):
+    if candidate is bad:
+      raise route_extract.EpisodeNotReplayableError("missing raw-model dependency")
+    return Path(root) / "good_bundle"
+
+  monkeypatch.setattr(route_extract, "write_episode_bundle", write_bundle)
+  monkeypatch.setattr(route_extract, "upsert_episode", lambda *args, **kwargs: 11)
+  monkeypatch.setattr(route_extract, "update_episode_bundle_path", lambda *args, **kwargs: None)
+  monkeypatch.setattr(route_extract, "record_snapshot_bundle", lambda *args, **kwargs: 22)
+
+  results = extract_ev6_episodes(conn, bundle_root=tmp_path / "bundles")
+
+  assert results[0] == {
+    "routeId": 7,
+    "episodeKey": "bad",
+    "episodeType": "false_closing",
+    "status": "not_evaluated",
+    "reason": "missing raw-model dependency",
+    "confidence": 1.0,
+  }
+  assert results[1]["status"] == "recorded"
+  assert results[1]["bundlePath"].endswith("good_bundle")
 
 
 def _make_car_params(*, car_fingerprint: str = "KIA_EV6"):
