@@ -11,7 +11,6 @@ Architecture: fetch → detect → publish at 1Hz
 
 import asyncio
 import inspect
-import json
 import math
 import os
 import time
@@ -399,65 +398,9 @@ class RTIDaemon:
                             location[0], location[1], radius_km
                         )
 
-                        # CAPTURE ALL POLICE DATA TO FILE
-                        police_capture_file = "/data/openpilot/live_waze_police_capture.json"
-                        police_alerts = []
-                        all_alert_types = set()
-
-                        for alert in (traffic_data_candidate or []):
-                            # Track all alert types
-                            all_alert_types.add(alert.type)
-
-                            # Capture police alerts with ALL data
-                            if alert.type in ['police', 'policeHiding', 'POLICE', 'POLICE_HIDING']:
-                                police_data = {
-                                    "timestamp": current_time,
-                                    "location": location,
-                                    "alert": {
-                                        "id": alert.id,
-                                        "type": alert.type,
-                                        "latitude": alert.latitude,
-                                        "longitude": alert.longitude,
-                                        "confidence": alert.confidence,
-                                        "speed_limit": alert.speed_limit,
-                                        "street": alert.street,
-                                        "country": alert.country,
-                                        "raw_data": alert.raw_data
-                                    }
-                                }
-                                police_alerts.append(police_data)
-
-                        # Log and save if we found police
-                        if police_alerts:
-                            cloudlog.warning(f"RTI: POLICE ALERTS FOUND! Count: {len(police_alerts)}")
-                            for pa in police_alerts:
-                                msg = "RTI POLICE: {} at {} ({:.5f}, {:.5f})".format(
-                                    pa['alert']['type'], pa['alert']['street'],
-                                    pa['alert']['latitude'], pa['alert']['longitude']
-                                )
-                                cloudlog.warning(msg)
-                                if pa['alert']['raw_data']:
-                                    cloudlog.warning(f"RTI POLICE RAW: {json.dumps(pa['alert']['raw_data'])}")
-
-                            # Append to capture file
-                            capture_dir = os.path.dirname(police_capture_file)
-                            if capture_dir and os.path.isdir(capture_dir):
-                                try:
-                                    existing_data = []
-                                    if os.path.exists(police_capture_file):
-                                        with open(police_capture_file) as f:
-                                            existing_data = json.load(f)
-                                    existing_data.extend(police_alerts)
-                                    with open(police_capture_file, 'w') as f:
-                                        json.dump(existing_data, f, indent=2)
-                                    cloudlog.warning(f"RTI: Saved {len(police_alerts)} police alerts to {police_capture_file}")
-                                except Exception as e:
-                                    cloudlog.error(f"RTI: Failed to save police data: {e}")
-                            else:
-                                cloudlog.debug(
-                                    "RTI: Skipping police capture file write; "
-                                    + f"missing directory '{capture_dir}'"
-                                )
+                        # Alert types are useful operational telemetry, but raw police captures
+                        # are development artifacts and must not mutate the tracked checkout.
+                        all_alert_types = {alert.type for alert in (traffic_data_candidate or [])}
 
                         # Only treat this fetch as "fresh" if the HTTP request actually succeeded.
                         # `get_traffic_alerts()` returns [] both for "no alerts" and for request errors,
