@@ -3088,6 +3088,56 @@ def test_strategic_post_apex_release_helper_state():
   assert decision.strategy_state == 'vision_owns'
 
 
+def test_strategic_visible_agreement_hands_off_after_takeover_dwell():
+  """Map covers the approach, then vision owns after sustained visible agreement."""
+  state = MapStrategyState()
+  candidate = MapCapCandidate(
+    mode='strategic',
+    cap_mps=15.0,
+    start_m=0.0,
+    coverage=0.8,
+    reason='cap_available',
+    anchor_dist_m=20.0,
+    anchor_vsafe_mps=9.0,
+    anchor_curvature=0.02,
+    anchor_index=12,
+  )
+
+  before_dwell = evaluate_map_strategy(
+    mode='strategic',
+    state=state,
+    candidate=candidate,
+    raw_target_pre_map=15.2,
+    full_visibility=True,
+    vision_good=True,
+    turn_visible=True,
+    s_visible_m=35.0,
+    vis_margin_m=10.0,
+    now_s=0.10,
+    apex_exit_ready=False,
+  )
+  assert before_dwell.apply_map_cap is True
+  assert before_dwell.map_floor_active is True
+
+  after_dwell = evaluate_map_strategy(
+    mode='strategic',
+    state=state,
+    candidate=candidate,
+    raw_target_pre_map=15.2,
+    full_visibility=True,
+    vision_good=True,
+    turn_visible=True,
+    s_visible_m=35.0,
+    vis_margin_m=10.0,
+    now_s=0.46,
+    apex_exit_ready=False,
+  )
+  assert after_dwell.apply_map_cap is False
+  assert after_dwell.map_floor_active is False
+  assert after_dwell.strategy_state == 'vision_owns'
+  assert after_dwell.vision_relax_reason == 'takeover_dwell'
+
+
 def test_strategic_counterevidence_dwell_releases_helper_state():
   state = MapStrategyState()
   candidate = MapCapCandidate(
@@ -3205,8 +3255,8 @@ def test_strategic_counterevidence_dwell_waits_for_anchor_visibility():
   assert d1.strategy_state == 'vision_clear_waiting'
 
 
-def test_counterevidence_blocked_when_vision_approached_cap():
-  """Counterevidence must not fire if vision ever got close to map cap in this zone."""
+def test_counterevidence_releases_after_brief_vision_agreement_then_sustained_disagreement():
+  """A brief agreement must not permanently lock map ownership in the visible zone."""
   state = MapStrategyState()
   candidate = MapCapCandidate(
     mode='strategic',
@@ -3220,7 +3270,8 @@ def test_counterevidence_blocked_when_vision_approached_cap():
     anchor_index=12,
   )
 
-  # Frame 1: vision approaches cap (15.2 <= 15.0 + 0.25)
+  # Frame 1: vision approaches cap (15.2 <= 15.0 + 0.25).
+  # This begins a normal takeover dwell, but does not complete it.
   evaluate_map_strategy(
     mode='strategic',
     state=state,
@@ -3234,10 +3285,10 @@ def test_counterevidence_blocked_when_vision_approached_cap():
     now_s=0.10,
     apex_exit_ready=False,
   )
-  assert state.takeover_ever_approached is True
 
-  # Frame 2: vision relaxes above cap + counterevidence_delta, wait long enough
-  d = evaluate_map_strategy(
+  # Frame 2: vision resolves the visible curve as gentler. Start continuous
+  # counterevidence after the zone dwell; one old agreement sample must not veto it.
+  d0 = evaluate_map_strategy(
     mode='strategic',
     state=state,
     candidate=candidate,
@@ -3250,9 +3301,241 @@ def test_counterevidence_blocked_when_vision_approached_cap():
     now_s=2.00,
     apex_exit_ready=False,
   )
-  # Counterevidence must NOT fire because takeover_ever_approached is True
+  assert state.counterevidence_since == 2.00
+  assert d0.apply_map_cap is True
+
+  # Frame 3: sustained disagreement reaches the normal 0.75 s dwell.
+  d1 = evaluate_map_strategy(
+    mode='strategic',
+    state=state,
+    candidate=candidate,
+    raw_target_pre_map=16.0,
+    full_visibility=True,
+    vision_good=True,
+    turn_visible=True,
+    s_visible_m=35.0,
+    vis_margin_m=10.0,
+    now_s=2.80,
+    apex_exit_ready=False,
+  )
+  assert d1.apply_map_cap is False
+  assert d1.vision_relax_allowed is True
+  assert d1.vision_relax_reason == 'counterevidence_dwell'
+
+
+def test_counterevidence_requires_continuous_visible_disagreement():
+  """A neutral or agreeing sample resets the counterevidence clock."""
+  state = MapStrategyState()
+  candidate = MapCapCandidate(
+    mode='strategic',
+    cap_mps=15.0,
+    start_m=0.0,
+    coverage=0.8,
+    reason='cap_available',
+    anchor_dist_m=20.0,
+    anchor_vsafe_mps=9.0,
+    anchor_curvature=0.02,
+    anchor_index=12,
+  )
+
+  # Enter the visible zone, then start CE after the normal zone dwell.
+  evaluate_map_strategy(
+    mode='strategic', state=state, candidate=candidate,
+    raw_target_pre_map=16.0, full_visibility=True, vision_good=True,
+    turn_visible=True, s_visible_m=35.0, vis_margin_m=10.0,
+    now_s=0.10, apex_exit_ready=False,
+  )
+  evaluate_map_strategy(
+    mode='strategic', state=state, candidate=candidate,
+    raw_target_pre_map=16.0, full_visibility=True, vision_good=True,
+    turn_visible=True, s_visible_m=35.0, vis_margin_m=10.0,
+    now_s=0.50, apex_exit_ready=False,
+  )
+  assert state.counterevidence_since == 0.50
+
+  # Vision drops into the neutral band (< cap + 0.75), invalidating the dwell.
+  neutral = evaluate_map_strategy(
+    mode='strategic', state=state, candidate=candidate,
+    raw_target_pre_map=15.5, full_visibility=True, vision_good=True,
+    turn_visible=True, s_visible_m=35.0, vis_margin_m=10.0,
+    now_s=0.70, apex_exit_ready=False,
+  )
+  assert neutral.apply_map_cap is True
   assert state.counterevidence_since == 0.0
-  assert d.apply_map_cap is True
+
+  # A later disagreement starts a fresh dwell; it cannot release early.
+  resumed = evaluate_map_strategy(
+    mode='strategic', state=state, candidate=candidate,
+    raw_target_pre_map=16.0, full_visibility=True, vision_good=True,
+    turn_visible=True, s_visible_m=35.0, vis_margin_m=10.0,
+    now_s=1.30, apex_exit_ready=False,
+  )
+  assert resumed.apply_map_cap is True
+  assert state.counterevidence_since == 1.30
+
+  still_waiting = evaluate_map_strategy(
+    mode='strategic', state=state, candidate=candidate,
+    raw_target_pre_map=16.0, full_visibility=True, vision_good=True,
+    turn_visible=True, s_visible_m=35.0, vis_margin_m=10.0,
+    now_s=2.00, apex_exit_ready=False,
+  )
+  assert still_waiting.apply_map_cap is True
+
+  released = evaluate_map_strategy(
+    mode='strategic', state=state, candidate=candidate,
+    raw_target_pre_map=16.0, full_visibility=True, vision_good=True,
+    turn_visible=True, s_visible_m=35.0, vis_margin_m=10.0,
+    now_s=2.10, apex_exit_ready=False,
+  )
+  assert released.apply_map_cap is False
+  assert released.vision_relax_reason == 'counterevidence_dwell'
+
+
+def test_materially_tighter_map_constraint_restarts_handoff_evidence():
+  """Vision evidence for one bend cannot release a newly tighter bend."""
+  state = MapStrategyState()
+  first_curve = MapCapCandidate(
+    mode='strategic', cap_mps=15.0, start_m=0.0, coverage=0.8,
+    reason='cap_available', anchor_dist_m=20.0, anchor_vsafe_mps=9.0,
+    anchor_curvature=0.02, anchor_index=12,
+  )
+  tighter_curve = MapCapCandidate(
+    mode='strategic', cap_mps=8.0, start_m=0.0, coverage=0.8,
+    reason='cap_available', anchor_dist_m=20.0, anchor_vsafe_mps=5.0,
+    anchor_curvature=0.06, anchor_index=42,
+  )
+
+  evaluate_map_strategy(
+    mode='strategic', state=state, candidate=first_curve,
+    raw_target_pre_map=16.0, full_visibility=True, vision_good=True,
+    turn_visible=True, s_visible_m=35.0, vis_margin_m=10.0,
+    now_s=0.10, apex_exit_ready=False,
+  )
+  evaluate_map_strategy(
+    mode='strategic', state=state, candidate=first_curve,
+    raw_target_pre_map=16.0, full_visibility=True, vision_good=True,
+    turn_visible=True, s_visible_m=35.0, vis_margin_m=10.0,
+    now_s=0.50, apex_exit_ready=False,
+  )
+  assert state.counterevidence_since == 0.50
+
+  switched = evaluate_map_strategy(
+    mode='strategic', state=state, candidate=tighter_curve,
+    raw_target_pre_map=16.0, full_visibility=True, vision_good=True,
+    turn_visible=True, s_visible_m=35.0, vis_margin_m=10.0,
+    now_s=0.60, apex_exit_ready=False,
+  )
+  assert switched.apply_map_cap is True
+  assert state.release_latched is False
+  assert state.zone_entry_since == 0.60
+  assert state.counterevidence_since == 0.0
+
+  evaluate_map_strategy(
+    mode='strategic', state=state, candidate=tighter_curve,
+    raw_target_pre_map=16.0, full_visibility=True, vision_good=True,
+    turn_visible=True, s_visible_m=35.0, vis_margin_m=10.0,
+    now_s=1.00, apex_exit_ready=False,
+  )
+  waiting = evaluate_map_strategy(
+    mode='strategic', state=state, candidate=tighter_curve,
+    raw_target_pre_map=16.0, full_visibility=True, vision_good=True,
+    turn_visible=True, s_visible_m=35.0, vis_margin_m=10.0,
+    now_s=1.60, apex_exit_ready=False,
+  )
+  assert waiting.apply_map_cap is True
+
+  released = evaluate_map_strategy(
+    mode='strategic', state=state, candidate=tighter_curve,
+    raw_target_pre_map=16.0, full_visibility=True, vision_good=True,
+    turn_visible=True, s_visible_m=35.0, vis_margin_m=10.0,
+    now_s=1.80, apex_exit_ready=False,
+  )
+  assert released.apply_map_cap is False
+  assert released.vision_relax_reason == 'counterevidence_dwell'
+
+
+def test_same_cap_anchor_index_jitter_keeps_handoff_evidence():
+  """A recentered map scan alone must not perpetually reset vision handoff."""
+  state = MapStrategyState()
+  candidate = MapCapCandidate(
+    mode='strategic', cap_mps=15.0, start_m=0.0, coverage=0.8,
+    reason='cap_available', anchor_dist_m=20.0, anchor_vsafe_mps=9.0,
+    anchor_curvature=0.02, anchor_index=12,
+  )
+  jittered_candidate = MapCapCandidate(
+    mode='strategic', cap_mps=15.0, start_m=0.0, coverage=0.8,
+    reason='cap_available', anchor_dist_m=19.5, anchor_vsafe_mps=9.1,
+    anchor_curvature=0.0201, anchor_index=17,
+  )
+
+  evaluate_map_strategy(
+    mode='strategic', state=state, candidate=candidate,
+    raw_target_pre_map=16.0, full_visibility=True, vision_good=True,
+    turn_visible=True, s_visible_m=35.0, vis_margin_m=10.0,
+    now_s=0.10, apex_exit_ready=False,
+  )
+  evaluate_map_strategy(
+    mode='strategic', state=state, candidate=candidate,
+    raw_target_pre_map=16.0, full_visibility=True, vision_good=True,
+    turn_visible=True, s_visible_m=35.0, vis_margin_m=10.0,
+    now_s=0.50, apex_exit_ready=False,
+  )
+  assert state.counterevidence_since == 0.50
+
+  evaluate_map_strategy(
+    mode='strategic', state=state, candidate=jittered_candidate,
+    raw_target_pre_map=16.0, full_visibility=True, vision_good=True,
+    turn_visible=True, s_visible_m=35.0, vis_margin_m=10.0,
+    now_s=0.70, apex_exit_ready=False,
+  )
+  assert state.counterevidence_since == 0.50
+
+  released = evaluate_map_strategy(
+    mode='strategic', state=state, candidate=jittered_candidate,
+    raw_target_pre_map=16.0, full_visibility=True, vision_good=True,
+    turn_visible=True, s_visible_m=35.0, vis_margin_m=10.0,
+    now_s=1.30, apex_exit_ready=False,
+  )
+  assert released.apply_map_cap is False
+
+
+def test_same_cap_material_anchor_switch_restarts_handoff_evidence():
+  """A distinct nearby bend with the same map cap still needs fresh vision proof."""
+  state = MapStrategyState()
+  first_curve = MapCapCandidate(
+    mode='strategic', cap_mps=15.0, start_m=0.0, coverage=0.8,
+    reason='cap_available', anchor_dist_m=20.0, anchor_vsafe_mps=9.0,
+    anchor_curvature=0.02, anchor_index=12,
+  )
+  replacement_curve = MapCapCandidate(
+    mode='strategic', cap_mps=15.0, start_m=0.0, coverage=0.8,
+    reason='cap_available', anchor_dist_m=19.0, anchor_vsafe_mps=6.0,
+    anchor_curvature=0.05, anchor_index=30,
+  )
+
+  evaluate_map_strategy(
+    mode='strategic', state=state, candidate=first_curve,
+    raw_target_pre_map=16.0, full_visibility=True, vision_good=True,
+    turn_visible=True, s_visible_m=35.0, vis_margin_m=10.0,
+    now_s=0.10, apex_exit_ready=False,
+  )
+  evaluate_map_strategy(
+    mode='strategic', state=state, candidate=first_curve,
+    raw_target_pre_map=16.0, full_visibility=True, vision_good=True,
+    turn_visible=True, s_visible_m=35.0, vis_margin_m=10.0,
+    now_s=0.50, apex_exit_ready=False,
+  )
+  assert state.counterevidence_since == 0.50
+
+  switched = evaluate_map_strategy(
+    mode='strategic', state=state, candidate=replacement_curve,
+    raw_target_pre_map=16.0, full_visibility=True, vision_good=True,
+    turn_visible=True, s_visible_m=35.0, vis_margin_m=10.0,
+    now_s=0.60, apex_exit_ready=False,
+  )
+  assert switched.apply_map_cap is True
+  assert state.counterevidence_since == 0.0
+  assert state.zone_entry_since == 0.60
 
 
 def test_counterevidence_fires_after_zone_dwell_without_approach():
@@ -3284,7 +3567,6 @@ def test_counterevidence_fires_after_zone_dwell_without_approach():
     now_s=0.10,
     apex_exit_ready=False,
   )
-  assert state.takeover_ever_approached is False
   assert state.zone_entry_since == 0.10
 
   # Frame 2: zone_elapsed=0.30 (< takeover_dwell_s=0.35), CE not eligible
@@ -3555,7 +3837,6 @@ def test_zone_debounce_resets_after_sustained_exit():
   )
   assert state.zone_entry_since == 0.0, "zone_entry_since should be wiped after sustained exit"
   assert state.counterevidence_since == 0.0, "counterevidence_since should be wiped"
-  assert state.takeover_ever_approached is False
   assert state.zone_exit_since == 0.0, "zone_exit_since should clear after wipe"
 
 

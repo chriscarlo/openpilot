@@ -44,6 +44,51 @@ EVENTS_DIR_DEFAULT = Path("/data/media/0/VTSCTuner/events")
 DEFAULT_MAX_TOTAL_MB = 512
 
 
+def _read_map_vision_arbitration(vtsc: Any) -> dict[str, Any]:
+  """Read typed planner provenance without mislabeling pre-schema messages."""
+  fields: dict[str, Any] = {
+    "map_strategy_state": None,
+    "map_strategy_mode": None,
+    "map_floor_active": None,
+    "map_floor_reason": None,
+    "vision_relax_allowed": None,
+    "vision_relax_reason": None,
+    "map_advisory_cap": None,
+    "map_strategic_cap": None,
+    "vision_local_cap": None,
+    "selected_cap": None,
+    "map_anchor_distance_m": None,
+    "map_anchor_curvature": None,
+    "map_anchor_index": None,
+    "map_takeover_dwell_s": None,
+    "map_counterevidence_dwell_s": None,
+  }
+  # PyCapnp readers expose all fields in the local schema for old-route wire
+  # data. The producer guarantees a non-empty state, which makes it a safe
+  # version sentinel for the entire arbitration bundle.
+  state = str(getattr(vtsc, "mapStrategyState", "") or "")
+  if not state:
+    return fields
+  fields.update({
+    "map_strategy_state": state,
+    "map_strategy_mode": str(getattr(vtsc, "mapStrategyMode", "") or "") or None,
+    "map_floor_active": bool(getattr(vtsc, "mapFloorActive", False)),
+    "map_floor_reason": str(getattr(vtsc, "mapFloorReason", "") or ""),
+    "vision_relax_allowed": bool(getattr(vtsc, "visionRelaxAllowed", False)),
+    "vision_relax_reason": str(getattr(vtsc, "visionRelaxReason", "") or ""),
+    "map_advisory_cap": float(getattr(vtsc, "mapAdvisoryCap", 0.0)),
+    "map_strategic_cap": float(getattr(vtsc, "mapStrategicCap", 0.0)),
+    "vision_local_cap": float(getattr(vtsc, "visionLocalCap", 0.0)),
+    "selected_cap": float(getattr(vtsc, "selectedCap", 0.0)),
+    "map_anchor_distance_m": float(getattr(vtsc, "mapAnchorDistanceM", 0.0)),
+    "map_anchor_curvature": float(getattr(vtsc, "mapAnchorCurvature", 0.0)),
+    "map_anchor_index": int(getattr(vtsc, "mapAnchorIndex", -1)),
+    "map_takeover_dwell_s": float(getattr(vtsc, "mapTakeoverDwellS", 0.0)),
+    "map_counterevidence_dwell_s": float(getattr(vtsc, "mapCounterevidenceDwellS", 0.0)),
+  })
+  return fields
+
+
 def _now_utc_tag() -> str:
   return _dt.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
 
@@ -588,6 +633,21 @@ def main() -> int:
     winding_context_score = None
     winding_context_confidence = None
     winding_context_source = None
+    map_strategy_state = None
+    map_strategy_mode = None
+    map_floor_active = None
+    map_floor_reason = None
+    vision_relax_allowed = None
+    vision_relax_reason = None
+    map_advisory_cap = None
+    map_strategic_cap = None
+    vision_local_cap = None
+    selected_cap = None
+    map_anchor_distance_m = None
+    map_anchor_curvature = None
+    map_anchor_index = None
+    map_takeover_dwell_s = None
+    map_counterevidence_dwell_s = None
     slc_active = False
     slc_offseted = None
     if lp is not None:
@@ -610,6 +670,22 @@ def main() -> int:
         winding_context_score = float(getattr(vtsc, "windingContextScore", 0.0)) if hasattr(vtsc, "windingContextScore") else None
         winding_context_confidence = float(getattr(vtsc, "windingContextConfidence", 0.0)) if hasattr(vtsc, "windingContextConfidence") else None
         winding_context_source = str(getattr(vtsc, "windingContextSource", "none")) if hasattr(vtsc, "windingContextSource") else None
+        arbitration = _read_map_vision_arbitration(vtsc)
+        map_strategy_state = arbitration["map_strategy_state"]
+        map_strategy_mode = arbitration["map_strategy_mode"]
+        map_floor_active = arbitration["map_floor_active"]
+        map_floor_reason = arbitration["map_floor_reason"]
+        vision_relax_allowed = arbitration["vision_relax_allowed"]
+        vision_relax_reason = arbitration["vision_relax_reason"]
+        map_advisory_cap = arbitration["map_advisory_cap"]
+        map_strategic_cap = arbitration["map_strategic_cap"]
+        vision_local_cap = arbitration["vision_local_cap"]
+        selected_cap = arbitration["selected_cap"]
+        map_anchor_distance_m = arbitration["map_anchor_distance_m"]
+        map_anchor_curvature = arbitration["map_anchor_curvature"]
+        map_anchor_index = arbitration["map_anchor_index"]
+        map_takeover_dwell_s = arbitration["map_takeover_dwell_s"]
+        map_counterevidence_dwell_s = arbitration["map_counterevidence_dwell_s"]
       except Exception:
         pass
       try:
@@ -677,6 +753,21 @@ def main() -> int:
       "windingContextScore": winding_context_score,
       "windingContextConfidence": winding_context_confidence,
       "windingContextSource": winding_context_source,
+      "mapStrategyState": map_strategy_state,
+      "mapStrategyMode": map_strategy_mode,
+      "mapFloorActive": map_floor_active,
+      "mapFloorReason": map_floor_reason,
+      "visionRelaxAllowed": vision_relax_allowed,
+      "visionRelaxReason": vision_relax_reason,
+      "mapAdvisoryCapMps": map_advisory_cap,
+      "mapStrategicCapMps": map_strategic_cap,
+      "visionLocalCapMps": vision_local_cap,
+      "selectedCapMps": selected_cap,
+      "mapAnchorDistanceM": map_anchor_distance_m,
+      "mapAnchorCurvature": map_anchor_curvature,
+      "mapAnchorIndex": map_anchor_index,
+      "mapTakeoverDwellS": map_takeover_dwell_s,
+      "mapCounterevidenceDwellS": map_counterevidence_dwell_s,
       "sources": sources,
       "minSource": min_src,
       "minSpeedMps": float(min_v),
@@ -778,6 +869,21 @@ def main() -> int:
       "vtscVelMps": vtsc_vel,
       "vtscMaxPredLatAcc": pred_lat_acc,
       "vtscCurLatAcc": cur_lat_acc,
+      "mapStrategyState": map_strategy_state,
+      "mapStrategyMode": map_strategy_mode,
+      "mapFloorActive": map_floor_active,
+      "mapFloorReason": map_floor_reason,
+      "visionRelaxAllowed": vision_relax_allowed,
+      "visionRelaxReason": vision_relax_reason,
+      "mapAdvisoryCapMps": map_advisory_cap,
+      "mapStrategicCapMps": map_strategic_cap,
+      "visionLocalCapMps": vision_local_cap,
+      "selectedCapMps": selected_cap,
+      "mapAnchorDistanceM": map_anchor_distance_m,
+      "mapAnchorCurvature": map_anchor_curvature,
+      "mapAnchorIndex": map_anchor_index,
+      "mapTakeoverDwellS": map_takeover_dwell_s,
+      "mapCounterevidenceDwellS": map_counterevidence_dwell_s,
       "sources": sources,
       "minSource": min_src,
       "minSpeedMps": float(min_v),

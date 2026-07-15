@@ -202,6 +202,25 @@ struct LongitudinalPlanSP @0xf35cc4560bbf6ec2 {
     windingContextSource @24 :WindingContextSource;
     curvePreviewTiles @25 :List(CurvePreviewTile);  # ordered nearest-first; tile-local (entry-up) geometry
 
+    # Per-cycle map/vision cap-arbitration provenance. This is intentionally part
+    # of the normal plan log so route analysis can attribute a VTSC intervention
+    # without relying on a rotating debug snapshot or swaglog verbosity.
+    mapStrategyState @26 :Text;
+    mapFloorActive @27 :Bool;
+    mapFloorReason @28 :Text;
+    visionRelaxAllowed @29 :Bool;
+    visionRelaxReason @30 :Text;
+    mapAdvisoryCap @31 :Float32;
+    mapStrategicCap @32 :Float32;
+    visionLocalCap @33 :Float32;
+    selectedCap @34 :Float32;
+    mapAnchorDistanceM @35 :Float32;
+    mapAnchorCurvature @36 :Float32;
+    mapTakeoverDwellS @37 :Float32;
+    mapCounterevidenceDwellS @38 :Float32;
+    mapStrategyMode @39 :Text;
+    mapAnchorIndex @40 :Int32;
+
     struct StripMapPoint {
       xFwdM @0 :Float32;
       yLeftM @1 :Float32;

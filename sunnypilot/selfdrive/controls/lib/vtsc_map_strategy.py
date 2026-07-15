@@ -28,6 +28,15 @@ STRATEGIC_CHAIN_REARM_RISE_MPS = 0.75
 # search planner-response probe for that constraint.  The chain envelope still
 # handles it via the simpler (and non-front-loading) kinematic formula.
 STRATEGIC_KINEMATIC_HEADROOM_SKIP_MPS = 3.0
+# A new map constraint must earn a fresh vision handoff. These gates ignore
+# ordinary per-frame map jitter while preventing evidence for one bend from
+# releasing a materially different nearby bend.
+MAP_HANDOFF_CAP_CHANGE_MPS = 0.50
+MAP_HANDOFF_ANCHOR_FORWARD_JUMP_M = 12.0
+MAP_HANDOFF_ANCHOR_INDEX_JUMP = 8
+MAP_HANDOFF_ANCHOR_CURVATURE_DELTA = 0.003
+MAP_HANDOFF_ANCHOR_CURVATURE_RATIO = 0.35
+MAP_HANDOFF_ANCHOR_VSAFE_DELTA_MPS = 1.0
 WINDING_ROAD_LOOKAHEAD_M = 325.0
 WINDING_ROAD_BASELINE_QUANTILE = 0.85
 WINDING_ROAD_MIN_DROP_MPS = 2.0
@@ -81,10 +90,14 @@ class MapStrategyState:
   counterevidence_since: float = 0.0
   release_reason: str = ""
   strategy_state: str = "idle"
-  takeover_ever_approached: bool = False
   zone_entry_since: float = 0.0
   release_at: float = 0.0
   zone_exit_since: float = 0.0
+  evidence_cap_mps: float | None = None
+  evidence_anchor_dist_m: float | None = None
+  evidence_anchor_vsafe_mps: float | None = None
+  evidence_anchor_curvature: float | None = None
+  evidence_anchor_index: int | None = None
 
   def reset(self) -> None:
     self.release_latched = False
@@ -92,10 +105,17 @@ class MapStrategyState:
     self.counterevidence_since = 0.0
     self.release_reason = ""
     self.strategy_state = "idle"
-    self.takeover_ever_approached = False
     self.zone_entry_since = 0.0
     self.release_at = 0.0
     self.zone_exit_since = 0.0
+    self.clear_candidate_evidence()
+
+  def clear_candidate_evidence(self) -> None:
+    self.evidence_cap_mps = None
+    self.evidence_anchor_dist_m = None
+    self.evidence_anchor_vsafe_mps = None
+    self.evidence_anchor_curvature = None
+    self.evidence_anchor_index = None
 
 
 @dataclass
@@ -108,6 +128,91 @@ class MapStrategyDecision:
   vision_relax_reason: str
   takeover_dwell_s: float
   counterevidence_dwell_s: float
+
+
+def _optional_finite(value: float | int | None) -> float | None:
+  try:
+    parsed = float(value)
+  except (TypeError, ValueError):
+    return None
+  return parsed if math.isfinite(parsed) else None
+
+
+def _store_candidate_evidence(state: MapStrategyState, candidate: MapCapCandidate) -> None:
+  state.evidence_cap_mps = _optional_finite(candidate.cap_mps)
+  state.evidence_anchor_dist_m = _optional_finite(candidate.anchor_dist_m)
+  state.evidence_anchor_vsafe_mps = _optional_finite(candidate.anchor_vsafe_mps)
+  state.evidence_anchor_curvature = _optional_finite(candidate.anchor_curvature)
+  state.evidence_anchor_index = int(candidate.anchor_index) if candidate.anchor_index is not None else None
+
+
+def _restart_handoff_evidence(state: MapStrategyState, candidate: MapCapCandidate) -> None:
+  """A material map-constraint change cannot inherit vision evidence."""
+  state.release_latched = False
+  state.takeover_since = 0.0
+  state.counterevidence_since = 0.0
+  state.release_reason = ""
+  state.zone_entry_since = 0.0
+  state.release_at = 0.0
+  state.zone_exit_since = 0.0
+  state.clear_candidate_evidence()
+  _store_candidate_evidence(state, candidate)
+
+
+def _candidate_requires_fresh_handoff(
+  state: MapStrategyState,
+  candidate: MapCapCandidate,
+  *,
+  in_takeover_zone: bool,
+) -> bool:
+  """Bind map→vision dwell to a stable map constraint, not a transient sample."""
+  cap_mps = _optional_finite(candidate.cap_mps)
+  if cap_mps is None:
+    return False
+  if state.evidence_cap_mps is None:
+    _store_candidate_evidence(state, candidate)
+    return False
+
+  cap_tightened = bool(cap_mps < float(state.evidence_cap_mps) - MAP_HANDOFF_CAP_CHANGE_MPS)
+  anchor_dist_m = _optional_finite(candidate.anchor_dist_m)
+  anchor_vsafe_mps = _optional_finite(candidate.anchor_vsafe_mps)
+  anchor_curvature = _optional_finite(candidate.anchor_curvature)
+
+  forward_anchor_jump = bool(
+    anchor_dist_m is not None
+    and state.evidence_anchor_dist_m is not None
+    and anchor_dist_m > float(state.evidence_anchor_dist_m) + MAP_HANDOFF_ANCHOR_FORWARD_JUMP_M
+  )
+  curvature_changed = bool(
+    anchor_curvature is not None
+    and state.evidence_anchor_curvature is not None
+    and abs(anchor_curvature - float(state.evidence_anchor_curvature))
+    >= max(MAP_HANDOFF_ANCHOR_CURVATURE_DELTA,
+           abs(float(state.evidence_anchor_curvature)) * MAP_HANDOFF_ANCHOR_CURVATURE_RATIO)
+  )
+  vsafe_changed = bool(
+    anchor_vsafe_mps is not None
+    and state.evidence_anchor_vsafe_mps is not None
+    and abs(anchor_vsafe_mps - float(state.evidence_anchor_vsafe_mps)) >= MAP_HANDOFF_ANCHOR_VSAFE_DELTA_MPS
+  )
+  anchor_index_changed = bool(
+    candidate.anchor_index is not None
+    and state.evidence_anchor_index is not None
+    and abs(int(candidate.anchor_index) - int(state.evidence_anchor_index)) >= MAP_HANDOFF_ANCHOR_INDEX_JUMP
+  )
+  # `anchor_index` alone is not stable for every map source. Require a real
+  # geometry discontinuity as well, while a substantially tighter cap always
+  # restarts the safety-critical handoff evidence.
+  anchor_replaced = bool(
+    in_takeover_zone
+    and (curvature_changed or vsafe_changed)
+    and (forward_anchor_jump or anchor_index_changed)
+  )
+  if not (cap_tightened or anchor_replaced):
+    return False
+
+  _restart_handoff_evidence(state, candidate)
+  return True
 
 
 @dataclass
@@ -871,42 +976,45 @@ def evaluate_map_strategy(
     state.release_reason = ""
     state.takeover_since = 0.0
     state.counterevidence_since = 0.0
-    state.takeover_ever_approached = False
     state.zone_entry_since = 0.0
     state.release_at = 0.0
     state.zone_exit_since = 0.0
+    state.clear_candidate_evidence()
 
   anchor_dist_m = float(candidate.anchor_dist_m if candidate.anchor_dist_m is not None else 1e9)
   takeover_zone_m = max(0.0, float(s_visible_m))
   in_takeover_zone = bool(full_visibility and vision_good and turn_visible and anchor_dist_m <= takeover_zone_m)
+  _candidate_requires_fresh_handoff(state, candidate, in_takeover_zone=in_takeover_zone)
 
   if in_takeover_zone:
     state.zone_exit_since = 0.0  # cancel pending debounce on re-entry
     if state.zone_entry_since <= 0.0:
       state.zone_entry_since = float(now_s)
 
-    if float(raw_target_pre_map) <= float(candidate.cap_mps) + takeover_eps_mps:
+    vision_agrees = bool(float(raw_target_pre_map) <= float(candidate.cap_mps) + takeover_eps_mps)
+    vision_disagrees = bool(float(raw_target_pre_map) >= float(candidate.cap_mps) + counterevidence_delta_mps)
+
+    if vision_agrees:
       if state.takeover_since <= 0.0:
         state.takeover_since = float(now_s)
-      state.takeover_ever_approached = True
     else:
       state.takeover_since = 0.0
 
-    # Counterevidence: only eligible after zone dwell AND vision never approached cap.
-    # In strategic mode, vision being above map cap is expected during curve approach
-    # (map sees curves before vision).  Only treat it as counterevidence when vision
-    # has had time to tighten (zone_elapsed >= takeover_dwell) and never did.
+    # Counterevidence is only credible after vision has been in the strict visible
+    # zone long enough to resolve the bend. It must be continuous: a brief near-map
+    # sample cannot permanently veto a later, sustained visible disagreement, and a
+    # neutral/agreement sample resets the disagreement dwell. This preserves map as
+    # the unseen-approach safety floor while allowing vision to own a visibly gentler
+    # curve once it has held that conclusion.
     zone_elapsed = (max(0.0, float(now_s) - float(state.zone_entry_since))
                     if state.zone_entry_since > 0.0 else 0.0)
-    ce_eligible = bool(not state.takeover_ever_approached
-                       and zone_elapsed >= float(takeover_dwell_s))
+    ce_eligible = bool(zone_elapsed >= float(takeover_dwell_s))
 
-    if ce_eligible and float(raw_target_pre_map) >= float(candidate.cap_mps) + counterevidence_delta_mps:
+    if ce_eligible and vision_disagrees:
       if state.counterevidence_since <= 0.0:
         state.counterevidence_since = float(now_s)
     else:
-      if not ce_eligible:
-        state.counterevidence_since = 0.0
+      state.counterevidence_since = 0.0
   else:
     # Zone exit debounce: don't wipe accumulators on a brief zone flicker.
     # Only start debounce if we had a prior zone entry worth preserving.
@@ -918,9 +1026,9 @@ def evaluate_map_strategy(
       # Sustained exit confirmed: wipe accumulators
       state.takeover_since = 0.0
       state.counterevidence_since = 0.0
-      state.takeover_ever_approached = False
       state.zone_entry_since = 0.0
       state.zone_exit_since = 0.0
+      state.clear_candidate_evidence()
       # Rearm cooldown: after release, don't rearm for at least counterevidence_dwell_s
       # to prevent instant re-engagement when anchor identity changes between frames.
       release_age = (max(0.0, float(now_s) - float(state.release_at))

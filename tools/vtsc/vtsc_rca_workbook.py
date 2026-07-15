@@ -291,6 +291,24 @@ def _build_trace_rows_for_segment(
       "vtscVelMps": vtsc_v,
       "vtscMaxPredLatAcc": lp_sp.get("vtscMaxPredLatAcc"),
       "vtscCurLatAcc": lp_sp.get("vtscCurLatAcc"),
+      # Durable map/vision arbitration from longitudinalPlanSP. Unlike
+      # VTSCDBG, these fields survive ordinary route logging and do not depend
+      # on a rotating snapshot file or debug-log filtering.
+      "mapStrategyState": lp_sp.get("mapStrategyState"),
+      "mapStrategyMode": lp_sp.get("mapStrategyMode"),
+      "mapFloorActive": lp_sp.get("mapFloorActive"),
+      "mapFloorReason": lp_sp.get("mapFloorReason"),
+      "visionRelaxAllowed": lp_sp.get("visionRelaxAllowed"),
+      "visionRelaxReason": lp_sp.get("visionRelaxReason"),
+      "mapAdvisoryCapMps": lp_sp.get("mapAdvisoryCapMps"),
+      "mapStrategicCapMps": lp_sp.get("mapStrategicCapMps"),
+      "visionLocalCapMps": lp_sp.get("visionLocalCapMps"),
+      "selectedCapMps": lp_sp.get("selectedCapMps"),
+      "mapAnchorDistanceM": lp_sp.get("mapAnchorDistanceM"),
+      "mapAnchorCurvature": lp_sp.get("mapAnchorCurvature"),
+      "mapAnchorIndex": lp_sp.get("mapAnchorIndex"),
+      "mapTakeoverDwellS": lp_sp.get("mapTakeoverDwellS"),
+      "mapCounterevidenceDwellS": lp_sp.get("mapCounterevidenceDwellS"),
       "mapdWindingValid": lp_sp.get("mapdWindingValid", map_sp.get("mapWindingValid")),
       "mapdWindingLevel": lp_sp.get("mapdWindingLevel", map_sp.get("mapWindingLevel")),
       "mapdWindingScore": lp_sp.get("mapdWindingScore", map_sp.get("mapWindingScore")),
@@ -455,11 +473,35 @@ def _build_trace_rows_for_segment(
       m = evt.longitudinalPlanSP
       vtsc = getattr(m, "visionTurnSpeedControl", None)
       if vtsc is not None:
+        # A current reader exposes fields added after an old route was logged,
+        # but returns their wire-defaults. A non-empty strategy state is the
+        # producer's version sentinel, so never turn an old route into a fake
+        # "map floor inactive" result.
+        arbitration_state = _safe_str(getattr(vtsc, "mapStrategyState", None)) or None
+        has_arbitration = bool(arbitration_state)
+        arbitration = {
+          "mapStrategyState": arbitration_state,
+          "mapStrategyMode": (_safe_str(getattr(vtsc, "mapStrategyMode", None)) or None) if has_arbitration else None,
+          "mapFloorActive": bool(getattr(vtsc, "mapFloorActive", False)) if has_arbitration else None,
+          "mapFloorReason": (_safe_str(getattr(vtsc, "mapFloorReason", None)) or None) if has_arbitration else None,
+          "visionRelaxAllowed": bool(getattr(vtsc, "visionRelaxAllowed", False)) if has_arbitration else None,
+          "visionRelaxReason": (_safe_str(getattr(vtsc, "visionRelaxReason", None)) or None) if has_arbitration else None,
+          "mapAdvisoryCapMps": _safe_float(getattr(vtsc, "mapAdvisoryCap", None)) if has_arbitration else None,
+          "mapStrategicCapMps": _safe_float(getattr(vtsc, "mapStrategicCap", None)) if has_arbitration else None,
+          "visionLocalCapMps": _safe_float(getattr(vtsc, "visionLocalCap", None)) if has_arbitration else None,
+          "selectedCapMps": _safe_float(getattr(vtsc, "selectedCap", None)) if has_arbitration else None,
+          "mapAnchorDistanceM": _safe_float(getattr(vtsc, "mapAnchorDistanceM", None)) if has_arbitration else None,
+          "mapAnchorCurvature": _safe_float(getattr(vtsc, "mapAnchorCurvature", None)) if has_arbitration else None,
+          "mapAnchorIndex": _safe_int(getattr(vtsc, "mapAnchorIndex", None)) if has_arbitration else None,
+          "mapTakeoverDwellS": _safe_float(getattr(vtsc, "mapTakeoverDwellS", None)) if has_arbitration else None,
+          "mapCounterevidenceDwellS": _safe_float(getattr(vtsc, "mapCounterevidenceDwellS", None)) if has_arbitration else None,
+        }
         latest["longitudinalPlanSP"] = {
           "vtscState": _safe_int(getattr(vtsc, "state", None)),
           "vtscVelMps": _safe_float(getattr(vtsc, "velocity", None)),
           "vtscMaxPredLatAcc": _safe_float(getattr(vtsc, "maxPredictedLateralAccel", None)),
           "vtscCurLatAcc": _safe_float(getattr(vtsc, "currentLateralAccel", None)),
+          **arbitration,
           "mapdWindingValid": bool(getattr(vtsc, "mapWindingValid", False)) if hasattr(vtsc, "mapWindingValid") else None,
           "mapdWindingLevel": _safe_int(getattr(vtsc, "mapWindingLevel", None)),
           "mapdWindingScore": _safe_int(getattr(vtsc, "mapWindingScore", None)),
@@ -874,6 +916,17 @@ def _compute_summary_row(ev: EventBundle, df: pd.DataFrame) -> Dict[str, Any]:
   row["capOcc@-0.5"] = _value_at_dt(df, -0.5, "capOcclVmin")
   row["capMap@-0.5"] = _value_at_dt(df, -0.5, "capMapVmin")
   row["mapCoverage@-0.5"] = _value_at_dt(df, -0.5, "mapTailCoverage")
+  row["mapStrategy@-0.5"] = _str_at_dt(df, -0.5, "mapStrategyState")
+  row["mapMode@-0.5"] = _str_at_dt(df, -0.5, "mapStrategyMode")
+  row["mapFloor@-0.5"] = _str_at_dt(df, -0.5, "mapFloorActive")
+  row["mapFloorReason@-0.5"] = _str_at_dt(df, -0.5, "mapFloorReason")
+  row["visionRelax@-0.5"] = _str_at_dt(df, -0.5, "visionRelaxAllowed")
+  row["visionRelaxReason@-0.5"] = _str_at_dt(df, -0.5, "visionRelaxReason")
+  row["mapStrategicCap@-0.5"] = _value_at_dt(df, -0.5, "mapStrategicCapMps")
+  row["visionLocalCap@-0.5"] = _value_at_dt(df, -0.5, "visionLocalCapMps")
+  row["selectedCap@-0.5"] = _value_at_dt(df, -0.5, "selectedCapMps")
+  row["mapAnchorDist@-0.5"] = _value_at_dt(df, -0.5, "mapAnchorDistanceM")
+  row["mapAnchorIndex@-0.5"] = _value_at_dt(df, -0.5, "mapAnchorIndex")
   row["visionStatus@-0.5"] = _str_at_dt(df, -0.5, "visionStatus")
   row["mapdWindLevel@-0.5"] = _value_at_dt(df, -0.5, "mapdWindingLevel")
   row["mapdWindConf@-0.5"] = _value_at_dt(df, -0.5, "mapdWindingConfidence")

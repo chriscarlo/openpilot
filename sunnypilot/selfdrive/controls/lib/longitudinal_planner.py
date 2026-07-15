@@ -242,6 +242,24 @@ class LongitudinalPlannerSP:
       visionTurnSpeedControl.velocity = float(self.v_tsc.v_turn)
       visionTurnSpeedControl.currentLateralAccel = float(self.v_tsc.current_lat_acc)
       visionTurnSpeedControl.maxPredictedLateralAccel = float(self.v_tsc.max_pred_lat_acc)
+      # Preserve the map/vision arbitration decision in every route log. The
+      # controller's legacy `state` remains compatibility-only, so it cannot
+      # attribute whether the final VTSC cap came from map lookahead or vision.
+      visionTurnSpeedControl.mapStrategyState = str(getattr(self.v_tsc, '_dbg_strategy_state', 'idle') or 'idle')
+      visionTurnSpeedControl.mapStrategyMode = str(getattr(self.v_tsc, '_dbg_strategy_mode', 'strategic') or 'strategic')
+      visionTurnSpeedControl.mapFloorActive = bool(getattr(self.v_tsc, '_dbg_map_floor_active', False))
+      visionTurnSpeedControl.mapFloorReason = str(getattr(self.v_tsc, '_dbg_map_floor_reason', '') or '')
+      visionTurnSpeedControl.visionRelaxAllowed = bool(getattr(self.v_tsc, '_dbg_vision_relax_allowed', False))
+      visionTurnSpeedControl.visionRelaxReason = str(getattr(self.v_tsc, '_dbg_vision_relax_reason', '') or '')
+      visionTurnSpeedControl.mapAdvisoryCap = float(getattr(self.v_tsc, '_dbg_map_advisory_cap', 0.0) or 0.0)
+      visionTurnSpeedControl.mapStrategicCap = float(getattr(self.v_tsc, '_dbg_map_strategic_cap', 0.0) or 0.0)
+      visionTurnSpeedControl.visionLocalCap = float(getattr(self.v_tsc, '_dbg_vision_local_cap', 0.0) or 0.0)
+      visionTurnSpeedControl.selectedCap = float(getattr(self.v_tsc, '_dbg_selected_cap', 0.0) or 0.0)
+      visionTurnSpeedControl.mapAnchorDistanceM = float(getattr(self.v_tsc, '_dbg_map_anchor_dist_m', 0.0) or 0.0)
+      visionTurnSpeedControl.mapAnchorCurvature = float(getattr(self.v_tsc, '_dbg_map_anchor_k', 0.0) or 0.0)
+      visionTurnSpeedControl.mapAnchorIndex = int(getattr(self.v_tsc, '_map_tail_anchor_index', -1))
+      visionTurnSpeedControl.mapTakeoverDwellS = float(getattr(self.v_tsc, '_dbg_map_takeover_dwell_s', 0.0) or 0.0)
+      visionTurnSpeedControl.mapCounterevidenceDwellS = float(getattr(self.v_tsc, '_dbg_map_counterevidence_dwell_s', 0.0) or 0.0)
       # Rally co-pilot curve preview (map-enriched). HUD-only telemetry.
       preview_encode_t0 = time.monotonic()
       preview_encode_span = start_span(SPAN_PREVIEW_ENCODE)

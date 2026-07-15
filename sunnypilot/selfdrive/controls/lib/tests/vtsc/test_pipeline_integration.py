@@ -194,6 +194,61 @@ def test_longitudinal_plan_sp_publishes_vtsc_velocity(planner_sp):
   assert vtsc_pub == pytest.approx(float(planner_sp.v_tsc.v_turn), abs=1e-6)
 
 
+def test_longitudinal_plan_sp_publishes_map_vision_arbitration(planner_sp):
+  class _FakePM:
+    def __init__(self):
+      self.sent = {}
+    def send(self, name, msg) -> None:
+      self.sent[name] = msg
+
+  planner_sp.v_tsc._dbg_strategy_state = 'vision_owns'
+  planner_sp.v_tsc._dbg_strategy_mode = 'strategic'
+  planner_sp.v_tsc._dbg_map_floor_active = False
+  planner_sp.v_tsc._dbg_map_floor_reason = 'counterevidence_dwell'
+  planner_sp.v_tsc._dbg_vision_relax_allowed = True
+  planner_sp.v_tsc._dbg_vision_relax_reason = 'counterevidence_dwell'
+  planner_sp.v_tsc._dbg_map_advisory_cap = 17.1
+  planner_sp.v_tsc._dbg_map_strategic_cap = 15.0
+  planner_sp.v_tsc._dbg_vision_local_cap = 16.0
+  planner_sp.v_tsc._dbg_selected_cap = 16.0
+  planner_sp.v_tsc._dbg_map_anchor_dist_m = 22.0
+  planner_sp.v_tsc._dbg_map_anchor_k = 0.018
+  planner_sp.v_tsc._map_tail_anchor_index = 42
+  planner_sp.v_tsc._dbg_map_takeover_dwell_s = 0.0
+  planner_sp.v_tsc._dbg_map_counterevidence_dwell_s = 0.80
+
+  from .pipeline_harness import FakeSubMaster, make_model_v2, make_radar_state, make_car_state, make_car_control
+  sm = FakeSubMaster(
+    data={
+      'modelV2': make_model_v2(curvature=0.0, v_pred=20.0, confidence=0.95),
+      'radarState': make_radar_state(lead_d_rel_m=None),
+      'carState': make_car_state(gas_pressed=False),
+      'carControl': make_car_control(long_active=True),
+      'controlsState': SimpleNamespace(),
+      'controlsStateSP': SimpleNamespace(),
+    },
+    valid={'modelV2': True, 'radarState': True},
+  )
+
+  pm = _FakePM()
+  planner_sp.publish_longitudinal_plan_sp(sm, pm)
+  vtsc = pm.sent['longitudinalPlanSP'].longitudinalPlanSP.visionTurnSpeedControl
+  assert str(vtsc.mapStrategyState) == 'vision_owns'
+  assert str(vtsc.mapStrategyMode) == 'strategic'
+  assert vtsc.mapFloorActive is False
+  assert str(vtsc.mapFloorReason) == 'counterevidence_dwell'
+  assert vtsc.visionRelaxAllowed is True
+  assert str(vtsc.visionRelaxReason) == 'counterevidence_dwell'
+  assert float(vtsc.mapAdvisoryCap) == pytest.approx(17.1, abs=1e-6)
+  assert float(vtsc.mapStrategicCap) == pytest.approx(15.0, abs=1e-6)
+  assert float(vtsc.visionLocalCap) == pytest.approx(16.0, abs=1e-6)
+  assert float(vtsc.selectedCap) == pytest.approx(16.0, abs=1e-6)
+  assert float(vtsc.mapAnchorDistanceM) == pytest.approx(22.0, abs=1e-6)
+  assert float(vtsc.mapAnchorCurvature) == pytest.approx(0.018, abs=1e-6)
+  assert int(vtsc.mapAnchorIndex) == 42
+  assert float(vtsc.mapCounterevidenceDwellS) == pytest.approx(0.80, abs=1e-6)
+
+
 def test_longitudinal_plan_sp_publishes_curve_preview_tiles(planner_sp):
   class _FakePM:
     def __init__(self):
