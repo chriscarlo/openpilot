@@ -275,10 +275,10 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
 
     // VTSC Physics Model
     {"VisionTurnSpeedControlPhysicsBaseline", {PERSISTENT | BACKUP, FLOAT, "4.107103"}},
-    {"VisionTurnSpeedControlPhysicsAmplitude", {PERSISTENT | BACKUP, FLOAT, "-1.658965"}},
-    {"VisionTurnSpeedControlPhysicsSteepness", {PERSISTENT | BACKUP, FLOAT, "-1395.055546"}},
-    {"VisionTurnSpeedControlPhysicsCenter", {PERSISTENT | BACKUP, FLOAT, "0.005397"}},
-    {"VisionTurnSpeedControlPhysicsMinLatAccel", {PERSISTENT | BACKUP, FLOAT, "2.4481"}},
+    {"VisionTurnSpeedControlPhysicsAmplitude", {PERSISTENT | BACKUP, FLOAT, "-2.548675"}},
+    {"VisionTurnSpeedControlPhysicsSteepness", {PERSISTENT | BACKUP, FLOAT, "-1024.629261"}},
+    {"VisionTurnSpeedControlPhysicsCenter", {PERSISTENT | BACKUP, FLOAT, "0.006053"}},
+    {"VisionTurnSpeedControlPhysicsMinLatAccel", {PERSISTENT | BACKUP, FLOAT, "1.5584"}},
     {"VisionTurnSpeedControlPhysicsMaxLatAccel", {PERSISTENT | BACKUP, FLOAT, "4.1071"}},
 
     // VTSC expert overrides (applied only when VTSCExpertModeEnabled=1)

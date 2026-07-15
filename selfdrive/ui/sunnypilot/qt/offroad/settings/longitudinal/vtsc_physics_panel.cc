@@ -24,11 +24,11 @@ VTSCPhysicsPanel::VTSCPhysicsPanel(QWidget *parent) : QWidget(parent) {
 
   QObject::connect(reset_btn, &QPushButton::clicked, [=]() {
     params.put("VisionTurnSpeedControlPhysicsBaseline", "4.107103");
-    params.put("VisionTurnSpeedControlPhysicsAmplitude", "-1.658965");
-    params.put("VisionTurnSpeedControlPhysicsMinLatAccel", "2.4481");
+    params.put("VisionTurnSpeedControlPhysicsAmplitude", "-2.548675");
+    params.put("VisionTurnSpeedControlPhysicsMinLatAccel", "1.5584");
     params.put("VisionTurnSpeedControlPhysicsMaxLatAccel", "4.1071");
-    params.put("VisionTurnSpeedControlPhysicsCenter", "0.005397");
-    params.put("VisionTurnSpeedControlPhysicsSteepness", "-1395.055546");
+    params.put("VisionTurnSpeedControlPhysicsCenter", "0.006053");
+    params.put("VisionTurnSpeedControlPhysicsSteepness", "-1024.629261");
     emit physBaseline->updateLabels();
     emit physAmplitude->updateLabels();
     emit physMinLat->updateLabels();
@@ -38,11 +38,11 @@ VTSCPhysicsPanel::VTSCPhysicsPanel(QWidget *parent) : QWidget(parent) {
   // Initialize defaults if unset
   auto ensure = [&](const char *k, const char *v){ if (QString::fromStdString(params.get(k)).isEmpty()) params.put(k, v); };
   ensure("VisionTurnSpeedControlPhysicsBaseline", "4.107103");
-  ensure("VisionTurnSpeedControlPhysicsAmplitude", "-1.658965");
-  ensure("VisionTurnSpeedControlPhysicsMinLatAccel", "2.4481");
+  ensure("VisionTurnSpeedControlPhysicsAmplitude", "-2.548675");
+  ensure("VisionTurnSpeedControlPhysicsMinLatAccel", "1.5584");
   ensure("VisionTurnSpeedControlPhysicsMaxLatAccel", "4.1071");
-  ensure("VisionTurnSpeedControlPhysicsCenter", "0.005397");
-  ensure("VisionTurnSpeedControlPhysicsSteepness", "-1395.055546");
+  ensure("VisionTurnSpeedControlPhysicsCenter", "0.006053");
+  ensure("VisionTurnSpeedControlPhysicsSteepness", "-1024.629261");
 
   addFloatControl(physBaseline, "VisionTurnSpeedControlPhysicsBaseline",
                   tr("Baseline Lat Accel"), tr("Baseline lateral accel on easy curves."),

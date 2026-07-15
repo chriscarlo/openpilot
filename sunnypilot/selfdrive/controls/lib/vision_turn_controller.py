@@ -879,11 +879,11 @@ MAP_PRECURVE_SPEEDS_ESTIMATOR_ALIGNED = False
 
 # Physics sigmoid tunables (overridden by params). These source defaults are
 # the source-rounded values from the persisted whole-curve production tune.
-PHYSICS_A = -1.658965
-PHYSICS_B = -1395.055546
-PHYSICS_C = 0.005397
+PHYSICS_A = -2.548675
+PHYSICS_B = -1024.629261
+PHYSICS_C = 0.006053
 PHYSICS_D = 4.107103
-PHYSICS_MIN_LAT_ACCEL = 2.4481
+PHYSICS_MIN_LAT_ACCEL = 1.5584
 PHYSICS_MAX_LAT_ACCEL = 4.1071
 
 # Low-speed bias (applied as +Δ mph under a taper)
