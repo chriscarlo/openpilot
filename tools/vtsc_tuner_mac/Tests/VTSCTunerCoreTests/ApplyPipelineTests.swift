@@ -173,7 +173,7 @@ import Testing
 
 @Test func ticiPhysicsMigrationPassesEverySourceRoundedValue() {
   let command = TiciPhysicsCommandBuilder.synchronizeAndVerifyCommand(parameters: .checkoutFallback)
-  #expect(command.hasPrefix("cd /data/openpilot && PYTHONPATH=/data/openpilot python3 tools/vtsc/apply_physics_params.py"))
+  #expect(command.hasPrefix("cd /data/openpilot && PYTHONPATH=/data/openpilot /usr/local/venv/bin/python3 tools/vtsc/apply_physics_params.py"))
   #expect(command.contains("--amplitude -1.658965"))
   #expect(command.contains("--steepness -1395.055546"))
   #expect(command.contains("--center 0.005397"))

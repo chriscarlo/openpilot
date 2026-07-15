@@ -2,6 +2,11 @@
 
 Reverse-chronological. Add a new dated section for every substantive change.
 
+## 2026-07-15 — explicit tici runtime interpreter
+
+- Fixed production-deployment preflight and follow-on remote helpers selecting the tici's minimal PATH `python3`, which cannot import NumPy or the openpilot Params bindings. Every native-app device Python invocation now pins `/usr/local/venv/bin/python3`, including physics Param migration, production inspection/install/postflight/rollback, and tile transaction helpers. This keeps the existing transaction behavior intact while the deployment control plane is moved out of embedded device Python.
+- Added a regression that requires every generated tici Python command to name the validated interpreter explicitly. A read-only live tici probe verified the PATH interpreter fails `import numpy`, while the pinned interpreter loads Params, the physics helper, the full controller, and rollback dependencies successfully.
+
 ## 2026-07-15 — self-healing USB / ADB deployment transport
 
 - Fixed the native Mac production preflight's false “no reachable tici” result when macOS ADB already had an authorized comma device but the local SSH port forward was absent. The pipeline still prefers an already-working network or `commaAdb` SSH channel; after a failed `commaAdb` probe it now locates ADB through Finder-safe explicit paths (including `~/.local/bin/adb`), requires one unambiguous authorized USB device, creates `tcp:2222 → tcp:22`, and retries the same SSH profile before any tune/source/Git/device mutation.

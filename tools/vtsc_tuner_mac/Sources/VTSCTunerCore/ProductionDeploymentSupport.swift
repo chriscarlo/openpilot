@@ -183,6 +183,11 @@ enum ProductionVerificationSuite {
 }
 
 enum TiciDeploymentCommandBuilder {
+  /// The tici's PATH-selected Python is intentionally minimal and does not
+  /// include openpilot's runtime dependencies. Every device-side helper must
+  /// use the validated openpilot virtual environment explicitly.
+  static let ticiPython = "/usr/local/venv/bin/python3"
+
   static let physicsKeys = [
     "VisionTurnSpeedControlPhysicsAmplitude",
     "VisionTurnSpeedControlPhysicsSteepness",
@@ -195,7 +200,7 @@ enum TiciDeploymentCommandBuilder {
   static func preflightInspectionCommand() -> String {
     let keys = pythonStringList(physicsKeys)
     return """
-    cd /data/openpilot && PYTHONPATH=/data/openpilot python3 - <<'PY'
+    cd /data/openpilot && PYTHONPATH=/data/openpilot \(ticiPython) - <<'PY'
     import hashlib, json, pathlib, subprocess
     from openpilot.common.params import Params
     params = Params()
@@ -275,7 +280,7 @@ enum TiciDeploymentCommandBuilder {
       "MapdReleaseID:\(artifact.releaseID)", "MapdBuildID:\(artifact.buildID)", artifact.capability,
     ])
     return """
-    cd /data/openpilot && PYTHONPATH=/data/openpilot python3 - <<'PY'
+    cd /data/openpilot && PYTHONPATH=/data/openpilot \(ticiPython) - <<'PY'
     import hashlib, json, os, pathlib, shutil, struct, subprocess
     from openpilot.common.params import Params
     staged = pathlib.Path(\(pythonLiteral(stagedPath)))
@@ -332,7 +337,7 @@ enum TiciDeploymentCommandBuilder {
 
   static func qCurveVerificationCommand(identity: TuneDeploymentIdentity) -> String {
     """
-    cd /data/openpilot && PYTHONPATH=/data/openpilot python3 - <<'PY'
+    cd /data/openpilot && PYTHONPATH=/data/openpilot \(ticiPython) - <<'PY'
     import hashlib, json, pathlib
     path = pathlib.Path("sunnypilot/selfdrive/controls/lib/vtsc_curve_tuning.py")
     lines = path.read_text().splitlines()
@@ -364,7 +369,7 @@ enum TiciDeploymentCommandBuilder {
     let physics = Dictionary(uniqueKeysWithValues: identity.physics.map { ($0.paramKey, $0.value) })
     let physicsJSON = String(data: try! JSONEncoder().encode(physics), encoding: .utf8)!
     return """
-    cd /data/openpilot && PYTHONPATH=/data/openpilot python3 - <<'PY'
+    cd /data/openpilot && PYTHONPATH=/data/openpilot \(ticiPython) - <<'PY'
     import hashlib, json, math, pathlib, struct, subprocess
     from openpilot.common.params import Params
     from openpilot.sunnypilot.selfdrive.controls.lib.vision_turn_controller import VisionTurnController
@@ -504,7 +509,7 @@ enum TiciDeploymentCommandBuilder {
   static func rollbackCommand(journal: DeploymentRollbackJournal, rollbackMapdPath: String) -> String {
     let paramsJSON = String(data: try! JSONEncoder().encode(journal.previousPhysicsParams), encoding: .utf8)!
     return """
-    cd /data/openpilot && PYTHONPATH=/data/openpilot python3 - <<'PY'
+    cd /data/openpilot && PYTHONPATH=/data/openpilot \(ticiPython) - <<'PY'
     import json, os, pathlib, shutil, subprocess
     from openpilot.common.params import Params
     previous_head = \(pythonLiteral(journal.previousHead))
@@ -537,7 +542,7 @@ enum TiciDeploymentCommandBuilder {
     let expectedTileID = journal.previousTileSetID.map(pythonLiteral) ?? "None"
     let targetTileID = journal.targetTileSetID.map(pythonLiteral) ?? "None"
     return """
-    cd /data/openpilot && PYTHONPATH=/data/openpilot python3 - <<'PY'
+    cd /data/openpilot && PYTHONPATH=/data/openpilot \(ticiPython) - <<'PY'
     import hashlib, json, pathlib, subprocess
     from openpilot.common.params import Params
     params = Params()

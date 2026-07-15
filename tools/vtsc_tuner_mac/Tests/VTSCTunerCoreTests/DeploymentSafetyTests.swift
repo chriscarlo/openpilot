@@ -259,6 +259,10 @@ import Testing
     ),
     TiciTileSetDeploymentService.atomicRollbackCommand(),
   ]
+  for command in commands {
+    #expect(command.contains("/usr/local/venv/bin/python3"))
+    #expect(!command.contains("PYTHONPATH=/data/openpilot python3"))
+  }
   let runner = SystemProcessRunner()
   for command in commands {
     let body = try #require(pythonHeredocBody(command))

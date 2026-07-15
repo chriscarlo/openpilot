@@ -279,7 +279,7 @@ enum TiciPhysicsCommandBuilder {
     let minLat = values["PHYSICS_MIN_LAT_ACCEL"]!
     let maxLat = values["PHYSICS_MAX_LAT_ACCEL"]!
     let invocation = [
-      "PYTHONPATH=/data/openpilot python3 tools/vtsc/apply_physics_params.py",
+      "PYTHONPATH=/data/openpilot \(TiciDeploymentCommandBuilder.ticiPython) tools/vtsc/apply_physics_params.py",
       "--amplitude \(amplitude)",
       "--steepness \(steepness)",
       "--center \(center)",

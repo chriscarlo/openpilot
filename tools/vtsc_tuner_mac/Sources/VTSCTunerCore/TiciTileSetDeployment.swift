@@ -185,7 +185,7 @@ public struct TiciTileSetDeploymentService: Sendable {
 
   static func remoteManifestVerificationCommand(stagingRoot: String, tileSetID: String) -> String {
     """
-    python3 - <<'PY'
+    \(TiciDeploymentCommandBuilder.ticiPython) - <<'PY'
     import hashlib, json, pathlib
     root = pathlib.Path(\(pythonLiteral(stagingRoot)))
     expected_id = \(pythonLiteral(tileSetID))
@@ -231,7 +231,7 @@ public struct TiciTileSetDeploymentService: Sendable {
     injectedFailurePoint: String? = nil
   ) -> String {
     """
-    python3 - <<'PY'
+    \(TiciDeploymentCommandBuilder.ticiPython) - <<'PY'
     import ctypes, hashlib, json, os, pathlib, shutil, stat, time
     root = pathlib.Path(\(pythonLiteral(remoteRoot)))
     stage = pathlib.Path(\(pythonLiteral(stagingRoot)))
@@ -395,7 +395,7 @@ public struct TiciTileSetDeploymentService: Sendable {
     injectedFailurePoint: String? = nil
   ) -> String {
     """
-    python3 - <<'PY'
+    \(TiciDeploymentCommandBuilder.ticiPython) - <<'PY'
     import ctypes, json, os, pathlib, time
     root = pathlib.Path(\(pythonLiteral(remoteRoot)))
     active = pathlib.Path(\(pythonLiteral(activeOfflinePath)))
