@@ -303,6 +303,12 @@ activate a canonical tile generation; then reboot once. Complete postflight or
 coherent rollback is required, so a Git push, file transfer, or reboot dispatch
 alone is never reported as success.
 
+The macOS app owns deployment policy, validation, transaction planning, and
+result decoding in Swift. The tici side is deliberately limited to POSIX/Git
+file and process primitives; it does not need a tici Python interpreter or
+Python modules. One bundled static ARM64 helper performs the Linux-only atomic
+tile-directory exchange, which Swift cannot execute on the device.
+
 ## Packaging verification
 
 The build script performs bundle checks automatically. They can also be run
