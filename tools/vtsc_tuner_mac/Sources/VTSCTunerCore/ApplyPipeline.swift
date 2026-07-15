@@ -114,7 +114,7 @@ enum ProductionTilePlan: Equatable, Sendable {
 
 public enum ApplyPipelineError: LocalizedError, Sendable {
   case commandFailed(String, Int32, String)
-  case noReachableTici
+  case noReachableTici(String?)
   case invalidProfile(String)
   case noCachedRegions
   case unexpectedRegionListing(String)
@@ -135,8 +135,11 @@ public enum ApplyPipelineError: LocalizedError, Sendable {
     switch self {
     case let .commandFailed(context, status, output):
       "\(context) exited \(status).\n\(output)"
-    case .noReachableTici:
-      "None of commaHome, commaCar, or commaAdb responded over SSH."
+    case let .noReachableTici(adbDetail):
+      [
+        "No SSH deployment channel could be opened through commaHome, commaCar, or commaAdb.",
+        adbDetail.map { "USB / ADB: \($0)" },
+      ].compactMap { $0 }.joined(separator: "\n")
     case let .invalidProfile(profile):
       "The SSH profile name contains unsupported characters: \(profile)"
     case .noCachedRegions:
@@ -168,6 +171,78 @@ public enum ApplyPipelineError: LocalizedError, Sendable {
     case let .postflightMismatch(reason):
       "Tici postflight verification failed: \(reason)"
     }
+  }
+}
+
+struct ADBDevice: Equatable, Sendable {
+  var serial: String
+  var state: String
+  var details: String
+
+  static func parseList(_ output: String) -> [ADBDevice] {
+    output.components(separatedBy: .newlines).compactMap { line in
+      let fields = line.split(whereSeparator: \Character.isWhitespace)
+      guard fields.count >= 2, fields[0] != "List", fields[0] != "*" else { return nil }
+      return ADBDevice(
+        serial: String(fields[0]),
+        state: String(fields[1]),
+        details: fields.dropFirst(2).joined(separator: " ")
+      )
+    }
+  }
+}
+
+enum ADBDeviceSelection: Equatable, Sendable {
+  case selected(String)
+  case unavailable(String)
+  case ambiguous([String])
+
+  static func select(from output: String) -> ADBDeviceSelection {
+    let devices = ADBDevice.parseList(output)
+    guard !devices.isEmpty else {
+      return .unavailable("No device is listed by adb.")
+    }
+    guard devices.count == 1 else {
+      return .ambiguous(devices.map { "\($0.serial)=\($0.state)" }.sorted())
+    }
+    let device = devices[0]
+    guard device.state == "device" else {
+      return .unavailable("No authorized device is ready (\(device.serial)=\(device.state)).")
+    }
+    return .selected(device.serial)
+  }
+}
+
+enum ADBExecutableLocator {
+  static func candidateURLs(environment: [String: String]) -> [URL] {
+    var paths: [String] = []
+    if let home = environment["HOME"], !home.isEmpty {
+      paths += [
+        "\(home)/.local/bin/adb",
+        "\(home)/Library/Android/sdk/platform-tools/adb",
+      ]
+    }
+    if let path = environment["PATH"] {
+      paths += path.split(separator: ":").map { "\($0)/adb" }
+    }
+    paths += [
+      "/opt/homebrew/bin/adb",
+      "/usr/local/bin/adb",
+    ]
+
+    var seen: Set<String> = []
+    return paths.compactMap { path in
+      let url = URL(fileURLWithPath: path).standardizedFileURL
+      guard seen.insert(url.path).inserted else { return nil }
+      return url
+    }
+  }
+
+  static func resolve(
+    environment: [String: String] = ProcessInfo.processInfo.environment,
+    fileManager: FileManager = .default
+  ) -> URL? {
+    candidateURLs(environment: environment).first { fileManager.isExecutableFile(atPath: $0.path) }
   }
 }
 
@@ -223,9 +298,22 @@ public actor ApplyPipeline {
   public static let networkSetupURL = URL(fileURLWithPath: "/usr/sbin/networksetup")
 
   private let processRunner: any ProcessRunning
+  private let adbURL: URL?
+  private var lastADBTransportDetail: String?
 
-  public init(processRunner: any ProcessRunning = SystemProcessRunner()) {
+  public init() {
+    processRunner = SystemProcessRunner()
+    adbURL = ADBExecutableLocator.resolve()
+  }
+
+  public init(processRunner: any ProcessRunning) {
     self.processRunner = processRunner
+    adbURL = nil
+  }
+
+  public init(processRunner: any ProcessRunning, adbURL: URL?) {
+    self.processRunner = processRunner
+    self.adbURL = adbURL
   }
 
   static func productionTilePlan(for request: ApplyRequest) -> ProductionTilePlan {
@@ -1225,8 +1313,9 @@ public actor ApplyPipeline {
     return result
   }
 
-  private func pickTiciProfile(preferred: String?) async throws -> String {
+  func pickTiciProfile(preferred: String?) async throws -> String {
     if let preferred { try validateProfile(preferred) }
+    lastADBTransportDetail = nil
     let ssid = await detectSSID()
     let defaults = ssid?.localizedCaseInsensitiveContains("comma") == true
       ? ["commaCar", "commaHome", "commaAdb"]
@@ -1234,7 +1323,7 @@ public actor ApplyPipeline {
     var profiles = preferred.map { [$0] } ?? []
     for profile in defaults where !profiles.contains(profile) { profiles.append(profile) }
     for profile in profiles where await probeProfile(profile) { return profile }
-    throw ApplyPipelineError.noReachableTici
+    throw ApplyPipelineError.noReachableTici(lastADBTransportDetail)
   }
 
   private func validateProfile(_ profile: String) throws {
@@ -1269,15 +1358,81 @@ public actor ApplyPipeline {
     return ssid.isEmpty ? nil : ssid
   }
 
-  private func probeProfile(_ profile: String) async -> Bool {
-    let result = try? await processRunner.run(
+  func probeProfile(_ profile: String) async -> Bool {
+    if await sshProbe(profile)?.succeeded == true { return true }
+    guard profile == "commaAdb" else { return false }
+    return await restoreADBForwardAndProbeSSH()
+  }
+
+  private func sshProbe(_ profile: String) async -> ProcessResult? {
+    try? await processRunner.run(
       ProcessRequest(
         executableURL: Self.sshURL,
         arguments: sshOptions(connectTimeout: 2, batchMode: true) + [profile, "true"],
         timeout: 5
       )
     )
-    return result?.succeeded == true
+  }
+
+  private func restoreADBForwardAndProbeSSH() async -> Bool {
+    guard let adbURL else {
+      lastADBTransportDetail = "adb was not found in the Mac app's standard executable locations."
+      return false
+    }
+
+    let listing: ProcessResult
+    do {
+      listing = try await processRunner.run(
+        ProcessRequest(executableURL: adbURL, arguments: ["devices", "-l"], timeout: 10)
+      )
+    } catch {
+      lastADBTransportDetail = "Could not run \(adbURL.path): \(error.localizedDescription)"
+      return false
+    }
+    guard listing.succeeded else {
+      lastADBTransportDetail = "adb devices failed: \(listing.combinedOutput)"
+      return false
+    }
+
+    let serial: String
+    switch ADBDeviceSelection.select(from: listing.standardOutput) {
+    case let .selected(selectedSerial):
+      serial = selectedSerial
+    case let .unavailable(detail):
+      lastADBTransportDetail = detail
+      return false
+    case let .ambiguous(serials):
+      lastADBTransportDetail = "Multiple ADB devices are listed (\(serials.joined(separator: ", "))). Disconnect the extras and retry."
+      return false
+    }
+
+    let forward: ProcessResult
+    do {
+      forward = try await processRunner.run(
+        ProcessRequest(
+          executableURL: adbURL,
+          arguments: ["-s", serial, "forward", "tcp:2222", "tcp:22"],
+          timeout: 10
+        )
+      )
+    } catch {
+      lastADBTransportDetail = "Device \(serial) is authorized, but the SSH port forward could not be started: \(error.localizedDescription)"
+      return false
+    }
+    guard forward.succeeded else {
+      lastADBTransportDetail = "Device \(serial) is authorized, but adb could not forward tcp:2222 to tcp:22: \(forward.combinedOutput)"
+      return false
+    }
+
+    let retry = await sshProbe("commaAdb")
+    guard retry?.succeeded == true else {
+      let sshOutput = retry?.combinedOutput ?? ""
+      let sshDetail = sshOutput.isEmpty ? "" : " \(sshOutput)"
+      lastADBTransportDetail = "Device \(serial) is authorized and the port forward was created, but an SSH channel through commaAdb still could not be opened.\(sshDetail)"
+      return false
+    }
+    lastADBTransportDetail = "Connected to \(serial) through an app-created tcp:2222 to tcp:22 forward."
+    return true
   }
 
   private func sendReboot(profile: String) async throws {
@@ -1294,15 +1449,25 @@ public actor ApplyPipeline {
     )
   }
 
-  private func waitForTici(profile: String, timeout: TimeInterval) async throws {
+  func waitForTici(
+    profile: String,
+    timeout: TimeInterval,
+    initialDelayNanoseconds: UInt64 = 15_000_000_000,
+    pollDelayNanoseconds: UInt64 = 5_000_000_000
+  ) async throws {
     let deadline = Date().addingTimeInterval(timeout)
-    try await Task.sleep(nanoseconds: 15_000_000_000)
+    try await Task.sleep(nanoseconds: initialDelayNanoseconds)
     while Date() < deadline {
       try Task.checkCancellation()
       if await probeProfile(profile) { return }
-      try await Task.sleep(nanoseconds: 5_000_000_000)
+      try await Task.sleep(nanoseconds: pollDelayNanoseconds)
     }
-    throw ApplyPipelineError.commandFailed("wait for tici", -1, "The tici did not return within \(Int(timeout)) seconds.")
+    let adbDetail = lastADBTransportDetail.map { "\nUSB / ADB: \($0)" } ?? ""
+    throw ApplyPipelineError.commandFailed(
+      "wait for tici",
+      -1,
+      "The tici did not return within \(Int(timeout)) seconds.\(adbDetail)"
+    )
   }
 
   private func discoverRegions(profile: String) async throws -> [RegionBox] {

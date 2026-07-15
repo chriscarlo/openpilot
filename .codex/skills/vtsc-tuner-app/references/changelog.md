@@ -2,6 +2,12 @@
 
 Reverse-chronological. Add a new dated section for every substantive change.
 
+## 2026-07-15 — self-healing USB / ADB deployment transport
+
+- Fixed the native Mac production preflight's false “no reachable tici” result when macOS ADB already had an authorized comma device but the local SSH port forward was absent. The pipeline still prefers an already-working network or `commaAdb` SSH channel; after a failed `commaAdb` probe it now locates ADB through Finder-safe explicit paths (including `~/.local/bin/adb`), requires one unambiguous authorized USB device, creates `tcp:2222 → tcp:22`, and retries the same SSH profile before any tune/source/Git/device mutation.
+- Kept the recovery inside the reusable profile probe so the wait-after-reboot path can recreate a forward dropped during the deployment reboot. Unauthorized, offline, missing, and multiple-device states now produce specific USB/ADB diagnostics instead of falsely equating a failed SSH alias with absent hardware.
+- Added focused transport regressions for first-time bridge creation, bridge restoration after loss, unauthorized and mixed-state devices, multiple-device ambiguity, already-working SSH preservation, post-reboot diagnostics, and Finder-safe ADB discovery. A controlled live check against authorized serial `e521630c` proved the exact forward makes `ssh commaAdb` reachable, then removed the temporary forward to restore the starting host state. Tile-decoder Go tests, all 71 Core tests, and all 39 App tests passed; the rebuilt Release bundle passed strict deep code-sign verification and replaced the prior running instance.
+
 ## 2026-07-14 — in-study familiar-curve capture and click-through map legend
 
 - Restored Whole-Curve Study as the normal Map Preview entry. It keeps its whole-curve presentation and normal colored-event inspection, while the right pane now exposes an explicit **Add New Curve to Sample Group** action instead of sending the user back to the separate Calibration workspace.
