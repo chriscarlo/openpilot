@@ -114,6 +114,11 @@ def test_collect_replay_git_metadata_scopes_dirty_diff(tmp_path: Path) -> None:
   clean = collect_replay_git_metadata(tmp_path)
   assert clean["gitDirty"] is False
   assert clean["gitDiffEmpty"] is True
+  assert clean["runtimeDeviceType"]
+  assert clean["runtimePlatform"]
+  assert clean["runtimeMachine"]
+  assert clean["runtimeOsVersion"]
+  assert clean["runtimeKernelVersion"]
 
   source.write_text("value = 2\n")
   dirty = collect_replay_git_metadata(tmp_path)

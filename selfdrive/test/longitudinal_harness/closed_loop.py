@@ -34,6 +34,7 @@ from .config import (
 )
 from .inputs import LeadDirective, StepInput
 from .metrics import summarize_trace
+from .provenance import exact_planner_state_initialization
 
 
 class HarnessParams:
@@ -306,6 +307,15 @@ def run_harness(*,
     raise ValueError(f"unsupported perception_filter '{perception_filter}'")
   if ego_replay_mode not in ("auto", "recorded", "plant"):
     raise ValueError(f"unsupported ego_replay_mode '{ego_replay_mode}'")
+  if any(
+    isinstance(step.replay_reference.get("plannerStateInitializationProvenance"), dict) and
+    step.replay_reference["plannerStateInitializationProvenance"].get("status") == "exact"
+    for step in steps
+  ):
+    raise ValueError(
+      "snapshot claims an exact planner/MPC state initializer, but this harness does not yet implement "
+      "state restoration; refusing to promote provenance without applying the captured state"
+    )
   if perception_filter == "auto":
     # Follow the config's declared fidelity (legacy direct constructions predate
     # the field and always fabricated radarState directly).
@@ -494,6 +504,14 @@ def run_harness(*,
         "opening_last_raw_proof_age_s": None,
         "opening_long_position_slope_mps": None,
         "opening_bridge_position_safe": False,
+        "steady_parity_candidate_valid": False,
+        "steady_parity_position_slope_mps": 0.0,
+        "steady_parity_vrel_floor_mps": 0.0,
+        "steady_parity_held": False,
+        "steady_parity_sample_count": 0,
+        "steady_parity_window_span_s": 0.0,
+        "steady_parity_max_sample_gap_s": 0.0,
+        "steady_parity_reason": "inactive",
       }
       for slot in ("leadOne", "leadTwo")
     }
@@ -572,6 +590,13 @@ def run_harness(*,
     radard_gate_eligible = bool(step.radard_gate_eligible and explicit_service_exact and warmup_ready)
     planner_service_provenance = step.planner_service_association_provenance
     params_provenance = planner_service_provenance.get("params")
+    planner_state_provenance = step.replay_reference.get("plannerStateInitializationProvenance")
+    # No checkpoint restoration exists yet. A well-formed row-level claim is
+    # deliberately insufficient; run_harness rejects such claims above.
+    planner_state_exact = exact_planner_state_initialization(
+      planner_state_provenance,
+      restoration_verified=False,
+    )
     planner_critical_exact = bool(
       step.planner_context_status == "exact" and
       all(
@@ -582,8 +607,18 @@ def run_harness(*,
       exact_replay_param_manifest(params_provenance)
     )
     context_scorable = planner_critical_exact
-    planner_fidelity_scorable = bool(scheduler_scorable and context_scorable and radard_gate_eligible)
+    planner_fidelity_scorable = bool(
+      scheduler_scorable and context_scorable and radard_gate_eligible and planner_state_exact
+    )
     replay_reference = dict(step.replay_reference)
+    if not isinstance(planner_state_provenance, dict):
+      planner_state_provenance = {
+        "status": "missing",
+        "version": 0,
+        "appliedAtReplayStart": False,
+        "reason": "snapshot does not contain an explicit planner/MPC state initializer",
+      }
+    replay_reference["plannerStateInitializationProvenance"] = dict(planner_state_provenance)
     scheduler_reason = (
       replay_reference.get("plannerRadarResolutionReason") or
       (
@@ -617,6 +652,8 @@ def run_harness(*,
       "schedulerReason": scheduler_reason,
       "contextStatus": step.planner_context_status or "untracked",
       "contextReason": step.planner_context_reason,
+      "stateInitializationStatus": str(planner_state_provenance.get("status", "missing")),
+      "stateInitializationExact": planner_state_exact,
     }
     published_d_rel = {
       slot: (float(getattr(radar_state, slot).dRel) if getattr(radar_state, slot).status else None)
@@ -789,6 +826,8 @@ def run_harness(*,
         "planner_context_reason": step.planner_context_reason,
         "planner_context_scorable": bool(context_scorable),
         "planner_critical_inputs_exact": bool(planner_critical_exact),
+        "planner_state_initialization_exact": bool(planner_state_exact),
+        "planner_state_initialization_provenance": dict(planner_state_provenance),
         "planner_service_log_mono_time_ns": dict(step.recorded_planner_service_log_mono_time_ns),
         "planner_service_association_provenance": dict(planner_service_provenance),
         "planner_fidelity_scorable": planner_fidelity_scorable,
@@ -842,6 +881,7 @@ def run_harness(*,
         "lead_two_model_prob": lead_meta["leadTwo"]["model_prob"],
         "mpc_acc_source_debug": _to_builtin(getattr(planner.mpc, "acc_source_debug", {})),
         "mpc_lead_role_debug": _to_builtin(getattr(planner.mpc, "lead_role_debug", {})),
+        "mpc_steady_parity_debug": _to_builtin(getattr(planner.mpc, "steady_parity_debug", {})),
         "mpc_cutin_settle_debug": _to_builtin(getattr(planner.mpc, "cutin_settle_debug", {})),
         "mpc_lead_preview_debug": _to_builtin(getattr(planner.mpc, "lead_approach_preview_debug", {})),
         "planner_lead_brake_release_debug": _to_builtin(getattr(planner, "lead_brake_release_debug", {})),

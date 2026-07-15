@@ -12,13 +12,15 @@ COMFORT_JERK = 0.4
 
 
 def _make_stub(*, prev_a: float = 0.0, owner: str = "", source: str = "lead0",
-               keepup_max_accel: float = 0.22):
+               keepup_max_accel: float = 0.22, release_jerk: float = 2.0,
+               track_id: int = -1035, hyundai_enabled: bool = True):
   cfg = replace(
     LeadResponseTuningConfig.defaults(),
     comfort_jerk_limit_mps3=COMFORT_JERK,
     comfort_jerk_bypass_decel_mps2=-1.5,
     cruise_relatch_bypass_decel_mps2=-1.5,
     lead_keepup_max_accel=keepup_max_accel,
+    lead_brake_release_jerk_mps3=release_jerk,
   )
   lead = SimpleNamespace(
     status=True,
@@ -27,18 +29,25 @@ def _make_stub(*, prev_a: float = 0.0, owner: str = "", source: str = "lead0",
     vRel=0.0,
     vLead=27.0,
     aLeadK=0.0,
+    radarTrackId=track_id,
   )
   stub = SimpleNamespace(
     dt=DT,
     output_a_target=prev_a,
     _comfort_jerk_prev_a=prev_a,
     _comfort_jerk_prev_src=source,
+    _comfort_jerk_prev_track_id=track_id,
+    _brake_release_slew_active=False,
     _comfort_upward_floor_owner=owner,
     _flutter_mode_active=False,
     handoff_limit_debug={"active": False, "clipped": False},
     relatch_blend_debug={"active": False},
     comfort_jerk_debug={},
-    mpc=SimpleNamespace(_live_tune_cfg=cfg, current_t_follow=1.45),
+    mpc=SimpleNamespace(
+      _live_tune_cfg=cfg,
+      current_t_follow=1.45,
+      _hyundai_ai_lead_stability_enabled=hyundai_enabled,
+    ),
   )
   stub._lead_owned_slot = LongitudinalPlanner._lead_owned_slot
   stub._relatch_urgency_bypass = MethodType(LongitudinalPlanner._relatch_urgency_bypass, stub)
@@ -68,7 +77,10 @@ def test_ordinary_mpc_upward_step_remains_unmodified() -> None:
   assert stub.comfort_jerk_debug["clipped"] is False
 
 
-def test_large_floor_owned_recovery_passes_immediately() -> None:
+def test_low_speed_legacy_large_floor_owned_recovery_passes_immediately() -> None:
+  # Omitting v_ego intentionally exercises the method's 0 m/s default: below
+  # LeadBrakeReleaseMinSpeedMps the new release leg is disabled and the legacy
+  # large-recovery pass-through remains exact.
   stub, leads = _make_stub(prev_a=-0.8, owner="brake_release")
   stub.output_a_target = 0.2
 
@@ -76,6 +88,116 @@ def test_large_floor_owned_recovery_passes_immediately() -> None:
 
   assert stub.output_a_target == pytest.approx(0.2)
   assert stub.comfort_jerk_debug["clipped"] is False
+
+
+def test_non_hyundai_brake_release_remains_exact_legacy() -> None:
+  stub, leads = _make_stub(prev_a=-0.8, owner="", hyundai_enabled=False)
+  stub.output_a_target = 0.2
+
+  stub._apply_comfort_jerk_envelope("lead0", leads, v_ego=22.0)
+
+  assert stub.output_a_target == pytest.approx(0.2)
+  assert stub._brake_release_slew_active is False
+  assert stub.comfort_jerk_debug["release_slew_clipped"] is False
+
+
+def test_same_track_brake_release_uses_positive_only_release_jerk() -> None:
+  stub, leads = _make_stub(prev_a=-0.8, owner="brake_release")
+  outputs = []
+  for _ in range(9):
+    stub.output_a_target = 0.05
+    stub._apply_comfort_jerk_envelope("lead0", leads, v_ego=22.0)
+    outputs.append(stub.output_a_target)
+
+  assert outputs == pytest.approx([-0.7, -0.6, -0.5, -0.4, -0.3, -0.2, -0.1, 0.0, 0.05])
+  assert max(b - a for a, b in zip([-0.8, *outputs[:-1]], outputs, strict=True)) == pytest.approx(2.0 * DT)
+  assert stub.comfort_jerk_debug["release_slew_active"] is False
+  assert stub.comfort_jerk_debug["release_slew_clipped"] is False
+
+
+def test_road_brake_to_floor_fix_rollback_and_emergency_twins() -> None:
+  # 2026-07-14 17:23:22.852: same lead0/track -1035 jumped from
+  # -0.8156906 straight to the +0.05 coast-bias floor in one model frame.
+  recorded_brake = -0.8156905770301819
+  recorded_floor = 0.05000000074505806
+
+  fix, leads = _make_stub(prev_a=recorded_brake, owner="brake_release", release_jerk=2.0)
+  rollback, rollback_leads = _make_stub(prev_a=recorded_brake, owner="brake_release", release_jerk=0.0)
+  emergency, emergency_leads = _make_stub(prev_a=recorded_brake, owner="brake_release", release_jerk=2.0)
+
+  for stub, stub_leads in ((fix, leads), (rollback, rollback_leads), (emergency, emergency_leads)):
+    stub.output_a_target = recorded_floor
+    stub._apply_comfort_jerk_envelope("lead0", stub_leads, v_ego=22.0)
+
+  assert fix.output_a_target == pytest.approx(recorded_brake + 2.0 * DT)
+  assert fix.comfort_jerk_debug["release_slew_active"] is True
+  assert fix.comfort_jerk_debug["release_slew_clipped"] is True
+
+  # The documented zero sentinel restores the exact ungraded floor jump.
+  assert rollback.output_a_target == pytest.approx(recorded_floor)
+  assert rollback.comfort_jerk_debug["release_slew_active"] is False
+  assert rollback.comfort_jerk_debug["release_slew_clipped"] is False
+
+  # Matched emergency twin: a renewed hard-brake request on the next frame is
+  # never rate-limited, even while the positive release episode is latched.
+  emergency.output_a_target = -2.0
+  emergency._apply_comfort_jerk_envelope("lead0", emergency_leads, v_ego=22.0)
+  assert emergency.output_a_target == pytest.approx(-2.0)
+  assert emergency._brake_release_slew_active is False
+  assert emergency.comfort_jerk_debug["bypassed"] is True
+  assert emergency.comfort_jerk_debug["bypass_reason"] == "requested_decel"
+
+
+def test_brake_release_slew_never_delays_renewed_braking() -> None:
+  stub, leads = _make_stub(prev_a=-0.8, owner="")
+  stub.output_a_target = 0.2
+  stub._apply_comfort_jerk_envelope("lead0", leads, v_ego=22.0)
+  assert stub.output_a_target == pytest.approx(-0.7)
+  assert stub._brake_release_slew_active is True
+
+  stub.output_a_target = -2.0
+  stub._apply_comfort_jerk_envelope("lead0", leads, v_ego=22.0)
+  assert stub.output_a_target == pytest.approx(-2.0)
+  assert stub._brake_release_slew_active is False
+
+
+def test_brake_release_slew_requires_same_track_and_normal_road_speed() -> None:
+  stub, leads = _make_stub(prev_a=-0.8, owner="")
+  leads[0].radarTrackId = -1036
+  stub.output_a_target = 0.2
+  stub._apply_comfort_jerk_envelope("lead0", leads, v_ego=22.0)
+  assert stub.output_a_target == pytest.approx(0.2)
+
+  stub, leads = _make_stub(prev_a=-0.8, owner="")
+  stub.output_a_target = 0.2
+  stub._apply_comfort_jerk_envelope("lead0", leads, v_ego=2.0)
+  assert stub.output_a_target == pytest.approx(0.2)
+
+
+def test_track_change_disarms_an_active_release_and_refreshes_anchor() -> None:
+  stub, leads = _make_stub(prev_a=-0.8, owner="")
+  stub.output_a_target = 0.2
+  stub._apply_comfort_jerk_envelope("lead0", leads, v_ego=22.0)
+  assert stub.output_a_target == pytest.approx(-0.7)
+  assert stub._brake_release_slew_active is True
+
+  leads[0].radarTrackId = -1036
+  stub.output_a_target = 0.2
+  stub._apply_comfort_jerk_envelope("lead0", leads, v_ego=22.0)
+  assert stub.output_a_target == pytest.approx(0.2)
+  assert stub._brake_release_slew_active is False
+  assert stub._comfort_jerk_prev_a == pytest.approx(0.2)
+  assert stub._comfort_jerk_prev_track_id == -1036
+
+
+def test_unknown_track_id_zero_fails_open_for_release_smoothing() -> None:
+  stub, leads = _make_stub(prev_a=-0.8, owner="", track_id=0)
+  stub.output_a_target = 0.2
+  stub._apply_comfort_jerk_envelope("lead0", leads, v_ego=22.0)
+
+  assert stub.output_a_target == pytest.approx(0.2)
+  assert stub.comfort_jerk_debug["release_track_id"] == -1
+  assert stub.comfort_jerk_debug["release_slew_clipped"] is False
 
 
 def test_live_keepup_raise_cannot_expand_micro_recovery_ceiling() -> None:

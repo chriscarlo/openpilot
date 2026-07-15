@@ -458,6 +458,19 @@ LEAD_RESPONSE_TUNE_SPECS = (
     description="Accel floor once the Vibe headway target is recovered and ego is no longer closing.",
   ),
   LeadResponseTuneSpec(
+    attr="lead_brake_release_jerk_mps3",
+    key="Longitudinal.LiveTune.LeadBrakeReleaseJerkMps3",
+    cli_name="lead-brake-release-jerk",
+    label="release_jerk",
+    default=2.0,
+    minimum=0.0,
+    maximum=10.0,
+    description="Positive-only jerk cap (m/s^3) while a continuous same-track lead-follow command releases an existing "
+                "brake. It smooths MPC, brake-release-floor, cut-in-floor, and closing-governor recovery jumps without "
+                "ever rate-limiting new braking. It is disabled below LeadBrakeReleaseMinSpeedMps so standstill/launch "
+                "response stays untouched. 0 restores the uncapped release path.",
+  ),
+  LeadResponseTuneSpec(
     attr="cutin_settle_duration_s",
     key="Longitudinal.LiveTune.CutInSettleDurationS",
     cli_name="cutin-settle-duration-s",
@@ -1737,6 +1750,43 @@ LEAD_RESPONSE_TUNE_SPECS = (
                 "and no relax arms — a braking lead's pessimistic publish stands even if the gap is momentarily opening.",
   ),
   LeadResponseTuneSpec(
+    attr="steady_parity_trust_deficit_mps",
+    key="Longitudinal.LiveTune.SteadyParityTrustDeficitMps",
+    cli_name="steady-parity-trust-deficit-mps",
+    label="steady_parity_trust_deficit",
+    default=0.20,
+    minimum=0.0,
+    maximum=100.0,
+    description="Steady-lead parity evidence: the planner-only vRel floor stays this far (m/s) below the robust 2 s raw "
+                "dRel slope. RadarD publishes evidence only; it never reshapes LeadData vRel. Current/window braking, "
+                "closing/short-TTC, lateral ambiguity, low probability, misses, and identity changes clear evidence. "
+                ">= 99 disables both evidence and planner correction (master rollback).",
+  ),
+  LeadResponseTuneSpec(
+    attr="steady_parity_vrel_slew_mps2",
+    key="Longitudinal.LiveTune.SteadyParityVRelSlewMps2",
+    cli_name="steady-parity-vrel-slew-mps2",
+    label="steady_parity_vrel_slew",
+    default=0.80,
+    minimum=0.0,
+    maximum=5.0,
+    description="Maximum planner working-copy vRel relaxation rate (m/s^2) toward steady-parity evidence. A more urgent "
+                "candidate or any safety/reset gate restores the unshaped lead immediately. 0 disables planner output "
+                "correction exactly while leaving telemetry available.",
+  ),
+  LeadResponseTuneSpec(
+    attr="steady_parity_hold_s",
+    key="Longitudinal.LiveTune.SteadyParityHoldS",
+    cli_name="steady-parity-hold-s",
+    label="steady_parity_hold",
+    default=0.50,
+    minimum=0.0,
+    maximum=1.5,
+    description="Maximum evidence-only bridge (s) across a sparse 2 s proof window while the current raw sample remains "
+                "independently safe. It cannot bridge a miss, identity/slot change, braking, closing/short TTC, lateral "
+                "ambiguity, low probability, or an out-of-band position slope. 0 disables the bridge.",
+  ),
+  LeadResponseTuneSpec(
     attr="launch_release_min_drel_m",
     key="Longitudinal.LiveTune.LaunchReleaseMinDrelM",
     cli_name="launch-release-min-drel",
@@ -1825,6 +1875,7 @@ class LeadResponseTuningConfig:
   lead_brake_release_vrel_credit_cap_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_brake_release_vrel_credit_cap_m"].default
   lead_brake_release_recovery_proj_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_brake_release_recovery_proj_s"].default
   lead_brake_release_coast_bias_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_brake_release_coast_bias_mps2"].default
+  lead_brake_release_jerk_mps3: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_brake_release_jerk_mps3"].default
   cutin_settle_duration_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cutin_settle_duration_s"].default
   cutin_settle_max_decel: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cutin_settle_max_decel"].default
   cutin_settle_max_closing_speed_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cutin_settle_max_closing_speed_mps"].default
@@ -1933,6 +1984,9 @@ class LeadResponseTuningConfig:
   opening_governor_hold_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["opening_governor_hold_s"].default
   opening_governor_raw_closing_veto_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["opening_governor_raw_closing_veto_mps"].default
   opening_governor_alead_veto_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["opening_governor_alead_veto_mps2"].default
+  steady_parity_trust_deficit_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["steady_parity_trust_deficit_mps"].default
+  steady_parity_vrel_slew_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["steady_parity_vrel_slew_mps2"].default
+  steady_parity_hold_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["steady_parity_hold_s"].default
   launch_release_min_drel_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["launch_release_min_drel_m"].default
   launch_release_depart_gate_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["launch_release_depart_gate_m"].default
   launch_follow_accel_floor_max_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["launch_follow_accel_floor_max_mps2"].default

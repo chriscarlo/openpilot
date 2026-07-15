@@ -4,8 +4,11 @@ from collections.abc import Iterable, Mapping
 from dataclasses import replace
 import hashlib
 from pathlib import Path
+import platform
 import subprocess
 from typing import Any
+
+from openpilot.system.hardware import HARDWARE
 
 from openpilot.selfdrive.test.longitudinal_harness.closed_loop import run_harness
 from openpilot.selfdrive.test.longitudinal_harness.config import captured_param_manifest, resolve_ev6_vehicle_config
@@ -15,7 +18,7 @@ from openpilot.selfdrive.test.longitudinal_harness.provenance import classify_re
 
 
 def collect_replay_git_metadata(repo_root: str | Path) -> dict[str, Any]:
-  """Describe the production source revision used by an offline replay.
+  """Describe the source revision and numerical runtime used by a replay.
 
   This intentionally uses the same full tracked-worktree command that updated
   writes into ``GitDiff`` on device. Untracked artifacts are absent from both.
@@ -25,11 +28,21 @@ def collect_replay_git_metadata(repo_root: str | Path) -> dict[str, Any]:
   root = Path(repo_root).resolve()
   commit = _git_output(root, "rev-parse", "HEAD").decode().strip()
   diff = _git_output(root, "diff", "--submodule=diff")
+  runtime_os_version = _read_runtime_file(
+    Path("/VERSION"),
+    fallback=HARDWARE.get_os_version() or platform.mac_ver()[0] or platform.version(),
+  )
+  runtime_kernel_version = _read_runtime_file(Path("/proc/version"), fallback=platform.version())
   return {
     "gitCommit": commit,
     "gitDirty": bool(diff),
     "gitDiffEmpty": not bool(diff),
     "gitDiffSha256": hashlib.sha256(diff).hexdigest(),
+    "runtimeDeviceType": str(HARDWARE.get_device_type()),
+    "runtimePlatform": platform.system().lower(),
+    "runtimeMachine": platform.machine().lower(),
+    "runtimeOsVersion": runtime_os_version,
+    "runtimeKernelVersion": runtime_kernel_version,
   }
 
 
@@ -327,7 +340,10 @@ def summarize_corpus(results: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
 def _capture_provenance(vehicle: Mapping[str, Any]) -> dict[str, Any]:
   return {
     key: vehicle.get(key)
-    for key in ("gitCommit", "gitBranch", "gitRemote", "gitDirty", "gitDiffEmpty", "gitDiffSha256")
+    for key in (
+      "gitCommit", "gitBranch", "gitRemote", "gitDirty", "gitDiffEmpty", "gitDiffSha256",
+      "runtimeDeviceType", "runtimePlatform", "runtimeMachine", "runtimeKernelVersion", "runtimeOsVersion",
+    )
   }
 
 
@@ -337,6 +353,14 @@ def _git_output(repo_root: Path, *args: str) -> bytes:
     check=True,
     capture_output=True,
   ).stdout
+
+
+def _read_runtime_file(path: Path, *, fallback: str | None) -> str:
+  try:
+    value = path.read_text()
+  except OSError:
+    value = fallback or ""
+  return str(value).strip()
 
 
 def _finite_float(value: Any) -> float | None:

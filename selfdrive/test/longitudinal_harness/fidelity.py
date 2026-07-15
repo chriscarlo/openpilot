@@ -8,7 +8,12 @@ import re
 from typing import Any
 
 from openpilot.selfdrive.test.longitudinal_harness.config import exact_replay_param_manifest
-from openpilot.selfdrive.test.longitudinal_harness.provenance import classify_replay_provenance
+from openpilot.selfdrive.test.longitudinal_harness.provenance import (
+  classify_planner_runtime_provenance,
+  classify_replay_provenance,
+  exact_planner_state_initialization,
+  well_formed_planner_state_initialization_claim,
+)
 
 
 PASS = "pass"
@@ -86,6 +91,48 @@ def evaluate_fidelity(
   counterfactual: bool = False,
   acknowledge_instrumentation_only: bool = False,
 ) -> dict[str, Any]:
+  """Public gate: row metadata alone can never verify planner state restoration."""
+  return _evaluate_fidelity_impl(
+    trace_rows,
+    thresholds=thresholds,
+    captured_metadata=captured_metadata,
+    replay_metadata=replay_metadata,
+    current_commit=current_commit,
+    current_diff_sha256=current_diff_sha256,
+    current_dirty=current_dirty,
+    current_diff_empty=current_diff_empty,
+    counterfactual=counterfactual,
+    acknowledge_instrumentation_only=acknowledge_instrumentation_only,
+    planner_state_restoration_verified=False,
+  )
+
+
+def _evaluate_fidelity_with_test_only_verified_planner_state(
+  trace_rows: Iterable[Mapping[str, Any]],
+  **kwargs: Any,
+) -> dict[str, Any]:
+  """Exercise downstream exact-planner quality checks without exposing a public bypass."""
+  return _evaluate_fidelity_impl(
+    trace_rows,
+    planner_state_restoration_verified=True,
+    **kwargs,
+  )
+
+
+def _evaluate_fidelity_impl(
+  trace_rows: Iterable[Mapping[str, Any]],
+  *,
+  thresholds: FidelityThresholds | Mapping[str, Any] | None = None,
+  captured_metadata: Mapping[str, Any] | None = None,
+  replay_metadata: Mapping[str, Any] | None = None,
+  current_commit: str | None = None,
+  current_diff_sha256: str | None = None,
+  current_dirty: bool | None = None,
+  current_diff_empty: bool | None = None,
+  counterfactual: bool = False,
+  acknowledge_instrumentation_only: bool = False,
+  planner_state_restoration_verified: bool,
+) -> dict[str, Any]:
   """Evaluate independently replayed RadarD and longitudinal-planner output.
 
   ``run_harness`` emits one row per 100 Hz control tick while a recorded replay
@@ -94,8 +141,10 @@ def evaluate_fidelity(
   scoring, so each recorded frame receives equal weight.
 
   Planner output is intentionally stricter than radar output. It is scored only
-  when the reference carries the v1 writer contract, an exact radar association,
-  and exact planner context. Missing, ambiguous, and N/A metadata
+  when the reference carries the v1 external-input contract, an exact radar
+  association and planner context, an explicitly applied captured planner/MPC
+  state seed, and matching numerical-runtime provenance. Missing, ambiguous,
+  and N/A metadata
   is reported as exclusion evidence and cannot turn a zero-sample planner stage
   into a pass. Both stages must also satisfy minimum sample count, scorable
   fraction, and contiguous-duration coverage. Finally, overall fidelity can pass
@@ -107,7 +156,14 @@ def evaluate_fidelity(
   replay_rows, duplicate_count, trace_integrity = _unique_replay_rows(input_rows)
 
   radar = _evaluate_radar(replay_rows, resolved_thresholds.radar)
-  planner = _evaluate_planner(replay_rows, resolved_thresholds.planner)
+  planner_runtime = classify_planner_runtime_provenance(captured_metadata, replay_metadata)
+  planner = _evaluate_planner(
+    replay_rows,
+    resolved_thresholds.planner,
+    planner_runtime_gate_eligible=planner_runtime.gate_eligible,
+    planner_state_restoration_verified=planner_state_restoration_verified,
+  )
+  planner["runtime_provenance"] = planner_runtime.as_dict()
   provenance = classify_replay_provenance(
     captured_metadata,
     replay_metadata,
@@ -157,7 +213,7 @@ def evaluate_fidelity(
     )
 
   return {
-    "schema_version": 3,
+    "schema_version": 4,
     "status": overall_status,
     "overall": {
       "status": overall_status,
@@ -236,7 +292,7 @@ def evaluate_diagnostic_fidelity(
       "diagnostic results do not certify that replay consumed the same asynchronous service snapshots",
       "legacy planner rows may use a synchronous or timing-inferred RadarD association",
       "legacy_ambiguous_synchronous rows score one explicit scheduler variant and do not resolve the recorded race",
-      "only a v1 exact replay result is eligible to authorize production behavior changes",
+      "only a state-seeded exact replay on a matching planner runtime can authorize production behavior changes",
     ],
     "thresholds": asdict(resolved_thresholds),
     "input_row_count": len(input_rows),
@@ -729,6 +785,8 @@ def _evaluate_planner(
   *,
   require_exact_contract: bool = True,
   diagnostic: bool = False,
+  planner_runtime_gate_eligible: bool = True,
+  planner_state_restoration_verified: bool = False,
 ) -> dict[str, Any]:
   exclusions: Counter[str] = Counter()
   association_statuses: Counter[str] = Counter()
@@ -784,7 +842,30 @@ def _evaluate_planner(
         exclusions[context_reason] += 1
       continue
 
-    if require_exact_contract and not _planner_v1_contract_exact(reference, plan_mapping):
+    state_initialization = reference.get("plannerStateInitializationProvenance")
+    if require_exact_contract and not well_formed_planner_state_initialization_claim(state_initialization):
+      state_status = _status_token(state_initialization)
+      exclusion = (
+        "missing_planner_state_initialization"
+        if state_status in (None, "missing", "unavailable", "not_available")
+        else "inexact_planner_state_initialization"
+      )
+      exclusions[exclusion] += 1
+      continue
+
+    if require_exact_contract and not planner_state_restoration_verified:
+      exclusions["unverified_planner_state_restoration"] += 1
+      continue
+
+    if require_exact_contract and not planner_runtime_gate_eligible:
+      exclusions["inexact_planner_runtime_provenance"] += 1
+      continue
+
+    if require_exact_contract and not _planner_v1_contract_exact(
+      reference,
+      plan_mapping,
+      planner_state_restoration_verified=planner_state_restoration_verified,
+    ):
       exclusions["inexact_planner_replay_contract"] += 1
       continue
 
@@ -1007,9 +1088,16 @@ def _radard_v1_contract_exact(reference: Mapping[str, Any]) -> bool:
 def _planner_v1_contract_exact(
   reference: Mapping[str, Any],
   plan_reference: Mapping[str, Any],
+  *,
+  planner_state_restoration_verified: bool,
 ) -> bool:
   fidelity = reference.get("plannerFidelity")
   if not isinstance(fidelity, Mapping) or fidelity.get("scorable") is not True:
+    return False
+  if not exact_planner_state_initialization(
+    reference.get("plannerStateInitializationProvenance"),
+    restoration_verified=planner_state_restoration_verified,
+  ):
     return False
   provenance = reference.get("plannerServiceAssociationProvenance")
   if not isinstance(provenance, Mapping):

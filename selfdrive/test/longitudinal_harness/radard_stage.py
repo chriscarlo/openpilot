@@ -131,6 +131,38 @@ class RadardPerceptionStage:
           if exact_governor and wire_governor.recoveryPositionClosingValid
           else None if exact_governor or track is None else track.governor_recovery_position_closing_mps
         ),
+        "steady_parity_candidate_valid": (
+          bool(wire_governor.steadyParityCandidateValid)
+          if exact_governor else bool(track is not None and track.steady_parity_candidate_valid)
+        ),
+        "steady_parity_position_slope_mps": (
+          float(wire_governor.steadyParityPositionSlopeMps)
+          if exact_governor else 0.0 if track is None else float(track.steady_parity_position_slope_mps)
+        ),
+        "steady_parity_vrel_floor_mps": (
+          float(wire_governor.steadyParityVRelFloorMps)
+          if exact_governor else 0.0 if track is None else float(track.steady_parity_vrel_floor_mps)
+        ),
+        "steady_parity_held": (
+          bool(wire_governor.steadyParityHeld)
+          if exact_governor else bool(track is not None and track.steady_parity_held)
+        ),
+        "steady_parity_sample_count": (
+          int(wire_governor.steadyParitySampleCount)
+          if exact_governor else 0 if track is None else int(track.steady_parity_sample_count)
+        ),
+        "steady_parity_window_span_s": (
+          float(wire_governor.steadyParityWindowSpanS)
+          if exact_governor else 0.0 if track is None else float(track.steady_parity_window_span_s)
+        ),
+        "steady_parity_max_sample_gap_s": (
+          float(wire_governor.steadyParityMaxSampleGapS)
+          if exact_governor else 0.0 if track is None else float(track.steady_parity_max_sample_gap_s)
+        ),
+        "steady_parity_reason": (
+          str(wire_governor.steadyParityReason)
+          if exact_governor else "inactive" if track is None else str(track.steady_parity_reason)
+        ),
         "opening_relax_vrel_mps": None if track is None or track.opening_relax_vrel is None else float(track.opening_relax_vrel),
         "opening_relax_held": bool(track is not None and track.opening_relax_held),
         "opening_relax_hold_remaining_s": 0.0 if track is None else max(0.0, float(track.opening_relax_hold_until_t) - float(now_s)),

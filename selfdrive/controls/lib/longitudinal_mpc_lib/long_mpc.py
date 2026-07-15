@@ -16,7 +16,16 @@ from openpilot.common.realtime import DT_MDL
 from openpilot.common.swaglog import cloudlog
 # WARNING: imports outside of constants will not trigger a rebuild
 from openpilot.selfdrive.modeld.constants import index_function
-from openpilot.selfdrive.controls.radard import _LEAD_ACCEL_TAU
+from openpilot.selfdrive.controls.radard import (
+  STEADY_PARITY_ALEAD_VETO_MPS2,
+  STEADY_PARITY_MAX_DPATH_M,
+  STEADY_PARITY_MAX_RAW_CLOSING_MPS,
+  STEADY_PARITY_MAX_VLAT_MPS,
+  STEADY_PARITY_MIN_MODEL_PROB,
+  STEADY_PARITY_MIN_RAW_TTC_S,
+  STEADY_PARITY_VLAT_OFFCENTER_DPATH_M,
+  _LEAD_ACCEL_TAU,
+)
 from openpilot.selfdrive.controls.lib.lead_role_classifier import ControlLead, LeadRoleClassifier
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.lead_kalman_filter import LeadKalmanFilter
 from openpilot.selfdrive.controls.lib.longitudinal_live_tune import (
@@ -325,12 +334,17 @@ class _StabilizedLead:
   it's looking at a raw capnp reader or a phantom-extrapolated snapshot."""
   __slots__ = ('status', 'dRel', 'yRel', 'vRel', 'vLead', 'aLeadK', 'modelProb',
                'dPath', 'vLat', 'aLeadTau', 'aRel', 'vLeadK', 'fcw',
-               'fcwSuppressed', 'closingGovernorRecovery', 'radar', 'radarTrackId')
+               'fcwSuppressed', 'closingGovernorRecovery',
+               'steadyParityCandidateValid', 'steadyParityPositionSlopeMps',
+               'steadyParityVRelFloorMps', 'steadyParityHeld',
+               'radar', 'radarTrackId')
 
   def __init__(self, status=False, dRel=0.0, yRel=0.0, vRel=0.0, vLead=0.0,
                 aLeadK=0.0, modelProb=0.0, dPath=0.0, vLat=0.0, aLeadTau=0.0,
                 aRel=0.0, vLeadK=0.0, fcw=False, fcwSuppressed=False,
-                closingGovernorRecovery=False, radar=False, radarTrackId=-1):
+                closingGovernorRecovery=False, steadyParityCandidateValid=False,
+                steadyParityPositionSlopeMps=0.0, steadyParityVRelFloorMps=0.0,
+                steadyParityHeld=False, radar=False, radarTrackId=-1):
     self.status = bool(status)
     self.dRel = float(dRel)
     self.yRel = float(yRel)
@@ -346,6 +360,10 @@ class _StabilizedLead:
     self.fcw = bool(fcw)
     self.fcwSuppressed = bool(fcwSuppressed)
     self.closingGovernorRecovery = bool(closingGovernorRecovery)
+    self.steadyParityCandidateValid = bool(steadyParityCandidateValid)
+    self.steadyParityPositionSlopeMps = float(steadyParityPositionSlopeMps)
+    self.steadyParityVRelFloorMps = float(steadyParityVRelFloorMps)
+    self.steadyParityHeld = bool(steadyParityHeld)
     self.radar = bool(radar)
     self.radarTrackId = int(radarTrackId)
 
@@ -378,6 +396,10 @@ class _StabilizedLead:
       fcw=bool(getattr(rd, 'fcw', False)),
       fcwSuppressed=bool(getattr(rd, 'fcwSuppressed', False)),
       closingGovernorRecovery=bool(getattr(rd, 'closingGovernorRecovery', False)),
+      steadyParityCandidateValid=bool(getattr(rd, 'steadyParityCandidateValid', False)),
+      steadyParityPositionSlopeMps=cls._safe_attr(rd, 'steadyParityPositionSlopeMps'),
+      steadyParityVRelFloorMps=cls._safe_attr(rd, 'steadyParityVRelFloorMps'),
+      steadyParityHeld=bool(getattr(rd, 'steadyParityHeld', False)),
       radar=bool(getattr(rd, 'radar', False)),
       radarTrackId=int(getattr(rd, 'radarTrackId', -1) or -1),
     )
@@ -445,6 +467,20 @@ class _LeadStabilityState:
     self.corr_settled_s = 0.0
     self.corr_track_id: int | None = None
     self.corr_danger_latched = False
+
+
+class _SteadyParityState:
+  """Per-slot planner-only correction state; never written back to RadarState."""
+  __slots__ = ('track_id', 'active', 'applied_floor_mps', 'last_t')
+
+  def __init__(self):
+    self.reset()
+
+  def reset(self) -> None:
+    self.track_id: int | None = None
+    self.active = False
+    self.applied_floor_mps = 0.0
+    self.last_t: float | None = None
 
 
 class LeadDistanceFilter:
@@ -560,6 +596,18 @@ COMFORT_BRAKE = DEFAULT_COMFORT_BRAKE
 STOP_DISTANCE = 6.0
 CRUISE_MIN_ACCEL = DEFAULT_CRUISE_MIN_ACCEL
 CRUISE_MAX_ACCEL = DEFAULT_CRUISE_MAX_ACCEL
+STEADY_PARITY_ARM_THW_S = 1.8
+STEADY_PARITY_ARM_GAP_SURPLUS_M = 3.0
+
+
+def _fcw_candidate_predicts_crash(lead_xv: np.ndarray | None, x_sol: np.ndarray,
+                                  model_prob: float, suppressed: bool) -> bool:
+  return bool(
+    lead_xv is not None and
+    np.any(lead_xv[FCW_IDXS, 0] - x_sol[FCW_IDXS, 0] < CRASH_DISTANCE) and
+    float(model_prob) > 0.9 and
+    not bool(suppressed)
+  )
 
 def get_jerk_factor(personality=log.LongitudinalPersonality.standard):
   if personality==log.LongitudinalPersonality.relaxed:
@@ -1569,6 +1617,9 @@ class LongitudinalMpc:
     self._lead_stability_state = [_LeadStabilityState(), _LeadStabilityState()]
     self._lead_stability_phantom_slots: tuple[bool, bool] = (False, False)
     self.lead_stability_debug: dict[str, Any] = {}
+    self._steady_parity_state = [_SteadyParityState(), _SteadyParityState()]
+    self._steady_parity_fcw_unshaped_leads: list[_StabilizedLead] = []
+    self.steady_parity_debug: dict[str, Any] = {}
 
   def reset(self):
     # self.solver = AcadosOcpSolverCython(MODEL_NAME, ACADOS_SOLVER_TYPE, N)
@@ -1596,6 +1647,11 @@ class LongitudinalMpc:
     self.last_v_upper = None
     self.last_v_cruise_clipped = None
     self.current_t_follow = float(get_T_FOLLOW())
+    if hasattr(self, '_steady_parity_state'):
+      for state in self._steady_parity_state:
+        state.reset()
+    self._steady_parity_fcw_unshaped_leads = []
+    self.steady_parity_debug = {}
     self.control_leads = (None, None)
     self.lead_approach_preview = (0.0, 0.0)
     self.lead_approach_preview_debug = {
@@ -3014,6 +3070,131 @@ class LongitudinalMpc:
     }
     return outs[0], outs[1]
 
+  def _apply_steady_parity_to_leads(self, lead0: _StabilizedLead, lead1: _StabilizedLead,
+                                    *, v_ego: float, t_follow: float,
+                                    now: float) -> tuple[_StabilizedLead, _StabilizedLead]:
+    """Apply RadarD's evidence to planner-private lead working copies only.
+
+    Correction can only make a false published closure less urgent and never
+    faster than parity. It arms above the exact configured following distance,
+    slews in slowly, and restores the original lead immediately for any invalid
+    evidence, identity/miss/phantom boundary, target crossing, or rollback.
+    Unshaped active leads are retained separately as an additional FCW input.
+    """
+    leads = (lead0, lead1)
+    unshaped = (copy.deepcopy(lead0), copy.deepcopy(lead1))
+    self._steady_parity_fcw_unshaped_leads = []
+    cfg = self._live_tune_cfg
+    trust_deficit = float(getattr(cfg, 'steady_parity_trust_deficit_mps', 99.0))
+    slew_mps2 = max(0.0, float(getattr(cfg, 'steady_parity_vrel_slew_mps2', 0.0)))
+    feature_enabled = bool(
+      self._hyundai_ai_lead_stability_enabled and
+      trust_deficit < 99.0 and
+      slew_mps2 > 0.0
+    )
+    target_gap_m = float(get_headway_follow_distance(float(v_ego), float(t_follow)))
+    debug: dict[str, Any] = {}
+
+    for slot, lead in enumerate(leads):
+      state = self._steady_parity_state[slot]
+      original_vrel = float(lead.vRel)
+      track_id = int(lead.radarTrackId)
+      gap_surplus_m = float(lead.dRel) - target_gap_m
+      thw_s = float(lead.dRel) / max(float(v_ego), 0.1)
+      reason = "inactive"
+      corrected_vrel = original_vrel
+
+      if state.track_id != track_id:
+        state.reset()
+        state.track_id = track_id
+        reason = "identity_change"
+
+      current_closing_mps = max(0.0, -original_vrel)
+      current_ttc_s = float(lead.dRel) / max(current_closing_mps, 0.1)
+      current_near = float(lead.dRel) <= max(10.0, 0.55 * max(0.0, float(v_ego)))
+      current_safe = bool(
+        float(lead.aLeadK) >= -STEADY_PARITY_ALEAD_VETO_MPS2 and
+        current_closing_mps < STEADY_PARITY_MAX_RAW_CLOSING_MPS and
+        (current_closing_mps <= 0.3 or current_ttc_s > STEADY_PARITY_MIN_RAW_TTC_S) and
+        float(lead.vLead) >= 0.0 and
+        not current_near and
+        abs(float(lead.dPath)) <= STEADY_PARITY_MAX_DPATH_M and
+        not (abs(float(lead.dPath)) > STEADY_PARITY_VLAT_OFFCENTER_DPATH_M and
+             abs(float(lead.vLat)) >= STEADY_PARITY_MAX_VLAT_MPS) and
+        float(lead.modelProb) >= STEADY_PARITY_MIN_MODEL_PROB
+      )
+      candidate_valid = bool(
+        feature_enabled and lead.status and
+        track_id != -1 and not bool(lead.radar) and current_safe and
+        not self._lead_stability_phantom_slots[slot] and
+        bool(lead.steadyParityCandidateValid)
+      )
+      candidate_floor = min(0.0, float(lead.steadyParityVRelFloorMps))
+      arm_eligible = bool(
+        candidate_valid and
+        thw_s >= STEADY_PARITY_ARM_THW_S and
+        gap_surplus_m >= STEADY_PARITY_ARM_GAP_SURPLUS_M
+      )
+
+      if not feature_enabled:
+        state.reset()
+        state.track_id = track_id
+        reason = "rollback_disabled"
+      elif not candidate_valid:
+        state.reset()
+        state.track_id = track_id
+        reason = "current_threat_restore" if not current_safe else "phantom_or_invalid_evidence"
+      elif state.active and gap_surplus_m <= 0.0:
+        state.reset()
+        state.track_id = track_id
+        reason = "target_reached"
+      elif not state.active and not arm_eligible:
+        state.applied_floor_mps = original_vrel
+        state.last_t = float(now)
+        reason = "awaiting_arm_surplus"
+      else:
+        dt_s = self.dt if state.last_t is None else float(np.clip(float(now) - state.last_t, 0.0, 0.25))
+        if not state.active:
+          state.active = True
+          state.applied_floor_mps = min(original_vrel, candidate_floor)
+          reason = "armed"
+        else:
+          reason = "active"
+        # A more urgent floor wins in the same frame. Less-urgent correction is
+        # the only direction rate-limited.
+        if candidate_floor < state.applied_floor_mps:
+          state.applied_floor_mps = candidate_floor
+        else:
+          state.applied_floor_mps = min(candidate_floor, state.applied_floor_mps + slew_mps2 * dt_s)
+        state.last_t = float(now)
+        corrected_vrel = max(original_vrel, min(0.0, state.applied_floor_mps))
+        delta_vrel = corrected_vrel - original_vrel
+        if delta_vrel > 0.0:
+          lead.vRel = corrected_vrel
+          lead.vLead = max(0.0, float(lead.vLead) + delta_vrel)
+          lead.vLeadK = max(0.0, float(lead.vLeadK) + delta_vrel)
+        self._steady_parity_fcw_unshaped_leads.append(unshaped[slot])
+
+      debug[f"slot{slot}"] = {
+        "active": bool(state.active),
+        "reason": reason,
+        "track_id": track_id,
+        "candidate_valid": bool(candidate_valid),
+        "current_safe": bool(current_safe),
+        "candidate_held": bool(lead.steadyParityHeld),
+        "position_slope_mps": float(lead.steadyParityPositionSlopeMps),
+        "candidate_floor_mps": float(candidate_floor),
+        "applied_floor_mps": float(state.applied_floor_mps),
+        "original_vrel_mps": float(original_vrel),
+        "corrected_vrel_mps": float(corrected_vrel),
+        "target_gap_m": target_gap_m,
+        "gap_surplus_m": float(gap_surplus_m),
+        "thw_s": float(thw_s),
+      }
+
+    self.steady_parity_debug = debug
+    return lead0, lead1
+
   def _stabilize_control_leads(self, raw_lead0, raw_lead1,
                                control_lead0: ControlLead,
                                control_lead1: ControlLead,
@@ -3788,6 +3969,10 @@ class LongitudinalMpc:
       getattr(radarstate, 'leadTwo', None),
       now,
     )
+    stabilized_lead0, stabilized_lead1 = self._apply_steady_parity_to_leads(
+      stabilized_lead0, stabilized_lead1,
+      v_ego=float(v_ego), t_follow=float(t_follow), now=now,
+    )
 
     raw_control_lead0, raw_control_lead1, lead_role_debug = self.lead_role_classifier.classify(
       v_ego, stabilized_lead0, stabilized_lead1, now=now,
@@ -4170,6 +4355,18 @@ class LongitudinalMpc:
         fcw_model_prob = float(control_lead1.modelProb)
         fcw_suppressed = bool(getattr(control_lead1, 'fcwSuppressed', False))
 
+    fcw_candidates: list[tuple[np.ndarray | None, float, bool]] = []
+    if fcw_lead_xv is not None:
+      fcw_candidates.append((fcw_lead_xv, fcw_model_prob, fcw_suppressed))
+    # A planner-only parity correction must never weaken FCW. Evaluate every
+    # parity-active track's untouched kinematics as an additional candidate,
+    # even when the corrected lead changes classifier/source selection.
+    fcw_candidates.extend(
+      (self.process_lead(lead), float(lead.modelProb), bool(lead.fcwSuppressed))
+      for lead in self._steady_parity_fcw_unshaped_leads
+      if lead.status
+    )
+
     # fcwSuppressed is the producing tracker's veto: the raw measurement stream
     # does NOT corroborate the filtered closeness (phantom-collapsed lead), so a
     # predicted crash against it must not accrue toward FCW / the Hyundai
@@ -4177,10 +4374,8 @@ class LongitudinalMpc:
     # which preserves legacy behavior for radar tracks and fabricated leads; a
     # corroborated genuine threat is never suppressed (raw <= filtered + tol on
     # a real collision course), so genuine FCW timing is frame-identical.
-    if (fcw_lead_xv is not None and
-            np.any(fcw_lead_xv[FCW_IDXS,0] - self.x_sol[FCW_IDXS,0] < CRASH_DISTANCE) and
-            fcw_model_prob > 0.9 and
-            not fcw_suppressed):
+    if any(_fcw_candidate_predicts_crash(lead_xv, self.x_sol, prob, suppressed)
+           for lead_xv, prob, suppressed in fcw_candidates):
       self.crash_cnt += 1
     else:
       self.crash_cnt = 0

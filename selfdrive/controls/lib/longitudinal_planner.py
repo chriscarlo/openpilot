@@ -545,14 +545,16 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     # hazard/urgency gate is active, it bounds |output_a_target - prev_a| per frame
     # to ComfortJerkLimitMps3 * dt so a single noisy vRel frame under a benign
     # steady follow cannot step-change aTarget hard. The downward leg is bounded
-    # generally; the upward leg is bounded only when a discrete lead-follow
-    # comfort floor (lead-keepup or brake-release) owns the rise, leaving ordinary
-    # MPC/reclaim/launch acceleration untouched.
-    # Fully bypassed under any hazard/urgency signal (the shared
-    # _relatch_urgency_bypass) so real braking is NEVER rate-limited. Anchors on
-    # the previous frame's final output (the same value published last frame).
+    # generally; one upward leg bounds small discrete lead-follow floors, while a
+    # separate same-track leg grades a large release out of an existing brake.
+    # Ordinary MPC/reclaim/launch acceleration that does not begin from braking
+    # stays untouched. Hazard/urgency bypasses every downward bound, so real
+    # braking is NEVER rate-limited. Anchors on the previous frame's final output
+    # (the same value published last frame).
     self._comfort_jerk_prev_a: float = 0.0
     self._comfort_jerk_prev_src: str = ""
+    self._comfort_jerk_prev_track_id: int = -1
+    self._brake_release_slew_active: bool = False
     self.comfort_jerk_debug: dict = {
       "active": False,
       "bypassed": False,
@@ -975,10 +977,10 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     self._apply_handoff_transition_limit(lead_source, control_leads, model_leads, v_ego)
     # CD7: the graded-onset comfort anti-jerk envelope is the truly-FINAL limiter.
     # It runs AFTER the handoff limiter so it bounds the fully composed
-    # output_a_target, and it is fully bypassed under any hazard/urgency signal so
-    # real braking (already passed by every earlier limiter's urgency bypass) is
-    # never rate-limited.
-    self._apply_comfort_jerk_envelope(lead_source, control_leads)
+    # output_a_target. Its downward leg is fully bypassed under any hazard/urgency
+    # signal so real braking is never rate-limited; the positive-only release leg
+    # can only retain more of the prior brake command.
+    self._apply_comfort_jerk_envelope(lead_source, control_leads, v_ego)
 
     end_span(total_span)
 
@@ -1560,7 +1562,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     self._handoff_prev_a = float(self.output_a_target)
     self._handoff_prev_src = lead_source
 
-  def _apply_comfort_jerk_envelope(self, lead_source: str, control_leads=()) -> None:
+  def _apply_comfort_jerk_envelope(self, lead_source: str, control_leads=(), v_ego: float = 0.0) -> None:
     # CD7 (road 200-10 / 200-9 tap1 / 201-9): under a benign STEADY single-source
     # LEAD follow the MPC QP output can step-change output_a_target hard on a single
     # noisy vRel frame (road: -0.31 -> -1.00 in 0.15 s, ~4.6 m/s^3) even though
@@ -1594,16 +1596,19 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     # discrete floors can jump on one noisy vRel frame (+0.05 -> +0.22 m/s^2 in
     # the road capture), which feels like a throttle tap on the EV6 before the
     # downward envelope walks it back. Only micro-corrections under the configured
-    # positive-delta ceiling qualify, and every qualifying frame uses the same
-    # configured jerk bound. Ordinary MPC, continuous gap-reclaim, large recovery,
-    # and launch acceleration remain free, so genuine pullaway response is not
-    # blunted.
+    # positive-delta ceiling qualify for that original floor-owned leg. A distinct
+    # same-source, same-track release leg covers a large MPC/floor/recovery rise
+    # only when the previous final command is already braking and ego is above the
+    # launch-speed gate. Ordinary positive acceleration that does not begin from
+    # braking remains free.
     #
-    # It only grades the ONSET of the sustained downward move (a step into a brake):
-    # once the output holds the value for a couple frames prev_a catches up and
-    # Delta -> 0, so no sustained comfort floor is lowered.
+    # The original leg only grades the ONSET of a sustained downward move. The
+    # release leg stays latched while a continuous lead asks to walk an existing
+    # brake command upward, then disarms at the requested target, on any downward
+    # request, or when source/track continuity breaks.
     cfg = getattr(self.mpc, "_live_tune_cfg", None)
     jerk_limit = float(getattr(cfg, "comfort_jerk_limit_mps3", 0.0) or 0.0)
+    release_jerk_limit = float(getattr(cfg, "lead_brake_release_jerk_mps3", 0.0) or 0.0)
     bypass_decel = float(getattr(cfg, "comfort_jerk_bypass_decel_mps2", -1.5) or -1.5)
     # A floor-owned positive move is a comfort micro-correction only across the
     # actual small floor span: from the near-target regen floor to the keep-up
@@ -1615,15 +1620,35 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     )
     dt = float(max(self.dt, 1e-3))
     max_step = jerk_limit * dt
+    release_max_step = release_jerk_limit * dt
 
     prev_src = self._comfort_jerk_prev_src
     self._comfort_jerk_prev_src = lead_source
+    lead_slot = self._lead_owned_slot(lead_source, control_leads)
+    # Match the existing control-lead pipeline's identity convention: zero and
+    # -1 are unknown, while model tracks use stable negative IDs below -1000.
+    current_track_id = int(getattr(lead_slot, "radarTrackId", -1) or -1) if lead_slot is not None else -1
+    prev_track_id = int(getattr(self, "_comfort_jerk_prev_track_id", -1))
+    self._comfort_jerk_prev_track_id = current_track_id
+    release_active = bool(getattr(self, "_brake_release_slew_active", False))
 
-    # Disabled (rollback sentinel: jerk_limit <= 0, or a large value whose
-    # per-frame bound is unreachable): pass through, keep the anchor fresh.
-    if jerk_limit <= 0.0 or max_step >= _COMFORT_JERK_DISABLE_STEP_MPS2:
+    comfort_enabled = bool(jerk_limit > 0.0 and max_step < _COMFORT_JERK_DISABLE_STEP_MPS2)
+    # This tuning was derived and validated on the Hyundai/EV6 longitudinal
+    # pipeline. Keep every non-Hyundai planner bit-identical to the pre-feature
+    # path even though the shared live-tune config carries the key globally.
+    release_enabled = bool(
+      getattr(self.mpc, "_hyundai_ai_lead_stability_enabled", False) and
+      release_jerk_limit > 0.0 and release_max_step < _COMFORT_JERK_DISABLE_STEP_MPS2
+    )
+
+    # Disabled (rollback sentinels, or large values whose per-frame bounds are
+    # unreachable): pass through and keep every continuity anchor fresh.
+    if not comfort_enabled and not release_enabled:
       self.comfort_jerk_debug = {"active": False, "bypassed": False, "bypass_reason": "",
-                                 "gated_reason": "disabled", "max_step_mps2": float(max_step), "clipped": False}
+                                 "gated_reason": "disabled", "max_step_mps2": float(max_step), "clipped": False,
+                                 "release_slew_active": False, "release_slew_clipped": False,
+                                 "release_max_step_mps2": float(release_max_step)}
+      self._brake_release_slew_active = False
       self._comfort_jerk_prev_a = float(self.output_a_target)
       return
 
@@ -1642,18 +1667,23 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
       gated_reason = "flutter_mode"          # flutter clamp engaged
     if gated_reason:
       self.comfort_jerk_debug = {"active": False, "bypassed": False, "bypass_reason": "",
-                                 "gated_reason": gated_reason, "max_step_mps2": float(max_step), "clipped": False}
+                                 "gated_reason": gated_reason, "max_step_mps2": float(max_step), "clipped": False,
+                                 "release_slew_active": False, "release_slew_clipped": False,
+                                 "release_max_step_mps2": float(release_max_step)}
+      self._brake_release_slew_active = False
       self._comfort_jerk_prev_a = float(self.output_a_target)
       return
 
     # In-regime: the source is lead-owned, so the urgency lead IS the source-owned
     # slot. Passing the real lead (not None) matters - _relatch_urgency_bypass
     # returns an unconditional bypass for None, which would defeat the envelope.
-    urgency_lead = self._lead_owned_slot(lead_source, control_leads)
+    urgency_lead = lead_slot
 
     # Hazard/urgency bypass (the SAME predicate as CD5/CD6). If ANY threat signal
-    # is present, the envelope is disarmed and the raw output passes unmodified so
-    # genuine braking is never rate-limited. With no lead object this frame (a
+    # is present, the downward comfort envelope is disarmed so genuine braking is
+    # never rate-limited. The positive-only release leg below may still retain
+    # more of the prior brake command, which is safety-conservative. With no lead
+    # object this frame (a
     # transient slot flap while still lead-source), honor only the requested-decel
     # floor so a hard MPC brake is never throttled; a benign flap is still graded.
     if urgency_lead is not None:
@@ -1668,18 +1698,56 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
       reason = "requested_decel" if bypassed else ""
 
     clipped = False
+    release_clipped = False
+    release_episode = False
+
+    # A separate positive-only release envelope covers the large same-source
+    # jumps that are not owned by CD7's tiny comfort floors. The 2026-07-14 road
+    # trace had identical physical leads jump from gentle braking directly to
+    # MPC, brake-release, cut-in, and calm-recovery accel targets (up to
+    # +22 m/s^3) without a source or track transition. Arm only while leaving an
+    # already-negative command, require the same physical track and normal road
+    # speed, and keep the episode latched through zero until the requested target
+    # is reached. Any renewed/downward brake demand passes this release leg
+    # immediately and disarms it; the pre-existing downward comfort/urgency rules
+    # then retain their normal authority.
+    same_track = bool(
+      lead_source in ("lead0", "lead1") and prev_src == lead_source and
+      current_track_id != -1 and current_track_id == prev_track_id
+    )
+    min_release_speed = float(getattr(cfg, "lead_brake_release_min_speed_mps", 5.0) or 0.0)
+    release_continuity = bool(
+      release_enabled and same_track and float(v_ego) >= min_release_speed
+    )
+    delta = self.output_a_target - self._comfort_jerk_prev_a
+    if release_active and (not release_continuity or delta <= 0.0):
+      release_active = False
+    if (not release_active and release_continuity and self._comfort_jerk_prev_a < -1e-3 and
+        delta > release_max_step):
+      release_active = True
+    if release_active and delta > 0.0:
+      release_episode = True
+      if delta > release_max_step:
+        self.output_a_target = self._comfort_jerk_prev_a + release_max_step
+        clipped = True
+        release_clipped = True
+      else:
+        release_active = False
+    self._brake_release_slew_active = release_active
+
     if bypassed:
       self.comfort_jerk_debug = {"active": True, "bypassed": True, "bypass_reason": reason or "urgent",
-                                 "gated_reason": "", "max_step_mps2": float(max_step), "clipped": False}
+                                 "gated_reason": "", "max_step_mps2": float(max_step), "clipped": bool(clipped)}
     else:
       # Bound every benign DOWNWARD comfort-braking onset. Bound an UPWARD move
       # only when a discrete lead-follow comfort floor owns it; all other positive
       # demand (MPC/continuous reclaim/launch) remains bit-identically free.
       delta = self.output_a_target - self._comfort_jerk_prev_a
-      if delta < -max_step:
+      if comfort_enabled and delta < -max_step:
         self.output_a_target = self._comfort_jerk_prev_a - max_step
         clipped = True
-      elif delta > max_step and bool(self._comfort_upward_floor_owner):
+      elif (comfort_enabled and not release_episode and delta > max_step and
+            bool(self._comfort_upward_floor_owner)):
         upward_eligible = upward_max_delta > 0.0 and delta <= upward_max_delta
         if upward_eligible:
           self.output_a_target = self._comfort_jerk_prev_a + max_step
@@ -1692,6 +1760,14 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
                                  "upward_floor_owner": str(self._comfort_upward_floor_owner),
                                  "upward_max_delta_mps2": float(upward_max_delta),
                                  "upward_step_mps2": float(max_step)}
+
+    self.comfort_jerk_debug.update({
+      "release_slew_active": bool(release_active),
+      "release_slew_clipped": bool(release_clipped),
+      "release_max_step_mps2": float(release_max_step),
+      "release_track_id": int(current_track_id),
+      "clipped": bool(clipped),
+    })
 
     self._comfort_jerk_prev_a = float(self.output_a_target)
 

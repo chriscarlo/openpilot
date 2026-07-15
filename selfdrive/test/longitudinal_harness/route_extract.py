@@ -32,7 +32,7 @@ from .config import captured_param_manifest, DEFAULT_PARAM_VALUES
 from .inputs import LeadDirective, SnapshotBundle, StepInput, serialize_model_frame, write_snapshot_bundle
 
 
-EXTRACTOR_VERSION = "ev6_v9_replay_inputs_v1"
+EXTRACTOR_VERSION = "ev6_v10_planner_state_fail_closed"
 DEFAULT_ROUTE_ROOTS = (
   Path(".cache/commaCar"),
   Path(".cache/commaAdb"),
@@ -1964,18 +1964,27 @@ def write_episode_bundle(scan: RouteScanResult, candidate: EpisodeCandidate, bun
     current = scan.frames[dependency_start_idx]
     if not (0.0 < current.t_s - previous.t_s <= MAX_EXACT_REPLAY_FRAME_GAP_S):
       break
-    if candidate.frames[0].t_s - previous.t_s > RADARD_DEPENDENCY_WARMUP_S:
-      break
     dependency_start_idx -= 1
+    # Include the first frame that reaches/passes the warmup boundary. At the
+    # normal 20 Hz RadarD cadence, stopping before it leaves the evaluation
+    # window about one frame short of the strict 15.0 s coverage requirement.
+    if candidate.frames[0].t_s - previous.t_s >= RADARD_DEPENDENCY_WARMUP_S:
+      break
   dependency_frames = scan.frames[dependency_start_idx:candidate_first_idx]
-  candidate_publish_times = {frame.radar_state_log_mono_time_ns for frame in candidate.frames}
+  replay_frames = [*dependency_frames, *candidate.frames]
+  replay_publish_times = {frame.radar_state_log_mono_time_ns for frame in replay_frames}
   scan_frames_by_publish_time = {frame.radar_state_log_mono_time_ns: frame for frame in scan.frames}
   scheduler_seed_frames: list[EpisodeFrame] = []
-  for frame in candidate.frames:
+  # Planner replay may consume the RadarD publication immediately preceding
+  # the first dependency frame. Seed every external target needed by the
+  # replay frames, then suppress planner evaluation for those seed-only rows.
+  # Looking only at candidate frames misses this first warmup predecessor and
+  # makes closed-loop replay abort before reaching the evaluation window.
+  for frame in replay_frames:
     if frame.planner_radar_resolution not in ("exact", "legacy_timing_unique"):
       continue
     target_ns = frame.planner_radar_state_log_mono_time_ns
-    if target_ns is None or target_ns in candidate_publish_times:
+    if target_ns is None or target_ns in replay_publish_times:
       continue
     seed_frame = scan_frames_by_publish_time.get(target_ns)
     if seed_frame is None:
@@ -1987,7 +1996,7 @@ def write_episode_bundle(scan: RouteScanResult, candidate: EpisodeCandidate, bun
   bundle_frames = sorted(
     {
       frame.radar_state_log_mono_time_ns: frame
-      for frame in [*dependency_frames, *scheduler_seed_frames, *candidate.frames]
+      for frame in [*scheduler_seed_frames, *replay_frames]
     }.values(),
     key=lambda frame: frame.log_mono_time,
   )
@@ -1995,7 +2004,7 @@ def write_episode_bundle(scan: RouteScanResult, candidate: EpisodeCandidate, bun
   scheduler_seed_times = {
     frame.radar_state_log_mono_time_ns
     for frame in scheduler_seed_frames
-    if frame.radar_state_log_mono_time_ns not in candidate_publish_times
+    if frame.radar_state_log_mono_time_ns not in replay_publish_times
   }
   warmup_ready_t_s = bundle_frames[0].t_s + RADARD_DEPENDENCY_WARMUP_S
   raw_frame_complete = [
@@ -2229,6 +2238,11 @@ def write_episode_bundle(scan: RouteScanResult, candidate: EpisodeCandidate, bun
       "gitDirty": scan.metadata.notes_json.get("gitDirty"),
       "gitDiffEmpty": scan.metadata.notes_json.get("gitDiffEmpty"),
       "gitDiffSha256": scan.metadata.notes_json.get("gitDiffSha256"),
+      "runtimeDeviceType": scan.metadata.notes_json.get("runtimeDeviceType"),
+      "runtimePlatform": scan.metadata.notes_json.get("runtimePlatform"),
+      "runtimeMachine": scan.metadata.notes_json.get("runtimeMachine"),
+      "runtimeKernelVersion": scan.metadata.notes_json.get("runtimeKernelVersion"),
+      "runtimeOsVersion": scan.metadata.notes_json.get("runtimeOsVersion"),
     },
     params=episode_params,
     timeline=timeline,
@@ -2659,6 +2673,15 @@ def _replay_reference_from_frame(frame: EpisodeFrame) -> dict[str, Any]:
     "plannerRadarResolutionReason": frame.planner_radar_reason,
     "plannerContextStatus": frame.planner_context_status,
     "plannerContextReason": frame.planner_context_reason,
+    "plannerStateInitializationProvenance": {
+      "status": "missing",
+      "version": 0,
+      "appliedAtReplayStart": False,
+      "reason": (
+        "RadarState/longitudinalPlan replay-inputs v1 captures external service snapshots "
+        "but not the recurrent LongitudinalPlanner/LongitudinalMpc state"
+      ),
+    },
     "serviceLogMonoTimeNs": {
       "modelV2": frame.model_v2_log_mono_time_ns,
       "carState": frame.car_state_log_mono_time_ns,
@@ -2745,11 +2768,18 @@ def _extract_init_params(init_data) -> dict[str, str]:
 
 
 def _extract_init_provenance(init_data) -> dict[str, Any]:
+  device_type = str(init_data.deviceType)
+  embedded_arm64 = device_type in {"tici", "tizi", "mici"}
   provenance: dict[str, Any] = {
     "gitCommit": str(init_data.gitCommit),
     "gitBranch": str(init_data.gitBranch),
     "gitRemote": str(init_data.gitRemote),
     "gitDirty": bool(init_data.dirty),
+    "runtimeDeviceType": device_type,
+    "runtimePlatform": "linux" if embedded_arm64 else None,
+    "runtimeMachine": "aarch64" if embedded_arm64 else None,
+    "runtimeKernelVersion": str(init_data.kernelVersion),
+    "runtimeOsVersion": str(init_data.osVersion),
   }
   git_diff: bytes | None = None
   for entry in init_data.params.entries:

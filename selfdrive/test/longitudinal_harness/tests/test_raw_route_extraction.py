@@ -125,6 +125,8 @@ def _write_raw_route(
   conflicting_car_state_duplicate: bool = False,
   duplicate_controls_state_at: int | None = None,
   conflicting_controls_state_duplicate: bool = False,
+  event_frame: int = _EVENT_FRAME,
+  planner_radar_lag_frames: int = 0,
 ) -> dict[str, int]:
   segment_dir = route_root / "0"
   segment_dir.mkdir(parents=True, exist_ok=True)
@@ -167,14 +169,14 @@ def _write_raw_route(
   expected_event_radar_mono_time = 0
   for frame_idx in range(frame_count):
     frame_base = 1_000_000_000 + frame_idx * _DT_NS
-    incident = _EVENT_FRAME <= frame_idx < _EVENT_END_FRAME
+    incident = event_frame <= frame_idx < event_frame + (_EVENT_END_FRAME - _EVENT_FRAME)
     if genuine_closure:
       raw_v_rel_mps = -3.0
     else:
       # Warm RadarD with a sustained closing estimate, then recover the exact
       # raw model at the incident while the published track remains pessimistic.
-      raw_v_rel_mps = 0.0 if frame_idx >= _EVENT_FRAME else -3.0
-    published_v_rel_mps = -3.0 if (frame_idx < _EVENT_FRAME or incident) else 0.0
+      raw_v_rel_mps = 0.0 if frame_idx >= event_frame else -3.0
+    published_v_rel_mps = -3.0 if (frame_idx < event_frame or incident) else 0.0
     planner_accel_mps2 = -1.0 if incident else 0.2
 
     car_state = messaging.new_message("carState")
@@ -316,7 +318,8 @@ def _write_raw_route(
       replay_inputs = longitudinal_plan_sp.longitudinalPlanSP.replayInputs
       replay_inputs.valid = True
       replay_inputs.version = 1
-      replay_inputs.radarStateMonoTimeNs = int(radar_state.logMonoTime)
+      replay_radar_frame = max(0, frame_idx - planner_radar_lag_frames)
+      replay_inputs.radarStateMonoTimeNs = 1_000_000_000 + replay_radar_frame * _DT_NS + 15_000_000
       replay_inputs.effectiveCruiseMps = 23.25
       replay_inputs.longitudinalPlanMonoTimeNs = int(longitudinal_plan.logMonoTime)
       # Planner deliberately consumes the later distractor carState; RadarD
@@ -340,7 +343,7 @@ def _write_raw_route(
     )
     messages.append(longitudinal_plan_sp.as_reader())
 
-    if frame_idx == _EVENT_FRAME:
+    if frame_idx == event_frame:
       expected_event_model_mono_time = intended_model_time
       expected_event_radar_mono_time = int(radar_state.logMonoTime)
 
@@ -348,9 +351,9 @@ def _write_raw_route(
   return {
     "event_model_mono_time": expected_event_model_mono_time,
     "event_radar_mono_time": expected_event_radar_mono_time,
-    "event_car_state_mono_time": 1_000_000_000 + _EVENT_FRAME * _DT_NS,
-    "event_live_tracks_mono_time": 1_000_000_000 + _EVENT_FRAME * _DT_NS + 8_000_000,
-    "event_planner_car_state_mono_time": 1_000_000_000 + _EVENT_FRAME * _DT_NS + 13_000_000,
+    "event_car_state_mono_time": 1_000_000_000 + event_frame * _DT_NS,
+    "event_live_tracks_mono_time": 1_000_000_000 + event_frame * _DT_NS + 8_000_000,
+    "event_planner_car_state_mono_time": 1_000_000_000 + event_frame * _DT_NS + 13_000_000,
   }
 
 
@@ -660,6 +663,81 @@ def test_v1_contracts_join_exact_inputs_and_keep_planner_car_state_separate(tmp_
     for service in ("carState", "controlsState", "carControl", "selfdriveState", "modelV2", "radarState")
   )
   assert exact.planner_service_association_provenance["params"]["status"] == "exact"
+
+
+def test_bundle_seeds_warmup_predecessor_and_covers_strict_boundary(tmp_path: Path) -> None:
+  log_root = tmp_path / "logs"
+  event_frame = 700
+  _write_raw_route(
+    log_root / "v1_warmup_route",
+    genuine_closure=False,
+    frame_count=event_frame + 101,
+    v1_contracts=True,
+    event_frame=event_frame,
+    planner_radar_lag_frames=1,
+  )
+  conn = open_catalog(tmp_path / "catalog.sqlite3")
+  try:
+    index_ev6_routes(conn, roots=[log_root])
+    route_row = get_route_rows(conn, route_keys=["v1_warmup_route"])[0]
+    scan = load_route_scan(conn, route_row)
+    candidate = next(
+      candidate for candidate in detect_episode_candidates(scan)
+      if candidate.episode_type == "false_closing"
+    )
+    bundle_path = write_episode_bundle(scan, candidate, tmp_path / "snapshots")
+  finally:
+    conn.close()
+
+  bundle = load_snapshot_bundle(bundle_path)
+  assert bundle.vehicle["dependencyHistoryS"] >= 15.0
+  assert bundle.timeline[0].planner_radar_resolution == "missing"
+  assert bundle.timeline[0].planner_radar_state_log_mono_time_ns is None
+  assert "scheduler_seed" in (bundle.timeline[0].note or "")
+
+  radar_publish_times = {
+    step.recorded_radar_state_log_mono_time_ns
+    for step in bundle.timeline
+    if step.recorded_radar_state_log_mono_time_ns is not None
+  }
+  assert all(
+    step.planner_radar_state_log_mono_time_ns in radar_publish_times
+    for step in bundle.timeline
+    if step.planner_radar_resolution in ("exact", "legacy_timing_unique")
+  )
+
+  evaluation_start_rel = float(bundle.vehicle["evaluationTStartS"]) - float(bundle.vehicle["tStartS"])
+  evaluation_steps = [step for step in bundle.timeline if step.t_s + 1e-9 >= evaluation_start_rel]
+  assert evaluation_steps
+  assert all(step.replay_warmup_status == "ready" for step in evaluation_steps)
+  assert all(step.radard_gate_eligible for step in evaluation_steps)
+
+  vehicle = resolve_ev6_vehicle_config(
+    topology=str(bundle.vehicle["topology"]),
+    controller_mode="auto",
+    tune_source="snapshot",
+    snapshot_vehicle=bundle.vehicle,
+    snapshot_params=bundle.params,
+    livetune_snapshot=None,
+  )
+  result = run_harness(
+    vehicle_config=vehicle,
+    scenario_name=bundle.name,
+    steps=bundle.timeline,
+    initial_speed_mps=bundle.initial_speed_mps,
+    initial_accel_mps2=bundle.initial_accel_mps2,
+    noise_profile="off",
+    perception_filter="auto",
+    ego_replay_mode="auto",
+  )
+  evaluation_trace = [row for row in result.trace if row["t_s"] + 1e-9 >= evaluation_start_rel]
+  assert evaluation_trace
+  assert all(row["planner_state_initialization_exact"] is False for row in evaluation_trace)
+  assert all(row["planner_fidelity_scorable"] is False for row in evaluation_trace)
+  assert all(
+    row["planner_state_initialization_provenance"]["status"] == "missing"
+    for row in evaluation_trace
+  )
 
 
 def test_identical_route_wide_core_input_duplicates_keep_v1_join_exact(tmp_path: Path) -> None:

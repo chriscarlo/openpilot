@@ -9,6 +9,7 @@ from openpilot.selfdrive.test.longitudinal_harness.fidelity import (
   FAIL,
   NOT_EVALUATED,
   PASS,
+  _evaluate_fidelity_with_test_only_verified_planner_state,
   evaluate_diagnostic_fidelity,
   evaluate_fidelity,
 )
@@ -39,11 +40,16 @@ def _metadata(commit: str = _COMMIT) -> dict[str, object]:
     "gitDirty": False,
     "gitDiffSha256": _EMPTY_SHA256,
     "gitDiffEmpty": True,
+    "runtimeDeviceType": "tici",
+    "runtimePlatform": "linux",
+    "runtimeMachine": "aarch64",
+    "runtimeOsVersion": "12.6",
+    "runtimeKernelVersion": "Linux version 4.9.103 test",
   }
 
 
 def _evaluate(rows: list[dict], *, thresholds=None) -> dict:
-  return evaluate_fidelity(
+  return _evaluate_fidelity_with_test_only_verified_planner_state(
     rows,
     thresholds=thresholds,
     captured_metadata=_metadata(),
@@ -126,6 +132,12 @@ def _row(
       },
     }
     reference["plannerFidelity"] = {"scorable": True}
+    reference["plannerStateInitializationProvenance"] = {
+      "status": "exact",
+      "version": 1,
+      "appliedAtReplayStart": True,
+      "stateSha256": "1" * 64,
+    }
 
   return {
     "t_s": index * 0.05,
@@ -181,6 +193,65 @@ def test_explicit_exact_planner_metadata_passes() -> None:
   assert result["planner"]["metrics"]["source_transitions"]["sequence_match"] is True
   assert result["planner"]["metrics"]["source_transitions"]["timing_max_error_s"] == 0.0
   assert result["overall"]["status"] == PASS
+
+
+def test_exact_external_inputs_without_planner_state_seed_fail_closed() -> None:
+  rows = [_row(index, association="exact", context="exact") for index in range(40)]
+  for row in rows:
+    row["replay_reference"]["plannerStateInitializationProvenance"] = {
+      "status": "missing",
+      "version": 0,
+      "appliedAtReplayStart": False,
+    }
+
+  result = _evaluate(rows)
+
+  assert result["radar"]["status"] == PASS
+  assert result["planner"]["status"] == NOT_EVALUATED
+  assert result["planner"]["sample_counts"]["scorable"] == 0
+  assert result["planner"]["exclusion_reasons"] == {"missing_planner_state_initialization": 40}
+
+
+def test_public_evaluator_does_not_trust_row_authored_state_restoration_claim() -> None:
+  rows = [_row(index, association="exact", context="exact") for index in range(40)]
+
+  result = evaluate_fidelity(rows, captured_metadata=_metadata(), replay_metadata=_metadata())
+
+  assert result["radar"]["status"] == PASS
+  assert result["planner"]["status"] == NOT_EVALUATED
+  assert result["planner"]["sample_counts"]["scorable"] == 0
+  assert result["planner"]["exclusion_reasons"] == {"unverified_planner_state_restoration": 40}
+
+
+def test_zero_digest_state_claim_is_invalid_even_in_verified_quality_test_seam() -> None:
+  rows = [_row(index, association="exact", context="exact") for index in range(40)]
+  for row in rows:
+    row["replay_reference"]["plannerStateInitializationProvenance"]["stateSha256"] = "0" * 64
+
+  result = _evaluate(rows)
+
+  assert result["planner"]["status"] == NOT_EVALUATED
+  assert result["planner"]["sample_counts"]["scorable"] == 0
+  assert result["planner"]["exclusion_reasons"] == {"inexact_planner_state_initialization": 40}
+
+
+def test_planner_runtime_mismatch_fails_closed_without_blocking_radar() -> None:
+  rows = [_row(index, association="exact", context="exact") for index in range(40)]
+  replay = _metadata()
+  replay.update(runtimeDeviceType="pc", runtimePlatform="darwin", runtimeMachine="arm64")
+
+  result = _evaluate_fidelity_with_test_only_verified_planner_state(
+    rows,
+    thresholds=_SHORT_COVERAGE_THRESHOLDS,
+    captured_metadata=_metadata(),
+    replay_metadata=replay,
+  )
+
+  assert result["radar"]["status"] == PASS
+  assert result["planner"]["status"] == NOT_EVALUATED
+  assert result["planner"]["sample_counts"]["scorable"] == 0
+  assert result["planner"]["exclusion_reasons"] == {"inexact_planner_runtime_provenance": 40}
+  assert result["planner"]["runtime_provenance"]["status"] == "mismatch"
 
 
 def test_old_exact_params_label_without_complete_manifest_is_not_scorable() -> None:
@@ -664,8 +735,19 @@ def test_default_complete_coverage_cannot_exclude_exact_transition_intervals() -
 
 def test_absent_provenance_blocks_otherwise_passing_fidelity() -> None:
   rows = [_row(index, association="exact", context="exact") for index in range(40)]
+  runtime_only = {
+    "runtimeDeviceType": "tici",
+    "runtimePlatform": "linux",
+    "runtimeMachine": "aarch64",
+    "runtimeOsVersion": "12.6",
+    "runtimeKernelVersion": "Linux version 4.9.103 test",
+  }
 
-  result = evaluate_fidelity(rows)
+  result = _evaluate_fidelity_with_test_only_verified_planner_state(
+    rows,
+    captured_metadata=runtime_only,
+    replay_metadata=runtime_only,
+  )
 
   assert result["radar"]["status"] == PASS
   assert result["planner"]["status"] == PASS
@@ -681,8 +763,12 @@ def test_mismatched_provenance_is_non_gating_even_when_counterfactual_is_explici
   capture = _metadata("a" * 40)
   replay = _metadata("b" * 40)
 
-  rejected = evaluate_fidelity(rows, captured_metadata=capture, replay_metadata=replay)
-  counterfactual = evaluate_fidelity(
+  rejected = _evaluate_fidelity_with_test_only_verified_planner_state(
+    rows,
+    captured_metadata=capture,
+    replay_metadata=replay,
+  )
+  counterfactual = _evaluate_fidelity_with_test_only_verified_planner_state(
     rows,
     captured_metadata=capture,
     replay_metadata=replay,
@@ -709,7 +795,7 @@ def test_dirty_capture_without_verified_diff_blocks_fidelity_gate() -> None:
     "gitDiffSha256": None,
   }
 
-  result = evaluate_fidelity(
+  result = _evaluate_fidelity_with_test_only_verified_planner_state(
     rows,
     captured_metadata=dirty_capture,
     replay_metadata=_metadata(),

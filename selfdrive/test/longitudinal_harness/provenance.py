@@ -50,6 +50,30 @@ class _GitSnapshot:
   diff_sha256: str | None
 
 
+@dataclass(frozen=True)
+class PlannerRuntimeProvenanceResult:
+  """Compatibility of the numerical runtime that executes the planner/MPC."""
+
+  status: Literal["exact", "mismatch", "unknown"]
+  gateEligible: bool
+  reasons: tuple[str, ...]
+  capturedRuntime: dict[str, str | None]
+  replayRuntime: dict[str, str | None]
+
+  @property
+  def gate_eligible(self) -> bool:
+    return self.gateEligible
+
+  def as_dict(self) -> dict[str, Any]:
+    return {
+      "status": self.status,
+      "gateEligible": self.gateEligible,
+      "reasons": list(self.reasons),
+      "capturedRuntime": dict(self.capturedRuntime),
+      "replayRuntime": dict(self.replayRuntime),
+    }
+
+
 def _normalize_text(value: Any) -> str | None:
   if value is None:
     return None
@@ -92,6 +116,110 @@ def _normalize_bool(value: Any) -> bool | None:
     if normalized in ("0", "false", "no"):
       return False
   return None
+
+
+def _normalize_runtime_value(value: Any) -> str | None:
+  normalized = _normalize_text(value)
+  return normalized.lower() if normalized is not None else None
+
+
+def _normalize_machine(value: Any) -> str | None:
+  normalized = _normalize_runtime_value(value)
+  return "aarch64" if normalized == "arm64" else normalized
+
+
+def _normalize_runtime_version(value: Any) -> str | None:
+  normalized = _normalize_text(value)
+  return " ".join(normalized.split()) if normalized is not None else None
+
+
+def classify_planner_runtime_provenance(
+  captured_metadata: Mapping[str, Any] | None,
+  replay_metadata: Mapping[str, Any] | None,
+) -> PlannerRuntimeProvenanceResult:
+  """Require a matching device/OS/architecture family for exact planner gates.
+
+  The ACADOS-generated solver and floating-point execution path are platform
+  dependent. A matching source tree is therefore necessary but not sufficient
+  for planner fidelity. This gate remains planner-specific so exact RadarD
+  reconstruction can still be reported independently.
+  """
+  capture_values = captured_metadata or {}
+  replay_values = replay_metadata or {}
+  captured = {
+    "deviceType": _normalize_runtime_value(capture_values.get("runtimeDeviceType")),
+    "platform": _normalize_runtime_value(capture_values.get("runtimePlatform")),
+    "machine": _normalize_machine(capture_values.get("runtimeMachine")),
+    "osVersion": _normalize_runtime_version(capture_values.get("runtimeOsVersion")),
+    "kernelVersion": _normalize_runtime_version(capture_values.get("runtimeKernelVersion")),
+  }
+  replay = {
+    "deviceType": _normalize_runtime_value(replay_values.get("runtimeDeviceType")),
+    "platform": _normalize_runtime_value(replay_values.get("runtimePlatform")),
+    "machine": _normalize_machine(replay_values.get("runtimeMachine")),
+    "osVersion": _normalize_runtime_version(replay_values.get("runtimeOsVersion")),
+    "kernelVersion": _normalize_runtime_version(replay_values.get("runtimeKernelVersion")),
+  }
+  missing = [
+    f"{label} planner runtime {key} is missing"
+    for label, values in (("capture", captured), ("replay", replay))
+    for key, value in values.items()
+    if value is None
+  ]
+  if missing:
+    return PlannerRuntimeProvenanceResult(
+      status="unknown",
+      gateEligible=False,
+      reasons=tuple(missing),
+      capturedRuntime=captured,
+      replayRuntime=replay,
+    )
+
+  mismatches = [
+    f"planner runtime {key} differs: capture={captured[key]}, replay={replay[key]}"
+    for key in captured
+    if captured[key] != replay[key]
+  ]
+  if mismatches:
+    return PlannerRuntimeProvenanceResult(
+      status="mismatch",
+      gateEligible=False,
+      reasons=tuple(mismatches),
+      capturedRuntime=captured,
+      replayRuntime=replay,
+    )
+  return PlannerRuntimeProvenanceResult(
+    status="exact",
+    gateEligible=True,
+    reasons=("capture and replay planner runtime families match exactly",),
+    capturedRuntime=captured,
+    replayRuntime=replay,
+  )
+
+
+def well_formed_planner_state_initialization_claim(provenance: Any) -> bool:
+  """Validate the shape of a claimed captured-and-applied planner state seed.
+
+  This is not restoration evidence. The fidelity evaluator must separately
+  know that checkpoint bytes were actually restored by the replay runtime.
+  """
+  if not isinstance(provenance, Mapping):
+    return False
+  digest = _normalize_sha(provenance.get("stateSha256"))
+  return bool(
+    provenance.get("status") == "exact" and
+    provenance.get("version") == 1 and
+    provenance.get("appliedAtReplayStart") is True and
+    digest is not None and
+    set(digest) != {"0"} and
+    digest != _EMPTY_SHA256 and
+    re.fullmatch(r"[0-9a-f]{64}", digest) is not None
+  )
+
+
+def exact_planner_state_initialization(provenance: Any, *, restoration_verified: bool = False) -> bool:
+  """Require both a well-formed claim and independent restoration verification."""
+  return restoration_verified and well_formed_planner_state_initialization_claim(provenance)
 
 
 def _snapshot(metadata: Mapping[str, Any] | None, *, infer_from_diff_digest: bool) -> _GitSnapshot:
@@ -240,4 +368,12 @@ def classify_replay_provenance(
   )
 
 
-__all__ = ["ProvenanceResult", "ProvenanceStatus", "classify_replay_provenance"]
+__all__ = [
+  "PlannerRuntimeProvenanceResult",
+  "ProvenanceResult",
+  "ProvenanceStatus",
+  "classify_planner_runtime_provenance",
+  "classify_replay_provenance",
+  "exact_planner_state_initialization",
+  "well_formed_planner_state_initialization_claim",
+]

@@ -94,6 +94,7 @@ Follow limit-cycle fix (2026-07-02, seat report: buck/slow/hold/late-re-accel/ov
 | `GapReclaimTaperGain` | 2.0 | 0.0–20.0 | Kinematic overshoot taper on the follow re-accel raise, 1/(m/s²): extra authority scales by clip(1 - gain·c_proj²/(2·gap_surplus), 0, 1). 0 = naive raise (diagnostic) |
 | `LeadBrakeReleaseApproachFloorMps2` | -0.60 | -6.0–0.0 | Most decel allowed while projected recovery ramps toward near-coast |
 | `LeadBrakeReleaseCoastBiasMps2` | 0.05 | -0.5–0.8 | Floor once target is recovered and ego is no longer closing |
+| `LeadBrakeReleaseJerkMps3` | 2.0 | 0.0–10.0 | Hyundai-only positive jerk cap while a continuous same-track lead-follow command releases an existing brake above `LeadBrakeReleaseMinSpeedMps`. New/downward braking is never limited; source/track/low-speed changes disarm immediately. `0` restores the pre-cap release path exactly |
 
 ## Lead Preview
 
@@ -241,6 +242,24 @@ The opening governor watches the SAME raw evidence window CD9 trusts and, when t
 | `OpeningGovernorHoldS` | 1.0 | 0.0–1.5 | Absolute hold from the last dense raw-position opening proof; bridges noisy proof-window dropouts but never self-refreshes. Threat/miss/identity exits clear it immediately. 0.0 restores per-frame legacy behavior |
 | `OpeningGovernorRawClosingVetoMps` | 1.0 | 0.0–100.0 | Veto: windowed raw vRel mean closing beyond this blocks the relax (model's own velocity stream strongly disagrees → resolve toward braking) |
 | `OpeningGovernorALeadVetoMps2` | 0.2 | 0.0–100.0 | Veto: windowed raw lead accel mean below −this (braking lead) blocks the relax |
+
+### Steady-Parity Reconciliation (radard evidence -> Hyundai MPC private copy)
+
+Steady-parity addresses the narrower case where a causal 2 s raw-dRel history
+shows a nearly steady lead while model/published vRel continues to report false
+closure and inflate the MPC target. RadarD publishes only evidence telemetry;
+it does not change dRel, vRel, vLead, or aLead. The Hyundai MPC may relax vRel
+on a private working copy only when actual THW is at least 1.8 s and the lead is
+at least 3 m beyond the exact configured equal-speed gap. An untouched copy
+remains an independent FCW candidate. Braking, fast/short-TTC closure, near
+range, lateral ambiguity, low probability, misses, identity/slot changes,
+phantom holds, or reaching the target restore the original lead immediately.
+
+| Param Key | Default | Range | Description |
+|---|---|---|---|
+| `SteadyParityTrustDeficitMps` | 0.20 | 0.0–100.0 | Keeps the planner-only vRel floor this far below the robust position slope. `>= 99` disables both evidence and correction (master rollback) |
+| `SteadyParityVRelSlewMps2` | 0.80 | 0.0–5.0 | Maximum less-urgent vRel relaxation rate toward proven parity. More-urgent evidence and every reset gate restore immediately. `0` disables output correction while retaining evidence telemetry |
+| `SteadyParityHoldS` | 0.50 | 0.0–1.5 | Maximum bridge across a sparse proof-window dropout while current evidence remains independently safe. It cannot bridge a miss, identity/slot change, threat, braking, lateral ambiguity, or an out-of-band position slope. `0` disables the bridge |
 
 ### Stop-Launch Release + Launch-Follow Demand Floor (Event A, planner/longcontrol)
 

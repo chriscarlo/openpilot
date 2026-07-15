@@ -766,6 +766,14 @@ struct RadarState @0x9a185389d6fdd05f {
       calmRecoveryApplied @8 :Bool;
       recoveryPositionClosingMps @9 :Float32;
       recoveryPositionClosingValid @10 :Bool;
+      steadyParityCandidateValid @11 :Bool;
+      steadyParityPositionSlopeMps @12 :Float32;
+      steadyParityVRelFloorMps @13 :Float32;
+      steadyParityHeld @14 :Bool;
+      steadyParitySampleCount @15 :UInt16;
+      steadyParityWindowSpanS @16 :Float32;
+      steadyParityMaxSampleGapS @17 :Float32;
+      steadyParityReason @18 :Text;
     }
   }
 
@@ -795,6 +803,13 @@ struct RadarState @0x9a185389d6fdd05f {
     # not treat their finite difference as independent physical evidence.
     # Default False preserves producers that do not implement the governor.
     closingGovernorRecovery @17 :Bool;
+    # Evidence-only steady-lead parity candidate from raw model position. RadarD
+    # never applies this floor to vRel/vLead; the longitudinal MPC may consume it
+    # on a private working copy only when exact configured-gap surplus remains.
+    steadyParityCandidateValid @18 :Bool;
+    steadyParityPositionSlopeMps @19 :Float32;
+    steadyParityVRelFloorMps @20 :Float32;
+    steadyParityHeld @21 :Bool;
 
     aLeadDEPRECATED @5 :Float32;
   }

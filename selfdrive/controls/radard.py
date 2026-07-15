@@ -94,6 +94,24 @@ LEAD_TRACK_PROB_DROPOUT_URGENT_TTC_S = 8.0
 # (ModelLeadFcwCorrobWindow) is clamped to this; history is seeded all-True so
 # a freshly acquired track (a genuine sudden cut-in) is never suppressed.
 MODEL_LEAD_FCW_CORROB_HIST_LEN = 8
+# Evidence-only steady-lead parity proof. This path never reshapes RadarState
+# kinematics: it publishes a bounded candidate for the planner to consume on a
+# private working copy after applying the exact configured-gap gate.
+STEADY_PARITY_WINDOW_S = 2.0
+STEADY_PARITY_MIN_SAMPLES = 24
+STEADY_PARITY_MIN_SPAN_S = 1.6
+STEADY_PARITY_MAX_SAMPLE_GAP_S = 0.075
+STEADY_PARITY_MIN_PAIR_SPAN_S = 0.5
+STEADY_PARITY_MIN_POSITION_SLOPE_MPS = -0.25
+STEADY_PARITY_MAX_POSITION_SLOPE_MPS = 0.75
+STEADY_PARITY_ALEAD_VETO_MPS2 = 0.20
+STEADY_PARITY_MAX_RAW_CLOSING_MPS = 1.5
+STEADY_PARITY_MIN_RAW_TTC_S = 12.0
+STEADY_PARITY_MAX_DPATH_M = 1.5
+STEADY_PARITY_MAX_VLAT_MPS = 0.7
+STEADY_PARITY_VLAT_OFFCENTER_DPATH_M = 1.25
+STEADY_PARITY_MIN_MODEL_PROB = 0.60
+STEADY_PARITY_IDENTITY_DREL_JUMP_M = 4.0
 
 # Version zero is the Cap'n Proto default and therefore means no producer-side
 # replay contract was emitted.
@@ -204,6 +222,19 @@ class ModelLeadTrack:
   # opening hold. Closing evidence remains intact for CD9 safety; only the
   # less-urgent opening proof must be earned again on fresh frames.
   opening_evidence_epoch_t: float = -1.0
+  # Independent 2 s raw-position history for the planner-only steady-parity
+  # candidate. It must not reuse CD9's destructively trimmed 0.6 s deque.
+  steady_parity_evidence: deque = field(default_factory=lambda: deque(maxlen=64))
+  steady_parity_candidate_valid: bool = False
+  steady_parity_position_slope_mps: float = 0.0
+  steady_parity_vrel_floor_mps: float = 0.0
+  steady_parity_held: bool = False
+  steady_parity_hold_floor_mps: float | None = None
+  steady_parity_hold_until_t: float = -1.0
+  steady_parity_reason: str = "inactive"
+  steady_parity_sample_count: int = 0
+  steady_parity_window_span_s: float = 0.0
+  steady_parity_max_sample_gap_s: float = 0.0
 
   @classmethod
   def from_lead_dict(cls, identifier: int, lead_dict: dict[str, Any], now: float, lead_slot: int) -> "ModelLeadTrack":
@@ -236,6 +267,150 @@ class ModelLeadTrack:
     self.opening_relax_held = False
     if rearm_after_t is not None:
       self.opening_evidence_epoch_t = max(self.opening_evidence_epoch_t, float(rearm_after_t))
+
+  def _clear_steady_parity(self, reason: str, *, clear_history: bool = True) -> None:
+    self.steady_parity_candidate_valid = False
+    self.steady_parity_held = False
+    self.steady_parity_hold_floor_mps = None
+    self.steady_parity_hold_until_t = -1.0
+    self.steady_parity_vrel_floor_mps = 0.0
+    self.steady_parity_reason = str(reason)
+    if clear_history:
+      self.steady_parity_evidence.clear()
+      self.steady_parity_position_slope_mps = 0.0
+      self.steady_parity_sample_count = 0
+      self.steady_parity_window_span_s = 0.0
+      self.steady_parity_max_sample_gap_s = 0.0
+
+  def _update_steady_parity(self, now: float, raw_drel: float, raw_vrel: float,
+                            raw_alead: float, raw_prob: float, raw_dpath: float,
+                            raw_vlat: float, v_ego: float,
+                            cfg: LeadResponseTuningConfig) -> None:
+    """Publish evidence for a planner-only steady-lead vRel correction.
+
+    The proof is intentionally stricter and longer than the existing opening
+    governor. A robust Theil-Sen slope over 2 s must agree the gap is near
+    parity while every independently urgent current/window signal stays calm.
+    No kinematic field on this ModelLeadTrack is changed here.
+    """
+    trust_deficit = float(getattr(cfg, 'steady_parity_trust_deficit_mps', 99.0))
+    if trust_deficit >= 99.0:
+      self._clear_steady_parity("disabled")
+      return
+
+    # A same-track association may survive a large position discontinuity. It
+    # is still an identity boundary for less-urgent evidence and must earn a
+    # completely fresh 2 s epoch.
+    if self.steady_parity_evidence:
+      prev_t, prev_drel, *_ = self.steady_parity_evidence[-1]
+      dt_s = float(now) - float(prev_t)
+      expected_step_m = float(raw_vrel) * max(0.0, dt_s)
+      if (dt_s <= 1e-3 or dt_s > 0.25 or
+          abs((float(raw_drel) - float(prev_drel)) - expected_step_m) > STEADY_PARITY_IDENTITY_DREL_JUMP_M):
+        self._clear_steady_parity("identity_boundary")
+
+    raw_closing_mps = max(0.0, -float(raw_vrel))
+    raw_ttc_s = float(raw_drel) / max(raw_closing_mps, 0.1)
+    raw_vlead = float(v_ego) + float(raw_vrel)
+    near_threat = float(raw_drel) <= max(10.0, 0.55 * max(0.0, float(v_ego)))
+    hard_reason = None
+    current_raw_braking = float(raw_alead) < -STEADY_PARITY_ALEAD_VETO_MPS2
+    if float(self.aLeadK) < -STEADY_PARITY_ALEAD_VETO_MPS2:
+      hard_reason = "published_braking"
+    elif raw_closing_mps >= STEADY_PARITY_MAX_RAW_CLOSING_MPS:
+      hard_reason = "fast_close"
+    elif raw_closing_mps > 0.3 and raw_ttc_s <= STEADY_PARITY_MIN_RAW_TTC_S:
+      hard_reason = "short_raw_ttc"
+    elif raw_vlead < 0.0:
+      hard_reason = "oncoming"
+    elif near_threat:
+      hard_reason = "near_threat"
+    elif (abs(float(raw_dpath)) > STEADY_PARITY_MAX_DPATH_M or
+          (abs(float(raw_dpath)) > STEADY_PARITY_VLAT_OFFCENTER_DPATH_M and
+           abs(float(raw_vlat)) >= STEADY_PARITY_MAX_VLAT_MPS)):
+      hard_reason = "lateral_ambiguity"
+    elif float(raw_prob) < STEADY_PARITY_MIN_MODEL_PROB:
+      hard_reason = "low_probability"
+    if hard_reason is not None:
+      self._clear_steady_parity(hard_reason)
+      return
+
+    self.steady_parity_candidate_valid = False
+    self.steady_parity_held = False
+    self.steady_parity_evidence.append((
+      float(now), float(raw_drel), float(raw_vrel), float(raw_alead),
+      float(raw_dpath), float(raw_vlat), float(raw_prob),
+    ))
+    while self.steady_parity_evidence and (float(now) - self.steady_parity_evidence[0][0]) > STEADY_PARITY_WINDOW_S:
+      self.steady_parity_evidence.popleft()
+
+    samples = list(self.steady_parity_evidence)
+    span_s = samples[-1][0] - samples[0][0] if len(samples) >= 2 else 0.0
+    gaps_s = [b[0] - a[0] for a, b in zip(samples, samples[1:], strict=False)]
+    max_gap_s = max(gaps_s) if gaps_s else 0.0
+    self.steady_parity_sample_count = len(samples)
+    self.steady_parity_window_span_s = float(span_s)
+    self.steady_parity_max_sample_gap_s = float(max_gap_s)
+    dense = bool(
+      len(samples) >= STEADY_PARITY_MIN_SAMPLES and
+      span_s >= STEADY_PARITY_MIN_SPAN_S and
+      gaps_s and max_gap_s <= STEADY_PARITY_MAX_SAMPLE_GAP_S
+    )
+
+    pair_slopes = [
+      (later[1] - earlier[1]) / (later[0] - earlier[0])
+      for i, earlier in enumerate(samples)
+      for later in samples[i + 1:]
+      if (later[0] - earlier[0]) >= STEADY_PARITY_MIN_PAIR_SPAN_S
+    ]
+    position_slope = float(np.median(pair_slopes)) if pair_slopes else None
+    if position_slope is not None:
+      self.steady_parity_position_slope_mps = position_slope
+
+    alead_mean = sum(sample[3] for sample in samples) / len(samples)
+    # A current raw braking sample always removes correction in the same frame,
+    # but remains in the evidence window so isolated model-accel noise is judged
+    # by the specified window mean. Sustained braking drives that mean below the
+    # veto; published aLead crossing the same threshold clears the epoch above.
+    if current_raw_braking:
+      self._clear_steady_parity("current_raw_braking", clear_history=False)
+      return
+    if alead_mean < -STEADY_PARITY_ALEAD_VETO_MPS2:
+      self._clear_steady_parity("window_braking", clear_history=False)
+      return
+    slope_in_band = bool(
+      position_slope is not None and
+      STEADY_PARITY_MIN_POSITION_SLOPE_MPS <= position_slope <= STEADY_PARITY_MAX_POSITION_SLOPE_MPS
+    )
+    if dense and slope_in_band:
+      floor_mps = min(0.0, float(position_slope) - max(0.0, trust_deficit))
+      self.steady_parity_candidate_valid = True
+      self.steady_parity_vrel_floor_mps = float(floor_mps)
+      self.steady_parity_hold_floor_mps = float(floor_mps)
+      hold_s = float(np.clip(float(getattr(cfg, 'steady_parity_hold_s', 0.0)), 0.0, 1.5))
+      self.steady_parity_hold_until_t = float(now) + hold_s
+      self.steady_parity_reason = "position_proven"
+      return
+
+    # Hold bridges only a density dropout. A dense out-of-band slope is fresh
+    # contradictory position evidence and immediately clears authority.
+    hold_active = bool(
+      not dense and self.steady_parity_hold_floor_mps is not None and
+      float(now) <= self.steady_parity_hold_until_t and
+      float(getattr(cfg, 'steady_parity_hold_s', 0.0)) > 0.0 and
+      (position_slope is None or slope_in_band)
+    )
+    if hold_active:
+      self.steady_parity_candidate_valid = True
+      self.steady_parity_vrel_floor_mps = float(self.steady_parity_hold_floor_mps)
+      self.steady_parity_held = True
+      self.steady_parity_reason = "density_hold"
+      return
+
+    self.steady_parity_hold_floor_mps = None
+    self.steady_parity_hold_until_t = -1.0
+    self.steady_parity_vrel_floor_mps = 0.0
+    self.steady_parity_reason = "sparse_window" if not dense else "position_slope_veto"
 
   def _fast_closing_supported(self, raw_drel: float, raw_vrel: float, raw_dpath: float,
                               raw_vlat: float, innovation_m: float, v_ego: float,
@@ -326,6 +501,7 @@ class ModelLeadTrack:
     if self.last_slot >= 0 and int(lead_slot) != self.last_slot:
       self._clear_opening_relax(rearm_after_t=now)
       self.opening_position_evidence.clear()
+      self._clear_steady_parity("slot_change")
 
     dt_s = float(np.clip(float(now) - self.last_t, 0.0, 0.25))
     predicted_drel = self.predict_drel(now)
@@ -341,6 +517,9 @@ class ModelLeadTrack:
     else:
       self.opening_confirm_frames = 0
     fast_closing = self._fast_closing_supported(raw_drel, raw_vrel, raw_dpath, raw_vlat, innovation_m, v_ego, cfg)
+    self._update_steady_parity(
+      now, raw_drel, raw_vrel, raw_alead, raw_prob, raw_dpath, raw_vlat, v_ego, cfg,
+    )
 
     urgency = 0.0 if fast_closing else self._closing_urgency(raw_drel, raw_vrel, innovation_m, cfg)
     # CD9: a corroborated sustained closure forces full urgency (the existing
@@ -1189,6 +1368,10 @@ class ModelLeadTrack:
       "fcw": False,
       "fcwSuppressed": bool(self.fcw_suppressed),
       "closingGovernorRecovery": bool(self.governor_calm_recovery_mode),
+      "steadyParityCandidateValid": bool(self.steady_parity_candidate_valid),
+      "steadyParityPositionSlopeMps": float(self.steady_parity_position_slope_mps),
+      "steadyParityVRelFloorMps": float(self.steady_parity_vrel_floor_mps),
+      "steadyParityHeld": bool(self.steady_parity_held),
       "modelProb": float(self.modelProb),
       "status": True,
       "radar": False,
@@ -1267,6 +1450,7 @@ class ModelLeadTracker:
         # A missed frame means no fresh position evidence: never carry a stale
         # opening relax onto a held/coasted publish (less-urgent direction).
         track._clear_opening_relax(rearm_after_t=track.last_t)
+        track._clear_steady_parity("missed_frame")
       if track.missed > MODEL_LEAD_TRACK_MAX_MISSES:
         self._tracks.pop(identifier, None)
     self._frame_active = False
@@ -1870,6 +2054,14 @@ class RadarD:
     if track.governor_recovery_position_closing_mps is not None:
       debug.recoveryPositionClosingMps = float(track.governor_recovery_position_closing_mps)
       debug.recoveryPositionClosingValid = True
+    debug.steadyParityCandidateValid = bool(track.steady_parity_candidate_valid)
+    debug.steadyParityPositionSlopeMps = float(track.steady_parity_position_slope_mps)
+    debug.steadyParityVRelFloorMps = float(track.steady_parity_vrel_floor_mps)
+    debug.steadyParityHeld = bool(track.steady_parity_held)
+    debug.steadyParitySampleCount = int(track.steady_parity_sample_count)
+    debug.steadyParityWindowSpanS = float(track.steady_parity_window_span_s)
+    debug.steadyParityMaxSampleGapS = float(track.steady_parity_max_sample_gap_s)
+    debug.steadyParityReason = str(track.steady_parity_reason)
 
   def _maybe_refresh_lead_prob_thresholds(self) -> None:
     if (self.current_time - self._last_prob_refresh_t) < self.LEAD_PROB_REFRESH_S:

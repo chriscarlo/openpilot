@@ -255,6 +255,30 @@ def test_closed_loop_rejects_old_exact_params_label_without_complete_manifest() 
   assert result.trace[0]["planner_fidelity_scorable"] is False
 
 
+def test_closed_loop_rejects_unapplied_exact_planner_state_claim() -> None:
+  step = StepInput(
+    t_s=0.0,
+    cruise_speed_mps=20.0,
+    replay_reference={
+      "plannerStateInitializationProvenance": {
+        "status": "exact",
+        "version": 1,
+        "appliedAtReplayStart": True,
+        "stateSha256": "0" * 64,
+      },
+    },
+  )
+
+  with pytest.raises(ValueError, match="does not yet implement state restoration"):
+    run_harness(
+      vehicle_config=_vehicle(),
+      scenario_name="unapplied_planner_state_claim",
+      steps=[step],
+      initial_speed_mps=20.0,
+      noise_profile="off",
+    )
+
+
 def test_missing_exact_radar_target_fails_with_pre_roll_message() -> None:
   step = StepInput(
     t_s=0.0,

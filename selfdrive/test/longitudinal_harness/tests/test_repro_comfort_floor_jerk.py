@@ -179,6 +179,34 @@ def _run_jerk(jerk_limit: float) -> SimulationResult:
   )
 
 
+FIX_RELEASE_JERK_MPS3 = 2.0
+ROLLBACK_RELEASE_JERK_MPS3 = 0.0
+
+
+@functools.lru_cache(maxsize=2)
+def _vehicle_config_release_jerk(jerk_limit: float):
+  return resolve_ev6_vehicle_config(param_overrides={
+    # Disable only the original CD7 micro-envelope so this matched pair isolates
+    # the new large brake-release leg and its own zero rollback sentinel.
+    "Longitudinal.LiveTune.ComfortJerkLimitMps3": "50",
+    "Longitudinal.LiveTune.LeadBrakeReleaseJerkMps3": f"{jerk_limit:g}",
+    "Longitudinal.LiveTune.OpeningGovernorHoldS": "0",
+  })
+
+
+@functools.lru_cache(maxsize=2)
+def _run_release_jerk(jerk_limit: float) -> SimulationResult:
+  return run_harness(
+    vehicle_config=_vehicle_config_release_jerk(jerk_limit),
+    scenario_name=f"same_track_brake_release_jerk_{jerk_limit:g}",
+    steps=_build_steps(),
+    initial_speed_mps=EGO_V0_MPS,
+    noise_profile="ev6_measured",
+    seed=SEED,
+    perception_filter="auto",
+  )
+
+
 def _planner_rows(result: SimulationResult) -> list[dict]:
   # One row per 20 Hz planner step (the harness logs every control tick; the
   # planner updates once per 5 ticks at DT_MDL).
@@ -440,6 +468,52 @@ def test_comfort_jerk_limit_knob_fix_vs_rollback() -> None:
 
   # And the fix is strictly smoother than its own rollback.
   assert fix_jerk < roll_jerk, physics
+
+
+def test_same_track_brake_release_jerk_fix_vs_zero_rollback() -> None:
+  """Full EV6 planner/RadarD regression for the separate release envelope.
+
+  The deterministic steady-lead trace naturally produces several negative
+  planner commands that jump to the +0.05 brake-release floor. Select the first
+  frame whose planner debug proves the new same-track envelope clipped it, then
+  compare the identical zero-sentinel twin at that exact timestamp.
+  """
+  fix = _run_release_jerk(FIX_RELEASE_JERK_MPS3)
+  rollback = _run_release_jerk(ROLLBACK_RELEASE_JERK_MPS3)
+  fix_rows = _planner_rows(fix)
+  rollback_by_t = {row["t_s"]: row for row in _planner_rows(rollback)}
+
+  candidate = next(
+    (prev, row)
+    for prev, row in zip(fix_rows[:-1], fix_rows[1:], strict=False)
+    if row["planner_comfort_jerk_debug"].get("release_slew_clipped", False)
+  )
+  fix_prev, fix_row = candidate
+  rollback_prev = rollback_by_t[fix_prev["t_s"]]
+  rollback_row = rollback_by_t[fix_row["t_s"]]
+
+  fix_debug = fix_row["planner_comfort_jerk_debug"]
+  rollback_debug = rollback_row["planner_comfort_jerk_debug"]
+  assert fix_prev["planner_source"] == fix_row["planner_source"] == "lead0"
+  assert fix_debug["release_track_id"] != -1
+  assert fix_prev["planner_comfort_jerk_debug"].get("release_track_id") == fix_debug["release_track_id"]
+  assert not fix_row["planner_handoff_limit_debug"].get("active", False)
+  assert not fix_row["planner_relatch_blend_debug"].get("active", False)
+  assert fix_prev["planner_accel_mps2"] < 0.0
+
+  fix_jerk = (fix_row["planner_accel_mps2"] - fix_prev["planner_accel_mps2"]) / DT_MDL
+  rollback_jerk = (rollback_row["planner_accel_mps2"] - rollback_prev["planner_accel_mps2"]) / DT_MDL
+  physics = (
+    f"same-track brake release at t={fix_row['t_s']:.2f}s:\n"
+    f"  fix {fix_prev['planner_accel_mps2']:+.3f} -> {fix_row['planner_accel_mps2']:+.3f} "
+    f"m/s^2 ({fix_jerk:.2f} m/s^3)\n"
+    f"  rollback {rollback_prev['planner_accel_mps2']:+.3f} -> "
+    f"{rollback_row['planner_accel_mps2']:+.3f} m/s^2 ({rollback_jerk:.2f} m/s^3)"
+  )
+  assert fix_jerk == pytest.approx(FIX_RELEASE_JERK_MPS3, abs=1e-6), physics
+  assert rollback_jerk > FIX_RELEASE_JERK_MPS3, physics
+  assert rollback_debug.get("release_slew_clipped", False) is False
+  assert rollback_debug.get("release_max_step_mps2") == pytest.approx(0.0)
 
 
 def test_release_floor_owned_upward_rollon_uses_comfort_jerk_limit() -> None:
