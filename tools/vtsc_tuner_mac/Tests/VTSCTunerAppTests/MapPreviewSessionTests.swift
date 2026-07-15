@@ -62,15 +62,148 @@ private func calibrationSession() -> MapPreviewSession {
 }
 
 @MainActor
-@Test func aFreshMapPreviewLetsTheFirstClickedCurveBecomeACalibrationDraft() {
+@Test func freshMapPreviewKeepsWholeCurveStudyUntilExplicitNewCurveCapture() {
   let session = MapPreviewSession(loadPersistedState: false, persistsCalibrationSamples: false)
 
   session.select(curveSelection(id: "fresh-click"))
 
-  #expect(session.purpose == .calibration)
+  #expect(session.purpose == .wholeCurveStudy)
+  #expect(session.selection == nil)
+  #expect(!session.canQueueSelection)
+
+  session.beginStudyCurveCapture()
+
+  #expect(session.purpose == .wholeCurveStudy)
+  #expect(session.isStudyCurveCaptureActive)
+  #expect(session.calibrationSamples.isEmpty)
+
+  session.select(curveSelection(id: "fresh-click"))
+
   #expect(session.selection?.way.id == "fresh-click")
   #expect(session.canQueueSelection)
   #expect(session.statusText.contains("Drafting"))
+}
+
+@MainActor
+@Test func wholeCurveCaptureKeepsDraftsUnsavedUntilBankedAndStaysReadyForAnother() {
+  let session = MapPreviewSession(
+    loadPersistedState: false,
+    persistsCalibrationSamples: false,
+    persistsMapPreferences: false
+  )
+  session.beginStudyCurveCapture()
+  session.select(curveSelection(id: "study-draft"))
+  session.setDraftDesiredSpeedMPH(47)
+
+  #expect(session.calibrationSamples.isEmpty)
+  #expect(session.selection?.way.id == "study-draft")
+  #expect(session.selectionDraftBadgeText == "DRAFT — NOT BANKED")
+
+  session.queueSelectedCurve()
+
+  #expect(session.purpose == .wholeCurveStudy)
+  #expect(session.isStudyCurveCaptureActive)
+  #expect(session.calibrationSamples.count == 1)
+  #expect(session.calibrationSamples.first?.desiredSpeedMPH == 47)
+  #expect(session.studyCaptureBankedNumber == 1)
+  #expect(session.selection == nil)
+  #expect(session.statusText.contains("Banked #1"))
+}
+
+@MainActor
+@Test func wholeCurveCaptureMissKeepsTheCurrentDraftAndCancelNeverBanksIt() {
+  let session = MapPreviewSession(
+    loadPersistedState: false,
+    persistsCalibrationSamples: false,
+    persistsMapPreferences: false
+  )
+  session.beginStudyCurveCapture()
+  session.select(curveSelection(id: "kept-draft"))
+  session.setDraftDesiredSpeedMPH(43)
+
+  session.select(nil)
+
+  #expect(session.selection?.way.id == "kept-draft")
+  #expect(session.draftDesiredSpeedMPH == 43)
+  #expect(session.calibrationSamples.isEmpty)
+  #expect(session.statusText.contains("draft for Curve kept-draft is still not banked"))
+
+  session.cancelStudyCurveCapture()
+
+  #expect(!session.isStudyCurveCaptureActive)
+  #expect(session.selection == nil)
+  #expect(session.calibrationSamples.isEmpty)
+}
+
+@MainActor
+@Test func leavingWholeCurveStudyClearsAnArmedNewCurveCapture() {
+  let session = MapPreviewSession(
+    loadPersistedState: false,
+    persistsCalibrationSamples: false,
+    persistsMapPreferences: false
+  )
+  session.beginStudyCurveCapture()
+  session.select(curveSelection(id: "leave-study"))
+
+  session.purpose = .calibration
+
+  #expect(session.purpose == .calibration)
+  #expect(!session.isStudyCurveCaptureActive)
+  #expect(session.selection?.way.id == "leave-study")
+  #expect(session.calibrationSamples.isEmpty)
+}
+
+@MainActor
+@Test func wholeCurveCaptureCannotEditOrDuplicateAnAlreadyBankedCurve() {
+  let session = calibrationSession()
+  let savedSelection = curveSelection(id: "already-banked")
+  session.select(savedSelection)
+  session.setDraftDesiredSpeedMPH(46)
+  session.queueSelectedCurve()
+
+  session.purpose = .wholeCurveStudy
+  session.beginStudyCurveCapture()
+  session.select(savedSelection)
+  session.setDraftDesiredSpeedMPH(61)
+  session.queueSelectedCurve()
+
+  #expect(session.selectionQueueActionTitle == "Already in Curve Bank")
+  #expect(!session.canQueueSelection)
+  #expect(session.calibrationSamples.count == 1)
+  #expect(session.calibrationSamples.first?.desiredSpeedMPH == 46)
+  #expect(session.draftDesiredSpeedMPH == 46)
+}
+
+@MainActor
+@Test func wholeCurveCaptureKeepsStraightCandidatesOutOfTheBank() {
+  let session = MapPreviewSession(
+    loadPersistedState: false,
+    persistsCalibrationSamples: false,
+    persistsMapPreferences: false
+  )
+  session.beginStudyCurveCapture()
+  session.select(curveSelection(id: "straight-capture", curvature: 0))
+
+  #expect(session.isStudyCurveCaptureActive)
+  #expect(session.selection?.way.id == "straight-capture")
+  #expect(!session.canQueueSelection)
+  #expect(session.calibrationSamples.isEmpty)
+  #expect(session.statusText.contains("no usable runtime-smoothed curvature"))
+}
+
+@MainActor
+@Test func normalWholeCurveStudyCannotQueueAnUnarmedSelection() {
+  let session = MapPreviewSession(
+    loadPersistedState: false,
+    persistsCalibrationSamples: false,
+    persistsMapPreferences: false
+  )
+
+  session.queueSelectedCurve()
+
+  #expect(session.calibrationSamples.isEmpty)
+  #expect(session.statusIsError)
+  #expect(session.statusText.contains("Choose Add New Curve"))
 }
 
 private func connectedWay(

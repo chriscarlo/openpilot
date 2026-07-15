@@ -2,11 +2,13 @@
 
 Reverse-chronological. Add a new dated section for every substantive change.
 
-## 2026-07-14 — direct curve-picking entry and click-through map legend
+## 2026-07-14 — in-study familiar-curve capture and click-through map legend
 
-- Restored Calibration as the normal Map Preview entry mode. The prior Whole-Curve Study default is deliberately read-only: it replaces the bank workflow with study inspection and routes road clicks to study events, which made ordinary curve selection look broken. Whole-Curve Study remains available from the purpose picker, and its inspector now has an explicit “Go to Curve Calibration” button that explains how to return to drafting and bank edits.
-- Made the display-only map speed legend ignore pointer events. Its alignment frame spans the map, so this prevents it from ever obscuring a colored road click as the map pane changes size.
-- Verification: all 64 core and 34 app Swift tests passed, as did the tile-decoder Go tests; the rebuilt Release bundle passed strict deep code-sign verification. In the fresh app, Map Preview opened in Calibration with the calibration workflow visible; a physical mouse click selected Forest Route 3N01, created a clearly marked unbanked draft at 27.9 mph, and enabled Add Curve to Bank. The persisted 18-curve bank hash was unchanged; nothing was added, fitted, accepted, or applied.
+- Restored Whole-Curve Study as the normal Map Preview entry. It keeps its whole-curve presentation and normal colored-event inspection, while the right pane now exposes an explicit **Add New Curve to Sample Group** action instead of sending the user back to the separate Calibration workspace.
+- That action arms a transient local capture state in the same viewport. A mapd-road click snaps to the existing apex-selection path and opens a visibly unbanked draft; only **Add Curve to Bank** persists a local sample. Saving leaves capture active, reports the bank number, reloads the visible local study, and lets the user keep collecting as many curves as they need. Escape, Back to Whole-Curve Study, a purpose change, and leaving the map workspace cancel the unsaved capture without touching the bank.
+- The normal study remains unable to edit/remove existing samples, fit, accept, sync, rebuild, apply, or contact the car. During capture it can add one new local sample at a time, while an already-banked curve stays non-editable and directs the user to Calibration for changes.
+- The display-only map speed legend ignores pointer events. Its alignment frame spans the map, so it cannot obscure a colored road click as the pane changes size.
+- Verification: tile-decoder Go tests passed; the complete Swift suite passed (64 Core + 39 App tests); the rebuilt Release bundle passed strict deep code-sign verification. A fresh launch opened Whole-Curve Study with the new right-column action. Physical clicks entered Map Preview, pressed Add New Curve to Sample Group, and showed the armed, unsaved capture state with the raw map palette and Back to Whole-Curve Study. No road was banked during smoke testing; the persistent archive remains at 18 samples.
 
 ## 2026-07-13 — production whole-curve runtime and coherent deployment
 

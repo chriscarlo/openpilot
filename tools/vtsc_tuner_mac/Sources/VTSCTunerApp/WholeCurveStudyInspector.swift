@@ -2,23 +2,44 @@ import Foundation
 import SwiftUI
 
 struct WholeCurveStudyInspector: View {
+  @ObservedObject var tuner: TunerSession
   @ObservedObject var map: MapPreviewSession
 
   var body: some View {
-    ScrollView {
-      LazyVStack(alignment: .leading, spacing: 16) {
-        safetyBanner
-        summaryCard
-        eventPicker
+    ScrollViewReader { proxy in
+      ScrollView {
+        LazyVStack(alignment: .leading, spacing: 16) {
+          safetyBanner
+          captureWorkflow
 
-        sectionHeader("Selected Whole Curve", systemImage: "point.topleft.down.to.point.bottomright.curvepath")
-        if let event = map.selectedWholeCurveEvent {
-          selectedEventCard(event)
-        } else {
-          emptySelectionCard
+          if map.isStudyCurveCaptureActive {
+            sectionHeader("New Curve Draft", systemImage: "plus.circle.fill")
+              .id("study-curve-draft")
+            if let selection = map.selection {
+              SelectedCurveDraftCard(tuner: tuner, map: map, selection: selection)
+            } else {
+              capturePrompt
+            }
+          }
+
+          summaryCard
+          eventPicker
+
+          sectionHeader("Selected Whole Curve", systemImage: "point.topleft.down.to.point.bottomright.curvepath")
+          if let event = map.selectedWholeCurveEvent {
+            selectedEventCard(event)
+          } else {
+            emptySelectionCard
+          }
+        }
+        .padding(16)
+      }
+      .onChange(of: map.selection?.id) { _, selectedID in
+        guard map.isStudyCurveCaptureActive, selectedID != nil else { return }
+        withAnimation(.easeInOut(duration: 0.2)) {
+          proxy.scrollTo("study-curve-draft", anchor: .top)
         }
       }
-      .padding(16)
     }
   }
 
@@ -29,18 +50,10 @@ struct WholeCurveStudyInspector: View {
         .foregroundStyle(.cyan)
       Text("DOES NOT CHANGE TUNE OR CAR")
         .font(.title3.weight(.heavy))
-      Text("This view only compares today’s mapd result with the experimental whole-curve calculation from local tile data. It cannot save or apply tune changes, edit the curve bank, sync, rebuild, or contact the car.")
+      Text("This view compares today’s mapd result with the experimental whole-curve calculation from local tile data. It never changes the tune or car. You can explicitly add a local curve-bank sample below, but only Add Curve to Bank saves it.")
         .font(.callout)
         .foregroundStyle(.secondary)
         .fixedSize(horizontal: false, vertical: true)
-      Button {
-        map.purpose = .calibration
-      } label: {
-        Label("Go to Curve Calibration", systemImage: "plus.circle.fill")
-      }
-      .buttonStyle(.borderedProminent)
-      .controlSize(.large)
-      .help("Switch to Calibration to click a mapd curve, choose its target speed, and add it to the persistent Curve Bank.")
     }
     .padding(13)
     .frame(maxWidth: .infinity, alignment: .leading)
@@ -49,6 +62,65 @@ struct WholeCurveStudyInspector: View {
       RoundedRectangle(cornerRadius: 12)
         .stroke(Color.cyan.opacity(0.42), lineWidth: 1)
     }
+  }
+
+  private var captureWorkflow: some View {
+    VStack(alignment: .leading, spacing: 9) {
+      if map.isStudyCurveCaptureActive {
+        Label("ADDING A NEW CURVE", systemImage: "plus.circle.fill")
+          .font(.callout.weight(.bold))
+          .foregroundStyle(.tint)
+        Text("Click a colored mapd road. That opens an apex-snapped draft only; set the target speed, then choose Add Curve to Bank. You can keep adding curves without leaving this study.")
+          .font(.callout)
+          .foregroundStyle(.secondary)
+          .fixedSize(horizontal: false, vertical: true)
+        if let number = map.studyCaptureBankedNumber {
+          Label("Banked #\(number) — \(map.calibrationSamples.count) curves saved on this Mac", systemImage: "checkmark.circle.fill")
+            .font(.callout.weight(.semibold))
+            .foregroundStyle(.green)
+        }
+        HStack {
+          Button("Back to Whole-Curve Study", action: map.cancelStudyCurveCapture)
+            .buttonStyle(.bordered)
+          Spacer()
+          Text("Nothing is added on map click")
+            .font(.caption.weight(.medium))
+            .foregroundStyle(.secondary)
+        }
+      } else {
+        Label("ADD A FAMILIAR CURVE", systemImage: "plus.circle.fill")
+          .font(.callout.weight(.bold))
+          .foregroundStyle(.tint)
+        Text("Know a curve that needs a different speed? Start here, click that mapd road, set the target mph, then press Add Curve to Bank. No click changes the bank by itself.")
+          .font(.callout)
+          .foregroundStyle(.secondary)
+          .fixedSize(horizontal: false, vertical: true)
+        Button {
+          map.beginStudyCurveCapture()
+        } label: {
+          Label("Add New Curve to Sample Group", systemImage: "plus.circle.fill")
+        }
+        .buttonStyle(.borderedProminent)
+        .controlSize(.large)
+      }
+    }
+    .padding(12)
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .background(Color.accentColor.opacity(0.10), in: RoundedRectangle(cornerRadius: 12))
+  }
+
+  private var capturePrompt: some View {
+    VStack(alignment: .leading, spacing: 8) {
+      Label("Choose a mapd curve", systemImage: "cursorarrow.click.2")
+        .font(.headline.weight(.semibold))
+      Text("Click a colored road on the map. The app will snap to the nearby curve apex and show a draft here; it will not save anything until you choose Add Curve to Bank.")
+        .font(.callout)
+        .foregroundStyle(.secondary)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+    .padding(13)
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
   }
 
   private var summaryCard: some View {

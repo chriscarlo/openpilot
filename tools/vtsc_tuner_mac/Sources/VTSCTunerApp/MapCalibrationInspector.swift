@@ -278,7 +278,7 @@ struct MapPreviewInspector: View {
   }
 }
 
-private struct SelectedCurveDraftCard: View {
+struct SelectedCurveDraftCard: View {
   @ObservedObject var tuner: TunerSession
   @ObservedObject var map: MapPreviewSession
   let selection: MapRoadSelection
@@ -412,6 +412,7 @@ private struct SelectedCurveDraftCard: View {
         .font(.system(size: 25, weight: .bold, design: .rounded))
         .frame(width: 120)
         .multilineTextAlignment(.trailing)
+        .disabled(map.isStudyCurveCaptureActive && map.selectionIsQueued)
         Text("mph")
           .font(.title3.weight(.semibold))
           .foregroundStyle(.secondary)
@@ -429,11 +430,13 @@ private struct SelectedCurveDraftCard: View {
       .disabled(!map.canQueueSelection)
       .help(map.selectionQueueHelp)
       Text(
-        map.selectionIsQueued
-          ? (map.selectionHasUncommittedTarget
-              ? "This change is not in the bank yet. Press Update before selecting another curve."
-              : "This edits the existing numbered bank item; it never creates a duplicate.")
-          : "This speed is only a draft until you add it to the bank."
+        map.isStudyCurveCaptureActive && map.selectionIsQueued
+          ? "This curve is already banked. Choose another road, or switch to Calibration to edit it."
+          : (map.selectionIsQueued
+              ? (map.selectionHasUncommittedTarget
+                  ? "This change is not in the bank yet. Press Update before selecting another curve."
+                  : "This edits the existing numbered bank item; it never creates a duplicate.")
+              : "This speed is only a draft until you add it to the bank.")
       )
       .font(.callout)
       .foregroundStyle(.secondary)

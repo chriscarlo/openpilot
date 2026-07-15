@@ -21,6 +21,7 @@ struct MapPreviewView: View {
         StrategicMapView(
           ways: map.ways,
           purpose: map.purpose,
+          isStudyCurveCaptureActive: map.isStudyCurveCaptureActive,
           mode: map.displayMode,
           wholeCurveMode: map.wholeCurveDisplayMode,
           wholeCurveEvents: map.wholeCurveEvents,
@@ -50,6 +51,7 @@ struct MapPreviewView: View {
 
         MapSpeedLegend(
           purpose: map.purpose,
+          isStudyCurveCaptureActive: map.isStudyCurveCaptureActive,
           calibrationMode: map.displayMode,
           wholeCurveMode: map.wholeCurveDisplayMode
         )
@@ -256,20 +258,27 @@ struct MapPreviewView: View {
 
 struct MapSpeedLegend: View {
   let purpose: MapPreviewPurpose
+  let isStudyCurveCaptureActive: Bool
   let calibrationMode: MapSpeedDisplayMode
   let wholeCurveMode: MapWholeCurveDisplayMode
   private let columns = Array(repeating: GridItem(.flexible(), spacing: 8), count: 3)
 
   private var title: String {
-    purpose == .calibration ? calibrationMode.rawValue : wholeCurveMode.rawValue
+    (purpose == .calibration || isStudyCurveCaptureActive)
+      ? calibrationMode.rawValue
+      : wholeCurveMode.rawValue
   }
 
   private var isDelta: Bool {
-    purpose == .calibration ? calibrationMode == .delta : wholeCurveMode == .difference
+    (purpose == .calibration || isStudyCurveCaptureActive)
+      ? calibrationMode == .delta
+      : wholeCurveMode == .difference
   }
 
   private var caption: String {
-    purpose == .calibration ? calibrationMode.legendCaption : wholeCurveMode.legendCaption
+    (purpose == .calibration || isStudyCurveCaptureActive)
+      ? calibrationMode.legendCaption
+      : wholeCurveMode.legendCaption
   }
 
   var body: some View {

@@ -23,17 +23,19 @@ final class MapPreviewSession: ObservableObject {
 
   @Published var tileRootURL: URL?
   @Published var ways: [MapRenderedWay] = []
-  // Curve picking is the normal Map Preview task. Whole-Curve Study remains
-  // available as an explicit, read-only mode from the map-purpose picker.
-  @Published var purpose: MapPreviewPurpose = .calibration {
+  @Published var purpose: MapPreviewPurpose = .wholeCurveStudy {
     didSet {
       guard purpose != oldValue else { return }
       if purpose == .calibration {
+        isStudyCurveCaptureActive = false
+        studyCaptureBankedNumber = nil
         selectedWholeCurveEventID = nil
         refreshCalibrationBaselines()
         invalidateFit()
         refreshUncommittedDraftIfNeeded()
       } else {
+        isStudyCurveCaptureActive = false
+        studyCaptureBankedNumber = nil
         clearSelection()
         focusWholeCurveBank(announce: false)
       }
@@ -52,6 +54,8 @@ final class MapPreviewSession: ObservableObject {
     }
   }
   @Published var selection: MapRoadSelection?
+  @Published private(set) var isStudyCurveCaptureActive = false
+  @Published private(set) var studyCaptureBankedNumber: Int?
   @Published private(set) var draftDesiredSpeedMPH = 0.0
   @Published var renderRevision = 0
   @Published var cameraDestination: MapCameraDestination?
@@ -146,11 +150,16 @@ final class MapPreviewSession: ObservableObject {
       Self.lateralAcceleration(curvature: $0.curvature, speedMPH: $0.desiredSpeedMPH)
     }.filter(\.isFinite).max() ?? 0
   }
+  var canEditSelectedCurveDraft: Bool {
+    purpose == .calibration || isStudyCurveCaptureActive
+  }
   var canQueueSelection: Bool {
-    guard let selection,
+    guard canEditSelectedCurveDraft,
+          let selection,
           selection.node.curvatureContextComplete,
           selection.node.curvature >= 1.0e-7
     else { return false }
+    guard !(isStudyCurveCaptureActive && selectionIsQueued) else { return false }
     return draftDesiredSpeedMPH.isFinite && draftDesiredSpeedMPH > 0
   }
   var selectionIsQueued: Bool {
@@ -166,6 +175,7 @@ final class MapPreviewSession: ObservableObject {
     return index + 1
   }
   var selectionQueueActionTitle: String {
+    if isStudyCurveCaptureActive, selectionIsQueued { return "Already in Curve Bank" }
     if let selectionQueuedNumber { return "Update Bank Item #\(selectionQueuedNumber)" }
     return "Add Curve to Bank"
   }
@@ -185,6 +195,9 @@ final class MapPreviewSession: ObservableObject {
       && !isFitting
   }
   var selectionQueueHelp: String {
+    guard canEditSelectedCurveDraft else {
+      return "Choose Add New Curve before drafting a local curve-bank sample."
+    }
     guard let selection else { return "Select a mapd curve first." }
     guard selection.node.curvatureContextComplete else {
       return "This point lacks unambiguous adjacent-way context. Load more surrounding map geometry or choose another point."
@@ -194,6 +207,9 @@ final class MapPreviewSession: ObservableObject {
     }
     guard draftDesiredSpeedMPH.isFinite && draftDesiredSpeedMPH > 0 else {
       return "Enter a positive target speed before adding this curve."
+    }
+    if isStudyCurveCaptureActive, selectionIsQueued {
+      return "This curve is already in the bank. Choose a new curve, or switch to Calibration to edit the saved item."
     }
     return selectionIsQueued
       ? "Save the edited target back to this curve's bank item."
@@ -241,10 +257,14 @@ final class MapPreviewSession: ObservableObject {
     lastViewport = viewport
     currentParameters = parameters
     currentBands = bands
-    if invalidatesFit, purpose == .calibration {
-      refreshCalibrationBaselines()
-      invalidateFit()
-      refreshUncommittedDraftIfNeeded()
+    if invalidatesFit {
+      if purpose == .calibration {
+        refreshCalibrationBaselines()
+        invalidateFit()
+        refreshUncommittedDraftIfNeeded()
+      } else if isStudyCurveCaptureActive {
+        refreshUncommittedDraftIfNeeded()
+      }
     }
     guard !isSyncing else { return }
     scheduleLoad(viewport: viewport, debounceNanoseconds: 220_000_000)
@@ -254,10 +274,14 @@ final class MapPreviewSession: ObservableObject {
     let invalidatesFit = parameters != currentParameters || bands != currentBands
     currentParameters = parameters
     currentBands = bands
-    if invalidatesFit, purpose == .calibration {
-      refreshCalibrationBaselines()
-      invalidateFit()
-      refreshUncommittedDraftIfNeeded()
+    if invalidatesFit {
+      if purpose == .calibration {
+        refreshCalibrationBaselines()
+        invalidateFit()
+        refreshUncommittedDraftIfNeeded()
+      } else if isStudyCurveCaptureActive {
+        refreshUncommittedDraftIfNeeded()
+      }
     }
     guard let lastViewport else { return }
     scheduleLoad(viewport: lastViewport, debounceNanoseconds: 80_000_000)
@@ -433,18 +457,50 @@ final class MapPreviewSession: ObservableObject {
     if announce { status("Centered on opening location \(openingLocation.title).") }
   }
 
+  func beginStudyCurveCapture() {
+    guard purpose == .wholeCurveStudy else {
+      status("Switch to Whole-Curve Study before starting a new curve capture.", error: true)
+      return
+    }
+    guard !isStudyCurveCaptureActive else { return }
+    isStudyCurveCaptureActive = true
+    studyCaptureBankedNumber = nil
+    clearSelection()
+    renderRevision &+= 1
+    status("Add a familiar curve: click a colored mapd road. It remains a draft until you choose Add Curve to Bank.")
+  }
+
+  func cancelStudyCurveCapture() {
+    guard isStudyCurveCaptureActive else { return }
+    let discardedMessage = discardedDraftMessage()
+    isStudyCurveCaptureActive = false
+    studyCaptureBankedNumber = nil
+    selection = nil
+    draftDesiredSpeedMPH = 0
+    draftBaselineDesiredSpeedMPH = 0
+    draftWasEdited = false
+    renderRevision &+= 1
+    status(discardedMessage ?? "Back to Whole-Curve Study. No new curve was added.")
+  }
+
   func setDraftDesiredSpeedMPH(_ value: Double) {
-    guard purpose == .calibration else { return }
+    guard canEditSelectedCurveDraft,
+          !(isStudyCurveCaptureActive && selectionIsQueued)
+    else { return }
     draftDesiredSpeedMPH = value
     draftWasEdited = !Self.speedsMatch(value, draftBaselineDesiredSpeedMPH)
   }
 
   func queueSelectedCurve() {
-    guard purpose == .calibration else {
-      status("Curve-bank editing is unavailable in the read-only whole-curve study.", error: true)
+    guard canEditSelectedCurveDraft else {
+      status("Choose Add New Curve before adding a sample from Whole-Curve Study.", error: true)
       return
     }
     guard let selection else { return }
+    guard !(isStudyCurveCaptureActive && selectionIsQueued) else {
+      status("That curve is already in the bank. Choose a new curve, or switch to Calibration to edit it.", error: true)
+      return
+    }
     let node = selection.node
     guard node.curvatureContextComplete else {
       status("That point lacks enough unambiguous route context for production-equivalent curvature. Load surrounding tiles or choose another point.", error: true)
@@ -499,10 +555,26 @@ final class MapPreviewSession: ObservableObject {
     }
     calibrationSamples.append(queued)
     let saved = batchDidChange()
+    if !saved, isStudyCurveCaptureActive {
+      calibrationSamples.removeLast()
+      status("Could not save this curve to the bank. The draft is still here; correct the problem and try Add Curve to Bank again.", error: true)
+      return
+    }
     draftBaselineDesiredSpeedMPH = draftDesiredSpeedMPH
     draftWasEdited = false
     if saved {
-      status("Added \(selection.way.displayName) to the curve bank at \(String(format: "%.1f", draftDesiredSpeedMPH)) mph (\(calibrationSamples.count) saved; \(Self.minimumCalibrationSamples) minimum, no maximum).")
+      if isStudyCurveCaptureActive {
+        let bankedNumber = calibrationSamples.count
+        studyCaptureBankedNumber = bankedNumber
+        self.selection = nil
+        draftDesiredSpeedMPH = 0
+        draftBaselineDesiredSpeedMPH = 0
+        renderRevision &+= 1
+        refreshVisibleWholeCurveStudy()
+        status("Banked #\(bankedNumber): \(selection.way.displayName) at \(String(format: "%.1f", queued.desiredSpeedMPH)) mph. Click another mapd curve to keep adding samples; no tune or car state changed.")
+      } else {
+        status("Added \(selection.way.displayName) to the curve bank at \(String(format: "%.1f", draftDesiredSpeedMPH)) mph (\(calibrationSamples.count) saved; \(Self.minimumCalibrationSamples) minimum, no maximum).")
+      }
     } else {
       status("Added the curve in memory, but it could not be saved to this Mac.", error: true)
     }
@@ -770,7 +842,21 @@ final class MapPreviewSession: ObservableObject {
     }
   }
 
+  private func refreshVisibleWholeCurveStudy() {
+    guard purpose == .wholeCurveStudy, let lastViewport else { return }
+    scheduleLoad(viewport: lastViewport, debounceNanoseconds: 0)
+  }
+
   func select(_ newSelection: MapRoadSelection?) {
+    guard canEditSelectedCurveDraft else { return }
+    if newSelection == nil, isStudyCurveCaptureActive {
+      if let selection {
+        status("No mapd curve found there. The draft for \(selection.way.displayName) is still not banked.")
+      } else {
+        status("No mapd curve found there. Click closer to a colored road.")
+      }
+      return
+    }
     let previousSelectionID = selection?.id
     let discardedMessage = previousSelectionID != newSelection?.id ? discardedDraftMessage() : nil
     selection = newSelection
@@ -787,10 +873,17 @@ final class MapPreviewSession: ObservableObject {
     } else if let newSelection,
               calibrationSamples.contains(where: { $0.sourceKey == calibrationSourceKey(newSelection) }) {
       let prefix = discardedMessage.map { "\($0) " } ?? ""
-      status("\(prefix)This curve is already in the bank. Edit its target, then update that bank item.")
+      if isStudyCurveCaptureActive {
+        status("\(prefix)This curve is already in the bank. Choose a new curve, or switch to Calibration to edit it.")
+      } else {
+        status("\(prefix)This curve is already in the bank. Edit its target, then update that bank item.")
+      }
     } else if let newSelection {
       let prefix = discardedMessage.map { "\($0) " } ?? ""
-      status("\(prefix)Drafting \(newSelection.way.displayName). Set the target speed, then choose Add Curve to Bank.")
+      let captureSuffix = isStudyCurveCaptureActive
+        ? " It has not been saved."
+        : ""
+      status("\(prefix)Drafting \(newSelection.way.displayName). Set the target speed, then choose Add Curve to Bank.\(captureSuffix)")
     } else if let discardedMessage {
       status(discardedMessage)
     }

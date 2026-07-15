@@ -123,6 +123,7 @@ private final class MapReadableLabelView: MKAnnotationView {
 struct StrategicMapView: NSViewRepresentable {
   var ways: [MapRenderedWay]
   var purpose: MapPreviewPurpose
+  var isStudyCurveCaptureActive: Bool
   var mode: MapSpeedDisplayMode
   var wholeCurveMode: MapWholeCurveDisplayMode
   var wholeCurveEvents: [MapWholeCurveEvent]
@@ -175,6 +176,7 @@ struct StrategicMapView: NSViewRepresentable {
       mapView,
       ways: ways,
       purpose: purpose,
+      isStudyCurveCaptureActive: isStudyCurveCaptureActive,
       mode: mode,
       wholeCurveMode: wholeCurveMode,
       wholeCurveEvents: wholeCurveEvents,
@@ -196,6 +198,7 @@ struct StrategicMapView: NSViewRepresentable {
 
     private var currentRenderKey = ""
     private var currentPurpose: MapPreviewPurpose = .calibration
+    private var currentStudyCurveCaptureActive = false
     private var currentCalibrationMode: MapSpeedDisplayMode = .currentlyBaked
     private var currentWholeCurveMode: MapWholeCurveDisplayMode = .wholeCurve
     private var currentCameraID: UUID?
@@ -233,6 +236,7 @@ struct StrategicMapView: NSViewRepresentable {
       _ mapView: MKMapView,
       ways: [MapRenderedWay],
       purpose: MapPreviewPurpose,
+      isStudyCurveCaptureActive: Bool,
       mode: MapSpeedDisplayMode,
       wholeCurveMode: MapWholeCurveDisplayMode,
       wholeCurveEvents: [MapWholeCurveEvent],
@@ -242,16 +246,18 @@ struct StrategicMapView: NSViewRepresentable {
       calibrationSamples: [MapCalibrationSample],
       revision: Int
     ) {
-      let selectedWayID = selection?.way.id
-      let sampleKey = calibrationSamples.map { $0.id.uuidString }.joined(separator: ",")
-      let eventKey = wholeCurveEvents.map(\.id).joined(separator: ",")
-      let key = "\(purpose.rawValue)|\(mode.rawValue)|\(wholeCurveMode.rawValue)|\(roadLabelSize.rawValue)|\(selectedWayID ?? "")|\(selection?.nodeIndex ?? -1)|\(selectedWholeCurveEventID ?? "")|\(revision)|\(ways.count)|\(eventKey)|\(sampleKey)"
-      guard key != currentRenderKey else { return }
-      currentRenderKey = key
       currentPurpose = purpose
+      currentStudyCurveCaptureActive = isStudyCurveCaptureActive
       currentCalibrationMode = mode
       currentWholeCurveMode = wholeCurveMode
       currentRoadLabelSize = roadLabelSize
+
+      let selectedWayID = selection?.way.id
+      let sampleKey = calibrationSamples.map { $0.id.uuidString }.joined(separator: ",")
+      let eventKey = wholeCurveEvents.map(\.id).joined(separator: ",")
+      let key = "\(purpose.rawValue)|\(isStudyCurveCaptureActive)|\(mode.rawValue)|\(wholeCurveMode.rawValue)|\(roadLabelSize.rawValue)|\(selectedWayID ?? "")|\(selection?.nodeIndex ?? -1)|\(selectedWholeCurveEventID ?? "")|\(revision)|\(ways.count)|\(eventKey)|\(sampleKey)"
+      guard key != currentRenderKey else { return }
+      currentRenderKey = key
 
       if !overlays.isEmpty { mapView.removeOverlays(overlays) }
       overlays.removeAll(keepingCapacity: true)
@@ -265,6 +271,7 @@ struct StrategicMapView: NSViewRepresentable {
       if !calibrationAnnotations.isEmpty { mapView.removeAnnotations(calibrationAnnotations) }
       calibrationAnnotations = []
 
+      let allowsRawSelection = purpose == .calibration || isStudyCurveCaptureActive
       var selectedPolyline: MKPolyline?
       for way in ways where way.nodes.count >= 2 {
         var coordinates = way.nodes.map {
@@ -273,7 +280,7 @@ struct StrategicMapView: NSViewRepresentable {
         let polyline = MKPolyline(coordinates: &coordinates, count: coordinates.count)
         overlays.append(polyline)
         wayByOverlay[ObjectIdentifier(polyline)] = way
-        if purpose == .calibration, way.id == selectedWayID { selectedPolyline = polyline }
+        if allowsRawSelection, way.id == selectedWayID { selectedPolyline = polyline }
       }
       mapView.addOverlays(overlays, level: .aboveRoads)
 
@@ -286,7 +293,10 @@ struct StrategicMapView: NSViewRepresentable {
           let polyline = MKPolyline(coordinates: &coordinates, count: coordinates.count)
           eventOverlays.append(polyline)
           wholeCurveEventByOverlay[ObjectIdentifier(polyline)] = event
-          if event.id == selectedWholeCurveEventID { selectedPolyline = polyline }
+          if event.id == selectedWholeCurveEventID,
+             !(allowsRawSelection && selection != nil) {
+            selectedPolyline = polyline
+          }
         }
         overlays.append(contentsOf: eventOverlays)
         mapView.addOverlays(eventOverlays, level: .aboveRoads)
@@ -299,7 +309,7 @@ struct StrategicMapView: NSViewRepresentable {
         overlays.append(highlight)
         mapView.addOverlay(highlight, level: .aboveRoads)
       }
-      if purpose == .calibration, let selection {
+      if allowsRawSelection, let selection {
         let annotation = MKPointAnnotation()
         annotation.coordinate = CLLocationCoordinate2D(
           latitude: selection.node.latitude,
@@ -317,7 +327,7 @@ struct StrategicMapView: NSViewRepresentable {
         mapView: mapView,
         ways: ways,
         size: roadLabelSize,
-        selectedWayID: purpose == .calibration ? selectedWayID : nil
+        selectedWayID: allowsRawSelection ? selectedWayID : nil
       )
       if !roadLabelAnnotations.isEmpty { mapView.addAnnotations(roadLabelAnnotations) }
     }
@@ -427,7 +437,7 @@ struct StrategicMapView: NSViewRepresentable {
       guard let way = wayByOverlay[ObjectIdentifier(polyline)] else {
         return MKPolylineRenderer(polyline: polyline)
       }
-      if currentPurpose == .wholeCurveStudy {
+      if currentPurpose == .wholeCurveStudy, !currentStudyCurveCaptureActive {
         let renderer = MKPolylineRenderer(polyline: polyline)
         renderer.strokeColor = .tertiaryLabelColor
         renderer.lineWidth = 2
@@ -516,7 +526,7 @@ struct StrategicMapView: NSViewRepresentable {
     @objc func clicked(_ recognizer: NSClickGestureRecognizer) {
       guard recognizer.state == .ended, let mapView else { return }
       let clickPoint = recognizer.location(in: mapView)
-      if currentPurpose == .wholeCurveStudy {
+      if currentPurpose == .wholeCurveStudy, !currentStudyCurveCaptureActive {
         var bestEvent: (distance: CGFloat, eventID: String)?
         for overlay in overlays {
           guard let event = wholeCurveEventByOverlay[ObjectIdentifier(overlay)],

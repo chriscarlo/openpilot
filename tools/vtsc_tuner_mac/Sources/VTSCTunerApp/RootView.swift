@@ -46,7 +46,9 @@ struct RootView: View {
             }
             .frame(width: 235)
 
-            if session.mapPreview.purpose == .calibration {
+            if session.mapPreview.purpose == .calibration
+              || session.mapPreview.isStudyCurveCaptureActive
+            {
               Picker(
                 "Map Colors",
                 selection: Binding(
@@ -57,11 +59,13 @@ struct RootView: View {
                 ForEach(MapSpeedDisplayMode.allCases) { mode in Text(mode.rawValue).tag(mode) }
               }
               .frame(width: 190)
-              Button(action: session.mapPreview.syncFromTici) {
-                Label("Sync from tici", systemImage: "arrow.triangle.2.circlepath")
+              if session.mapPreview.purpose == .calibration {
+                Button(action: session.mapPreview.syncFromTici) {
+                  Label("Sync from tici", systemImage: "arrow.triangle.2.circlepath")
+                }
+                .disabled(!session.mapPreview.canSync)
+                .help("Explicitly copy the tici's current mapd tiles into this Mac")
               }
-              .disabled(!session.mapPreview.canSync)
-              .help("Explicitly copy the tici's current mapd tiles into this Mac")
             } else {
               Picker(
                 "Study Colors",
@@ -115,7 +119,11 @@ struct RootView: View {
       .onExitCommand {
         if session.workspace == .mapPreview {
           if session.mapPreview.purpose == .wholeCurveStudy {
-            session.mapPreview.selectWholeCurveEvent(nil)
+            if session.mapPreview.isStudyCurveCaptureActive {
+              session.mapPreview.cancelStudyCurveCapture()
+            } else {
+              session.mapPreview.selectWholeCurveEvent(nil)
+            }
           } else {
             session.mapPreview.clearSelection()
           }
@@ -124,6 +132,10 @@ struct RootView: View {
         } else {
           session.plot.selected = nil
         }
+      }
+      .onChange(of: session.workspace) { _, workspace in
+        guard workspace != .mapPreview, session.mapPreview.isStudyCurveCaptureActive else { return }
+        session.mapPreview.cancelStudyCurveCapture()
       }
   }
 
@@ -161,7 +173,7 @@ struct RootView: View {
       CurveControlsInspector(session: session)
     case .mapPreview:
       if session.mapPreview.purpose == .wholeCurveStudy {
-        WholeCurveStudyInspector(map: session.mapPreview)
+        WholeCurveStudyInspector(tuner: session, map: session.mapPreview)
       } else {
         MapPreviewInspector(tuner: session, map: session.mapPreview)
       }
@@ -181,7 +193,11 @@ struct MapPreviewStatusBar: View {
       Text(map.statusText).font(.caption).lineLimit(1)
       Spacer()
       if map.purpose == .wholeCurveStudy {
-        Text("\(map.wholeCurveEvents.count) directional events  ·  local shadow only")
+        Text(
+          map.isStudyCurveCaptureActive
+            ? "new curve capture  ·  \(map.calibrationSamples.count) saved"
+            : "\(map.wholeCurveEvents.count) directional events  ·  local shadow study"
+        )
           .font(.system(.caption, design: .monospaced))
           .foregroundStyle(.secondary)
       } else {
