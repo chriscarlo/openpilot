@@ -171,15 +171,15 @@ import Testing
   #expect(requests.filter { $0.executableURL == decoderURL }.count == 2)
 }
 
-@Test func ticiPhysicsMigrationPassesEverySourceRoundedValue() {
-  let command = TiciPhysicsCommandBuilder.synchronizeAndVerifyCommand(parameters: .checkoutFallback)
-  #expect(command.hasPrefix("cd /data/openpilot && PYTHONPATH=/data/openpilot /usr/local/venv/bin/python3 tools/vtsc/apply_physics_params.py"))
-  #expect(command.contains("--amplitude -1.658965"))
-  #expect(command.contains("--steepness -1395.055546"))
-  #expect(command.contains("--center 0.005397"))
-  #expect(command.contains("--baseline 4.107103"))
-  #expect(command.contains("--min-lat 2.4481"))
-  #expect(command.contains("--max-lat 4.1071"))
+@Test func ticiPhysicsMigrationPassesEverySourceRoundedValue() throws {
+  let command = try TiciPhysicsCommandBuilder.synchronizeAndVerifyCommand(parameters: .checkoutFallback)
+  #expect(!command.lowercased().contains("python"))
+  #expect(command.contains("'VisionTurnSpeedControlPhysicsAmplitude') printf '%s' '-1.658965'"))
+  #expect(command.contains("'VisionTurnSpeedControlPhysicsSteepness') printf '%s' '-1395.055546'"))
+  #expect(command.contains("'VisionTurnSpeedControlPhysicsCenter') printf '%s' '0.005397'"))
+  #expect(command.contains("'VisionTurnSpeedControlPhysicsBaseline') printf '%s' '4.107103'"))
+  #expect(command.contains("'VisionTurnSpeedControlPhysicsMinLatAccel') printf '%s' '2.4481'"))
+  #expect(command.contains("'VisionTurnSpeedControlPhysicsMaxLatAccel') printf '%s' '4.1071'"))
 }
 
 @Test func tuneSaveFailureStopsBeforeSourceMutation() async {

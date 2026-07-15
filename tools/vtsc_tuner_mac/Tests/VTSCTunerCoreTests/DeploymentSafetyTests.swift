@@ -30,14 +30,15 @@ import Testing
   #expect(validated.byteCount == UInt64(bytes.count))
   #expect(validated.persistentCacheFileName.hasPrefix("mapd-"))
   #expect(validated.persistentCacheFileName.hasSuffix(String(digest.prefix(16))))
-  let install = TiciDeploymentCommandBuilder.installReleaseCommand(
+  let install = try TiciMapdReleaseTransactionCommandBuilder.installCommand(
     release: validated,
-    stagedPath: "/tmp/mapd.partial",
-    rollbackPath: "/tmp/mapd.rollback"
+    stagedPath: "/data/media/0/osm/binaries/.mapd-release-01234567-89ab-cdef-0123-456789abcdef.partial",
+    rollbackPath: "/data/media/0/osm/binaries/mapd-rollback-01234567-89ab-cdef-0123-456789abcdef"
   )
   #expect(install.contains("MapdReleaseID:whole-curve-release-v1"))
   #expect(install.contains("MapdBuildID:build-abc123"))
-  #expect(install.contains("[str(staged), \"--build-info\"]"))
+  #expect(install.contains("\"$staged\" --build-info"))
+  #expect(!install.lowercased().contains("python"))
 
   var wrongDigest = artifact
   wrongDigest.sha256 = String(repeating: "0", count: 64)
@@ -104,7 +105,7 @@ import Testing
   }
 }
 
-@Test func tileDeploymentOnlyRsyncsToStagingAndUsesRenameExchange() async throws {
+@Test func tileDeploymentOnlyRsyncsToStagingAndUsesTheVerifiedNativeExchangeHelper() async throws {
   let root = temporaryDirectory("vtsc-stage")
   defer { try? FileManager.default.removeItem(at: root) }
   let offline = root.appendingPathComponent("offline/32/-118", isDirectory: true)
@@ -130,8 +131,16 @@ import Testing
     )]
   )
   try manifest.write(to: root)
-  let runner = DeploymentRecordingRunner(identity: manifest.tileSetID)
-  let service = TiciTileSetDeploymentService(processRunner: runner)
+  let runner = DeploymentRecordingRunner(
+    identity: manifest.tileSetID,
+    fileCount: manifest.fileCount,
+    totalBytes: manifest.totalBytes
+  )
+  let helper = try transactionHelperFixture(in: root)
+  let service = TiciTileSetDeploymentService(
+    processRunner: runner,
+    transactionHelperURL: helper
+  )
   let staged = try await service.stageAndVerify(
     artifact: CanonicalTileSetArtifact(rootURL: root, manifest: manifest),
     profile: "commaAdb"
@@ -139,17 +148,18 @@ import Testing
   _ = try await service.activate(staged)
   let requests = await runner.requests
   let rsyncRequests = requests.filter { $0.executableURL == TiciTileSetDeploymentService.rsyncURL }
-  #expect(rsyncRequests.count == 2)
+  #expect(rsyncRequests.count == 3)
   #expect(rsyncRequests[0].arguments.contains("--delete"))
   #expect(rsyncRequests[0].arguments.last?.contains(".tileset-\(manifest.tileSetID).partial/offline/") == true)
   #expect(!rsyncRequests.flatMap(\.arguments).contains("commaAdb:/data/media/0/osm/offline/"))
   let activation = try #require(requests.last?.arguments.last)
-  #expect(activation.contains("renameat2"))
-  #expect(activation.contains("os.fsencode(active), 2"))
-  #expect(TiciTileSetDeploymentService.atomicRollbackCommand().contains("renameat2"))
+  #expect(activation.contains("vtsc-tile-transaction-"))
+  #expect(activation.contains(" activate --root "))
+  #expect(activation.contains("MTSCLookaheadEnabled"))
+  #expect(!activation.lowercased().contains("python"))
 }
 
-@Test func immutableTileGenerationRecoversEveryInjectedSwitchBoundary() {
+@Test func immutableTileGenerationRecoversEveryInjectedSwitchBoundary() throws {
   let previous = "tile-generations/old/offline"
   let next = "tile-generations/new/offline"
   #expect(TileTransactionRecovery.activation(
@@ -173,361 +183,172 @@ import Testing
     recordedActiveTarget: next, recordedPreviousTarget: previous
   ) == .performRollback)
 
-  let activation = TiciTileSetDeploymentService.atomicActivationCommand(
-    stagingRoot: "/data/media/0/osm/.tileset-new.partial",
-    tileSetID: "new",
+  let tileSetID = String(repeating: "f", count: 64)
+  let helperPath = "/data/media/0/osm/binaries/vtsc-tile-transaction-\(String(repeating: "a", count: 16))"
+  let activation = try TiciTileSetDeploymentService.atomicActivationCommand(
+    helperPath: helperPath,
+    stagingRoot: TiciTileSetDeploymentService.stagingRoot(tileSetID: tileSetID),
+    tileSetID: tileSetID,
     injectedFailurePoint: "after_switch"
   )
-  #expect(activation.contains("injected tile activation failure"))
-  #expect(activation.contains(".tileset-manifest.json"))
-  #expect(activation.contains("tile-generations"))
-  #expect(activation.contains(".tileset-transaction.json"))
-  #expect(activation.contains("fsync_dir(root)"))
-  #expect(!activation.contains("offline.manifest.previous.json"))
-  let rollback = TiciTileSetDeploymentService.atomicRollbackCommand(
-    expectedActivatedTileSetID: "new",
+  #expect(activation.contains("vtsc-tile-transaction-"))
+  #expect(activation.contains("--inject-failure 'after_switch'"))
+  #expect(activation.contains("refusing tile mutation unless tici is offroad"))
+  let rollback = try TiciTileSetDeploymentService.atomicRollbackCommand(
+    helperPath: helperPath,
+    expectedActivatedTileSetID: tileSetID,
     injectedFailurePoint: "after_switch"
   )
-  #expect(rollback.contains("injected tile rollback failure"))
-  #expect(rollback.contains("manifest_id(active)"))
-  #expect(rollback.contains("pending.get(\"kind\") == \"activation\""))
-  #expect(rollback.contains("tile_activation_not_observed"))
+  #expect(rollback.contains(" rollback --root "))
+  #expect(rollback.contains("--expected-tile-set-id '\(tileSetID)'"))
+  #expect(rollback.contains("--inject-failure 'after_switch'"))
+  #expect(!rollback.lowercased().contains("python"))
 }
 
-@Test func productionCommandsPinSafetyBranchAndExactCommit() {
-  let fastForward = TiciDeploymentCommandBuilder.exactFastForwardCommand(
+@Test func swiftOwnedDeploymentCommandsKeepPinnedSafetyContracts() throws {
+  let head = String(repeating: "a", count: 40)
+  let fastForward = try TiciGitDeploymentCommandBuilder.exactFastForwardCommand(
     branch: "chauffeur-exp01",
-    head: String(repeating: "a", count: 40)
+    head: head
   )
+  let snapshotCommand = TiciSnapshotWireCommandBuilder.inspectionCommand(includeRuntimePostflight: true)
+  let mapdRecovery = TiciMapdReleaseTransactionCommandBuilder.recoveryCommand()
+
+  let releaseID = "release-v1"
+  let releaseSHA = String(repeating: "a", count: 64)
+  let cacheName = "mapd-" + String(MapdReleaseArtifact.sha256Hex(Data(releaseID.utf8)).prefix(16))
+    + "-" + String(releaseSHA.prefix(16))
+  let release = ValidatedMapdReleaseArtifact(
+    artifact: MapdReleaseArtifact(
+      releaseID: releaseID,
+      buildID: "build-v1",
+      binaryURL: URL(fileURLWithPath: "/tmp/mapd"),
+      sha256: releaseSHA
+    ),
+    byteCount: 1,
+    persistentCacheFileName: cacheName
+  )
+  let stagedPath = "/data/media/0/osm/binaries/.mapd-release-v1-0123456789.partial"
+  let rollbackPath = "/data/media/0/osm/binaries/mapd-rollback-v1-0123456789"
+  let probe = try TiciMapdReleaseTransactionCommandBuilder.probeCommand(
+    release: release,
+    stagedPath: stagedPath
+  )
+  let install = try TiciMapdReleaseTransactionCommandBuilder.installCommand(
+    release: release,
+    stagedPath: stagedPath,
+    rollbackPath: rollbackPath
+  )
+  let physics = Dictionary(uniqueKeysWithValues: VTSCPhysicsAuthority.entries(for: .checkoutFallback).map {
+    ($0.paramKey, Optional.some($0.formattedValue))
+  })
+  let journal = DeploymentRollbackJournal(
+    profile: "commaAdb",
+    branch: "chauffeur-exp01",
+    previousHead: String(repeating: "b", count: 40),
+    previousPhysicsParams: physics,
+    previousQCurveSHA256: String(repeating: "c", count: 64),
+    previousMapdReleaseVersion: "old-release",
+    previousMapdVersion: "old-release",
+    previousActiveMapdSHA256: String(repeating: "d", count: 64),
+    previousCachedMapdPath: "/data/media/0/osm/binaries/mapd-old",
+    mapdRollbackPath: rollbackPath
+  )
+  let parameterTransaction = try TiciParamTransactionCommandBuilder.synchronizeAndVerifyCommand(
+    parameters: .checkoutFallback
+  )
+  let rollback = try TiciProductionRollbackCommandBuilder.command(journal: journal)
+
+  let commands = [fastForward, snapshotCommand, mapdRecovery, probe, install, parameterTransaction, rollback]
+  for command in commands {
+    #expect(!command.lowercased().contains("python"))
+    #expect(!command.contains("openpilot.common.params"))
+  }
+
   #expect(fastForward.contains("git fetch --no-tags origin refs/heads/chauffeur-exp01"))
   #expect(fastForward.contains("git merge --ff-only"))
   #expect(fastForward.contains("git status --porcelain"))
-  let inspection = TiciDeploymentCommandBuilder.preflightInspectionCommand()
-  #expect(inspection.contains("IsOffroad"))
-  #expect(inspection.contains("MTSCLookaheadEnabled"))
-  #expect(inspection.contains("q_curve_sha256"))
+  #expect(snapshotCommand.contains("/bin/sh <<'VTSC_SNAPSHOT_SH'"))
+  #expect(snapshotCommand.contains(TiciSnapshotWireField.isOffroad.rawValue))
+  #expect(snapshotCommand.contains(TiciSnapshotWireField.qCurveFile.rawValue))
+  #expect(snapshotCommand.contains(TiciSnapshotWireField.activeMapdBuildInfo.rawValue))
+  #expect(mapdRecovery.contains(TiciMapdReleaseTransactionCommandBuilder.recoveryMarker))
+  #expect(mapdRecovery.contains(TiciMapdReleaseTransactionCommandBuilder.transactionDirectory))
+  #expect(mapdRecovery.contains("flock -x 8"))
+  #expect(probe.contains(TiciMapdReleaseTransactionCommandBuilder.probeMarker))
+  #expect(install.contains(TiciMapdReleaseTransactionCommandBuilder.resultMarker))
+  #expect(install.contains("/data/params/.lock"))
+  #expect(parameterTransaction.contains("VisionTurnSpeedControlPhysicsMaxLatAccel"))
+  #expect(parameterTransaction.contains("flock -x 9"))
+  #expect(rollback.contains(TiciProductionRollbackCommandBuilder.resultMarker))
+  #expect(rollback.contains("git reset --hard"))
+
+  let encoded = TiciSnapshotWireCodec.encode(.init(rawValues: [
+    .branch: Data("chauffeur-exp01".utf8),
+    .head: Data(head.utf8),
+    .dirty: Data("0".utf8),
+  ]))
+  let decoded = try TiciSnapshotWireCodec.decode(encoded)
+  #expect(decoded.text(for: .branch) == "chauffeur-exp01")
+  #expect(decoded.text(for: .head) == head)
+
   let suite = ProductionVerificationSuite.requests(repositoryRoot: URL(fileURLWithPath: "/repo"))
   let go = suite.first { $0.executableURL.lastPathComponent == "go" }
   #expect(go?.executableURL.path == "/repo/tools/vtsc_tuner_mac/.build-tools/go-1.26.5-darwin-arm64/bin/go")
   #expect(go?.environment["CGO_ENABLED"] == "0")
 }
 
-@Test func generatedRemotePythonCommandsAreSyntacticallyValid() async throws {
-  let artifact = MapdReleaseArtifact(
-    releaseID: "release-v1",
-    buildID: "build-v1",
-    binaryURL: URL(fileURLWithPath: "/tmp/mapd"),
-    sha256: String(repeating: "a", count: 64)
+@Test func tileTransactionHelperCommandsArePinnedToTheVerifiedHelper() throws {
+  let tileSetID = String(repeating: "f", count: 64)
+  let helperPath = "/data/media/0/osm/binaries/vtsc-tile-transaction-aaaaaaaaaaaaaaaa"
+  let stagingRoot = TiciTileSetDeploymentService.stagingRoot(tileSetID: tileSetID)
+  let verify = try TiciTileSetDeploymentService.remoteManifestVerificationCommand(
+    helperPath: helperPath,
+    stagingRoot: stagingRoot,
+    tileSetID: tileSetID
   )
-  let release = ValidatedMapdReleaseArtifact(
-    artifact: artifact,
-    byteCount: 1_000_000,
-    persistentCacheFileName: "mapd-version-artifact"
+  let activate = try TiciTileSetDeploymentService.atomicActivationCommand(
+    helperPath: helperPath,
+    stagingRoot: stagingRoot,
+    tileSetID: tileSetID
   )
-  let identity = TuneDeploymentIdentity(tune: Tune(params: .checkoutFallback))
-  let journal = DeploymentRollbackJournal(
-    profile: "commaAdb",
-    branch: "chauffeur-exp01",
-    previousHead: String(repeating: "b", count: 40),
-    previousPhysicsParams: [:],
-    previousQCurveSHA256: String(repeating: "c", count: 64),
-    previousMapdReleaseVersion: "old-release",
-    previousMapdVersion: "old-release",
-    previousActiveMapdSHA256: String(repeating: "d", count: 64),
-    previousCachedMapdPath: "/tmp/old-cache",
-    mapdRollbackPath: "/tmp/rollback"
+  let rollback = try TiciTileSetDeploymentService.atomicRollbackCommand(
+    helperPath: helperPath,
+    expectedActivatedTileSetID: tileSetID
   )
-  let commands = [
-    TiciDeploymentCommandBuilder.preflightInspectionCommand(),
-    TiciDeploymentCommandBuilder.installReleaseCommand(
-      release: release, stagedPath: "/tmp/staged", rollbackPath: "/tmp/rollback"
-    ),
-    TiciDeploymentCommandBuilder.qCurveVerificationCommand(identity: identity),
-    TiciDeploymentCommandBuilder.postflightInspectionCommand(
-      head: String(repeating: "e", count: 40),
-      release: release,
-      identity: identity,
-      expectedTileSetID: nil
-    ),
-    TiciDeploymentCommandBuilder.rollbackCommand(journal: journal, rollbackMapdPath: "/tmp/rollback"),
-    TiciDeploymentCommandBuilder.rollbackVerificationCommand(journal: journal, tilesWereTouched: true),
-    TiciTileSetDeploymentService.remoteManifestVerificationCommand(
-      stagingRoot: "/tmp/stage", tileSetID: String(repeating: "f", count: 64)
-    ),
-    TiciTileSetDeploymentService.atomicActivationCommand(
-      stagingRoot: "/tmp/stage", tileSetID: String(repeating: "f", count: 64)
-    ),
-    TiciTileSetDeploymentService.atomicRollbackCommand(),
-  ]
-  for command in commands {
-    #expect(command.contains("/usr/local/venv/bin/python3"))
-    #expect(!command.contains("PYTHONPATH=/data/openpilot python3"))
+  for command in [verify, activate, rollback] {
+    #expect(command.contains(helperPath))
+    #expect(!command.lowercased().contains("python"))
   }
-  let runner = SystemProcessRunner()
-  for command in commands {
-    let body = try #require(pythonHeredocBody(command))
-    let result = try await runner.run(ProcessRequest(
-      executableURL: URL(fileURLWithPath: "/usr/bin/python3"),
-      arguments: ["-c", "import ast, sys; ast.parse(sys.argv[1])", body],
-      timeout: 10
-    ))
-    #expect(result.succeeded, Comment(rawValue: result.combinedOutput))
-  }
+  #expect(verify.contains(" verify --root "))
+  #expect(activate.contains(" activate --root "))
+  #expect(rollback.contains(" rollback --root "))
 }
 
-@Test func generatedPostflightScriptExecutesWithStubbedRuntimeNames() async throws {
-  let directory = temporaryDirectory("vtsc-postflight-script")
-  defer { try? FileManager.default.removeItem(at: directory) }
-  let qURL = directory.appendingPathComponent(
-    "sunnypilot/selfdrive/controls/lib/vtsc_curve_tuning.py",
-    isDirectory: false
-  )
-  try FileManager.default.createDirectory(
-    at: qURL.deletingLastPathComponent(),
-    withIntermediateDirectories: true
-  )
-  let identity = TuneDeploymentIdentity(tune: Tune(params: .checkoutFallback))
-  try TuneDeploymentIdentity.canonicalQCurveSource(
-    parameters: .checkoutFallback,
-    bands: []
-  ).write(to: qURL, atomically: true, encoding: .utf8)
+@Test func tileRollbackAcceptsVerifiedOldGenerationAndRejectsActivationMismatch() async throws {
+  let root = temporaryDirectory("vtsc-tile-rollback")
+  defer { try? FileManager.default.removeItem(at: root) }
+  let helper = try transactionHelperFixture(in: root)
+  let expectedTileSetID = String(repeating: "f", count: 64)
 
-  let activeBinary = directory.appendingPathComponent("mapd")
-  let cachedBinary = directory.appendingPathComponent("mapd-cache")
-  var binaryData = Data(repeating: 0, count: 128)
-  binaryData.replaceSubrange(0 ..< 6, with: [0x7f, 0x45, 0x4c, 0x46, 2, 1])
-  binaryData[18] = 183
-  binaryData.append(Data("MapWholeCurveProfile:whole-curve-v1".utf8))
-  try binaryData.write(to: activeBinary)
-  try binaryData.write(to: cachedBinary)
-  let digest = MapdReleaseArtifact.sha256Hex(binaryData)
-  let artifact = MapdReleaseArtifact(
-    releaseID: "release-v1",
-    buildID: "build-v1",
-    binaryURL: activeBinary,
-    sha256: digest
+  let succeeded = TiciTileSetDeploymentService(
+    processRunner: TileRollbackRunner(output: #"{"operation":"rollback","rolled_back_tile_set_id":"old","tile_activation_not_observed":false}"#),
+    transactionHelperURL: helper
   )
-  let release = ValidatedMapdReleaseArtifact(
-    artifact: artifact,
-    byteCount: UInt64(binaryData.count),
-    persistentCacheFileName: "mapd-version-artifact"
-  )
-  let head = String(repeating: "e", count: 40)
-  let command = TiciDeploymentCommandBuilder.postflightInspectionCommand(
-    head: head,
-    release: release,
-    identity: identity,
-    expectedTileSetID: nil
-  )
-  var body = try #require(pythonHeredocBody(command))
-  let physics = Dictionary(uniqueKeysWithValues: identity.physics.map { ($0.paramKey, $0.value) })
-  let physicsJSON = String(data: try JSONEncoder().encode(physics), encoding: .utf8)!
-  let profile: [String: Any] = [
-    "estimatorVersion": "whole-curve-v1",
-    "generatedAtUnixMillis": Date().timeIntervalSince1970 * 1_000,
-    "generation": 1,
-    "routeFingerprint": String(repeating: "f", count: 64),
-    "fatalAmbiguity": false,
-    "points": [
-      ["latitude": 34.0, "longitude": -118.0, "distanceMeters": 0.0, "curvature": 0.0],
-      ["latitude": 34.0001, "longitude": -118.0, "distanceMeters": 11.1, "curvature": 0.0],
-      ["latitude": 34.0002, "longitude": -118.0, "distanceMeters": 22.2, "curvature": 0.0],
-    ],
-    "events": [],
-  ]
-  let profileJSON = String(data: try JSONSerialization.data(withJSONObject: profile), encoding: .utf8)!
-  let paramsStub = """
-  class Params:
-    values = json.loads(\(pythonTestLiteral(physicsJSON)))
-    values.update({"MapdReleaseVersion": "release-v1", "MapdVersion": "release-v1"})
-    profile = json.loads(\(pythonTestLiteral(profileJSON)))
-    gps = {"latitude": 34.0, "longitude": -118.0, "bearing": 90.0}
-    def __init__(self, *_args): pass
-    def get(self, key):
-      if key == "MapWholeCurveProfile": return json.dumps(self.profile).encode()
-      if key == "LastGPSPosition": return json.dumps(self.gps).encode()
-      value = self.values.get(key)
-      return value.encode() if value is not None else None
-    def get_bool(self, key):
-      return key == "IsOffroad"
-  """
-  let runtimeStub = """
-  class VisionTurnController:
-    @classmethod
-    def _parse_map_whole_curve_profile(cls, raw, gps_pose):
-      payload = json.loads(raw)
-      if len(payload.get("points", [])) < 3 or len(gps_pose) != 3: raise ValueError("invalid profile")
-      return payload
-  class _RunResult:
-    returncode = 0
-  def _stub_check_output(arguments, **_kwargs):
-    if arguments[0] == "git": return \(pythonTestLiteral(head + "\n"))
-    return json.dumps({
-      "releaseID": "release-v1",
-      "buildID": "build-v1",
-      "estimatorVersion": "whole-curve-v1",
-      "capabilities": ["MapWholeCurveProfile:whole-curve-v1"],
-    })
-  subprocess.check_output = _stub_check_output
-  subprocess.run = lambda *_args, **_kwargs: _RunResult()
-  """
-  body = body.replacingOccurrences(
-    of: "from openpilot.common.params import Params",
-    with: paramsStub
-  )
-  body = body.replacingOccurrences(
-    of: "from openpilot.sunnypilot.selfdrive.controls.lib.vision_turn_controller import VisionTurnController",
-    with: runtimeStub
-  )
-  body = body.replacingOccurrences(
-    of: "/data/openpilot/third_party/mapd/mapd",
-    with: activeBinary.path
-  )
-  body = body.replacingOccurrences(
-    of: "/data/media/0/osm/binaries/mapd-version-artifact",
-    with: cachedBinary.path
-  )
-  body = body.replacingOccurrences(
-    of: "/data/media/0/osm/offline.manifest.json",
-    with: directory.appendingPathComponent("missing-manifest.json").path
-  )
-  let result = try await SystemProcessRunner().run(ProcessRequest(
-    executableURL: URL(fileURLWithPath: "/usr/bin/python3"),
-    arguments: ["-c", body],
-    currentDirectoryURL: directory,
-    timeout: 20
-  ))
-  #expect(result.succeeded, Comment(rawValue: result.combinedOutput))
-  let decoded = try TiciDeploymentCommandBuilder.decodeLastJSONLine(
-    TiciDeploymentPostflight.self,
-    output: result.standardOutput
-  )
-  #expect(decoded.profileFresh)
-  #expect(decoded.gpsStatus == "valid")
-  #expect(decoded.profileValidationStatus == "valid")
-  #expect(decoded.profilePointCount == 3)
-  #expect(decoded.profileEventCount == 0)
-  #expect(decoded.activeELFARM64)
-  #expect(decoded.buildInfoMatches)
+  try await succeeded.rollback(profile: "commaAdb", expectedActivatedTileSetID: expectedTileSetID)
 
-  let pendingGPSBody = body.replacingOccurrences(
-    of: "if key == \"LastGPSPosition\": return json.dumps(self.gps).encode()",
-    with: "if key == \"LastGPSPosition\": return None"
+  let mismatch = TiciTileSetDeploymentService(
+    processRunner: TileRollbackRunner(output: #"{"operation":"rollback","rolled_back_tile_set_id":"old","tile_activation_not_observed":true}"#),
+    transactionHelperURL: helper
   )
-  let pendingResult = try await SystemProcessRunner().run(ProcessRequest(
-    executableURL: URL(fileURLWithPath: "/usr/bin/python3"),
-    arguments: ["-c", pendingGPSBody],
-    currentDirectoryURL: directory,
-    timeout: 20
-  ))
-  #expect(pendingResult.succeeded, Comment(rawValue: pendingResult.combinedOutput))
-  let pending = try TiciDeploymentCommandBuilder.decodeLastJSONLine(
-    TiciDeploymentPostflight.self,
-    output: pendingResult.standardOutput
-  )
-  #expect(pending.gpsStatus == "pending")
-  #expect(pending.profileValidationStatus == "pending_real_gps")
-  #expect(!pending.profileFresh)
-
-  let farGPSBody = body.replacingOccurrences(
-    of: "gps = {\"latitude\": 34.0, \"longitude\": -118.0, \"bearing\": 90.0}",
-    with: "gps = {\"latitude\": 36.0, \"longitude\": -118.0, \"bearing\": 90.0}"
-  )
-  let farResult = try await SystemProcessRunner().run(ProcessRequest(
-    executableURL: URL(fileURLWithPath: "/usr/bin/python3"),
-    arguments: ["-c", farGPSBody],
-    currentDirectoryURL: directory,
-    timeout: 20
-  ))
-  #expect(farResult.succeeded, Comment(rawValue: farResult.combinedOutput))
-  let far = try TiciDeploymentCommandBuilder.decodeLastJSONLine(
-    TiciDeploymentPostflight.self,
-    output: farResult.standardOutput
-  )
-  #expect(far.gpsStatus == "valid")
-  #expect(far.profileValidationStatus.contains("route_not_near_real_gps"))
-  #expect(!far.profileFresh)
-}
-
-@Test func generatedRollbackVerificationChecksExactRestoredIdentity() async throws {
-  let directory = temporaryDirectory("vtsc-rollback-verification")
-  defer { try? FileManager.default.removeItem(at: directory) }
-  let qURL = directory.appendingPathComponent(
-    "sunnypilot/selfdrive/controls/lib/vtsc_curve_tuning.py",
-    isDirectory: false
-  )
-  try FileManager.default.createDirectory(at: qURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-  let identity = TuneDeploymentIdentity(tune: Tune(params: .checkoutFallback))
-  try TuneDeploymentIdentity.canonicalQCurveSource(parameters: .checkoutFallback, bands: [])
-    .write(to: qURL, atomically: true, encoding: .utf8)
-  let active = directory.appendingPathComponent("mapd")
-  let cache = directory.appendingPathComponent("mapd-cache")
-  let binary = Data(repeating: 0x7a, count: 256)
-  try binary.write(to: active)
-  try binary.write(to: cache)
-  let digest = MapdReleaseArtifact.sha256Hex(binary)
-  let head = String(repeating: "b", count: 40)
-  let physics = Dictionary(uniqueKeysWithValues: identity.physics.map { ($0.paramKey, Optional($0.value)) })
-  let journal = DeploymentRollbackJournal(
-    profile: "commaAdb",
-    branch: "chauffeur-exp01",
-    previousHead: head,
-    previousPhysicsParams: physics,
-    previousQCurveSHA256: identity.qCurveSHA256,
-    previousMapdReleaseVersion: nil,
-    previousMapdVersion: "old-release",
-    previousActiveMapdSHA256: digest,
-    previousCachedMapdPath: cache.path,
-    previousCachedMapdSHA256: digest,
-    mapdRollbackPath: "/tmp/rollback"
-  )
-  var body = try #require(pythonHeredocBody(
-    TiciDeploymentCommandBuilder.rollbackVerificationCommand(
-      journal: journal,
-      tilesWereTouched: false
-    )
-  ))
-  let physicsJSON = String(data: try JSONEncoder().encode(physics), encoding: .utf8)!
-  let paramsStub = """
-  class Params:
-    values = json.loads(\(pythonTestLiteral(physicsJSON)))
-    values["MapdVersion"] = "old-release"
-    def get(self, key):
-      value = self.values.get(key)
-      return value.encode() if value is not None else None
-    def get_bool(self, key): return key == "IsOffroad"
-  """
-  let processStub = """
-  class _RunResult:
-    returncode = 0
-  def _stub_check_output(arguments, **_kwargs):
-    if arguments[:3] == ["git", "rev-parse", "HEAD"]: return \(pythonTestLiteral(head + "\n"))
-    if arguments[:3] == ["git", "status", "--porcelain"]: return ""
-    raise RuntimeError(arguments)
-  subprocess.check_output = _stub_check_output
-  subprocess.run = lambda *_args, **_kwargs: _RunResult()
-  """
-  body = body.replacingOccurrences(of: "from openpilot.common.params import Params", with: paramsStub)
-  body = body.replacingOccurrences(
-    of: "params = Params()",
-    with: "params = Params()\n" + processStub
-  )
-  body = body.replacingOccurrences(of: "/data/openpilot/third_party/mapd/mapd", with: active.path)
-  let runner = SystemProcessRunner()
-  let request = ProcessRequest(
-    executableURL: URL(fileURLWithPath: "/usr/bin/python3"),
-    arguments: ["-c", body],
-    currentDirectoryURL: directory,
-    timeout: 20
-  )
-  let result = try await runner.run(request)
-  #expect(result.succeeded, Comment(rawValue: result.combinedOutput))
-  #expect(result.standardOutput.contains("\"rollback_verified\": true"))
-
-  try Data(repeating: 0x33, count: 256).write(to: active)
-  let corrupt = try await runner.run(request)
-  #expect(!corrupt.succeeded)
-  #expect(corrupt.combinedOutput.contains("active_mapd"))
+  do {
+    try await mismatch.rollback(profile: "commaAdb", expectedActivatedTileSetID: expectedTileSetID)
+    Issue.record("expected a tile activation mismatch to stop rollback verification")
+  } catch let error as TiciTileSetDeploymentError {
+    #expect(error == .activationIdentityMissing(expectedTileSetID))
+  } catch {
+    Issue.record("unexpected tile rollback error: \(error)")
+  }
 }
 
 @Test func onroadPreflightStopsBeforeTuneOrSourceMutation() async throws {
@@ -603,6 +424,9 @@ import Testing
   #expect((await runner.requests).contains { request in
     request.arguments.last?.contains("IsOffroad") == true
   })
+  #expect((await runner.requests).contains { request in
+    request.arguments.last?.contains(TiciMapdReleaseTransactionCommandBuilder.recoveryMarker) == true
+  })
   #expect(!(await runner.requests).contains { request in
     request.executableURL == ApplyPipeline.gitURL && request.arguments.first == "fetch"
   })
@@ -619,7 +443,9 @@ import Testing
   #expect(result.detail.contains("journal retained"))
   let requests = await runner.requests
   #expect(requests.count == 1)
-  #expect(!requests.contains { $0.arguments.last?.contains("rolled_back_head") == true })
+  #expect(!requests.contains {
+    $0.arguments.last?.contains(TiciProductionRollbackCommandBuilder.resultMarker) == true
+  })
   #expect(!requests.contains { $0.arguments.last?.contains("sudo reboot") == true })
 }
 
@@ -636,7 +462,9 @@ import Testing
   #expect(!result.success)
   #expect(result.detail.contains("rollback reboot or post-rollback verification failed"))
   let requests = await runner.requests
-  #expect(requests.contains { $0.arguments.last?.contains("rolled_back_head") == true })
+  #expect(requests.contains {
+    $0.arguments.last?.contains(TiciProductionRollbackCommandBuilder.resultMarker) == true
+  })
   #expect(!requests.contains { $0.arguments.last?.contains("sudo reboot") == true })
 }
 
@@ -645,20 +473,6 @@ private func temporaryDirectory(_ prefix: String) -> URL {
     .appendingPathComponent("\(prefix)-\(UUID().uuidString)", isDirectory: true)
   try! FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
   return url
-}
-
-private func pythonHeredocBody(_ command: String) -> String? {
-  guard let start = command.range(of: "<<'PY'\n"),
-        let end = command.range(of: "\nPY", options: .backwards),
-        start.upperBound <= end.lowerBound
-  else { return nil }
-  return String(command[start.upperBound ..< end.lowerBound])
-}
-
-private func pythonTestLiteral(_ value: String) -> String {
-  "'" + value.replacingOccurrences(of: "\\", with: "\\\\")
-    .replacingOccurrences(of: "'", with: "\\'")
-    .replacingOccurrences(of: "\n", with: "\\n") + "'"
 }
 
 private func makeRollbackPreflight(rebootSent: Bool) -> RuntimeDeploymentPreflight {
@@ -678,7 +492,7 @@ private func makeRollbackPreflight(rebootSent: Bool) -> RuntimeDeploymentPreflig
     previousMapdVersion: "old-release",
     previousActiveMapdSHA256: String(repeating: "d", count: 64),
     previousCachedMapdPath: "/tmp/old-cache",
-    mapdRollbackPath: "/tmp/rollback"
+    mapdRollbackPath: "/data/media/0/osm/binaries/mapd-rollback-01234567-89ab-cdef-0123-456789abcdef"
   )
   journal.rebootSent = rebootSent
   return RuntimeDeploymentPreflight(
@@ -689,6 +503,7 @@ private func makeRollbackPreflight(rebootSent: Bool) -> RuntimeDeploymentPreflig
       upstream: "origin/chauffeur-exp01"
     ),
     profile: "commaAdb",
+    mapdRecoveryOutcome: .clean,
     release: ValidatedMapdReleaseArtifact(
       artifact: artifact,
       byteCount: 1_000_000,
@@ -723,14 +538,54 @@ private actor ManifestTileDecoder: MapTileDecoding {
 
 private actor DeploymentRecordingRunner: ProcessRunning {
   let identity: String
+  let fileCount: Int
+  let totalBytes: UInt64
   private(set) var requests: [ProcessRequest] = []
 
-  init(identity: String) { self.identity = identity }
+  init(identity: String, fileCount: Int, totalBytes: UInt64) {
+    self.identity = identity
+    self.fileCount = fileCount
+    self.totalBytes = totalBytes
+  }
 
   func run(_ request: ProcessRequest) async throws -> ProcessResult {
     requests.append(request)
-    return ProcessResult(terminationStatus: 0, standardOutput: identity, standardError: "")
+    let command = request.arguments.last ?? ""
+    if command.contains(" verify --root ") {
+      return success("""
+      {"operation":"verify","tile_set_id":"\(identity)","file_count":\(fileCount),"total_bytes":\(totalBytes)}
+      """)
+    }
+    if command.contains(" activate --root ") {
+      return success("""
+      {"operation":"activate","activated_tile_set_id":"\(identity)"}
+      """)
+    }
+    return success("")
   }
+
+  private func success(_ output: String) -> ProcessResult {
+    ProcessResult(terminationStatus: 0, standardOutput: output + "\n", standardError: "")
+  }
+}
+
+private actor TileRollbackRunner: ProcessRunning {
+  let output: String
+
+  init(output: String) { self.output = output }
+
+  func run(_ request: ProcessRequest) async throws -> ProcessResult {
+    let command = request.arguments.last ?? ""
+    let standardOutput = command.contains(" rollback --root ") ? output + "\n" : ""
+    return ProcessResult(terminationStatus: 0, standardOutput: standardOutput, standardError: "")
+  }
+}
+
+private func transactionHelperFixture(in directory: URL) throws -> URL {
+  let helper = directory.appendingPathComponent("vtsc-tile-transaction")
+  try Data("#!/bin/sh\nexit 0\n".utf8).write(to: helper)
+  try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: helper.path)
+  return helper
 }
 
 private actor DeploymentEventCollector {
@@ -766,22 +621,15 @@ private actor OnroadPreflightRunner: ProcessRunning {
     }
     if request.executableURL == ApplyPipeline.sshURL {
       if request.arguments.last == "true" { return success("") }
-      let snapshot: [String: Any] = [
-        "is_offroad": false,
-        "is_onroad": true,
-        "map_lookahead_enabled": false,
-        "branch": "chauffeur-exp01",
-        "head": head,
-        "dirty": false,
-        "physics_params": [:],
-        "q_curve_sha256": String(repeating: "b", count: 64),
-        "mapd_release_version": "old",
-        "mapd_version": "old",
-        "active_mapd_sha256": String(repeating: "c", count: 64),
-        "cached_mapd_path": "/tmp/cache",
-        "active_tile_set_id": NSNull(),
-      ]
-      return success(String(data: try JSONSerialization.data(withJSONObject: snapshot), encoding: .utf8)! + "\n")
+      if request.arguments.last?.contains(TiciMapdReleaseTransactionCommandBuilder.recoveryMarker) == true {
+        return success("\(TiciMapdReleaseTransactionCommandBuilder.recoveryMarker)\tclean\n")
+      }
+      return success(deploymentSnapshotWire(
+        isOffroad: false,
+        isOnroad: true,
+        mapLookaheadEnabled: false,
+        head: head
+      ))
     }
     return success("")
   }
@@ -806,31 +654,52 @@ private actor RollbackSafetyRunner: ProcessRunning {
   func run(_ request: ProcessRequest) async throws -> ProcessResult {
     requests.append(request)
     let command = request.arguments.last ?? ""
-    if command.contains("\"is_offroad\"") {
+    if command.contains(TiciProductionRollbackCommandBuilder.resultMarker) {
+      let head = String(repeating: "b", count: 40)
+      return ProcessResult(
+        terminationStatus: 0,
+        standardOutput: "\(TiciProductionRollbackCommandBuilder.resultMarker)\t\(Data(head.utf8).base64EncodedString())\n",
+        standardError: ""
+      )
+    }
+    if command.contains("is_offroad") {
       let state = states.isEmpty
         ? RollbackSafetyState(isOffroad: false, isOnroad: true, mapLookaheadEnabled: false)
         : states.removeFirst()
-      let snapshot: [String: Any] = [
-        "is_offroad": state.isOffroad,
-        "is_onroad": state.isOnroad,
-        "map_lookahead_enabled": state.mapLookaheadEnabled,
-        "branch": "chauffeur-exp01",
-        "head": String(repeating: "b", count: 40),
-        "dirty": false,
-        "physics_params": [:],
-        "q_curve_sha256": String(repeating: "c", count: 64),
-        "mapd_release_version": "old-release",
-        "mapd_version": "old-release",
-        "active_mapd_sha256": String(repeating: "d", count: 64),
-        "cached_mapd_path": "/tmp/old-cache",
-        "active_tile_set_id": NSNull(),
-      ]
       return ProcessResult(
         terminationStatus: 0,
-        standardOutput: String(data: try JSONSerialization.data(withJSONObject: snapshot), encoding: .utf8)! + "\n",
+        standardOutput: deploymentSnapshotWire(
+          isOffroad: state.isOffroad,
+          isOnroad: state.isOnroad,
+          mapLookaheadEnabled: state.mapLookaheadEnabled,
+          head: String(repeating: "b", count: 40)
+        ),
         standardError: ""
       )
     }
     return ProcessResult(terminationStatus: 0, standardOutput: "ok\n", standardError: "")
   }
+}
+
+private func deploymentSnapshotWire(
+  isOffroad: Bool,
+  isOnroad: Bool,
+  mapLookaheadEnabled: Bool,
+  head: String
+) -> String {
+  let qCurve = TuneDeploymentIdentity.canonicalQCurveSource(parameters: .checkoutFallback, bands: [])
+  let values: [TiciSnapshotWireField: Data] = [
+    .branch: Data("chauffeur-exp01".utf8),
+    .head: Data(head.utf8),
+    .dirty: Data("0".utf8),
+    .isOffroad: Data((isOffroad ? "1" : "0").utf8),
+    .isOnroad: Data((isOnroad ? "1" : "0").utf8),
+    .mapLookaheadEnabled: Data((mapLookaheadEnabled ? "1" : "0").utf8),
+    .qCurveFile: Data(qCurve.utf8),
+    .activeMapdSHA256: Data(String(repeating: "d", count: 64).utf8),
+    .mapdReleaseVersion: Data("old-release".utf8),
+    .mapdVersion: Data("old-release".utf8),
+    .mapdCacheListing: Data("/tmp/old-cache\t\(String(repeating: "d", count: 64))\n".utf8),
+  ]
+  return TiciSnapshotWireCodec.encode(.init(rawValues: values)) + "\n"
 }

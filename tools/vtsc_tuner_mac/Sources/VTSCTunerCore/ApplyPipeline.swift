@@ -266,28 +266,11 @@ enum MapdCommandBuilder {
 }
 
 enum TiciPhysicsCommandBuilder {
-  static func synchronizeAndVerifyCommand(parameters: SigmoidParameters) -> String {
-    let values = Dictionary(
-      uniqueKeysWithValues: VTSCPhysicsAuthority.entries(for: parameters).map {
-        ($0.moduleName, $0.formattedValue)
-      }
-    )
-    let amplitude = values["PHYSICS_A"]!
-    let steepness = values["PHYSICS_B"]!
-    let center = values["PHYSICS_C"]!
-    let baseline = values["PHYSICS_D"]!
-    let minLat = values["PHYSICS_MIN_LAT_ACCEL"]!
-    let maxLat = values["PHYSICS_MAX_LAT_ACCEL"]!
-    let invocation = [
-      "PYTHONPATH=/data/openpilot \(TiciDeploymentCommandBuilder.ticiPython) tools/vtsc/apply_physics_params.py",
-      "--amplitude \(amplitude)",
-      "--steepness \(steepness)",
-      "--center \(center)",
-      "--baseline \(baseline)",
-      "--min-lat \(minLat)",
-      "--max-lat \(maxLat)",
-    ].joined(separator: " ")
-    return "cd /data/openpilot && \(invocation)"
+  /// The device-side operation is deliberately shell-only. The Mac Swift
+  /// process validates/renderers the exact six values and the tici only
+  /// performs the small atomic Params transaction it cannot perform locally.
+  static func synchronizeAndVerifyCommand(parameters: SigmoidParameters) throws -> String {
+    try TiciParamTransactionCommandBuilder.synchronizeAndVerifyCommand(parameters: parameters)
   }
 }
 
@@ -358,11 +341,14 @@ public actor ApplyPipeline {
         await emit(
           .succeeded,
           id: 0,
-          text: "Production deployment preflight passed without mutation",
+          text: runtimePreflight!.mapdRecoveryOutcome == .recovered
+            ? "Recovered an interrupted mapd update; production deployment preflight passed"
+            : "Production deployment preflight passed without mutation",
           detail: [
             "branch=\(runtimePreflight!.git.branch)",
             "head=\(runtimePreflight!.git.localHead)",
             "tici=\(runtimePreflight!.profile) offroad",
+            "mapd_recovery=\(runtimePreflight!.mapdRecoveryOutcome.rawValue)",
             "release=\(runtimePreflight!.release.artifact.releaseID)",
             "mapd_sha256=\(runtimePreflight!.release.artifact.sha256)",
             tileDetail,
@@ -589,18 +575,32 @@ public actor ApplyPipeline {
     }
 
     let profile = try await pickTiciProfile(preferred: request.preferredTiciProfile)
-    let inspection = try await checked(
+    let recovery = try await checked(
       ProcessRequest(
         executableURL: Self.sshURL,
-        arguments: sshOptions(connectTimeout: 10) + [profile, TiciDeploymentCommandBuilder.preflightInspectionCommand()],
+        arguments: sshOptions(connectTimeout: 10) + [
+          profile,
+          TiciMapdReleaseTransactionCommandBuilder.recoveryCommand(),
+        ],
         timeout: 60
       ),
-      context: "read-only tici deployment preflight"
+      context: "recover an interrupted tici mapd transaction"
     )
-    let snapshot = try TiciDeploymentCommandBuilder.decodeLastJSONLine(
-      TiciDeploymentSnapshot.self,
-      output: inspection.standardOutput
-    )
+    let mapdRecoveryOutcome: TiciMapdReleaseRecoveryOutcome
+    do {
+      mapdRecoveryOutcome = try TiciMapdReleaseTransactionCommandBuilder.decodeRecoveryOutcome(
+        recovery.standardOutput
+      )
+    } catch {
+      throw ApplyPipelineError.invalidDeploymentOutput(
+        "\(recovery.standardOutput)\n\(error.localizedDescription)"
+      )
+    }
+    let snapshot = try await readTiciDeploymentSnapshot(
+      profile: profile,
+      context: "read-only tici deployment preflight",
+      timeout: 60
+    ).snapshot
     try validateTiciPreflight(snapshot, git: git)
 
     let tileSet: CanonicalTileSetArtifact?
@@ -656,6 +656,7 @@ public actor ApplyPipeline {
     return RuntimeDeploymentPreflight(
       git: git,
       profile: profile,
+      mapdRecoveryOutcome: mapdRecoveryOutcome,
       release: release,
       tileSet: tileSet,
       journal: journal,
@@ -849,20 +850,11 @@ public actor ApplyPipeline {
     let identity = TuneDeploymentIdentity(tune: request.tune)
     do {
       await emit(.running, id: 5, text: "Reconfirming offroad/kill-switch safety immediately before mutation…", progress: progress)
-      let recheck = try await checked(
-        ProcessRequest(
-          executableURL: Self.sshURL,
-          arguments: sshOptions(connectTimeout: 10) + [
-            deployment.profile, TiciDeploymentCommandBuilder.preflightInspectionCommand(),
-          ],
-          timeout: 60
-        ),
-        context: "final read-only tici safety check"
-      )
-      let snapshot = try TiciDeploymentCommandBuilder.decodeLastJSONLine(
-        TiciDeploymentSnapshot.self,
-        output: recheck.standardOutput
-      )
+      let snapshot = try await readTiciDeploymentSnapshot(
+        profile: deployment.profile,
+        context: "final read-only tici safety check",
+        timeout: 60
+      ).snapshot
       try validateTiciPreflight(snapshot, git: deployment.git)
       await emit(.succeeded, id: 5, text: "Tici is still parked/offroad with Map Lookahead disabled", progress: progress)
 
@@ -876,7 +868,10 @@ public actor ApplyPipeline {
           executableURL: Self.sshURL,
           arguments: sshOptions(connectTimeout: 10) + [
             deployment.profile,
-            TiciDeploymentCommandBuilder.exactFastForwardCommand(branch: deployment.git.branch, head: targetHead),
+            try TiciGitDeploymentCommandBuilder.exactFastForwardCommand(
+              branch: deployment.git.branch,
+              head: targetHead
+            ),
           ],
           timeout: 180
         ),
@@ -894,28 +889,33 @@ public actor ApplyPipeline {
           executableURL: Self.sshURL,
           arguments: sshOptions(connectTimeout: 10) + [
             deployment.profile,
-            TiciPhysicsCommandBuilder.synchronizeAndVerifyCommand(parameters: request.tune.params),
+            try TiciPhysicsCommandBuilder.synchronizeAndVerifyCommand(parameters: request.tune.params),
           ],
           timeout: 60
         ),
         context: "synchronize exact VTSC physics Params"
       )
-      let qCurve = try await checked(
-        ProcessRequest(
-          executableURL: Self.sshURL,
-          arguments: sshOptions(connectTimeout: 10) + [
-            deployment.profile,
-            TiciDeploymentCommandBuilder.qCurveVerificationCommand(identity: identity),
-          ],
-          timeout: 60
-        ),
-        context: "verify exact VTSC Q curve"
+      let qReadback = try await readTiciDeploymentSnapshot(
+        profile: deployment.profile,
+        context: "verify exact VTSC Q curve",
+        timeout: 60
       )
+      guard qReadback.qCurve.sha256 == identity.qCurveSHA256,
+            qReadback.qCurve.enabled == identity.qCurveEnabled,
+            qReadback.qCurve.pointCount == identity.qCurvePointCount
+      else {
+        throw ApplyPipelineError.postflightMismatch("Q curve differs from the exact deployed source")
+      }
+      let qCurveDetail = [
+        "q_curve_sha256=\(qReadback.qCurve.sha256)",
+        "q_curve_enabled=\(qReadback.qCurve.enabled)",
+        "q_curve_point_count=\(qReadback.qCurve.pointCount)",
+      ].joined(separator: "\\n")
       await emit(
         .succeeded,
         id: 8,
         text: "All six physics Params and Q data match the source-rounded tune",
-        detail: [physics.combinedOutput, qCurve.combinedOutput].filter { !$0.isEmpty }.joined(separator: "\n"),
+        detail: [physics.combinedOutput, qCurveDetail].filter { !$0.isEmpty }.joined(separator: "\n"),
         progress: progress
       )
 
@@ -1012,12 +1012,36 @@ public actor ApplyPipeline {
       ),
       context: "stage exact mapd release"
     )
+    let probe = try await checked(
+      ProcessRequest(
+        executableURL: Self.sshURL,
+        arguments: sshOptions(connectTimeout: 10) + [
+          preflight.profile,
+          try TiciMapdReleaseTransactionCommandBuilder.probeCommand(
+            release: preflight.release,
+            stagedPath: stagedPath
+          ),
+        ],
+        timeout: 60
+      ),
+      context: "run read-only mapd release identity probe"
+    )
+    do {
+      _ = try TiciMapdReleaseTransactionCommandBuilder.validateBuildInfo(
+        TiciMapdReleaseTransactionCommandBuilder.decodeProbe(probe.standardOutput),
+        matches: preflight.release
+      )
+    } catch {
+      throw ApplyPipelineError.invalidDeploymentOutput(
+        "\(probe.standardOutput)\n\(error.localizedDescription)"
+      )
+    }
     let install = try await checked(
       ProcessRequest(
         executableURL: Self.sshURL,
         arguments: sshOptions(connectTimeout: 10) + [
           preflight.profile,
-          TiciDeploymentCommandBuilder.installReleaseCommand(
+          try TiciMapdReleaseTransactionCommandBuilder.installCommand(
             release: preflight.release,
             stagedPath: stagedPath,
             rollbackPath: preflight.journal.mapdRollbackPath
@@ -1027,10 +1051,21 @@ public actor ApplyPipeline {
       ),
       context: "install and verify exact mapd release"
     )
-    guard install.standardOutput.contains(preflight.release.artifact.releaseID),
-          install.standardOutput.contains(preflight.release.artifact.sha256)
-    else { throw ApplyPipelineError.invalidDeploymentOutput(install.standardOutput) }
-    return [transfer.combinedOutput, install.combinedOutput].filter { !$0.isEmpty }.joined(separator: "\n")
+    do {
+      let result = try TiciMapdReleaseTransactionCommandBuilder.decodeResult(install.standardOutput)
+      _ = try TiciMapdReleaseTransactionCommandBuilder.validate(
+        result,
+        matches: preflight.release,
+        rollbackPath: preflight.journal.mapdRollbackPath
+      )
+    } catch {
+      throw ApplyPipelineError.invalidDeploymentOutput(
+        "\(install.standardOutput)\n\(error.localizedDescription)"
+      )
+    }
+    return [transfer.combinedOutput, probe.combinedOutput, install.combinedOutput]
+      .filter { !$0.isEmpty }
+      .joined(separator: "\n")
   }
 
   private func waitForProductionPostflight(
@@ -1045,25 +1080,14 @@ public actor ApplyPipeline {
     repeat {
       try Task.checkCancellation()
       do {
-        let result = try await checked(
-          ProcessRequest(
-            executableURL: Self.sshURL,
-            arguments: sshOptions(connectTimeout: 10) + [
-              preflight.profile,
-              TiciDeploymentCommandBuilder.postflightInspectionCommand(
-                head: targetHead,
-                release: preflight.release,
-                identity: identity,
-                expectedTileSetID: preflight.tileSet?.manifest.tileSetID
-              ),
-            ],
-            timeout: 30
-          ),
+        let readback = try await readTiciRuntimePostflight(
+          profile: preflight.profile,
           context: "complete tici deployment postflight"
         )
-        let postflight = try TiciDeploymentCommandBuilder.decodeLastJSONLine(
-          TiciDeploymentPostflight.self,
-          output: result.standardOutput
+        let postflight = makeProductionPostflight(
+          readback,
+          preflight: preflight,
+          identity: identity
         )
         try validatePostflight(
           postflight,
@@ -1079,6 +1103,88 @@ public actor ApplyPipeline {
       if Date() < deadline { try await Task.sleep(for: .seconds(2)) }
     } while Date() < deadline
     throw lastError
+  }
+
+  private func readTiciRuntimePostflight(
+    profile: String,
+    context: String
+  ) async throws -> TiciRuntimePostflightRead {
+    let result = try await checked(
+      ProcessRequest(
+        executableURL: Self.sshURL,
+        arguments: sshOptions(connectTimeout: 10) + [
+          profile,
+          TiciSnapshotWireCommandBuilder.inspectionCommand(includeRuntimePostflight: true),
+        ],
+        timeout: 30
+      ),
+      context: context
+    )
+    do {
+      return try TiciDeploymentSnapshotDecoder.decodeRuntimePostflight(result.standardOutput)
+    } catch {
+      throw ApplyPipelineError.invalidDeploymentOutput(
+        "\(result.standardOutput)\n\(error.localizedDescription)"
+      )
+    }
+  }
+
+  private func makeProductionPostflight(
+    _ readback: TiciRuntimePostflightRead,
+    preflight: RuntimeDeploymentPreflight,
+    identity: TuneDeploymentIdentity
+  ) -> TiciDeploymentPostflight {
+    let snapshot = readback.deployment.snapshot
+    let physics = Dictionary(uniqueKeysWithValues: identity.physics.map { ($0.paramKey, $0.value) })
+    let physicsMatches = physics.allSatisfy { snapshot.physicsParams[$0.key] ?? nil == $0.value }
+    let release = preflight.release.artifact
+    let buildInfo = try? JSONDecoder().decode(TiciMapdReleaseBuildInfo.self, from: readback.activeMapdBuildInfo)
+    let buildInfoMatches = buildInfo?.releaseID == release.releaseID &&
+      buildInfo?.buildID == release.buildID &&
+      buildInfo?.estimatorVersion == release.estimatorVersion &&
+      buildInfo?.capabilities.contains(release.capability) == true
+    let activeELFARM64 = isELF64LittleEndianARM64(readback.activeMapdELFHeader)
+    let profile = TiciWholeCurvePostflightValidator.inspect(
+      profileData: readback.wholeCurveProfile,
+      gpsData: readback.lastGPSPosition,
+      now: Date(timeIntervalSince1970: TimeInterval(readback.remoteEpochMilliseconds) / 1_000)
+    )
+    return TiciDeploymentPostflight(
+      isOffroad: snapshot.isOffroad,
+      isOnroad: snapshot.isOnroad,
+      mapLookaheadEnabled: snapshot.mapLookaheadEnabled,
+      head: snapshot.head,
+      physicsMatches: physicsMatches,
+      qCurveSHA256: readback.deployment.qCurve.sha256,
+      qCurveEnabled: readback.deployment.qCurve.enabled,
+      qCurvePointCount: readback.deployment.qCurve.pointCount,
+      mapdReleaseVersion: snapshot.mapdReleaseVersion ?? "",
+      mapdVersion: snapshot.mapdVersion ?? "",
+      activeMapdSHA256: snapshot.activeMapdSHA256,
+      cachedMapdSHA256: snapshot.cachedMapdSHA256 ?? "",
+      mapdRunning: readback.mapdRunning,
+      // An exact active digest is a stronger marker check than scanning a
+      // moving executable, and the local immutable artifact was marker- and
+      // build-info-validated before it was transferred.
+      capabilityPresent: snapshot.activeMapdSHA256 == release.sha256,
+      activeELFARM64: activeELFARM64,
+      buildInfoMatches: buildInfoMatches,
+      profileEstimatorVersion: profile.estimatorVersion,
+      profileRouteFingerprint: profile.routeFingerprint,
+      profileFresh: profile.fresh,
+      profileValuesFinite: profile.valuesFinite,
+      gpsStatus: profile.gpsStatus,
+      profileValidationStatus: profile.validationStatus,
+      profilePointCount: profile.pointCount,
+      profileEventCount: profile.eventCount,
+      activeTileSetID: snapshot.activeTileSetID
+    )
+  }
+
+  private func isELF64LittleEndianARM64(_ header: Data) -> Bool {
+    guard header.count >= 20 else { return false }
+    return Array(header.prefix(6)) == [0x7f, 0x45, 0x4c, 0x46, 2, 1] &&
+      header[18] == 183 && header[19] == 0
   }
 
   private func validatePostflight(
@@ -1168,15 +1274,20 @@ public actor ApplyPipeline {
           executableURL: Self.sshURL,
           arguments: sshOptions(connectTimeout: 10) + [
             preflight.profile,
-            TiciDeploymentCommandBuilder.rollbackCommand(
-              journal: preflight.journal,
-              rollbackMapdPath: preflight.journal.mapdRollbackPath
-            ),
+            try TiciProductionRollbackCommandBuilder.command(journal: preflight.journal),
           ],
           timeout: 180
         ),
         context: "restore tici source, Params, and mapd"
       )
+      let restoredHead = try TiciProductionRollbackCommandBuilder.restoredHead(from: result.standardOutput)
+      guard restoredHead == preflight.journal.previousHead else {
+        throw ApplyPipelineError.commitMismatch(
+          context: "tici rollback",
+          expected: preflight.journal.previousHead,
+          actual: restoredHead
+        )
+      }
       details.append(result.combinedOutput)
     } catch {
       succeeded = false
@@ -1217,24 +1328,20 @@ public actor ApplyPipeline {
     repeat {
       try Task.checkCancellation()
       do {
-        let result = try await checked(
-          ProcessRequest(
-            executableURL: Self.sshURL,
-            arguments: sshOptions(connectTimeout: 10) + [
-              preflight.profile,
-              TiciDeploymentCommandBuilder.rollbackVerificationCommand(
-                journal: preflight.journal,
-                tilesWereTouched: tilesWereTouched
-              ),
-            ],
-            timeout: 30
-          ),
+        let readback = try await readTiciRuntimePostflight(
+          profile: preflight.profile,
           context: "verify complete post-rollback identity"
         )
-        guard result.standardOutput.contains("\"rollback_verified\": true") else {
-          throw ApplyPipelineError.invalidDeploymentOutput(result.standardOutput)
-        }
-        return result.combinedOutput
+        try validateRollbackReadback(
+          readback,
+          journal: preflight.journal,
+          tilesWereTouched: tilesWereTouched
+        )
+        return [
+          "rollback_verified=true",
+          "head=\(readback.deployment.snapshot.head)",
+          "active_tile_set_id=\(readback.deployment.snapshot.activeTileSetID ?? "")",
+        ].joined(separator: "\n")
       } catch {
         lastError = error
       }
@@ -1243,25 +1350,96 @@ public actor ApplyPipeline {
     throw lastError
   }
 
+  private func validateRollbackReadback(
+    _ readback: TiciRuntimePostflightRead,
+    journal: DeploymentRollbackJournal,
+    tilesWereTouched: Bool
+  ) throws {
+    let snapshot = readback.deployment.snapshot
+    guard snapshot.isOffroad, !snapshot.isOnroad, !snapshot.mapLookaheadEnabled else {
+      throw ApplyPipelineError.postflightMismatch("rollback parked/offroad/kill-switch state differs")
+    }
+    guard snapshot.head == journal.previousHead else {
+      throw ApplyPipelineError.commitMismatch(
+        context: "tici rollback verification",
+        expected: journal.previousHead,
+        actual: snapshot.head
+      )
+    }
+    guard !snapshot.dirty else { throw ApplyPipelineError.repositoryDirty("tici checkout is dirty after rollback") }
+    for (key, expected) in journal.previousPhysicsParams {
+      guard (snapshot.physicsParams[key] ?? nil) == expected else {
+        throw ApplyPipelineError.postflightMismatch("rollback physics Param differs: \(key)")
+      }
+    }
+    guard readback.deployment.qCurve.sha256 == journal.previousQCurveSHA256 else {
+      throw ApplyPipelineError.postflightMismatch("rollback Q curve differs from the recorded source")
+    }
+    guard snapshot.mapdReleaseVersion == journal.previousMapdReleaseVersion,
+          snapshot.mapdVersion == journal.previousMapdVersion else {
+      throw ApplyPipelineError.postflightMismatch("rollback MapdVersion/MapdReleaseVersion differ")
+    }
+    guard snapshot.activeMapdSHA256 == journal.previousActiveMapdSHA256 else {
+      throw ApplyPipelineError.postflightMismatch("rollback active mapd digest differs")
+    }
+    guard snapshot.cachedMapdPath == journal.previousCachedMapdPath else {
+      throw ApplyPipelineError.postflightMismatch("rollback persistent mapd cache path differs")
+    }
+    if let expectedCacheSHA = journal.previousCachedMapdSHA256 {
+      guard snapshot.cachedMapdSHA256 == expectedCacheSHA else {
+        throw ApplyPipelineError.postflightMismatch("rollback persistent mapd cache digest differs")
+      }
+    }
+    guard readback.mapdRunning else {
+      throw ApplyPipelineError.postflightMismatch("mapd is not running after rollback")
+    }
+    if let expectedTileSetID = journal.previousTileSetID {
+      guard snapshot.activeTileSetID == expectedTileSetID else {
+        throw ApplyPipelineError.postflightMismatch("rollback tile-set identity differs")
+      }
+    }
+    if tilesWereTouched, let targetTileSetID = journal.targetTileSetID,
+       snapshot.activeTileSetID == targetTileSetID {
+      throw ApplyPipelineError.postflightMismatch("rolled-back tile set is still active")
+    }
+  }
+
   private func freshParkedSafetySnapshot(profile: String) async throws -> TiciDeploymentSnapshot {
-    let result = try await checked(
-      ProcessRequest(
-        executableURL: Self.sshURL,
-        arguments: sshOptions(connectTimeout: 5) + [
-          profile,
-          TiciDeploymentCommandBuilder.preflightInspectionCommand(),
-        ],
-        timeout: 20
-      ),
-      context: "fresh parked-state verification"
-    )
-    let snapshot = try TiciDeploymentCommandBuilder.decodeLastJSONLine(
-      TiciDeploymentSnapshot.self,
-      output: result.standardOutput
-    )
+    let snapshot = try await readTiciDeploymentSnapshot(
+      profile: profile,
+      context: "fresh parked-state verification",
+      timeout: 20,
+      connectTimeout: 5
+    ).snapshot
     guard snapshot.isOffroad, !snapshot.isOnroad else { throw ApplyPipelineError.ticiNotOffroad }
     guard !snapshot.mapLookaheadEnabled else { throw ApplyPipelineError.mapLookaheadMustRemainDisabled }
     return snapshot
+  }
+
+  private func readTiciDeploymentSnapshot(
+    profile: String,
+    context: String,
+    timeout: TimeInterval,
+    connectTimeout: Int = 10
+  ) async throws -> TiciDeploymentSnapshotRead {
+    let result = try await checked(
+      ProcessRequest(
+        executableURL: Self.sshURL,
+        arguments: sshOptions(connectTimeout: connectTimeout) + [
+          profile,
+          TiciSnapshotWireCommandBuilder.inspectionCommand(),
+        ],
+        timeout: timeout
+      ),
+      context: context
+    )
+    do {
+      return try TiciDeploymentSnapshotDecoder.decodeRead(result.standardOutput)
+    } catch {
+      throw ApplyPipelineError.invalidDeploymentOutput(
+        "\(result.standardOutput)\n\(error.localizedDescription)"
+      )
+    }
   }
 
   private func gitOutput(_ arguments: [String], repositoryRoot: URL) async throws -> String {

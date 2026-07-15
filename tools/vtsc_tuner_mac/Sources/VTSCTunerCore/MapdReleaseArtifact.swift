@@ -142,7 +142,10 @@ public struct MapdReleaseArtifact: Codable, Equatable, Sendable {
   }
 
   private static func isSafeMarker(_ value: String) -> Bool {
-    !value.isEmpty && value.count <= 128 && value.unicodeScalars.allSatisfy { $0.value >= 0x20 && $0.value < 0x7f }
+    !value.isEmpty && value.range(
+      of: #"^[A-Za-z0-9][A-Za-z0-9._:+/-]{0,127}$"#,
+      options: .regularExpression
+    ) != nil
   }
 }
 

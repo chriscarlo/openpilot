@@ -1,0 +1,245 @@
+import Foundation
+
+/// The source-relevant subset of `vtsc_curve_tuning.py` that the Python
+/// deployer historically hashed on the tici. Keeping this parser on the Mac
+/// means a read-only device snapshot has no dependency on openpilot imports.
+struct TiciQCurveIdentity: Equatable, Sendable {
+  var sha256: String
+  var enabled: Bool
+  var pointCount: Int
+}
+
+struct TiciDeploymentSnapshotRead: Equatable, Sendable {
+  var snapshot: TiciDeploymentSnapshot
+  var qCurve: TiciQCurveIdentity
+  var wire: TiciSnapshotWireSnapshot
+}
+
+struct TiciRuntimePostflightRead: Equatable, Sendable {
+  var deployment: TiciDeploymentSnapshotRead
+  var activeMapdBuildInfo: Data
+  var activeMapdELFHeader: Data
+  var mapdRunning: Bool
+  var remoteEpochMilliseconds: Int64
+  var wholeCurveProfile: Data?
+  var lastGPSPosition: Data?
+}
+
+enum TiciDeploymentSnapshotDecodeError: LocalizedError, Equatable, Sendable {
+  case missingField(TiciSnapshotWireField)
+  case invalidBoolean(TiciSnapshotWireField, String)
+  case invalidEpochMilliseconds(String)
+  case malformedCacheListing(String)
+  case qCurveMarkerMissing(String)
+
+  var errorDescription: String? {
+    switch self {
+    case let .missingField(field):
+      "The tici snapshot did not contain \(field.rawValue)."
+    case let .invalidBoolean(field, value):
+      "The tici snapshot reported invalid \(field.rawValue)=\(value.debugDescription)."
+    case let .invalidEpochMilliseconds(value):
+      "The tici snapshot reported invalid remote_epoch_milliseconds=\(value.debugDescription)."
+    case let .malformedCacheListing(line):
+      "The tici mapd cache listing is malformed: \(line)"
+    case let .qCurveMarkerMissing(marker):
+      "The tici Q-curve source is missing \(marker)."
+    }
+  }
+}
+
+/// Decodes the dependency-free shell snapshot into the same model used by the
+/// existing deployment journal. The host owns all interpretation: the tici
+/// merely reads files and calculates ordinary SHA-256 values.
+enum TiciDeploymentSnapshotDecoder {
+  private static let physicsFields: [(String, TiciSnapshotWireField)] = [
+    ("VisionTurnSpeedControlPhysicsAmplitude", .physicsAmplitude),
+    ("VisionTurnSpeedControlPhysicsSteepness", .physicsSteepness),
+    ("VisionTurnSpeedControlPhysicsCenter", .physicsCenter),
+    ("VisionTurnSpeedControlPhysicsBaseline", .physicsBaseline),
+    ("VisionTurnSpeedControlPhysicsMinLatAccel", .physicsMinLatAccel),
+    ("VisionTurnSpeedControlPhysicsMaxLatAccel", .physicsMaxLatAccel),
+  ]
+
+  static func decode(_ output: String) throws -> TiciDeploymentSnapshot {
+    try decodeRead(output).snapshot
+  }
+
+  static func decodeRead(_ output: String) throws -> TiciDeploymentSnapshotRead {
+    try decodeRead(TiciSnapshotWireCodec.decode(output))
+  }
+
+  static func decodeRead(_ wire: TiciSnapshotWireSnapshot) throws -> TiciDeploymentSnapshotRead {
+    let snapshot = try decode(wire)
+    return TiciDeploymentSnapshotRead(
+      snapshot: snapshot,
+      qCurve: try qCurveIdentity(source: requiredData(wire, .qCurveFile)),
+      wire: wire
+    )
+  }
+
+  static func decodeRuntimePostflight(_ output: String) throws -> TiciRuntimePostflightRead {
+    let wire = try TiciSnapshotWireCodec.decode(output)
+    let deployment = try decodeRead(wire)
+    return TiciRuntimePostflightRead(
+      deployment: deployment,
+      activeMapdBuildInfo: try requiredData(wire, .activeMapdBuildInfo),
+      activeMapdELFHeader: try requiredData(wire, .activeMapdELFHeader),
+      mapdRunning: try requiredBool(wire, .mapdRunning),
+      remoteEpochMilliseconds: try requiredEpochMilliseconds(wire),
+      wholeCurveProfile: firstNonempty(wire[.memoryWholeCurveProfile], wire[.persistentWholeCurveProfile]),
+      lastGPSPosition: firstNonempty(wire[.memoryLastGPSPosition], wire[.persistentLastGPSPosition])
+    )
+  }
+
+  static func decode(_ wire: TiciSnapshotWireSnapshot) throws -> TiciDeploymentSnapshot {
+    let release = optionalText(wire, .mapdReleaseVersion)
+    let version = optionalText(wire, .mapdVersion)
+    let cacheEntries = try decodeCacheEntries(optionalText(wire, .mapdCacheListing) ?? "")
+    let activeRelease = release ?? version
+    let cached = activeRelease.flatMap { selectCachedMapd(releaseID: $0, entries: cacheEntries) }
+
+    let qCurveData = try requiredData(wire, .qCurveFile)
+    let qCurve = try qCurveIdentity(source: qCurveData)
+    let physics = Dictionary(uniqueKeysWithValues: physicsFields.map { key, field in
+      (key, optionalText(wire, field))
+    })
+
+    return TiciDeploymentSnapshot(
+      isOffroad: try requiredBool(wire, .isOffroad),
+      isOnroad: try requiredBool(wire, .isOnroad),
+      mapLookaheadEnabled: try requiredBool(wire, .mapLookaheadEnabled),
+      branch: try requiredText(wire, .branch),
+      head: try requiredText(wire, .head),
+      dirty: try requiredBool(wire, .dirty),
+      physicsParams: physics,
+      qCurveSHA256: qCurve.sha256,
+      mapdReleaseVersion: release,
+      mapdVersion: version,
+      activeMapdSHA256: optionalText(wire, .activeMapdSHA256) ?? "",
+      cachedMapdPath: cached?.path ?? "",
+      cachedMapdSHA256: cached?.sha256,
+      activeTileSetID: tileSetID(from: wire[.tileManifest])
+    )
+  }
+
+  static func qCurveIdentity(source: Data) throws -> TiciQCurveIdentity {
+    // Python's `splitlines()` intentionally removes line terminators before
+    // hashing the selected rows back with exactly one LF each.
+    let lines = String(decoding: source, as: UTF8.self).split(
+      omittingEmptySubsequences: false,
+      whereSeparator: \.isNewline
+    ).map(String.init)
+    guard let enabledLine = lines.first(where: { $0.hasPrefix("Q_CURVE_ENABLED") }) else {
+      throw TiciDeploymentSnapshotDecodeError.qCurveMarkerMissing("Q_CURVE_ENABLED")
+    }
+    guard let firstPointIndex = lines.firstIndex(where: { $0.hasPrefix("Q_CURVE_POINTS") }) else {
+      throw TiciDeploymentSnapshotDecodeError.qCurveMarkerMissing("Q_CURVE_POINTS")
+    }
+
+    var selected = [enabledLine, lines[firstPointIndex]]
+    if !lines[firstPointIndex].trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix("]") {
+      for line in lines.dropFirst(firstPointIndex + 1) {
+        selected.append(line)
+        if line.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix("]") { break }
+      }
+    }
+    let digest = TuneDeploymentIdentity.sha256Hex(Data((selected.joined(separator: "\n") + "\n").utf8))
+    let enabled = enabledLine
+      .split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+      .last
+      .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) == "True" }
+      ?? false
+    let pointLines = selected.dropFirst(2).dropLast()
+    let pointCount = pointLines.reduce(into: 0) { count, line in
+      if line.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("(") { count += 1 }
+    }
+    return TiciQCurveIdentity(sha256: digest, enabled: enabled, pointCount: pointCount)
+  }
+
+  private static func requiredData(
+    _ wire: TiciSnapshotWireSnapshot,
+    _ field: TiciSnapshotWireField
+  ) throws -> Data {
+    guard let value = wire[field], !value.isEmpty else {
+      throw TiciDeploymentSnapshotDecodeError.missingField(field)
+    }
+    return value
+  }
+
+  private static func requiredText(
+    _ wire: TiciSnapshotWireSnapshot,
+    _ field: TiciSnapshotWireField
+  ) throws -> String {
+    let value = String(decoding: try requiredData(wire, field), as: UTF8.self)
+    guard !value.isEmpty else { throw TiciDeploymentSnapshotDecodeError.missingField(field) }
+    return value
+  }
+
+  private static func optionalText(
+    _ wire: TiciSnapshotWireSnapshot,
+    _ field: TiciSnapshotWireField
+  ) -> String? {
+    guard let value = wire[field], !value.isEmpty else { return nil }
+    return String(decoding: value, as: UTF8.self)
+  }
+
+  private static func firstNonempty(_ first: Data?, _ second: Data?) -> Data? {
+    if let first, !first.isEmpty { return first }
+    if let second, !second.isEmpty { return second }
+    return nil
+  }
+
+  private static func requiredBool(
+    _ wire: TiciSnapshotWireSnapshot,
+    _ field: TiciSnapshotWireField
+  ) throws -> Bool {
+    let text = try requiredText(wire, field)
+    switch text {
+    case "0": return false
+    case "1": return true
+    default: throw TiciDeploymentSnapshotDecodeError.invalidBoolean(field, text)
+    }
+  }
+
+  private static func requiredEpochMilliseconds(_ wire: TiciSnapshotWireSnapshot) throws -> Int64 {
+    let text = try requiredText(wire, .remoteEpochMilliseconds)
+    guard text.range(of: #"^[0-9]{13,16}$"#, options: .regularExpression) != nil,
+          let value = Int64(text), value > 0
+    else { throw TiciDeploymentSnapshotDecodeError.invalidEpochMilliseconds(text) }
+    return value
+  }
+
+  private struct CacheEntry: Equatable, Sendable {
+    var path: String
+    var sha256: String
+  }
+
+  private static func decodeCacheEntries(_ listing: String) throws -> [CacheEntry] {
+    guard !listing.isEmpty else { return [] }
+    return try listing.split(whereSeparator: \.isNewline).map { rawLine in
+      let fields = rawLine.split(separator: "\t", maxSplits: 1, omittingEmptySubsequences: false)
+      guard fields.count == 2,
+            !fields[0].isEmpty,
+            fields[1].range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil
+      else { throw TiciDeploymentSnapshotDecodeError.malformedCacheListing(String(rawLine)) }
+      return CacheEntry(path: String(fields[0]), sha256: String(fields[1]))
+    }
+  }
+
+  private static func selectCachedMapd(releaseID: String, entries: [CacheEntry]) -> CacheEntry? {
+    let releaseDigest = TuneDeploymentIdentity.sha256Hex(Data(releaseID.utf8))
+    let prefix = "mapd-\(releaseDigest.prefix(16))-"
+    return entries
+      .filter { URL(fileURLWithPath: $0.path).lastPathComponent.hasPrefix(prefix) }
+      .sorted { $0.path < $1.path }
+      .last
+  }
+
+  private static func tileSetID(from raw: Data?) -> String? {
+    guard let raw, !raw.isEmpty,
+          let object = try? JSONSerialization.jsonObject(with: raw) as? [String: Any]
+    else { return nil }
+    return object["tile_set_id"] as? String
+  }
+}
