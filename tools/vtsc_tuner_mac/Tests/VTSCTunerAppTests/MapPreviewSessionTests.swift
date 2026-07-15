@@ -61,6 +61,18 @@ private func calibrationSession() -> MapPreviewSession {
   return session
 }
 
+@MainActor
+@Test func aFreshMapPreviewLetsTheFirstClickedCurveBecomeACalibrationDraft() {
+  let session = MapPreviewSession(loadPersistedState: false, persistsCalibrationSamples: false)
+
+  session.select(curveSelection(id: "fresh-click"))
+
+  #expect(session.purpose == .calibration)
+  #expect(session.selection?.way.id == "fresh-click")
+  #expect(session.canQueueSelection)
+  #expect(session.statusText.contains("Drafting"))
+}
+
 private func connectedWay(
   id: String,
   coordinates: [(Double, Double)],

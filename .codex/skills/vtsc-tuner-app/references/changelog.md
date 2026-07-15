@@ -2,6 +2,12 @@
 
 Reverse-chronological. Add a new dated section for every substantive change.
 
+## 2026-07-14 — direct curve-picking entry and click-through map legend
+
+- Restored Calibration as the normal Map Preview entry mode. The prior Whole-Curve Study default is deliberately read-only: it replaces the bank workflow with study inspection and routes road clicks to study events, which made ordinary curve selection look broken. Whole-Curve Study remains available from the purpose picker, and its inspector now has an explicit “Go to Curve Calibration” button that explains how to return to drafting and bank edits.
+- Made the display-only map speed legend ignore pointer events. Its alignment frame spans the map, so this prevents it from ever obscuring a colored road click as the map pane changes size.
+- Verification: all 64 core and 34 app Swift tests passed, as did the tile-decoder Go tests; the rebuilt Release bundle passed strict deep code-sign verification. In the fresh app, Map Preview opened in Calibration with the calibration workflow visible; a physical mouse click selected Forest Route 3N01, created a clearly marked unbanked draft at 27.9 mph, and enabled Add Curve to Bank. The persisted 18-curve bank hash was unchanged; nothing was added, fitted, accepted, or applied.
+
 ## 2026-07-13 — production whole-curve runtime and coherent deployment
 
 - Ported the accepted whole-curve estimator to Go and made one approximately 1,200 m ordered directional route feed both legacy curvature and the new profile. The estimator preserves source/traversal provenance and predecessor context, publishes stable signed events through versioned `MapWholeCurveProfile`, accepts a unique mainline beside an ordinary side road, and fails closed on genuinely unresolved forks. A shared Swift/Go corpus covers the actual 18 saved samples and 12 directional events plus the synthetic geometry, ambiguity, truncation, reversal, and rollover cases.

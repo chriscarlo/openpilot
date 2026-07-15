@@ -23,7 +23,9 @@ final class MapPreviewSession: ObservableObject {
 
   @Published var tileRootURL: URL?
   @Published var ways: [MapRenderedWay] = []
-  @Published var purpose: MapPreviewPurpose = .wholeCurveStudy {
+  // Curve picking is the normal Map Preview task. Whole-Curve Study remains
+  // available as an explicit, read-only mode from the map-purpose picker.
+  @Published var purpose: MapPreviewPurpose = .calibration {
     didSet {
       guard purpose != oldValue else { return }
       if purpose == .calibration {

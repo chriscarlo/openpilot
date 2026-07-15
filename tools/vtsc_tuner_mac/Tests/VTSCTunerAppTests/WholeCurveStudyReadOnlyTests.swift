@@ -9,6 +9,7 @@ import VTSCTunerCore
     persistsCalibrationSamples: false,
     persistsMapPreferences: false
   )
+  session.purpose = .wholeCurveStudy
   session.calibrationSamples = [MapCalibrationSample(
     sourceKey: "saved-road:1",
     roadName: "Saved road",

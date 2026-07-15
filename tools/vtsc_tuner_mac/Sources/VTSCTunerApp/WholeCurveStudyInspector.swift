@@ -33,6 +33,14 @@ struct WholeCurveStudyInspector: View {
         .font(.callout)
         .foregroundStyle(.secondary)
         .fixedSize(horizontal: false, vertical: true)
+      Button {
+        map.purpose = .calibration
+      } label: {
+        Label("Go to Curve Calibration", systemImage: "plus.circle.fill")
+      }
+      .buttonStyle(.borderedProminent)
+      .controlSize(.large)
+      .help("Switch to Calibration to click a mapd curve, choose its target speed, and add it to the persistent Curve Bank.")
     }
     .padding(13)
     .frame(maxWidth: .infinity, alignment: .leading)

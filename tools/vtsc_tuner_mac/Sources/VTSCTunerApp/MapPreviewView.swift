@@ -56,6 +56,9 @@ struct MapPreviewView: View {
           .padding(.leading, 12)
           .padding(.bottom, 36)
           .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+          // The alignment frame spans the map. Keep this display-only legend
+          // transparent to pointer events so MKMapView receives road clicks.
+          .allowsHitTesting(false)
       }
     }
     // RootView owns the top workspace inset. Keep the map toolbar below it,
