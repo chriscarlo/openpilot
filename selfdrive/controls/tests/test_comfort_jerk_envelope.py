@@ -13,7 +13,8 @@ COMFORT_JERK = 0.4
 
 def _make_stub(*, prev_a: float = 0.0, owner: str = "", source: str = "lead0",
                keepup_max_accel: float = 0.22, release_jerk: float = 2.0,
-               track_id: int = -1035, hyundai_enabled: bool = True):
+               track_id: int = -1035, hyundai_enabled: bool = True,
+               release_elapsed_s: float | None = DT):
   cfg = replace(
     LeadResponseTuningConfig.defaults(),
     comfort_jerk_limit_mps3=COMFORT_JERK,
@@ -38,6 +39,7 @@ def _make_stub(*, prev_a: float = 0.0, owner: str = "", source: str = "lead0",
     _comfort_jerk_prev_src=source,
     _comfort_jerk_prev_track_id=track_id,
     _brake_release_slew_active=False,
+    _positive_release_elapsed_s=release_elapsed_s,
     _comfort_upward_floor_owner=owner,
     _flutter_mode_active=False,
     handoff_limit_debug={"active": False, "clipped": False},
@@ -115,6 +117,74 @@ def test_same_track_brake_release_uses_positive_only_release_jerk() -> None:
   assert stub.comfort_jerk_debug["release_slew_clipped"] is False
 
 
+def test_same_track_brake_release_uses_elapsed_cycle_time() -> None:
+  stub, leads = _make_stub(prev_a=-0.8, owner="", release_elapsed_s=0.028)
+  stub.output_a_target = 0.2
+  stub._apply_comfort_jerk_envelope("lead0", leads, v_ego=22.0)
+  first_output = stub.output_a_target
+
+  assert first_output == pytest.approx(-0.8 + 2.0 * 0.028)
+  assert stub.comfort_jerk_debug["release_elapsed_s"] == pytest.approx(0.028)
+  assert stub.comfort_jerk_debug["release_max_step_mps2"] == pytest.approx(2.0 * 0.028)
+
+  stub._positive_release_elapsed_s = 0.071
+  stub.output_a_target = 0.2
+  stub._apply_comfort_jerk_envelope("lead0", leads, v_ego=22.0)
+
+  assert stub.output_a_target == pytest.approx(first_output + 2.0 * 0.071)
+  assert stub.comfort_jerk_debug["release_elapsed_s"] == pytest.approx(0.071)
+
+
+@pytest.mark.parametrize("elapsed_s", [None, 0.0, -0.01, 0.201, float("inf"), float("nan")])
+def test_brake_release_invalid_or_stale_elapsed_uses_nominal_fallback(elapsed_s) -> None:
+  stub, leads = _make_stub(prev_a=-0.8, owner="", release_elapsed_s=elapsed_s)
+  stub.output_a_target = 0.2
+
+  stub._apply_comfort_jerk_envelope("lead0", leads, v_ego=22.0)
+
+  assert stub.output_a_target == pytest.approx(-0.8 + 2.0 * DT)
+  assert stub.comfort_jerk_debug["release_elapsed_s"] == pytest.approx(DT)
+
+
+def test_positive_release_clock_uses_model_monotonic_cadence_and_resets_gaps() -> None:
+  stub = SimpleNamespace(
+    dt=DT,
+    _positive_release_prev_model_mono_ns=0,
+    _positive_release_elapsed_s=DT,
+  )
+
+  LongitudinalPlanner._refresh_positive_release_elapsed(
+    stub, SimpleNamespace(logMonoTime={"modelV2": 1_000_000_000}),
+  )
+  assert stub._positive_release_elapsed_s == pytest.approx(DT)
+
+  LongitudinalPlanner._refresh_positive_release_elapsed(
+    stub, SimpleNamespace(logMonoTime={"modelV2": 1_028_000_000}),
+  )
+  assert stub._positive_release_elapsed_s == pytest.approx(0.028)
+
+  # A stale gap and a non-monotonic clock both retain the conservative nominal
+  # step, while anchoring the next valid cycle to the latest positive clock.
+  LongitudinalPlanner._refresh_positive_release_elapsed(
+    stub, SimpleNamespace(logMonoTime={"modelV2": 1_500_000_000}),
+  )
+  assert stub._positive_release_elapsed_s == pytest.approx(DT)
+  LongitudinalPlanner._refresh_positive_release_elapsed(
+    stub, SimpleNamespace(logMonoTime={"modelV2": 1_400_000_000}),
+  )
+  assert stub._positive_release_elapsed_s == pytest.approx(DT)
+  LongitudinalPlanner._refresh_positive_release_elapsed(
+    stub, SimpleNamespace(logMonoTime={"modelV2": 1_450_000_000}),
+  )
+  assert stub._positive_release_elapsed_s == pytest.approx(DT)
+
+  LongitudinalPlanner._refresh_positive_release_elapsed(
+    stub, SimpleNamespace(logMonoTime={}),
+  )
+  assert stub._positive_release_elapsed_s == pytest.approx(DT)
+  assert stub._positive_release_prev_model_mono_ns == 0
+
+
 def test_road_brake_to_floor_fix_rollback_and_emergency_twins() -> None:
   # 2026-07-14 17:23:22.852: same lead0/track -1035 jumped from
   # -0.8156906 straight to the +0.05 coast-bias floor in one model frame.
@@ -149,10 +219,10 @@ def test_road_brake_to_floor_fix_rollback_and_emergency_twins() -> None:
 
 
 def test_brake_release_slew_never_delays_renewed_braking() -> None:
-  stub, leads = _make_stub(prev_a=-0.8, owner="")
+  stub, leads = _make_stub(prev_a=-0.8, owner="", release_elapsed_s=0.028)
   stub.output_a_target = 0.2
   stub._apply_comfort_jerk_envelope("lead0", leads, v_ego=22.0)
-  assert stub.output_a_target == pytest.approx(-0.7)
+  assert stub.output_a_target == pytest.approx(-0.8 + 2.0 * 0.028)
   assert stub._brake_release_slew_active is True
 
   stub.output_a_target = -2.0
@@ -224,13 +294,36 @@ def test_persistent_micro_floor_rollon_uses_constant_comfort_jerk() -> None:
 
 
 def test_benign_downward_step_remains_comfort_slewed() -> None:
-  stub, leads = _make_stub(owner="")
+  stub, leads = _make_stub(owner="", release_elapsed_s=0.028)
   stub.output_a_target = -0.5
 
   stub._apply_comfort_jerk_envelope("lead0", leads)
 
   assert stub.output_a_target == pytest.approx(-COMFORT_JERK * DT)
   assert stub.comfort_jerk_debug["clipped"] is True
+  assert stub.comfort_jerk_debug["max_step_mps2"] == pytest.approx(COMFORT_JERK * DT)
+  assert stub.comfort_jerk_debug["release_elapsed_s"] == pytest.approx(0.028)
+
+
+def test_same_track_steady_parity_threat_bypasses_downward_comfort_carryover() -> None:
+  stub, leads = _make_stub(prev_a=0.05, owner="")
+  leads[0].steadyParityThreatRestore = True
+  stub.output_a_target = -0.083013
+
+  stub._apply_comfort_jerk_envelope("lead0", leads)
+
+  assert stub.output_a_target == pytest.approx(-0.083013)
+  assert stub._comfort_jerk_prev_a == pytest.approx(-0.083013)
+  assert stub.comfort_jerk_debug["bypassed"] is True
+  assert stub.comfort_jerk_debug["bypass_reason"] == "steady_parity_current_threat"
+
+  # The producer leaves raw-vRel-only invalidation un-attested, so the identical
+  # comfort step remains graded instead of reintroducing a phantom brake tap.
+  calm_stub, calm_leads = _make_stub(prev_a=0.05, owner="")
+  calm_stub.output_a_target = -0.083013
+  calm_stub._apply_comfort_jerk_envelope("lead0", calm_leads)
+  assert calm_stub.output_a_target == pytest.approx(0.05 - COMFORT_JERK * DT)
+  assert calm_stub.comfort_jerk_debug["bypassed"] is False
 
 
 def test_requested_emergency_brake_bypasses_envelope() -> None:

@@ -67,6 +67,10 @@ _COMFORT_JERK_DISABLE_STEP_MPS2 = 2.0
 # not a feel knob: larger moves pass immediately even if a user raises the
 # keep-up floor live-tune range.
 _COMFORT_UPWARD_MICRO_MAX_DELTA_MPS2 = 0.30
+# A delayed/stale planner cycle must not turn the positive-only release slew
+# into a large acceleration jump. Valid model-cycle cadence may jitter, but a
+# gap beyond this many nominal cycles falls back to the nominal step.
+_POSITIVE_RELEASE_STALE_CYCLES = 4.0
 
 # Increment whenever the non-deprecated LongitudinalPlanSP replay-input
 # contract changes incompatibly. Version zero remains the Cap'n Proto default
@@ -105,6 +109,25 @@ GAP_RECLAIM_FOLLOW_PULLAWAY_V = [0.0, 1.0]
 GAP_RECLAIM_FOLLOW_PROJECT_HORIZON_S = 1.2
 GAP_RECLAIM_FOLLOW_MIN_GAP_DIV_M = 0.5
 LEAD_BRAKE_RELEASE_CLOSING_COAST_MIN_ALEAD_MPS2 = -0.15
+# Calm-recovery bridge safety envelope. RadarD's producer applies the same raw
+# probability/lateral gates before asserting numeric validity; these consumer
+# mirrors are defense in depth around the positive-only release floor.
+CLOSING_RECOVERY_MIN_PUBLISHED_TTC_S = 12.0
+CLOSING_RECOVERY_MAX_PUBLISHED_CLOSING_MPS = 2.5
+CLOSING_RECOVERY_MAX_FLOOR_CLOSING_MPS = 2.5
+CLOSING_RECOVERY_MIN_MODEL_PROB = 0.60
+CLOSING_RECOVERY_MAX_DPATH_M = 1.50
+CLOSING_RECOVERY_OFFCENTER_DPATH_M = 1.25
+CLOSING_RECOVERY_MAX_VLAT_MPS = 0.70
+CLOSING_RECOVERY_ALEAD_VETO_MPS2 = 0.20
+# This is an invariant safety boundary, not a live feel knob. Recovery must
+# never weaken a composed request at or below routine hard-brake authority even
+# if unrelated comfort/relatch bypass tunes are disabled or widened.
+CLOSING_RECOVERY_HARD_BRAKE_BYPASS_MPS2 = -1.50
+# Recovery is a polish correction, not a replacement planner. Even when the
+# guarded coast floor is much higher, let it lift the current composed demand
+# by at most this amount per publication.
+CLOSING_RECOVERY_MAX_OUTPUT_UPLIFT_MPS2 = 0.10
 
 # Lookup table for turns
 # Allow higher total accel (lateral+longitudinal) at low speeds and taper with speed
@@ -123,6 +146,19 @@ def _submaster_log_mono_time_ns(sm, service: str) -> int:
     return int(sm.logMonoTime[service])
   except (AttributeError, KeyError, TypeError, ValueError):
     return 0
+
+
+def _validated_positive_release_elapsed_s(elapsed_s, nominal_dt_s: float) -> float:
+  """Return a safe per-cycle release interval with a nominal fallback."""
+  nominal_dt = float(max(nominal_dt_s, 1e-3))
+  try:
+    elapsed = float(elapsed_s)
+  except (TypeError, ValueError):
+    return nominal_dt
+  if (not math.isfinite(elapsed) or elapsed <= 0.0 or
+      elapsed > _POSITIVE_RELEASE_STALE_CYCLES * nominal_dt):
+    return nominal_dt
+  return elapsed
 
 
 class _ReplayInputsPubMaster:
@@ -188,7 +224,11 @@ def should_release_stop_for_lead_launch(CP, *, standstill: bool, v_ego: float,
   return bool(lead_pullaway_speed > max(float(getattr(CP, "vEgoStarting", 0.0)), 0.1))
 
 
-def get_lead_brake_release_accel_floor(mpc, *, v_ego: float, lead_source: str, control_leads):
+def get_lead_brake_release_accel_floor(mpc, *, v_ego: float, lead_source: str, control_leads,
+                                       radarstate=None, radarstate_updated: bool = False,
+                                       previous_lead_source: str | None = None,
+                                       previous_track_id: int = -1,
+                                       planner_fcw: bool = False):
   debug = {
     "active": False,
     "reason": "inactive",
@@ -201,6 +241,28 @@ def get_lead_brake_release_accel_floor(mpc, *, v_ego: float, lead_source: str, c
     "brake_authority_decel_mps2": None,
     "brake_authority_gap_m": None,
     "brake_authority_surplus_m": None,
+    "closing_recovery_bridge": {
+      "candidate": False,
+      "applied": False,
+      "reason": "not_evaluated",
+      "baseline_floor_mps2": None,
+      "position_closing_mps": None,
+      "recovery_vrel_floor_mps": None,
+      "published_closing_mps": None,
+      "published_ttc_s": None,
+      "gap_surplus_m": None,
+      "track_id": None,
+      "candidate_floor_mps2": None,
+      "effective_closing_mps": None,
+      "output_uplift_cap_mps2": CLOSING_RECOVERY_MAX_OUTPUT_UPLIFT_MPS2,
+      "output_uplift_applied_mps2": 0.0,
+      "rollback_output_mps2": None,
+      "desired_output_mps2": None,
+      "wire_slot": None,
+      "duplicate_reconciled": False,
+      "control_gap_surplus_m": None,
+      "control_recovery_time_to_target_s": None,
+    },
   }
   vibe_controller = getattr(mpc, "vibe_controller", None)
   if vibe_controller is None or not bool(vibe_controller.is_follow_enabled()):
@@ -233,6 +295,282 @@ def get_lead_brake_release_accel_floor(mpc, *, v_ego: float, lead_source: str, c
   lead_vrel = float(getattr(lead, "vRel", lead_v - float(v_ego)) or 0.0)
   pullaway_speed = max(lead_vrel, lead_v - float(v_ego))
   closing_speed = max(0.0, -lead_vrel, float(v_ego) - lead_v)
+  target_gap = get_headway_follow_distance(float(v_ego), t_follow)
+  control_gap_surplus = lead_drel - target_gap
+  calm_alead_min = max(
+    -CLOSING_RECOVERY_ALEAD_VETO_MPS2,
+    LEAD_BRAKE_RELEASE_CLOSING_COAST_MIN_ALEAD_MPS2,
+    float(tuning.lead_brake_release_lead_decel_min_mps2),
+  )
+  control_ttc = lead_drel / max(closing_speed, 0.1)
+
+  def finite_lead_value(lead_obj, name: str) -> float | None:
+    try:
+      value = float(getattr(lead_obj, name))
+      return value if math.isfinite(value) else None
+    except (AttributeError, TypeError, ValueError):
+      return None
+
+  control_dpath = finite_lead_value(lead, "dPath")
+  control_vlat = finite_lead_value(lead, "vLat")
+  control_prob = finite_lead_value(lead, "modelProb")
+  control_longitudinal_values = (
+    finite_lead_value(lead, "dRel"),
+    finite_lead_value(lead, "vRel"),
+    finite_lead_value(lead, "vLead"),
+    finite_lead_value(lead, "aLeadK"),
+  )
+  control_evidence_finite = all(
+    value is not None
+    for value in (*control_longitudinal_values, control_dpath, control_vlat, control_prob)
+  )
+  control_lateral_ambiguity = bool(
+    control_evidence_finite and (
+      abs(float(control_dpath)) > CLOSING_RECOVERY_MAX_DPATH_M or
+      (abs(float(control_dpath)) > CLOSING_RECOVERY_OFFCENTER_DPATH_M and
+       abs(float(control_vlat)) >= CLOSING_RECOVERY_MAX_VLAT_MPS - 1e-6)
+    )
+  )
+  control_near_threat = lead_drel <= max(10.0, 0.55 * max(0.0, float(v_ego)))
+
+  # Recovery evidence never enters ControlLead or LongitudinalMpc. Match the
+  # source-owned physical model-track ID against this frame's untouched wire
+  # RadarState and, when every threat gate is calm, offer only the existing
+  # positive coast-bias floor as a post-limiter candidate. The ordinary release
+  # calculation below and its return value remain the untouched baseline.
+  bridge_debug = debug["closing_recovery_bridge"]
+  recovery_candidate_floor: float | None = None
+  recovery_floor_closing_mps: float | None = None
+  max_position_closing = float(getattr(
+    tuning, "closing_recovery_bridge_max_position_closing_mps", 0.0,
+  ))
+  feature_enabled = bool(
+    getattr(mpc, "_hyundai_ai_lead_stability_enabled", False) and
+    max_position_closing > 0.0
+  )
+  control_track_id = int(getattr(lead, "radarTrackId", -1) or -1)
+  bridge_debug["track_id"] = control_track_id
+  bridge_debug["control_gap_surplus_m"] = float(control_gap_surplus)
+
+  if not feature_enabled:
+    bridge_debug["reason"] = "rollback_disabled"
+  elif not radarstate_updated or radarstate is None:
+    bridge_debug["reason"] = "stale_radarstate"
+  elif previous_lead_source != lead_source:
+    bridge_debug["reason"] = "source_change"
+  elif int(previous_track_id) != control_track_id:
+    bridge_debug["reason"] = "identity_change"
+  elif bool(getattr(lead, "radar", False)) or control_track_id > -1001:
+    bridge_debug["reason"] = "invalid_model_identity"
+  elif bool(planner_fcw) or int(getattr(mpc, "crash_cnt", 0) or 0) > 0:
+    bridge_debug["reason"] = "fcw_or_crash"
+  elif bool(getattr(lead, "fcw", False)):
+    bridge_debug["reason"] = "control_lead_fcw"
+  elif not control_evidence_finite:
+    bridge_debug["reason"] = "invalid_control_evidence"
+  elif float(control_prob) < CLOSING_RECOVERY_MIN_MODEL_PROB:
+    bridge_debug["reason"] = "control_low_probability"
+  elif control_lateral_ambiguity:
+    bridge_debug["reason"] = "control_lateral_ambiguity"
+  elif control_near_threat:
+    bridge_debug["reason"] = "control_near_threat"
+  elif control_gap_surplus <= 0.0:
+    bridge_debug["reason"] = "control_inside_target"
+  elif lead_accel < calm_alead_min:
+    bridge_debug["reason"] = "control_lead_braking"
+  elif closing_speed >= CLOSING_RECOVERY_MAX_PUBLISHED_CLOSING_MPS:
+    bridge_debug["reason"] = "control_fast_close"
+  elif control_ttc <= CLOSING_RECOVERY_MIN_PUBLISHED_TTC_S:
+    bridge_debug["reason"] = "control_short_ttc"
+  else:
+    matching_wire_leads = []
+    for wire_slot, wire_lead in enumerate((getattr(radarstate, "leadOne", None), getattr(radarstate, "leadTwo", None))):
+      try:
+        wire_track_id = int(getattr(wire_lead, "radarTrackId", -1) or -1)
+        if bool(getattr(wire_lead, "status", False)) and wire_track_id == control_track_id:
+          matching_wire_leads.append((wire_slot, wire_lead))
+      except (TypeError, ValueError):
+        continue
+
+    role_debug = getattr(mpc, "lead_role_debug", {})
+    virtual_debug = role_debug.get("virtual_duplicate", {}) if isinstance(role_debug, dict) else {}
+    virtual_duplicate_active = bool(virtual_debug.get("active", False))
+    wire_lead = None
+    if len(matching_wire_leads) == 1:
+      if virtual_duplicate_active:
+        bridge_debug["reason"] = "unproven_virtual_duplicate"
+      else:
+        wire_slot, wire_lead = matching_wire_leads[0]
+        bridge_debug["wire_slot"] = int(wire_slot)
+    elif len(matching_wire_leads) == 2:
+      # RadarD updates its shared ModelLeadTrack from slot 0 before the same-track
+      # slot-1 early return. The July 15 route contains that exact virtual-
+      # duplicate topology: the MPC intentionally selects raw slot 0 as lead0
+      # while RadarState publishes the same physical/numeric recovery proof in
+      # both slots (only vLat differs). Reconcile ONLY that producer-proven case;
+      # arbitrary two-match, slot-1-selected, or cut-in-merged pairs fail closed.
+      topology_proven = bool(
+        virtual_duplicate_active and
+        virtual_debug.get("selected_raw_slot") == 0 and
+        virtual_debug.get("suppressed_raw_slot") == 1 and
+        lead_source == "lead0" and
+        str(role_debug.get("reasons", {}).get("lead0", "")) == "virtual_duplicate_raw_0" and
+        not bool(role_debug.get("cutin_promoted", {}).get("lead0", False)) and
+        not bool(getattr(mpc, "cutin_settle_active", False))
+      )
+      slot_map = dict(matching_wire_leads)
+      selected_wire = slot_map.get(0)
+      duplicate_wire = slot_map.get(1)
+      duplicate_numeric_fields = (
+        "dRel", "dPath", "vRel", "vLead", "vLeadK", "aLeadK", "modelProb",
+        "closingGovernorRecoveryPositionClosingMps", "closingGovernorRecoveryVRelFloorMps",
+      )
+      duplicate_bool_fields = (
+        "status", "radar", "fcw", "fcwSuppressed", "closingGovernorRecovery",
+        "closingGovernorRecoveryNumericValid", "steadyParityCurrentThreat",
+      )
+      duplicate_values_proven = bool(selected_wire is not None and duplicate_wire is not None)
+      if duplicate_values_proven:
+        for field in duplicate_numeric_fields:
+          selected_value = finite_lead_value(selected_wire, field)
+          duplicate_value = finite_lead_value(duplicate_wire, field)
+          if (selected_value is None or duplicate_value is None or
+              not math.isclose(selected_value, duplicate_value, rel_tol=0.0, abs_tol=1e-6)):
+            duplicate_values_proven = False
+            break
+      if duplicate_values_proven:
+        duplicate_values_proven = all(
+          bool(getattr(selected_wire, field, False)) == bool(getattr(duplicate_wire, field, False))
+          for field in duplicate_bool_fields
+        )
+
+      if topology_proven and duplicate_values_proven:
+        wire_lead = selected_wire
+        bridge_debug["wire_slot"] = 0
+        bridge_debug["duplicate_reconciled"] = True
+      else:
+        bridge_debug["reason"] = "unproven_virtual_duplicate" if virtual_duplicate_active else "ambiguous_wire_identity"
+    else:
+      bridge_debug["reason"] = "ambiguous_wire_identity" if matching_wire_leads else "missing_wire_identity"
+
+    if wire_lead is not None:
+
+      def finite_wire_value(name: str) -> float | None:
+        return finite_lead_value(wire_lead, name)
+
+      published_drel = finite_wire_value("dRel")
+      published_vrel = finite_wire_value("vRel")
+      published_vlead = finite_wire_value("vLead")
+      published_alead = finite_wire_value("aLeadK")
+      published_dpath = finite_wire_value("dPath")
+      published_vlat = finite_wire_value("vLat")
+      published_prob = finite_wire_value("modelProb")
+      position_closing = finite_wire_value("closingGovernorRecoveryPositionClosingMps")
+      recovery_vrel_floor = finite_wire_value("closingGovernorRecoveryVRelFloorMps")
+      numeric_values = (
+        published_drel, published_vrel, published_vlead, published_alead,
+        published_dpath, published_vlat, published_prob,
+        position_closing, recovery_vrel_floor,
+      )
+      numeric_finite = all(value is not None for value in numeric_values)
+
+      if numeric_finite:
+        assert published_drel is not None and published_vrel is not None and published_vlead is not None
+        assert published_alead is not None and published_dpath is not None and published_vlat is not None
+        assert published_prob is not None and position_closing is not None and recovery_vrel_floor is not None
+        published_closing = max(0.0, -published_vrel, float(v_ego) - published_vlead)
+        published_ttc = published_drel / max(published_closing, 0.1)
+        floor_closing = -recovery_vrel_floor
+        target_gap = get_headway_follow_distance(float(v_ego), t_follow)
+        gap_surplus = published_drel - target_gap
+        near_threat = published_drel <= max(10.0, 0.55 * max(0.0, float(v_ego)))
+        lateral_ambiguity = bool(
+          abs(published_dpath) > CLOSING_RECOVERY_MAX_DPATH_M or
+          (abs(published_dpath) > CLOSING_RECOVERY_OFFCENTER_DPATH_M and
+           abs(published_vlat) >= CLOSING_RECOVERY_MAX_VLAT_MPS - 1e-6)
+        )
+        recovery_time_to_target = gap_surplus / max(floor_closing, 0.1)
+        control_recovery_time_to_target = control_gap_surplus / max(floor_closing, 0.1)
+        bridge_debug.update({
+          "position_closing_mps": position_closing,
+          "recovery_vrel_floor_mps": recovery_vrel_floor,
+          "published_closing_mps": published_closing,
+          "published_ttc_s": published_ttc,
+          "gap_surplus_m": gap_surplus,
+          "recovery_time_to_target_s": recovery_time_to_target,
+          "control_recovery_time_to_target_s": control_recovery_time_to_target,
+        })
+
+      if not bool(getattr(wire_lead, "closingGovernorRecovery", False)):
+        bridge_debug["reason"] = "inactive"
+      elif not bool(getattr(wire_lead, "closingGovernorRecoveryNumericValid", False)):
+        bridge_debug["reason"] = "invalid_numeric_provenance"
+      elif not numeric_finite:
+        bridge_debug["reason"] = "nonfinite_numeric_provenance"
+      elif bool(getattr(wire_lead, "radar", False)):
+        bridge_debug["reason"] = "radar_track"
+      elif bool(getattr(wire_lead, "fcw", False)):
+        bridge_debug["reason"] = "lead_fcw"
+      elif published_alead < calm_alead_min:
+        bridge_debug["reason"] = "current_braking"
+      elif published_prob < CLOSING_RECOVERY_MIN_MODEL_PROB:
+        bridge_debug["reason"] = "low_probability"
+      elif lateral_ambiguity:
+        bridge_debug["reason"] = "lateral_ambiguity"
+      elif near_threat:
+        bridge_debug["reason"] = "near_threat"
+      elif gap_surplus <= 0.0:
+        bridge_debug["reason"] = "inside_target"
+      elif published_closing >= CLOSING_RECOVERY_MAX_PUBLISHED_CLOSING_MPS:
+        bridge_debug["reason"] = "fast_published_close"
+      elif published_ttc <= CLOSING_RECOVERY_MIN_PUBLISHED_TTC_S:
+        bridge_debug["reason"] = "short_published_ttc"
+      elif not (0.0 <= position_closing <= min(max_position_closing, 1.25)):
+        bridge_debug["reason"] = "position_closing_veto"
+      elif not (-CLOSING_RECOVERY_MAX_FLOOR_CLOSING_MPS < recovery_vrel_floor <= 0.0):
+        bridge_debug["reason"] = "recovery_floor_veto"
+      elif floor_closing + 1e-3 < position_closing:
+        bridge_debug["reason"] = "inconsistent_recovery_floor"
+      elif floor_closing > float(tuning.lead_brake_release_near_target_max_closing_mps):
+        bridge_debug["reason"] = "recovery_close_too_fast"
+      elif recovery_time_to_target <= float(tuning.lead_brake_release_lookahead_s):
+        bridge_debug["reason"] = "recovery_target_near"
+      elif control_recovery_time_to_target <= float(tuning.lead_brake_release_lookahead_s):
+        bridge_debug["reason"] = "control_recovery_target_near"
+      elif not (lead_vrel < recovery_vrel_floor - 1e-3 or
+                lead_v < float(v_ego) + recovery_vrel_floor - 1e-3):
+        bridge_debug["reason"] = "already_at_recovery_floor"
+      elif float(tuning.lead_brake_release_coast_bias_mps2) <= 0.0:
+        bridge_debug["reason"] = "nonpositive_coast_bias"
+      else:
+        bridge_debug["candidate"] = True
+        bridge_debug["reason"] = "candidate"
+        recovery_candidate_floor = float(tuning.lead_brake_release_coast_bias_mps2)
+        recovery_floor_closing_mps = float(floor_closing)
+
+  def finish_release_floor(baseline_floor: float | None):
+    bridge_debug["baseline_reason"] = str(debug.get("reason", "inactive"))
+    bridge_debug["baseline_floor_mps2"] = None if baseline_floor is None else float(baseline_floor)
+    if recovery_candidate_floor is None:
+      return baseline_floor, debug
+    if baseline_floor is None:
+      bridge_debug["candidate"] = False
+      bridge_debug["reason"] = f"baseline_{debug.get('reason', 'unavailable')}"
+      return None, debug
+    if float(baseline_floor) >= recovery_candidate_floor:
+      bridge_debug["candidate"] = False
+      bridge_debug["reason"] = "baseline_at_or_above_candidate"
+      return baseline_floor, debug
+
+    # Preserve the entire ordinary release-floor composition and all downstream
+    # limiter state. The authorized recovery candidate is applied in an isolated
+    # post-CD7 step, so default-off output and renewed-threat timing remain exact
+    # and the candidate can never become more braking than rollback.
+    bridge_debug["candidate"] = True
+    bridge_debug["reason"] = "candidate"
+    bridge_debug["candidate_floor_mps2"] = float(recovery_candidate_floor)
+    bridge_debug["effective_closing_mps"] = float(recovery_floor_closing_mps or 0.0)
+    return baseline_floor, debug
 
   # vRel-aware gap error (variant A of the limit-cycle brake-hold fix): measure
   # recovery against the same target the MPC itself uses —
@@ -274,7 +612,7 @@ def get_lead_brake_release_accel_floor(mpc, *, v_ego: float, lead_source: str, c
   params = getattr(mpc, "params", None)
   if params is None:
     debug["reason"] = "missing_mpc_geometry"
-    return None, debug
+    return finish_release_floor(None)
 
   brake_decel = max(1e-3, abs(min(0.0, float(params[0, 0]) if float(params[0, 0]) < 0.0 else ACCEL_MIN)))
   relative_stop_extra_m = (closing_speed ** 2) / (2.0 * brake_decel)
@@ -289,11 +627,11 @@ def get_lead_brake_release_accel_floor(mpc, *, v_ego: float, lead_source: str, c
   debug["danger_surplus_m"] = float(brake_authority_surplus)
   if brake_authority_surplus < -tuning.lead_brake_release_brake_deficit_margin_m:
     debug["reason"] = "brake_authority_deficit"
-    return None, debug
+    return finish_release_floor(None)
 
   if lead_accel < tuning.lead_brake_release_lead_decel_min_mps2:
     debug["reason"] = "lead_decelerating"
-    return None, debug
+    return finish_release_floor(None)
 
   # CD1 fix — lead-decel-aware brake-release floor (road 200-15-17 TAP 1). The
   # closing / near-target branches below sized the floor from the INSTANTANEOUS
@@ -377,12 +715,12 @@ def get_lead_brake_release_accel_floor(mpc, *, v_ego: float, lead_source: str, c
   else:
     if pullaway_speed <= tuning.lead_brake_release_min_pullaway_mps:
       debug["reason"] = "not_opening"
-      return None, debug
+      return finish_release_floor(None)
     time_to_target_s = -gap_error / max(pullaway_speed, 1e-3)
     if time_to_target_s > tuning.lead_brake_release_lookahead_s:
       debug["time_to_target_s"] = float(time_to_target_s)
       debug["reason"] = "target_too_far"
-      return None, debug
+      return finish_release_floor(None)
     progress = 1.0 - float(np.clip(time_to_target_s / tuning.lead_brake_release_lookahead_s, 0.0, 1.0))
     release_floor = float(np.interp(
       progress,
@@ -401,7 +739,7 @@ def get_lead_brake_release_accel_floor(mpc, *, v_ego: float, lead_source: str, c
     debug["reason"] = "projected_recovery"
   debug["floor_mps2"] = float(release_floor)
   debug["time_to_target_s"] = float(time_to_target_s)
-  return float(release_floor), debug
+  return finish_release_floor(float(release_floor))
 
 
 def should_apply_lead_brake_release_accel_floor(output_a_target: float,
@@ -555,6 +893,12 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     self._comfort_jerk_prev_src: str = ""
     self._comfort_jerk_prev_track_id: int = -1
     self._brake_release_slew_active: bool = False
+    # Positive brake release is a real-time comfort bound, so its acceleration
+    # step follows the exact model-cycle cadence rather than fixed DT_MDL. This
+    # state is deliberately isolated from every fixed-frame planner state
+    # machine and from the downward comfort/braking envelope.
+    self._positive_release_prev_model_mono_ns: int = 0
+    self._positive_release_elapsed_s: float = float(max(self.dt, 1e-3))
     self.comfort_jerk_debug: dict = {
       "active": False,
       "bypassed": False,
@@ -565,6 +909,13 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     }
     self.lead_brake_release_accel_floor = 0.0
     self.lead_brake_release_debug = {"active": False, "reason": "init"}
+    self.steady_parity_threat_debug = {
+      "active": False,
+      "pre_comfort_limiter_output_mps2": None,
+      "final_output_mps2": float(self.output_a_target),
+      "safety_cap_applied": False,
+      "bound_satisfied": True,
+    }
     self._comfort_upward_floor_owner: str = ""
     # Observability for the cruise-reacquire jerk ramp (read-only; does not
     # affect behavior). Lets the longitudinal harness prove whether the ramp is
@@ -609,8 +960,26 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
       throttle_prob = 1.0
     return x, v, a, j, throttle_prob
 
+  def _refresh_positive_release_elapsed(self, sm) -> None:
+    current_model_mono_ns = _submaster_log_mono_time_ns(sm, "modelV2")
+    previous_model_mono_ns = int(getattr(self, "_positive_release_prev_model_mono_ns", 0) or 0)
+    elapsed_s = None
+    if current_model_mono_ns > 0 and previous_model_mono_ns > 0:
+      elapsed_s = (current_model_mono_ns - previous_model_mono_ns) * 1e-9
+    self._positive_release_elapsed_s = _validated_positive_release_elapsed_s(elapsed_s, self.dt)
+    # Reset across an absent clock so the next valid frame also uses the
+    # conservative nominal step instead of spanning an unknown interval.
+    self._positive_release_prev_model_mono_ns = current_model_mono_ns if current_model_mono_ns > 0 else 0
+
   def update(self, sm):
     total_span = start_span(SPAN_PLANNER_UPDATE_TOTAL)
+    self._refresh_positive_release_elapsed(sm)
+    # Recovery-only release slew anchors on the command actually published by
+    # the previous planner frame. It intentionally does not modify CD5/CD6/CD7
+    # state: a renewed threat must revoke straight to the ordinary rollback
+    # output on this frame, with no less-braking tail retained by a comfort
+    # limiter that never owned the recovery correction.
+    previous_published_output = float(self.output_a_target)
     self.mode = 'blended' if sm['selfdriveState'].experimentalMode else 'acc'
     if not self.mlsim:
       self.mpc.mode = self.mode
@@ -819,6 +1188,11 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
       v_ego=v_ego,
       lead_source=lead_source,
       control_leads=control_leads,
+      radarstate=sm['radarState'],
+      radarstate_updated=bool(sm.updated['radarState']),
+      previous_lead_source=self._comfort_jerk_prev_src,
+      previous_track_id=self._comfort_jerk_prev_track_id,
+      planner_fcw=bool(self.fcw),
     )
     self.lead_brake_release_accel_floor = float(lead_brake_release_floor or 0.0)
     self.lead_brake_release_debug = lead_brake_release_debug
@@ -941,6 +1315,11 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     model_accel_for_flutter = float(sm['modelV2'].action.desiredAcceleration) if hasattr(sm['modelV2'], 'action') else 0.0
     self._apply_cruise_reacquire_jerk_limit(lead_source, control_leads, published_lead)
     self._apply_flutter_mode_clamp(lead_source, model_accel_for_flutter)
+    steady_parity_current_threat = any(
+      lead is not None and bool(getattr(lead, "steadyParityThreatRestore", False))
+      for lead in control_leads
+    )
+    pre_comfort_limiter_output = float(self.output_a_target)
     # CD5(a): the relatch obstacle blend is the FINAL negative-leg authority, so
     # there is exactly one binding downward slew clamp per frame. It anchors on
     # the previous frame's final output (shared prev_a semantics with the flutter
@@ -981,8 +1360,115 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     # signal so real braking is never rate-limited; the positive-only release leg
     # can only retain more of the prior brake command.
     self._apply_comfort_jerk_envelope(lead_source, control_leads, v_ego)
+    self._apply_closing_recovery_output_uplift(
+      previous_published_output=previous_published_output,
+      force_slow_decel=bool(force_slow_decel),
+      steady_parity_current_threat=bool(steady_parity_current_threat),
+    )
+    safety_cap_applied = bool(
+      steady_parity_current_threat and
+      self.output_a_target > pre_comfort_limiter_output + 1e-9
+    )
+    if safety_cap_applied:
+      # Defense in depth: CD5/CD6/CD7 all share the explicit urgency bypass, and
+      # the recovery uplift is gated above. Keep a final one-sided invariant so
+      # a future stateful comfort stage cannot silently reintroduce carryover.
+      self.output_a_target = pre_comfort_limiter_output
+      self._relatch_blend_prev_a = float(self.output_a_target)
+      self._handoff_prev_a = float(self.output_a_target)
+      self._comfort_jerk_prev_a = float(self.output_a_target)
+    self.steady_parity_threat_debug = {
+      "active": bool(steady_parity_current_threat),
+      "pre_comfort_limiter_output_mps2": (
+        float(pre_comfort_limiter_output) if steady_parity_current_threat else None
+      ),
+      "final_output_mps2": float(self.output_a_target),
+      "safety_cap_applied": bool(safety_cap_applied),
+      "bound_satisfied": bool(
+        not steady_parity_current_threat or
+        self.output_a_target <= pre_comfort_limiter_output + 1e-9
+      ),
+    }
 
     end_span(total_span)
+
+  def _apply_closing_recovery_output_uplift(self, *, previous_published_output: float,
+                                             force_slow_decel: bool = False,
+                                             steady_parity_current_threat: bool = False) -> None:
+    """Apply an isolated positive-only calm-recovery delta after every limiter."""
+    bridge_debug = self.lead_brake_release_debug.get("closing_recovery_bridge", {})
+    if steady_parity_current_threat:
+      bridge_debug["reason"] = "steady_parity_current_threat"
+      return
+    if not bool(bridge_debug.get("candidate", False)):
+      return
+    if self.output_should_stop:
+      bridge_debug["reason"] = "should_stop"
+      return
+    if force_slow_decel:
+      bridge_debug["reason"] = "force_decel"
+      return
+    if bool(self.fcw):
+      bridge_debug["reason"] = "planner_fcw"
+      return
+
+    candidate_floor = bridge_debug.get("candidate_floor_mps2")
+    if candidate_floor is None:
+      bridge_debug["candidate"] = False
+      bridge_debug["reason"] = "missing_candidate_floor"
+      return
+
+    rollback_output = float(self.output_a_target)
+    bridge_debug["rollback_output_mps2"] = rollback_output
+    cfg = getattr(self.mpc, "_live_tune_cfg", None)
+    hard_brake_thresholds = [
+      float(getattr(cfg, "comfort_jerk_bypass_decel_mps2", -1.5)),
+      float(getattr(cfg, "cruise_relatch_bypass_decel_mps2", -1.5)),
+    ]
+    active_hard_brake_thresholds = [
+      threshold for threshold in hard_brake_thresholds
+      if math.isfinite(threshold) and threshold < 0.0
+    ]
+    hard_brake_floor = max([
+      CLOSING_RECOVERY_HARD_BRAKE_BYPASS_MPS2,
+      *active_hard_brake_thresholds,
+    ])
+    if rollback_output <= hard_brake_floor:
+      bridge_debug["reason"] = "hard_requested_decel"
+      return
+
+    accel_clip_max = float(getattr(self, "_planner_output_accel_limits", (ACCEL_MIN, ACCEL_MAX))[1])
+    desired_output = min(
+      max(rollback_output, float(candidate_floor)),
+      rollback_output + CLOSING_RECOVERY_MAX_OUTPUT_UPLIFT_MPS2,
+      accel_clip_max,
+    )
+    bridge_debug["desired_output_mps2"] = float(desired_output)
+
+    # Reuse the existing positive brake-release jerk tune, but keep its history
+    # private to this post-limiter calculation. A disabled/unreachable tune is an
+    # exact pass-through. Any recovery veto skips this method and therefore
+    # publishes rollback immediately, favoring braking by at most the hard 0.10
+    # m/s^2 correction cap.
+    release_jerk = float(getattr(cfg, "lead_brake_release_jerk_mps3", 0.0) or 0.0)
+    release_elapsed_s = _validated_positive_release_elapsed_s(
+      getattr(self, "_positive_release_elapsed_s", None), self.dt,
+    )
+    release_step = release_jerk * release_elapsed_s
+    bridge_debug["release_elapsed_s"] = float(release_elapsed_s)
+    bridge_debug["release_max_step_mps2"] = float(release_step)
+    if release_jerk > 0.0 and release_step < _COMFORT_JERK_DISABLE_STEP_MPS2:
+      desired_output = min(desired_output, float(previous_published_output) + release_step)
+    candidate_output = max(rollback_output, desired_output)
+    uplift = max(0.0, candidate_output - rollback_output)
+    bridge_debug["output_uplift_applied_mps2"] = float(uplift)
+    if uplift <= 1e-9:
+      bridge_debug["reason"] = "output_at_or_above_candidate"
+      return
+
+    self.output_a_target = float(candidate_output)
+    bridge_debug["applied"] = True
+    bridge_debug["reason"] = "applied"
 
   @staticmethod
   def _lead_owned_slot(lead_source: str, control_leads):
@@ -1210,6 +1696,12 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     if lead_slot is None:
       # No lead object to reason about -> do not risk suppressing braking.
       return True, "no_lead_obj"
+    if bool(getattr(lead_slot, "steadyParityThreatRestore", False)):
+      # RadarD attested an independently urgent longitudinal invalidation and
+      # the MPC confirmed it is the same track that owned an active private
+      # parity correction on the preceding frame. Do not let CD5/CD6/CD7's
+      # recurrent comfort anchors weaken the restored unshaped demand.
+      return True, "steady_parity_current_threat"
     if bool(getattr(lead_slot, "fcw", False)):
       return True, "fcw"
     closing = -float(getattr(lead_slot, "vRel", 0.0) or 0.0)
@@ -1620,7 +2112,10 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     )
     dt = float(max(self.dt, 1e-3))
     max_step = jerk_limit * dt
-    release_max_step = release_jerk_limit * dt
+    release_elapsed_s = _validated_positive_release_elapsed_s(
+      getattr(self, "_positive_release_elapsed_s", None), self.dt,
+    )
+    release_max_step = release_jerk_limit * release_elapsed_s
 
     prev_src = self._comfort_jerk_prev_src
     self._comfort_jerk_prev_src = lead_source
@@ -1647,7 +2142,8 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
       self.comfort_jerk_debug = {"active": False, "bypassed": False, "bypass_reason": "",
                                  "gated_reason": "disabled", "max_step_mps2": float(max_step), "clipped": False,
                                  "release_slew_active": False, "release_slew_clipped": False,
-                                 "release_max_step_mps2": float(release_max_step)}
+                                 "release_max_step_mps2": float(release_max_step),
+                                 "release_elapsed_s": float(release_elapsed_s)}
       self._brake_release_slew_active = False
       self._comfort_jerk_prev_a = float(self.output_a_target)
       return
@@ -1669,7 +2165,8 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
       self.comfort_jerk_debug = {"active": False, "bypassed": False, "bypass_reason": "",
                                  "gated_reason": gated_reason, "max_step_mps2": float(max_step), "clipped": False,
                                  "release_slew_active": False, "release_slew_clipped": False,
-                                 "release_max_step_mps2": float(release_max_step)}
+                                 "release_max_step_mps2": float(release_max_step),
+                                 "release_elapsed_s": float(release_elapsed_s)}
       self._brake_release_slew_active = False
       self._comfort_jerk_prev_a = float(self.output_a_target)
       return
@@ -1765,6 +2262,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
       "release_slew_active": bool(release_active),
       "release_slew_clipped": bool(release_clipped),
       "release_max_step_mps2": float(release_max_step),
+      "release_elapsed_s": float(release_elapsed_s),
       "release_track_id": int(current_track_id),
       "clipped": bool(clipped),
     })

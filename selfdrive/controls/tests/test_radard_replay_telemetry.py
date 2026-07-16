@@ -45,7 +45,7 @@ def test_radard_publishes_versioned_exact_input_clocks() -> None:
   assert pm.message is not None
   replay = pm.message.radarState.replayInputs
   assert replay.valid
-  assert replay.version == 1
+  assert replay.version == 2
   assert replay.modelV2MonoTimeNs == clocks["modelV2"]
   assert replay.carStateMonoTimeNs == clocks["carState"]
   assert replay.liveTracksMonoTimeNs == clocks["liveTracks"]
@@ -70,6 +70,10 @@ def test_radard_replay_contract_records_exact_governor_state() -> None:
   track.governor_calm_recovery_mode = True
   track.governor_calm_recovery_applied = True
   track.governor_recovery_position_closing_mps = 0.38
+  track.governor_recovery_vrel_floor_mps = -0.42
+  track.accel_corr_calm_position_valid = True
+  track.accel_corr_calm_position_slope_mps = -0.35
+  track.accel_corr_calm_position_reason = "position_proven"
   rd.model_lead_tracker.tracks[track.identifier] = track
   lead = {"status": True, "radarTrackId": track.identifier}
 
@@ -90,6 +94,11 @@ def test_radard_replay_contract_records_exact_governor_state() -> None:
   assert debug.calmRecoveryApplied
   assert debug.recoveryPositionClosingValid
   assert debug.recoveryPositionClosingMps == pytest.approx(0.38)
+  assert debug.recoveryVRelFloorValid
+  assert debug.recoveryVRelFloorMps == pytest.approx(-0.42)
+  assert debug.accelCorrCalmPositionValid
+  assert debug.accelCorrCalmPositionSlopeMps == pytest.approx(-0.35)
+  assert debug.accelCorrCalmPositionReason == "position_proven"
 
 
 def test_recovery_provenance_round_trips_on_behavioral_lead_data() -> None:
@@ -100,10 +109,22 @@ def test_recovery_provenance_round_trips_on_behavioral_lead_data() -> None:
     0,
   )
   track.governor_calm_recovery_mode = True
+  track.governor_recovery_position_closing_mps = 0.38
+  track.governor_recovery_vrel_floor_mps = -0.42
+  track.accel_corr_calm_position_dense_valid = True
+  track.accel_corr_calm_position_valid = True
+  track.accel_corr_calm_position_slope_mps = -0.35
   state = log.RadarState.new_message()
   state.leadOne = track.get_RadarState()
 
   reader = state.as_reader()
   assert reader.leadOne.closingGovernorRecovery
+  assert reader.leadOne.closingGovernorRecoveryNumericValid
+  assert reader.leadOne.closingGovernorRecoveryPositionClosingMps == pytest.approx(0.38)
+  assert reader.leadOne.closingGovernorRecoveryVRelFloorMps == pytest.approx(-0.42)
+  assert reader.leadOne.accelCorrCalmPositionValid
+  assert reader.leadOne.accelCorrCalmPositionSlopeMps == pytest.approx(-0.35)
   # Producers that do not set the new behavior field retain the schema default.
   assert not reader.leadTwo.closingGovernorRecovery
+  assert not reader.leadTwo.closingGovernorRecoveryNumericValid
+  assert not reader.leadTwo.accelCorrCalmPositionValid

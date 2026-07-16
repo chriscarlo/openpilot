@@ -15,12 +15,18 @@ from openpilot.selfdrive.controls.radard import _is_lead_prob_accepted
 
 def _make_raw_lead(status=True, dRel=40.0, yRel=0.0, vRel=-1.0, vLead=25.0,
                    aLeadK=0.0, modelProb=0.9, dPath=0.0, vLat=0.0, aLeadTau=0.0,
-                   aRel=0.0, closingGovernorRecovery=False) -> SimpleNamespace:
+                   aRel=0.0, fcwSuppressed=False, closingGovernorRecovery=False,
+                   accelCorrCalmPositionValid=False,
+                   accelCorrCalmPositionSlopeMps=0.0,
+                   radarTrackId=-1001) -> SimpleNamespace:
   return SimpleNamespace(
     status=status, dRel=dRel, yRel=yRel, vRel=vRel, vLead=vLead,
     aLeadK=aLeadK, modelProb=modelProb, dPath=dPath, vLat=vLat,
-    aLeadTau=aLeadTau, aRel=aRel,
+    aLeadTau=aLeadTau, aRel=aRel, fcwSuppressed=fcwSuppressed,
     closingGovernorRecovery=closingGovernorRecovery,
+    accelCorrCalmPositionValid=accelCorrCalmPositionValid,
+    accelCorrCalmPositionSlopeMps=accelCorrCalmPositionSlopeMps,
+    radar=False, radarTrackId=radarTrackId,
   )
 
 
@@ -57,6 +63,8 @@ def _make_mpc(acquire_frames: float = 1.0, release_frames: float = 1.0,
     _lead_stability_phantom_slots=(False, False),
     lead_stability_debug={},
     x0=[0.0, v_ego, 0.0],
+    current_t_follow=1.5,
+    _hyundai_ai_lead_stability_enabled=True,
     LEAD_STABILIZER_PHANTOM_YREL_KILL_M=LongitudinalMpc.LEAD_STABILIZER_PHANTOM_YREL_KILL_M,
   )
   import types
@@ -462,6 +470,95 @@ class TestLeadAccelCorrBound:
     out0, state = self._run_deepening_trend(-0.54, model_min=0.10)
     assert state.corr_a_meas_lp < -1.0
     assert out0.aLeadK < -1.0
+
+  @staticmethod
+  def _run_calm_position_case(*, proof_valid: bool, d_rel: float = 82.0,
+                              model_a_lead_k: float = -0.15,
+                              fcw_suppressed: bool = False):
+    mpc = _make_mpc(
+      accel_corr_margin=0.5,
+      accel_corr_amplify_gain=1.0,
+      accel_corr_amplify_model_min=0.10,
+      accel_corr_amplify_deadband=0.35,
+    )
+    t = 1.0
+    v_lead = 26.0
+    out0 = None
+    for _ in range(20):
+      v_lead -= 1.8 * 0.05
+      out0, _ = mpc._stabilize_raw_leads(
+        _make_raw_lead(
+          dRel=d_rel, vRel=v_lead - 26.0, vLead=v_lead,
+          aLeadK=model_a_lead_k,
+          fcwSuppressed=fcw_suppressed,
+          accelCorrCalmPositionValid=proof_valid,
+          accelCorrCalmPositionSlopeMps=-0.4,
+        ),
+        _make_raw_lead(status=False), now=t,
+      )
+      t += 0.05
+    return out0, mpc._lead_stability_state[0]
+
+  def test_calm_position_proof_vetoes_only_extra_amplification_outside_target(self):
+    protected, protected_state = self._run_calm_position_case(proof_valid=True)
+    legacy, legacy_state = self._run_calm_position_case(proof_valid=False)
+
+    assert protected_state.corr_a_meas_lp < -1.0
+    assert protected_state.corr_amplify_vetoed
+    assert not protected_state.corr_amplified
+    assert protected.aLeadK == pytest.approx(-0.15)
+    assert legacy_state.corr_amplified
+    assert legacy.aLeadK < -1.0
+
+  def test_calm_position_proof_cannot_weaken_inside_target_or_meaningful_brake(self):
+    inside, inside_state = self._run_calm_position_case(proof_valid=True, d_rel=40.0)
+    genuine, genuine_state = self._run_calm_position_case(
+      proof_valid=True, model_a_lead_k=-0.54,
+    )
+
+    assert inside_state.corr_amplified
+    assert not inside_state.corr_amplify_vetoed
+    assert inside.aLeadK < -1.0
+    assert genuine_state.corr_amplified
+    assert not genuine_state.corr_amplify_vetoed
+    assert genuine.aLeadK < -1.0
+
+  def test_fcw_suppressed_does_not_discard_fresh_independent_position_proof(self):
+    # fcwSuppressed is raw-farther corroboration for FCW, not a stale/phantom
+    # marker. The same fresh track and producer-attested calm position history
+    # must still prevent a noisy vLead derivative from deepening mild aLeadK.
+    protected, state = self._run_calm_position_case(
+      proof_valid=True,
+      fcw_suppressed=True,
+    )
+
+    assert state.corr_a_meas_lp < -1.0
+    assert state.corr_amplify_vetoed
+    assert not state.corr_amplified
+    assert protected.aLeadK == pytest.approx(-0.15)
+
+  def test_raw_invalid_phantom_never_uses_calm_position_veto(self):
+    mpc = _make_mpc(
+      phantom_hold_s=0.5,
+      stable_frames=1.0,
+      accel_corr_margin=0.5,
+      accel_corr_amplify_gain=1.0,
+      accel_corr_amplify_model_min=0.10,
+      accel_corr_amplify_deadband=0.35,
+    )
+    # Seed a valid lead carrying proof, then force a raw-invalid held frame.
+    mpc._stabilize_raw_leads(
+      _make_raw_lead(aLeadK=-0.15, accelCorrCalmPositionValid=True),
+      _make_raw_lead(status=False), now=1.0,
+    )
+    held, _ = mpc._stabilize_raw_leads(
+      _make_raw_lead(status=False), _make_raw_lead(status=False), now=1.1,
+    )
+    state = mpc._lead_stability_state[0]
+
+    assert held.status
+    assert not state.corr_amplify_vetoed
+    assert not state.corr_amplified
 
   def test_zero_model_floor_restores_any_negative_report_amplification(self):
     out0, state = self._run_deepening_trend(-0.04, model_min=0.0)

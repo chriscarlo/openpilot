@@ -337,6 +337,8 @@ class _StabilizedLead:
                'fcwSuppressed', 'closingGovernorRecovery',
                'steadyParityCandidateValid', 'steadyParityPositionSlopeMps',
                'steadyParityVRelFloorMps', 'steadyParityHeld',
+               'steadyParityCurrentThreat', 'steadyParityThreatRestore',
+               'accelCorrCalmPositionValid', 'accelCorrCalmPositionSlopeMps',
                'radar', 'radarTrackId')
 
   def __init__(self, status=False, dRel=0.0, yRel=0.0, vRel=0.0, vLead=0.0,
@@ -344,7 +346,9 @@ class _StabilizedLead:
                 aRel=0.0, vLeadK=0.0, fcw=False, fcwSuppressed=False,
                 closingGovernorRecovery=False, steadyParityCandidateValid=False,
                 steadyParityPositionSlopeMps=0.0, steadyParityVRelFloorMps=0.0,
-                steadyParityHeld=False, radar=False, radarTrackId=-1):
+                steadyParityHeld=False, steadyParityCurrentThreat=False,
+                accelCorrCalmPositionValid=False,
+                accelCorrCalmPositionSlopeMps=0.0, radar=False, radarTrackId=-1):
     self.status = bool(status)
     self.dRel = float(dRel)
     self.yRel = float(yRel)
@@ -364,6 +368,11 @@ class _StabilizedLead:
     self.steadyParityPositionSlopeMps = float(steadyParityPositionSlopeMps)
     self.steadyParityVRelFloorMps = float(steadyParityVRelFloorMps)
     self.steadyParityHeld = bool(steadyParityHeld)
+    self.steadyParityCurrentThreat = bool(steadyParityCurrentThreat)
+    # Planner-private one-frame classification; never read from RadarState.
+    self.steadyParityThreatRestore = False
+    self.accelCorrCalmPositionValid = bool(accelCorrCalmPositionValid)
+    self.accelCorrCalmPositionSlopeMps = float(accelCorrCalmPositionSlopeMps)
     self.radar = bool(radar)
     self.radarTrackId = int(radarTrackId)
 
@@ -400,6 +409,9 @@ class _StabilizedLead:
       steadyParityPositionSlopeMps=cls._safe_attr(rd, 'steadyParityPositionSlopeMps'),
       steadyParityVRelFloorMps=cls._safe_attr(rd, 'steadyParityVRelFloorMps'),
       steadyParityHeld=bool(getattr(rd, 'steadyParityHeld', False)),
+      steadyParityCurrentThreat=bool(getattr(rd, 'steadyParityCurrentThreat', False)),
+      accelCorrCalmPositionValid=bool(getattr(rd, 'accelCorrCalmPositionValid', False)),
+      accelCorrCalmPositionSlopeMps=cls._safe_attr(rd, 'accelCorrCalmPositionSlopeMps'),
       radar=bool(getattr(rd, 'radar', False)),
       radarTrackId=int(getattr(rd, 'radarTrackId', -1) or -1),
     )
@@ -438,6 +450,18 @@ LEAD_ACCEL_CORR_AMPLIFY_GAIN = 0.0
 LEAD_ACCEL_CORR_AMPLIFY_MODEL_DECEL_MIN_MPS2 = 0.10
 LEAD_ACCEL_CORR_AMPLIFY_DEADBAND_MPS2 = 0.35
 LEAD_ACCEL_CORR_AMPLIFY_CAP_MPS2 = 2.0
+# Defense-in-depth mirrors around RadarD's explicit dense-position proof. These
+# gates can only skip EXTRA correlation amplification; the model's published
+# aLeadK and the ordinary one-directional corroboration bound remain live.
+LEAD_ACCEL_CORR_CALM_POSITION_MIN_SLOPE_MPS = -1.25
+LEAD_ACCEL_CORR_CALM_POSITION_MAX_SLOPE_MPS = 0.75
+LEAD_ACCEL_CORR_CALM_POSITION_MAX_ALEAD_ABS_MPS2 = 0.20
+LEAD_ACCEL_CORR_CALM_POSITION_MAX_CLOSING_MPS = 2.5
+LEAD_ACCEL_CORR_CALM_POSITION_MIN_TTC_S = 12.0
+LEAD_ACCEL_CORR_CALM_POSITION_MIN_MODEL_PROB = 0.60
+LEAD_ACCEL_CORR_CALM_POSITION_MAX_DPATH_M = 1.50
+LEAD_ACCEL_CORR_CALM_POSITION_OFFCENTER_DPATH_M = 1.25
+LEAD_ACCEL_CORR_CALM_POSITION_MAX_VLAT_MPS = 0.70
 
 
 class _LeadStabilityState:
@@ -446,7 +470,8 @@ class _LeadStabilityState:
                'latched_valid_streak', 'last_valid', 'last_valid_t',
                'a_lead_k_trend', 'corr_meas_t', 'corr_meas_v',
                'corr_a_meas_lp', 'corr_settled_s', 'corr_track_id',
-               'corr_danger_latched')
+               'corr_danger_latched', 'corr_amplify_vetoed',
+               'corr_amplify_veto_reason', 'corr_amplified')
 
   def __init__(self):
     self.latched = False
@@ -467,6 +492,9 @@ class _LeadStabilityState:
     self.corr_settled_s = 0.0
     self.corr_track_id: int | None = None
     self.corr_danger_latched = False
+    self.corr_amplify_vetoed = False
+    self.corr_amplify_veto_reason = ""
+    self.corr_amplified = False
 
 
 class _SteadyParityState:
@@ -2787,6 +2815,9 @@ class LongitudinalMpc:
     passes full aLeadK through. Returns True when the bound trimmed aLeadK."""
     state = self._lead_stability_state[slot]
     cfg = self._live_tune_cfg
+    state.corr_amplify_vetoed = False
+    state.corr_amplify_veto_reason = ""
+    state.corr_amplified = False
     margin = float(getattr(cfg, 'lead_accel_corr_margin_mps2', LEAD_ACCEL_CORR_DISABLE_MARGIN_MPS2))
     if margin >= LEAD_ACCEL_CORR_DISABLE_MARGIN_MPS2:
       state.corr_meas_t = None
@@ -2903,8 +2934,50 @@ class LongitudinalMpc:
                                      LEAD_ACCEL_CORR_AMPLIFY_DEADBAND_MPS2))
     amplify_cap = float(getattr(cfg, 'lead_accel_corr_amplify_cap_mps2',
                                 LEAD_ACCEL_CORR_AMPLIFY_CAP_MPS2))
-    if (amplify_gain > 0.0 and settled and lead.aLeadK < -amplify_model_decel_min and
-        float(state.corr_a_meas_lp) < float(lead.aLeadK) - amplify_deadband):
+    amplify_candidate = bool(
+      amplify_gain > 0.0 and settled and lead.aLeadK < -amplify_model_decel_min and
+      float(state.corr_a_meas_lp) < float(lead.aLeadK) - amplify_deadband
+    )
+
+    # RadarD's producer proof is deliberately independent of the noisy vLead
+    # derivative being judged here. Consume it only when the untouched public
+    # lead is still outside the exact configured target and every current
+    # threat mirror remains calm. fcwSuppressed is intentionally NOT one of
+    # those mirrors: it means raw dRel is farther than a pessimistic filtered
+    # dRel, not that this fresh lead is a stabilizer phantom. Actual raw-invalid
+    # / phantom-held frames are rejected by ``fresh`` above before reaching
+    # this branch. Making fcwSuppressed a veto recreated a delayed false brake
+    # when the exact route proof otherwise remained calm.
+    #
+    # This veto skips only the extra CD3 deepening; the ordinary correlation
+    # bound below still runs, and the known -0.48..-0.54 m/s^2 truth-deficit
+    # case fails the fixed |aLeadK| <= 0.20 gate.
+    proof_valid = bool(getattr(lead, 'accelCorrCalmPositionValid', False))
+    position_slope = float(getattr(lead, 'accelCorrCalmPositionSlopeMps', 0.0))
+    t_follow = float(getattr(self, 'current_t_follow', get_T_FOLLOW()))
+    target_gap_m = get_headway_follow_distance(v_ego, t_follow)
+    gap_surplus_m = float(lead.dRel) - target_gap_m
+    lateral_safe = bool(
+      abs(float(lead.dPath)) <= LEAD_ACCEL_CORR_CALM_POSITION_MAX_DPATH_M and
+      not (abs(float(lead.dPath)) > LEAD_ACCEL_CORR_CALM_POSITION_OFFCENTER_DPATH_M and
+           abs(float(lead.vLat)) >= LEAD_ACCEL_CORR_CALM_POSITION_MAX_VLAT_MPS)
+    )
+    calm_position_veto = bool(
+      bool(getattr(self, '_hyundai_ai_lead_stability_enabled', False)) and proof_valid and
+      not bool(lead.radar) and int(lead.radarTrackId) <= -1001 and
+      not bool(lead.fcw) and
+      not bool(lead.closingGovernorRecovery) and
+      LEAD_ACCEL_CORR_CALM_POSITION_MIN_SLOPE_MPS <= position_slope <= LEAD_ACCEL_CORR_CALM_POSITION_MAX_SLOPE_MPS and
+      abs(float(lead.aLeadK)) <= LEAD_ACCEL_CORR_CALM_POSITION_MAX_ALEAD_ABS_MPS2 and
+      closing < LEAD_ACCEL_CORR_CALM_POSITION_MAX_CLOSING_MPS and
+      ttc > LEAD_ACCEL_CORR_CALM_POSITION_MIN_TTC_S and
+      gap_surplus_m > 0.0 and float(lead.vLead) >= 0.0 and
+      float(lead.modelProb) >= LEAD_ACCEL_CORR_CALM_POSITION_MIN_MODEL_PROB and lateral_safe
+    )
+    if amplify_candidate and calm_position_veto:
+      state.corr_amplify_vetoed = True
+      state.corr_amplify_veto_reason = "calm_position_outside_target"
+    elif amplify_candidate:
       # Never pull past the measured trend, and never deepen by more than the
       # per-frame cap below the current aLeadK (bounds a single noisy trend
       # sample). Sign is preserved: target is always <= aLeadK < 0.
@@ -2912,6 +2985,7 @@ class LongitudinalMpc:
       amplified = float(lead.aLeadK) + amplify_gain * (target - float(lead.aLeadK))
       if amplified < float(lead.aLeadK):
         lead.aLeadK = amplified
+        state.corr_amplified = True
         return True
 
     if (state.corr_danger_latched or lead.aLeadK >= 0.0 or not settled):
@@ -3065,6 +3139,11 @@ class LongitudinalMpc:
         "accel_corr_clamped": bool(corr_clamped[slot]),
         "accel_corr_a_meas_lp": float(state.corr_a_meas_lp),
         "accel_corr_danger_latched": bool(state.corr_danger_latched),
+        "accel_corr_amplified": bool(state.corr_amplified),
+        "accel_corr_amplify_vetoed": bool(state.corr_amplify_vetoed),
+        "accel_corr_amplify_veto_reason": str(state.corr_amplify_veto_reason),
+        "accel_corr_calm_position_valid": bool(getattr(outs[slot], 'accelCorrCalmPositionValid', False)),
+        "accel_corr_calm_position_slope_mps": float(getattr(outs[slot], 'accelCorrCalmPositionSlopeMps', 0.0)),
       }
       for slot, state in enumerate(self._lead_stability_state)
     }
@@ -3099,6 +3178,10 @@ class LongitudinalMpc:
       state = self._steady_parity_state[slot]
       original_vrel = float(lead.vRel)
       track_id = int(lead.radarTrackId)
+      previous_track_id = state.track_id
+      was_active = bool(state.active)
+      same_track = bool(previous_track_id is not None and previous_track_id == track_id)
+      lead.steadyParityThreatRestore = False
       gap_surplus_m = float(lead.dRel) - target_gap_m
       thw_s = float(lead.dRel) / max(float(v_ego), 0.1)
       reason = "inactive"
@@ -3112,6 +3195,16 @@ class LongitudinalMpc:
       current_closing_mps = max(0.0, -original_vrel)
       current_ttc_s = float(lead.dRel) / max(current_closing_mps, 0.1)
       current_near = float(lead.dRel) <= max(10.0, 0.55 * max(0.0, float(v_ego)))
+      current_lead_braking = float(lead.aLeadK) < -1e-6
+      current_fast_closing = current_closing_mps >= STEADY_PARITY_MAX_RAW_CLOSING_MPS
+      current_short_ttc = current_closing_mps > 0.3 and current_ttc_s <= STEADY_PARITY_MIN_RAW_TTC_S
+      current_oncoming = float(lead.vLead) < 0.0
+      current_lateral_ambiguity = bool(
+        abs(float(lead.dPath)) > STEADY_PARITY_MAX_DPATH_M or
+        (abs(float(lead.dPath)) > STEADY_PARITY_VLAT_OFFCENTER_DPATH_M and
+         abs(float(lead.vLat)) >= STEADY_PARITY_MAX_VLAT_MPS)
+      )
+      current_low_probability = float(lead.modelProb) < STEADY_PARITY_MIN_MODEL_PROB
       current_safe = bool(
         float(lead.aLeadK) >= -STEADY_PARITY_ALEAD_VETO_MPS2 and
         current_closing_mps < STEADY_PARITY_MAX_RAW_CLOSING_MPS and
@@ -3129,6 +3222,34 @@ class LongitudinalMpc:
         not self._lead_stability_phantom_slots[slot] and
         bool(lead.steadyParityCandidateValid)
       )
+      producer_current_threat = bool(lead.steadyParityCurrentThreat)
+      threat_restore = bool(
+        feature_enabled and lead.status and was_active and same_track and
+        not candidate_valid and producer_current_threat and
+        not current_lateral_ambiguity and not current_low_probability
+      )
+      if threat_restore:
+        lead.steadyParityThreatRestore = True
+      if current_lead_braking:
+        current_threat_reason = "lead_braking"
+      elif current_short_ttc:
+        current_threat_reason = "short_ttc"
+      elif current_near:
+        current_threat_reason = "near_threat"
+      elif current_oncoming:
+        current_threat_reason = "oncoming"
+      elif current_fast_closing:
+        current_threat_reason = "fast_closing"
+      elif producer_current_threat:
+        current_threat_reason = "producer_attested_longitudinal"
+      elif current_lateral_ambiguity:
+        current_threat_reason = "lateral_ambiguity"
+      elif current_low_probability:
+        current_threat_reason = "low_probability"
+      elif not same_track and was_active:
+        current_threat_reason = "identity_change"
+      else:
+        current_threat_reason = "none"
       candidate_floor = min(0.0, float(lead.steadyParityVRelFloorMps))
       arm_eligible = bool(
         candidate_valid and
@@ -3181,6 +3302,18 @@ class LongitudinalMpc:
         "track_id": track_id,
         "candidate_valid": bool(candidate_valid),
         "current_safe": bool(current_safe),
+        "was_active": bool(was_active),
+        "same_track": bool(same_track),
+        "producer_current_threat": bool(producer_current_threat),
+        "current_kinematic_threat": bool(threat_restore),
+        "current_threat_reason": str(current_threat_reason),
+        "current_lead_braking": bool(current_lead_braking),
+        "current_fast_closing": bool(current_fast_closing),
+        "current_short_ttc": bool(current_short_ttc),
+        "current_near_threat": bool(current_near),
+        "current_oncoming": bool(current_oncoming),
+        "current_lateral_ambiguity": bool(current_lateral_ambiguity),
+        "current_low_probability": bool(current_low_probability),
         "candidate_held": bool(lead.steadyParityHeld),
         "position_slope_mps": float(lead.steadyParityPositionSlopeMps),
         "candidate_floor_mps": float(candidate_floor),

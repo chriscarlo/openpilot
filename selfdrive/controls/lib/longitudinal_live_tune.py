@@ -1625,11 +1625,15 @@ LEAD_RESPONSE_TUNE_SPECS = (
     default=0.35,
     minimum=0.05,
     maximum=100.0,
-    description="CD9 (radard): sustained-lead-decel arm path - the governor also latches when the windowed mean RAW model "
-                "lead accel is below -this (m/s^2) while the windowed raw vRel corroborates closing. On the road event the "
+    description="CD9 (radard): sustained-lead-decel arm and full-position-trust threshold - the governor also latches "
+                "when the windowed mean RAW model lead accel is below -this (m/s^2) while the windowed raw vRel "
+                "corroborates closing; two consecutive samples must also cross this threshold before acceleration alone "
+                "may grant full ClosingGovernorPosTrustExcessMps authority. On the road event the "
                 "raw aLead mean separated cleanly (-0.55 sustained during the brake vs -0.10 steady phase) a full ~0.5 s "
-                "before the position slope confirmed - this is the earliest reliable signal. Rollback sentinel: >= 99 "
-                "disables this arm path only (position-excess path unaffected).",
+                "before the position slope confirmed - this is the earliest reliable signal. The smaller opening veto "
+                "still revokes less-urgent behavior immediately but cannot spend full position trust. Rollback sentinel: "
+                ">= 99 disables both accel-derived arm and full-position-trust paths; position-excess/velocity/short-TTC "
+                "paths remain available.",
   ),
   LeadResponseTuneSpec(
     attr="closing_governor_pos_trust_excess_mps",
@@ -1748,6 +1752,20 @@ LEAD_RESPONSE_TUNE_SPECS = (
     maximum=100.0,
     description="Opening governor veto: if the windowed raw lead accel mean is below -this (m/s^2), the lead is braking "
                 "and no relax arms — a braking lead's pessimistic publish stands even if the gap is momentarily opening.",
+  ),
+  LeadResponseTuneSpec(
+    attr="closing_recovery_bridge_max_position_closing_mps",
+    key="Longitudinal.LiveTune.ClosingRecoveryBridgeMaxPositionClosingMps",
+    cli_name="closing-recovery-bridge-max-position-closing-mps",
+    label="closing_recovery_bridge_max_position_closing",
+    default=0.0,
+    minimum=0.0,
+    maximum=1.25,
+    description="Positive brake-release-only calm-recovery bridge: maximum long-window raw-position closing rate "
+                "(m/s) allowed before the planner may raise the existing release floor to its coast bias. RadarD's "
+                "public lead, classifier, MPC obstacles, FCW, and source selection remain unchanged. Current braking, "
+                "near/short-TTC/lateral/identity/phantom threats revoke the floor in the same frame. 0 disables the "
+                "bridge exactly (default-off master rollback).",
   ),
   LeadResponseTuneSpec(
     attr="steady_parity_trust_deficit_mps",
@@ -1984,6 +2002,7 @@ class LeadResponseTuningConfig:
   opening_governor_hold_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["opening_governor_hold_s"].default
   opening_governor_raw_closing_veto_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["opening_governor_raw_closing_veto_mps"].default
   opening_governor_alead_veto_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["opening_governor_alead_veto_mps2"].default
+  closing_recovery_bridge_max_position_closing_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["closing_recovery_bridge_max_position_closing_mps"].default
   steady_parity_trust_deficit_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["steady_parity_trust_deficit_mps"].default
   steady_parity_vrel_slew_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["steady_parity_vrel_slew_mps2"].default
   steady_parity_hold_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["steady_parity_hold_s"].default

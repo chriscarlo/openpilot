@@ -32,7 +32,7 @@ from .config import captured_param_manifest, DEFAULT_PARAM_VALUES
 from .inputs import LeadDirective, SnapshotBundle, StepInput, serialize_model_frame, write_snapshot_bundle
 
 
-EXTRACTOR_VERSION = "ev6_v10_planner_state_fail_closed"
+EXTRACTOR_VERSION = "ev6_v11_radard_replay_v2"
 DEFAULT_ROUTE_ROOTS = (
   Path(".cache/commaCar"),
   Path(".cache/commaAdb"),
@@ -70,7 +70,8 @@ RADARD_DEPENDENCY_WARMUP_S = 15.0
 LONGITUDINAL_PLAN_SP_PAIR_MAX_NS = 20_000_000
 MPH_TO_MPS = 0.44704
 PLANNER_REPLAY_INPUTS_VERSION = 1
-RADARD_REPLAY_INPUTS_VERSION = 1
+RADARD_REPLAY_INPUTS_VERSION = 2
+RADARD_REPLAY_INPUTS_SUPPORTED_VERSIONS = (1, RADARD_REPLAY_INPUTS_VERSION)
 
 
 class EpisodeNotReplayableError(ValueError):
@@ -1398,10 +1399,15 @@ def load_route_scan(conn, route_row, *, strict_service_joins: bool = False) -> R
         radar_replay_inputs = msg.radarState.replayInputs
         radar_replay_valid = bool(radar_replay_inputs.valid)
         radar_replay_version = int(radar_replay_inputs.version)
-        radar_replay_v1 = bool(radar_replay_valid and radar_replay_version == RADARD_REPLAY_INPUTS_VERSION)
+        # v2 appends recovery-floor and calm-position amplifier-veto telemetry;
+        # the exact service clocks introduced by v1 are unchanged, so both
+        # versions remain valid dependency contracts for route extraction.
+        radar_replay_supported = bool(
+          radar_replay_valid and radar_replay_version in RADARD_REPLAY_INPUTS_SUPPORTED_VERSIONS
+        )
         built_in_car_state_clock = int(msg.radarState.carStateMonoTime)
         built_in_model_clock = int(msg.radarState.mdMonoTime)
-        if radar_replay_v1:
+        if radar_replay_supported:
           radar_car_state_mono_time = int(radar_replay_inputs.carStateMonoTimeNs)
           car_clock_matches = radar_car_state_mono_time == built_in_car_state_clock
           frame_car_state = car_state_by_mono_time.get(radar_car_state_mono_time)
@@ -1410,7 +1416,7 @@ def load_route_scan(conn, route_row, *, strict_service_joins: bool = False) -> R
             car_state_association = {
               "status": "conflict",
               "clockNs": radar_car_state_mono_time,
-              "reason": "RadarState.replayInputs v1 carState target has conflicting duplicate payloads",
+              "reason": f"RadarState.replayInputs v{radar_replay_version} carState target has conflicting duplicate payloads",
             }
           elif not car_clock_matches:
             car_state_association = {
@@ -1423,19 +1429,19 @@ def load_route_scan(conn, route_row, *, strict_service_joins: bool = False) -> R
             car_state_association = {
               "status": "missing",
               "clockNs": radar_car_state_mono_time,
-              "reason": "RadarState.replayInputs v1 carState clock is zero",
+              "reason": f"RadarState.replayInputs v{radar_replay_version} carState clock is zero",
             }
           elif frame_car_state is None:
             car_state_association = {
               "status": "missing",
               "clockNs": radar_car_state_mono_time,
-              "reason": "RadarState.replayInputs v1 carState target is absent from the loaded route",
+              "reason": f"RadarState.replayInputs v{radar_replay_version} carState target is absent from the loaded route",
             }
           else:
             car_state_association = {
               "status": "exact",
               "clockNs": radar_car_state_mono_time,
-              "reason": "RadarState.replayInputs v1 exact route-wide carState join",
+              "reason": f"RadarState.replayInputs v{radar_replay_version} exact route-wide carState join",
             }
           if frame_car_state is None:
             frame_car_state = latest_car_state
@@ -1480,14 +1486,14 @@ def load_route_scan(conn, route_row, *, strict_service_joins: bool = False) -> R
           continue
         model_record = None
         model_mono_time = (
-          int(radar_replay_inputs.modelV2MonoTimeNs) if radar_replay_v1 else built_in_model_clock
+          int(radar_replay_inputs.modelV2MonoTimeNs) if radar_replay_supported else built_in_model_clock
         )
         if model_mono_time > 0:
           model_record = model_by_mono_time.get(model_mono_time)
         # A nonzero mdMonoTime is an exact association contract. Falling back to
         # a nearby frame when that model is missing silently pairs RadarD output
         # with the wrong perception input and defeats recorded replay fidelity.
-        if model_record is None and not radar_replay_v1 and model_mono_time <= 0 and latest_model is not None:
+        if model_record is None and not radar_replay_supported and model_mono_time <= 0 and latest_model is not None:
           latest_model_time = int(latest_model[1].get("logMonoTimeNs", 0))
           if abs(int(msg.logMonoTime) - latest_model_time) <= 150_000_000:
             model_record = latest_model
@@ -1499,11 +1505,11 @@ def load_route_scan(conn, route_row, *, strict_service_joins: bool = False) -> R
         if model_record is not None:
           model_msg, raw_model = model_record
           frame_model_v2_mono_time_ns = (
-            model_mono_time if radar_replay_v1 else int(raw_model.get("logMonoTimeNs", 0)) or None
+            model_mono_time if radar_replay_supported else int(raw_model.get("logMonoTimeNs", 0)) or None
           )
           raw_lead_one = _lead_from_model(model_msg, 0, frame_car_state.v_ego_mps)
           raw_lead_two = _lead_from_model(model_msg, 1, frame_car_state.v_ego_mps)
-        elif radar_replay_v1:
+        elif radar_replay_supported:
           frame_model_v2_mono_time_ns = model_mono_time
         if model_mono_time in replay_index.conflicting_input_mono_times_by_service.get("modelV2", ()):
           model_association = {
@@ -1511,30 +1517,30 @@ def load_route_scan(conn, route_row, *, strict_service_joins: bool = False) -> R
             "clockNs": model_mono_time,
             "reason": "associated modelV2 clock has conflicting duplicate payloads",
           }
-        elif radar_replay_v1 and model_mono_time != built_in_model_clock:
+        elif radar_replay_supported and model_mono_time != built_in_model_clock:
           model_association = {
             "status": "mismatch",
             "clockNs": model_mono_time,
             "builtInClockNs": built_in_model_clock,
             "reason": "RadarState.replayInputs modelV2 clock disagrees with mdMonoTime",
           }
-        elif radar_replay_v1 and model_mono_time > 0 and model_record is not None:
+        elif radar_replay_supported and model_mono_time > 0 and model_record is not None:
           model_association = {
             "status": "exact",
             "clockNs": model_mono_time,
-            "reason": "RadarState.replayInputs v1 exact route-wide modelV2 join",
+            "reason": f"RadarState.replayInputs v{radar_replay_version} exact route-wide modelV2 join",
           }
-        elif radar_replay_v1 and model_mono_time <= 0:
+        elif radar_replay_supported and model_mono_time <= 0:
           model_association = {
             "status": "missing",
             "clockNs": model_mono_time,
-            "reason": "RadarState.replayInputs v1 modelV2 clock is zero",
+            "reason": f"RadarState.replayInputs v{radar_replay_version} modelV2 clock is zero",
           }
-        elif radar_replay_v1:
+        elif radar_replay_supported:
           model_association = {
             "status": "missing",
             "clockNs": model_mono_time,
-            "reason": "RadarState.replayInputs v1 modelV2 target is absent from the loaded route",
+            "reason": f"RadarState.replayInputs v{radar_replay_version} modelV2 target is absent from the loaded route",
           }
         elif model_mono_time > 0 and model_record is not None:
           model_association = {
@@ -1553,34 +1559,34 @@ def load_route_scan(conn, route_row, *, strict_service_joins: bool = False) -> R
           }
 
         radar_unavailable_proven = bool(route_row["radar_unavailable"])
-        if radar_replay_v1:
+        if radar_replay_supported:
           frame_live_tracks_mono_time_ns = int(radar_replay_inputs.liveTracksMonoTimeNs)
           if frame_live_tracks_mono_time_ns == 0:
             live_tracks_association = {
               "status": "exact",
               "clockNs": 0,
-              "reason": "RadarState.replayInputs v1 explicitly records liveTracks not yet received",
+              "reason": f"RadarState.replayInputs v{radar_replay_version} explicitly records liveTracks not yet received",
               "emptyPayloadValid": True,
             }
           elif frame_live_tracks_mono_time_ns in replay_index.conflicting_input_mono_times_by_service.get("liveTracks", ()):
             live_tracks_association = {
               "status": "conflict",
               "clockNs": frame_live_tracks_mono_time_ns,
-              "reason": "RadarState.replayInputs v1 liveTracks target has conflicting duplicate payloads",
+              "reason": f"RadarState.replayInputs v{radar_replay_version} liveTracks target has conflicting duplicate payloads",
               "emptyPayloadValid": False,
             }
           elif frame_live_tracks_mono_time_ns not in live_tracks_mono_times:
             live_tracks_association = {
               "status": "missing",
               "clockNs": frame_live_tracks_mono_time_ns,
-              "reason": "RadarState.replayInputs v1 liveTracks target is absent from the loaded route",
+              "reason": f"RadarState.replayInputs v{radar_replay_version} liveTracks target is absent from the loaded route",
               "emptyPayloadValid": False,
             }
           else:
             live_tracks_association = {
               "status": "exact",
               "clockNs": frame_live_tracks_mono_time_ns,
-              "reason": "RadarState.replayInputs v1 exact route-wide liveTracks join",
+              "reason": f"RadarState.replayInputs v{radar_replay_version} exact route-wide liveTracks join",
               "emptyPayloadValid": radar_unavailable_proven,
               "payloadStatus": "empty_radarless" if radar_unavailable_proven else "not_serialized",
             }
@@ -1620,14 +1626,14 @@ def load_route_scan(conn, route_row, *, strict_service_joins: bool = False) -> R
           },
           "contract": {
             "status": (
-              "exact" if radar_replay_v1 else
+              "exact" if radar_replay_supported else
               "unsupported" if radar_replay_valid else
               "inferred"
             ),
             "valid": radar_replay_valid,
             "version": radar_replay_version,
             "reason": (
-              "RadarState.replayInputs v1" if radar_replay_v1 else
+              f"RadarState.replayInputs v{radar_replay_version}" if radar_replay_supported else
               f"unsupported RadarState.replayInputs version {radar_replay_version}" if radar_replay_valid else
               "schema-default/legacy RadarState; liveTracks must be inferred"
             ),
@@ -1651,7 +1657,7 @@ def load_route_scan(conn, route_row, *, strict_service_joins: bool = False) -> R
         radard_service_status = (
           "conflict" if "conflict" in service_statuses
           else "mismatch" if "mismatch" in service_statuses
-          else "unsupported" if radar_replay_valid and not radar_replay_v1
+          else "unsupported" if radar_replay_valid and not radar_replay_supported
           else "missing" if "missing" in service_statuses
           else "inferred" if "inferred" in service_statuses
           else "exact"

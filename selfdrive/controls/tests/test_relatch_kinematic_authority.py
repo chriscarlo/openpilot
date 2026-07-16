@@ -21,7 +21,7 @@ V_EGO = 21.6
 
 
 def _lead(*, v_ego=V_EGO, closing=0.0, surplus_m=15.0, a_lead=0.0, fcw=False,
-          track_id=7):
+          track_id=7, steady_parity_threat=False):
   d_rel = STOP_DISTANCE + T_FOLLOW * v_ego + surplus_m
   v_lead = v_ego - closing
   return SimpleNamespace(
@@ -31,6 +31,7 @@ def _lead(*, v_ego=V_EGO, closing=0.0, surplus_m=15.0, a_lead=0.0, fcw=False,
     vLead=v_lead,
     aLeadK=a_lead,
     fcw=fcw,
+    steadyParityThreatRestore=steady_parity_threat,
     radarTrackId=track_id,
   )
 
@@ -161,6 +162,12 @@ class TestRelatchUrgencyBypassKinematic:
     bypassed, reason = stub._relatch_urgency_bypass(lead, stub.mpc._live_tune_cfg)
     assert bypassed and reason == "requested_decel"
 
+  def test_same_track_steady_parity_threat_bypasses_shared_comfort_limiters(self):
+    stub = _make_stub()
+    lead = _lead(closing=0.0, surplus_m=60.0, steady_parity_threat=True)
+    bypassed, reason = stub._relatch_urgency_bypass(lead, stub.mpc._live_tune_cfg)
+    assert bypassed and reason == "steady_parity_current_threat"
+
   def test_bypass_decel_zero_disables_kinematic_leg(self):
     stub = _make_stub(_make_cfg(cruise_relatch_bypass_decel_mps2=0.0))
     lead = _lead(closing=4.16, surplus_m=5.0)
@@ -173,6 +180,8 @@ class TestHandoffMultiLeadUrgency:
     (_lead(closing=2.0, surplus_m=20.0, fcw=True, track_id=8), "fcw"),
     (_lead(closing=4.16, surplus_m=5.0, track_id=9), "kinematic"),
     (_lead(closing=0.5, surplus_m=60.0, a_lead=-1.2, track_id=10), "lead_decel"),
+    (_lead(closing=0.0, surplus_m=60.0, track_id=11, steady_parity_threat=True),
+     "steady_parity_current_threat"),
   ))
   def test_opening_lead_cannot_mask_second_urgent_lead(self, threat, reason):
     stub = _make_handoff_stub()

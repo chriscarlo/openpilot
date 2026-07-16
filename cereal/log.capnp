@@ -745,7 +745,7 @@ struct RadarState @0x9a185389d6fdd05f {
   # the vehicle reports radarUnavailable.
   struct ReplayInputs {
     valid @0 :Bool;       # true only when the producer populated this payload
-    version @1 :UInt16;   # version 1 is the layout below
+    version @1 :UInt16;   # v2 adds recoveryVRelFloor* and accelCorrCalmPosition* telemetry
     modelV2MonoTimeNs @2 :UInt64;
     carStateMonoTimeNs @3 :UInt64;
     liveTracksMonoTimeNs @4 :UInt64;
@@ -774,6 +774,16 @@ struct RadarState @0x9a185389d6fdd05f {
       steadyParityWindowSpanS @16 :Float32;
       steadyParityMaxSampleGapS @17 :Float32;
       steadyParityReason @18 :Text;
+      # Planner brake-release calm-recovery evidence. The vRel floor is derived
+      # only from the independent dense position window after same-frame raw
+      # TTC, range-step, acceleration, probability, and lateral vetoes pass.
+      recoveryVRelFloorMps @19 :Float32;
+      recoveryVRelFloorValid @20 :Bool;
+      # Independent dense-position proof used only to veto the private
+      # lead-acceleration correlation amplifier. It never reshapes RadarState.
+      accelCorrCalmPositionValid @21 :Bool;
+      accelCorrCalmPositionSlopeMps @22 :Float32;
+      accelCorrCalmPositionReason @23 :Text;
     }
   }
 
@@ -810,6 +820,23 @@ struct RadarState @0x9a185389d6fdd05f {
     steadyParityPositionSlopeMps @19 :Float32;
     steadyParityVRelFloorMps @20 :Float32;
     steadyParityHeld @21 :Bool;
+    # Numeric calm-recovery evidence for the planner's positive-only
+    # brake-release floor. Public RadarState kinematics, MPC obstacles, source
+    # selection, and FCW remain unchanged.
+    closingGovernorRecoveryPositionClosingMps @22 :Float32;
+    closingGovernorRecoveryVRelFloorMps @23 :Float32;
+    closingGovernorRecoveryNumericValid @24 :Bool;
+    # Producer-attested calm same-track position evidence. The longitudinal
+    # MPC may use this only to skip extra aLeadK amplification while outside
+    # the configured target gap; all public kinematics remain unchanged.
+    accelCorrCalmPositionValid @25 :Bool;
+    accelCorrCalmPositionSlopeMps @26 :Float32;
+    # One-frame producer attestation that steady-parity authority was revoked by
+    # independently urgent longitudinal evidence. Raw-vRel-only invalidation,
+    # lateral/probability ambiguity, identity changes, and missed frames remain
+    # false. The planner may use this only to bypass stateful comfort carryover;
+    # it does not alter any RadarState kinematic or the producer proof state.
+    steadyParityCurrentThreat @27 :Bool;
 
     aLeadDEPRECATED @5 :Float32;
   }

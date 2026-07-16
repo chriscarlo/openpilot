@@ -78,6 +78,7 @@ FRIENDLY_PARAM_NAMES = {
   "lead_brake_release_vrel_credit_cap_m": "Longitudinal.LiveTune.LeadBrakeReleaseVrelCreditCapM",
   "lead_brake_release_recovery_proj_s": "Longitudinal.LiveTune.LeadBrakeReleaseRecoveryProjS",
   "lead_brake_release_jerk_mps3": "Longitudinal.LiveTune.LeadBrakeReleaseJerkMps3",
+  "closing_recovery_bridge_max_position_closing_mps": "Longitudinal.LiveTune.ClosingRecoveryBridgeMaxPositionClosingMps",
   "cutin_settle_duration_s": "Longitudinal.LiveTune.CutInSettleDurationS",
   "cutin_settle_max_decel": "Longitudinal.LiveTune.CutInSettleMaxDecel",
   "cutin_settle_max_closing_speed_mps": "Longitudinal.LiveTune.CutInSettleMaxClosingSpeedMps",

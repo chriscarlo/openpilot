@@ -17,6 +17,7 @@ from selfdrive.test.longitudinal_harness.config import REPLAY_PARAM_DEFAULT_VALU
 from selfdrive.test.longitudinal_harness.fidelity import NOT_EVALUATED, evaluate_fidelity
 from selfdrive.test.longitudinal_harness.inputs import load_snapshot_bundle
 from selfdrive.test.longitudinal_harness.route_extract import (
+  EXTRACTOR_VERSION,
   detect_episode_candidates,
   extract_ev6_episodes,
   index_ev6_routes,
@@ -33,6 +34,11 @@ _EGO_SPEED_MPS = 25.0
 _LEAD_GAP_M = 45.0
 _TRACK_ID = 4242
 _DISTRACTOR_EGO_SPEED_MPS = 41.0
+
+
+def test_radard_replay_v2_bumps_extractor_identity() -> None:
+  assert EXTRACTOR_VERSION == "ev6_v11_radard_replay_v2"
+  assert "v10" not in EXTRACTOR_VERSION
 
 
 def _make_car_params(*, radar_unavailable: bool = True):
@@ -116,6 +122,7 @@ def _write_raw_route(
   zero_service_timestamps_at: int | None = None,
   radar_unavailable: bool = True,
   v1_contracts: bool = False,
+  radar_replay_version: int | None = None,
   radar_contract_model_mismatch_at: int | None = None,
   planner_missing_controls_at: int | None = None,
   live_tracks_not_received_at: int | None = None,
@@ -132,6 +139,10 @@ def _write_raw_route(
   segment_dir.mkdir(parents=True, exist_ok=True)
   rlog_path = segment_dir / "rlog.zst"
   messages: list[Any] = []
+  effective_radar_replay_version = (
+    int(radar_replay_version) if radar_replay_version is not None
+    else 1 if v1_contracts else None
+  )
 
   init_data = messaging.new_message("initData")
   init_data.logMonoTime = 900_000_000
@@ -274,10 +285,10 @@ def _write_raw_route(
       0 if frame_idx == zero_service_timestamps_at else
       frame_base - 123 if frame_idx == missing_car_state_reference_at else frame_base
     )
-    if v1_contracts:
+    if effective_radar_replay_version is not None:
       replay_inputs = radar_state.radarState.replayInputs
       replay_inputs.valid = True
-      replay_inputs.version = 1
+      replay_inputs.version = effective_radar_replay_version
       replay_inputs.modelV2MonoTimeNs = (
         intended_model_time + 1 if frame_idx == radar_contract_model_mismatch_at else intended_model_time
       )
@@ -605,13 +616,19 @@ def test_zero_service_timestamps_remain_inferred_not_exact(tmp_path: Path) -> No
   assert frame.radard_gate_eligible is False
 
 
-def test_v1_contracts_join_exact_inputs_and_keep_planner_car_state_separate(tmp_path: Path) -> None:
+@pytest.mark.parametrize("radar_replay_version", (1, 2))
+def test_supported_radar_contracts_join_exact_inputs_and_keep_planner_car_state_separate(
+  tmp_path: Path,
+  radar_replay_version: int,
+) -> None:
   log_root = tmp_path / "logs"
+  route_key = f"v{radar_replay_version}_route"
   expected = _write_raw_route(
-    log_root / "v1_route",
+    log_root / route_key,
     genuine_closure=False,
     frame_count=_EVENT_FRAME + 1,
     v1_contracts=True,
+    radar_replay_version=radar_replay_version,
     live_tracks_not_received_at=_EVENT_FRAME - 3,
     radar_contract_model_mismatch_at=_EVENT_FRAME - 2,
     planner_missing_controls_at=_EVENT_FRAME - 1,
@@ -619,7 +636,7 @@ def test_v1_contracts_join_exact_inputs_and_keep_planner_car_state_separate(tmp_
   conn = open_catalog(tmp_path / "catalog.sqlite3")
   try:
     index_ev6_routes(conn, roots=[log_root])
-    route_row = get_route_rows(conn, route_keys=["v1_route"])[0]
+    route_row = get_route_rows(conn, route_keys=[route_key])[0]
     scan = load_route_scan(conn, route_row)
   finally:
     conn.close()
@@ -627,6 +644,8 @@ def test_v1_contracts_join_exact_inputs_and_keep_planner_car_state_separate(tmp_
   explicit_zero = scan.frames[_EVENT_FRAME - 3]
   assert explicit_zero.live_tracks_log_mono_time_ns == 0
   assert explicit_zero.radard_service_association_provenance["liveTracks"]["status"] == "exact"
+  assert f"replayInputs v{radar_replay_version}" in \
+    explicit_zero.radard_service_association_provenance["liveTracks"]["reason"]
   assert "not yet received" in explicit_zero.radard_service_association_provenance["liveTracks"]["reason"]
   assert explicit_zero.radard_gate_eligible is True
 
@@ -645,9 +664,15 @@ def test_v1_contracts_join_exact_inputs_and_keep_planner_car_state_separate(tmp_
   assert exact.radard_service_association_provenance["contract"] == {
     "status": "exact",
     "valid": True,
-    "version": 1,
-    "reason": "RadarState.replayInputs v1",
+    "version": radar_replay_version,
+    "reason": f"RadarState.replayInputs v{radar_replay_version}",
   }
+  assert f"replayInputs v{radar_replay_version}" in \
+    exact.radard_service_association_provenance["carState"]["reason"]
+  assert f"replayInputs v{radar_replay_version}" in \
+    exact.radard_service_association_provenance["modelV2"]["reason"]
+  assert f"replayInputs v{radar_replay_version}" in \
+    exact.radard_service_association_provenance["liveTracks"]["reason"]
   assert exact.radard_gate_eligible is True
   assert exact.planner_radar_resolution == "exact"
   assert exact.planner_context_status == "exact"
@@ -663,6 +688,36 @@ def test_v1_contracts_join_exact_inputs_and_keep_planner_car_state_separate(tmp_
     for service in ("carState", "controlsState", "carControl", "selfdriveState", "modelV2", "radarState")
   )
   assert exact.planner_service_association_provenance["params"]["status"] == "exact"
+
+
+def test_unsupported_radar_contract_version_is_not_gate_eligible(tmp_path: Path) -> None:
+  log_root = tmp_path / "logs"
+  _write_raw_route(
+    log_root / "v3_route",
+    genuine_closure=False,
+    frame_count=1,
+    event_frame=0,
+    v1_contracts=True,
+    radar_replay_version=3,
+  )
+  conn = open_catalog(tmp_path / "catalog.sqlite3")
+  try:
+    index_ev6_routes(conn, roots=[log_root])
+    route_row = get_route_rows(conn, route_keys=["v3_route"])[0]
+    scan = load_route_scan(conn, route_row)
+  finally:
+    conn.close()
+
+  assert len(scan.frames) == 1
+  frame = scan.frames[0]
+  assert frame.radard_service_association_provenance["contract"] == {
+    "status": "unsupported",
+    "valid": True,
+    "version": 3,
+    "reason": "unsupported RadarState.replayInputs version 3",
+  }
+  assert frame.radard_service_association_status == "unsupported"
+  assert frame.radard_gate_eligible is False
 
 
 def test_bundle_seeds_warmup_predecessor_and_covers_strict_boundary(tmp_path: Path) -> None:

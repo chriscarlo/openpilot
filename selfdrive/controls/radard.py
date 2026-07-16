@@ -80,6 +80,7 @@ CLOSING_GOVERNOR_RECOVERY_MAX_POSITION_CLOSING_MPS = 1.25
 CLOSING_GOVERNOR_RECOVERY_MIN_POSITION_SPAN_S = 1.0
 CLOSING_GOVERNOR_RECOVERY_MIN_POSITION_SAMPLES = 16
 CLOSING_GOVERNOR_RECOVERY_MAX_SAMPLE_GAP_S = 0.075
+CLOSING_GOVERNOR_RECOVERY_MIN_RAW_TTC_S = 12.0
 MODEL_LEAD_CENTER_PATH_GATE_M = 2.6
 MODEL_LEAD_CUTIN_VLAT_MPS = 0.7
 LEAD_TRACK_PROB_DROPOUT_MIN_SPEED_MPS = 4.0
@@ -112,10 +113,34 @@ STEADY_PARITY_MAX_VLAT_MPS = 0.7
 STEADY_PARITY_VLAT_OFFCENTER_DPATH_M = 1.25
 STEADY_PARITY_MIN_MODEL_PROB = 0.60
 STEADY_PARITY_IDENTITY_DREL_JUMP_M = 4.0
+# Raw vRel alone is not enough to attest a genuine threat after a private
+# steady-parity correction. A same-frame range step must independently confirm
+# at least this much closure before the planner may bypass comfort carryover.
+STEADY_PARITY_CURRENT_THREAT_MIN_POSITION_CLOSING_MPS = 1.25
+# Independent proof for the MPC's private lead-acceleration correlation
+# amplifier. Unlike steady parity, a velocity-only spike does not deassert this
+# proof: that spike is precisely the measurement the amplifier would otherwise
+# treat as corroboration. The dense raw-position slope, current published
+# aLeadK, and same-frame threat gates must all remain calm.
+ACCEL_CORR_CALM_POSITION_WINDOW_S = 2.0
+ACCEL_CORR_CALM_POSITION_MIN_SAMPLES = 24
+ACCEL_CORR_CALM_POSITION_MIN_SPAN_S = 1.6
+ACCEL_CORR_CALM_POSITION_MAX_SAMPLE_GAP_S = 0.075
+ACCEL_CORR_CALM_POSITION_MIN_PAIR_SPAN_S = 0.5
+ACCEL_CORR_CALM_POSITION_MIN_SLOPE_MPS = -1.25
+ACCEL_CORR_CALM_POSITION_MAX_SLOPE_MPS = 0.75
+ACCEL_CORR_CALM_POSITION_MAX_ALEAD_ABS_MPS2 = 0.20
+# The intended false-onset route frame reached raw aLead=-0.3506 while the
+# known genuine CD3 truth-deficit reports -0.48..-0.54. A -0.20 gate would
+# erase the fix; this fixed hard gate preserves that separation and ensures a
+# meaningful genuine raw-decel onset clears veto authority in the same frame.
+ACCEL_CORR_CALM_POSITION_RAW_ALEAD_HARD_VETO_MPS2 = 0.40
+ACCEL_CORR_CALM_POSITION_MAX_PUBLISHED_CLOSING_MPS = 2.5
+ACCEL_CORR_CALM_POSITION_MIN_PUBLISHED_TTC_S = 12.0
 
 # Version zero is the Cap'n Proto default and therefore means no producer-side
 # replay contract was emitted.
-_REPLAY_INPUTS_VERSION = 1
+_REPLAY_INPUTS_VERSION = 2
 
 
 def _finite_float(value: Any, default: float = 0.0) -> float:
@@ -201,6 +226,7 @@ class ModelLeadTrack:
   governor_calm_recovery_mode: bool = False
   governor_calm_recovery_applied: bool = False
   governor_recovery_position_closing_mps: float | None = None
+  governor_recovery_vrel_floor_mps: float | None = None
   # Opening governor (CD9's mirror): publish-time one-directional vRel relax
   # floor while the raw position window PROVES sustained opening that the
   # closing-biased publish pipeline is contradicting. The separate hold state
@@ -235,6 +261,20 @@ class ModelLeadTrack:
   steady_parity_sample_count: int = 0
   steady_parity_window_span_s: float = 0.0
   steady_parity_max_sample_gap_s: float = 0.0
+  # One-frame, current-measurement attestation for the planner's stateful
+  # comfort bypass. This never changes the steady-parity proof/candidate state.
+  steady_parity_current_threat: bool = False
+  # Separate raw-position history for the private aLead correlation-amplifier
+  # veto. It must survive the very velocity-only contradiction that clears
+  # steady-parity correction authority.
+  accel_corr_position_evidence: deque = field(default_factory=lambda: deque(maxlen=64))
+  accel_corr_calm_position_dense_valid: bool = False
+  accel_corr_calm_position_valid: bool = False
+  accel_corr_calm_position_slope_mps: float = 0.0
+  accel_corr_calm_position_reason: str = "inactive"
+  accel_corr_calm_position_sample_count: int = 0
+  accel_corr_calm_position_window_span_s: float = 0.0
+  accel_corr_calm_position_max_sample_gap_s: float = 0.0
 
   @classmethod
   def from_lead_dict(cls, identifier: int, lead_dict: dict[str, Any], now: float, lead_slot: int) -> "ModelLeadTrack":
@@ -282,6 +322,103 @@ class ModelLeadTrack:
       self.steady_parity_window_span_s = 0.0
       self.steady_parity_max_sample_gap_s = 0.0
 
+  def _clear_accel_corr_calm_position(self, reason: str, *, clear_history: bool = True) -> None:
+    self.accel_corr_calm_position_dense_valid = False
+    self.accel_corr_calm_position_valid = False
+    self.accel_corr_calm_position_reason = str(reason)
+    if clear_history:
+      self.accel_corr_position_evidence.clear()
+      self.accel_corr_calm_position_slope_mps = 0.0
+      self.accel_corr_calm_position_sample_count = 0
+      self.accel_corr_calm_position_window_span_s = 0.0
+      self.accel_corr_calm_position_max_sample_gap_s = 0.0
+
+  def _update_accel_corr_calm_position(self, now: float, raw_drel: float, raw_vrel: float,
+                                       raw_alead: float, raw_prob: float, raw_dpath: float,
+                                       raw_vlat: float, v_ego: float) -> None:
+    """Attest dense calm position evidence without changing lead kinematics.
+
+    A noisy published-vLead derivative can make the private MPC correlation
+    amplifier deepen a mild model decel into a false hard brake. This producer
+    proof intentionally ignores that derivative and asks an independent 2 s
+    raw-position history whether the same physical lead is actually closing.
+    Any current published braking, identity/lateral/probability boundary, or
+    dense closing slope clears the proof in the same frame. A sub-identity-gate
+    range step remains visible in untouched public kinematics and cannot by
+    itself authorize this positive-only skip of extra amplification.
+    """
+    self.accel_corr_calm_position_dense_valid = False
+    self.accel_corr_calm_position_valid = False
+
+    if self.accel_corr_position_evidence:
+      prev_t, prev_drel = self.accel_corr_position_evidence[-1]
+      dt_s = float(now) - float(prev_t)
+      expected_step_m = float(raw_vrel) * max(0.0, dt_s)
+      if (dt_s <= 1e-3 or dt_s > 0.25 or
+          abs((float(raw_drel) - float(prev_drel)) - expected_step_m) > STEADY_PARITY_IDENTITY_DREL_JUMP_M):
+        self._clear_accel_corr_calm_position("identity_boundary")
+
+    raw_vlead = float(v_ego) + float(raw_vrel)
+    near_threat = float(raw_drel) <= max(10.0, 0.55 * max(0.0, float(v_ego)))
+    hard_reason = None
+    if float(raw_alead) < -ACCEL_CORR_CALM_POSITION_RAW_ALEAD_HARD_VETO_MPS2:
+      hard_reason = "raw_hard_braking"
+    elif abs(float(self.aLeadK)) > ACCEL_CORR_CALM_POSITION_MAX_ALEAD_ABS_MPS2:
+      hard_reason = "published_accel"
+    elif raw_vlead < 0.0:
+      hard_reason = "oncoming"
+    elif near_threat:
+      hard_reason = "near_threat"
+    elif (abs(float(raw_dpath)) > STEADY_PARITY_MAX_DPATH_M or
+          (abs(float(raw_dpath)) > STEADY_PARITY_VLAT_OFFCENTER_DPATH_M and
+           abs(float(raw_vlat)) >= STEADY_PARITY_MAX_VLAT_MPS)):
+      hard_reason = "lateral_ambiguity"
+    elif float(raw_prob) < STEADY_PARITY_MIN_MODEL_PROB:
+      hard_reason = "low_probability"
+    if hard_reason is not None:
+      self._clear_accel_corr_calm_position(hard_reason)
+      return
+
+    self.accel_corr_position_evidence.append((float(now), float(raw_drel)))
+    while (self.accel_corr_position_evidence and
+           (float(now) - self.accel_corr_position_evidence[0][0]) > ACCEL_CORR_CALM_POSITION_WINDOW_S):
+      self.accel_corr_position_evidence.popleft()
+
+    samples = list(self.accel_corr_position_evidence)
+    span_s = samples[-1][0] - samples[0][0] if len(samples) >= 2 else 0.0
+    gaps_s = [b[0] - a[0] for a, b in zip(samples, samples[1:], strict=False)]
+    max_gap_s = max(gaps_s) if gaps_s else 0.0
+    self.accel_corr_calm_position_sample_count = len(samples)
+    self.accel_corr_calm_position_window_span_s = float(span_s)
+    self.accel_corr_calm_position_max_sample_gap_s = float(max_gap_s)
+    dense = bool(
+      len(samples) >= ACCEL_CORR_CALM_POSITION_MIN_SAMPLES and
+      span_s >= ACCEL_CORR_CALM_POSITION_MIN_SPAN_S and
+      gaps_s and max_gap_s <= ACCEL_CORR_CALM_POSITION_MAX_SAMPLE_GAP_S
+    )
+    pair_slopes = [
+      (later[1] - earlier[1]) / (later[0] - earlier[0])
+      for i, earlier in enumerate(samples)
+      for later in samples[i + 1:]
+      if (later[0] - earlier[0]) >= ACCEL_CORR_CALM_POSITION_MIN_PAIR_SPAN_S
+    ]
+    position_slope = float(np.median(pair_slopes)) if pair_slopes else None
+    if position_slope is not None:
+      self.accel_corr_calm_position_slope_mps = position_slope
+
+    slope_in_band = bool(
+      position_slope is not None and
+      ACCEL_CORR_CALM_POSITION_MIN_SLOPE_MPS <= position_slope <= ACCEL_CORR_CALM_POSITION_MAX_SLOPE_MPS
+    )
+    if dense and not slope_in_band:
+      self._clear_accel_corr_calm_position("position_slope_veto")
+      return
+    if dense and slope_in_band:
+      self.accel_corr_calm_position_dense_valid = True
+      self.accel_corr_calm_position_reason = "position_proven"
+      return
+    self.accel_corr_calm_position_reason = "sparse_window"
+
   def _update_steady_parity(self, now: float, raw_drel: float, raw_vrel: float,
                             raw_alead: float, raw_prob: float, raw_dpath: float,
                             raw_vlat: float, v_ego: float,
@@ -293,6 +430,9 @@ class ModelLeadTrack:
     parity while every independently urgent current/window signal stays calm.
     No kinematic field on this ModelLeadTrack is changed here.
     """
+    # One-frame telemetry only: never let an earlier threat survive a calm,
+    # missing, or identity-only publication.
+    self.steady_parity_current_threat = False
     trust_deficit = float(getattr(cfg, 'steady_parity_trust_deficit_mps', 99.0))
     if trust_deficit >= 99.0:
       self._clear_steady_parity("disabled")
@@ -301,6 +441,7 @@ class ModelLeadTrack:
     # A same-track association may survive a large position discontinuity. It
     # is still an identity boundary for less-urgent evidence and must earn a
     # completely fresh 2 s epoch.
+    recent_position_closing_mps: float | None = None
     if self.steady_parity_evidence:
       prev_t, prev_drel, *_ = self.steady_parity_evidence[-1]
       dt_s = float(now) - float(prev_t)
@@ -308,18 +449,22 @@ class ModelLeadTrack:
       if (dt_s <= 1e-3 or dt_s > 0.25 or
           abs((float(raw_drel) - float(prev_drel)) - expected_step_m) > STEADY_PARITY_IDENTITY_DREL_JUMP_M):
         self._clear_steady_parity("identity_boundary")
+      elif dt_s <= STEADY_PARITY_MAX_SAMPLE_GAP_S:
+        recent_position_closing_mps = max(
+          0.0, -(float(raw_drel) - float(prev_drel)) / dt_s,
+        )
 
     raw_closing_mps = max(0.0, -float(raw_vrel))
     raw_ttc_s = float(raw_drel) / max(raw_closing_mps, 0.1)
     raw_vlead = float(v_ego) + float(raw_vrel)
     near_threat = float(raw_drel) <= max(10.0, 0.55 * max(0.0, float(v_ego)))
-    hard_reason = None
     current_raw_braking = float(raw_alead) < -STEADY_PARITY_ALEAD_VETO_MPS2
+    current_fast_close = raw_closing_mps >= STEADY_PARITY_MAX_RAW_CLOSING_MPS
+    current_short_ttc = raw_closing_mps > 0.3 and raw_ttc_s <= STEADY_PARITY_MIN_RAW_TTC_S
+    hard_reason = None
     if float(self.aLeadK) < -STEADY_PARITY_ALEAD_VETO_MPS2:
       hard_reason = "published_braking"
-    elif raw_closing_mps >= STEADY_PARITY_MAX_RAW_CLOSING_MPS:
-      hard_reason = "fast_close"
-    elif raw_closing_mps > 0.3 and raw_ttc_s <= STEADY_PARITY_MIN_RAW_TTC_S:
+    elif current_short_ttc:
       hard_reason = "short_raw_ttc"
     elif raw_vlead < 0.0:
       hard_reason = "oncoming"
@@ -332,56 +477,79 @@ class ModelLeadTrack:
     elif float(raw_prob) < STEADY_PARITY_MIN_MODEL_PROB:
       hard_reason = "low_probability"
     if hard_reason is not None:
+      self.steady_parity_current_threat = hard_reason in (
+        "published_braking", "short_raw_ttc", "oncoming", "near_threat",
+      )
       self._clear_steady_parity(hard_reason)
+      return
+
+    def append_and_measure_position_window() -> tuple[list[tuple], bool, float | None, float]:
+      self.steady_parity_evidence.append((
+        float(now), float(raw_drel), float(raw_vrel), float(raw_alead),
+        float(raw_dpath), float(raw_vlat), float(raw_prob),
+      ))
+      while self.steady_parity_evidence and (float(now) - self.steady_parity_evidence[0][0]) > STEADY_PARITY_WINDOW_S:
+        self.steady_parity_evidence.popleft()
+
+      samples = list(self.steady_parity_evidence)
+      span_s = samples[-1][0] - samples[0][0] if len(samples) >= 2 else 0.0
+      gaps_s = [b[0] - a[0] for a, b in zip(samples, samples[1:], strict=False)]
+      max_gap_s = max(gaps_s) if gaps_s else 0.0
+      self.steady_parity_sample_count = len(samples)
+      self.steady_parity_window_span_s = float(span_s)
+      self.steady_parity_max_sample_gap_s = float(max_gap_s)
+      dense = bool(
+        len(samples) >= STEADY_PARITY_MIN_SAMPLES and
+        span_s >= STEADY_PARITY_MIN_SPAN_S and
+        gaps_s and max_gap_s <= STEADY_PARITY_MAX_SAMPLE_GAP_S
+      )
+
+      pair_slopes = [
+        (later[1] - earlier[1]) / (later[0] - earlier[0])
+        for i, earlier in enumerate(samples)
+        for later in samples[i + 1:]
+        if (later[0] - earlier[0]) >= STEADY_PARITY_MIN_PAIR_SPAN_S
+      ]
+      position_slope = float(np.median(pair_slopes)) if pair_slopes else None
+      if position_slope is not None:
+        self.steady_parity_position_slope_mps = position_slope
+      alead_mean = sum(sample[3] for sample in samples) / len(samples)
+      return samples, dense, position_slope, float(alead_mean)
+
+    # A far/high-TTC raw-vRel spike removes private correction immediately and
+    # clears the complete proof epoch. It is attested as a genuine threat only
+    # when raw braking or an independent same-frame range step corroborates it.
+    # The rejected short proof-preservation experiment deliberately does not
+    # survive in production: a calm frame must earn a fresh dense position proof.
+    if current_fast_close:
+      self.steady_parity_current_threat = bool(
+        current_raw_braking or
+        (recent_position_closing_mps is not None and
+         recent_position_closing_mps > STEADY_PARITY_CURRENT_THREAT_MIN_POSITION_CLOSING_MPS)
+      )
+      self._clear_steady_parity("current_raw_braking" if current_raw_braking else "fast_close")
       return
 
     self.steady_parity_candidate_valid = False
     self.steady_parity_held = False
-    self.steady_parity_evidence.append((
-      float(now), float(raw_drel), float(raw_vrel), float(raw_alead),
-      float(raw_dpath), float(raw_vlat), float(raw_prob),
-    ))
-    while self.steady_parity_evidence and (float(now) - self.steady_parity_evidence[0][0]) > STEADY_PARITY_WINDOW_S:
-      self.steady_parity_evidence.popleft()
-
-    samples = list(self.steady_parity_evidence)
-    span_s = samples[-1][0] - samples[0][0] if len(samples) >= 2 else 0.0
-    gaps_s = [b[0] - a[0] for a, b in zip(samples, samples[1:], strict=False)]
-    max_gap_s = max(gaps_s) if gaps_s else 0.0
-    self.steady_parity_sample_count = len(samples)
-    self.steady_parity_window_span_s = float(span_s)
-    self.steady_parity_max_sample_gap_s = float(max_gap_s)
-    dense = bool(
-      len(samples) >= STEADY_PARITY_MIN_SAMPLES and
-      span_s >= STEADY_PARITY_MIN_SPAN_S and
-      gaps_s and max_gap_s <= STEADY_PARITY_MAX_SAMPLE_GAP_S
-    )
-
-    pair_slopes = [
-      (later[1] - earlier[1]) / (later[0] - earlier[0])
-      for i, earlier in enumerate(samples)
-      for later in samples[i + 1:]
-      if (later[0] - earlier[0]) >= STEADY_PARITY_MIN_PAIR_SPAN_S
-    ]
-    position_slope = float(np.median(pair_slopes)) if pair_slopes else None
-    if position_slope is not None:
-      self.steady_parity_position_slope_mps = position_slope
-
-    alead_mean = sum(sample[3] for sample in samples) / len(samples)
+    samples, dense, position_slope, alead_mean = append_and_measure_position_window()
     # A current raw braking sample always removes correction in the same frame,
     # but remains in the evidence window so isolated model-accel noise is judged
     # by the specified window mean. Sustained braking drives that mean below the
     # veto; published aLead crossing the same threshold clears the epoch above.
     if current_raw_braking:
+      self.steady_parity_current_threat = True
       self._clear_steady_parity("current_raw_braking", clear_history=False)
       return
     if alead_mean < -STEADY_PARITY_ALEAD_VETO_MPS2:
+      self.steady_parity_current_threat = True
       self._clear_steady_parity("window_braking", clear_history=False)
       return
     slope_in_band = bool(
       position_slope is not None and
       STEADY_PARITY_MIN_POSITION_SLOPE_MPS <= position_slope <= STEADY_PARITY_MAX_POSITION_SLOPE_MPS
     )
+
     if dense and slope_in_band:
       floor_mps = min(0.0, float(position_slope) - max(0.0, trust_deficit))
       self.steady_parity_candidate_valid = True
@@ -502,6 +670,7 @@ class ModelLeadTrack:
       self._clear_opening_relax(rearm_after_t=now)
       self.opening_position_evidence.clear()
       self._clear_steady_parity("slot_change")
+      self._clear_accel_corr_calm_position("slot_change")
 
     dt_s = float(np.clip(float(now) - self.last_t, 0.0, 0.25))
     predicted_drel = self.predict_drel(now)
@@ -525,7 +694,10 @@ class ModelLeadTrack:
     # CD9: a corroborated sustained closure forces full urgency (the existing
     # fast-tau/slew-boost machinery) even while the per-frame gates read calm -
     # the road event sat below BlendCloseLoMps for the entire first second.
-    governor_active = self._update_closing_governor(now, raw_drel, raw_vrel, raw_alead, cfg)
+    governor_active = self._update_closing_governor(
+      now, raw_drel, raw_vrel, raw_alead, cfg,
+      raw_prob=raw_prob, raw_dpath=raw_dpath, raw_vlat=raw_vlat,
+    )
     if governor_active and not fast_closing:
       urgency = 1.0
     self._update_opening_governor(
@@ -623,6 +795,9 @@ class ModelLeadTrack:
     self.aLeadK = float(self.aLeadK + accel_alpha * (raw_alead - self.aLeadK))
     self.aLeadTau = 0.3
     self.modelProb = float(self.modelProb + prob_alpha * (raw_prob - self.modelProb))
+    self._update_accel_corr_calm_position(
+      now, raw_drel, raw_vrel, raw_alead, raw_prob, raw_dpath, raw_vlat, v_ego,
+    )
     self.last_t = float(now)
     self.last_slot = int(lead_slot)
     self.age += 1
@@ -630,7 +805,9 @@ class ModelLeadTrack:
     return self.get_RadarState(cfg)
 
   def _update_closing_governor(self, now: float, raw_drel: float, raw_vrel: float,
-                               raw_alead: float, cfg: LeadResponseTuningConfig) -> bool:
+                               raw_alead: float, cfg: LeadResponseTuningConfig, *,
+                               raw_prob: float = 1.0, raw_dpath: float = 0.0,
+                               raw_vlat: float = 0.0) -> bool:
     """CD9 corroborated-closing governor (road 205-6 Event B).
 
     The road near-collision was pure publish-side latency: the model's RAW
@@ -665,12 +842,14 @@ class ModelLeadTrack:
 
     Rollback sentinels: ClosingGovernorMarginMps >= 99 disables the governor
     entirely (exact legacy publish); ClosingGovernorAccelOnsetMps2 >= 99
-    disables the sustained-decel arm path only.
+    disables acceleration-derived arming and full position trust while leaving
+    position-excess, velocity-earned, and short-raw-TTC authority available.
     """
     self.closing_evidence.append((float(now), float(raw_drel), float(raw_vrel), float(raw_alead)))
     self.opening_position_evidence.append((float(now), float(raw_drel)))
     self.governor_calm_recovery_applied = False
     self.governor_recovery_position_closing_mps = None
+    self.governor_recovery_vrel_floor_mps = None
 
     margin = float(getattr(cfg, 'closing_governor_margin_mps', 99.0))
     if margin >= 99.0:
@@ -773,6 +952,25 @@ class ModelLeadTrack:
       1e-3 < (recent_samples[1][0] - recent_samples[0][0]) <= CLOSING_GOVERNOR_RECOVERY_MAX_SAMPLE_GAP_S
     )
 
+    # The long-window position estimate owns the recovery floor, but it must
+    # agree with the newest raw range step in this same publication. This veto
+    # catches a genuine closure before the robust one-second window can react;
+    # it never supplies the floor itself, so a single noisy step cannot create
+    # less-urgent evidence.
+    recent_position_safe = False
+    recent_position_samples = list(self.opening_position_evidence)[-2:]
+    if len(recent_position_samples) == 2:
+      (recent_t0, recent_d0), (recent_t1, recent_d1) = recent_position_samples
+      recent_dt = float(recent_t1) - float(recent_t0)
+      if (math.isfinite(recent_dt) and math.isfinite(float(recent_d0)) and math.isfinite(float(recent_d1)) and
+          1e-3 < recent_dt <= CLOSING_GOVERNOR_RECOVERY_MAX_SAMPLE_GAP_S):
+        recent_position_closing = max(0.0, (float(recent_d0) - float(recent_d1)) / recent_dt)
+        recent_position_ttc_s = float(raw_drel) / max(recent_position_closing, 0.1)
+        recent_position_safe = bool(
+          recent_position_closing <= CLOSING_GOVERNOR_RECOVERY_MAX_POSITION_CLOSING_MPS and
+          recent_position_ttc_s > CLOSING_GOVERNOR_RECOVERY_MIN_RAW_TTC_S
+        )
+
     def calm_recovery_sample(sample: tuple[float, float, float, float]) -> bool:
       _, sample_drel, sample_vrel, sample_alead = sample
       sample_closing = max(0.0, -float(sample_vrel))
@@ -783,6 +981,22 @@ class ModelLeadTrack:
         sample_ttc_s > OPENING_GOVERNOR_MIN_PUBLISHED_TTC_S
       )
 
+    def numeric_recovery_sample_safe(sample: tuple[float, float, float, float]) -> bool:
+      _, sample_drel, sample_vrel, sample_alead = sample
+      sample_closing = max(0.0, -float(sample_vrel))
+      sample_ttc_s = float(sample_drel) / max(sample_closing, 0.1)
+      return bool(
+        float(sample_alead) >= -recovery_alead_veto and
+        sample_closing < OPENING_GOVERNOR_HARD_CLOSING_MPS and
+        sample_ttc_s > CLOSING_GOVERNOR_RECOVERY_MIN_RAW_TTC_S
+      )
+
+    raw_recovery_context_safe = bool(
+      float(raw_prob) >= STEADY_PARITY_MIN_MODEL_PROB and
+      abs(float(raw_dpath)) <= STEADY_PARITY_MAX_DPATH_M and
+      not (abs(float(raw_dpath)) > STEADY_PARITY_VLAT_OFFCENTER_DPATH_M and
+           abs(float(raw_vlat)) >= STEADY_PARITY_MAX_VLAT_MPS)
+    )
     calm_recovery = bool(
       active and
       self.governor_threat_corroborated and
@@ -791,6 +1005,12 @@ class ModelLeadTrack:
       alead_mean >= -recovery_alead_veto and
       long_position_closing is not None and
       long_position_closing <= CLOSING_GOVERNOR_RECOVERY_MAX_POSITION_CLOSING_MPS
+    )
+    numeric_recovery_safe = bool(
+      raw_recovery_context_safe and
+      recent_position_safe and
+      all(numeric_recovery_sample_safe(sample) for sample in recent_samples) and
+      raw_collision_ttc_s > CLOSING_GOVERNOR_RECOVERY_MIN_RAW_TTC_S
     )
     recovery_closing = None if long_position_closing is None else max(raw_closing, float(long_position_closing))
     enters_recovery = bool(
@@ -807,6 +1027,12 @@ class ModelLeadTrack:
       self.governor_calm_recovery_mode = True
       self.governor_calm_recovery_applied = True
       self.governor_recovery_position_closing_mps = float(long_position_closing)
+      # Raw/model vRel is the signal that the independent dense position window
+      # has disproven. Publish the position-only correction for the planner's
+      # positive brake-release seam; public vRel and the governor's own clamp
+      # remain conservative at max(raw, position) above.
+      if numeric_recovery_safe:
+        self.governor_recovery_vrel_floor_mps = -float(long_position_closing)
       return True
     self.governor_calm_recovery_mode = False
 
@@ -855,12 +1081,22 @@ class ModelLeadTrack:
       # retain the full allowance. A single raw-aLead frame is not enough: the
       # road corpus has isolated threshold crossings, so acceleration must be
       # confirmed by the window mean or two consecutive model-cadence samples.
+      # Full position trust uses the sustained-decel onset threshold, not the
+      # smaller opening-recovery veto. The 2026-07-15 20:38:27 capture had two
+      # mild -0.30/-0.24 m/s^2 samples trip the 0.20 opening veto and spend the
+      # entire +1.5 m/s position allowance even as raw range was opening. Keep
+      # that state threat-corroborated (current_braking above still uses the
+      # opening veto), but do not amplify position noise until aLead reaches
+      # the independently tuned sustained-braking threshold.
       # Otherwise windowed velocity corroboration earns position excess
       # continuously, one-for-one above MarginMps and capped by the tune.
       # This removes the binary full-trust cliff at vrel_closing == margin.
       max_pos_trust = max(0.0, float(getattr(cfg, 'closing_governor_pos_trust_excess_mps', 0.0)))
-      recent_alead_decel = len(samples) >= 2 and all(s[3] < -opening_alead_veto for s in samples[-2:])
-      braking_corroborated = alead_mean < -opening_alead_veto or recent_alead_decel
+      recent_alead_decel = bool(
+        accel_onset < 99.0 and len(samples) >= 2 and
+        all(s[3] < -accel_onset for s in samples[-2:])
+      )
+      braking_corroborated = armed_decel or recent_alead_decel
       short_raw_ttc = raw_closing > min_closing and raw_collision_ttc_s <= OPENING_GOVERNOR_MIN_PUBLISHED_TTC_S
       if braking_corroborated or short_raw_ttc:
         pos_trust = max_pos_trust
@@ -1357,6 +1593,27 @@ class ModelLeadTrack:
       published_vrel = float(relax_floor)
       published_vlead = max(0.0, v_ego_est + published_vrel)
       published_vleadk = published_vlead
+    published_closing_mps = max(0.0, -float(published_vrel))
+    published_ttc_s = float(published_drel) / max(published_closing_mps, 0.1)
+    self.accel_corr_calm_position_valid = bool(
+      self.accel_corr_calm_position_dense_valid and
+      self.missed == 0 and
+      abs(float(self.aLeadK)) <= ACCEL_CORR_CALM_POSITION_MAX_ALEAD_ABS_MPS2 and
+      published_closing_mps < ACCEL_CORR_CALM_POSITION_MAX_PUBLISHED_CLOSING_MPS and
+      published_ttc_s > ACCEL_CORR_CALM_POSITION_MIN_PUBLISHED_TTC_S and
+      published_vlead >= 0.0
+    )
+    if self.accel_corr_calm_position_dense_valid and not self.accel_corr_calm_position_valid:
+      if self.missed != 0:
+        self.accel_corr_calm_position_reason = "missed_frame"
+      elif abs(float(self.aLeadK)) > ACCEL_CORR_CALM_POSITION_MAX_ALEAD_ABS_MPS2:
+        self.accel_corr_calm_position_reason = "published_accel"
+      elif published_closing_mps >= ACCEL_CORR_CALM_POSITION_MAX_PUBLISHED_CLOSING_MPS:
+        self.accel_corr_calm_position_reason = "published_fast_close"
+      elif published_ttc_s <= ACCEL_CORR_CALM_POSITION_MIN_PUBLISHED_TTC_S:
+        self.accel_corr_calm_position_reason = "published_short_ttc"
+      else:
+        self.accel_corr_calm_position_reason = "oncoming"
     return {
       "dRel": published_drel,
       "yRel": float(self.yRel),
@@ -1368,10 +1625,20 @@ class ModelLeadTrack:
       "fcw": False,
       "fcwSuppressed": bool(self.fcw_suppressed),
       "closingGovernorRecovery": bool(self.governor_calm_recovery_mode),
+      "closingGovernorRecoveryPositionClosingMps": float(self.governor_recovery_position_closing_mps or 0.0),
+      "closingGovernorRecoveryVRelFloorMps": float(self.governor_recovery_vrel_floor_mps or 0.0),
+      "closingGovernorRecoveryNumericValid": bool(
+        self.governor_calm_recovery_mode and
+        self.governor_recovery_position_closing_mps is not None and
+        self.governor_recovery_vrel_floor_mps is not None
+      ),
       "steadyParityCandidateValid": bool(self.steady_parity_candidate_valid),
       "steadyParityPositionSlopeMps": float(self.steady_parity_position_slope_mps),
       "steadyParityVRelFloorMps": float(self.steady_parity_vrel_floor_mps),
       "steadyParityHeld": bool(self.steady_parity_held),
+      "steadyParityCurrentThreat": bool(self.steady_parity_current_threat),
+      "accelCorrCalmPositionValid": bool(self.accel_corr_calm_position_valid),
+      "accelCorrCalmPositionSlopeMps": float(self.accel_corr_calm_position_slope_mps),
       "modelProb": float(self.modelProb),
       "status": True,
       "radar": False,
@@ -1444,13 +1711,16 @@ class ModelLeadTracker:
     for identifier, track in list(self._tracks.items()):
       if identifier not in self._updated_track_ids:
         track.missed += 1
+        track.steady_parity_current_threat = False
         track.governor_calm_recovery_mode = False
         track.governor_calm_recovery_applied = False
         track.governor_recovery_position_closing_mps = None
+        track.governor_recovery_vrel_floor_mps = None
         # A missed frame means no fresh position evidence: never carry a stale
         # opening relax onto a held/coasted publish (less-urgent direction).
         track._clear_opening_relax(rearm_after_t=track.last_t)
         track._clear_steady_parity("missed_frame")
+        track._clear_accel_corr_calm_position("missed_frame")
       if track.missed > MODEL_LEAD_TRACK_MAX_MISSES:
         self._tracks.pop(identifier, None)
     self._frame_active = False
@@ -2054,6 +2324,9 @@ class RadarD:
     if track.governor_recovery_position_closing_mps is not None:
       debug.recoveryPositionClosingMps = float(track.governor_recovery_position_closing_mps)
       debug.recoveryPositionClosingValid = True
+    if track.governor_recovery_vrel_floor_mps is not None:
+      debug.recoveryVRelFloorMps = float(track.governor_recovery_vrel_floor_mps)
+      debug.recoveryVRelFloorValid = True
     debug.steadyParityCandidateValid = bool(track.steady_parity_candidate_valid)
     debug.steadyParityPositionSlopeMps = float(track.steady_parity_position_slope_mps)
     debug.steadyParityVRelFloorMps = float(track.steady_parity_vrel_floor_mps)
@@ -2062,6 +2335,9 @@ class RadarD:
     debug.steadyParityWindowSpanS = float(track.steady_parity_window_span_s)
     debug.steadyParityMaxSampleGapS = float(track.steady_parity_max_sample_gap_s)
     debug.steadyParityReason = str(track.steady_parity_reason)
+    debug.accelCorrCalmPositionValid = bool(track.accel_corr_calm_position_valid)
+    debug.accelCorrCalmPositionSlopeMps = float(track.accel_corr_calm_position_slope_mps)
+    debug.accelCorrCalmPositionReason = str(track.accel_corr_calm_position_reason)
 
   def _maybe_refresh_lead_prob_thresholds(self) -> None:
     if (self.current_time - self._last_prob_refresh_t) < self.LEAD_PROB_REFRESH_S:

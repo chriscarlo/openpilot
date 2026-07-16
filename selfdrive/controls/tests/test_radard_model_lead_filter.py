@@ -9,12 +9,12 @@ import pytest
 from opendbc.car.hyundai.values import HyundaiFlags
 from openpilot.selfdrive.controls.lib.longitudinal_live_tune import LeadResponseTuningConfig
 from openpilot.selfdrive.controls.radard import (
+  CLOSING_GOVERNOR_RECOVERY_MIN_RAW_TTC_S,
   CLOSING_GOVERNOR_RECOVERY_MAX_POSITION_CLOSING_MPS,
   KalmanParams,
   ModelLeadTrack,
   ModelLeadTracker,
   OPENING_GOVERNOR_HARD_CLOSING_MPS,
-  OPENING_GOVERNOR_MIN_PUBLISHED_TTC_S,
   RADAR_TO_CAMERA,
   Track,
   get_lead,
@@ -861,13 +861,17 @@ class TestClosingGovernorCalmRecovery:
       tr.closing_evidence.append((float(sample_t), sample_drel, -sample_closing, sample_alead))
 
   @staticmethod
-  def _update(tr, *, now, drel_m, raw_closing_mps, raw_alead_mps2=0.0, cfg=None):
+  def _update(tr, *, now, drel_m, raw_closing_mps, raw_alead_mps2=0.0,
+              raw_prob=1.0, raw_dpath=0.0, raw_vlat=0.0, cfg=None):
     return tr._update_closing_governor(
       float(now),
       raw_drel=float(drel_m),
       raw_vrel=-float(raw_closing_mps),
       raw_alead=float(raw_alead_mps2),
       cfg=cfg if cfg is not None else TestClosingGovernorCalmRecovery._cfg(),
+      raw_prob=float(raw_prob),
+      raw_dpath=float(raw_dpath),
+      raw_vlat=float(raw_vlat),
     )
 
   def test_active_hold_recovers_only_after_two_calm_frames_and_full_position_span(self):
@@ -892,6 +896,7 @@ class TestClosingGovernorCalmRecovery:
     assert tr.governor_calm_recovery_applied
     assert tr.governor_reason == "calm_recovery_capped"
     assert tr.governor_recovery_position_closing_mps == pytest.approx(0.6)
+    assert tr.governor_recovery_vrel_floor_mps == pytest.approx(-0.6)
     assert tr.governor_closing_mps == pytest.approx(0.6)
     assert tr.governor_hold_until_t == pytest.approx(deadline)
     assert tr.get_RadarState(self._cfg())["closingGovernorRecovery"] is True
@@ -912,6 +917,49 @@ class TestClosingGovernorCalmRecovery:
     )
     assert tr.governor_calm_recovery_mode is False
     assert tr.get_RadarState(self._cfg())["closingGovernorRecovery"] is False
+
+  @pytest.mark.parametrize(
+    ("context", "expected_safe"),
+    [
+      ({"raw_prob": 0.59}, False),
+      ({"raw_dpath": 1.51}, False),
+      ({"raw_dpath": 1.30, "raw_vlat": 0.70}, False),
+      ({"raw_prob": 0.60, "raw_dpath": 1.25, "raw_vlat": 0.70}, True),
+    ],
+  )
+  def test_numeric_recovery_requires_current_raw_probability_and_lateral_context(self, context, expected_safe):
+    tr = self._track()
+    self._seed_histories(tr, raw_closing_mps=0.4, position_closing_mps=0.6)
+
+    assert self._update(
+      tr, now=self.NOW, drel_m=self.DREL_M, raw_closing_mps=0.4, **context,
+    )
+    state = tr.get_RadarState(self._cfg())
+    # Raw probability/lateral context authorizes only the new numeric proof;
+    # the pre-existing public governor recovery path must remain unchanged.
+    assert state["closingGovernorRecovery"] is True
+    assert state["closingGovernorRecoveryNumericValid"] is expected_safe
+    assert tr.governor_recovery_position_closing_mps is not None
+    assert (tr.governor_recovery_vrel_floor_mps is not None) is expected_safe
+
+  def test_missed_frame_clears_numeric_recovery_provenance(self):
+    tr = self._track()
+    self._seed_histories(tr, raw_closing_mps=0.4, position_closing_mps=0.6)
+    assert self._update(
+      tr, now=self.NOW, drel_m=self.DREL_M, raw_closing_mps=0.4,
+    )
+    assert tr.get_RadarState(self._cfg())["closingGovernorRecoveryNumericValid"] is True
+
+    tracker = ModelLeadTracker(params=_NoParams())
+    tracker._tracks[tr.identifier] = tr
+    tracker.begin_frame(self.NOW + 0.05)
+    tracker.end_frame()
+
+    state = tr.get_RadarState(self._cfg())
+    assert state["closingGovernorRecovery"] is False
+    assert state["closingGovernorRecoveryNumericValid"] is False
+    assert tr.governor_recovery_position_closing_mps is None
+    assert tr.governor_recovery_vrel_floor_mps is None
 
   def test_slot_transition_clears_position_history_before_recovery(self):
     tr = self._track()
@@ -966,8 +1014,30 @@ class TestClosingGovernorCalmRecovery:
     )
     assert tr.governor_calm_recovery_applied
     assert tr.governor_recovery_position_closing_mps == pytest.approx(position_closing_mps)
+    # The public governor clamp stays conservative at max(raw, position), while
+    # the planner's positive-only release proof is independently position-only.
+    assert tr.governor_recovery_vrel_floor_mps == pytest.approx(-position_closing_mps)
     assert tr.governor_closing_mps == pytest.approx(expected_mps)
     assert tr.governor_hold_until_t == pytest.approx(deadline)
+
+  def test_recovery_rejects_same_frame_raw_position_close_above_limit(self):
+    tr = self._track()
+    self._seed_histories(
+      tr,
+      raw_closing_mps=0.4,
+      position_closing_mps=0.6,
+    )
+
+    # The retained robust window is mild, but the newest raw range step closes
+    # 2.0 m/s. It must veto recovery before the long estimator can catch up.
+    assert self._update(
+      tr,
+      now=self.NOW,
+      drel_m=self.DREL_M - 0.07,
+      raw_closing_mps=0.4,
+    )
+    assert tr.governor_calm_recovery_mode is True
+    assert tr.governor_recovery_vrel_floor_mps is None
 
   def test_recovery_mode_never_raises_extra_clamp_when_current_raw_closing_rises(self):
     tr = self._track()
@@ -1131,12 +1201,12 @@ class TestClosingGovernorCalmRecovery:
   @pytest.mark.parametrize(
     "drel_m,expected_recovery",
     [
-      (2.4, False),       # exactly 6.0 s raw TTC: fail closed
-      (2.4004, True),     # 6.001 s raw TTC: strictly beyond the veto
+      (4.8, False),       # exactly 12.0 s raw TTC: fail closed
+      (4.8004, True),     # 12.001 s raw TTC: strictly beyond the veto
     ],
   )
-  def test_raw_ttc_boundary_is_strictly_greater_than_six_seconds(self, drel_m, expected_recovery):
-    assert OPENING_GOVERNOR_MIN_PUBLISHED_TTC_S == pytest.approx(6.0)
+  def test_recovery_raw_ttc_boundary_is_strictly_greater_than_twelve_seconds(self, drel_m, expected_recovery):
+    assert CLOSING_GOVERNOR_RECOVERY_MIN_RAW_TTC_S == pytest.approx(12.0)
     tr = self._track(drel_m=drel_m)
     self._seed_histories(
       tr,
@@ -1148,8 +1218,9 @@ class TestClosingGovernorCalmRecovery:
     assert self._update(
       tr, now=self.NOW, drel_m=drel_m, raw_closing_mps=0.4,
     )
-    assert tr.governor_calm_recovery_applied is expected_recovery
-    assert tr.governor_closing_mps == pytest.approx(0.4 if expected_recovery else 1.8)
+    assert tr.governor_calm_recovery_applied is True
+    assert tr.governor_closing_mps == pytest.approx(0.4)
+    assert (tr.governor_recovery_vrel_floor_mps is not None) is expected_recovery
 
   @pytest.mark.parametrize(
     "raw_closing_mps,expected_recovery",
@@ -1574,6 +1645,48 @@ class TestOpeningGovernor:
     assert active
     expected = min(7.16, 0.46 + cfg.closing_governor_pos_trust_excess_mps)
     assert tr.governor_closing_mps == pytest.approx(expected)
+
+  def test_two_mild_raw_alead_samples_do_not_spend_full_position_trust(self):
+    # 2026-07-15 20:38:27 road fingerprint: two mild aLead samples crossed the
+    # opening-recovery veto (-0.20) but not the sustained-braking onset (-0.35).
+    # They must keep the threat latch conservative without turning an opening
+    # raw-position artifact into the full +1.5 m/s published closing clamp.
+    tr = self._track(vrel_state=-0.35, drel_state=42.9, slope=-7.16,
+                     raw_vrel=-0.46, raw_alead=0.0)
+    cfg = self._cfg(closing_governor_margin_mps=0.75)
+
+    assert tr._update_closing_governor(
+      self.NOW, raw_drel=42.9, raw_vrel=-0.46, raw_alead=-0.30, cfg=cfg,
+    )
+    active = tr._update_closing_governor(
+      self.NOW + 0.05, raw_drel=42.9 - 7.16 * 0.05,
+      raw_vrel=-0.46, raw_alead=-0.24, cfg=cfg,
+    )
+
+    assert active
+    assert tr.governor_threat_corroborated
+    assert tr.governor_closing_mps < 0.46 + cfg.closing_governor_pos_trust_excess_mps
+    assert 0.46 <= tr.governor_closing_mps <= 0.56 + 1e-9
+
+  def test_accel_onset_sentinel_disables_accel_derived_full_position_trust(self):
+    tr = self._track(vrel_state=-0.35, drel_state=42.9, slope=-7.16,
+                     raw_vrel=-0.46, raw_alead=0.0)
+    cfg = self._cfg(
+      closing_governor_margin_mps=0.75,
+      closing_governor_accel_onset_mps2=100.0,
+    )
+
+    assert tr._update_closing_governor(
+      self.NOW, raw_drel=42.9, raw_vrel=-0.46, raw_alead=-1.0, cfg=cfg,
+    )
+    active = tr._update_closing_governor(
+      self.NOW + 0.05, raw_drel=42.9 - 7.16 * 0.05,
+      raw_vrel=-0.46, raw_alead=-1.0, cfg=cfg,
+    )
+
+    assert active
+    assert tr.governor_threat_corroborated
+    assert tr.governor_closing_mps < 0.46 + cfg.closing_governor_pos_trust_excess_mps
 
   def test_windowed_closure_margin_has_no_full_position_trust_cliff(self):
     # The current >= 0.75 rule jumps from no excess to the full +1.5 m/s for

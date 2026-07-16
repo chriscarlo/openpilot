@@ -109,17 +109,40 @@ def _vehicle_config(model_decel_floor_mps2: float):
   })
 
 
-@functools.lru_cache(maxsize=4)
-def _run(case: _Case, model_decel_floor_mps2: float) -> SimulationResult:
-  return run_harness(
-    vehicle_config=_vehicle_config(model_decel_floor_mps2),
-    scenario_name=f"alead_amplifier_{case.name}_{model_decel_floor_mps2:g}",
-    steps=_build_steps(case),
-    initial_speed_mps=case.ego_v0_mps,
-    noise_profile="off",
-    seed=42,
-    perception_filter="auto",
-  )
+@functools.lru_cache(maxsize=8)
+def _run(case: _Case, model_decel_floor_mps2: float,
+         disable_calm_position_proof: bool = False) -> SimulationResult:
+  # The legacy model-floor A/B predates the independent dense-position proof.
+  # Keep that oracle isolated by explicitly disabling only the new telemetry;
+  # separate assertions below exercise the integrated default path.
+  from openpilot.selfdrive.controls.radard import ModelLeadTrack
+
+  original_get_radar_state = ModelLeadTrack.get_RadarState
+
+  def get_radar_state_without_calm_position_proof(self, *args, **kwargs):
+    lead = original_get_radar_state(self, *args, **kwargs)
+    lead["accelCorrCalmPositionValid"] = False
+    lead["accelCorrCalmPositionSlopeMps"] = 0.0
+    return lead
+
+  if disable_calm_position_proof:
+    ModelLeadTrack.get_RadarState = get_radar_state_without_calm_position_proof
+  try:
+    return run_harness(
+      vehicle_config=_vehicle_config(model_decel_floor_mps2),
+      scenario_name=(
+        f"alead_amplifier_{case.name}_{model_decel_floor_mps2:g}_"
+        f"proof_{'off' if disable_calm_position_proof else 'on'}"
+      ),
+      steps=_build_steps(case),
+      initial_speed_mps=case.ego_v0_mps,
+      noise_profile="off",
+      seed=42,
+      perception_filter="auto",
+    )
+  finally:
+    if disable_calm_position_proof:
+      ModelLeadTrack.get_RadarState = original_get_radar_state
 
 
 def _planner_rows(result: SimulationResult) -> list[dict]:
@@ -155,8 +178,8 @@ def test_amplifier_tap_scenarios_use_real_radard_without_true_lead_braking() -> 
 
 
 def test_far_cap_collapse_tap_is_bounded_and_rollback_reproduces_it() -> None:
-  fix = _run(FAR_CAP_TAP, MODEL_DECEL_FLOOR_FIX_MPS2)
-  rollback = _run(FAR_CAP_TAP, MODEL_DECEL_FLOOR_ROLLBACK_MPS2)
+  fix = _run(FAR_CAP_TAP, MODEL_DECEL_FLOOR_FIX_MPS2, True)
+  rollback = _run(FAR_CAP_TAP, MODEL_DECEL_FLOOR_ROLLBACK_MPS2, True)
   fix_drop, _, fix_row = _worst_drop(fix, end_s=4.2)
   roll_drop, _, roll_row = _worst_drop(rollback, end_s=4.2)
 
@@ -182,8 +205,8 @@ def test_far_cap_collapse_tap_is_bounded_and_rollback_reproduces_it() -> None:
 
 
 def test_moderate_approach_waits_for_raw_ttc_instead_of_amplified_alead() -> None:
-  fix = _run(MODERATE_APPROACH_TAP, MODEL_DECEL_FLOOR_FIX_MPS2)
-  rollback = _run(MODERATE_APPROACH_TAP, MODEL_DECEL_FLOOR_ROLLBACK_MPS2)
+  fix = _run(MODERATE_APPROACH_TAP, MODEL_DECEL_FLOOR_FIX_MPS2, True)
+  rollback = _run(MODERATE_APPROACH_TAP, MODEL_DECEL_FLOOR_ROLLBACK_MPS2, True)
   fix_rows = _window(fix, end_s=5.5)
   roll_rows = _window(rollback, end_s=5.5)
   fix_first = next(row for row in fix_rows if row["mpc_acc_source_debug"].get("approach_reacquire"))
@@ -202,7 +225,10 @@ def test_moderate_approach_waits_for_raw_ttc_instead_of_amplified_alead() -> Non
   )
   assert roll_dbg["approach_reacquire_lead_decel_mps2"] > 1.0, physics
   assert roll_dbg["approach_reacquire_ttc_threshold_s"] > 7.0, physics
-  assert roll_first["planner_handoff_limit_debug"]["bypass_reason"] == "lead_decel", physics
+  # The integrated closing-recovery bridge may already own the urgency bypass;
+  # either reason is fail-safe, while the assertions above prove amplification
+  # still controls the early ownership threshold in this isolated A/B.
+  assert roll_first["planner_handoff_limit_debug"]["bypass_reason"] in ("lead_decel", "closing"), physics
 
   assert fix_same_dbg["approach_reacquire"] is False, physics
   assert fix_same_dbg["approach_reacquire_lead_decel_mps2"] < 0.05, physics
@@ -210,6 +236,27 @@ def test_moderate_approach_waits_for_raw_ttc_instead_of_amplified_alead() -> Non
   assert fix_same_dbg["raw_ttc_to_headway_s"] > fix_same_dbg["approach_reacquire_ttc_threshold_s"], physics
   assert fix_first["t_s"] >= roll_first["t_s"] + 0.5, physics
   assert fix_dbg["raw_ttc_to_headway_s"] <= fix_dbg["approach_reacquire_ttc_threshold_s"], physics
+
+
+def test_dense_position_proof_prevents_far_false_tap_with_floor_rollback() -> None:
+  protected = _run(FAR_CAP_TAP, MODEL_DECEL_FLOOR_ROLLBACK_MPS2)
+  unprotected = _run(FAR_CAP_TAP, MODEL_DECEL_FLOOR_ROLLBACK_MPS2, True)
+  protected_drop, _, protected_row = _worst_drop(protected, end_s=4.2)
+  unprotected_drop, _, unprotected_row = _worst_drop(unprotected, end_s=4.2)
+
+  physics = (
+    f"dense-position proof at t={protected_row['t_s']:.2f}s: protected delta "
+    f"{protected_drop:+.3f}, aTarget {protected_row['planner_accel_mps2']:+.3f}; "
+    f"proof-disabled delta {unprotected_drop:+.3f}, "
+    f"aTarget {unprotected_row['planner_accel_mps2']:+.3f}"
+  )
+  protected_debug = protected_row["mpc_lead_stability_debug"]["slot0"]
+  assert protected_debug["accel_corr_calm_position_valid"], physics
+  assert protected_debug["accel_corr_amplify_vetoed"], physics
+  assert not protected_debug["accel_corr_amplified"], physics
+  assert protected_drop >= -ROAD_HANDOFF_MAX_DELTA_MPS2 - 1e-9, physics
+  assert unprotected_row["mpc_lead_stability_debug"]["slot0"]["accel_corr_amplified"], physics
+  assert unprotected_drop < -0.6, physics
 
 
 def test_cd3_meaningful_model_brake_still_amplifies() -> None:

@@ -511,6 +511,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"Longitudinal.LiveTune.OpeningGovernorHoldS", {PERSISTENT | BACKUP, FLOAT, "1.0"}},
     {"Longitudinal.LiveTune.OpeningGovernorRawClosingVetoMps", {PERSISTENT | BACKUP, FLOAT, "1.0"}},
     {"Longitudinal.LiveTune.OpeningGovernorALeadVetoMps2", {PERSISTENT | BACKUP, FLOAT, "0.2"}},
+    {"Longitudinal.LiveTune.ClosingRecoveryBridgeMaxPositionClosingMps", {PERSISTENT | BACKUP, FLOAT, "0.0"}},
     {"Longitudinal.LiveTune.SteadyParityTrustDeficitMps", {PERSISTENT | BACKUP, FLOAT, "0.20"}},
     {"Longitudinal.LiveTune.SteadyParityVRelSlewMps2", {PERSISTENT | BACKUP, FLOAT, "0.80"}},
     {"Longitudinal.LiveTune.SteadyParityHoldS", {PERSISTENT | BACKUP, FLOAT, "0.50"}},

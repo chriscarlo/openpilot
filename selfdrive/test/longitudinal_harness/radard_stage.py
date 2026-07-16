@@ -101,6 +101,9 @@ class RadardPerceptionStage:
       track = tracks.get(int(lead.radarTrackId)) if lead.status else None
       wire_governor = getattr(radar_state.replayInputs, f"{slot}Governor")
       exact_governor = bool(wire_governor.valid)
+      # Only writer-v2 defines these appended fields. A future unknown contract
+      # must remain non-exact until its compatibility is reviewed explicitly.
+      exact_governor_v2 = bool(exact_governor and int(radar_state.replayInputs.version) == 2)
       debug[slot] = {
         "track_id": None if track is None else int(track.identifier),
         "closing_governor_debug_exact": exact_governor,
@@ -130,6 +133,11 @@ class RadardPerceptionStage:
           float(wire_governor.recoveryPositionClosingMps)
           if exact_governor and wire_governor.recoveryPositionClosingValid
           else None if exact_governor or track is None else track.governor_recovery_position_closing_mps
+        ),
+        "closing_governor_recovery_vrel_floor_mps": (
+          float(wire_governor.recoveryVRelFloorMps)
+          if exact_governor_v2 and wire_governor.recoveryVRelFloorValid
+          else None if exact_governor or track is None else track.governor_recovery_vrel_floor_mps
         ),
         "steady_parity_candidate_valid": (
           bool(wire_governor.steadyParityCandidateValid)
@@ -162,6 +170,28 @@ class RadardPerceptionStage:
         "steady_parity_reason": (
           str(wire_governor.steadyParityReason)
           if exact_governor else "inactive" if track is None else str(track.steady_parity_reason)
+        ),
+        "accel_corr_calm_position_valid": (
+          bool(wire_governor.accelCorrCalmPositionValid)
+          if exact_governor_v2 else bool(track is not None and track.accel_corr_calm_position_valid)
+        ),
+        "accel_corr_calm_position_debug_exact": exact_governor_v2,
+        "accel_corr_calm_position_slope_mps": (
+          float(wire_governor.accelCorrCalmPositionSlopeMps)
+          if exact_governor_v2 else 0.0 if track is None else float(track.accel_corr_calm_position_slope_mps)
+        ),
+        "accel_corr_calm_position_reason": (
+          str(wire_governor.accelCorrCalmPositionReason) if exact_governor_v2
+          else "inactive" if track is None else str(track.accel_corr_calm_position_reason)
+        ),
+        "accel_corr_calm_position_sample_count": (
+          0 if track is None else int(track.accel_corr_calm_position_sample_count)
+        ),
+        "accel_corr_calm_position_window_span_s": (
+          0.0 if track is None else float(track.accel_corr_calm_position_window_span_s)
+        ),
+        "accel_corr_calm_position_max_sample_gap_s": (
+          0.0 if track is None else float(track.accel_corr_calm_position_max_sample_gap_s)
         ),
         "opening_relax_vrel_mps": None if track is None or track.opening_relax_vrel is None else float(track.opening_relax_vrel),
         "opening_relax_held": bool(track is not None and track.opening_relax_held),
@@ -290,7 +320,11 @@ def _fill_lead_v3(entry, raw_lead, *, model_v_ego: float) -> None:
 
   dt = _LEAD_TRAJECTORY_DT_S
   x0 = float(raw_lead.dRel) + RADAR_TO_CAMERA
-  y0 = -float(raw_lead.yRel)
+  # The synthetic/direct LeadData already carries path-relative lateral
+  # geometry. This stage builds a straight model path, so encode dPath into the
+  # model lead's y coordinate; using yRel here silently discarded an explicit
+  # LeadDirective.d_path_m override in every real-RadarD harness run.
+  y0 = -float(raw_lead.dPath)
   v0 = model_v_ego + float(raw_lead.vRel)
   entry.prob = float(raw_lead.modelProb)
   entry.t = [0.0, dt]
