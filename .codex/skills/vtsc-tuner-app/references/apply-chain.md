@@ -25,6 +25,23 @@ The SwiftUI product presents these as one **Save or Send This Tune** chooser rat
 
 Selecting a destination only opens its review sheet. It does not start work until the user confirms there.
 
+Before **Install on the Car (tici)** opens its normal review, the app refreshes
+the authoritative journal directory. A rebooted runtime-only install that still
+awaits outdoor closeout opens **Previous Car Install Needs Attention** instead:
+
+- **Review Undo Previous Install…** routes the exact selected journal into the
+  existing guarded Abort confirmation and is the normal path when the user
+  wants to proceed with a different new draft.
+- **Finish Verifying Previous Install Outdoors…** verifies the earlier tune,
+  not the current draft, and is unavailable while the editor differs from the
+  checked-in tune.
+- Cancel and either route leave the current editor draft untouched; no recovery
+  starts from this explanatory sheet.
+
+The same refresh runs again from final Install confirmation so a journal created
+after the chooser is still intercepted. Core unresolved-journal preflight remains
+the fail-closed race backstop.
+
 ## Current tile-replacement quarantine
 
 The native product currently offers only Local, Commit, Push, and PullOnTici.

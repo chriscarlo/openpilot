@@ -49,6 +49,11 @@ extension ApplyAction: Identifiable {
   public var id: String { label }
 }
 
+private enum PendingInstallResolutionRoute {
+  case resume
+  case abort
+}
+
 @MainActor
 final class TunerSession: ObservableObject {
   static let repositoryDefaultsKey = "VTSCTuner.repositoryPath"
@@ -65,6 +70,7 @@ final class TunerSession: ObservableObject {
   @Published var applyActionChooserVisible = false
   @Published var applyChooserSelection: ApplyAction?
   @Published var pendingApplyAction: ApplyAction?
+  @Published var pendingInstallResolution = false
   @Published var tileDeploymentInfoVisible = false
   @Published var runningApplyAction: ApplyAction?
   @Published var pendingResumePostflight = false
@@ -97,6 +103,15 @@ final class TunerSession: ObservableObject {
     return !candidate.journal.includesTileReplacement
   }
 
+  var selectedPendingDeployment: DeploymentRollbackJournal.RecoverableRollback? {
+    guard let selectedPendingDeploymentURL else { return nil }
+    return pendingDeployments.first { $0.url == selectedPendingDeploymentURL }
+  }
+
+  var currentDraftDiffersFromCheckout: Bool {
+    parameters != checkoutBaseline || !bands.isEmpty
+  }
+
   private(set) var checkoutBaseline: SigmoidParameters
 
   private var historyPast: [EditableSnapshot] = []
@@ -106,6 +121,7 @@ final class TunerSession: ObservableObject {
   private var applyTask: Task<Void, Never>?
   private var queuedApplyActionAfterChooser: ApplyAction?
   private var showTileInfoAfterApplyChooser = false
+  private var queuedPendingInstallResolutionRoute: PendingInstallResolutionRoute?
 
   init() {
     let saved = UserDefaults.standard.string(forKey: Self.repositoryDefaultsKey)
@@ -338,7 +354,7 @@ final class TunerSession: ObservableObject {
     applyActionChooserVisible = false
   }
 
-  func applyActionChooserDidDismiss() {
+  func applyActionChooserDidDismiss(journalDirectory: URL? = nil) {
     if showTileInfoAfterApplyChooser {
       showTileInfoAfterApplyChooser = false
       tileDeploymentInfoVisible = true
@@ -347,7 +363,7 @@ final class TunerSession: ObservableObject {
     guard let action = queuedApplyActionAfterChooser else { return }
     queuedApplyActionAfterChooser = nil
     applyChooserSelection = nil
-    requestApply(action)
+    requestApply(action, journalDirectory: journalDirectory)
   }
 
   func showTileDeploymentInfoFromApplyChooser() {
@@ -356,7 +372,7 @@ final class TunerSession: ObservableObject {
     applyActionChooserVisible = false
   }
 
-  func requestApply(_ action: ApplyAction) {
+  func requestApply(_ action: ApplyAction, journalDirectory: URL? = nil) {
     guard workspace == .curveLab else {
       status("Tune changes can only be saved or sent from Curve Lab.", error: true)
       return
@@ -367,15 +383,19 @@ final class TunerSession: ObservableObject {
       status(action.unavailableReason ?? "That apply action is unavailable.")
       return
     }
+    if action == .pullOnTici,
+       presentPendingInstallResolutionIfNeeded(journalDirectory: journalDirectory) {
+      return
+    }
     pendingApplyAction = action
   }
 
-  func requestRuntimeDeploymentFromTileInfo() {
+  func requestRuntimeDeploymentFromTileInfo(journalDirectory: URL? = nil) {
     tileDeploymentInfoVisible = false
-    requestApply(.pullOnTici)
+    requestApply(.pullOnTici, journalDirectory: journalDirectory)
   }
 
-  func confirmApply() {
+  func confirmApply(journalDirectory: URL? = nil) {
     guard workspace == .curveLab else {
       pendingApplyAction = nil
       status("Tune changes can only be saved or sent from Curve Lab.", error: true)
@@ -385,6 +405,10 @@ final class TunerSession: ObservableObject {
     guard action.isAvailable else {
       pendingApplyAction = nil
       status(action.unavailableReason ?? "That apply action is unavailable.", error: true)
+      return
+    }
+    if action == .pullOnTici,
+       presentPendingInstallResolutionIfNeeded(journalDirectory: journalDirectory) {
       return
     }
     guard let repositoryURL else {
@@ -415,6 +439,68 @@ final class TunerSession: ObservableObject {
         }
       }
     }
+  }
+
+  func cancelPendingInstallResolution() {
+    queuedPendingInstallResolutionRoute = nil
+    pendingInstallResolution = false
+  }
+
+  func reviewPendingInstallAbort() {
+    guard selectedPendingDeploymentIsRuntimeOnly else {
+      status("This recorded install cannot be rolled back by the current runtime-only build.", error: true)
+      return
+    }
+    queuedPendingInstallResolutionRoute = .abort
+    pendingInstallResolution = false
+  }
+
+  func reviewPendingInstallResume() {
+    guard selectedPendingDeploymentIsRuntimeOnly else {
+      status("This recorded install cannot be verified by the current runtime-only build.", error: true)
+      return
+    }
+    guard !currentDraftDiffersFromCheckout else {
+      status(
+        "The current draft differs from the checked-in tune. Save it, then load the earlier tune before verifying that earlier install.",
+        error: true
+      )
+      return
+    }
+    queuedPendingInstallResolutionRoute = .resume
+    pendingInstallResolution = false
+  }
+
+  func pendingInstallResolutionDidDismiss() {
+    let route = queuedPendingInstallResolutionRoute
+    queuedPendingInstallResolutionRoute = nil
+    switch route {
+    case .resume:
+      pendingResumePostflight = true
+    case .abort:
+      pendingAbortPendingDeployment = true
+    case nil:
+      break
+    }
+  }
+
+  @discardableResult
+  private func presentPendingInstallResolutionIfNeeded(journalDirectory: URL?) -> Bool {
+    refreshRecoverableRollbackState(directory: journalDirectory)
+    guard !pendingDeployments.isEmpty else {
+      if hasRecoverableRollback {
+        pendingApplyAction = nil
+        pendingRollbackRecovery = true
+        status("Finish the recorded interrupted rollback before installing another tune.")
+        return true
+      }
+      return false
+    }
+    pendingApplyAction = nil
+    queuedPendingInstallResolutionRoute = nil
+    pendingInstallResolution = true
+    status("Finish or undo the previous car install before installing this tune.")
+    return true
   }
 
   func confirmResumePostflight() {

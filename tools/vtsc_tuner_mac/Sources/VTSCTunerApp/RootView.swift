@@ -128,9 +128,15 @@ struct RootView: View {
       }
       .sheet(
         isPresented: $session.applyActionChooserVisible,
-        onDismiss: session.applyActionChooserDidDismiss
+        onDismiss: { session.applyActionChooserDidDismiss() }
       ) {
         ApplyActionChooserView(session: session)
+      }
+      .sheet(
+        isPresented: $session.pendingInstallResolution,
+        onDismiss: session.pendingInstallResolutionDidDismiss
+      ) {
+        PendingInstallResolutionView(session: session)
       }
       .sheet(item: $session.runningApplyAction) { action in
         ApplyProgressView(session: session, action: action)
@@ -662,6 +668,95 @@ struct ApplyActionChooserView: View {
     .accessibilityValue(action.chooserDestination)
     .accessibilityHint(action.description)
     .accessibilityAddTraits(selected ? .isSelected : [])
+  }
+}
+
+struct PendingInstallResolutionView: View {
+  @ObservedObject var session: TunerSession
+
+  private var journalLabel: String {
+    guard let candidate = session.selectedPendingDeployment else { return "Unknown recorded install" }
+    return "\(candidate.journal.deploymentID.uuidString.prefix(8)) · \(candidate.journal.createdAt)"
+  }
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 18) {
+      VStack(alignment: .leading, spacing: 6) {
+        Label("Previous Car Install Needs Attention", systemImage: "exclamationmark.shield.fill")
+          .font(.title2.weight(.semibold))
+        Text(
+          "An earlier tune was installed and rebooted, but its final safety verification was never completed. Another car install cannot start until that record is finished or undone."
+        )
+        .foregroundStyle(.secondary)
+      }
+
+      Label(journalLabel, systemImage: "doc.text")
+        .font(.callout.monospaced())
+        .foregroundStyle(.secondary)
+        .textSelection(.enabled)
+
+      Label(
+        "Your current draft is still loaded. This stopped before changing the checkout, Git, or the car.",
+        systemImage: "checkmark.shield"
+      )
+      .foregroundStyle(.secondary)
+
+      GroupBox {
+        VStack(alignment: .leading, spacing: 10) {
+          HStack(spacing: 8) {
+            Text("INSTALL THE NEW TUNE")
+              .font(.caption.weight(.bold))
+            Text("RECOMMENDED")
+              .font(.caption2.weight(.bold))
+              .foregroundStyle(Color.accentColor)
+          }
+          Text(
+            "First review an undo of the previous install. The guarded rollback restores its recorded prior runtime and reboots the tici. After that succeeds, choose Install on the Car again for this tune."
+          )
+          .foregroundStyle(.secondary)
+          Button("Review Undo Previous Install…") {
+            session.reviewPendingInstallAbort()
+          }
+          .buttonStyle(.borderedProminent)
+          .disabled(!session.selectedPendingDeploymentIsRuntimeOnly)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+      }
+
+      GroupBox {
+        VStack(alignment: .leading, spacing: 10) {
+          Text("KEEP THE PREVIOUS TUNE")
+            .font(.caption.weight(.bold))
+          Text(
+            "Finish the previous tune's outdoor verification instead. This verifies that earlier tune; it does not install the new draft currently on screen."
+          )
+          .foregroundStyle(.secondary)
+          if session.currentDraftDiffersFromCheckout {
+            Label(
+              "Unavailable while the current draft differs from the checked-in tune. Save this draft, then load or revert to the earlier tune if you need this path.",
+              systemImage: "info.circle"
+            )
+            .font(.callout)
+            .foregroundStyle(.orange)
+          }
+          Button("Finish Verifying Previous Install Outdoors…") {
+            session.reviewPendingInstallResume()
+          }
+          .disabled(
+            !session.selectedPendingDeploymentIsRuntimeOnly || session.currentDraftDiffersFromCheckout
+          )
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+      }
+
+      HStack {
+        Spacer()
+        Button("Not Now", role: .cancel) { session.cancelPendingInstallResolution() }
+          .keyboardShortcut(.cancelAction)
+      }
+    }
+    .padding(24)
+    .frame(width: 650)
   }
 }
 
