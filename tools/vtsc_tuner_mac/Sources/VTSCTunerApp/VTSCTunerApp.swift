@@ -57,6 +57,8 @@ struct VTSCTunerApp: App {
           }
           Divider()
           Button(ResumePostflightAction.label) { session.pendingResumePostflight = true }
+          Button(AbortPendingDeploymentAction.label) { session.pendingAbortPendingDeployment = true }
+            .disabled(session.pendingDeployments.isEmpty)
           Button(RollbackRecoveryAction.label) { session.pendingRollbackRecovery = true }
             .disabled(!session.hasRecoverableRollback)
         } else {

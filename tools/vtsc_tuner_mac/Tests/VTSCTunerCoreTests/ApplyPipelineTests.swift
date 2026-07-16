@@ -254,7 +254,11 @@ import Testing
 @Test func resumedPostflightGivesTheOffroadPhaseItsOwnFullDeadline() async throws {
   var fixture = try resumePostflightFixture(validGPS: true)
   defer { try? FileManager.default.removeItem(at: fixture.root) }
-  fixture.firstRuntimeDelay = .milliseconds(45)
+  // Keep the first phase close enough to its deadline that one phase-wide
+  // deadline would expire during the offroad poll, while leaving enough wall
+  // clock margin for this timing contract to remain stable in the full
+  // parallel test suite.
+  fixture.firstRuntimeDelay = .milliseconds(400)
   fixture.offroadWaitReads = 1
   let runner = ResumePostflightRunner(fixture: fixture)
 
@@ -264,8 +268,8 @@ import Testing
       repositoryRoot: fixture.repository,
       mapdReleaseManifestURL: fixture.releaseURL,
       journalURL: fixture.journalURL,
-      timeout: 0.05,
-      pollInterval: 0.03
+      timeout: 0.5,
+      pollInterval: 0.15
     )
   ) { _ in }
 
@@ -687,6 +691,153 @@ import Testing
   #expect(!requests.contains { $0.arguments.joined(separator: " ").contains("sudo reboot") })
 }
 
+@Test func terminalResumeMismatchOffersSelectedAbortAndRollbackRecovery() async throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  fixture.journal.previousCachedMapdPath = ""
+  fixture.journal.previousCachedMapdSHA256 = nil
+  try fixture.journal.write(to: fixture.journalURL)
+  fixture.runtimeDirty = true
+  let events = ApplyEventCollector()
+  let resumed = await ApplyPipeline(processRunner: ResumePostflightRunner(fixture: fixture))
+    .resumePendingPostflight(
+      ResumePostflightRequest(
+        tune: fixture.tune,
+        repositoryRoot: fixture.repository,
+        mapdReleaseManifestURL: fixture.releaseURL,
+        journalURL: fixture.journalURL,
+        timeout: 1,
+        pollInterval: 0.001
+      )
+    ) { await events.append($0) }
+  #expect(!resumed)
+  #expect((await events.events).contains { event in
+    guard case let .step(step) = event else { return false }
+    return step.id == 3 && step.text.contains(AbortPendingDeploymentAction.label)
+  })
+  #expect(try DeploymentRollbackJournal.load(from: fixture.journalURL).effectiveResolution == .awaitingPostflight)
+
+  let runner = FreshProcessRollbackRecoveryRunner(journal: fixture.journal)
+  let aborted = await ApplyPipeline(
+    processRunner: runner,
+    rebootInitialDelayNanoseconds: 0,
+    rebootPollDelayNanoseconds: 1
+  ).abortPendingDeployment(
+    AbortPendingDeploymentRequest(
+      repositoryRoot: fixture.repository,
+      journalURL: fixture.journalURL
+    )
+  ) { _ in }
+
+  #expect(aborted)
+  #expect(try DeploymentRollbackJournal.load(from: fixture.journalURL).effectiveResolution == .rolledBack)
+  #expect((await runner.requests).contains {
+    $0.arguments.last?.contains(TiciProductionRollbackCommandBuilder.resultMarker) == true
+  })
+}
+
+@Test func abortRejectsWrongJournalSelectionBeforeAnyRemoteRequest() async throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  fixture.journal.completed = true
+  fixture.journal.resolution = .completed
+  try fixture.journal.write(to: fixture.journalURL)
+  let runner = RollbackClaimRecoveryRunner(failRemoteRollback: false)
+
+  let succeeded = await ApplyPipeline(processRunner: runner).abortPendingDeployment(
+    AbortPendingDeploymentRequest(
+      repositoryRoot: fixture.repository,
+      journalURL: fixture.journalURL
+    )
+  ) { _ in }
+
+  #expect(!succeeded)
+  #expect(await runner.requests.isEmpty)
+  #expect(try DeploymentRollbackJournal.load(from: fixture.journalURL).effectiveResolution == .completed)
+}
+
+@Test func abortSafetyFailureLeavesAwaitingJournalAndIssuesZeroRollbackMutation() async throws {
+  let fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  let before = try Data(contentsOf: fixture.journalURL)
+  let runner = UnsafeAbortRunner()
+
+  let succeeded = await ApplyPipeline(processRunner: runner).abortPendingDeployment(
+    AbortPendingDeploymentRequest(
+      repositoryRoot: fixture.repository,
+      journalURL: fixture.journalURL
+    )
+  ) { _ in }
+
+  #expect(!succeeded)
+  #expect(try Data(contentsOf: fixture.journalURL) == before)
+  #expect(!(await runner.requests).contains {
+    let command = $0.arguments.last ?? ""
+    return command.contains(TiciProductionRollbackCommandBuilder.resultMarker) ||
+      command.contains(" rollback --root ") || command.contains("sudo reboot")
+  })
+}
+
+@Test func concurrentCompletionAndAbortSerializeThroughGlobalThenJournalLocks() async throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  fixture.journal.previousCachedMapdPath = ""
+  fixture.journal.previousCachedMapdSHA256 = nil
+  try fixture.journal.write(to: fixture.journalURL)
+  let concurrentFixture = fixture
+  let held = try DeploymentRollbackJournal.acquireProductionOwnerLock(
+    directory: concurrentFixture.journalURL.deletingLastPathComponent()
+  )
+  let resumeRunner = ResumePostflightRunner(fixture: concurrentFixture)
+  let abortRunner = FreshProcessRollbackRecoveryRunner(journal: concurrentFixture.journal)
+
+  let resumeTask = Task {
+    await ApplyPipeline(processRunner: resumeRunner).resumePendingPostflight(
+      ResumePostflightRequest(
+        tune: concurrentFixture.tune,
+        repositoryRoot: concurrentFixture.repository,
+        mapdReleaseManifestURL: concurrentFixture.releaseURL,
+        journalURL: concurrentFixture.journalURL,
+        timeout: 2,
+        pollInterval: 0.001
+      )
+    ) { _ in }
+  }
+  let abortTask = Task {
+    await ApplyPipeline(
+      processRunner: abortRunner,
+      rebootInitialDelayNanoseconds: 0,
+      rebootPollDelayNanoseconds: 1
+    ).abortPendingDeployment(
+      AbortPendingDeploymentRequest(
+        repositoryRoot: concurrentFixture.repository,
+        journalURL: concurrentFixture.journalURL
+      )
+    ) { _ in }
+  }
+  try await Task.sleep(for: .milliseconds(100))
+  held.unlock()
+
+  let resumeSucceeded = await resumeTask.value
+  let abortSucceeded = await abortTask.value
+  let settled = try DeploymentRollbackJournal.load(from: concurrentFixture.journalURL)
+  let rollbackRequests = (await abortRunner.requests).filter {
+    $0.arguments.last?.contains(TiciProductionRollbackCommandBuilder.resultMarker) == true
+  }
+  switch settled.effectiveResolution {
+  case .completed:
+    #expect(resumeSucceeded)
+    #expect(!abortSucceeded)
+    #expect(rollbackRequests.isEmpty)
+  case .rolledBack:
+    #expect(!resumeSucceeded)
+    #expect(abortSucceeded)
+    #expect(rollbackRequests.count == 1)
+  default:
+    Issue.record("completion/abort race did not settle exactly once: \(settled.effectiveResolution)")
+  }
+}
+
 @Test func preRenameRebootIntentFailureRollsBackFromFreshDurableStateWithoutReboot() async throws {
   var fixture = try resumePostflightFixture(validGPS: true)
   defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -868,6 +1019,149 @@ import Testing
   first.unlock()
   let second = try DeploymentRollbackJournal.acquireCompletionLock(for: journalURL)
   second.unlock()
+}
+
+@Test func globalProductionOwnerSerializesDifferentWouldBeJournals() throws {
+  let root = FileManager.default.temporaryDirectory
+    .appendingPathComponent("vtsc-global-production-lock-\(UUID().uuidString)", isDirectory: true)
+  defer { try? FileManager.default.removeItem(at: root) }
+  let first = try DeploymentRollbackJournal.acquireProductionOwnerLock(directory: root)
+  let expectedLockURL = root.standardizedFileURL.appendingPathComponent(".production-owner.lock")
+  #expect(throws: DeploymentRollbackJournalError.productionOwnerLocked(expectedLockURL)) {
+    try DeploymentRollbackJournal.acquireProductionOwnerLock(directory: root)
+  }
+  // Distinct per-journal locks do not conflict; the global owner is therefore
+  // the required cross-journal serialization layer.
+  let a = root.appendingPathComponent("a.json")
+  let b = root.appendingPathComponent("b.json")
+  let lockA = try DeploymentRollbackJournal.acquireCompletionLock(for: a)
+  let lockB = try DeploymentRollbackJournal.acquireCompletionLock(for: b)
+  lockA.unlock()
+  lockB.unlock()
+  first.unlock()
+  let next = try DeploymentRollbackJournal.acquireProductionOwnerLock(directory: root)
+  next.unlock()
+}
+
+@Test func abandonedTargetlessPreflightIsRemovedButTargetBearingLegacyStateIsRecoverable() throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  let directory = fixture.journalURL.deletingLastPathComponent()
+  fixture.journal.rebootSent = false
+  fixture.journal.targetHead = nil
+  fixture.journal.completed = false
+  fixture.journal.resolution = nil
+  fixture.journal.createdAt = Date(timeIntervalSinceNow: -3_600).ISO8601Format()
+  try fixture.journal.write(to: fixture.journalURL)
+  let targetedURL = directory.appendingPathComponent("target-bearing.json")
+  var targeted = fixture.journal
+  targeted.deploymentID = UUID()
+  targeted.targetHead = String(repeating: "e", count: 40)
+  try targeted.write(to: targetedURL)
+  let freshURL = directory.appendingPathComponent("fresh-targetless.json")
+  var fresh = fixture.journal
+  fresh.deploymentID = UUID()
+  fresh.createdAt = Date().ISO8601Format()
+  try fresh.write(to: freshURL)
+
+  let owner = try DeploymentRollbackJournal.acquireProductionOwnerLock(directory: directory)
+  defer { owner.unlock() }
+  try DeploymentRollbackJournal.removeAbandonedPreflightReservations(directory: directory)
+
+  #expect(!FileManager.default.fileExists(atPath: fixture.journalURL.path))
+  #expect(FileManager.default.fileExists(atPath: targetedURL.path))
+  #expect(FileManager.default.fileExists(atPath: freshURL.path))
+  #expect(try DeploymentRollbackJournal.loadRecoverableRollback(from: targetedURL).journal == targeted)
+  let unresolved = try DeploymentRollbackJournal.unresolvedProductionJournals(directory: directory)
+  #expect(unresolved.contains { $0.url == freshURL.standardizedFileURL })
+}
+
+@Test func customJournalDirectoryOwnsScanCreationLockAndMutationClaimWithoutDefaultLeak() async throws {
+  let fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  let custom = fixture.root.appendingPathComponent("authoritative-journals", isDirectory: true)
+  let defaultDirectory = try DeploymentRollbackJournal.defaultDirectory()
+  let defaultBefore = try jsonFileNames(in: defaultDirectory)
+  let runner = ProductionPreflightRunner(head: fixture.toolingHead)
+  let pipeline = ApplyPipeline(processRunner: runner)
+
+  let preflight = try await pipeline.productionPreflight(ApplyRequest(
+    action: .pullOnTici,
+    tune: fixture.tune,
+    repositoryRoot: fixture.repository,
+    preferredTiciProfile: "commaAdb",
+    mapdReleaseManifestURL: fixture.releaseURL,
+    rollbackJournalDirectoryURL: custom,
+    verificationRequests: []
+  ))
+  defer { preflight.productionOwnerLock?.unlock() }
+
+  #expect(preflight.journalURL.deletingLastPathComponent() == custom.standardizedFileURL)
+  #expect(preflight.journalURL.lastPathComponent == "\(preflight.journal.deploymentID.uuidString).json")
+  #expect(try jsonFileNames(in: custom) == [preflight.journalURL.lastPathComponent])
+  let journalLock = try DeploymentRollbackJournal.acquireCompletionLock(for: preflight.journalURL)
+  defer { journalLock.unlock() }
+  let claimed = try await pipeline.claimProductionMutation(
+    expected: preflight.journal,
+    at: preflight.journalURL
+  )
+  #expect(claimed.effectiveResolution == .mutationInProgress)
+  #expect(try jsonFileNames(in: defaultDirectory) == defaultBefore)
+}
+
+@Test func twoProductionPreflightsSerializeBeforeJournalCreationAndSecondIssuesNoRemoteRequest() async throws {
+  let fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  let directory = fixture.root.appendingPathComponent("concurrent-journals", isDirectory: true)
+  let firstRunner = BlockingProductionPreflightRunner(head: fixture.toolingHead)
+  let secondRunner = ProductionPreflightRunner(head: fixture.toolingHead)
+  let request = ApplyRequest(
+    action: .pullOnTici,
+    tune: fixture.tune,
+    repositoryRoot: fixture.repository,
+    preferredTiciProfile: "commaAdb",
+    mapdReleaseManifestURL: fixture.releaseURL,
+    rollbackJournalDirectoryURL: directory,
+    verificationRequests: []
+  )
+  let firstTask = Task {
+    try await ApplyPipeline(processRunner: firstRunner).productionPreflight(request)
+  }
+  await firstRunner.waitUntilGlobalOwnerReachedRemoteBoundary()
+
+  await #expect(throws: DeploymentRollbackJournalError.productionOwnerLocked(
+    directory.standardizedFileURL.appendingPathComponent(".production-owner.lock").standardizedFileURL
+  )) {
+    _ = try await ApplyPipeline(processRunner: secondRunner).productionPreflight(request)
+  }
+  #expect(!(await secondRunner.requests).contains { $0.executableURL == ApplyPipeline.sshURL })
+
+  await firstRunner.releaseRemoteBoundary()
+  let first = try await firstTask.value
+  defer { first.productionOwnerLock?.unlock() }
+  #expect(try jsonFileNames(in: directory).count == 1)
+}
+
+@Test func earlyHostFailureDurablyRemovesItsOwnTargetlessPreflightBeforeUnlock() async throws {
+  let fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  let directory = fixture.root.appendingPathComponent("early-failure-journals", isDirectory: true)
+  let runner = ProductionPreflightRunner(head: fixture.toolingHead)
+  let succeeded = await ApplyPipeline(processRunner: runner).apply(ApplyRequest(
+    action: .pullOnTici,
+    tune: fixture.tune,
+    repositoryRoot: fixture.repository,
+    tuneURL: fixture.root, // writing a tune over an existing directory must fail
+    preferredTiciProfile: "commaAdb",
+    mapdReleaseManifestURL: fixture.releaseURL,
+    rollbackJournalDirectoryURL: directory,
+    verificationRequests: []
+  )) { _ in }
+
+  #expect(!succeeded)
+  #expect(try jsonFileNames(in: directory).isEmpty)
+  let nextOwner = try DeploymentRollbackJournal.acquireProductionOwnerLock(directory: directory)
+  nextOwner.unlock()
 }
 
 @Test func durableJournalWriterReportsVisibleButIndeterminateAfterDirectorySyncFailure() throws {
@@ -1321,7 +1615,12 @@ import Testing
     )) { _ in }
     #expect(!succeeded)
     #expect(!FileManager.default.fileExists(atPath: tuneURL.path))
-    #expect(await runner.requests.isEmpty)
+    #expect(!(await runner.requests).contains { request in
+      request.executableURL == ApplyPipeline.sshURL ||
+        request.executableURL == ApplyPipeline.rsyncURL ||
+        (request.executableURL == ApplyPipeline.gitURL &&
+          ["fetch", "merge", "commit", "push", "reset"].contains(request.arguments.first ?? ""))
+    })
   }
 }
 
@@ -1421,6 +1720,146 @@ private final class JournalWriterAttemptRecorder: @unchecked Sendable {
       attempts += 1
       return attempts
     }
+  }
+}
+
+private func jsonFileNames(in directory: URL) throws -> [String] {
+  guard FileManager.default.fileExists(atPath: directory.path) else { return [] }
+  return try FileManager.default.contentsOfDirectory(
+    at: directory,
+    includingPropertiesForKeys: nil,
+    options: [.skipsHiddenFiles]
+  ).filter { $0.pathExtension == "json" }.map(\.lastPathComponent).sorted()
+}
+
+private actor ProductionPreflightRunner: ProcessRunning {
+  let head: String
+  private(set) var requests: [ProcessRequest] = []
+
+  init(head: String) { self.head = head }
+
+  func run(_ request: ProcessRequest) async throws -> ProcessResult {
+    requests.append(request)
+    if request.executableURL == ApplyPipeline.gitURL {
+      switch request.arguments {
+      case ["branch", "--show-current"]: return success("chauffeur-exp01\n")
+      case ["status", "--porcelain"]: return success("")
+      case ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]:
+        return success("origin/chauffeur-exp01\n")
+      case ["rev-parse", "HEAD"]: return success(head + "\n")
+      case ["ls-remote", "--heads", "origin", "refs/heads/chauffeur-exp01"]:
+        return success("\(head)\trefs/heads/chauffeur-exp01\n")
+      default: return success("")
+      }
+    }
+    if request.executableURL == ApplyPipeline.networkSetupURL {
+      return ProcessResult(terminationStatus: 1, standardOutput: "", standardError: "unavailable")
+    }
+    if request.executableURL == ApplyPipeline.sshURL {
+      let command = request.arguments.last ?? ""
+      if command == "true" { return success("") }
+      if command.contains(TiciMapdReleaseTransactionCommandBuilder.recoveryMarker) {
+        return success("\(TiciMapdReleaseTransactionCommandBuilder.recoveryMarker)\tclean\n")
+      }
+      return success(snapshotWire())
+    }
+    return success("")
+  }
+
+  private func snapshotWire() -> String {
+    TiciSnapshotWireCodec.encode(.init(rawValues: [
+      .branch: Data("chauffeur-exp01".utf8),
+      .head: Data(head.utf8),
+      .dirty: Data("0".utf8),
+      .isOffroad: Data("1".utf8),
+      .isOnroad: Data("0".utf8),
+      .mapLookaheadEnabled: Data("0".utf8),
+      .qCurveFile: Data(TuneDeploymentIdentity.canonicalQCurveSource(
+        parameters: .checkoutFallback,
+        bands: []
+      ).utf8),
+      .activeMapdSHA256: Data(String(repeating: "c", count: 64).utf8),
+      .mapdCacheListing: Data("".utf8),
+    ])) + "\n"
+  }
+
+  private func success(_ output: String) -> ProcessResult {
+    ProcessResult(terminationStatus: 0, standardOutput: output, standardError: "")
+  }
+}
+
+private actor BlockingProductionPreflightRunner: ProcessRunning {
+  let head: String
+  private var reached = false
+  private var released = false
+  private var reachedWaiters: [CheckedContinuation<Void, Never>] = []
+  private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+  init(head: String) { self.head = head }
+
+  func waitUntilGlobalOwnerReachedRemoteBoundary() async {
+    if reached { return }
+    await withCheckedContinuation { reachedWaiters.append($0) }
+  }
+
+  func releaseRemoteBoundary() {
+    released = true
+    let waiters = releaseWaiters
+    releaseWaiters.removeAll()
+    waiters.forEach { $0.resume() }
+  }
+
+  func run(_ request: ProcessRequest) async throws -> ProcessResult {
+    if request.executableURL == ApplyPipeline.gitURL {
+      switch request.arguments {
+      case ["branch", "--show-current"]: return success("chauffeur-exp01\n")
+      case ["status", "--porcelain"]: return success("")
+      case ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]:
+        return success("origin/chauffeur-exp01\n")
+      case ["rev-parse", "HEAD"]: return success(head + "\n")
+      case ["ls-remote", "--heads", "origin", "refs/heads/chauffeur-exp01"]:
+        return success("\(head)\trefs/heads/chauffeur-exp01\n")
+      default: return success("")
+      }
+    }
+    if request.executableURL == ApplyPipeline.networkSetupURL {
+      return ProcessResult(terminationStatus: 1, standardOutput: "", standardError: "unavailable")
+    }
+    if request.executableURL == ApplyPipeline.sshURL {
+      let command = request.arguments.last ?? ""
+      if command == "true" {
+        reached = true
+        let waiters = reachedWaiters
+        reachedWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        if !released {
+          await withCheckedContinuation { releaseWaiters.append($0) }
+        }
+        return success("")
+      }
+      if command.contains(TiciMapdReleaseTransactionCommandBuilder.recoveryMarker) {
+        return success("\(TiciMapdReleaseTransactionCommandBuilder.recoveryMarker)\tclean\n")
+      }
+      return success(TiciSnapshotWireCodec.encode(.init(rawValues: [
+        .branch: Data("chauffeur-exp01".utf8),
+        .head: Data(head.utf8),
+        .dirty: Data("0".utf8),
+        .isOffroad: Data("1".utf8),
+        .isOnroad: Data("0".utf8),
+        .mapLookaheadEnabled: Data("0".utf8),
+        .qCurveFile: Data(TuneDeploymentIdentity.canonicalQCurveSource(
+          parameters: .checkoutFallback,
+          bands: []
+        ).utf8),
+        .activeMapdSHA256: Data(String(repeating: "c", count: 64).utf8),
+        .mapdCacheListing: Data("".utf8),
+      ])) + "\n")
+    }
+    return success("")
+  }
+
+  private func success(_ output: String) -> ProcessResult {
+    ProcessResult(terminationStatus: 0, standardOutput: output, standardError: "")
   }
 }
 
@@ -1527,6 +1966,36 @@ private actor FreshProcessRollbackRecoveryRunner: ProcessRunning {
 
   private func success(_ output: String) -> ProcessResult {
     ProcessResult(terminationStatus: 0, standardOutput: output, standardError: "")
+  }
+}
+
+private actor UnsafeAbortRunner: ProcessRunning {
+  private(set) var requests: [ProcessRequest] = []
+
+  func run(_ request: ProcessRequest) async throws -> ProcessResult {
+    requests.append(request)
+    let command = request.arguments.last ?? ""
+    if request.executableURL == ApplyPipeline.sshURL, command == "true" {
+      return ProcessResult(terminationStatus: 0, standardOutput: "", standardError: "")
+    }
+    if request.executableURL == ApplyPipeline.sshURL, command.contains("params_root=/data/params/d") {
+      let wire = TiciSnapshotWireCodec.encode(.init(rawValues: [
+        .branch: Data("chauffeur-exp01".utf8),
+        .head: Data(String(repeating: "b", count: 40).utf8),
+        .dirty: Data("0".utf8),
+        .isOffroad: Data("0".utf8),
+        .isOnroad: Data("1".utf8),
+        .mapLookaheadEnabled: Data("0".utf8),
+        .qCurveFile: Data(TuneDeploymentIdentity.canonicalQCurveSource(
+          parameters: .checkoutFallback,
+          bands: []
+        ).utf8),
+        .activeMapdSHA256: Data(String(repeating: "c", count: 64).utf8),
+        .mapdCacheListing: Data("".utf8),
+      ])) + "\n"
+      return ProcessResult(terminationStatus: 0, standardOutput: wire, standardError: "")
+    }
+    return ProcessResult(terminationStatus: 1, standardOutput: "", standardError: "unexpected mutation")
   }
 }
 

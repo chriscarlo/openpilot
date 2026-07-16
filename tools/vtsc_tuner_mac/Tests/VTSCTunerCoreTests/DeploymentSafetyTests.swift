@@ -260,8 +260,9 @@ import Testing
     parameters: .checkoutFallback
   )
   let rollback = try TiciProductionRollbackCommandBuilder.command(journal: journal)
+  let reboot = TiciRebootCommandBuilder.command()
 
-  let mutatingCommands = [fastForward, mapdRecovery, probe, install, parameterTransaction, rollback]
+  let mutatingCommands = [fastForward, mapdRecovery, probe, install, parameterTransaction, rollback, reboot]
   for command in mutatingCommands {
     #expect(!command.lowercased().contains("python"))
     #expect(!command.contains("openpilot.common.params"))
@@ -291,6 +292,8 @@ import Testing
   #expect(parameterTransaction.contains("flock -x 9"))
   #expect(rollback.contains(TiciProductionRollbackCommandBuilder.resultMarker))
   #expect(rollback.contains("git reset --hard"))
+  #expect(reboot.contains("refusing reboot unless tici is exactly offroad"))
+  #expect(reboot.contains("nohup sudo reboot"))
 
   let encoded = TiciSnapshotWireCodec.encode(.init(rawValues: [
     .branch: Data("chauffeur-exp01".utf8),
@@ -554,6 +557,10 @@ private func makeRollbackPreflight(rebootSent: Bool) -> RuntimeDeploymentPreflig
     mapdRollbackPath: "/data/media/0/osm/binaries/mapd-rollback-01234567-89ab-cdef-0123-456789abcdef"
   )
   journal.rebootSent = rebootSent
+  // Global production ownership is namespaced by the authoritative journal
+  // directory. Keep each parallel test transaction in its own namespace so
+  // unrelated rollback scenarios do not contend on a shared /tmp lock.
+  let journalDirectory = temporaryDirectory("rollback-journal-\(journal.deploymentID.uuidString)")
   return RuntimeDeploymentPreflight(
     git: GitDeploymentPreflight(
       branch: "chauffeur-exp01",
@@ -570,7 +577,7 @@ private func makeRollbackPreflight(rebootSent: Bool) -> RuntimeDeploymentPreflig
     ),
     tileSet: nil,
     journal: journal,
-    journalURL: URL(fileURLWithPath: "/tmp/rollback-journal.json")
+    journalURL: journalDirectory.appendingPathComponent("journal.json")
   )
 }
 

@@ -129,6 +129,10 @@ struct RuntimeDeploymentPreflight: Sendable {
   var tileSet: CanonicalTileSetArtifact?
   var journal: DeploymentRollbackJournal
   var journalURL: URL
+  /// Held only for a live production transaction. Resume reconstruction and
+  /// test fixtures leave this nil and acquire the global owner explicitly at
+  /// the terminal action boundary.
+  var productionOwnerLock: ProductionDeploymentOwnerLock? = nil
 }
 
 struct ProductionRollbackContext: Sendable {

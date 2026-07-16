@@ -289,6 +289,19 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
     public var id: URL { url }
   }
 
+  public static func pendingPostflights(
+    directory explicitDirectory: URL? = nil,
+    fileManager: FileManager = .default
+  ) throws -> [RecoverableRollback] {
+    try journalCandidates(directory: explicitDirectory, fileManager: fileManager).compactMap { journal, url in
+      guard journal.effectiveResolution == .awaitingPostflight,
+            journal.rebootSent,
+            !journal.completed else { return nil }
+      try journal.validatePendingPostflight()
+      return RecoverableRollback(journal: journal, url: url)
+    }
+  }
+
   public static func recoverableRollbacks(
     from explicitURL: URL? = nil,
     directory explicitDirectory: URL? = nil,
@@ -303,6 +316,8 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
       $0.0.effectiveResolution == .rollbackInProgress ||
         $0.0.effectiveResolution == .mutationInProgress ||
         $0.0.effectiveResolution == .rollbackFailed ||
+        ($0.0.effectiveResolution == .awaitingPostflight &&
+          !$0.0.rebootSent && $0.0.targetHead != nil) ||
         ($0.0.effectiveResolution == .rolledBack && !$0.0.completed)
     }
     return try recoverable.map { journal, url in
@@ -325,6 +340,10 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
       let unresolvedRollback = journal.effectiveResolution == .rollbackInProgress ||
         journal.effectiveResolution == .mutationInProgress ||
         journal.effectiveResolution == .rollbackFailed ||
+        (journal.effectiveResolution == .awaitingPostflight &&
+          !journal.rebootSent && journal.targetHead == nil) ||
+        (journal.effectiveResolution == .awaitingPostflight &&
+          !journal.rebootSent && journal.targetHead != nil) ||
         (journal.effectiveResolution == .rolledBack && !journal.completed)
       guard unresolvedAwaiting || unresolvedRollback else { return nil }
       return RecoverableRollback(journal: journal, url: url)
@@ -367,6 +386,78 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
     for journalURL: URL
   ) throws -> DeploymentRollbackJournalCompletionLock {
     try DeploymentRollbackJournalCompletionLock(journalURL: journalURL.standardizedFileURL)
+  }
+
+  /// Acquire the one process-wide production mutation owner for this journal
+  /// namespace. Every path which can mutate the tici takes this lock before a
+  /// per-journal resolution lock; this global -> journal ordering is the only
+  /// permitted lock order.
+  public static func acquireProductionOwnerLock(
+    directory explicitDirectory: URL? = nil,
+    fileManager: FileManager = .default
+  ) throws -> ProductionDeploymentOwnerLock {
+    let requested = try explicitDirectory?.standardizedFileURL ?? defaultDirectory(fileManager: fileManager)
+    try ensureDurableDirectory(requested, fileManager: fileManager)
+    let authoritative = requested.resolvingSymlinksInPath().standardizedFileURL
+    return try ProductionDeploymentOwnerLock(directory: authoritative)
+  }
+
+  /// Remove only states which prove that the current transaction never
+  /// reached a remote mutation. A target-bearing legacy awaiting journal is
+  /// deliberately retained and routed through guarded rollback because old
+  /// app builds lacked the durable mutation claim.
+  public static func removeAbandonedPreflightReservations(
+    directory explicitDirectory: URL? = nil,
+    fileManager: FileManager = .default,
+    olderThan minimumAge: TimeInterval = 600,
+    now: Date = Date()
+  ) throws {
+    let directory = try explicitDirectory?.standardizedFileURL ?? defaultDirectory(fileManager: fileManager)
+    guard fileManager.fileExists(atPath: directory.path) else { return }
+    for (journal, url) in try journalCandidates(directory: directory, fileManager: fileManager) {
+      let targetlessLegacyPreflight = journal.effectiveResolution == .awaitingPostflight &&
+        !journal.completed && !journal.rebootSent && journal.targetHead == nil
+      guard targetlessLegacyPreflight,
+            let created = ISO8601DateFormatter().date(from: journal.createdAt),
+            now.timeIntervalSince(created) >= minimumAge else { continue }
+      try durablyRemoveJournal(at: url, fileManager: fileManager)
+    }
+  }
+
+  public static func removeOwnedTargetlessPreflightReservation(
+    matching expected: Self,
+    at url: URL,
+    fileManager: FileManager = .default
+  ) throws {
+    let current = try load(from: url, fileManager: fileManager)
+    guard current == expected,
+          current.effectiveResolution == .awaitingPostflight,
+          !current.completed,
+          !current.rebootSent,
+          current.targetHead == nil else { return }
+    try durablyRemoveJournal(at: url, fileManager: fileManager)
+  }
+
+  private static func durablyRemoveJournal(at url: URL, fileManager: FileManager) throws {
+    let directory = url.deletingLastPathComponent()
+    do {
+      try fileManager.removeItem(at: url)
+      let directoryFD = Darwin.open(directory.path, O_RDONLY)
+      guard directoryFD >= 0 else {
+        throw DeploymentRollbackJournalError.couldNotWrite(url, String(cString: strerror(errno)))
+      }
+      defer { Darwin.close(directoryFD) }
+      guard Darwin.fsync(directoryFD) == 0 else {
+        throw DeploymentRollbackJournalError.couldNotWrite(
+          url,
+          "journal directory fsync after preflight removal failed: \(String(cString: strerror(errno)))"
+        )
+      }
+    } catch let error as DeploymentRollbackJournalError {
+      throw error
+    } catch {
+      throw DeploymentRollbackJournalError.couldNotWrite(url, error.localizedDescription)
+    }
   }
 
   @discardableResult
@@ -527,6 +618,7 @@ public enum DeploymentRollbackJournalError: LocalizedError, Equatable, Sendable 
   case multiplePendingPostflights([URL])
   case notAwaitingPostflight
   case invalidTargetHead(String)
+  case productionOwnerLocked(URL)
   case completionLocked(URL)
   case couldNotLock(URL, String)
   case inconsistentResolution(String)
@@ -552,6 +644,8 @@ public enum DeploymentRollbackJournalError: LocalizedError, Equatable, Sendable 
       "The selected deployment journal is not an incomplete deployment that has already rebooted."
     case let .invalidTargetHead(head):
       "The pending deployment journal has an invalid exact target head: \(head)."
+    case let .productionOwnerLocked(url):
+      "Another VTSC Tuner instance owns the global production transaction at \(url.path). No car-facing mutation was attempted."
     case let .completionLocked(url):
       "Another VTSC Tuner instance already owns the deployment journal transaction at \(url.path)."
     case let .couldNotLock(url, reason):
@@ -570,6 +664,43 @@ public enum DeploymentRollbackJournalError: LocalizedError, Equatable, Sendable 
       "The selected journal does not contain a complete recoverable deployment identity."
     }
   }
+}
+
+/// One stable advisory lock per authoritative deployment-journal namespace.
+/// Every device-mutating production path acquires this lock before any
+/// per-journal resolution lock. It is retained from atomic scan/reservation
+/// through durable post-reboot handoff or rollback terminal settlement.
+public final class ProductionDeploymentOwnerLock: @unchecked Sendable {
+  public let directoryURL: URL
+  public let lockURL: URL
+  private var fileDescriptor: Int32
+
+  fileprivate init(directory: URL) throws {
+    directoryURL = directory.standardizedFileURL
+    lockURL = directoryURL.appendingPathComponent(".production-owner.lock").standardizedFileURL
+    fileDescriptor = Darwin.open(lockURL.path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
+    guard fileDescriptor >= 0 else {
+      throw DeploymentRollbackJournalError.couldNotLock(lockURL, String(cString: strerror(errno)))
+    }
+    guard vtscSystemFlock(fileDescriptor, LOCK_EX | LOCK_NB) == 0 else {
+      let errorNumber = errno
+      Darwin.close(fileDescriptor)
+      fileDescriptor = -1
+      if errorNumber == EWOULDBLOCK {
+        throw DeploymentRollbackJournalError.productionOwnerLocked(lockURL)
+      }
+      throw DeploymentRollbackJournalError.couldNotLock(lockURL, String(cString: strerror(errorNumber)))
+    }
+  }
+
+  public func unlock() {
+    guard fileDescriptor >= 0 else { return }
+    _ = vtscSystemFlock(fileDescriptor, LOCK_UN)
+    Darwin.close(fileDescriptor)
+    fileDescriptor = -1
+  }
+
+  deinit { unlock() }
 }
 
 /// A stable sibling advisory lock shared by every app instance. File presence

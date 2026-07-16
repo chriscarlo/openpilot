@@ -70,11 +70,16 @@ final class TunerSession: ObservableObject {
   @Published var applySucceeded: Bool?
   @Published var resumePostflightCancellationRequested = false
   @Published var resumePostflightFinalizing = false
+  @Published var resumePostflightCanAbort = false
   @Published var pendingRollbackRecovery = false
   @Published var runningRollbackRecovery = false
   @Published var hasRecoverableRollback = false
   @Published var recoverableRollbacks: [DeploymentRollbackJournal.RecoverableRollback] = []
   @Published var selectedRollbackJournalURL: URL?
+  @Published var pendingAbortPendingDeployment = false
+  @Published var runningAbortPendingDeployment = false
+  @Published var pendingDeployments: [DeploymentRollbackJournal.RecoverableRollback] = []
+  @Published var selectedPendingDeploymentURL: URL?
 
   let mapPreview = MapPreviewSession()
 
@@ -314,6 +319,7 @@ final class TunerSession: ObservableObject {
         case let .step(step): self.upsertStep(step)
         case let .finished(success):
           self.applySucceeded = success
+          self.refreshRecoverableRollbackState()
           self.status(success ? "\(action.label) succeeded." : "\(action.label) failed.", error: !success)
         }
       }
@@ -341,6 +347,7 @@ final class TunerSession: ObservableObject {
     applySucceeded = nil
     resumePostflightCancellationRequested = false
     resumePostflightFinalizing = false
+    resumePostflightCanAbort = false
     applyTask?.cancel()
     let pipeline = ApplyPipeline()
     applyTask = Task { [weak self] in
@@ -349,6 +356,9 @@ final class TunerSession: ObservableObject {
         await MainActor.run {
           guard let self else { return }
           self.upsertStep(step)
+          if step.id == 3, step.status == .failed {
+            self.resumePostflightCanAbort = true
+          }
           if step.id == 2, step.status == .running {
             self.resumePostflightFinalizing = true
           }
@@ -389,6 +399,7 @@ final class TunerSession: ObservableObject {
     runningResumePostflight = false
     resumePostflightCancellationRequested = false
     resumePostflightFinalizing = false
+    resumePostflightCanAbort = false
   }
 
   func cancelResumePostflight() {
@@ -414,6 +425,23 @@ final class TunerSession: ObservableObject {
       selectedRollbackJournalURL = nil
       hasRecoverableRollback = false
     }
+    do {
+      pendingDeployments = try DeploymentRollbackJournal.pendingPostflights()
+      if !pendingDeployments.contains(where: { $0.url == selectedPendingDeploymentURL }) {
+        selectedPendingDeploymentURL = pendingDeployments.first?.url
+      }
+    } catch {
+      pendingDeployments = []
+      selectedPendingDeploymentURL = nil
+    }
+  }
+
+  func offerAbortFromResume() {
+    guard resumePostflightCanAbort else { return }
+    runningResumePostflight = false
+    refreshRecoverableRollbackState()
+    pendingAbortPendingDeployment = selectedPendingDeploymentURL != nil
+    resumePostflightCanAbort = false
   }
 
   func confirmRollbackRecovery() {
@@ -460,6 +488,52 @@ final class TunerSession: ObservableObject {
     applyTask?.cancel()
     applyTask = nil
     runningRollbackRecovery = false
+    refreshRecoverableRollbackState()
+  }
+
+  func confirmAbortPendingDeployment() {
+    guard workspace == .curveLab else {
+      pendingAbortPendingDeployment = false
+      status("Pending deployment rollback is only available in Curve Lab.", error: true)
+      return
+    }
+    guard let repositoryURL, let journalURL = selectedPendingDeploymentURL else {
+      pendingAbortPendingDeployment = false
+      status("Choose a Chauffeur repository and an exact pending deployment.", error: true)
+      return
+    }
+    pendingAbortPendingDeployment = false
+    runningAbortPendingDeployment = true
+    applySteps = []
+    applySucceeded = nil
+    applyTask?.cancel()
+    let pipeline = ApplyPipeline()
+    applyTask = Task { [weak self] in
+      let success = await pipeline.abortPendingDeployment(
+        AbortPendingDeploymentRequest(
+          repositoryRoot: repositoryURL,
+          journalURL: journalURL
+        )
+      ) { [weak self] event in
+        guard case let .step(step) = event else { return }
+        await MainActor.run { self?.upsertStep(step) }
+      }
+      guard let self else { return }
+      self.applySucceeded = success
+      self.refreshRecoverableRollbackState()
+      self.status(
+        success
+          ? "Selected pending deployment rolled back and verified."
+          : "Pending deployment was not aborted; its journal was retained.",
+        error: !success
+      )
+    }
+  }
+
+  func closeAbortPendingDeployment() {
+    applyTask?.cancel()
+    applyTask = nil
+    runningAbortPendingDeployment = false
     refreshRecoverableRollbackState()
   }
 

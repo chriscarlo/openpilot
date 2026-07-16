@@ -159,6 +159,22 @@ public struct RollbackRecoveryRequest: Sendable {
   }
 }
 
+public struct AbortPendingDeploymentAction: Sendable {
+  public static let label = "Abort and Roll Back Pending Deployment"
+  public static let description =
+    "Explicitly abandon one selected rebooted deployment that cannot pass postflight. This rechecks parked/offroad safety, restores only its recorded prior Git, Params, mapd/cache, and tile identity, and reboots only when that journal proves its deployment reboot was sent."
+}
+
+public struct AbortPendingDeploymentRequest: Sendable {
+  public var repositoryRoot: URL
+  public var journalURL: URL
+
+  public init(repositoryRoot: URL, journalURL: URL) {
+    self.repositoryRoot = repositoryRoot
+    self.journalURL = journalURL.standardizedFileURL
+  }
+}
+
 private struct ResumedPostflightObservation: Sendable {
   var controllerReady: TiciDeploymentPostflight
   var offroad: TiciDeploymentPostflight
@@ -252,7 +268,7 @@ public enum ApplyPipelineError: LocalizedError, Sendable {
     case let .postflightMismatch(reason):
       "Tici postflight verification failed: \(reason)"
     case let .unresolvedProductionRollbacks(urls):
-      "Resolve the recorded production transaction before starting another car-facing deployment. Use Resume Pending Outdoor Postflight for an awaiting journal, or Recover Interrupted Production Rollback for a mutation/rollback journal: \(urls.map(\.lastPathComponent).joined(separator: ", "))."
+      "Resolve the recorded production transaction before starting another car-facing deployment. Use Resume or Abort for a rebooted awaiting journal, Recover Interrupted Production Rollback for a mutation/rollback journal, or wait ten minutes and retry if a fresh targetless preflight may belong to another app instance: \(urls.map(\.lastPathComponent).joined(separator: ", "))."
     }
   }
 }
@@ -366,33 +382,57 @@ public actor ApplyPipeline {
   private let processRunner: any ProcessRunning
   private let adbURL: URL?
   private let journalWriter: @Sendable (DeploymentRollbackJournal, URL) throws -> Void
+  private let rebootInitialDelayNanoseconds: UInt64
+  private let rebootPollDelayNanoseconds: UInt64
   private var lastADBTransportDetail: String?
 
   public init() {
     processRunner = SystemProcessRunner()
     adbURL = ADBExecutableLocator.resolve()
     journalWriter = { journal, url in try journal.write(to: url) }
+    rebootInitialDelayNanoseconds = 15_000_000_000
+    rebootPollDelayNanoseconds = 5_000_000_000
   }
 
   public init(processRunner: any ProcessRunning) {
     self.processRunner = processRunner
     adbURL = nil
     journalWriter = { journal, url in try journal.write(to: url) }
+    rebootInitialDelayNanoseconds = 15_000_000_000
+    rebootPollDelayNanoseconds = 5_000_000_000
   }
 
   public init(processRunner: any ProcessRunning, adbURL: URL?) {
     self.processRunner = processRunner
     self.adbURL = adbURL
     journalWriter = { journal, url in try journal.write(to: url) }
+    rebootInitialDelayNanoseconds = 15_000_000_000
+    rebootPollDelayNanoseconds = 5_000_000_000
+  }
+
+  init(
+    processRunner: any ProcessRunning,
+    rebootInitialDelayNanoseconds: UInt64,
+    rebootPollDelayNanoseconds: UInt64
+  ) {
+    self.processRunner = processRunner
+    adbURL = nil
+    journalWriter = { journal, url in try journal.write(to: url) }
+    self.rebootInitialDelayNanoseconds = rebootInitialDelayNanoseconds
+    self.rebootPollDelayNanoseconds = rebootPollDelayNanoseconds
   }
 
   init(
     processRunner: any ProcessRunning,
     adbURL: URL? = nil,
+    rebootInitialDelayNanoseconds: UInt64 = 15_000_000_000,
+    rebootPollDelayNanoseconds: UInt64 = 5_000_000_000,
     journalWriter: @escaping @Sendable (DeploymentRollbackJournal, URL) throws -> Void
   ) {
     self.processRunner = processRunner
     self.adbURL = adbURL
+    self.rebootInitialDelayNanoseconds = rebootInitialDelayNanoseconds
+    self.rebootPollDelayNanoseconds = rebootPollDelayNanoseconds
     self.journalWriter = journalWriter
   }
 
@@ -521,6 +561,9 @@ public actor ApplyPipeline {
       try Task.checkCancellation()
       // Revalidate the on-disk journal immediately before its only permitted
       // mutation so an external replacement cannot be finalized accidentally.
+      // Canonical lock order is global production owner, then journal.
+      let productionOwnerLock = try await acquireGlobalProductionOwnerLock(for: loaded.url)
+      defer { productionOwnerLock.unlock() }
       let completionLock = try await acquireJournalResolutionLock(for: loaded.url)
       defer { completionLock.unlock() }
       let current = try DeploymentRollbackJournal.load(from: loaded.url)
@@ -618,6 +661,15 @@ public actor ApplyPipeline {
         error: error,
         progress: progress
       )
+      if isTerminalResumePostflightFailure(error) {
+        await emit(
+          .failed,
+          id: 3,
+          text: "This identity mismatch is persistent; Abort and Roll Back Pending Deployment is available",
+          detail: "Rollback is never automatic. Review and confirm the exact selected deployment journal from the Apply menu.",
+          progress: progress
+        )
+      }
       return await finish(false, progress: progress)
     }
   }
@@ -665,6 +717,8 @@ public actor ApplyPipeline {
         text: "Taking guarded rollback ownership and verifying fresh parked safety…",
         progress: progress
       )
+      let productionOwnerLock = try await acquireGlobalProductionOwnerLock(for: loaded.url)
+      defer { productionOwnerLock.unlock() }
       let resolution = await rollbackProductionDeploymentIfJournalPending(
         context: ProductionRollbackContext(journal: loaded.journal, journalURL: loaded.url)
       )
@@ -682,6 +736,70 @@ public actor ApplyPipeline {
       await emitFailure(
         id: 1,
         text: "Rollback recovery remains unresolved; journal retained for another guarded attempt",
+        error: error,
+        progress: progress
+      )
+      return await finish(false, progress: progress)
+    }
+  }
+
+  /// Explicitly abandon one selected rebooted deployment which cannot satisfy
+  /// postflight. This never runs automatically. Lock order is global owner,
+  /// then the journal resolution lock acquired by the shared rollback path.
+  @discardableResult
+  public func abortPendingDeployment(
+    _ request: AbortPendingDeploymentRequest,
+    progress: @escaping ApplyProgressHandler
+  ) async -> Bool {
+    await emit(.running, id: 0, text: "Loading the selected pending deployment identity…", progress: progress)
+    do {
+      try Task.checkCancellation()
+      try RepositoryLocator.validate(request.repositoryRoot)
+      let loaded = try DeploymentRollbackJournal.loadPendingPostflight(from: request.journalURL)
+      try validateProfile(loaded.journal.profile)
+      await emit(
+        .succeeded,
+        id: 0,
+        text: "Selected rebooted deployment is eligible for explicit abort",
+        detail: [
+          "journal=\(loaded.url.path)",
+          "deployment_id=\(loaded.journal.deploymentID.uuidString)",
+          "target_head=\(loaded.journal.targetHead ?? "")",
+          "created_at=\(loaded.journal.createdAt)",
+        ].joined(separator: "\n"),
+        progress: progress
+      )
+      await emit(
+        .running,
+        id: 1,
+        text: "Taking global and journal ownership, then restoring the recorded prior deployment…",
+        progress: progress
+      )
+      let productionOwnerLock = try await acquireGlobalProductionOwnerLock(for: loaded.url)
+      defer { productionOwnerLock.unlock() }
+      let current = try DeploymentRollbackJournal.load(from: loaded.url)
+      guard current == loaded.journal else {
+        throw ApplyPipelineError.postflightMismatch(
+          "selected pending deployment changed before abort ownership was acquired"
+        )
+      }
+      let resolution = await rollbackProductionDeploymentIfJournalPending(
+        context: ProductionRollbackContext(journal: current, journalURL: loaded.url)
+      )
+      switch resolution {
+      case let .alreadyCompleted(detail):
+        await emit(.succeeded, id: 1, text: "Deployment completed before abort ownership was acquired", detail: detail, progress: progress)
+        return await finish(true, progress: progress)
+      case let .rolledBack(detail):
+        await emit(.succeeded, id: 1, text: "Pending deployment was rolled back and verified", detail: detail, progress: progress)
+        return await finish(true, progress: progress)
+      case let .rollbackFailed(detail):
+        throw ApplyPipelineError.postflightMismatch(detail)
+      }
+    } catch {
+      await emitFailure(
+        id: 1,
+        text: "Pending deployment was not aborted; its journal remains available for a guarded retry",
         error: error,
         progress: progress
       )
@@ -735,6 +853,19 @@ public actor ApplyPipeline {
       }
     } else {
       runtimePreflight = nil
+    }
+    // Idempotent unlock is also performed at the exact durable handoff inside
+    // deployProductionRuntime. This defer covers every earlier host-side exit
+    // (save/patch/test/commit/push) after production preflight reserved the
+    // global transaction.
+    defer {
+      if let preflight = runtimePreflight {
+        try? DeploymentRollbackJournal.removeOwnedTargetlessPreflightReservation(
+          matching: preflight.journal,
+          at: preflight.journalURL
+        )
+        preflight.productionOwnerLock?.unlock()
+      }
     }
 
     await emit(.running, id: 1, text: "Saving the tune file…", progress: progress)
@@ -879,13 +1010,7 @@ public actor ApplyPipeline {
     )
   }
 
-  private func productionPreflight(_ request: ApplyRequest) async throws -> RuntimeDeploymentPreflight {
-    let recoverable = try DeploymentRollbackJournal.unresolvedProductionJournals(
-      directory: request.rollbackJournalDirectoryURL
-    )
-    guard recoverable.isEmpty else {
-      throw ApplyPipelineError.unresolvedProductionRollbacks(recoverable.map(\.url))
-    }
+  func productionPreflight(_ request: ApplyRequest) async throws -> RuntimeDeploymentPreflight {
     try RepositoryLocator.validate(request.repositoryRoot)
     _ = try SourcePatcher.readParameters(from: request.repositoryRoot)
     _ = try SourcePatcher.makePatch(
@@ -947,6 +1072,25 @@ public actor ApplyPipeline {
       explicitTileSet = nil
       rebuildConfig = nil
       decoderURL = nil
+    }
+
+    // One authoritative namespace owns the global production lock, unresolved
+    // scan, abandoned-preflight cleanup, and every newly created journal. The
+    // lock remains held in RuntimeDeploymentPreflight through all subsequent
+    // host/source/Git/device work until durable post-reboot handoff or rollback
+    // terminal settlement.
+    let requestedJournalDirectory = try request.rollbackJournalDirectoryURL?.standardizedFileURL ??
+      DeploymentRollbackJournal.defaultDirectory()
+    let productionOwnerLock = try DeploymentRollbackJournal.acquireProductionOwnerLock(
+      directory: requestedJournalDirectory
+    )
+    let journalDirectory = productionOwnerLock.directoryURL
+    try DeploymentRollbackJournal.removeAbandonedPreflightReservations(directory: journalDirectory)
+    let unresolved = try DeploymentRollbackJournal.unresolvedProductionJournals(
+      directory: journalDirectory
+    )
+    guard unresolved.isEmpty else {
+      throw ApplyPipelineError.unresolvedProductionRollbacks(unresolved.map(\.url))
     }
 
     let profile = try await pickTiciProfile(preferred: request.preferredTiciProfile)
@@ -1027,7 +1171,8 @@ public actor ApplyPipeline {
       previousTileSetID: snapshot.activeTileSetID,
       targetTileSetID: tileSet?.manifest.tileSetID
     )
-    let journalURL = try journal.write()
+    let journalURL = journalDirectory.appendingPathComponent("\(deploymentID.uuidString).json")
+    try journal.write(to: journalURL)
     return RuntimeDeploymentPreflight(
       git: git,
       profile: profile,
@@ -1035,7 +1180,8 @@ public actor ApplyPipeline {
       release: release,
       tileSet: tileSet,
       journal: journal,
-      journalURL: journalURL
+      journalURL: journalURL,
+      productionOwnerLock: productionOwnerLock
     )
   }
 
@@ -1354,10 +1500,23 @@ public actor ApplyPipeline {
     progress: @escaping ApplyProgressHandler
   ) async -> Bool {
     var deployment = preflight
+    guard let productionOwnerLock = deployment.productionOwnerLock else {
+      await emit(
+        .failed,
+        id: 5,
+        text: "Production deployment lost its global transaction owner",
+        detail: "No tici mutation was attempted.",
+        progress: progress
+      )
+      return await finish(false, progress: progress)
+    }
     var remoteMutationStarted = false
-    var deploymentOwnerLock: DeploymentRollbackJournalCompletionLock?
+    var journalResolutionLock: DeploymentRollbackJournalCompletionLock?
     var handedOffToOutdoorPostflight = false
-    defer { deploymentOwnerLock?.unlock() }
+    defer {
+      journalResolutionLock?.unlock()
+      productionOwnerLock.unlock()
+    }
     let identity = TuneDeploymentIdentity(tune: request.tune)
     do {
       await emit(.running, id: 5, text: "Reconfirming offroad/kill-switch safety immediately before mutation…", progress: progress)
@@ -1374,7 +1533,7 @@ public actor ApplyPipeline {
       await emit(.succeeded, id: 5, text: "Tici is still parked/offroad with Map Lookahead disabled", progress: progress)
 
       let ownerLock = try DeploymentRollbackJournal.acquireCompletionLock(for: deployment.journalURL)
-      deploymentOwnerLock = ownerLock
+      journalResolutionLock = ownerLock
       deployment.journal = try claimProductionMutation(
         expected: deployment.journal,
         at: deployment.journalURL
@@ -1474,13 +1633,19 @@ public actor ApplyPipeline {
         expected: deployment.journal,
         at: deployment.journalURL
       )
-      deploymentOwnerLock?.unlock()
-      deploymentOwnerLock = nil
+      journalResolutionLock?.unlock()
+      journalResolutionLock = nil
+      productionOwnerLock.unlock()
       handedOffToOutdoorPostflight = true
       await emit(.succeeded, id: 10, text: "Single deployment reboot sent", progress: progress)
 
       await emit(.running, id: 11, text: "Waiting for the tici and verifying the complete postflight identity…", progress: progress)
-      try await waitForTici(profile: deployment.profile, timeout: 300)
+      try await waitForTici(
+        profile: deployment.profile,
+        timeout: 300,
+        initialDelayNanoseconds: rebootInitialDelayNanoseconds,
+        pollDelayNanoseconds: rebootPollDelayNanoseconds
+      )
       let postflight = try await waitForProductionPostflight(
         request: request,
         preflight: deployment,
@@ -1519,7 +1684,7 @@ public actor ApplyPipeline {
       if remoteMutationStarted {
         let resolution = await rollbackProductionDeploymentIfJournalPending(
           context: ProductionRollbackContext(preflight: deployment),
-          ownerLock: deploymentOwnerLock
+          ownerLock: journalResolutionLock
         )
         switch resolution {
         case let .alreadyCompleted(detail):
@@ -1796,6 +1961,19 @@ public actor ApplyPipeline {
     }
   }
 
+  private func isTerminalResumePostflightFailure(_ error: Error) -> Bool {
+    if error is CancellationError || error is ResumedPostflightWaitState { return false }
+    if let journalError = error as? DeploymentRollbackJournalError {
+      switch journalError {
+      case .productionOwnerLocked, .completionLocked:
+        return false
+      default:
+        break
+      }
+    }
+    return !isRetryableResumedTransportError(error)
+  }
+
   private func acquireJournalResolutionLock(
     for journalURL: URL,
     timeout: Duration = .seconds(180)
@@ -1808,6 +1986,28 @@ public actor ApplyPipeline {
         return try DeploymentRollbackJournal.acquireCompletionLock(for: journalURL)
       } catch DeploymentRollbackJournalError.completionLocked {
         guard clock.now < deadline else { throw DeploymentRollbackJournalError.completionLocked(journalURL) }
+        try await clock.sleep(for: .milliseconds(10))
+      }
+    }
+  }
+
+  private func acquireGlobalProductionOwnerLock(
+    for journalURL: URL,
+    timeout: Duration = .seconds(180)
+  ) async throws -> ProductionDeploymentOwnerLock {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: timeout)
+    let directory = journalURL.standardizedFileURL.deletingLastPathComponent()
+    while true {
+      try Task.checkCancellation()
+      do {
+        return try DeploymentRollbackJournal.acquireProductionOwnerLock(directory: directory)
+      } catch DeploymentRollbackJournalError.productionOwnerLocked {
+        guard clock.now < deadline else {
+          throw DeploymentRollbackJournalError.productionOwnerLocked(
+            directory.appendingPathComponent(".production-owner.lock")
+          )
+        }
         try await clock.sleep(for: .milliseconds(10))
       }
     }
@@ -2096,8 +2296,8 @@ public actor ApplyPipeline {
     }
   }
 
-  /// The original deployer and a later resume instance share one stable
-  /// per-journal transaction lock for their only completion write. If resume
+  /// The original deployer and a later resume instance use the canonical
+  /// global-then-journal lock order for their only completion write. If resume
   /// already completed this deployment, preserve its richer tooling metadata
   /// instead of overwriting it from the older app instance.
   private func completeOriginalDeploymentJournal(
@@ -2106,6 +2306,8 @@ public actor ApplyPipeline {
     toolingHead: String,
     identity: TuneDeploymentIdentity
   ) async throws -> DeploymentRollbackJournal {
+    let productionOwnerLock = try await acquireGlobalProductionOwnerLock(for: preflight.journalURL)
+    defer { productionOwnerLock.unlock() }
     let lock = try await acquireJournalResolutionLock(for: preflight.journalURL)
     defer { lock.unlock() }
     let current = try DeploymentRollbackJournal.load(from: preflight.journalURL)
@@ -2227,7 +2429,18 @@ public actor ApplyPipeline {
     preflight: RuntimeDeploymentPreflight,
     tilesActivated _: Bool
   ) async -> ProductionRollbackResolution {
-    await rollbackProductionDeploymentIfJournalPending(
+    let productionOwnerLock: ProductionDeploymentOwnerLock
+    do {
+      productionOwnerLock = try DeploymentRollbackJournal.acquireProductionOwnerLock(
+        directory: preflight.journalURL.deletingLastPathComponent()
+      )
+    } catch {
+      return .rollbackFailed(
+        "rollback mutation was not attempted because global production ownership could not be acquired: \(error.localizedDescription)"
+      )
+    }
+    defer { productionOwnerLock.unlock() }
+    return await rollbackProductionDeploymentIfJournalPending(
       context: ProductionRollbackContext(preflight: preflight),
       ownerLock: nil
     )
@@ -2453,7 +2666,16 @@ public actor ApplyPipeline {
     preflight: RuntimeDeploymentPreflight,
     tilesActivated _: Bool
   ) async -> (success: Bool, detail: String) {
-    await rollbackProductionDeployment(
+    let productionOwnerLock: ProductionDeploymentOwnerLock
+    do {
+      productionOwnerLock = try DeploymentRollbackJournal.acquireProductionOwnerLock(
+        directory: preflight.journalURL.deletingLastPathComponent()
+      )
+    } catch {
+      return (false, "rollback mutation was not attempted because global production ownership could not be acquired: \(error.localizedDescription)")
+    }
+    defer { productionOwnerLock.unlock() }
+    return await rollbackProductionDeployment(
       context: ProductionRollbackContext(preflight: preflight)
     )
   }
@@ -2517,7 +2739,12 @@ public actor ApplyPipeline {
         details.append("fresh pre-reboot parked-state gate passed")
         try await sendReboot(profile: context.profile)
         details.append("rollback reboot sent")
-        try await waitForTici(profile: context.profile, timeout: 300)
+        try await waitForTici(
+          profile: context.profile,
+          timeout: 300,
+          initialDelayNanoseconds: rebootInitialDelayNanoseconds,
+          pollDelayNanoseconds: rebootPollDelayNanoseconds
+        )
         let verification = try await waitForRollbackVerification(
           context: context,
           tilesWereTouched: context.journal.targetTileSetID != nil,
@@ -2850,7 +3077,7 @@ public actor ApplyPipeline {
         executableURL: Self.sshURL,
         arguments: sshOptions(connectTimeout: 5) + [
           profile,
-          "nohup sudo reboot >/dev/null 2>&1 </dev/null &",
+          TiciRebootCommandBuilder.command(),
         ],
         timeout: 10
       ),

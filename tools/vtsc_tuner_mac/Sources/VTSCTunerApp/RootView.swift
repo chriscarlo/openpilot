@@ -33,6 +33,8 @@ struct RootView: View {
               }
               Divider()
               Button(ResumePostflightAction.label) { session.pendingResumePostflight = true }
+              Button(AbortPendingDeploymentAction.label) { session.pendingAbortPendingDeployment = true }
+                .disabled(session.pendingDeployments.isEmpty)
               Button(RollbackRecoveryAction.label) { session.pendingRollbackRecovery = true }
                 .disabled(!session.hasRecoverableRollback)
             }
@@ -125,6 +127,12 @@ struct RootView: View {
       }
       .sheet(isPresented: $session.runningResumePostflight) {
         ResumePostflightProgressView(session: session)
+      }
+      .sheet(isPresented: $session.pendingAbortPendingDeployment) {
+        AbortPendingDeploymentConfirmationView(session: session)
+      }
+      .sheet(isPresented: $session.runningAbortPendingDeployment) {
+        AbortPendingDeploymentProgressView(session: session)
       }
       .sheet(isPresented: $session.pendingRollbackRecovery) {
         RollbackRecoveryConfirmationView(session: session)
@@ -649,6 +657,9 @@ struct ResumePostflightProgressView: View {
               session.resumePostflightCancellationRequested || session.resumePostflightFinalizing
             )
         }
+        if session.applySucceeded == false, session.resumePostflightCanAbort {
+          Button("Abort and Roll Back…", role: .destructive) { session.offerAbortFromResume() }
+        }
         Spacer()
         Button("Close") { session.closeResumePostflight() }
           .disabled(session.applySucceeded == nil)
@@ -657,6 +668,85 @@ struct ResumePostflightProgressView: View {
     }
     .padding(24)
     .frame(width: 680, height: 400)
+    .interactiveDismissDisabled(session.applySucceeded == nil)
+  }
+}
+
+struct AbortPendingDeploymentConfirmationView: View {
+  @ObservedObject var session: TunerSession
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 16) {
+      Text(AbortPendingDeploymentAction.label).font(.title2.weight(.semibold))
+      Label(
+        "Use this only when a rebooted deployment cannot satisfy postflight and you intend to restore its exact recorded prior state.",
+        systemImage: "exclamationmark.shield.fill"
+      )
+      .foregroundStyle(.red)
+      Text("The app will acquire global production ownership, recheck that the tici is exactly parked/offroad with Map Lookahead disabled, then restore only the selected journal's Git, Params, mapd/cache, and tile identity. It never starts automatically.")
+        .foregroundStyle(.secondary)
+      Picker("Pending deployment", selection: $session.selectedPendingDeploymentURL) {
+        ForEach(session.pendingDeployments) { candidate in
+          Text("\(candidate.journal.deploymentID.uuidString.prefix(8)) · \(candidate.journal.targetHead?.prefix(10) ?? "unknown") · \(candidate.journal.createdAt)")
+            .tag(Optional(candidate.url))
+        }
+      }
+      HStack {
+        Spacer()
+        Button("Cancel", role: .cancel) { session.pendingAbortPendingDeployment = false }
+        Button("Abort and Restore Prior Deployment", role: .destructive) {
+          session.confirmAbortPendingDeployment()
+        }
+        .disabled(session.selectedPendingDeploymentURL == nil)
+        .keyboardShortcut(.defaultAction)
+      }
+    }
+    .padding(24)
+    .frame(width: 660)
+  }
+}
+
+struct AbortPendingDeploymentProgressView: View {
+  @ObservedObject var session: TunerSession
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 14) {
+      Text(AbortPendingDeploymentAction.label).font(.title2.weight(.semibold))
+      ScrollView {
+        LazyVStack(alignment: .leading, spacing: 12) {
+          ForEach(session.applySteps, id: \.id) { step in
+            HStack(alignment: .top, spacing: 10) {
+              Group {
+                switch step.status {
+                case .running: ProgressView().controlSize(.small)
+                case .succeeded: Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                case .failed: Image(systemName: "xmark.circle.fill").foregroundStyle(.red)
+                }
+              }
+              .frame(width: 18)
+              VStack(alignment: .leading, spacing: 4) {
+                Text(step.text)
+                if !step.detail.isEmpty {
+                  Text(step.detail)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                }
+              }
+            }
+          }
+        }
+      }
+      .frame(minHeight: 240)
+      HStack {
+        Spacer()
+        Button("Close") { session.closeAbortPendingDeployment() }
+          .disabled(session.applySucceeded == nil)
+          .keyboardShortcut(.defaultAction)
+      }
+    }
+    .padding(24)
+    .frame(width: 720, height: 430)
     .interactiveDismissDisabled(session.applySucceeded == nil)
   }
 }

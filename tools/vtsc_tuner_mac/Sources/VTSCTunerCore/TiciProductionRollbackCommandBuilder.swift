@@ -53,8 +53,8 @@ enum TiciProductionRollbackCommandBuilder {
     offroad="$(cat "$params_dir/IsOffroad" 2>/dev/null || true)"
     onroad="$(cat "$params_dir/IsOnroad" 2>/dev/null || true)"
     lookahead="$(cat "$params_dir/MTSCLookaheadEnabled" 2>/dev/null || true)"
-    if [ "$offroad" != '1' ] || [ "$onroad" = '1' ] || [ "$lookahead" = '1' ]; then
-      fail 'refusing rollback unless tici is offroad and Map Lookahead is disabled'
+    if [ "$offroad" != '1' ] || [ "$onroad" != '0' ] || [ "$lookahead" != '0' ]; then
+      fail 'refusing rollback unless tici is exactly offroad and Map Lookahead is disabled'
     fi
     for tool in git cat flock mktemp sync mv rm mkdir chmod dirname sha256sum awk base64 tr
     do
