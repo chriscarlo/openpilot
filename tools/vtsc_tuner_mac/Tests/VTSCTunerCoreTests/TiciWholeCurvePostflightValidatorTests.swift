@@ -65,6 +65,24 @@ import Testing
   #expect(!status.fresh)
 }
 
+@Test func wholeCurvePostflightValidatorTreatsEmptyObjectAsPendingProfile() throws {
+  let now = Date(timeIntervalSince1970: 1_800_000_000)
+  let gps = try JSONSerialization.data(withJSONObject: [
+    "latitude": 37.0,
+    "longitude": -122.0,
+    "bearing": 90.0,
+  ])
+  let status = TiciWholeCurvePostflightValidator.inspect(
+    profileData: Data("{}".utf8),
+    gpsData: gps,
+    now: now
+  )
+  #expect(status.gpsStatus == "valid")
+  #expect(status.validationStatus == "profile_pending")
+  #expect(status.estimatorVersion.isEmpty)
+  #expect(status.sigmoidHash.isEmpty)
+}
+
 @Test func wholeCurvePostflightValidatorUsesTheTiciClockForFreshness() throws {
   let ticiNow = Date(timeIntervalSince1970: 1_800_000_000)
   let profile = try wholeCurveProfileData(now: ticiNow)

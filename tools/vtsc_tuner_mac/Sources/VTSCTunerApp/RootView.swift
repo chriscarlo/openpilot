@@ -581,7 +581,7 @@ struct ResumePostflightConfirmationView: View {
         .foregroundStyle(.secondary)
         .textSelection(.enabled)
       Label(
-        "Outdoors after a normal GPS/profile-producing drive: stop safely with ignition still on, click Verify and Complete, then turn ignition off. The app polls until IsOffroad=1 while the profile/GPS are still fresh (about 3 seconds). Failure keeps the original journal pending.",
+        "Outdoors after a normal GPS/profile-producing drive: stop safely with ignition still on, then click Verify and Complete. The app first captures a fresh profile that the live controller can consume; when that succeeds, turn ignition off. It keeps that proof only in memory while polling for IsOffroad=1 and rechecking the unchanged tune/runtime identity. Failure keeps the original journal pending.",
         systemImage: "location.viewfinder"
       )
       .foregroundStyle(.orange)

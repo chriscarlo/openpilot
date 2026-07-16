@@ -48,6 +48,9 @@ struct TiciDeploymentSnapshot: Codable, Equatable, Sendable {
 struct TiciDeploymentPostflight: Codable, Equatable, Sendable {
   var isOffroad: Bool
   var isOnroad: Bool
+  var runtimeEndIsOffroad: Bool
+  var runtimeEndIsOnroad: Bool
+  var runtimeEndMapLookaheadEnabled: Bool
   var mapLookaheadEnabled: Bool
   var branch: String
   var head: String
@@ -73,11 +76,19 @@ struct TiciDeploymentPostflight: Codable, Equatable, Sendable {
   var profileValidationStatus: String
   var profilePointCount: Int
   var profileEventCount: Int
+  var liveMapDataUpdated: Bool
+  var liveMapDataValid: Bool
+  var liveMapDataLogMonoTimeNs: UInt64
+  var liveMapDataSampleMonoTimeNs: UInt64
+  var roadGeometryValid: Bool
   var activeTileSetID: String?
 
   enum CodingKeys: String, CodingKey {
     case isOffroad = "is_offroad"
     case isOnroad = "is_onroad"
+    case runtimeEndIsOffroad = "runtime_end_is_offroad"
+    case runtimeEndIsOnroad = "runtime_end_is_onroad"
+    case runtimeEndMapLookaheadEnabled = "runtime_end_map_lookahead_enabled"
     case mapLookaheadEnabled = "map_lookahead_enabled"
     case branch, head, dirty
     case physicsMatches = "physics_matches"
@@ -101,6 +112,11 @@ struct TiciDeploymentPostflight: Codable, Equatable, Sendable {
     case profileValidationStatus = "profile_validation_status"
     case profilePointCount = "profile_point_count"
     case profileEventCount = "profile_event_count"
+    case liveMapDataUpdated = "live_map_data_updated"
+    case liveMapDataValid = "live_map_data_valid"
+    case liveMapDataLogMonoTimeNs = "live_map_data_log_mono_time_ns"
+    case liveMapDataSampleMonoTimeNs = "live_map_data_sample_mono_time_ns"
+    case roadGeometryValid = "road_geometry_valid"
     case activeTileSetID = "active_tile_set_id"
   }
 }

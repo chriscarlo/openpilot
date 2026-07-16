@@ -27,10 +27,14 @@ public enum TiciSnapshotWireField: String, CaseIterable, Codable, Sendable {
   case persistentWholeCurveProfile = "persistent_whole_curve_profile"
   case memoryLastGPSPosition = "memory_last_gps_position"
   case persistentLastGPSPosition = "persistent_last_gps_position"
-    case activeMapdBuildInfo = "active_mapd_build_info"
-    case activeMapdELFHeader = "active_mapd_elf_header"
-    case mapdRunning = "mapd_running"
-    case remoteEpochMilliseconds = "remote_epoch_milliseconds"
+  case runtimeEndIsOffroad = "runtime_end_is_offroad"
+  case runtimeEndIsOnroad = "runtime_end_is_onroad"
+  case runtimeEndMapLookaheadEnabled = "runtime_end_map_lookahead_enabled"
+  case liveMapDataControllerStatus = "live_map_data_controller_status"
+  case activeMapdBuildInfo = "active_mapd_build_info"
+  case activeMapdELFHeader = "active_mapd_elf_header"
+  case mapdRunning = "mapd_running"
+  case remoteEpochMilliseconds = "remote_epoch_milliseconds"
 }
 
 /// A lossless, typed representation of one remote tici snapshot.
@@ -115,8 +119,10 @@ public enum TiciSnapshotWireCodec {
   }
 }
 
-/// Builds the tici-side snapshot probe without importing the checked-out
-/// openpilot Python environment. It emits only the wire records decoded above.
+/// Builds the tici-side snapshot probe. File and process identity stays in
+/// dependency-free shell; the bounded liveMapDataSP record uses the tici's
+/// checked-out cereal runtime because Cap'n Proto interpretation belongs with
+/// the exact deployed schema. Swift still owns every acceptance decision.
 ///
 /// `compact_base64` removes any implementation-specific line wrapping using
 /// POSIX shell built-ins, so a large Q-curve or manifest remains one record.
@@ -125,6 +131,7 @@ public enum TiciSnapshotWireCommandBuilder {
     let runtimeRecords: String
     if includeRuntimePostflight {
       runtimeRecords = """
+      emit_command live_map_data_controller_status timeout 5 env PYTHONPATH=/data/openpilot /usr/local/venv/bin/python -c 'import time; from cereal import messaging; sm=messaging.SubMaster(["liveMapDataSP"], ignore_avg_freq=["liveMapDataSP"]); sm.update(2000); now=time.clock_gettime_ns(time.CLOCK_BOOTTIME); print("{}|{}|{}|{}|{}".format(int(sm.updated["liveMapDataSP"]), int(sm.valid["liveMapDataSP"]), int(sm.logMonoTime["liveMapDataSP"]), int(sm["liveMapDataSP"].roadGeometryValid), now), end="")'
       emit_file memory_whole_curve_profile "$memory_params_root/MapWholeCurveProfile"
       emit_file persistent_whole_curve_profile "$params_root/MapWholeCurveProfile"
       emit_file memory_last_gps_position "$memory_params_root/LastGPSPosition"
@@ -138,6 +145,9 @@ public enum TiciSnapshotWireCommandBuilder {
       else
         emit_text mapd_running 0
       fi
+      emit_file runtime_end_is_offroad "$params_root/IsOffroad"
+      emit_file runtime_end_is_onroad "$params_root/IsOnroad"
+      emit_file runtime_end_map_lookahead_enabled "$params_root/MTSCLookaheadEnabled"
       emit_text remote_epoch_milliseconds "$(date +%s%3N)"
       """
     } else {

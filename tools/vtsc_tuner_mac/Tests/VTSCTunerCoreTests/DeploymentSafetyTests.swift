@@ -259,11 +259,18 @@ import Testing
   )
   let rollback = try TiciProductionRollbackCommandBuilder.command(journal: journal)
 
-  let commands = [fastForward, snapshotCommand, mapdRecovery, probe, install, parameterTransaction, rollback]
-  for command in commands {
+  let mutatingCommands = [fastForward, mapdRecovery, probe, install, parameterTransaction, rollback]
+  for command in mutatingCommands {
     #expect(!command.lowercased().contains("python"))
     #expect(!command.contains("openpilot.common.params"))
   }
+  #expect(snapshotCommand.components(separatedBy: "/usr/local/venv/bin/python").count == 2)
+  #expect(snapshotCommand.contains("timeout 5 env PYTHONPATH=/data/openpilot"))
+  #expect(snapshotCommand.contains("from cereal import messaging"))
+  #expect(snapshotCommand.contains("sm.update(2000)"))
+  #expect(snapshotCommand.contains("time.clock_gettime_ns(time.CLOCK_BOOTTIME)"))
+  #expect(!snapshotCommand.contains("time.monotonic_ns()"))
+  #expect(!snapshotCommand.contains("openpilot.common.params"))
 
   #expect(fastForward.contains("git fetch --no-tags origin refs/heads/chauffeur-exp01"))
   #expect(fastForward.contains("git merge --ff-only"))

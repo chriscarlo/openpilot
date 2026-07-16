@@ -73,7 +73,7 @@ enum TiciWholeCurvePostflightValidator {
       gpsStatus = "invalid:unknown"
     }
 
-    guard let profileData, !profileData.isEmpty else {
+    guard let profileData, !profileData.isEmpty, !isEmptyPlaceholderProfile(profileData) else {
       return TiciWholeCurvePostflightStatus(
         estimatorVersion: metadata.estimatorVersion,
         routeFingerprint: metadata.routeFingerprint,
@@ -477,6 +477,11 @@ enum TiciWholeCurvePostflightValidator {
       (root["points"] as? [Any])?.count ?? 0,
       (root["events"] as? [Any])?.count ?? 0
     )
+  }
+
+  private static func isEmptyPlaceholderProfile(_ data: Data) -> Bool {
+    guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+    return root.isEmpty
   }
 
   private static func finiteNumber(_ value: Any?, error: ValidationError) throws -> Double {

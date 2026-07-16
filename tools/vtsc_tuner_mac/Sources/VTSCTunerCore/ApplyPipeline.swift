@@ -119,6 +119,7 @@ public struct ResumePostflightRequest: Sendable {
   public var mapdReleaseManifestURL: URL?
   public var journalURL: URL?
   public var timeout: TimeInterval
+  var pollInterval: TimeInterval
 
   public init(
     tune: Tune,
@@ -126,7 +127,8 @@ public struct ResumePostflightRequest: Sendable {
     expectedBranch: String = "chauffeur-exp01",
     mapdReleaseManifestURL: URL? = nil,
     journalURL: URL? = nil,
-    timeout: TimeInterval = 120
+    timeout: TimeInterval = 120,
+    pollInterval: TimeInterval = 2
   ) {
     self.tune = tune
     self.repositoryRoot = repositoryRoot
@@ -134,7 +136,13 @@ public struct ResumePostflightRequest: Sendable {
     self.mapdReleaseManifestURL = mapdReleaseManifestURL
     self.journalURL = journalURL
     self.timeout = timeout
+    self.pollInterval = pollInterval
   }
+}
+
+private struct ResumedPostflightObservation: Sendable {
+  var controllerReady: TiciDeploymentPostflight
+  var offroad: TiciDeploymentPostflight
 }
 
 enum ProductionTilePlan: Equatable, Sendable {
@@ -432,21 +440,23 @@ public actor ApplyPipeline {
       await emit(
         .running,
         id: 1,
-        text: "Verifying the unchanged tici identity and fresh real-GPS whole-curve profile…",
+        text: "Capturing controller-ready curve evidence, then waiting for the clean offroad transition…",
         progress: progress
       )
       let identity = TuneDeploymentIdentity(tune: request.tune)
-      let postflight = try await waitForResumedProductionPostflight(
+      let observation = try await waitForResumedProductionPostflight(
         preflight: preflight,
         toolingHead: gitIdentity.toolingHead,
         identity: identity,
-        timeout: request.timeout
+        timeout: request.timeout,
+        pollInterval: request.pollInterval,
+        progress: progress
       )
       await emit(
         .succeeded,
         id: 1,
-        text: "Exact deployed identity and native whole-curve validator passed",
-        detail: "profile_points=\(postflight.profilePointCount) profile_events=\(postflight.profileEventCount)",
+        text: "Controller-ready evidence and the subsequent clean offroad identity both passed",
+        detail: "profile_points=\(observation.controllerReady.profilePointCount) profile_events=\(observation.controllerReady.profileEventCount)",
         progress: progress
       )
 
@@ -477,9 +487,9 @@ public actor ApplyPipeline {
         preflight: preflight,
         identity: identity
       )
-      try validatePostflight(
+      try validateResumedOffroadCompletion(
         finalPostflight,
-        requireNonemptyWholeCurveProfile: true,
+        controllerEvidence: observation.controllerReady,
         preflight: preflight,
         targetHead: gitIdentity.toolingHead,
         identity: identity,
@@ -1442,10 +1452,13 @@ public actor ApplyPipeline {
     preflight: RuntimeDeploymentPreflight,
     toolingHead: String,
     identity: TuneDeploymentIdentity,
-    timeout: TimeInterval
-  ) async throws -> TiciDeploymentPostflight {
+    timeout: TimeInterval,
+    pollInterval: TimeInterval,
+    progress: @escaping ApplyProgressHandler
+  ) async throws -> ResumedPostflightObservation {
     let deadline = Date().addingTimeInterval(max(0, timeout))
     var lastError: Error = ApplyPipelineError.postflightMismatch("resumed postflight did not run")
+    var controllerEvidence: TiciDeploymentPostflight?
     repeat {
       try Task.checkCancellation()
       do {
@@ -1458,19 +1471,45 @@ public actor ApplyPipeline {
           preflight: preflight,
           identity: identity
         )
-        try validatePostflight(
-          postflight,
-          requireNonemptyWholeCurveProfile: true,
-          preflight: preflight,
-          targetHead: toolingHead,
-          identity: identity,
-          expectedActiveTileSetID: preflight.journal.targetTileSetID ?? preflight.journal.previousTileSetID
-        )
-        return postflight
+        if let controllerEvidence {
+          try validateResumedOffroadCompletion(
+            postflight,
+            controllerEvidence: controllerEvidence,
+            preflight: preflight,
+            targetHead: toolingHead,
+            identity: identity,
+            expectedActiveTileSetID: preflight.journal.targetTileSetID ?? preflight.journal.previousTileSetID
+          )
+          return ResumedPostflightObservation(controllerReady: controllerEvidence, offroad: postflight)
+        } else {
+          try validateResumedControllerEvidence(
+            postflight,
+            preflight: preflight,
+            targetHead: toolingHead,
+            identity: identity,
+            expectedActiveTileSetID: preflight.journal.targetTileSetID ?? preflight.journal.previousTileSetID
+          )
+          // This evidence is deliberately in-memory only. A later offroad
+          // liveMapDataSP.valid=false cannot erase the controller-ready state
+          // observed while ignition was still on.
+          controllerEvidence = postflight
+          await emit(
+            .running,
+            id: 1,
+            text: "Controller-ready profile captured — turn ignition off now",
+            detail: "The proof is retained only in memory while the app waits for the clean offroad transition.",
+            progress: progress
+          )
+          lastError = ApplyPipelineError.postflightMismatch(
+            "Controller-ready curve evidence captured. Turn ignition off; waiting for IsOffroad=1."
+          )
+        }
       } catch {
         lastError = error
       }
-      if Date() < deadline { try await Task.sleep(for: .seconds(2)) }
+      if Date() < deadline {
+        try await Task.sleep(for: .seconds(max(0.001, pollInterval)))
+      }
     } while Date() < deadline
     throw lastError
   }
@@ -1522,6 +1561,9 @@ public actor ApplyPipeline {
     return TiciDeploymentPostflight(
       isOffroad: snapshot.isOffroad,
       isOnroad: snapshot.isOnroad,
+      runtimeEndIsOffroad: readback.runtimeEndIsOffroad,
+      runtimeEndIsOnroad: readback.runtimeEndIsOnroad,
+      runtimeEndMapLookaheadEnabled: readback.runtimeEndMapLookaheadEnabled,
       mapLookaheadEnabled: snapshot.mapLookaheadEnabled,
       branch: snapshot.branch,
       head: snapshot.head,
@@ -1550,6 +1592,11 @@ public actor ApplyPipeline {
       profileValidationStatus: profile.validationStatus,
       profilePointCount: profile.pointCount,
       profileEventCount: profile.eventCount,
+      liveMapDataUpdated: readback.liveMapDataControllerStatus.updated,
+      liveMapDataValid: readback.liveMapDataControllerStatus.valid,
+      liveMapDataLogMonoTimeNs: readback.liveMapDataControllerStatus.logMonoTimeNs,
+      liveMapDataSampleMonoTimeNs: readback.liveMapDataControllerStatus.sampleMonoTimeNs,
+      roadGeometryValid: readback.liveMapDataControllerStatus.roadGeometryValid,
       activeTileSetID: snapshot.activeTileSetID
     )
   }
@@ -1594,6 +1641,15 @@ public actor ApplyPipeline {
     guard result.mapdRunning, result.capabilityPresent, result.activeELFARM64, result.buildInfoMatches else {
       throw ApplyPipelineError.postflightMismatch("native mapd is not running with the exact ARM64 build identity/capability")
     }
+    if requireNonemptyWholeCurveProfile {
+      guard result.profileValidationStatus != "profile_pending",
+            result.gpsStatus == "valid"
+      else {
+        throw ApplyPipelineError.postflightMismatch(
+          "whole-curve profile pending real GPS/profile: gps=\(result.gpsStatus) profile=\(result.profileValidationStatus)"
+        )
+      }
+    }
     guard result.profileEstimatorVersion == release.estimatorVersion else {
       throw ApplyPipelineError.postflightMismatch("whole-curve estimator version is missing or mismatched")
     }
@@ -1603,9 +1659,6 @@ public actor ApplyPipeline {
       )
     }
     if requireNonemptyWholeCurveProfile {
-      guard result.gpsStatus == "valid" else {
-        throw ApplyPipelineError.postflightMismatch("whole-curve profile pending real GPS: \(result.gpsStatus)")
-      }
       guard result.profilePointCount >= 3,
             result.profileFresh,
             result.profileValuesFinite,
@@ -1619,6 +1672,139 @@ public actor ApplyPipeline {
     guard result.activeTileSetID == expectedActiveTileSetID else {
       throw ApplyPipelineError.postflightMismatch(
         "active tile-set identity is \(result.activeTileSetID ?? "<none>"), expected \(expectedActiveTileSetID ?? "<none>")"
+      )
+    }
+  }
+
+  private func validateResumedStaticIdentity(
+    _ result: TiciDeploymentPostflight,
+    preflight: RuntimeDeploymentPreflight,
+    targetHead: String,
+    identity: TuneDeploymentIdentity,
+    expectedActiveTileSetID: String?
+  ) throws {
+    guard !result.mapLookaheadEnabled else { throw ApplyPipelineError.mapLookaheadMustRemainDisabled }
+    guard !result.runtimeEndMapLookaheadEnabled else { throw ApplyPipelineError.mapLookaheadMustRemainDisabled }
+    guard result.branch == preflight.journal.branch else { throw ApplyPipelineError.invalidBranch(result.branch) }
+    guard !result.dirty else {
+      throw ApplyPipelineError.repositoryDirty("tici checkout is dirty during postflight")
+    }
+    guard result.head == targetHead else {
+      throw ApplyPipelineError.commitMismatch(context: "tici postflight", expected: targetHead, actual: result.head)
+    }
+    guard result.physicsMatches else { throw ApplyPipelineError.postflightMismatch("physics Params differ from source") }
+    guard result.qCurveSHA256 == identity.qCurveSHA256,
+          result.qCurveEnabled == identity.qCurveEnabled,
+          result.qCurvePointCount == identity.qCurvePointCount
+    else { throw ApplyPipelineError.postflightMismatch("Q curve differs from the exact deployed source") }
+    let release = preflight.release.artifact
+    guard result.mapdReleaseVersion == release.releaseID, result.mapdVersion == release.releaseID else {
+      throw ApplyPipelineError.postflightMismatch("MapdVersion/MapdReleaseVersion do not match \(release.releaseID)")
+    }
+    guard result.activeMapdSHA256 == release.sha256, result.cachedMapdSHA256 == release.sha256 else {
+      throw ApplyPipelineError.postflightMismatch("active and persistent mapd digests are not exact")
+    }
+    guard result.mapdRunning, result.capabilityPresent, result.activeELFARM64, result.buildInfoMatches else {
+      throw ApplyPipelineError.postflightMismatch("native mapd is not running with the exact ARM64 build identity/capability")
+    }
+    guard result.activeTileSetID == expectedActiveTileSetID else {
+      throw ApplyPipelineError.postflightMismatch("active tile-set identity changed during resumed postflight")
+    }
+  }
+
+  private func validateResumedControllerEvidence(
+    _ result: TiciDeploymentPostflight,
+    preflight: RuntimeDeploymentPreflight,
+    targetHead: String,
+    identity: TuneDeploymentIdentity,
+    expectedActiveTileSetID: String?
+  ) throws {
+    try validateResumedStaticIdentity(
+      result,
+      preflight: preflight,
+      targetHead: targetHead,
+      identity: identity,
+      expectedActiveTileSetID: expectedActiveTileSetID
+    )
+    guard result.profileValidationStatus != "profile_pending", result.gpsStatus == "valid" else {
+      throw ApplyPipelineError.postflightMismatch(
+        "whole-curve profile pending real GPS/profile: gps=\(result.gpsStatus) profile=\(result.profileValidationStatus)"
+      )
+    }
+    guard result.isOnroad, !result.isOffroad,
+          result.runtimeEndIsOnroad, !result.runtimeEndIsOffroad
+    else {
+      throw ApplyPipelineError.postflightMismatch(
+        "No controller-ready evidence was captured. Start Verify while parked with ignition still on after a normal GPS/profile-producing drive."
+      )
+    }
+    guard result.profileEstimatorVersion == preflight.release.artifact.estimatorVersion else {
+      throw ApplyPipelineError.postflightMismatch("whole-curve estimator version is missing or mismatched")
+    }
+    guard result.profileSigmoidHash == identity.tileSigmoidHash else {
+      throw ApplyPipelineError.postflightMismatch(
+        "whole-curve profile sigmoid hash is \(result.profileSigmoidHash), expected \(identity.tileSigmoidHash)"
+      )
+    }
+    guard result.profilePointCount >= 3,
+          result.profileFresh,
+          result.profileValuesFinite,
+          result.profileRouteFingerprint.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil
+    else {
+      throw ApplyPipelineError.postflightMismatch(
+        "whole-curve profile is missing, stale, malformed, or not near real GPS: \(result.profileValidationStatus)"
+      )
+    }
+    guard result.liveMapDataUpdated,
+          result.liveMapDataValid,
+          result.liveMapDataLogMonoTimeNs > 0,
+          result.roadGeometryValid
+    else {
+      throw ApplyPipelineError.postflightMismatch(
+        "liveMapDataSP is not newly updated, valid, and roadGeometryValid=true; the deployed controller would not consume this profile"
+      )
+    }
+    guard result.liveMapDataSampleMonoTimeNs >= result.liveMapDataLogMonoTimeNs,
+          result.liveMapDataSampleMonoTimeNs - result.liveMapDataLogMonoTimeNs <= 1_500_000_000
+    else {
+      throw ApplyPipelineError.postflightMismatch(
+        "liveMapDataSP is stale or from the future relative to the bounded controller probe"
+      )
+    }
+  }
+
+  private func validateResumedOffroadCompletion(
+    _ result: TiciDeploymentPostflight,
+    controllerEvidence: TiciDeploymentPostflight,
+    preflight: RuntimeDeploymentPreflight,
+    targetHead: String,
+    identity: TuneDeploymentIdentity,
+    expectedActiveTileSetID: String?
+  ) throws {
+    try validateResumedStaticIdentity(
+      result,
+      preflight: preflight,
+      targetHead: targetHead,
+      identity: identity,
+      expectedActiveTileSetID: expectedActiveTileSetID
+    )
+    guard result.isOffroad, !result.isOnroad,
+          result.runtimeEndIsOffroad, !result.runtimeEndIsOnroad
+    else { throw ApplyPipelineError.ticiNotOffroad }
+    try validatePostflight(
+      result,
+      requireNonemptyWholeCurveProfile: true,
+      preflight: preflight,
+      targetHead: targetHead,
+      identity: identity,
+      expectedActiveTileSetID: expectedActiveTileSetID
+    )
+    guard result.profileRouteFingerprint == controllerEvidence.profileRouteFingerprint,
+          result.profilePointCount == controllerEvidence.profilePointCount,
+          result.profileEventCount == controllerEvidence.profileEventCount
+    else {
+      throw ApplyPipelineError.postflightMismatch(
+        "whole-curve profile identity changed between controller-ready and offroad observations"
       )
     }
   }

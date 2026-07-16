@@ -23,6 +23,18 @@ struct TiciRuntimePostflightRead: Equatable, Sendable {
   var remoteEpochMilliseconds: Int64
   var wholeCurveProfile: Data?
   var lastGPSPosition: Data?
+  var liveMapDataControllerStatus: TiciLiveMapDataControllerStatus
+  var runtimeEndIsOffroad: Bool
+  var runtimeEndIsOnroad: Bool
+  var runtimeEndMapLookaheadEnabled: Bool
+}
+
+struct TiciLiveMapDataControllerStatus: Equatable, Sendable {
+  var updated: Bool
+  var valid: Bool
+  var logMonoTimeNs: UInt64
+  var roadGeometryValid: Bool
+  var sampleMonoTimeNs: UInt64
 }
 
 enum TiciDeploymentSnapshotDecodeError: LocalizedError, Equatable, Sendable {
@@ -31,6 +43,7 @@ enum TiciDeploymentSnapshotDecodeError: LocalizedError, Equatable, Sendable {
   case invalidEpochMilliseconds(String)
   case malformedCacheListing(String)
   case qCurveMarkerMissing(String)
+  case malformedLiveMapDataControllerStatus(String)
 
   var errorDescription: String? {
     switch self {
@@ -44,6 +57,8 @@ enum TiciDeploymentSnapshotDecodeError: LocalizedError, Equatable, Sendable {
       "The tici mapd cache listing is malformed: \(line)"
     case let .qCurveMarkerMissing(marker):
       "The tici Q-curve source is missing \(marker)."
+    case let .malformedLiveMapDataControllerStatus(value):
+      "The tici liveMapDataSP controller probe is malformed: \(value.debugDescription)."
     }
   }
 }
@@ -88,7 +103,11 @@ enum TiciDeploymentSnapshotDecoder {
       mapdRunning: try requiredBool(wire, .mapdRunning),
       remoteEpochMilliseconds: try requiredEpochMilliseconds(wire),
       wholeCurveProfile: firstNonempty(wire[.memoryWholeCurveProfile], wire[.persistentWholeCurveProfile]),
-      lastGPSPosition: firstNonempty(wire[.memoryLastGPSPosition], wire[.persistentLastGPSPosition])
+      lastGPSPosition: firstNonempty(wire[.memoryLastGPSPosition], wire[.persistentLastGPSPosition]),
+      liveMapDataControllerStatus: try requiredLiveMapDataControllerStatus(wire),
+      runtimeEndIsOffroad: try requiredBool(wire, .runtimeEndIsOffroad),
+      runtimeEndIsOnroad: try requiredBool(wire, .runtimeEndIsOnroad),
+      runtimeEndMapLookaheadEnabled: try requiredBool(wire, .runtimeEndMapLookaheadEnabled)
     )
   }
 
@@ -208,6 +227,27 @@ enum TiciDeploymentSnapshotDecoder {
           let value = Int64(text), value > 0
     else { throw TiciDeploymentSnapshotDecodeError.invalidEpochMilliseconds(text) }
     return value
+  }
+
+  private static func requiredLiveMapDataControllerStatus(
+    _ wire: TiciSnapshotWireSnapshot
+  ) throws -> TiciLiveMapDataControllerStatus {
+    let text = try requiredText(wire, .liveMapDataControllerStatus)
+    let fields = text.split(separator: "|", omittingEmptySubsequences: false)
+    guard fields.count == 5,
+          [fields[0], fields[1], fields[3]].allSatisfy({ $0 == "0" || $0 == "1" }),
+          fields[2].range(of: #"^[0-9]{1,20}$"#, options: .regularExpression) != nil,
+          fields[4].range(of: #"^[0-9]{1,20}$"#, options: .regularExpression) != nil,
+          let logMonoTimeNs = UInt64(fields[2]),
+          let sampleMonoTimeNs = UInt64(fields[4])
+    else { throw TiciDeploymentSnapshotDecodeError.malformedLiveMapDataControllerStatus(text) }
+    return TiciLiveMapDataControllerStatus(
+      updated: fields[0] == "1",
+      valid: fields[1] == "1",
+      logMonoTimeNs: logMonoTimeNs,
+      roadGeometryValid: fields[3] == "1",
+      sampleMonoTimeNs: sampleMonoTimeNs
+    )
   }
 
   private struct CacheEntry: Equatable, Sendable {

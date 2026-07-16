@@ -91,7 +91,7 @@ import Testing
   }
 }
 
-@Test func resumePostflightKeepsImmutableDeploymentTargetAndOnlyCompletesExistingJournal() async throws {
+@Test func resumePostflightCapturesOnroadControllerEvidenceThenCompletesOffroadWithoutErasingIt() async throws {
   let fixture = try resumePostflightFixture(validGPS: true)
   defer { try? FileManager.default.removeItem(at: fixture.root) }
   let runner = ResumePostflightRunner(fixture: fixture)
@@ -103,7 +103,8 @@ import Testing
       repositoryRoot: fixture.repository,
       mapdReleaseManifestURL: fixture.releaseURL,
       journalURL: fixture.journalURL,
-      timeout: 0
+      timeout: 1,
+      pollInterval: 0.001
     )
   ) { event in
     await collector.append(event)
@@ -136,6 +137,176 @@ import Testing
     let command = request.arguments.joined(separator: " ")
     return command.contains("sudo reboot") || command.contains("git fetch --no-tags") ||
       command.contains("flock -x 9") || command.contains(".mapd-release-")
+  })
+  #expect(await runner.runtimeReadCount >= 3)
+  let events = await collector.events
+  let captureIndex = try #require(events.firstIndex { event in
+    if case let .step(step) = event {
+      return step.text == "Controller-ready profile captured — turn ignition off now"
+    }
+    return false
+  })
+  let completionIndex = try #require(events.firstIndex { event in
+    if case let .step(step) = event {
+      return step.text == "Controller-ready evidence and the subsequent clean offroad identity both passed"
+    }
+    return false
+  })
+  #expect(captureIndex < completionIndex)
+}
+
+@Test func resumePostflightRequiresControllerReadyRoadGeometryBeforeOffroadCompletion() async throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  fixture.controllerRoadGeometryValid = false
+  let runner = ResumePostflightRunner(fixture: fixture)
+  let before = try Data(contentsOf: fixture.journalURL)
+
+  let succeeded = await ApplyPipeline(processRunner: runner).resumePendingPostflight(
+    ResumePostflightRequest(
+      tune: fixture.tune,
+      repositoryRoot: fixture.repository,
+      mapdReleaseManifestURL: fixture.releaseURL,
+      journalURL: fixture.journalURL,
+      timeout: 0
+    )
+  ) { _ in }
+
+  #expect(!succeeded)
+  #expect(try Data(contentsOf: fixture.journalURL) == before)
+}
+
+@Test func resumePostflightRejectsStaleOrFutureControllerMessages() async throws {
+  for delta in [UInt64(1_500_000_001), UInt64.max] {
+    var fixture = try resumePostflightFixture(validGPS: true)
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    if delta == UInt64.max {
+      fixture.controllerLogMonoTimeNs = 2_000_000_000
+      fixture.controllerSampleMonoTimeNs = 1_999_999_999
+    } else {
+      fixture.controllerLogMonoTimeNs = 1_000_000_000
+      fixture.controllerSampleMonoTimeNs = 1_000_000_000 + delta
+    }
+    let before = try Data(contentsOf: fixture.journalURL)
+    let succeeded = await ApplyPipeline(processRunner: ResumePostflightRunner(fixture: fixture))
+      .resumePendingPostflight(
+        ResumePostflightRequest(
+          tune: fixture.tune,
+          repositoryRoot: fixture.repository,
+          mapdReleaseManifestURL: fixture.releaseURL,
+          journalURL: fixture.journalURL,
+          timeout: 0
+        )
+      ) { _ in }
+    #expect(!succeeded)
+    #expect(try Data(contentsOf: fixture.journalURL) == before)
+  }
+}
+
+@Test func resumePostflightRejectsRoadStateThatStraddlesEitherPhase() async throws {
+  for phase in ["controller", "offroad"] {
+    var fixture = try resumePostflightFixture(validGPS: true)
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    if phase == "controller" {
+      fixture.controllerEndIsOffroad = true
+      fixture.controllerEndIsOnroad = false
+    } else {
+      fixture.offroadEndIsOffroad = false
+      fixture.offroadEndIsOnroad = true
+    }
+    let before = try Data(contentsOf: fixture.journalURL)
+    let succeeded = await ApplyPipeline(processRunner: ResumePostflightRunner(fixture: fixture))
+      .resumePendingPostflight(
+        ResumePostflightRequest(
+          tune: fixture.tune,
+          repositoryRoot: fixture.repository,
+          mapdReleaseManifestURL: fixture.releaseURL,
+          journalURL: fixture.journalURL,
+          timeout: phase == "controller" ? 0 : 0.1,
+          pollInterval: 0.001
+        )
+      ) { _ in }
+    #expect(!succeeded)
+    #expect(try Data(contentsOf: fixture.journalURL) == before)
+  }
+}
+
+@Test func resumePostflightRejectsLookaheadThatTurnsOnDuringRuntimeBlock() async throws {
+  for phase in ["controller", "offroad"] {
+    var fixture = try resumePostflightFixture(validGPS: true)
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    if phase == "controller" { fixture.controllerEndMapLookaheadEnabled = true }
+    else { fixture.offroadEndMapLookaheadEnabled = true }
+    let before = try Data(contentsOf: fixture.journalURL)
+    let succeeded = await ApplyPipeline(processRunner: ResumePostflightRunner(fixture: fixture))
+      .resumePendingPostflight(
+        ResumePostflightRequest(
+          tune: fixture.tune,
+          repositoryRoot: fixture.repository,
+          mapdReleaseManifestURL: fixture.releaseURL,
+          journalURL: fixture.journalURL,
+          timeout: phase == "controller" ? 0 : 0.1,
+          pollInterval: 0.001
+        )
+      ) { _ in }
+    #expect(!succeeded)
+    #expect(try Data(contentsOf: fixture.journalURL) == before)
+  }
+}
+
+@Test func resumePostflightRejectsMalformedOffroadProfileWithCopiedTopLevelIdentity() async throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  var root = try JSONSerialization.jsonObject(with: fixture.profileData) as! [String: Any]
+  var points = root["points"] as! [[String: Any]]
+  points[2]["curvatureCoefficient"] = "not-a-number"
+  root["points"] = points
+  fixture.offroadProfileData = try JSONSerialization.data(withJSONObject: root)
+  let before = try Data(contentsOf: fixture.journalURL)
+
+  let succeeded = await ApplyPipeline(processRunner: ResumePostflightRunner(fixture: fixture))
+    .resumePendingPostflight(
+      ResumePostflightRequest(
+        tune: fixture.tune,
+        repositoryRoot: fixture.repository,
+        mapdReleaseManifestURL: fixture.releaseURL,
+        journalURL: fixture.journalURL,
+        timeout: 0.1,
+        pollInterval: 0.001
+      )
+    ) { _ in }
+
+  #expect(!succeeded)
+  #expect(try Data(contentsOf: fixture.journalURL) == before)
+}
+
+@Test func resumePostflightClassifiesEmptyIndoorProfileBeforeVersionOrHash() async throws {
+  var fixture = try resumePostflightFixture(validGPS: false)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  fixture.profileData = Data("{}".utf8)
+  let runner = ResumePostflightRunner(fixture: fixture)
+  let collector = ApplyEventCollector()
+
+  let succeeded = await ApplyPipeline(processRunner: runner).resumePendingPostflight(
+    ResumePostflightRequest(
+      tune: fixture.tune,
+      repositoryRoot: fixture.repository,
+      mapdReleaseManifestURL: fixture.releaseURL,
+      journalURL: fixture.journalURL,
+      timeout: 0
+    )
+  ) { event in
+    await collector.append(event)
+  }
+
+  #expect(!succeeded)
+  let events = await collector.events
+  #expect(events.contains { event in
+    if case let .step(step) = event {
+      return step.status == .failed && step.detail.contains("pending real GPS/profile") &&
+        !step.detail.contains("estimator version") && !step.detail.contains("sigmoid hash")
+    }
+    return false
   })
 }
 
@@ -575,8 +746,18 @@ private struct ResumePostflightFixture: Sendable {
   var runtimeHead: String
   var runtimeBranch: String
   var runtimeDirty: Bool
+  var controllerRoadGeometryValid: Bool
+  var controllerLogMonoTimeNs: UInt64
+  var controllerSampleMonoTimeNs: UInt64
+  var controllerEndIsOffroad: Bool
+  var controllerEndIsOnroad: Bool
+  var offroadEndIsOffroad: Bool
+  var offroadEndIsOnroad: Bool
+  var controllerEndMapLookaheadEnabled: Bool
+  var offroadEndMapLookaheadEnabled: Bool
   var changedPaths: [String]
   var profileData: Data
+  var offroadProfileData: Data?
   var gpsData: Data?
 }
 
@@ -674,6 +855,15 @@ private func resumePostflightFixture(validGPS: Bool) throws -> ResumePostflightF
     runtimeHead: toolingHead,
     runtimeBranch: "chauffeur-exp01",
     runtimeDirty: false,
+    controllerRoadGeometryValid: true,
+    controllerLogMonoTimeNs: 123_456_789,
+    controllerSampleMonoTimeNs: 123_456_999,
+    controllerEndIsOffroad: false,
+    controllerEndIsOnroad: true,
+    offroadEndIsOffroad: true,
+    offroadEndIsOnroad: false,
+    controllerEndMapLookaheadEnabled: false,
+    offroadEndMapLookaheadEnabled: false,
     changedPaths: [
       ".codex/skills/vtsc-tuner-app/references/changelog.md",
       "tools/vtsc_tuner_mac/Sources/VTSCTunerCore/ApplyPipeline.swift",
@@ -683,6 +873,7 @@ private func resumePostflightFixture(validGPS: Bool) throws -> ResumePostflightF
       now: now,
       sigmoidHash: TuneDeploymentIdentity(tune: tune).tileSigmoidHash
     ),
+    offroadProfileData: nil,
     gpsData: validGPS ? try JSONSerialization.data(withJSONObject: [
       "latitude": 37.0,
       "longitude": -122.0,
@@ -694,6 +885,7 @@ private func resumePostflightFixture(validGPS: Bool) throws -> ResumePostflightF
 private actor ResumePostflightRunner: ProcessRunning {
   let fixture: ResumePostflightFixture
   private(set) var requests: [ProcessRequest] = []
+  private(set) var runtimeReadCount = 0
 
   init(fixture: ResumePostflightFixture) { self.fixture = fixture }
 
@@ -723,14 +915,15 @@ private actor ResumePostflightRunner: ProcessRunning {
     if request.executableURL == ApplyPipeline.sshURL {
       if request.arguments.last == "true" { return success("") }
       if request.arguments.last?.contains("remote_epoch_milliseconds") == true {
-        return success(runtimeWire())
+        runtimeReadCount += 1
+        return success(runtimeWire(readIndex: runtimeReadCount))
       }
       return failure("unexpected ssh request")
     }
     return failure("unexpected executable: \(request.executableURL.path)")
   }
 
-  private func runtimeWire() -> String {
+  private func runtimeWire(readIndex: Int) -> String {
     let identity = TuneDeploymentIdentity(tune: fixture.tune)
     let releaseDigest = TuneDeploymentIdentity.sha256Hex(Data(fixture.release.releaseID.utf8))
     let cachePath = "/data/media/0/osm/binaries/mapd-\(releaseDigest.prefix(16))-\(fixture.release.sha256.prefix(16))"
@@ -744,12 +937,13 @@ private actor ResumePostflightRunner: ProcessRunning {
         "MapdBuildID:\(fixture.release.buildID)",
       ]
     )
+    let controllerPhase = readIndex == 1
     var fields: [TiciSnapshotWireField: Data] = [
       .branch: Data(fixture.runtimeBranch.utf8),
       .head: Data(fixture.runtimeHead.utf8),
       .dirty: Data((fixture.runtimeDirty ? "1" : "0").utf8),
-      .isOffroad: Data("1".utf8),
-      .isOnroad: Data("0".utf8),
+      .isOffroad: Data((controllerPhase ? "0" : "1").utf8),
+      .isOnroad: Data((controllerPhase ? "1" : "0").utf8),
       .mapLookaheadEnabled: Data("0".utf8),
       .mapdReleaseVersion: Data(fixture.release.releaseID.utf8),
       .mapdVersion: Data(fixture.release.releaseID.utf8),
@@ -763,7 +957,16 @@ private actor ResumePostflightRunner: ProcessRunning {
       .activeMapdELFHeader: Data([0x7f, 0x45, 0x4c, 0x46, 2, 1] + Array(repeating: 0, count: 12) + [183, 0]),
       .mapdRunning: Data("1".utf8),
       .remoteEpochMilliseconds: Data("1800000000000".utf8),
-      .memoryWholeCurveProfile: fixture.profileData,
+      .memoryWholeCurveProfile: controllerPhase ? fixture.profileData : (fixture.offroadProfileData ?? fixture.profileData),
+      .liveMapDataControllerStatus: Data((controllerPhase
+        ? "1|1|\(fixture.controllerLogMonoTimeNs)|\(fixture.controllerRoadGeometryValid ? 1 : 0)|\(fixture.controllerSampleMonoTimeNs)"
+        : "1|0|123456790|0|123456999").utf8),
+      .runtimeEndIsOffroad: Data(((controllerPhase
+        ? fixture.controllerEndIsOffroad : fixture.offroadEndIsOffroad) ? "1" : "0").utf8),
+      .runtimeEndIsOnroad: Data(((controllerPhase
+        ? fixture.controllerEndIsOnroad : fixture.offroadEndIsOnroad) ? "1" : "0").utf8),
+      .runtimeEndMapLookaheadEnabled: Data(((controllerPhase
+        ? fixture.controllerEndMapLookaheadEnabled : fixture.offroadEndMapLookaheadEnabled) ? "1" : "0").utf8),
     ]
     if let gpsData = fixture.gpsData { fields[.memoryLastGPSPosition] = gpsData }
     for physics in identity.physics {
