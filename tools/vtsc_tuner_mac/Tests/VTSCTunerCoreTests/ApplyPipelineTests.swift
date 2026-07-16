@@ -158,6 +158,73 @@ import Testing
   #expect(captureIndex < completionIndex)
 }
 
+@Test func newOutdoorResumeRequiresChangedDeploymentBootIdentity() async throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  fixture.journal.resolution = .awaitingOutdoorPostflight
+  fixture.bootIDsByRead = [fixture.journal.deploymentPreRebootBootID]
+  try fixture.journal.write(to: fixture.journalURL)
+  let runner = ResumePostflightRunner(fixture: fixture)
+
+  let succeeded = await ApplyPipeline(processRunner: runner).resumePendingPostflight(
+    ResumePostflightRequest(
+      tune: fixture.tune,
+      repositoryRoot: fixture.repository,
+      mapdReleaseManifestURL: fixture.releaseURL,
+      journalURL: fixture.journalURL,
+      timeout: 1,
+      pollInterval: 0.001
+    )
+  ) { _ in }
+
+  #expect(!succeeded)
+  #expect(await runner.runtimeReadCount == 1)
+  #expect(try DeploymentRollbackJournal.load(from: fixture.journalURL) == fixture.journal)
+}
+
+@Test func legacyAwaitingPostflightWithoutBootIdentityRemainsResumable() async throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  fixture.journal.resolution = nil
+  fixture.journal.deploymentPreRebootBootID = nil
+  try fixture.journal.write(to: fixture.journalURL)
+  let succeeded = await ApplyPipeline(processRunner: ResumePostflightRunner(fixture: fixture))
+    .resumePendingPostflight(
+      ResumePostflightRequest(
+        tune: fixture.tune,
+        repositoryRoot: fixture.repository,
+        mapdReleaseManifestURL: fixture.releaseURL,
+        journalURL: fixture.journalURL,
+        timeout: 1,
+        pollInterval: 0.001
+      )
+    ) { _ in }
+  #expect(succeeded)
+  #expect(try DeploymentRollbackJournal.load(from: fixture.journalURL).effectiveResolution == .completed)
+}
+
+@Test func awaitingOutdoorPostflightWithoutBootIdentityIsNotTreatedAsLegacy() async throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  fixture.journal.resolution = .awaitingOutdoorPostflight
+  fixture.journal.deploymentPreRebootBootID = nil
+  try fixture.journal.write(to: fixture.journalURL)
+  let runner = ResumePostflightRunner(fixture: fixture)
+  let succeeded = await ApplyPipeline(processRunner: runner).resumePendingPostflight(
+    ResumePostflightRequest(
+      tune: fixture.tune,
+      repositoryRoot: fixture.repository,
+      mapdReleaseManifestURL: fixture.releaseURL,
+      journalURL: fixture.journalURL,
+      timeout: 1,
+      pollInterval: 0.001
+    )
+  ) { _ in }
+  #expect(!succeeded)
+  #expect(await runner.runtimeReadCount == 1)
+  #expect(try DeploymentRollbackJournal.load(from: fixture.journalURL) == fixture.journal)
+}
+
 @Test(arguments: [[false], [true, false]])
 func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByRead: [Bool]) async throws {
   var fixture = try resumePostflightFixture(validGPS: true)
@@ -872,6 +939,7 @@ func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByR
 @Test func staticPostRebootInstallationRetriesStartupAndRequiresExactIdentity() async throws {
   var fixture = try resumePostflightFixture(validGPS: true)
   defer { try? FileManager.default.removeItem(at: fixture.root) }
+  fixture.runtimeHead = fixture.toolingHead
   fixture.managerRunningByRead = [false, true]
   let runner = ResumePostflightRunner(fixture: fixture)
   _ = try await ApplyPipeline(processRunner: runner).waitForStaticInstalledIdentity(
@@ -905,6 +973,7 @@ func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByR
   let newBootID = "22222222-2222-4222-8222-222222222222"
   var fixture = try resumePostflightFixture(validGPS: true)
   defer { try? FileManager.default.removeItem(at: fixture.root) }
+  fixture.runtimeHead = fixture.toolingHead
   fixture.journal.deploymentPreRebootBootID = oldBootID
   fixture.bootIDsByRead = [oldBootID, newBootID]
   let runner = ResumePostflightRunner(fixture: fixture)
@@ -940,6 +1009,7 @@ func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByR
   let newBootID = "22222222-2222-4222-8222-222222222222"
   var fixture = try resumePostflightFixture(validGPS: true)
   defer { try? FileManager.default.removeItem(at: fixture.root) }
+  fixture.runtimeHead = fixture.toolingHead
   fixture.bootIDsByRead = [nil, newBootID]
   let missingThenReady = ResumePostflightRunner(fixture: fixture)
   _ = try await ApplyPipeline(processRunner: missingThenReady).waitForStaticInstalledIdentity(
@@ -1154,7 +1224,11 @@ func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByR
   try fixture.journal.write(to: fixture.journalURL)
   let runner = FreshProcessRollbackRecoveryRunner(journal: fixture.journal)
 
-  let succeeded = await ApplyPipeline(processRunner: runner).recoverPendingRollback(
+  let succeeded = await ApplyPipeline(
+    processRunner: runner,
+    rebootInitialDelayNanoseconds: 0,
+    rebootPollDelayNanoseconds: 1
+  ).recoverPendingRollback(
     RollbackRecoveryRequest(
       repositoryRoot: fixture.repository,
       journalURL: fixture.journalURL
@@ -1168,7 +1242,79 @@ func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByR
     request.arguments.last?.contains("rollback --root") == true &&
       request.arguments.last?.contains("--expected-tile-set-id '\(targetTileSetID)'") == true
   })
-  #expect(!requests.contains { $0.arguments.joined(separator: " ").contains("sudo reboot") })
+  #expect(requests.contains { $0.arguments.joined(separator: " ").contains("sudo reboot") })
+  let settled = try DeploymentRollbackJournal.load(from: fixture.journalURL)
+  #expect(settled.rollbackPreRebootBootID != nil)
+}
+
+@Test func watchdogCycleBeforeDeploymentRebootIntentStillForcesRollbackReboot() async throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  fixture.journal.previousCachedMapdPath = ""
+  fixture.journal.previousCachedMapdSHA256 = nil
+  fixture.journal.previousBootID = "11111111-1111-4111-8111-111111111111"
+  fixture.journal.rebootSent = false
+  fixture.journal.completed = true
+  fixture.journal.resolution = .rollbackInProgress
+  try fixture.journal.write(to: fixture.journalURL)
+  let watchdogBoot = "33333333-3333-4333-8333-333333333333"
+  let finalBoot = "44444444-4444-4444-8444-444444444444"
+  let runner = FreshProcessRollbackRecoveryRunner(
+    journal: fixture.journal,
+    runtimeBootIDs: [watchdogBoot, watchdogBoot, watchdogBoot, finalBoot]
+  )
+
+  let result = await ApplyPipeline(
+    processRunner: runner,
+    rebootInitialDelayNanoseconds: 0,
+    rebootPollDelayNanoseconds: 1
+  ).rollbackProductionDeploymentIfJournalPending(
+    preflight: try resumeRuntimePreflight(fixture),
+    tilesActivated: false
+  )
+  guard case .rolledBack = result else {
+    Issue.record("watchdog-cycle recovery did not settle rolledBack")
+    return
+  }
+  #expect((await runner.requests).contains {
+    $0.arguments.joined(separator: " ").contains("sudo reboot")
+  })
+  #expect(try DeploymentRollbackJournal.load(from: fixture.journalURL).rollbackPreRebootBootID == watchdogBoot)
+}
+
+@Test func legacyMissingDeploymentBaselineStillForcesProvenRollbackReboot() async throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  fixture.journal.previousCachedMapdPath = ""
+  fixture.journal.previousCachedMapdSHA256 = nil
+  fixture.journal.previousBootID = nil
+  fixture.journal.rebootSent = false
+  fixture.journal.completed = true
+  fixture.journal.resolution = .rollbackInProgress
+  try fixture.journal.write(to: fixture.journalURL)
+  let rollbackBoot = "55555555-5555-4555-8555-555555555555"
+  let finalBoot = "66666666-6666-4666-8666-666666666666"
+  let runner = FreshProcessRollbackRecoveryRunner(
+    journal: fixture.journal,
+    runtimeBootIDs: [rollbackBoot, rollbackBoot, rollbackBoot, finalBoot]
+  )
+
+  let result = await ApplyPipeline(
+    processRunner: runner,
+    rebootInitialDelayNanoseconds: 0,
+    rebootPollDelayNanoseconds: 1
+  ).rollbackProductionDeploymentIfJournalPending(
+    preflight: try resumeRuntimePreflight(fixture),
+    tilesActivated: false
+  )
+  guard case .rolledBack = result else {
+    Issue.record("legacy missing-baseline recovery did not settle rolledBack")
+    return
+  }
+  #expect((await runner.requests).contains {
+    $0.arguments.joined(separator: " ").contains("sudo reboot")
+  })
+  #expect(try DeploymentRollbackJournal.load(from: fixture.journalURL).rollbackPreRebootBootID == rollbackBoot)
 }
 
 @Test func terminalResumeMismatchOffersSelectedAbortAndRollbackRecovery() async throws {
@@ -1319,7 +1465,7 @@ func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByR
   }
 }
 
-@Test func preRenameRebootIntentFailureRollsBackFromFreshDurableStateWithoutReboot() async throws {
+@Test func preRenameDeploymentRebootIntentFailureStillRebootsSuccessfulRollback() async throws {
   var fixture = try resumePostflightFixture(validGPS: true)
   defer { try? FileManager.default.removeItem(at: fixture.root) }
   fixture.journal.rebootSent = false
@@ -1345,13 +1491,17 @@ func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByR
   #expect(!(try DeploymentRollbackJournal.load(from: fixture.journalURL).rebootSent))
 
   let runner = FreshProcessRollbackRecoveryRunner(journal: fixture.journal)
-  guard case .rolledBack = await ApplyPipeline(processRunner: runner)
+  guard case .rolledBack = await ApplyPipeline(
+    processRunner: runner,
+    rebootInitialDelayNanoseconds: 0,
+    rebootPollDelayNanoseconds: 1
+  )
     .rollbackProductionDeploymentIfJournalPending(
       preflight: inMemoryPreflight,
       tilesActivated: false
     )
   else { Issue.record("durable rebootSent=false rollback should succeed"); return }
-  #expect(!(await runner.requests).contains {
+  #expect((await runner.requests).contains {
     $0.arguments.joined(separator: " ").contains("sudo reboot")
   })
 }
@@ -1788,10 +1938,10 @@ func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByR
   })
 }
 
-@Test func resumePostflightRejectsADeviceThatHasNotReachedTheExactToolingHead() async throws {
+@Test func resumePostflightRejectsTiciAtHostToolingHeadWhenDeployedTargetDiffers() async throws {
   var fixture = try resumePostflightFixture(validGPS: true)
   defer { try? FileManager.default.removeItem(at: fixture.root) }
-  fixture.runtimeHead = fixture.deployedTargetHead
+  fixture.runtimeHead = fixture.toolingHead
   let runner = ResumePostflightRunner(fixture: fixture)
 
   let succeeded = await ApplyPipeline(processRunner: runner).resumePendingPostflight(
@@ -2162,7 +2312,11 @@ func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByR
     // discover and settle it through guarded rollback, regardless of which
     // mutating command the original process completed before crashing.
     let recoveryRunner = FreshProcessRollbackRecoveryRunner(journal: claimed)
-    let recovered = await ApplyPipeline(processRunner: recoveryRunner).recoverPendingRollback(
+    let recovered = await ApplyPipeline(
+      processRunner: recoveryRunner,
+      rebootInitialDelayNanoseconds: 0,
+      rebootPollDelayNanoseconds: 1
+    ).recoverPendingRollback(
       RollbackRecoveryRequest(
         repositoryRoot: fixture.repository,
         journalURL: fixture.journalURL
@@ -2956,7 +3110,7 @@ private func resumePostflightFixture(validGPS: Bool) throws -> ResumePostflightF
     journal: journal,
     deployedTargetHead: deployedTargetHead,
     toolingHead: toolingHead,
-    runtimeHead: toolingHead,
+    runtimeHead: deployedTargetHead,
     runtimeBranch: "chauffeur-exp01",
     runtimeDirty: false,
     managerRunningByRead: [],

@@ -574,7 +574,7 @@ public actor ApplyPipeline {
       let identity = TuneDeploymentIdentity(tune: request.tune)
       let observation = try await waitForResumedProductionPostflight(
         preflight: preflight,
-        toolingHead: gitIdentity.toolingHead,
+        deployedTargetHead: gitIdentity.deployedTargetHead,
         identity: identity,
         timeout: request.timeout,
         pollInterval: request.pollInterval,
@@ -637,7 +637,7 @@ public actor ApplyPipeline {
         finalPostflight,
         controllerEvidence: observation.controllerReady,
         preflight: preflight,
-        targetHead: gitIdentity.toolingHead,
+        targetHead: gitIdentity.deployedTargetHead,
         identity: identity,
         expectedActiveTileSetID: preflight.journal.targetTileSetID ?? preflight.journal.previousTileSetID
       )
@@ -1953,7 +1953,7 @@ public actor ApplyPipeline {
 
   private func waitForResumedProductionPostflight(
     preflight: RuntimeDeploymentPreflight,
-    toolingHead: String,
+    deployedTargetHead: String,
     identity: TuneDeploymentIdentity,
     timeout: TimeInterval,
     pollInterval: TimeInterval,
@@ -2002,7 +2002,7 @@ public actor ApplyPipeline {
             postflight,
             controllerEvidence: controllerEvidence,
             preflight: preflight,
-            targetHead: toolingHead,
+            targetHead: deployedTargetHead,
             identity: identity,
             expectedActiveTileSetID: preflight.journal.targetTileSetID ?? preflight.journal.previousTileSetID
           )
@@ -2015,7 +2015,7 @@ public actor ApplyPipeline {
           try validateResumedControllerEvidence(
             postflight,
             preflight: preflight,
-            targetHead: toolingHead,
+            targetHead: deployedTargetHead,
             identity: identity,
             expectedActiveTileSetID: preflight.journal.targetTileSetID ?? preflight.journal.previousTileSetID
           )
@@ -2159,6 +2159,25 @@ public actor ApplyPipeline {
     guard let current, current != previous else {
       throw BootTransitionWaitState.identityPending(previous: previous, current: current)
     }
+  }
+
+  private func requireResumedDeploymentBootTransition(
+    current: String?,
+    journal: DeploymentRollbackJournal
+  ) throws {
+    // B174-style schema-1 journals predate boot identity capture and use the
+    // legacy awaitingPostflight lifecycle. Their current supervised onroad
+    // controller evidence remains resumable without fabricating history. New
+    // awaitingOutdoorPostflight journals never receive this exception.
+    if journal.effectiveResolution == .awaitingPostflight,
+       journal.deploymentPreRebootBootID == nil {
+      return
+    }
+    try requireBootTransition(
+      current: current,
+      previous: journal.deploymentPreRebootBootID,
+      missingPreviousDetail: "This new outdoor-postflight journal has no durable deployment pre-reboot boot identity and cannot be completed safely. Abort and roll back, then redeploy with the current tuner."
+    )
   }
 
   private func requireNoOtherTunerProcess() async throws {
@@ -2577,6 +2596,10 @@ public actor ApplyPipeline {
     guard result.activeTileSetID == expectedActiveTileSetID else {
       throw ApplyPipelineError.postflightMismatch("active tile-set identity changed during resumed postflight")
     }
+    try requireResumedDeploymentBootTransition(
+      current: result.bootID,
+      journal: preflight.journal
+    )
   }
 
   private func validateResumedControllerEvidence(
@@ -2965,8 +2988,7 @@ public actor ApplyPipeline {
     var current = try DeploymentRollbackJournal.load(from: url)
     guard current.hasSameDeploymentIdentity(as: expected),
           current.effectiveResolution == .rollbackInProgress,
-          current.completed,
-          current.rebootSent else {
+          current.completed else {
       throw ApplyPipelineError.postflightMismatch(
         "rollback journal changed before pre-reboot boot identity could be recorded"
       )
@@ -3070,7 +3092,7 @@ public actor ApplyPipeline {
       succeeded = false
       details.append("source/Params/mapd rollback failed: \(error.localizedDescription)")
     }
-    if succeeded, context.journal.rebootSent {
+    if succeeded {
       do {
         let preRebootSnapshot = try await freshParkedSafetySnapshot(profile: context.profile)
         guard let preRebootBootID = preRebootSnapshot.bootID else {
@@ -3104,19 +3126,6 @@ public actor ApplyPipeline {
       } catch {
         succeeded = false
         details.append("rollback reboot or post-rollback verification failed: \(error.localizedDescription)")
-      }
-    } else if succeeded {
-      do {
-        let verification = try await waitForRollbackVerification(
-          context: context,
-          tilesWereTouched: context.journal.targetTileSetID != nil,
-          timeout: 120
-        )
-        details.append("pre-reboot rollback identity verification passed; no rollback reboot was sent")
-        details.append(verification)
-      } catch {
-        succeeded = false
-        details.append("pre-reboot rollback verification failed: \(error.localizedDescription)")
       }
     } else {
       details.append("rollback reboot suppressed because rollback mutation did not complete")
@@ -3211,13 +3220,11 @@ public actor ApplyPipeline {
        snapshot.activeTileSetID == targetTileSetID {
       throw ApplyPipelineError.postflightMismatch("rolled-back tile set is still active")
     }
-    if journal.rebootSent {
-      try requireBootTransition(
-        current: snapshot.bootID,
-        previous: journal.rollbackPreRebootBootID,
-        missingPreviousDetail: "This rollback journal has no durable pre-reboot boot identity. Recovery cannot certify a reboot; retry the explicit Recover Interrupted Production Rollback action."
-      )
-    }
+    try requireBootTransition(
+      current: snapshot.bootID,
+      previous: journal.rollbackPreRebootBootID,
+      missingPreviousDetail: "This rollback journal has no durable pre-reboot boot identity. Recovery cannot certify a reboot; retry the explicit Recover Interrupted Production Rollback action."
+    )
     guard readback.managerRunning, readback.mapdRunning else {
       throw RuntimeStartupWaitState.processesNotReady(
         manager: readback.managerRunning,

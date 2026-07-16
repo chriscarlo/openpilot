@@ -554,7 +554,8 @@ private func makeRollbackPreflight(rebootSent: Bool) -> RuntimeDeploymentPreflig
     previousMapdVersion: "old-release",
     previousActiveMapdSHA256: String(repeating: "d", count: 64),
     previousCachedMapdPath: "/tmp/old-cache",
-    mapdRollbackPath: "/data/media/0/osm/binaries/mapd-rollback-01234567-89ab-cdef-0123-456789abcdef"
+    mapdRollbackPath: "/data/media/0/osm/binaries/mapd-rollback-01234567-89ab-cdef-0123-456789abcdef",
+    rollbackPreRebootBootID: "11111111-1111-4111-8111-111111111111"
   )
   journal.rebootSent = rebootSent
   // Global production ownership is namespaced by the authoritative journal
@@ -755,6 +756,7 @@ private func deploymentSnapshotWire(
 ) -> String {
   let qCurve = TuneDeploymentIdentity.canonicalQCurveSource(parameters: .checkoutFallback, bands: [])
   let values: [TiciSnapshotWireField: Data] = [
+    .bootID: Data("11111111-1111-4111-8111-111111111111".utf8),
     .branch: Data("chauffeur-exp01".utf8),
     .head: Data(head.utf8),
     .dirty: Data("0".utf8),
