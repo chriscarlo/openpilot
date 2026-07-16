@@ -94,6 +94,7 @@ type legacyMigrationPlan struct {
 	ContainerID  string
 	PreviousID   string
 	Target       string
+	TreeSHA256   string
 	ManifestData []byte
 }
 
@@ -956,12 +957,117 @@ func (e *transactionEngine) verifyExactSameTargetDirectTree(expectedTileSetID st
 	return nil
 }
 
+func (e *transactionEngine) verifyUnchangedDirectTreeIdentity(expectedPreviousTileSetID string) error {
+	if !isSafeID(expectedPreviousTileSetID) {
+		return fmt.Errorf("recorded direct-tree identity is invalid")
+	}
+	unchanged, err := e.unchangedDirectLegacyTree()
+	if err != nil {
+		return err
+	}
+	if !unchanged {
+		return fmt.Errorf("direct tile tree has ambiguous transaction or pointer evidence")
+	}
+	adjacent, present, err := e.adjacentManifestIdentity()
+	if err != nil {
+		return err
+	}
+	if !present || adjacent.TileSetID != expectedPreviousTileSetID {
+		return fmt.Errorf("direct tile tree differs from the recorded adjacent previous identity")
+	}
+	return nil
+}
+
 func (e *transactionEngine) clearTransaction() error {
 	err := os.Remove(e.transactionPath())
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	return e.syncDir(e.root)
+}
+
+func validateOwnedRemovalTree(tree string) error {
+	info, err := os.Lstat(tree)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("transaction-owned cleanup path is not a real directory: %s", tree)
+	}
+	return filepath.WalkDir(tree, func(current string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		entryInfo, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if entryInfo.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("transaction-owned cleanup tree contains a symlink: %s", current)
+		}
+		if !entryInfo.IsDir() && !entryInfo.Mode().IsRegular() {
+			return fmt.Errorf("transaction-owned cleanup tree contains a non-regular entry: %s", current)
+		}
+		return nil
+	})
+}
+
+func (e *transactionEngine) removeOwnedTreeDurably(tree string) error {
+	if _, err := os.Lstat(tree); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	var directories []string
+	if err := filepath.WalkDir(tree, func(current string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			directories = append(directories, current)
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	for _, directory := range directories {
+		if err := os.Chmod(directory, 0o755); err != nil {
+			return err
+		}
+	}
+	if err := os.RemoveAll(tree); err != nil {
+		return err
+	}
+	return e.syncDir(filepath.Dir(tree))
+}
+
+func (e *transactionEngine) validateOwnedSymlink(link, expectedTarget string) error {
+	actual, isLink, err := symlinkTarget(link)
+	if err != nil {
+		return err
+	}
+	if !isLink {
+		if _, err := os.Lstat(link); errors.Is(err, os.ErrNotExist) {
+			return nil
+		} else if err != nil {
+			return err
+		}
+		return fmt.Errorf("transaction-owned cleanup link is not a symlink: %s", link)
+	}
+	if actual != expectedTarget {
+		return fmt.Errorf("transaction-owned cleanup link has an unexpected target: %s", link)
+	}
+	return nil
+}
+
+func (e *transactionEngine) removeOwnedSymlinkDurably(link string) error {
+	if err := os.Remove(link); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return e.syncDir(filepath.Dir(link))
 }
 
 func symlinkTarget(link string) (string, bool, error) {
@@ -1205,7 +1311,8 @@ func (e *transactionEngine) planLegacyMigration(targetTileSetID string) (legacyM
 		return legacyMigrationPlan{}, fmt.Errorf("direct legacy prior identity equals requested target")
 	}
 	return legacyMigrationPlan{
-		ContainerID: legacyID, PreviousID: previousID, Target: target, ManifestData: manifestData,
+		ContainerID: legacyID, PreviousID: previousID, Target: target,
+		TreeSHA256: legacyTreeSHA256, ManifestData: manifestData,
 	}, nil
 }
 
@@ -1480,6 +1587,151 @@ func (e *transactionEngine) validateExactPostRollbackTopology(expectedTargetTile
 	return activeManifest, nil
 }
 
+// settlePreExchangeActivation removes only artifacts whose exact paths and
+// identities are authorized by the still-durable activation transaction. The
+// transaction is cleared last, after every removal and parent-directory sync,
+// so a crash at any cleanup boundary remains safely replayable.
+func (e *transactionEngine) settlePreExchangeActivation(transaction tileTransaction) error {
+	if transaction.Kind != "activation" {
+		return fmt.Errorf("pre-exchange settlement requires an activation transaction")
+	}
+	activeTarget, activeIsLink, err := symlinkTarget(e.activePath())
+	if err != nil {
+		return err
+	}
+	var legacyPlan *legacyMigrationPlan
+	if activeIsLink {
+		if activeTarget != transaction.PreviousTarget {
+			return fmt.Errorf("active tile pointer differs from the pre-exchange transaction baseline")
+		}
+		manifest, present, err := readManifestIdentity(e.activePath())
+		if err != nil || !present || manifest.TileSetID != transaction.PreviousID {
+			if err != nil {
+				return err
+			}
+			return fmt.Errorf("pre-exchange active generation differs from the durable previous identity")
+		}
+	} else {
+		info, err := os.Lstat(e.activePath())
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("pre-exchange active tile tree is not the original direct directory")
+		}
+		if _, present, err := readManifestIdentity(e.activePath()); err != nil || present {
+			if err != nil {
+				return err
+			}
+			return fmt.Errorf("pre-exchange direct tile tree unexpectedly has an embedded manifest")
+		}
+		plan, err := e.planLegacyMigration(transaction.NewID)
+		if err != nil {
+			return err
+		}
+		if plan.Target != transaction.PreviousTarget || plan.PreviousID != transaction.PreviousID {
+			return fmt.Errorf("pre-exchange direct tree differs from the durable migration authority")
+		}
+		legacyPlan = &plan
+	}
+
+	stage := e.stagePath(transaction.NewID)
+	if _, err := os.Lstat(stage); err == nil {
+		if _, err := verifyArtifactRoot(stage, transaction.NewID, false); err != nil {
+			return fmt.Errorf("verify transaction-owned target stage: %w", err)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	targetGeneration := e.generationPath(transaction.NewID)
+	if _, err := os.Lstat(targetGeneration); err == nil {
+		if err := e.verifyGeneration(transaction.NewID); err != nil {
+			return fmt.Errorf("verify transaction-owned target generation: %w", err)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	targetBuilding := filepath.Join(e.generationsPath(), "."+transaction.NewID+".building")
+	if err := validateOwnedRemovalTree(targetBuilding); err != nil {
+		return err
+	}
+
+	var legacyGeneration, legacyBuilding string
+	if legacyPlan != nil {
+		legacyGeneration = e.generationPath(legacyPlan.ContainerID)
+		if _, err := os.Lstat(legacyGeneration); err == nil {
+			manifest, present, err := readManifestIdentity(filepath.Join(legacyGeneration, activeOfflineName))
+			if err != nil || !present || manifest.TileSetID != transaction.PreviousID {
+				if err != nil {
+					return err
+				}
+				return fmt.Errorf("transaction-owned legacy generation differs from its durable previous identity")
+			}
+			if err := verifyLegacyMigrationTree(
+				filepath.Join(legacyGeneration, activeOfflineName), manifest, transaction.NewID,
+			); err != nil {
+				return err
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		legacyBuilding = filepath.Join(e.generationsPath(), "."+legacyPlan.ContainerID+".building")
+		if err := validateOwnedRemovalTree(legacyBuilding); err != nil {
+			return err
+		}
+	}
+
+	if err := e.validateOwnedSymlink(transaction.SwitchPath, transaction.NewTarget); err != nil {
+		return err
+	}
+	previousTemporary := filepath.Join(e.root, ".offline-previous-link-"+transaction.NewID)
+	if err := e.validateOwnedSymlink(previousTemporary, transaction.PreviousTarget); err != nil {
+		return err
+	}
+	retained, err := filepath.Glob(filepath.Join(e.root, ".retained-pre-generation-"+transaction.NewID+"-*"))
+	if err != nil {
+		return err
+	}
+	if len(retained) != 0 && legacyPlan == nil {
+		return fmt.Errorf("pre-exchange transaction has unexplained retained direct-tree artifacts")
+	}
+	for _, retainedTree := range retained {
+		if err := validateOwnedRemovalTree(retainedTree); err != nil {
+			return err
+		}
+		digest, err := treeSHA256(retainedTree, "")
+		if err != nil || digest != legacyPlan.TreeSHA256 {
+			if err != nil {
+				return err
+			}
+			return fmt.Errorf("retained direct-tree artifact differs from the transaction migration authority")
+		}
+	}
+
+	if err := e.removeOwnedSymlinkDurably(transaction.SwitchPath); err != nil {
+		return err
+	}
+	if err := e.removeOwnedSymlinkDurably(previousTemporary); err != nil {
+		return err
+	}
+	// The verified transfer stage predates the helper transaction and remains
+	// available for an activation retry. Only mutation artifacts created under
+	// this transaction authority are removed here.
+	for _, tree := range []string{targetBuilding, targetGeneration, legacyBuilding, legacyGeneration} {
+		if tree != "" {
+			if err := e.removeOwnedTreeDurably(tree); err != nil {
+				return err
+			}
+		}
+	}
+	for _, retainedTree := range retained {
+		if err := e.removeOwnedTreeDurably(retainedTree); err != nil {
+			return err
+		}
+	}
+	return e.clearTransaction()
+}
+
 func (e *transactionEngine) recoverActivation(tileSetID string) (bool, transactionResult, error) {
 	transaction, exists, err := e.readTransaction()
 	if err != nil || !exists {
@@ -1530,10 +1782,7 @@ func (e *transactionEngine) recoverActivation(tileSetID string) (bool, transacti
 	if activeIsLink && activeTarget != transaction.PreviousTarget {
 		return false, transactionResult{}, fmt.Errorf("active tile pointer diverged during recovery")
 	}
-	if err := e.cleanupExchange(transaction.SwitchPath, tileSetID); err != nil {
-		return false, transactionResult{}, err
-	}
-	if err := e.clearTransaction(); err != nil {
+	if err := e.settlePreExchangeActivation(transaction); err != nil {
 		return false, transactionResult{}, err
 	}
 	return false, transactionResult{}, nil
@@ -1765,13 +2014,17 @@ func (e *transactionEngine) rollbackLocked(expectedTileSetID, expectedPreviousTi
 				if expectedPreviousTileSetID != "" && transaction.PreviousID != expectedPreviousTileSetID {
 					return transactionResult{}, fmt.Errorf("activation recovery previous identity differs from the recorded journal")
 				}
-				if err := e.cleanupExchange(transaction.SwitchPath, transaction.NewID); err != nil {
+				if err := e.settlePreExchangeActivation(transaction); err != nil {
 					return transactionResult{}, err
 				}
-				if err := e.clearTransaction(); err != nil {
-					return transactionResult{}, err
+				result := transactionResult{
+					Operation: "rollback", TileActivationNotSwitched: true, Recovered: true,
 				}
-				return transactionResult{Operation: "rollback", TileActivationNotSwitched: true, Recovered: true}, nil
+				if expectedPreviousTileSetID != "" {
+					result.ActiveTileSetID = expectedPreviousTileSetID
+					result.PreviousTileSetID = expectedPreviousTileSetID
+				}
+				return result, nil
 			}
 			if activeTarget != transaction.NewTarget {
 				return transactionResult{}, fmt.Errorf("activation pointers diverged during rollback recovery")
@@ -1870,12 +2123,13 @@ func (e *transactionEngine) rollbackLocked(expectedTileSetID, expectedPreviousTi
 			return transactionResult{}, err
 		}
 		if !present || activeManifest.TileSetID != expectedTileSetID {
-			if !present && expectedPreviousTileSetID == expectedTileSetID {
-				if err := e.verifyExactSameTargetDirectTree(expectedTileSetID); err != nil {
+			if !present && expectedPreviousTileSetID != "" {
+				if err := e.verifyUnchangedDirectTreeIdentity(expectedPreviousTileSetID); err != nil {
 					return transactionResult{}, err
 				}
 				return transactionResult{
 					Operation: "rollback", TileActivationNotSwitched: true,
+					ActiveTileSetID: expectedPreviousTileSetID, PreviousTileSetID: expectedPreviousTileSetID,
 				}, nil
 			}
 			if !present && expectedPreviousTileSetID == "" {
@@ -1889,8 +2143,8 @@ func (e *transactionEngine) rollbackLocked(expectedTileSetID, expectedPreviousTi
 					}, nil
 				}
 			}
-			if expectedPreviousTileSetID != "" {
-				if !present || activeManifest.TileSetID != expectedPreviousTileSetID {
+			if present && expectedPreviousTileSetID != "" {
+				if activeManifest.TileSetID != expectedPreviousTileSetID {
 					return transactionResult{}, fmt.Errorf("target activation is absent without the recorded previous identity")
 				}
 				return transactionResult{

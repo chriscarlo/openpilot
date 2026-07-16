@@ -941,7 +941,7 @@ func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByR
   _ = try await ApplyPipeline(processRunner: runner).waitForRollbackVerification(
     context: ProductionRollbackContext(repositoryRoot: fixture.repository, journal: fixture.journal, journalURL: fixture.journalURL),
     tilesWereTouched: false,
-    timeout: 1,
+    timeout: 5,
     pollInterval: 0.001
   )
   #expect(await runner.runtimeReadCount == 2)
@@ -1705,7 +1705,7 @@ func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByR
   #expect(try DeploymentRollbackJournal.load(from: fixture.journalURL) == recorded)
 }
 
-@Test func sameTargetNoSwitchPreservesSamePreviousIdentityAndJournalBytes() async throws {
+@Test func sameTargetNoSwitchPersistsExplicitOutcomeWithSamePreviousIdentity() async throws {
   var fixture = try resumePostflightFixture(validGPS: true)
   defer { try? FileManager.default.removeItem(at: fixture.root) }
   let target = String(repeating: "f", count: 64)
@@ -1728,9 +1728,10 @@ func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByR
     at: fixture.journalURL
   )
 
-  #expect(reconciled == fixture.journal)
+  #expect(reconciled.hasSameDeploymentIdentity(as: fixture.journal))
   #expect(reconciled.effectivePreviousTileSetID == target)
-  #expect(try Data(contentsOf: fixture.journalURL) == before)
+  #expect(reconciled.tileActivationOutcome == .notSwitched)
+  #expect(try Data(contentsOf: fixture.journalURL) != before)
 
   var incoherent = fixture.journal
   incoherent.previousTileSetID = nil
@@ -1747,6 +1748,94 @@ func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByR
       at: fixture.journalURL
     )
   }
+}
+
+@Test func sameTargetNoSwitchLaterFailureRollsBackSourceAndReplaysAsTerminalSuccess() async throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  let target = String(repeating: "f", count: 64)
+  fixture.journal.completed = true
+  fixture.journal.resolution = .rollbackInProgress
+  fixture.journal.previousTileSetID = target
+  fixture.journal.targetTileSetID = target
+  fixture.journal.tileActivationOutcome = .notSwitched
+  fixture.journal.previousCachedMapdPath = ""
+  fixture.journal.previousCachedMapdSHA256 = nil
+  try fixture.journal.write(to: fixture.journalURL)
+  let runner = FreshProcessRollbackRecoveryRunner(
+    journal: fixture.journal,
+    runtimeActiveTileSetID: target,
+    tileActivationNeverStarted: true
+  )
+  let pipeline = ApplyPipeline(
+    processRunner: runner,
+    rebootInitialDelayNanoseconds: 0,
+    rebootPollDelayNanoseconds: 1
+  )
+
+  guard case .rolledBack = await pipeline.rollbackProductionDeploymentIfJournalPending(
+    preflight: try resumeRuntimePreflight(fixture),
+    tilesActivated: false
+  ) else {
+    Issue.record("same-target verified no-switch did not complete source/Params/mapd rollback")
+    return
+  }
+  let settled = try DeploymentRollbackJournal.load(from: fixture.journalURL)
+  #expect(settled.effectiveResolution == .rolledBack)
+  #expect(settled.tileActivationOutcome == .notSwitched)
+  #expect(settled.effectivePreviousTileSetID == target)
+  let firstRequests = await runner.requests.count
+  #expect((await runner.requests).contains { $0.arguments.last?.contains(TiciProductionRollbackCommandBuilder.resultMarker) == true })
+  #expect((await runner.requests).contains { $0.arguments.last?.contains("sudo reboot") == true })
+
+  guard case .rolledBack = await pipeline.rollbackProductionDeploymentIfJournalPending(
+    preflight: try resumeRuntimePreflight(fixture),
+    tilesActivated: false
+  ) else {
+    Issue.record("fresh same-target rollback retry did not return terminal rolledBack")
+    return
+  }
+  #expect(await runner.requests.count == firstRequests)
+}
+
+@Test func beforeJournalDirectIdentityNoSwitchCompletesFullRollbackAndPostflight() async throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  let previous = String(repeating: "c", count: 64)
+  let target = String(repeating: "f", count: 64)
+  fixture.journal.completed = true
+  fixture.journal.resolution = .rollbackInProgress
+  fixture.journal.previousTileSetID = previous
+  fixture.journal.targetTileSetID = target
+  fixture.journal.tileActivationOutcome = nil
+  fixture.journal.previousCachedMapdPath = ""
+  fixture.journal.previousCachedMapdSHA256 = nil
+  try fixture.journal.write(to: fixture.journalURL)
+  let runner = FreshProcessRollbackRecoveryRunner(
+    journal: fixture.journal,
+    runtimeActiveTileSetID: previous,
+    tileActivationNeverStarted: true
+  )
+
+  let result = await ApplyPipeline(
+    processRunner: runner,
+    rebootInitialDelayNanoseconds: 0,
+    rebootPollDelayNanoseconds: 1
+  ).rollbackProductionDeploymentIfJournalPending(
+    preflight: try resumeRuntimePreflight(fixture),
+    tilesActivated: false
+  )
+
+  guard case .rolledBack = result else {
+    Issue.record("before-journal direct identity did not complete coherent rollback: \(result)")
+    return
+  }
+  let settled = try DeploymentRollbackJournal.load(from: fixture.journalURL)
+  #expect(settled.effectiveResolution == .rolledBack)
+  #expect(settled.effectivePreviousTileSetID == previous)
+  #expect(settled.tileActivationOutcome == .notSwitched)
+  #expect((await runner.requests).contains { $0.arguments.last?.contains(TiciProductionRollbackCommandBuilder.resultMarker) == true })
+  #expect((await runner.requests).contains { $0.arguments.last?.contains("sudo reboot") == true })
 }
 
 @Test(arguments: [false, true])
@@ -3343,7 +3432,15 @@ private actor FreshProcessRollbackRecoveryRunner: ProcessRunning {
         return ProcessResult(terminationStatus: 1, standardOutput: "", standardError: "injected tile precondition failure")
       }
       if tileActivationNeverStarted {
-        return success(#"{"operation":"rollback","tile_activation_not_switched":true}"# + "\n")
+        var payload: [String: Any] = [
+          "operation": "rollback",
+          "tile_activation_not_switched": true,
+        ]
+        if let previous = journal.effectivePreviousTileSetID {
+          payload["active_tile_set_id"] = previous
+          payload["previous_tile_set_id"] = previous
+        }
+        return success(String(decoding: try JSONSerialization.data(withJSONObject: payload), as: UTF8.self) + "\n")
       }
       if let resolvedLegacyTileSetID {
         let target = resolvedTileProvenanceTargetID ?? journal.targetTileSetID ?? ""

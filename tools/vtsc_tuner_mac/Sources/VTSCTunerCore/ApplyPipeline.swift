@@ -3234,6 +3234,46 @@ public actor ApplyPipeline {
     return current
   }
 
+  func durablyRecordTileActivationOutcome(
+    expected: DeploymentRollbackJournal,
+    outcome: TiciTileActivationOutcome,
+    at url: URL
+  ) throws -> DeploymentRollbackJournal {
+    var current = try DeploymentRollbackJournal.load(from: url)
+    guard current.hasSameDeploymentIdentity(as: expected),
+          current.completed,
+          current.targetTileSetID != nil,
+          current.effectiveResolution == .mutationInProgress ||
+            current.effectiveResolution == .rollbackInProgress
+    else {
+      throw ApplyPipelineError.postflightMismatch(
+        "tile activation journal changed before its verified outcome could be recorded"
+      )
+    }
+    if let recorded = current.tileActivationOutcome {
+      guard recorded == outcome else {
+        throw ApplyPipelineError.postflightMismatch(
+          "helper tile activation outcome differs from the durable journal"
+        )
+      }
+      return current
+    }
+    switch outcome {
+    case .switched:
+      guard current.effectivePreviousTileSetID != nil,
+            current.effectivePreviousTileSetID != current.targetTileSetID else {
+        throw ApplyPipelineError.postflightMismatch(
+          "a switched tile activation requires a distinct durable previous identity"
+        )
+      }
+    case .notSwitched:
+      break
+    }
+    current.tileActivationOutcome = outcome
+    try durablyWriteLifecycleBarrier(current, at: url)
+    return current
+  }
+
   func reconcileTileActivationJournal(
     expected: DeploymentRollbackJournal,
     activation: TiciTileActivationResult,
@@ -3250,10 +3290,15 @@ public actor ApplyPipeline {
           "tile activation cannot both retain a prior generation and be a no-switch result"
         )
       }
-      return try durablyRecordResolvedPreviousTileIdentity(
+      let withPrevious = try durablyRecordResolvedPreviousTileIdentity(
         expected: expected,
         activatedTileSetID: activation.tileSetID,
         resolvedPreviousTileSetID: previousTileSetID,
+        at: url
+      )
+      return try durablyRecordTileActivationOutcome(
+        expected: withPrevious,
+        outcome: .switched,
         at: url
       )
     }
@@ -3269,7 +3314,11 @@ public actor ApplyPipeline {
         "tile helper reported no prior generation without a coherent same-target no-switch journal"
       )
     }
-    return current
+    return try durablyRecordTileActivationOutcome(
+      expected: current,
+      outcome: .notSwitched,
+      at: url
+    )
   }
 
   private func durablyWriteLifecycleBarrier(
@@ -3359,14 +3408,16 @@ public actor ApplyPipeline {
     }
     if rollbackJournal.targetTileSetID != nil {
       do {
-        let resolvedPrevious = try await TiciTileSetDeploymentService(processRunner: processRunner).rollback(
+        let tileRollback = try await TiciTileSetDeploymentService(processRunner: processRunner).rollbackWithOutcome(
           profile: context.profile,
           expectedActivatedTileSetID: rollbackJournal.targetTileSetID,
           expectedRestoredTileSetID: rollbackJournal.effectivePreviousTileSetID,
           expectedGitBranch: rollbackJournal.branch,
           expectedGitHead: expectedRollbackSourceHead
         )
-        if let resolvedPrevious, let target = rollbackJournal.targetTileSetID {
+        if let resolvedPrevious = tileRollback.restoredTileSetID,
+           let target = rollbackJournal.targetTileSetID,
+           rollbackJournal.effectivePreviousTileSetID == nil {
           rollbackJournal = try durablyRecordResolvedPreviousTileIdentity(
             expected: rollbackJournal,
             activatedTileSetID: target,
@@ -3374,6 +3425,11 @@ public actor ApplyPipeline {
             at: context.journalURL
           )
         }
+        rollbackJournal = try durablyRecordTileActivationOutcome(
+          expected: rollbackJournal,
+          outcome: tileRollback.activationOutcome,
+          at: context.journalURL
+        )
         details.append("tile activation transaction recovered and prior set restored when needed")
       } catch {
         return (
@@ -3436,9 +3492,20 @@ public actor ApplyPipeline {
           initialDelayNanoseconds: rebootInitialDelayNanoseconds,
           pollDelayNanoseconds: rebootPollDelayNanoseconds
         )
+        let tilesWereTouched: Bool
+        switch rebootJournal.tileActivationOutcome {
+        case .switched: tilesWereTouched = true
+        case .notSwitched, nil:
+          guard rebootJournal.targetTileSetID == nil || rebootJournal.tileActivationOutcome == .notSwitched else {
+            throw ApplyPipelineError.postflightMismatch(
+              "tile-bearing rollback lacks a durable verified activation outcome"
+            )
+          }
+          tilesWereTouched = false
+        }
         let verification = try await waitForRollbackVerification(
           context: verificationContext,
-          tilesWereTouched: context.journal.targetTileSetID != nil,
+          tilesWereTouched: tilesWereTouched,
           timeout: 900
         )
         details.append("post-rollback source/Params/binary/cache/tiles/runtime verification passed")
@@ -3494,6 +3561,18 @@ public actor ApplyPipeline {
     tilesWereTouched: Bool
   ) throws {
     let snapshot = readback.deployment.snapshot
+    if journal.targetTileSetID != nil {
+      guard let outcome = journal.tileActivationOutcome,
+            tilesWereTouched == (outcome == .switched) else {
+        throw ApplyPipelineError.postflightMismatch(
+          "rollback tile-touch verification differs from the durable helper activation outcome"
+        )
+      }
+    } else if tilesWereTouched {
+      throw ApplyPipelineError.postflightMismatch(
+        "rollback cannot verify touched tiles without a durable target identity"
+      )
+    }
     guard snapshot.isOffroad, !snapshot.isOnroad, !snapshot.mapLookaheadEnabled,
           readback.runtimeEndIsOffroad, !readback.runtimeEndIsOnroad,
           !readback.runtimeEndMapLookaheadEnabled else {

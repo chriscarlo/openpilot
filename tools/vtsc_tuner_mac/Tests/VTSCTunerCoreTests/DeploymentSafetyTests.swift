@@ -459,6 +459,40 @@ import Testing
     )
   }
 
+  let recordedDirectNoSwitch = TiciTileSetDeploymentService(
+    processRunner: TileRollbackRunner(output: """
+    {"operation":"rollback","tile_activation_not_switched":true,"active_tile_set_id":"\(preservedCanonicalID)","previous_tile_set_id":"\(preservedCanonicalID)"}
+    """),
+    transactionHelperURL: helper
+  )
+  let recordedResult = try await recordedDirectNoSwitch.rollbackWithOutcome(
+    profile: "commaAdb",
+    expectedActivatedTileSetID: expectedTileSetID,
+    expectedRestoredTileSetID: preservedCanonicalID,
+    expectedGitBranch: "chauffeur-exp01",
+    expectedGitHead: String(repeating: "a", count: 40)
+  )
+  #expect(recordedResult == TiciTileRollbackResult(
+    restoredTileSetID: preservedCanonicalID,
+    activationOutcome: .notSwitched
+  ))
+
+  let incompleteRecordedDirectNoSwitch = TiciTileSetDeploymentService(
+    processRunner: TileRollbackRunner(output: """
+    {"operation":"rollback","tile_activation_not_switched":true,"previous_tile_set_id":"\(preservedCanonicalID)"}
+    """),
+    transactionHelperURL: helper
+  )
+  await #expect(throws: TiciTileSetDeploymentError.activationIdentityMissing(preservedCanonicalID)) {
+    try await incompleteRecordedDirectNoSwitch.rollbackWithOutcome(
+      profile: "commaAdb",
+      expectedActivatedTileSetID: expectedTileSetID,
+      expectedRestoredTileSetID: preservedCanonicalID,
+      expectedGitBranch: "chauffeur-exp01",
+      expectedGitHead: String(repeating: "a", count: 40)
+    )
+  }
+
   let mismatch = TiciTileSetDeploymentService(
     processRunner: TileRollbackRunner(output: #"{"operation":"rollback","rolled_back_tile_set_id":"old","tile_activation_not_observed":true}"#),
     transactionHelperURL: helper

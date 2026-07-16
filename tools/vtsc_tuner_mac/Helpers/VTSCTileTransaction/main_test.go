@@ -569,6 +569,13 @@ func TestSameIDDirectTreeReturnsProvenNoSwitchOnlyForExactRequestedContent(t *te
 				if err == nil || !strings.Contains(err.Error(), "differs from requested target") {
 					t.Fatalf("same-ID mismatched content error = %v", err)
 				}
+				rolledBack, rollbackErr := engine.rollback("fresh", "fresh", "")
+				if rollbackErr != nil {
+					t.Fatalf("same-ID rejected activation no-switch rollback: %v", rollbackErr)
+				}
+				if !rolledBack.TileActivationNotSwitched || rolledBack.PreviousTileSetID != "fresh" {
+					t.Fatalf("same-ID rejected activation rollback = %+v", rolledBack)
+				}
 			} else {
 				if err != nil {
 					t.Fatalf("same-ID equivalent activation: %v", err)
@@ -597,6 +604,41 @@ func TestSameIDDirectTreeReturnsProvenNoSwitchOnlyForExactRequestedContent(t *te
 				t.Fatalf("same-ID case changed direct active topology: isLink=%t err=%v", isLink, err)
 			}
 		})
+	}
+}
+
+func TestNoTransactionRollbackUsesOnlyExactRecordedDirectAdjacentIdentity(t *testing.T) {
+	root := newTestRoot(t)
+	legacyTile := filepath.Join(root, activeOfflineName, "38", "-121", "legacy-tile")
+	if err := os.MkdirAll(filepath.Dir(legacyTile), 0o755); err != nil {
+		t.Fatalf("create direct tree: %v", err)
+	}
+	if err := os.WriteFile(legacyTile, bytes.Repeat([]byte("legacy"), 20), 0o644); err != nil {
+		t.Fatalf("write direct tile: %v", err)
+	}
+	previous := strings.Repeat("c", 64)
+	if err := os.WriteFile(
+		filepath.Join(root, "offline.manifest.json"),
+		[]byte(fmt.Sprintf("{\"tile_set_id\":%q}\n", previous)),
+		0o644,
+	); err != nil {
+		t.Fatalf("write adjacent manifest: %v", err)
+	}
+	engine := testEngine(t, root)
+	target := strings.Repeat("f", 64)
+
+	result, err := engine.rollback(target, previous, "")
+	if err != nil {
+		t.Fatalf("before-journal exact direct rollback: %v", err)
+	}
+	if !result.TileActivationNotSwitched || result.ActiveTileSetID != previous || result.PreviousTileSetID != previous {
+		t.Fatalf("before-journal exact direct rollback = %+v", result)
+	}
+	if _, err := engine.rollback(target, strings.Repeat("d", 64), ""); err == nil || !strings.Contains(err.Error(), "adjacent previous identity") {
+		t.Fatalf("mismatched recorded direct identity error = %v", err)
+	}
+	if _, isLink, err := symlinkTarget(engine.activePath()); err != nil || isLink {
+		t.Fatalf("direct identity proof changed active topology: isLink=%t err=%v", isLink, err)
 	}
 }
 
@@ -650,6 +692,101 @@ func TestActivationDurabilityBoundariesAlwaysPermitDeterministicFreshRollback(t 
 			}
 			if _, err := os.Lstat(engine.switchPath("fresh")); !os.IsNotExist(err) {
 				t.Fatalf("recovery at %s retained switch: %v", point, err)
+			}
+		})
+	}
+}
+
+func TestPreExchangeRollbackReportsExactRecordedPreviousIdentity(t *testing.T) {
+	root := newTestRoot(t)
+	legacyTile := filepath.Join(root, activeOfflineName, "38", "-121", "legacy-tile")
+	if err := os.MkdirAll(filepath.Dir(legacyTile), 0o755); err != nil {
+		t.Fatalf("create direct tree: %v", err)
+	}
+	if err := os.WriteFile(legacyTile, bytes.Repeat([]byte("legacy"), 20), 0o644); err != nil {
+		t.Fatalf("write direct tile: %v", err)
+	}
+	previous := strings.Repeat("c", 64)
+	if err := os.WriteFile(
+		filepath.Join(root, "offline.manifest.json"),
+		[]byte(fmt.Sprintf("{\"tile_set_id\":%q}\n", previous)),
+		0o644,
+	); err != nil {
+		t.Fatalf("write adjacent manifest: %v", err)
+	}
+	stage := writeStage(t, root, "fresh")
+	engine := testEngine(t, root)
+	if _, err := engine.activate(stage, "fresh", "after_generation"); err == nil {
+		t.Fatal("injected activation unexpectedly succeeded")
+	}
+
+	result, err := engine.rollback("fresh", previous, "")
+	if err != nil {
+		t.Fatalf("pre-exchange rollback with recorded previous: %v", err)
+	}
+	if !result.TileActivationNotSwitched || result.ActiveTileSetID != previous || result.PreviousTileSetID != previous {
+		t.Fatalf("pre-exchange recorded no-switch result = %+v", result)
+	}
+}
+
+func TestPreExchangeRollbackLostReplyReplaysAsExactNoSwitchWithoutOwnedArtifacts(t *testing.T) {
+	for _, point := range []string{"after_journal", "after_generation", "after_legacy", "after_switch_publish"} {
+		t.Run(point, func(t *testing.T) {
+			root := newTestRoot(t)
+			legacyTile := filepath.Join(root, activeOfflineName, "38", "-121", "legacy-tile")
+			if err := os.MkdirAll(filepath.Dir(legacyTile), 0o755); err != nil {
+				t.Fatalf("create direct tree: %v", err)
+			}
+			original := bytes.Repeat([]byte("legacy"), 20)
+			if err := os.WriteFile(legacyTile, original, 0o644); err != nil {
+				t.Fatalf("write direct tile: %v", err)
+			}
+			stage := writeStage(t, root, "fresh")
+			engine := testEngine(t, root)
+			if _, err := engine.activate(stage, "fresh", point); err == nil {
+				t.Fatalf("injected %s activation unexpectedly succeeded", point)
+			}
+
+			first, err := engine.rollback("fresh", "", "")
+			if err != nil {
+				t.Fatalf("first rollback after %s: %v", point, err)
+			}
+			if !first.TileActivationNotSwitched || !first.Recovered {
+				t.Fatalf("first no-switch result after %s = %+v", point, first)
+			}
+			// Simulate loss of the successful helper reply. A fresh process has only
+			// the settled filesystem state and must reach the identical answer.
+			second, err := engine.rollback("fresh", "", "")
+			if err != nil {
+				t.Fatalf("replayed rollback after lost %s reply: %v", point, err)
+			}
+			if !second.TileActivationNotSwitched || second.RolledBackTileSetID != "" || second.PreviousTileSetID != "" {
+				t.Fatalf("replayed no-switch result after %s = %+v", point, second)
+			}
+
+			actual, err := os.ReadFile(legacyTile)
+			if err != nil || !bytes.Equal(actual, original) {
+				t.Fatalf("settlement changed original direct tree after %s: err=%v", point, err)
+			}
+			if _, isLink, err := symlinkTarget(engine.activePath()); err != nil || isLink {
+				t.Fatalf("settlement changed active direct topology after %s: isLink=%t err=%v", point, isLink, err)
+			}
+			if _, err := os.Lstat(engine.previousPath()); !os.IsNotExist(err) {
+				t.Fatalf("settlement created previous pointer after %s: %v", point, err)
+			}
+			if _, err := os.Lstat(engine.transactionPath()); !os.IsNotExist(err) {
+				t.Fatalf("settlement retained helper transaction after %s: %v", point, err)
+			}
+			for _, pattern := range []string{
+				filepath.Join(generationDirectory, "*"),
+				filepath.Join(generationDirectory, ".*.building"),
+				".offline-*",
+				".retained-*",
+			} {
+				matches, err := filepath.Glob(filepath.Join(root, pattern))
+				if err != nil || len(matches) != 0 {
+					t.Fatalf("settlement retained owned artifacts after %s for %s: %v err=%v", point, pattern, matches, err)
+				}
 			}
 		})
 	}

@@ -64,6 +64,7 @@ enum TiciDeploymentSnapshotDecodeError: LocalizedError, Equatable, Sendable {
   case invalidBootID(String)
   case invalidEpochMilliseconds(String)
   case malformedCacheListing(String)
+  case malformedTileManifest(String)
   case qCurveMarkerMissing(String)
   case malformedLiveMapDataControllerStatus(String)
 
@@ -79,6 +80,8 @@ enum TiciDeploymentSnapshotDecodeError: LocalizedError, Equatable, Sendable {
       "The tici snapshot reported invalid remote_epoch_milliseconds=\(value.debugDescription)."
     case let .malformedCacheListing(line):
       "The tici mapd cache listing is malformed: \(line)"
+    case let .malformedTileManifest(value):
+      "The tici active tile manifest/topology is malformed: \(value)"
     case let .qCurveMarkerMissing(marker):
       "The tici Q-curve source is missing \(marker)."
     case let .malformedLiveMapDataControllerStatus(value):
@@ -190,7 +193,7 @@ enum TiciDeploymentSnapshotDecoder {
       activeMapdSHA256: optionalText(wire, .activeMapdSHA256) ?? "",
       cachedMapdPath: cached?.path ?? "",
       cachedMapdSHA256: cached?.sha256,
-      activeTileSetID: tileSetID(from: wire[.tileManifest])
+      activeTileSetID: try tileSetID(from: wire[.tileManifest])
     )
   }
 
@@ -336,10 +339,17 @@ enum TiciDeploymentSnapshotDecoder {
       .last
   }
 
-  private static func tileSetID(from raw: Data?) -> String? {
-    guard let raw, !raw.isEmpty,
-          let object = try? JSONSerialization.jsonObject(with: raw) as? [String: Any]
-    else { return nil }
-    return object["tile_set_id"] as? String
+  private static func tileSetID(from raw: Data?) throws -> String? {
+    guard let raw else { return nil }
+    guard !raw.isEmpty,
+          let object = try? JSONSerialization.jsonObject(with: raw) as? [String: Any],
+          let tileSetID = object["tile_set_id"] as? String,
+          tileSetID.range(of: #"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"#, options: .regularExpression) != nil
+    else {
+      throw TiciDeploymentSnapshotDecodeError.malformedTileManifest(
+        String(decoding: raw, as: UTF8.self)
+      )
+    }
+    return tileSetID
   }
 }

@@ -1,5 +1,10 @@
 import Foundation
 
+public enum TiciTileActivationOutcome: String, Codable, Equatable, Sendable {
+  case switched
+  case notSwitched
+}
+
 public struct TiciStagedTileSet: Equatable, Sendable {
   public var profile: String
   public var tileSetID: String
@@ -35,6 +40,16 @@ public struct TiciTileActivationResult: Equatable, Sendable {
     self.previousTileSetID = previousTileSetID
     self.targetAlreadyActive = targetAlreadyActive
     self.commandOutput = commandOutput
+  }
+}
+
+public struct TiciTileRollbackResult: Equatable, Sendable {
+  public var restoredTileSetID: String?
+  public var activationOutcome: TiciTileActivationOutcome
+
+  public init(restoredTileSetID: String?, activationOutcome: TiciTileActivationOutcome) {
+    self.restoredTileSetID = restoredTileSetID
+    self.activationOutcome = activationOutcome
   }
 }
 
@@ -260,6 +275,22 @@ public struct TiciTileSetDeploymentService: Sendable {
     expectedGitBranch: String,
     expectedGitHead: String
   ) async throws -> String? {
+    try await rollbackWithOutcome(
+      profile: profile,
+      expectedActivatedTileSetID: expectedActivatedTileSetID,
+      expectedRestoredTileSetID: expectedRestoredTileSetID,
+      expectedGitBranch: expectedGitBranch,
+      expectedGitHead: expectedGitHead
+    ).restoredTileSetID
+  }
+
+  public func rollbackWithOutcome(
+    profile: String,
+    expectedActivatedTileSetID: String? = nil,
+    expectedRestoredTileSetID: String? = nil,
+    expectedGitBranch: String,
+    expectedGitHead: String
+  ) async throws -> TiciTileRollbackResult {
     try Self.validateProfile(profile)
     if let expectedActivatedTileSetID { try Self.validateTileSetID(expectedActivatedTileSetID) }
     if let expectedRestoredTileSetID { try Self.validateStoredTileSetID(expectedRestoredTileSetID) }
@@ -294,7 +325,10 @@ public struct TiciTileSetDeploymentService: Sendable {
         guard decoded.activeTileSetID == expectedRestoredTileSetID else {
           throw TiciTileSetDeploymentError.activationIdentityMissing(expectedActivatedTileSetID)
         }
-        return expectedRestoredTileSetID
+        return TiciTileRollbackResult(
+          restoredTileSetID: expectedRestoredTileSetID,
+          activationOutcome: .switched
+        )
       }
       guard let resolved = decoded.previousTileSetID else {
         throw TiciTileSetDeploymentError.activationIdentityMissing(expectedActivatedTileSetID)
@@ -306,7 +340,7 @@ public struct TiciTileSetDeploymentService: Sendable {
       else {
         throw TiciTileSetDeploymentError.activationIdentityMissing(resolved)
       }
-      return resolved
+      return TiciTileRollbackResult(restoredTileSetID: resolved, activationOutcome: .switched)
     }
     if let expectedRestoredTileSetID, decoded.tileActivationNotSwitched != true {
       guard decoded.rolledBackTileSetID == expectedRestoredTileSetID else {
@@ -318,13 +352,23 @@ public struct TiciTileSetDeploymentService: Sendable {
     }
     if decoded.tileActivationNotSwitched == true {
       guard decoded.rolledBackTileSetID == nil,
-            decoded.previousTileSetID == nil,
             decoded.previousTileSetProvenance == nil,
             decoded.previousTileSetTargetID == nil
       else {
         throw TiciTileSetDeploymentError.invalidHelperOutput(result.standardOutput)
       }
-      return expectedRestoredTileSetID
+      if let expectedRestoredTileSetID {
+        guard decoded.previousTileSetID == expectedRestoredTileSetID,
+              decoded.activeTileSetID == expectedRestoredTileSetID else {
+          throw TiciTileSetDeploymentError.activationIdentityMissing(expectedRestoredTileSetID)
+        }
+      } else if decoded.previousTileSetID != nil || decoded.activeTileSetID != nil {
+        throw TiciTileSetDeploymentError.invalidHelperOutput(result.standardOutput)
+      }
+      return TiciTileRollbackResult(
+        restoredTileSetID: expectedRestoredTileSetID,
+        activationOutcome: .notSwitched
+      )
     }
     guard let restored = decoded.rolledBackTileSetID else {
       throw TiciTileSetDeploymentError.invalidHelperOutput(result.standardOutput)
@@ -345,7 +389,7 @@ public struct TiciTileSetDeploymentService: Sendable {
         throw TiciTileSetDeploymentError.activationIdentityMissing(restored)
       }
     }
-    return restored
+    return TiciTileRollbackResult(restoredTileSetID: restored, activationOutcome: .switched)
   }
 
   public static func stagingRoot(tileSetID: String) -> String {

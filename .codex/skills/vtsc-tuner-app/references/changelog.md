@@ -4,6 +4,26 @@ Reverse-chronological. Add a new dated section for every substantive change.
 
 ## 2026-07-16 — whole-curve-v3 continuous local curvature
 
+- Made helper rollback settlement replay-safe before pointer exchange. The
+  target-bound transaction remains durable until every exact helper-owned
+  generation, build, switch, temporary link, and retained-tree artifact has
+  been validated, removed, and parent-synced. Losing a successful no-switch
+  reply now leaves a clean topology that returns the same no-switch on retry.
+- Persisted the helper's explicit `switched` / `notSwitched` outcome in the
+  production journal and made rollback postflight use it instead of inferring
+  tile mutation from target IDs. Same-target and before-activation no-switch
+  paths can now restore Git/Params/mapd, reboot, certify the unchanged active
+  tile identity, and return idempotent success in a fresh process.
+- Added exact unchanged-direct-tree rollback proof for failures before helper
+  transaction creation. A valid adjacent manifest must match the journal's
+  recorded previous identity and the helper reports that exact ID as both
+  active and previous; missing, mismatched, pointer, or transaction-artifact
+  evidence fails closed. This also lets a same-ID content mismatch reject tile
+  activation with zero mutation without blocking rollback of earlier legs.
+- Restricted active-tile snapshot fallback to a real non-symlink direct
+  `offline/` directory. A missing path, broken pointer, or canonical generation
+  pointer without a readable embedded manifest is explicit invalid topology
+  rather than being certified by a stale adjacent manifest.
 - Made direct-tree same-set activation a proven idempotent no-op. When the adjacent canonical manifest already names the requested tile set, the helper verifies the complete direct tree against both that manifest and the staged artifact, returns `target_already_active` without a prior-generation result, and performs zero transaction/generation/switch/exchange mutation. Any same-ID content mismatch fails before mutation; Swift preserves the snapshot's same target/prior identity and exact journal bytes.
 - Moved the durable target-bound tile transaction ahead of every generation build and switch-link publication. Injected failures before the journal, after its durable write, after switch publication, and after exchange all recover deterministically; an orphan switch can no longer precede transaction authority.
 - Closed nil-prior rollback's active-manifest shortcut. Without a durable matching transaction, a target-inactive recovery now requires the exact immutable post-rollback topology: a distinct target-bound migrated active generation, `offline.previous` pointing to the complete deployed target generation, verified content digests, no conflicting temporary artifacts, and the exact retained direct-tree provenance. Matching-target/no-previous and wrong-previous fixtures fail closed, while transaction-bound and complete-topology fixtures succeed.
@@ -30,7 +50,7 @@ Reverse-chronological. Add a new dated section for every substantive change.
 - Made new transactions fail closed across released app versions. A durable `preflightReserved` journal is created under the global production-owner lock before host preflight work; released readers cannot decode that lifecycle and therefore cannot start a concurrent deployment. New deployments hand off as `awaitingOutdoorPostflight`, while current code still resumes or aborts legacy `awaitingPostflight` journals such as B174. Unclaimed reservations are removed on normal early failure or by the next peer-free proven global owner after a crash, whether target identity had already been populated or not.
 - Removed the weaker original-deployer completion path. A successful install now durably hands off as “installed, outdoor proof pending”; only the existing two-phase Resume Pending Outdoor Postflight observer may complete the journal after onroad controller-ready evidence followed by a stable offroad read. Rollback certification now requires exact branch, exact optional prior tile identity, stable start/end safety brackets, and retries only explicit transport unavailability rather than hard identity failures.
 - Extracted the lead launch and relatch math into `selfdrive/controls/lib/longitudinal_lead_helpers.py` as the single Acados-free production/test authority. `long_mpc.py` and the VTSC pipeline harness import the same functions, with reviewer goldens pinning launch factor `0.8666666667` and required relatch decel `1.5822784810` plus zero/oncoming/decelerating-lead coverage.
-- Verification: tile decoder and transaction-helper Go tests pass; mapd Go passes; mapd Python passes 63 tests plus 11 subtests; the complete VTSC controller/scenario/harness gate passes 202 tests; and a true-clean native Swift build passes 204 Core plus 40 App tests. The rebuilt Release bundle passes strict deep code-sign verification. No tici mutation or push was performed.
+- Verification: tile decoder and transaction-helper Go tests pass; mapd Go passes; mapd Python passes 63 tests plus 11 subtests; the complete VTSC controller/scenario/harness gate passes 202 tests; and a true-clean native Swift build plus isolated bounded execution passes 207 Core plus 40 App tests. The rebuilt Release bundle passes strict deep code-sign verification. No tici mutation or push was performed.
 - Hardened the pending outdoor postflight transaction after independent concurrency review. Resume now retries only explicit wait states: OpenSSH transport exit 255 or a bounded timeout, pending real GPS/controller-readiness before capture, and a not-yet-stable offroad transition after capture. Branch/head/dirty, lookahead, Params/Q, mapd/cache/build/tile, present-profile estimator/hash/semantics, and captured-profile continuity fail immediately. Two `ContinuousClock` phase budgets give ignition-off its own full grace window and cap each snapshot to the remaining budget.
 - Made completion and rollback mutually exclusive durable schema-1 journal resolutions. Legacy journals without the optional field still decode as awaiting postflight; rollback claims set the legacy `completed=true` sentinel so an older app cannot mistake an in-progress rollback for pending completion. Completion, rollback claim, and rollback settlement use the same short per-journal flock plus atomic readback. Completed metadata is preserved idempotently across stale instances, orphaned/failed rollback claims have an explicit fresh-safety-gated idempotent recovery path, and an original deployer reports peer completion as success instead of a false rollback failure.
 - Defined an honest non-cancellable journal commit point. Cancel remains active during polling and final locked revalidation, becomes disabled when finalization begins, and the task reports the atomic journal readback rather than claiming an unchanged journal after a late click. With the kill switch disabled, the outdoor copy now accurately says captured evidence proves the profile would be accepted when Map Lookahead is later enabled; only that phase-change event tells the user to turn ignition off.

@@ -111,6 +111,10 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
   /// This is lifecycle evidence, not part of the original deployment
   /// identity, and is durably filled before any post-activation continuation.
   public var resolvedPreviousTileSetID: String?
+  /// Exact verified helper outcome. This distinguishes a true same-target
+  /// no-switch from pathological equal-ID mutation and survives reboot/fresh
+  /// rollback recovery without changing immutable deployment identity.
+  public var tileActivationOutcome: TiciTileActivationOutcome?
   /// Exact Linux boot identity captured and durably synced immediately before
   /// the deployment reboot. Optional only for schema-1 compatibility; a
   /// missing value can never certify the immediate post-reboot install.
@@ -204,6 +208,7 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
     previousTileSetID: String? = nil,
     targetTileSetID: String? = nil,
     resolvedPreviousTileSetID: String? = nil,
+    tileActivationOutcome: TiciTileActivationOutcome? = nil,
     deploymentPreRebootBootID: String? = nil,
     rollbackPreRebootBootID: String? = nil,
     rebootSent: Bool = false,
@@ -234,6 +239,7 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
     self.previousTileSetID = previousTileSetID
     self.targetTileSetID = targetTileSetID
     self.resolvedPreviousTileSetID = resolvedPreviousTileSetID
+    self.tileActivationOutcome = tileActivationOutcome
     self.deploymentPreRebootBootID = deploymentPreRebootBootID
     self.rollbackPreRebootBootID = rollbackPreRebootBootID
     self.rebootSent = rebootSent

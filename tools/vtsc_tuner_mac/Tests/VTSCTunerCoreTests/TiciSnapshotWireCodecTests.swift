@@ -51,6 +51,8 @@ import Testing
   #expect(command.contains("tile_manifest"))
   #expect(command.contains("/data/media/0/osm/offline/.tileset-manifest.json"))
   #expect(command.contains("/data/media/0/osm/offline.manifest.json"))
+  #expect(command.contains(#"[ -L "$tile_offline" ]"#))
+  #expect(command.contains(#"[ -d "$tile_offline" ] && [ ! -L "$tile_offline" ]"#))
   #expect(command.contains("mapd_cache_listing"))
 
   let process = Process()
@@ -63,6 +65,52 @@ import Testing
   input.fileHandleForWriting.closeFile()
   process.waitUntilExit()
   #expect(process.terminationStatus == 0)
+}
+
+@Test func tileManifestProbeFallsBackOnlyForARealDirectTree() throws {
+  let root = FileManager.default.temporaryDirectory
+    .appendingPathComponent("vtsc-tile-probe-\(UUID().uuidString)", isDirectory: true)
+  defer { try? FileManager.default.removeItem(at: root) }
+  try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+  let offline = root.appendingPathComponent("offline", isDirectory: true)
+  let adjacent = root.appendingPathComponent("offline.manifest.json")
+  let tileID = String(repeating: "a", count: 64)
+  try FileManager.default.createDirectory(at: offline, withIntermediateDirectories: true)
+  try "{\"tile_set_id\":\"\(tileID)\"}\n".write(to: adjacent, atomically: true, encoding: .utf8)
+
+  let direct = try runTileManifestProbeShell(offline: offline, adjacent: adjacent)
+  var fields = runtimeSnapshotMinimumFields()
+  fields[.tileManifest] = Data(direct.utf8)
+  #expect(try TiciDeploymentSnapshotDecoder.decodeRead(
+    TiciSnapshotWireCodec.encode(.init(rawValues: fields))
+  ).snapshot.activeTileSetID == tileID)
+
+  func expectInvalidTopology(_ label: String) throws {
+    let result = try runTileManifestProbeShell(offline: offline, adjacent: adjacent)
+    #expect(result.hasPrefix("invalid:"), "\(label) did not emit explicit invalid topology")
+    var invalidFields = runtimeSnapshotMinimumFields()
+    invalidFields[.tileManifest] = Data(result.utf8)
+    #expect(throws: TiciDeploymentSnapshotDecodeError.self) {
+      try TiciDeploymentSnapshotDecoder.decodeRead(
+        TiciSnapshotWireCodec.encode(.init(rawValues: invalidFields))
+      )
+    }
+  }
+
+  try FileManager.default.removeItem(at: offline)
+  try expectInvalidTopology("missing active path with stale adjacent manifest")
+
+  try FileManager.default.createSymbolicLink(
+    at: offline,
+    withDestinationURL: root.appendingPathComponent("missing-generation/offline")
+  )
+  try expectInvalidTopology("broken generation symlink")
+
+  try FileManager.default.removeItem(at: offline)
+  let generation = root.appendingPathComponent("tile-generations/current/offline", isDirectory: true)
+  try FileManager.default.createDirectory(at: generation, withIntermediateDirectories: true)
+  try FileManager.default.createSymbolicLink(at: offline, withDestinationURL: generation)
+  try expectInvalidTopology("generation symlink without embedded manifest")
 }
 
 @Test func deploymentSnapshotDecoderOwnsQCacheAndManifestInterpretation() throws {
@@ -375,6 +423,21 @@ private func runManagerProbeShell(repository: URL, procRoot: URL, pgrep: URL) th
   emit_text() { manager_probe_result=$2; }
   \(fragment)
   printf '%s' "$manager_probe_result"
+  """)
+}
+
+private func runTileManifestProbeShell(offline: URL, adjacent: URL) throws -> String {
+  let fragment = TiciSnapshotWireCommandBuilder.tileManifestProbeShellFragment(
+    offlinePath: offline.path,
+    adjacentManifestPath: adjacent.path
+  )
+  return try runShell("""
+  set -eu
+  tile_probe_result=
+  emit_file() { tile_probe_result=$(cat "$2"); }
+  emit_text() { tile_probe_result=$2; }
+  \(fragment)
+  printf '%s' "$tile_probe_result"
   """)
 }
 
