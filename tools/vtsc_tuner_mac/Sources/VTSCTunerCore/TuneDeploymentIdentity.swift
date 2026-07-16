@@ -79,6 +79,7 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
 
   public enum Resolution: String, Codable, Equatable, Sendable {
     case awaitingPostflight
+    case mutationInProgress
     case completed
     case rollbackInProgress
     case rolledBack
@@ -133,8 +134,7 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
       previousCachedMapdSHA256 == other.previousCachedMapdSHA256 &&
       mapdRollbackPath == other.mapdRollbackPath &&
       previousTileSetID == other.previousTileSetID &&
-      targetTileSetID == other.targetTileSetID &&
-      rebootSent == other.rebootSent
+      targetTileSetID == other.targetTileSetID
   }
 
   public func validateResolutionConsistency() throws {
@@ -145,7 +145,7 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
           "awaitingPostflight requires completed=false"
         )
       }
-    case .completed, .rollbackInProgress, .rolledBack, .rollbackFailed:
+    case .mutationInProgress, .completed, .rollbackInProgress, .rolledBack, .rollbackFailed:
       guard completed else {
         throw DeploymentRollbackJournalError.inconsistentResolution(
           "\(effectiveResolution.rawValue) requires the legacy completed=true sentinel"
@@ -294,22 +294,14 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
     directory explicitDirectory: URL? = nil,
     fileManager: FileManager = .default
   ) throws -> [RecoverableRollback] {
-    let candidates: [(Self, URL)]
-    if let explicitURL {
-      let url = explicitURL.standardizedFileURL
-      candidates = [(try load(from: url, fileManager: fileManager), url)]
-    } else {
-      let directory = try explicitDirectory?.standardizedFileURL ?? defaultDirectory(fileManager: fileManager)
-      guard fileManager.fileExists(atPath: directory.path) else { return [] }
-      let urls = try fileManager.contentsOfDirectory(
-        at: directory,
-        includingPropertiesForKeys: [.isRegularFileKey],
-        options: [.skipsHiddenFiles]
-      ).filter { $0.pathExtension.lowercased() == "json" }.sorted { $0.path < $1.path }
-      candidates = try urls.map { (try load(from: $0, fileManager: fileManager), $0.standardizedFileURL) }
-    }
+    let candidates = try journalCandidates(
+      from: explicitURL,
+      directory: explicitDirectory,
+      fileManager: fileManager
+    )
     let recoverable = candidates.filter {
       $0.0.effectiveResolution == .rollbackInProgress ||
+        $0.0.effectiveResolution == .mutationInProgress ||
         $0.0.effectiveResolution == .rollbackFailed ||
         ($0.0.effectiveResolution == .rolledBack && !$0.0.completed)
     }
@@ -318,6 +310,44 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
       else { throw DeploymentRollbackJournalError.notRecoverableRollback }
       return RecoverableRollback(journal: journal, url: url)
     }
+  }
+
+  /// Every journal that represents a deployment which must be resolved before
+  /// another car-facing transaction can safely begin. A rebooted awaiting
+  /// journal belongs to outdoor postflight; rollback states belong to guarded
+  /// rollback recovery.
+  public static func unresolvedProductionJournals(
+    directory explicitDirectory: URL? = nil,
+    fileManager: FileManager = .default
+  ) throws -> [RecoverableRollback] {
+    try journalCandidates(directory: explicitDirectory, fileManager: fileManager).compactMap { journal, url in
+      let unresolvedAwaiting = journal.effectiveResolution == .awaitingPostflight && journal.rebootSent
+      let unresolvedRollback = journal.effectiveResolution == .rollbackInProgress ||
+        journal.effectiveResolution == .mutationInProgress ||
+        journal.effectiveResolution == .rollbackFailed ||
+        (journal.effectiveResolution == .rolledBack && !journal.completed)
+      guard unresolvedAwaiting || unresolvedRollback else { return nil }
+      return RecoverableRollback(journal: journal, url: url)
+    }
+  }
+
+  private static func journalCandidates(
+    from explicitURL: URL? = nil,
+    directory explicitDirectory: URL? = nil,
+    fileManager: FileManager = .default
+  ) throws -> [(Self, URL)] {
+    if let explicitURL {
+      let url = explicitURL.standardizedFileURL
+      return [(try load(from: url, fileManager: fileManager), url)]
+    }
+    let directory = try explicitDirectory?.standardizedFileURL ?? defaultDirectory(fileManager: fileManager)
+    guard fileManager.fileExists(atPath: directory.path) else { return [] }
+    let urls = try fileManager.contentsOfDirectory(
+      at: directory,
+      includingPropertiesForKeys: [.isRegularFileKey],
+      options: [.skipsHiddenFiles]
+    ).filter { $0.pathExtension.lowercased() == "json" }.sorted { $0.path < $1.path }
+    return try urls.map { (try load(from: $0, fileManager: fileManager), $0.standardizedFileURL) }
   }
 
   public func validatePendingPostflight() throws {

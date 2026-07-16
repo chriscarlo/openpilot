@@ -12,6 +12,7 @@ import numpy as np
 
 from openpilot.selfdrive.modeld.constants import ModelConstants
 from openpilot.selfdrive.controls.lib.longitudinal_response_model import (
+  DEFAULT_COMFORT_BRAKE,
   DEFAULT_CRUISE_MAX_ACCEL,
   DEFAULT_CRUISE_MIN_ACCEL,
   build_cruise_response_model,
@@ -194,7 +195,41 @@ def install_fake_long_mpc(*, module_name: str = 'openpilot.selfdrive.controls.li
 
   fake = types.ModuleType(module_name)
   fake.LongitudinalMpc = FakeLongitudinalMpc
+  # Keep the fake module's import surface aligned with the real long_mpc
+  # module. The main planner imports this shared response-model constant even
+  # though these VTSC flow tests do not exercise the Acados implementation.
+  fake.COMFORT_BRAKE = DEFAULT_COMFORT_BRAKE
   fake.T_IDXS = list(ModelConstants.T_IDXS)
+
+  def get_headway_follow_distance(v_ego, t_follow) -> float:
+    return 6.0 + float(t_follow) * float(v_ego)
+
+  def desired_follow_distance(v_ego, v_lead, t_follow=1.5) -> float:
+    if t_follow is None:
+      t_follow = 1.5
+    return (
+      float(v_ego) ** 2 / (2.0 * DEFAULT_COMFORT_BRAKE) +
+      get_headway_follow_distance(v_ego, t_follow) -
+      float(v_lead) ** 2 / (2.0 * DEFAULT_COMFORT_BRAKE)
+    )
+
+  def get_low_speed_launch_follow_factor(_v_ego, _lead, _t_follow) -> float:
+    return 0.0
+
+  def compute_relatch_required_decel(v_ego, lead, t_follow, _tuning=None) -> float:
+    if lead is None or not getattr(lead, 'status', False):
+      return 0.0
+    v_ego = float(v_ego)
+    v_lead = float(getattr(lead, 'vLead', v_ego) or v_ego)
+    v_rel = float(getattr(lead, 'vRel', v_lead - v_ego) or 0.0)
+    closing = max(0.0, v_ego - max(0.0, v_lead), -v_rel)
+    surplus = float(getattr(lead, 'dRel', 0.0) or 0.0) - get_headway_follow_distance(v_ego, t_follow)
+    return closing ** 2 / (2.0 * max(surplus, 0.5))
+
+  fake.get_headway_follow_distance = get_headway_follow_distance
+  fake.desired_follow_distance = desired_follow_distance
+  fake.get_low_speed_launch_follow_factor = get_low_speed_launch_follow_factor
+  fake.compute_relatch_required_decel = compute_relatch_required_decel
 
   def get_low_speed_launch_follow_max_accel(_v_ego, _lead, _t_follow, base_max_accel: float) -> float:
     return float(base_max_accel)

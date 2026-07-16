@@ -252,7 +252,7 @@ public enum ApplyPipelineError: LocalizedError, Sendable {
     case let .postflightMismatch(reason):
       "Tici postflight verification failed: \(reason)"
     case let .unresolvedProductionRollbacks(urls):
-      "Resolve the recorded production rollback before starting another car-facing deployment: \(urls.map(\.lastPathComponent).joined(separator: ", "))."
+      "Resolve the recorded production transaction before starting another car-facing deployment. Use Resume Pending Outdoor Postflight for an awaiting journal, or Recover Interrupted Production Rollback for a mutation/rollback journal: \(urls.map(\.lastPathComponent).joined(separator: ", "))."
     }
   }
 }
@@ -537,7 +537,7 @@ public actor ApplyPipeline {
           throw ApplyPipelineError.postflightMismatch("completed resolution lacks its legacy completion sentinel")
         }
         completionAlreadyWon = true
-      case .rollbackInProgress, .rolledBack, .rollbackFailed:
+      case .mutationInProgress, .rollbackInProgress, .rolledBack, .rollbackFailed:
         throw ApplyPipelineError.postflightMismatch(
           "deployment rollback already owns or settled this journal; completion is forbidden"
         )
@@ -880,7 +880,7 @@ public actor ApplyPipeline {
   }
 
   private func productionPreflight(_ request: ApplyRequest) async throws -> RuntimeDeploymentPreflight {
-    let recoverable = try DeploymentRollbackJournal.recoverableRollbacks(
+    let recoverable = try DeploymentRollbackJournal.unresolvedProductionJournals(
       directory: request.rollbackJournalDirectoryURL
     )
     guard recoverable.isEmpty else {
@@ -1355,7 +1355,9 @@ public actor ApplyPipeline {
   ) async -> Bool {
     var deployment = preflight
     var remoteMutationStarted = false
-    var tilesMayHaveActivated = false
+    var deploymentOwnerLock: DeploymentRollbackJournalCompletionLock?
+    var handedOffToOutdoorPostflight = false
+    defer { deploymentOwnerLock?.unlock() }
     let identity = TuneDeploymentIdentity(tune: request.tune)
     do {
       await emit(.running, id: 5, text: "Reconfirming offroad/kill-switch safety immediately before mutation…", progress: progress)
@@ -1371,11 +1373,18 @@ public actor ApplyPipeline {
       )
       await emit(.succeeded, id: 5, text: "Tici is still parked/offroad with Map Lookahead disabled", progress: progress)
 
-      await emit(.running, id: 6, text: "Fast-forwarding the tici to the exact pushed commit…", progress: progress)
-      // The SSH result is not proof that the remote command did not run. Mark
-      // the transaction dirty before issuing the first mutating command so a
-      // transport failure cannot suppress rollback.
+      let ownerLock = try DeploymentRollbackJournal.acquireCompletionLock(for: deployment.journalURL)
+      deploymentOwnerLock = ownerLock
+      deployment.journal = try claimProductionMutation(
+        expected: deployment.journal,
+        at: deployment.journalURL
+      )
+      // In-process error handling may now roll back immediately; crash
+      // recovery does not depend on this flag because mutationInProgress is
+      // already fully durable and old-reader-safe.
       remoteMutationStarted = true
+
+      await emit(.running, id: 6, text: "Fast-forwarding the tici to the exact pushed commit…", progress: progress)
       let fastForward = try await checked(
         ProcessRequest(
           executableURL: Self.sshURL,
@@ -1438,7 +1447,6 @@ public actor ApplyPipeline {
         let staged = try await service.stageAndVerify(artifact: tileSet, profile: deployment.profile)
         // Activation can complete remotely even if SSH disconnects before the
         // result arrives. Recovery inspects the durable on-device transaction.
-        tilesMayHaveActivated = true
         let activated = try await service.activate(staged)
         await emit(
           .succeeded,
@@ -1460,8 +1468,15 @@ public actor ApplyPipeline {
       await emit(.running, id: 10, text: "Rebooting once after every artifact is ready…", progress: progress)
       _ = try await freshParkedSafetySnapshot(profile: deployment.profile)
       deployment.journal.rebootSent = true
-      try journalWriter(deployment.journal, deployment.journalURL)
+      try durablyRecordRebootIntent(deployment.journal, at: deployment.journalURL)
       try await sendReboot(profile: deployment.profile)
+      deployment.journal = try handoffToOutdoorPostflight(
+        expected: deployment.journal,
+        at: deployment.journalURL
+      )
+      deploymentOwnerLock?.unlock()
+      deploymentOwnerLock = nil
+      handedOffToOutdoorPostflight = true
       await emit(.succeeded, id: 10, text: "Single deployment reboot sent", progress: progress)
 
       await emit(.running, id: 11, text: "Waiting for the tici and verifying the complete postflight identity…", progress: progress)
@@ -1492,10 +1507,19 @@ public actor ApplyPipeline {
       )
       return await finish(true, progress: progress)
     } catch {
+      if handedOffToOutdoorPostflight {
+        await emitFailure(
+          id: 11,
+          text: "Deployment is installed; outdoor postflight remains pending",
+          error: error,
+          progress: progress
+        )
+        return await finish(false, progress: progress)
+      }
       if remoteMutationStarted {
         let resolution = await rollbackProductionDeploymentIfJournalPending(
-          preflight: deployment,
-          tilesActivated: tilesMayHaveActivated
+          context: ProductionRollbackContext(preflight: deployment),
+          ownerLock: deploymentOwnerLock
         )
         switch resolution {
         case let .alreadyCompleted(detail):
@@ -2101,7 +2125,7 @@ public actor ApplyPipeline {
       return current
     case .awaitingPostflight:
       break
-    case .rollbackInProgress, .rolledBack, .rollbackFailed:
+    case .mutationInProgress, .rollbackInProgress, .rolledBack, .rollbackFailed:
       throw ApplyPipelineError.postflightMismatch(
         "deployment rollback already owns or settled this journal; completion is forbidden"
       )
@@ -2154,6 +2178,48 @@ public actor ApplyPipeline {
     return completed
   }
 
+  func claimProductionMutation(
+    expected: DeploymentRollbackJournal,
+    at url: URL
+  ) throws -> DeploymentRollbackJournal {
+    let current = try DeploymentRollbackJournal.load(from: url)
+    guard current.hasSameDeploymentIdentity(as: expected),
+          current.effectiveResolution == .awaitingPostflight,
+          !current.completed,
+          !current.rebootSent
+    else {
+      throw ApplyPipelineError.postflightMismatch(
+        "production journal is not an untouched pre-mutation deployment"
+      )
+    }
+    var claimed = current
+    claimed.completed = true
+    claimed.resolution = .mutationInProgress
+    try durablyWriteLifecycleBarrier(claimed, at: url)
+    return claimed
+  }
+
+  func handoffToOutdoorPostflight(
+    expected: DeploymentRollbackJournal,
+    at url: URL
+  ) throws -> DeploymentRollbackJournal {
+    let current = try DeploymentRollbackJournal.load(from: url)
+    guard current.hasSameDeploymentIdentity(as: expected),
+          current.effectiveResolution == .mutationInProgress,
+          current.completed,
+          current.rebootSent
+    else {
+      throw ApplyPipelineError.postflightMismatch(
+        "production journal is not a rebooted mutation awaiting postflight handoff"
+      )
+    }
+    var awaiting = current
+    awaiting.completed = false
+    awaiting.resolution = .awaitingPostflight
+    try durablyWriteLifecycleBarrier(awaiting, at: url)
+    return awaiting
+  }
+
   /// Own rollback under the same stable journal transaction lock used by
   /// resume completion. A stale original app instance must never roll back a
   /// deployment that another instance has already certified as complete.
@@ -2162,27 +2228,34 @@ public actor ApplyPipeline {
     tilesActivated _: Bool
   ) async -> ProductionRollbackResolution {
     await rollbackProductionDeploymentIfJournalPending(
-      context: ProductionRollbackContext(preflight: preflight)
+      context: ProductionRollbackContext(preflight: preflight),
+      ownerLock: nil
     )
   }
 
   private func rollbackProductionDeploymentIfJournalPending(
-    context: ProductionRollbackContext
+    context: ProductionRollbackContext,
+    ownerLock: DeploymentRollbackJournalCompletionLock? = nil
   ) async -> ProductionRollbackResolution {
     let claimLock: DeploymentRollbackJournalCompletionLock
-    do {
-      claimLock = try DeploymentRollbackJournal.acquireCompletionLock(for: context.journalURL)
-    } catch {
-      return .rollbackFailed(
-        "rollback mutation was not attempted because journal transaction ownership could not be acquired: \(error.localizedDescription)\n" +
-          "journal retained at \(context.journalURL.path)"
-      )
+    let acquiredHere = ownerLock == nil
+    if let ownerLock {
+      claimLock = ownerLock
+    } else {
+      do {
+        claimLock = try DeploymentRollbackJournal.acquireCompletionLock(for: context.journalURL)
+      } catch {
+        return .rollbackFailed(
+          "rollback mutation was not attempted because journal transaction ownership could not be acquired: \(error.localizedDescription)\n" +
+            "journal retained at \(context.journalURL.path)"
+        )
+      }
     }
     // Rollback ownership is intentionally held through the complete device
     // mutation, verification, and terminal journal settlement. A process
     // crash releases flock and permits orphan recovery; a live owner excludes
     // every other app instance from concurrent rollback or completion.
-    defer { claimLock.unlock() }
+    defer { if acquiredHere { claimLock.unlock() } }
 
     let loadedCurrent: DeploymentRollbackJournal
     do {
@@ -2206,7 +2279,7 @@ public actor ApplyPipeline {
         return .rollbackFailed(
           "rollback mutation was not attempted because a corrupt completed resolution lacks its proof sentinel"
         )
-      case .rollbackInProgress, .rolledBack, .rollbackFailed:
+      case .mutationInProgress, .rollbackInProgress, .rolledBack, .rollbackFailed:
         // Never promote a torn rolledBack/rollbackFailed state directly. Move
         // it back to rollbackInProgress and replay full device restoration and
         // verification before any terminal rollback resolution is trusted.
@@ -2247,6 +2320,11 @@ public actor ApplyPipeline {
       // still performing the rollback. Recover the orphaned claim by rerunning
       // the idempotent rollback path after a fresh parked-state gate.
       break
+    case .mutationInProgress:
+      // The original deployer durably claimed mutation ownership before its
+      // first device write. If that owner died, acquiring this lock proves the
+      // claim is orphaned and must be converted to rollback ownership.
+      break
     case .rollbackFailed:
       // An explicit new invocation is the recovery action. Reacquiring the
       // resolution lock proves the previous owner is gone; after the fresh
@@ -2284,12 +2362,33 @@ public actor ApplyPipeline {
       }
     }
 
+    let durableClaim: DeploymentRollbackJournal
+    do {
+      durableClaim = try DeploymentRollbackJournal.load(from: context.journalURL)
+      guard durableClaim.hasSameDeploymentIdentity(as: current),
+            durableClaim.effectiveResolution == .rollbackInProgress,
+            durableClaim.completed
+      else {
+        throw ApplyPipelineError.postflightMismatch(
+          "durable rollback claim changed before device restoration"
+        )
+      }
+    } catch {
+      return .rollbackFailed(
+        "rollback mutation was not attempted because its durable lifecycle state could not be reloaded: \(error.localizedDescription)"
+      )
+    }
+    let durableContext = ProductionRollbackContext(
+      journal: durableClaim,
+      journalURL: context.journalURL
+    )
     let rollbackResult = await rollbackProductionDeployment(
-      context: context
+      context: durableContext
     )
     do {
       var settled = try DeploymentRollbackJournal.load(from: context.journalURL)
-      guard settled.hasSameDeploymentIdentity(as: context.journal),
+      guard settled.hasSameDeploymentIdentity(as: durableClaim),
+            settled.rebootSent == durableClaim.rebootSent,
             settled.effectiveResolution == .rollbackInProgress
       else {
         throw ApplyPipelineError.postflightMismatch(
@@ -2310,6 +2409,44 @@ public actor ApplyPipeline {
     return rollbackResult.success
       ? .rolledBack(rollbackResult.detail)
       : .rollbackFailed(rollbackResult.detail)
+  }
+
+  /// Persist the reboot lifecycle intent before the reboot command can run.
+  /// A post-rename directory-sync failure is visible but not crash-durable, so
+  /// retry the exact same transition until one write confirms the directory
+  /// barrier. A pre-rename failure returns immediately and leaves the durable
+  /// journal's rebootSent=false authority intact for rollback.
+  func durablyRecordRebootIntent(
+    _ journal: DeploymentRollbackJournal,
+    at url: URL
+  ) throws {
+    guard journal.rebootSent else {
+      throw ApplyPipelineError.postflightMismatch("reboot intent must set rebootSent=true")
+    }
+    try durablyWriteLifecycleBarrier(journal, at: url)
+  }
+
+  private func durablyWriteLifecycleBarrier(
+    _ journal: DeploymentRollbackJournal,
+    at url: URL
+  ) throws {
+    var lastIndeterminate: DeploymentRollbackJournalError?
+    for _ in 0..<3 {
+      do {
+        try journalWriter(journal, url)
+        guard try DeploymentRollbackJournal.load(from: url) == journal else {
+          throw ApplyPipelineError.postflightMismatch("reboot intent did not read back exactly")
+        }
+        return
+      } catch let durabilityError as DeploymentRollbackJournalError {
+        guard case .committedButNotDurable = durabilityError else { throw durabilityError }
+        guard try DeploymentRollbackJournal.load(from: url) == journal else { throw durabilityError }
+        lastIndeterminate = durabilityError
+      }
+    }
+    throw lastIndeterminate ?? ApplyPipelineError.postflightMismatch(
+      "reboot intent durability was not established"
+    )
   }
 
   func rollbackProductionDeployment(

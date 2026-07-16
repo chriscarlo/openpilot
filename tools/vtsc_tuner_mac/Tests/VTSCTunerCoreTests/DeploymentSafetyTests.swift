@@ -470,6 +470,7 @@ import Testing
     tuneURL: tuneURL,
     preferredTiciProfile: "commaAdb",
     mapdReleaseManifestURL: releaseURL,
+    rollbackJournalDirectoryURL: repository.appendingPathComponent("journals", isDirectory: true),
     verificationRequests: []
   )) { event in
     await events.append(event)

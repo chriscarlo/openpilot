@@ -192,7 +192,9 @@ import Testing
         repositoryRoot: fixture.repository,
         mapdReleaseManifestURL: fixture.releaseURL,
         journalURL: fixture.journalURL,
-        timeout: 0.2,
+        // Leave enough wall-clock headroom for the full parallel suite; this
+        // test verifies retry classification, not deadline exhaustion.
+        timeout: 2,
         pollInterval: 0.001
       )
     ) { _ in }
@@ -683,6 +685,66 @@ import Testing
       request.arguments.last?.contains("--expected-tile-set-id '\(targetTileSetID)'") == true
   })
   #expect(!requests.contains { $0.arguments.joined(separator: " ").contains("sudo reboot") })
+}
+
+@Test func preRenameRebootIntentFailureRollsBackFromFreshDurableStateWithoutReboot() async throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  fixture.journal.rebootSent = false
+  fixture.journal.previousCachedMapdPath = ""
+  fixture.journal.previousCachedMapdSHA256 = nil
+  try fixture.journal.write(to: fixture.journalURL)
+  var inMemoryPreflight = try resumeRuntimePreflight(fixture)
+  inMemoryPreflight.journal.rebootSent = true
+  let failingWriterPipeline = ApplyPipeline(
+    processRunner: RollbackClaimRecoveryRunner(failRemoteRollback: false)
+  ) { _, url in
+    throw DeploymentRollbackJournalError.couldNotWrite(url, "injected pre-rename failure")
+  }
+  await #expect(throws: DeploymentRollbackJournalError.couldNotWrite(
+    fixture.journalURL,
+    "injected pre-rename failure"
+  )) {
+    try await failingWriterPipeline.durablyRecordRebootIntent(
+      inMemoryPreflight.journal,
+      at: fixture.journalURL
+    )
+  }
+  #expect(!(try DeploymentRollbackJournal.load(from: fixture.journalURL).rebootSent))
+
+  let runner = FreshProcessRollbackRecoveryRunner(journal: fixture.journal)
+  guard case .rolledBack = await ApplyPipeline(processRunner: runner)
+    .rollbackProductionDeploymentIfJournalPending(
+      preflight: inMemoryPreflight,
+      tilesActivated: false
+    )
+  else { Issue.record("durable rebootSent=false rollback should succeed"); return }
+  #expect(!(await runner.requests).contains {
+    $0.arguments.joined(separator: " ").contains("sudo reboot")
+  })
+}
+
+@Test func postRenameIndeterminateRebootIntentIsRetriedToADurableExactReadback() async throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  fixture.journal.rebootSent = false
+  try fixture.journal.write(to: fixture.journalURL)
+  var intended = fixture.journal
+  intended.rebootSent = true
+  let recorder = JournalWriterAttemptRecorder()
+  let pipeline = ApplyPipeline(
+    processRunner: RollbackClaimRecoveryRunner(failRemoteRollback: false)
+  ) { journal, url in
+    try journal.write(to: url)
+    if recorder.recordAttempt() == 1 {
+      throw DeploymentRollbackJournalError.committedButNotDurable(url, "injected post-rename failure")
+    }
+  }
+
+  try await pipeline.durablyRecordRebootIntent(intended, at: fixture.journalURL)
+
+  #expect(recorder.attemptCount == 2)
+  #expect(try DeploymentRollbackJournal.load(from: fixture.journalURL) == intended)
 }
 
 @Test func liveRollbackOwnerExcludesASecondMutatorUntilTerminalSettlement() async throws {
@@ -1231,21 +1293,73 @@ import Testing
 }
 
 @Test func newCarFacingDeploymentIsBlockedByAnyRecoverableRollbackJournal() async throws {
-  var fixture = try resumePostflightFixture(validGPS: true)
-  defer { try? FileManager.default.removeItem(at: fixture.root) }
-  fixture.journal.completed = true
-  fixture.journal.resolution = .rollbackFailed
-  try fixture.journal.write(to: fixture.journalURL)
-  let tuneURL = fixture.root.appendingPathComponent("must-not-save.json")
-  let succeeded = await ApplyPipeline().apply(ApplyRequest(
-    action: .pullOnTici,
-    tune: fixture.tune,
-    repositoryRoot: fixture.repository,
-    tuneURL: tuneURL,
-    rollbackJournalDirectoryURL: fixture.journalURL.deletingLastPathComponent()
-  )) { _ in }
-  #expect(!succeeded)
-  #expect(!FileManager.default.fileExists(atPath: tuneURL.path))
+  for state in ["awaitingPostflight", "rollbackFailed", "mutationInProgress"] {
+    var fixture = try resumePostflightFixture(validGPS: true)
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    switch state {
+    case "awaitingPostflight":
+      fixture.journal.completed = false
+      fixture.journal.rebootSent = true
+      fixture.journal.resolution = .awaitingPostflight
+    case "mutationInProgress":
+      fixture.journal.completed = true
+      fixture.journal.rebootSent = false
+      fixture.journal.resolution = .mutationInProgress
+    default:
+      fixture.journal.completed = true
+      fixture.journal.resolution = .rollbackFailed
+    }
+    try fixture.journal.write(to: fixture.journalURL)
+    let tuneURL = fixture.root.appendingPathComponent("must-not-save.json")
+    let runner = RollbackClaimRecoveryRunner(failRemoteRollback: false)
+    let succeeded = await ApplyPipeline(processRunner: runner).apply(ApplyRequest(
+      action: .pullOnTici,
+      tune: fixture.tune,
+      repositoryRoot: fixture.repository,
+      tuneURL: tuneURL,
+      rollbackJournalDirectoryURL: fixture.journalURL.deletingLastPathComponent()
+    )) { _ in }
+    #expect(!succeeded)
+    #expect(!FileManager.default.fileExists(atPath: tuneURL.path))
+    #expect(await runner.requests.isEmpty)
+  }
+}
+
+@Test func mutationClaimIsLegacySafeAndFreshProcessRecoverableAcrossEveryMutationBoundary() async throws {
+  for boundary in ["before-git-ff", "after-git-ff", "after-mapd", "after-params", "after-tiles"] {
+    var fixture = try resumePostflightFixture(validGPS: true)
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    fixture.journal.rebootSent = false
+    fixture.journal.previousCachedMapdPath = ""
+    fixture.journal.previousCachedMapdSHA256 = nil
+    try fixture.journal.write(to: fixture.journalURL)
+    let claimed = try await ApplyPipeline(processRunner: RollbackClaimRecoveryRunner(failRemoteRollback: false))
+      .claimProductionMutation(expected: fixture.journal, at: fixture.journalURL)
+    #expect(claimed.effectiveResolution == .mutationInProgress)
+    #expect(claimed.completed)
+    let legacy = try JSONDecoder().decode(
+      LegacySchemaOnePendingReader.self,
+      from: Data(contentsOf: fixture.journalURL)
+    )
+    #expect(!legacy.isPendingPostflight)
+    #expect(try DeploymentRollbackJournal.loadRecoverableRollback(from: fixture.journalURL).journal == claimed)
+
+    // Every remote mutation boundary deliberately retains the same durable
+    // mutationInProgress authority. A newly launched pipeline must therefore
+    // discover and settle it through guarded rollback, regardless of which
+    // mutating command the original process completed before crashing.
+    let recoveryRunner = FreshProcessRollbackRecoveryRunner(journal: claimed)
+    let recovered = await ApplyPipeline(processRunner: recoveryRunner).recoverPendingRollback(
+      RollbackRecoveryRequest(
+        repositoryRoot: fixture.repository,
+        journalURL: fixture.journalURL
+      )
+    ) { _ in }
+    #expect(recovered, "fresh-process recovery failed at \(boundary)")
+    let settled = try DeploymentRollbackJournal.load(from: fixture.journalURL)
+    #expect(settled.effectiveResolution == .rolledBack, "wrong resolution at \(boundary)")
+    #expect(settled.completed)
+  }
 }
 
 @Test func multipleRollbackJournalsAreEnumeratedForExactSelection() throws {
@@ -1290,6 +1404,22 @@ private actor TwoPartyBarrier {
     }
     await withCheckedContinuation { continuation in
       waiters.append(continuation)
+    }
+  }
+}
+
+private final class JournalWriterAttemptRecorder: @unchecked Sendable {
+  private let lock = NSLock()
+  private var attempts = 0
+
+  var attemptCount: Int {
+    lock.withLock { attempts }
+  }
+
+  func recordAttempt() -> Int {
+    lock.withLock {
+      attempts += 1
+      return attempts
     }
   }
 }
