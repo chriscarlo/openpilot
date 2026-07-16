@@ -640,7 +640,7 @@ public actor ApplyPipeline {
         preflight: preflight,
         targetHead: observation.deviceIdentity.deviceHead,
         identity: identity,
-        expectedActiveTileSetID: preflight.journal.targetTileSetID ?? preflight.journal.previousTileSetID
+        expectedActiveTileSetID: preflight.journal.targetTileSetID ?? preflight.journal.effectivePreviousTileSetID
       )
       await emit(
         .running,
@@ -738,7 +738,7 @@ public actor ApplyPipeline {
           "previous_head=\(loaded.journal.previousHead)",
           "target_head=\(loaded.journal.targetHead ?? "")",
           "previous_mapd_sha256=\(loaded.journal.previousActiveMapdSHA256)",
-          "previous_tile_set_id=\(loaded.journal.previousTileSetID ?? "")",
+          "previous_tile_set_id=\(loaded.journal.effectivePreviousTileSetID ?? "")",
           "target_tile_set_id=\(loaded.journal.targetTileSetID ?? "")",
         ].joined(separator: "\n"),
         progress: progress
@@ -1804,6 +1804,12 @@ public actor ApplyPipeline {
         // Activation can complete remotely even if SSH disconnects before the
         // result arrives. Recovery inspects the durable on-device transaction.
         let activated = try await service.activate(staged)
+        deployment.journal = try durablyRecordResolvedPreviousTileIdentity(
+          expected: deployment.journal,
+          activatedTileSetID: activated.tileSetID,
+          resolvedPreviousTileSetID: activated.previousTileSetID,
+          at: deployment.journalURL
+        )
         await emit(
           .succeeded,
           id: 9,
@@ -1856,7 +1862,7 @@ public actor ApplyPipeline {
           preflight: deployment,
           targetHead: targetHead,
           identity: identity,
-          expectedActiveTileSetID: deployment.tileSet?.manifest.tileSetID ?? deployment.journal.previousTileSetID,
+          expectedActiveTileSetID: deployment.tileSet?.manifest.tileSetID ?? deployment.journal.effectivePreviousTileSetID,
           timeout: 300,
           pollInterval: max(0.001, Double(rebootPollDelayNanoseconds) / 1_000_000_000)
         )
@@ -2124,7 +2130,7 @@ public actor ApplyPipeline {
             preflight: preflight,
             targetHead: compatibleDeviceIdentity.deviceHead,
             identity: identity,
-            expectedActiveTileSetID: preflight.journal.targetTileSetID ?? preflight.journal.previousTileSetID
+            expectedActiveTileSetID: preflight.journal.targetTileSetID ?? preflight.journal.effectivePreviousTileSetID
           )
           return ResumedPostflightObservation(
             controllerReady: controllerEvidence,
@@ -2141,7 +2147,7 @@ public actor ApplyPipeline {
             preflight: preflight,
             targetHead: compatibleDeviceIdentity.deviceHead,
             identity: identity,
-            expectedActiveTileSetID: preflight.journal.targetTileSetID ?? preflight.journal.previousTileSetID
+            expectedActiveTileSetID: preflight.journal.targetTileSetID ?? preflight.journal.effectivePreviousTileSetID
           )
           // This evidence is deliberately in-memory only. A later offroad
           // liveMapDataSP.valid=false cannot erase the controller-ready state
@@ -2326,8 +2332,18 @@ public actor ApplyPipeline {
   private func validateExclusiveRollbackOwnership(selectedJournalURL: URL) async throws {
     try await requireNoOtherTunerProcess()
     let selected = selectedJournalURL.standardizedFileURL
+    let directory = selected.deletingLastPathComponent()
+    let selectedJournal = try DeploymentRollbackJournal.load(from: selected)
+    // Global ownership plus the peer-free check proves that an aged
+    // targetless legacy preflight is abandoned. Never prune the exact selected
+    // journal, regardless of its shape; selection owns its explicit outcome.
+    try DeploymentRollbackJournal.removeAbandonedPreflightReservations(
+      directory: directory,
+      excluding: selected,
+      excludingJournal: selectedJournal
+    )
     let unresolved = try DeploymentRollbackJournal.unresolvedProductionJournals(
-      directory: selected.deletingLastPathComponent()
+      directory: directory
     ).filter { $0.url.standardizedFileURL != selected }
     guard unresolved.isEmpty else {
       throw ApplyPipelineError.unresolvedProductionRollbacks(unresolved.map(\.url))
@@ -3180,6 +3196,43 @@ public actor ApplyPipeline {
     return current
   }
 
+  func durablyRecordResolvedPreviousTileIdentity(
+    expected: DeploymentRollbackJournal,
+    activatedTileSetID: String,
+    resolvedPreviousTileSetID: String,
+    at url: URL
+  ) throws -> DeploymentRollbackJournal {
+    var current = try DeploymentRollbackJournal.load(from: url)
+    guard current.hasSameDeploymentIdentity(as: expected),
+          current.completed,
+          current.targetTileSetID == activatedTileSetID,
+          current.effectiveResolution == .mutationInProgress ||
+            current.effectiveResolution == .rollbackInProgress
+    else {
+      throw ApplyPipelineError.postflightMismatch(
+        "tile activation journal changed before its resolved previous identity could be recorded"
+      )
+    }
+    if let recorded = current.effectivePreviousTileSetID {
+      guard recorded == resolvedPreviousTileSetID else {
+        throw ApplyPipelineError.postflightMismatch(
+          "helper-resolved previous tile identity differs from the durable journal"
+        )
+      }
+      return current
+    }
+    guard resolvedPreviousTileSetID.range(
+      of: #"^(?:[0-9a-f]{64}|legacy-[0-9a-f]{16})$"#,
+      options: .regularExpression
+    ) != nil,
+    resolvedPreviousTileSetID != activatedTileSetID else {
+      throw ApplyPipelineError.postflightMismatch("helper returned an invalid previous tile identity")
+    }
+    current.resolvedPreviousTileSetID = resolvedPreviousTileSetID
+    try durablyWriteLifecycleBarrier(current, at: url)
+    return current
+  }
+
   private func durablyWriteLifecycleBarrier(
     _ journal: DeploymentRollbackJournal,
     at url: URL
@@ -3241,6 +3294,7 @@ public actor ApplyPipeline {
   ) async -> (success: Bool, detail: String) {
     var details: [String] = []
     var succeeded = true
+    var rollbackJournal = context.journal
     guard let expectedRollbackSourceHead = context.expectedRollbackSourceHead else {
       return (
         false,
@@ -3264,15 +3318,23 @@ public actor ApplyPipeline {
           "journal retained at \(context.journalURL.path)"
       )
     }
-    if context.journal.targetTileSetID != nil {
+    if rollbackJournal.targetTileSetID != nil {
       do {
-        try await TiciTileSetDeploymentService(processRunner: processRunner).rollback(
+        let resolvedPrevious = try await TiciTileSetDeploymentService(processRunner: processRunner).rollback(
           profile: context.profile,
-          expectedActivatedTileSetID: context.journal.targetTileSetID,
-          expectedRestoredTileSetID: context.journal.previousTileSetID,
-          expectedGitBranch: context.journal.branch,
+          expectedActivatedTileSetID: rollbackJournal.targetTileSetID,
+          expectedRestoredTileSetID: rollbackJournal.effectivePreviousTileSetID,
+          expectedGitBranch: rollbackJournal.branch,
           expectedGitHead: expectedRollbackSourceHead
         )
+        if let resolvedPrevious, let target = rollbackJournal.targetTileSetID {
+          rollbackJournal = try durablyRecordResolvedPreviousTileIdentity(
+            expected: rollbackJournal,
+            activatedTileSetID: target,
+            resolvedPreviousTileSetID: resolvedPrevious,
+            at: context.journalURL
+          )
+        }
         details.append("tile activation transaction recovered and prior set restored when needed")
       } catch {
         return (
@@ -3289,7 +3351,7 @@ public actor ApplyPipeline {
           arguments: sshOptions(connectTimeout: 10) + [
             context.profile,
             try TiciProductionRollbackCommandBuilder.command(
-              journal: context.journal,
+              journal: rollbackJournal,
               expectedCurrentHead: expectedRollbackSourceHead
             ),
           ],
@@ -3317,7 +3379,7 @@ public actor ApplyPipeline {
           throw ApplyPipelineError.postflightMismatch("tici boot identity is missing before rollback reboot")
         }
         let rebootJournal = try durablyRecordRollbackRebootIdentity(
-          expected: context.journal,
+          expected: rollbackJournal,
           bootID: preRebootBootID,
           at: context.journalURL
         )
@@ -3432,7 +3494,7 @@ public actor ApplyPipeline {
         throw ApplyPipelineError.postflightMismatch("rollback persistent mapd cache digest differs")
       }
     }
-    guard snapshot.activeTileSetID == journal.previousTileSetID else {
+    guard snapshot.activeTileSetID == journal.effectivePreviousTileSetID else {
       throw ApplyPipelineError.postflightMismatch("rollback tile-set identity differs")
     }
     if tilesWereTouched, let targetTileSetID = journal.targetTileSetID,

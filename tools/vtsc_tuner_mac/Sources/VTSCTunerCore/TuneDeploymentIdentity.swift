@@ -107,6 +107,10 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
   public var mapdRollbackPath: String
   public var previousTileSetID: String?
   public var targetTileSetID: String?
+  /// Helper-resolved immutable identity for a legacy direct `offline/` tree.
+  /// This is lifecycle evidence, not part of the original deployment
+  /// identity, and is durably filled before any post-activation continuation.
+  public var resolvedPreviousTileSetID: String?
   /// Exact Linux boot identity captured and durably synced immediately before
   /// the deployment reboot. Optional only for schema-1 compatibility; a
   /// missing value can never certify the immediate post-reboot install.
@@ -135,6 +139,10 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
   public var isAwaitingOutdoorPostflight: Bool {
     effectiveResolution == .awaitingPostflight ||
       effectiveResolution == .awaitingOutdoorPostflight
+  }
+
+  public var effectivePreviousTileSetID: String? {
+    resolvedPreviousTileSetID ?? previousTileSetID
   }
 
   public func hasSameDeploymentIdentity(as other: Self) -> Bool {
@@ -195,6 +203,7 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
     mapdRollbackPath: String,
     previousTileSetID: String? = nil,
     targetTileSetID: String? = nil,
+    resolvedPreviousTileSetID: String? = nil,
     deploymentPreRebootBootID: String? = nil,
     rollbackPreRebootBootID: String? = nil,
     rebootSent: Bool = false,
@@ -224,6 +233,7 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
     self.mapdRollbackPath = mapdRollbackPath
     self.previousTileSetID = previousTileSetID
     self.targetTileSetID = targetTileSetID
+    self.resolvedPreviousTileSetID = resolvedPreviousTileSetID
     self.deploymentPreRebootBootID = deploymentPreRebootBootID
     self.rollbackPreRebootBootID = rollbackPreRebootBootID
     self.rebootSent = rebootSent
@@ -442,6 +452,7 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
   public static func removeAbandonedPreflightReservations(
     directory explicitDirectory: URL? = nil,
     excluding excludedURL: URL? = nil,
+    excludingJournal excludedJournal: Self? = nil,
     fileManager: FileManager = .default,
     olderThan minimumAge: TimeInterval = 600,
     now: Date = Date()
@@ -451,6 +462,7 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
     let excluded = excludedURL?.standardizedFileURL
     for (journal, url) in try journalCandidates(directory: directory, fileManager: fileManager) {
       if url.standardizedFileURL == excluded { continue }
+      if let excludedJournal, journal.hasSameDeploymentIdentity(as: excludedJournal) { continue }
       // The caller owns the canonical global production flock. Acquiring that
       // lock proves no prior new-version deployment process remains alive, so
       // either targetless or fully populated preflightReserved is safe to

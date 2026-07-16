@@ -54,6 +54,7 @@ type tileManifest struct {
 
 type manifestIdentity struct {
 	TileSetID string `json:"tile_set_id"`
+	Legacy    bool   `json:"legacy,omitempty"`
 }
 
 // The field names deliberately match the pre-existing Python journal so a
@@ -73,6 +74,7 @@ type transactionResult struct {
 	TileSetID                 string `json:"tile_set_id,omitempty"`
 	ActivatedTileSetID        string `json:"activated_tile_set_id,omitempty"`
 	RolledBackTileSetID       string `json:"rolled_back_tile_set_id,omitempty"`
+	PreviousTileSetID         string `json:"previous_tile_set_id,omitempty"`
 	ActiveTileSetID           string `json:"active_tile_set_id,omitempty"`
 	FileCount                 int    `json:"file_count,omitempty"`
 	TotalBytes                uint64 `json:"total_bytes,omitempty"`
@@ -83,7 +85,7 @@ type transactionResult struct {
 
 type exchangeFunction func(string, string) error
 type directorySyncFunction func(string) error
-type gitIdentityFunction func(string) (string, string, error)
+type gitIdentityFunction func(string) (string, string, bool, error)
 
 type transactionEngine struct {
 	root        string
@@ -224,16 +226,20 @@ func usageError() error {
 	return errors.New("usage: vtsc-tile-transaction verify --root <artifact-root> --tile-set-id <id> | activate --root <osm-root> --params-dir <params-data-dir> --stage <artifact-root> --tile-set-id <id> [--inject-failure <point>] | rollback --root <osm-root> --params-dir <params-data-dir> --repo-root <checkout> --expected-git-branch <branch> --expected-git-head <head> [--expected-tile-set-id <id>] [--expected-previous-tile-set-id <id>] [--inject-failure <point>]")
 }
 
-func currentGitIdentity(repoRoot string) (string, string, error) {
+func currentGitIdentity(repoRoot string) (string, string, bool, error) {
 	branchOutput, err := exec.Command("git", "-C", repoRoot, "branch", "--show-current").Output()
 	if err != nil {
-		return "", "", fmt.Errorf("read rollback Git branch: %w", err)
+		return "", "", false, fmt.Errorf("read rollback Git branch: %w", err)
 	}
 	headOutput, err := exec.Command("git", "-C", repoRoot, "rev-parse", "HEAD").Output()
 	if err != nil {
-		return "", "", fmt.Errorf("read rollback Git HEAD: %w", err)
+		return "", "", false, fmt.Errorf("read rollback Git HEAD: %w", err)
 	}
-	return strings.TrimSpace(string(branchOutput)), strings.TrimSpace(string(headOutput)), nil
+	statusOutput, err := exec.Command("git", "-C", repoRoot, "status", "--porcelain").Output()
+	if err != nil {
+		return "", "", false, fmt.Errorf("read rollback Git status: %w", err)
+	}
+	return strings.TrimSpace(string(branchOutput)), strings.TrimSpace(string(headOutput)), len(statusOutput) != 0, nil
 }
 
 func isSafeGitHead(value string) bool {
@@ -1008,6 +1014,7 @@ func (e *transactionEngine) legacyManifestBytes(legacyID string) ([]byte, error)
 	if tileSetID, ok := payload["tile_set_id"].(string); !ok || tileSetID == "" {
 		payload["tile_set_id"] = legacyID
 	}
+	payload["legacy"] = true
 	contents, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
@@ -1070,21 +1077,26 @@ func copyRegularFile(source, destination string, mode fs.FileMode) error {
 }
 
 func manifestID(tree string) (string, bool, error) {
+	manifest, present, err := readManifestIdentity(tree)
+	return manifest.TileSetID, present, err
+}
+
+func readManifestIdentity(tree string) (manifestIdentity, bool, error) {
 	contents, err := os.ReadFile(filepath.Join(tree, embeddedManifestName))
 	if errors.Is(err, os.ErrNotExist) {
-		return "", false, nil
+		return manifestIdentity{}, false, nil
 	}
 	if err != nil {
-		return "", false, err
+		return manifestIdentity{}, false, err
 	}
 	var manifest manifestIdentity
 	if err := decodeSingleJSON(contents, &manifest); err != nil {
-		return "", false, err
+		return manifestIdentity{}, false, err
 	}
 	if manifest.TileSetID == "" || !isSafeID(manifest.TileSetID) {
-		return "", false, fmt.Errorf("invalid embedded tile-set identifier")
+		return manifestIdentity{}, false, fmt.Errorf("invalid embedded tile-set identifier")
 	}
-	return manifest.TileSetID, true, nil
+	return manifest, true, nil
 }
 
 func (e *transactionEngine) recoverActivation(tileSetID string) (bool, transactionResult, error) {
@@ -1112,7 +1124,17 @@ func (e *transactionEngine) recoverActivation(tileSetID string) (bool, transacti
 		if err := e.clearTransaction(); err != nil {
 			return false, transactionResult{}, err
 		}
-		return true, transactionResult{Operation: "activate", TileSetID: tileSetID, ActivatedTileSetID: tileSetID, Recovered: true}, nil
+		previousID, present, err := manifestID(filepath.Join(e.root, transaction.PreviousTarget))
+		if err != nil || !present || previousID == "" {
+			if err != nil {
+				return false, transactionResult{}, err
+			}
+			return false, transactionResult{}, fmt.Errorf("recovered activation previous generation identity is missing")
+		}
+		return true, transactionResult{
+			Operation: "activate", TileSetID: tileSetID, ActivatedTileSetID: tileSetID,
+			PreviousTileSetID: previousID, Recovered: true,
+		}, nil
 	}
 	if activeIsLink && activeTarget != transaction.PreviousTarget {
 		return false, transactionResult{}, fmt.Errorf("active tile pointer diverged during recovery")
@@ -1144,6 +1166,21 @@ func (e *transactionEngine) activateLocked(stage, tileSetID, injectedFailure str
 	if _, err := e.ensureGeneration(stage, tileSetID); err != nil {
 		return transactionResult{}, err
 	}
+	if activeID, present, err := manifestID(e.activePath()); err != nil {
+		return transactionResult{}, err
+	} else if present && activeID == tileSetID {
+		previousID, previousPresent, err := manifestID(e.previousPath())
+		if err != nil || !previousPresent || previousID == "" {
+			if err != nil {
+				return transactionResult{}, err
+			}
+			return transactionResult{}, fmt.Errorf("already active tile set has no exact previous generation identity")
+		}
+		return transactionResult{
+			Operation: "activate", TileSetID: tileSetID, ActivatedTileSetID: tileSetID,
+			PreviousTileSetID: previousID, Recovered: true,
+		}, nil
+	}
 	if injectedFailure == "after_generation" {
 		return transactionResult{}, errors.New("injected tile activation failure: after_generation")
 	}
@@ -1173,6 +1210,13 @@ func (e *transactionEngine) activateLocked(stage, tileSetID, injectedFailure str
 		if err != nil {
 			return transactionResult{}, err
 		}
+	}
+	previousID, previousPresent, err := manifestID(filepath.Join(e.root, previousTarget))
+	if err != nil || !previousPresent || previousID == "" {
+		if err != nil {
+			return transactionResult{}, err
+		}
+		return transactionResult{}, fmt.Errorf("previous tile generation identity is missing")
 	}
 
 	switchPath := e.switchPath(tileSetID)
@@ -1219,7 +1263,10 @@ func (e *transactionEngine) activateLocked(stage, tileSetID, injectedFailure str
 	if err := e.clearTransaction(); err != nil {
 		return transactionResult{}, err
 	}
-	return transactionResult{Operation: "activate", TileSetID: tileSetID, ActivatedTileSetID: tileSetID}, nil
+	return transactionResult{
+		Operation: "activate", TileSetID: tileSetID, ActivatedTileSetID: tileSetID,
+		PreviousTileSetID: previousID,
+	}, nil
 }
 
 func (e *transactionEngine) rollback(expectedTileSetID, expectedPreviousTileSetID, injectedFailure string) (transactionResult, error) {
@@ -1232,11 +1279,11 @@ func (e *transactionEngine) rollbackBound(
 	expectedTileSetID, expectedPreviousTileSetID, repoRoot, expectedBranch, expectedHead, injectedFailure string,
 ) (transactionResult, error) {
 	return e.withExclusiveTransactionLock(func() (transactionResult, error) {
-		branch, head, err := e.gitIdentity(repoRoot)
+		branch, head, dirty, err := e.gitIdentity(repoRoot)
 		if err != nil {
 			return transactionResult{}, err
 		}
-		if branch != expectedBranch || head != expectedHead {
+		if branch != expectedBranch || head != expectedHead || dirty {
 			return transactionResult{}, fmt.Errorf("rollback Git identity changed before tile mutation")
 		}
 		return e.rollbackLocked(expectedTileSetID, expectedPreviousTileSetID, injectedFailure)
@@ -1286,17 +1333,27 @@ func (e *transactionEngine) rollbackLocked(expectedTileSetID, expectedPreviousTi
 				return transactionResult{}, err
 			}
 			if activeIsLink && previousIsLink && activeTarget == transaction.PreviousTarget && previousTarget == transaction.ActiveTarget {
-				id, _, err := manifestID(e.activePath())
-				if err != nil {
+				manifest, present, err := readManifestIdentity(e.activePath())
+				if err != nil || !present || manifest.TileSetID == "" {
+					if err == nil {
+						err = fmt.Errorf("recovered rollback active identity is missing")
+					}
 					return transactionResult{}, err
 				}
+				id := manifest.TileSetID
 				if expectedPreviousTileSetID != "" && id != expectedPreviousTileSetID {
 					return transactionResult{}, fmt.Errorf("recovered rollback tile-set ID differs from recorded previous identity")
+				}
+				if expectedPreviousTileSetID == "" && (!manifest.Legacy || !strings.HasPrefix(id, "legacy-")) {
+					return transactionResult{}, fmt.Errorf("recovered unrecorded rollback identity is not helper-migrated legacy")
 				}
 				if err := e.clearTransaction(); err != nil {
 					return transactionResult{}, err
 				}
-				return transactionResult{Operation: "rollback", RolledBackTileSetID: id, Recovered: true}, nil
+				return transactionResult{
+					Operation: "rollback", RolledBackTileSetID: id,
+					PreviousTileSetID: id, Recovered: true,
+				}, nil
 			}
 			if !activeIsLink || !previousIsLink || activeTarget != transaction.ActiveTarget || previousTarget != transaction.PreviousTarget {
 				return transactionResult{}, fmt.Errorf("tile rollback pointers diverged during recovery")
@@ -1307,12 +1364,19 @@ func (e *transactionEngine) rollbackLocked(expectedTileSetID, expectedPreviousTi
 	}
 
 	if expectedTileSetID != "" {
-		id, present, err := manifestID(e.activePath())
+		activeManifest, present, err := readManifestIdentity(e.activePath())
 		if err != nil {
 			return transactionResult{}, err
 		}
-		if !present || id != expectedTileSetID {
-			return transactionResult{Operation: "rollback", TileActivationNotObserved: true, ActiveTileSetID: id}, nil
+		if !present || activeManifest.TileSetID != expectedTileSetID {
+			if expectedPreviousTileSetID == "" &&
+				(!present || !activeManifest.Legacy || !strings.HasPrefix(activeManifest.TileSetID, "legacy-")) {
+				return transactionResult{}, fmt.Errorf("target activation is absent without an exact helper-migrated legacy identity")
+			}
+			return transactionResult{
+				Operation: "rollback", TileActivationNotObserved: true,
+				ActiveTileSetID: activeManifest.TileSetID, PreviousTileSetID: activeManifest.TileSetID,
+			}, nil
 		}
 	}
 	activeTarget, activeIsLink, err := symlinkTarget(e.activePath())
@@ -1332,15 +1396,19 @@ func (e *transactionEngine) rollbackLocked(expectedTileSetID, expectedPreviousTi
 		}
 		return transactionResult{}, fmt.Errorf("active generation manifest is missing")
 	}
-	previousID, present, err := manifestID(e.previousPath())
-	if err != nil || !present || previousID == "" {
+	previousManifest, present, err := readManifestIdentity(e.previousPath())
+	if err != nil || !present || previousManifest.TileSetID == "" {
 		if err != nil {
 			return transactionResult{}, err
 		}
 		return transactionResult{}, fmt.Errorf("previous generation manifest is missing")
 	}
+	previousID := previousManifest.TileSetID
 	if expectedPreviousTileSetID != "" && previousID != expectedPreviousTileSetID {
 		return transactionResult{}, fmt.Errorf("previous generation tile-set ID differs from recorded rollback identity")
+	}
+	if expectedPreviousTileSetID == "" && (!previousManifest.Legacy || !strings.HasPrefix(previousID, "legacy-")) {
+		return transactionResult{}, fmt.Errorf("unrecorded previous generation is not an exact helper-migrated legacy identity")
 	}
 
 	transaction = tileTransaction{Kind: "rollback", ActiveTarget: activeTarget, PreviousTarget: previousTarget}
@@ -1369,5 +1437,7 @@ func (e *transactionEngine) rollbackLocked(expectedTileSetID, expectedPreviousTi
 	if err != nil {
 		return transactionResult{}, err
 	}
-	return transactionResult{Operation: "rollback", RolledBackTileSetID: id}, nil
+	return transactionResult{
+		Operation: "rollback", RolledBackTileSetID: id, PreviousTileSetID: id,
+	}, nil
 }

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -185,8 +186,8 @@ func TestBoundRollbackRejectsGitIdentityDriftBeforeJournalOrExchange(t *testing.
 	linkGeneration(t, root, activeOfflineName, "fresh")
 	linkGeneration(t, root, previousOfflineName, "old")
 	engine := testEngine(t, root)
-	engine.gitIdentity = func(string) (string, string, error) {
-		return "chauffeur-exp01", strings.Repeat("b", 40), nil
+	engine.gitIdentity = func(string) (string, string, bool, error) {
+		return "chauffeur-exp01", strings.Repeat("b", 40), false, nil
 	}
 
 	_, err := engine.rollbackBound(
@@ -204,6 +205,49 @@ func TestBoundRollbackRejectsGitIdentityDriftBeforeJournalOrExchange(t *testing.
 	assertLinkTarget(t, filepath.Join(root, previousOfflineName), "tile-generations/old/offline")
 	if _, err := os.Lstat(filepath.Join(root, transactionFileName)); !os.IsNotExist(err) {
 		t.Fatalf("bound rollback wrote a transaction before rejecting Git drift: %v", err)
+	}
+}
+
+func TestBoundRollbackRejectsDirtyCheckoutAfterTileLockWait(t *testing.T) {
+	root := newTestRoot(t)
+	makeMinimalGeneration(t, root, "fresh")
+	makeMinimalGeneration(t, root, "old")
+	linkGeneration(t, root, activeOfflineName, "fresh")
+	linkGeneration(t, root, previousOfflineName, "old")
+	engine := testEngine(t, root)
+	var dirty atomic.Bool
+	engine.gitIdentity = func(string) (string, string, bool, error) {
+		return "chauffeur-exp01", strings.Repeat("a", 40), dirty.Load(), nil
+	}
+
+	firstEntered := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	go func() {
+		_, _ = engine.withExclusiveTransactionLock(func() (transactionResult, error) {
+			close(firstEntered)
+			<-releaseFirst
+			return transactionResult{}, nil
+		})
+	}()
+	<-firstEntered
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := engine.rollbackBound(
+			"fresh", "old", filepath.Join(root, "checkout"),
+			"chauffeur-exp01", strings.Repeat("a", 40), "",
+		)
+		result <- err
+	}()
+	dirty.Store(true)
+	close(releaseFirst)
+	if err := <-result; err == nil || !strings.Contains(err.Error(), "Git identity changed") {
+		t.Fatalf("dirty rollback after lock wait error = %v, want fail-closed identity rejection", err)
+	}
+	assertLinkTarget(t, filepath.Join(root, activeOfflineName), "tile-generations/fresh/offline")
+	assertLinkTarget(t, filepath.Join(root, previousOfflineName), "tile-generations/old/offline")
+	if _, err := os.Lstat(filepath.Join(root, transactionFileName)); !os.IsNotExist(err) {
+		t.Fatalf("dirty locked rollback wrote a transaction: %v", err)
 	}
 }
 
@@ -303,8 +347,12 @@ func TestActivationMigratesLegacyDirectoryBeforeExchange(t *testing.T) {
 	stage := writeStage(t, root, "fresh")
 	engine := testEngine(t, root)
 
-	if _, err := engine.activate(stage, "fresh", ""); err != nil {
+	activated, err := engine.activate(stage, "fresh", "")
+	if err != nil {
 		t.Fatalf("activate from legacy directory: %v", err)
+	}
+	if !strings.HasPrefix(activated.PreviousTileSetID, "legacy-") {
+		t.Fatalf("activation previous identity = %q, want helper-resolved legacy ID", activated.PreviousTileSetID)
 	}
 	assertLinkTarget(t, filepath.Join(root, activeOfflineName), "tile-generations/fresh/offline")
 	previousTarget, isLink, err := symlinkTarget(filepath.Join(root, previousOfflineName))
@@ -318,6 +366,15 @@ func TestActivationMigratesLegacyDirectoryBeforeExchange(t *testing.T) {
 	if err != nil || len(retained) != 1 {
 		t.Fatalf("legacy source was not retained after exchange: paths=%v err=%v", retained, err)
 	}
+	rolledBack, err := engine.rollback("fresh", activated.PreviousTileSetID, "")
+	if err != nil {
+		t.Fatalf("rollback to migrated legacy generation: %v", err)
+	}
+	if rolledBack.RolledBackTileSetID != activated.PreviousTileSetID ||
+		rolledBack.PreviousTileSetID != activated.PreviousTileSetID {
+		t.Fatalf("legacy rollback identity = %+v, want %q", rolledBack, activated.PreviousTileSetID)
+	}
+	assertLinkTarget(t, filepath.Join(root, activeOfflineName), previousTarget)
 }
 
 func TestLegacyActivationRecoversBeforePointerExchange(t *testing.T) {
@@ -346,10 +403,42 @@ func TestLegacyActivationRecoversBeforePointerExchange(t *testing.T) {
 	if activated.Recovered || activated.ActivatedTileSetID != "fresh" {
 		t.Fatalf("unexpected legacy recovery result: %+v", activated)
 	}
+	if !strings.HasPrefix(activated.PreviousTileSetID, "legacy-") {
+		t.Fatalf("recovered legacy previous identity = %q", activated.PreviousTileSetID)
+	}
 	assertLinkTarget(t, filepath.Join(root, activeOfflineName), "tile-generations/fresh/offline")
 	previousTarget, isLink, err := symlinkTarget(filepath.Join(root, previousOfflineName))
 	if err != nil || !isLink || !strings.HasPrefix(previousTarget, "tile-generations/legacy-") {
 		t.Fatalf("legacy recovery previous target = %q (isLink=%t err=%v)", previousTarget, isLink, err)
+	}
+}
+
+func TestLegacyActivationRecoversAfterPointerExchangeWithSamePreviousIdentity(t *testing.T) {
+	root := newTestRoot(t)
+	legacyTile := filepath.Join(root, activeOfflineName, "38", "-121", "legacy-tile")
+	if err := os.MkdirAll(filepath.Dir(legacyTile), 0o755); err != nil {
+		t.Fatalf("create legacy tree: %v", err)
+	}
+	if err := os.WriteFile(legacyTile, bytes.Repeat([]byte("legacy"), 20), 0o644); err != nil {
+		t.Fatalf("write legacy tile: %v", err)
+	}
+	stage := writeStage(t, root, "fresh")
+	engine := testEngine(t, root)
+
+	if _, err := engine.activate(stage, "fresh", "after_switch"); err == nil {
+		t.Fatal("legacy activation with injected post-switch failure unexpectedly succeeded")
+	}
+	recovered, err := engine.activate(stage, "fresh", "")
+	if err != nil {
+		t.Fatalf("recover legacy activation after switch: %v", err)
+	}
+	if !recovered.Recovered || recovered.ActivatedTileSetID != "fresh" ||
+		!strings.HasPrefix(recovered.PreviousTileSetID, "legacy-") {
+		t.Fatalf("unexpected recovered legacy activation: %+v", recovered)
+	}
+	previousManifest, present, err := readManifestIdentity(filepath.Join(root, previousOfflineName))
+	if err != nil || !present || previousManifest.TileSetID != recovered.PreviousTileSetID {
+		t.Fatalf("recovered previous manifest = %+v present=%t err=%v", previousManifest, present, err)
 	}
 }
 

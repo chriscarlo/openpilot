@@ -145,7 +145,8 @@ import Testing
     artifact: CanonicalTileSetArtifact(rootURL: root, manifest: manifest),
     profile: "commaAdb"
   )
-  _ = try await service.activate(staged)
+  let activationResult = try await service.activate(staged)
+  #expect(activationResult.previousTileSetID == String(repeating: "e", count: 64))
   let requests = await runner.requests
   let rsyncRequests = requests.filter { $0.executableURL == TiciTileSetDeploymentService.rsyncURL }
   #expect(rsyncRequests.count == 3)
@@ -208,6 +209,7 @@ import Testing
   #expect(rollback.contains("--expected-git-branch \"$expected_git_branch\""))
   #expect(rollback.contains("--expected-git-head \"$expected_git_head\""))
   #expect(rollback.contains("git -C \"$repo\" rev-parse HEAD"))
+  #expect(rollback.contains("git -C \"$repo\" status --porcelain"))
   #expect(rollback.contains("--inject-failure 'after_switch'"))
   #expect(!rollback.lowercased().contains("python"))
 }
@@ -353,12 +355,15 @@ import Testing
   defer { try? FileManager.default.removeItem(at: root) }
   let helper = try transactionHelperFixture(in: root)
   let expectedTileSetID = String(repeating: "f", count: 64)
+  let legacyTileSetID = "legacy-0123456789abcdef"
 
   let succeeded = TiciTileSetDeploymentService(
-    processRunner: TileRollbackRunner(output: #"{"operation":"rollback","rolled_back_tile_set_id":"old","tile_activation_not_observed":false}"#),
+    processRunner: TileRollbackRunner(output: """
+    {"operation":"rollback","rolled_back_tile_set_id":"\(legacyTileSetID)","previous_tile_set_id":"\(legacyTileSetID)","tile_activation_not_observed":false}
+    """),
     transactionHelperURL: helper
   )
-  try await succeeded.rollback(
+  _ = try await succeeded.rollback(
     profile: "commaAdb",
     expectedActivatedTileSetID: expectedTileSetID,
     expectedGitBranch: "chauffeur-exp01",
@@ -370,7 +375,7 @@ import Testing
     transactionHelperURL: helper
   )
   do {
-    try await mismatch.rollback(
+    _ = try await mismatch.rollback(
       profile: "commaAdb",
       expectedActivatedTileSetID: expectedTileSetID,
       expectedGitBranch: "chauffeur-exp01",
@@ -390,7 +395,7 @@ import Testing
     """),
     transactionHelperURL: helper
   )
-  try await exact.rollback(
+  _ = try await exact.rollback(
     profile: "commaAdb",
     expectedActivatedTileSetID: expectedTileSetID,
     expectedRestoredTileSetID: previousTileSetID,
@@ -416,7 +421,7 @@ import Testing
     """),
     transactionHelperURL: helper
   )
-  try await replayed.rollback(
+  _ = try await replayed.rollback(
     profile: "commaAdb",
     expectedActivatedTileSetID: expectedTileSetID,
     expectedRestoredTileSetID: previousTileSetID,
@@ -592,6 +597,8 @@ private func makeRollbackPreflight(rebootSent: Bool) -> RuntimeDeploymentPreflig
   // directory. Keep each parallel test transaction in its own namespace so
   // unrelated rollback scenarios do not contend on a shared /tmp lock.
   let journalDirectory = temporaryDirectory("rollback-journal-\(journal.deploymentID.uuidString)")
+  let journalURL = journalDirectory.appendingPathComponent("journal.json")
+  try! journal.write(to: journalURL)
   return RuntimeDeploymentPreflight(
     repositoryRoot: URL(fileURLWithPath: "/tmp/chauffeur"),
     git: GitDeploymentPreflight(
@@ -609,7 +616,7 @@ private func makeRollbackPreflight(rebootSent: Bool) -> RuntimeDeploymentPreflig
     ),
     tileSet: nil,
     journal: journal,
-    journalURL: journalDirectory.appendingPathComponent("journal.json")
+    journalURL: journalURL
   )
 }
 
@@ -656,7 +663,7 @@ private actor DeploymentRecordingRunner: ProcessRunning {
     }
     if command.contains(" activate --root ") {
       return success("""
-      {"operation":"activate","activated_tile_set_id":"\(identity)"}
+      {"operation":"activate","activated_tile_set_id":"\(identity)","previous_tile_set_id":"\(String(repeating: "e", count: 64))"}
       """)
     }
     return success("")

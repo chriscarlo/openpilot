@@ -27,7 +27,10 @@ enum TiciProductionRollbackCommandBuilder {
 
   static func command(
     journal: DeploymentRollbackJournal,
-    expectedCurrentHead: String
+    expectedCurrentHead: String,
+    repositoryPath: String = "/data/openpilot",
+    paramsDirectory: String = TiciParkedMutationGate.defaultParamsDirectory,
+    paramsLockPath: String = "/data/params/.lock"
   ) throws -> String {
     try validate(journal)
     guard expectedCurrentHead.range(of: #"^[0-9a-f]{40}$"#, options: .regularExpression) != nil else {
@@ -42,9 +45,9 @@ enum TiciProductionRollbackCommandBuilder {
 
     return """
     set -eu
-    repo='/data/openpilot'
-    params_dir='/data/params/d'
-    params_lock='/data/params/.lock'
+    repo=\(shellQuote(repositoryPath))
+    params_dir=\(shellQuote(paramsDirectory))
+    params_lock=\(shellQuote(paramsLockPath))
     previous_head=\(shellQuote(journal.previousHead))
     expected_current_head=\(shellQuote(expectedCurrentHead))
     expected_branch=\(shellQuote(journal.branch))
@@ -67,11 +70,13 @@ enum TiciProductionRollbackCommandBuilder {
     cd "$repo"
     [ "$(git branch --show-current)" = "$expected_branch" ] || fail 'rollback branch changed unexpectedly'
     [ "$(git rev-parse HEAD)" = "$expected_current_head" ] || fail 'rollback source head is not the host-proven target identity'
+    [ -z "$(git status --porcelain)" ] || fail 'rollback source checkout is dirty'
     \(TiciParkedMutationGate.shellFragment(
       refusalMessage: "refusing Git rollback unless tici remains exactly offroad and Map Lookahead is disabled"
     ))
     [ "$(git branch --show-current)" = "$expected_branch" ] || fail 'rollback branch changed immediately before Git mutation'
     [ "$(git rev-parse HEAD)" = "$expected_current_head" ] || fail 'rollback source head changed immediately before Git mutation'
+    [ -z "$(git status --porcelain)" ] || fail 'rollback source checkout became dirty immediately before Git mutation'
     git reset --hard "$previous_head"
     [ "$(git rev-parse HEAD)" = "$previous_head" ] || fail 'git rollback head mismatch'
 

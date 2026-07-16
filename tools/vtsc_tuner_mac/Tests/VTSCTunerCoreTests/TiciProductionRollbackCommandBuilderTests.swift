@@ -12,7 +12,9 @@ import Testing
   #expect(!command.lowercased().contains("python"))
   #expect(command.contains("git reset --hard \"$previous_head\""))
   #expect(command.contains("[ \"$(git rev-parse HEAD)\" = \"$expected_current_head\" ]"))
+  #expect(command.components(separatedBy: "git status --porcelain").count - 1 == 2)
   #expect(command.range(of: "rollback source head changed immediately before Git mutation")!.lowerBound < command.range(of: "git reset --hard")!.lowerBound)
+  #expect(command.range(of: "rollback source checkout became dirty immediately before Git mutation")!.lowerBound < command.range(of: "git reset --hard")!.lowerBound)
   #expect(command.contains("MTSCLookaheadEnabled"))
   #expect(command.contains("refusing rollback unless tici is exactly offroad"))
   #expect(command.contains("[ \"$offroad\" != '1' ] || [ \"$onroad\" != '0' ] || [ \"$lookahead\" != '0' ]"))
@@ -56,6 +58,70 @@ import Testing
   #expect(throws: (any Error).self) {
     try TiciProductionRollbackCommandBuilder.restoredHead(from: "bad output")
   }
+}
+
+@Test func dirtyCheckoutImmediatelyBeforeResetStopsAllRollbackMutation() throws {
+  let root = FileManager.default.temporaryDirectory
+    .appendingPathComponent("vtsc-dirty-rollback-\(UUID().uuidString)", isDirectory: true)
+  defer { try? FileManager.default.removeItem(at: root) }
+  let repository = root.appendingPathComponent("repo", isDirectory: true)
+  let params = root.appendingPathComponent("params", isDirectory: true)
+  let bin = root.appendingPathComponent("bin", isDirectory: true)
+  try FileManager.default.createDirectory(at: repository, withIntermediateDirectories: true)
+  try FileManager.default.createDirectory(at: params, withIntermediateDirectories: true)
+  try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+  try "1".write(to: params.appendingPathComponent("IsOffroad"), atomically: true, encoding: .utf8)
+  try "0".write(to: params.appendingPathComponent("IsOnroad"), atomically: true, encoding: .utf8)
+  try "0".write(to: params.appendingPathComponent("MTSCLookaheadEnabled"), atomically: true, encoding: .utf8)
+
+  let statusCount = root.appendingPathComponent("status-count")
+  let resetMarker = root.appendingPathComponent("git-reset-ran")
+  let previousHead = String(repeating: "a", count: 40)
+  let currentHead = String(repeating: "b", count: 40)
+  let fakeGit = bin.appendingPathComponent("git")
+  try """
+  #!/bin/sh
+  case "$1 $2" in
+    "branch --show-current") printf '%s\\n' chauffeur-exp01 ;;
+    "rev-parse HEAD") printf '%s\\n' '\(currentHead)' ;;
+    "status --porcelain")
+      count="$(cat '\(statusCount.path)' 2>/dev/null || printf 0)"
+      count=$((count + 1))
+      printf '%s' "$count" > '\(statusCount.path)'
+      [ "$count" -ge 2 ] && printf '%s\\n' user-owned-change || :
+      ;;
+    "reset --hard") /usr/bin/touch '\(resetMarker.path)' ;;
+    *) exit 1 ;;
+  esac
+  """.write(to: fakeGit, atomically: true, encoding: .utf8)
+  try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fakeGit.path)
+  for tool in ["flock", "sha256sum"] {
+    let url = bin.appendingPathComponent(tool)
+    try "#!/bin/sh\nexit 0\n".write(to: url, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+  }
+
+  var journal = rollbackJournalFixture()
+  journal.previousHead = previousHead
+  let command = try TiciProductionRollbackCommandBuilder.command(
+    journal: journal,
+    expectedCurrentHead: currentHead,
+    repositoryPath: repository.path,
+    paramsDirectory: params.path,
+    paramsLockPath: root.appendingPathComponent("params.lock").path
+  )
+  let process = Process()
+  process.executableURL = URL(fileURLWithPath: "/bin/sh")
+  process.arguments = ["-c", command]
+  process.environment = ["PATH": "\(bin.path):/usr/bin:/bin:/usr/sbin:/sbin"]
+  try process.run()
+  process.waitUntilExit()
+
+  #expect(process.terminationStatus != 0)
+  #expect(!FileManager.default.fileExists(atPath: resetMarker.path))
+  #expect(FileManager.default.fileExists(atPath: statusCount.path))
+  #expect(try String(contentsOf: statusCount, encoding: .utf8) == "2")
+  #expect(try String(contentsOf: params.appendingPathComponent("IsOffroad"), encoding: .utf8) == "1")
 }
 
 @Test func mapdRollbackReplayNeedsNoArtifactWhenTheActiveBinaryIsAlreadyExact() {

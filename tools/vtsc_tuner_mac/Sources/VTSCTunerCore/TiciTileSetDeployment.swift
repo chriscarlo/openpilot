@@ -21,10 +21,12 @@ public struct TiciStagedTileSet: Equatable, Sendable {
 
 public struct TiciTileActivationResult: Equatable, Sendable {
   public var tileSetID: String
+  public var previousTileSetID: String
   public var commandOutput: String
 
-  public init(tileSetID: String, commandOutput: String) {
+  public init(tileSetID: String, previousTileSetID: String, commandOutput: String) {
     self.tileSetID = tileSetID
+    self.previousTileSetID = previousTileSetID
     self.commandOutput = commandOutput
   }
 }
@@ -207,10 +209,21 @@ public struct TiciTileSetDeploymentService: Sendable {
       context: "atomically activate tile set"
     )
     let decoded = try Self.decodeHelperResult(result.standardOutput)
-    guard decoded.operation == "activate", decoded.activatedTileSetID == staged.tileSetID else {
+    guard decoded.operation == "activate",
+          decoded.activatedTileSetID == staged.tileSetID,
+          let previousTileSetID = decoded.previousTileSetID
+    else {
       throw TiciTileSetDeploymentError.activationIdentityMissing(staged.tileSetID)
     }
-    return TiciTileActivationResult(tileSetID: staged.tileSetID, commandOutput: result.combinedOutput)
+    try Self.validateStoredTileSetID(previousTileSetID)
+    guard previousTileSetID != staged.tileSetID else {
+      throw TiciTileSetDeploymentError.activationIdentityMissing(previousTileSetID)
+    }
+    return TiciTileActivationResult(
+      tileSetID: staged.tileSetID,
+      previousTileSetID: previousTileSetID,
+      commandOutput: result.combinedOutput
+    )
   }
 
   public func rollback(
@@ -219,10 +232,10 @@ public struct TiciTileSetDeploymentService: Sendable {
     expectedRestoredTileSetID: String? = nil,
     expectedGitBranch: String,
     expectedGitHead: String
-  ) async throws {
+  ) async throws -> String? {
     try Self.validateProfile(profile)
     if let expectedActivatedTileSetID { try Self.validateTileSetID(expectedActivatedTileSetID) }
-    if let expectedRestoredTileSetID { try Self.validateTileSetID(expectedRestoredTileSetID) }
+    if let expectedRestoredTileSetID { try Self.validateStoredTileSetID(expectedRestoredTileSetID) }
     try Self.validateGitBinding(branch: expectedGitBranch, head: expectedGitHead)
     let helperPath = try await stageTransactionHelper(
       profile: profile,
@@ -250,12 +263,20 @@ public struct TiciTileSetDeploymentService: Sendable {
     }
     if let expectedActivatedTileSetID,
        decoded.tileActivationNotObserved == true {
-      guard let expectedRestoredTileSetID,
-            decoded.activeTileSetID == expectedRestoredTileSetID
-      else {
+      if let expectedRestoredTileSetID {
+        guard decoded.activeTileSetID == expectedRestoredTileSetID else {
+          throw TiciTileSetDeploymentError.activationIdentityMissing(expectedActivatedTileSetID)
+        }
+        return expectedRestoredTileSetID
+      }
+      guard let resolved = decoded.previousTileSetID else {
         throw TiciTileSetDeploymentError.activationIdentityMissing(expectedActivatedTileSetID)
       }
-      return
+      try Self.validateLegacyTileSetID(resolved)
+      guard decoded.activeTileSetID == resolved else {
+        throw TiciTileSetDeploymentError.activationIdentityMissing(resolved)
+      }
+      return resolved
     }
     if let expectedRestoredTileSetID, decoded.tileActivationNotSwitched != true {
       guard decoded.rolledBackTileSetID == expectedRestoredTileSetID else {
@@ -265,6 +286,21 @@ public struct TiciTileSetDeploymentService: Sendable {
     guard decoded.rolledBackTileSetID != nil || decoded.tileActivationNotSwitched == true else {
       throw TiciTileSetDeploymentError.invalidHelperOutput(result.standardOutput)
     }
+    if decoded.tileActivationNotSwitched == true { return expectedRestoredTileSetID }
+    guard let restored = decoded.rolledBackTileSetID else {
+      throw TiciTileSetDeploymentError.invalidHelperOutput(result.standardOutput)
+    }
+    if let expectedRestoredTileSetID {
+      guard restored == expectedRestoredTileSetID else {
+        throw TiciTileSetDeploymentError.activationIdentityMissing(expectedRestoredTileSetID)
+      }
+    } else {
+      try Self.validateLegacyTileSetID(restored)
+      guard decoded.previousTileSetID == restored else {
+        throw TiciTileSetDeploymentError.activationIdentityMissing(restored)
+      }
+    }
+    return restored
   }
 
   public static func stagingRoot(tileSetID: String) -> String {
@@ -311,7 +347,7 @@ public struct TiciTileSetDeploymentService: Sendable {
   ) throws -> String {
     try validateHelperPath(helperPath)
     if let expectedActivatedTileSetID { try validateTileSetID(expectedActivatedTileSetID) }
-    if let expectedRestoredTileSetID { try validateTileSetID(expectedRestoredTileSetID) }
+    if let expectedRestoredTileSetID { try validateStoredTileSetID(expectedRestoredTileSetID) }
     try validateGitBinding(branch: expectedGitBranch, head: expectedGitHead)
     let expected = expectedActivatedTileSetID.map {
       " --expected-tile-set-id \(shellQuote($0))"
@@ -326,6 +362,7 @@ public struct TiciTileSetDeploymentService: Sendable {
     expected_git_head=\(shellQuote(expectedGitHead))
     [ "$(git -C "$repo" branch --show-current)" = "$expected_git_branch" ] || { printf '%s\n' 'tile rollback branch is not the host-proven identity' >&2; exit 1; }
     [ "$(git -C "$repo" rev-parse HEAD)" = "$expected_git_head" ] || { printf '%s\n' 'tile rollback head is not the host-proven identity' >&2; exit 1; }
+    [ -z "$(git -C "$repo" status --porcelain)" ] || { printf '%s\n' 'tile rollback checkout is dirty' >&2; exit 1; }
     exec \(shellQuote(helperPath)) rollback --root \(shellQuote(remoteRoot)) --params-dir \(shellQuote(TiciParkedMutationGate.defaultParamsDirectory)) --repo-root "$repo" --expected-git-branch "$expected_git_branch" --expected-git-head "$expected_git_head"\(expected)\(expectedPrevious)\(try injectionArgument(injectedFailurePoint))
     """
   }
@@ -484,6 +521,7 @@ public struct TiciTileSetDeploymentService: Sendable {
     repo='/data/openpilot'
     [ "$(git -C "$repo" branch --show-current)" = \(shellQuote(expectedGitBranch)) ] || { printf '%s\n' 'tile-helper staging branch is not the host-proven identity' >&2; exit 1; }
     [ "$(git -C "$repo" rev-parse HEAD)" = \(shellQuote(expectedGitHead)) ] || { printf '%s\n' 'tile-helper staging head is not the host-proven identity' >&2; exit 1; }
+    [ -z "$(git -C "$repo" status --porcelain)" ] || { printf '%s\n' 'tile-helper staging checkout is dirty' >&2; exit 1; }
     """
   }
 
@@ -530,6 +568,17 @@ public struct TiciTileSetDeploymentService: Sendable {
     }
   }
 
+  private static func validateStoredTileSetID(_ tileSetID: String) throws {
+    if tileSetID.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil { return }
+    try validateLegacyTileSetID(tileSetID)
+  }
+
+  private static func validateLegacyTileSetID(_ tileSetID: String) throws {
+    guard tileSetID.range(of: #"^legacy-[0-9a-f]{16}$"#, options: .regularExpression) != nil else {
+      throw TiciTileSetDeploymentError.invalidTileSetID(tileSetID)
+    }
+  }
+
   private static func validateHelperPath(_ path: String) throws {
     guard path.range(
       of: #"^/data/media/0/osm/binaries/vtsc-tile-transaction-[0-9a-f]{16}$"#,
@@ -572,6 +621,7 @@ public struct TiciTileSetDeploymentService: Sendable {
     var tileSetID: String?
     var activatedTileSetID: String?
     var rolledBackTileSetID: String?
+    var previousTileSetID: String?
     var activeTileSetID: String?
     var fileCount: Int?
     var totalBytes: UInt64?
@@ -583,6 +633,7 @@ public struct TiciTileSetDeploymentService: Sendable {
       case tileSetID = "tile_set_id"
       case activatedTileSetID = "activated_tile_set_id"
       case rolledBackTileSetID = "rolled_back_tile_set_id"
+      case previousTileSetID = "previous_tile_set_id"
       case activeTileSetID = "active_tile_set_id"
       case fileCount = "file_count"
       case totalBytes = "total_bytes"
