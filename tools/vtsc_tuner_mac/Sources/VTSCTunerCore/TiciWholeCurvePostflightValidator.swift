@@ -8,6 +8,7 @@ import Foundation
 struct TiciWholeCurvePostflightStatus: Equatable, Sendable {
   var estimatorVersion: String
   var routeFingerprint: String
+  var sigmoidHash: String
   var fresh: Bool
   var valuesFinite: Bool
   var gpsStatus: String
@@ -76,6 +77,7 @@ enum TiciWholeCurvePostflightValidator {
       return TiciWholeCurvePostflightStatus(
         estimatorVersion: metadata.estimatorVersion,
         routeFingerprint: metadata.routeFingerprint,
+        sigmoidHash: metadata.sigmoidHash,
         fresh: false,
         valuesFinite: false,
         gpsStatus: gpsStatus,
@@ -88,6 +90,7 @@ enum TiciWholeCurvePostflightValidator {
       return TiciWholeCurvePostflightStatus(
         estimatorVersion: metadata.estimatorVersion,
         routeFingerprint: metadata.routeFingerprint,
+        sigmoidHash: metadata.sigmoidHash,
         fresh: false,
         valuesFinite: false,
         gpsStatus: gpsStatus,
@@ -118,6 +121,7 @@ enum TiciWholeCurvePostflightValidator {
       return TiciWholeCurvePostflightStatus(
         estimatorVersion: profile.estimatorVersion,
         routeFingerprint: profile.routeFingerprint,
+        sigmoidHash: profile.sigmoidHash,
         fresh: true,
         valuesFinite: true,
         gpsStatus: gpsStatus,
@@ -129,6 +133,7 @@ enum TiciWholeCurvePostflightValidator {
       return TiciWholeCurvePostflightStatus(
         estimatorVersion: metadata.estimatorVersion,
         routeFingerprint: metadata.routeFingerprint,
+        sigmoidHash: metadata.sigmoidHash,
         fresh: false,
         valuesFinite: false,
         gpsStatus: gpsStatus,
@@ -140,6 +145,7 @@ enum TiciWholeCurvePostflightValidator {
       return TiciWholeCurvePostflightStatus(
         estimatorVersion: metadata.estimatorVersion,
         routeFingerprint: metadata.routeFingerprint,
+        sigmoidHash: metadata.sigmoidHash,
         fresh: false,
         valuesFinite: false,
         gpsStatus: gpsStatus,
@@ -458,13 +464,16 @@ enum TiciWholeCurvePostflightValidator {
     )
   }
 
-  private static func profileMetadata(_ data: Data?) -> (estimatorVersion: String, routeFingerprint: String, pointCount: Int, eventCount: Int) {
+  private static func profileMetadata(
+    _ data: Data?
+  ) -> (estimatorVersion: String, routeFingerprint: String, sigmoidHash: String, pointCount: Int, eventCount: Int) {
     guard let data,
           let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-    else { return ("", "", 0, 0) }
+    else { return ("", "", "", 0, 0) }
     return (
       root["estimatorVersion"] as? String ?? "",
       root["routeFingerprint"] as? String ?? "",
+      root["sigmoidHash"] as? String ?? "",
       (root["points"] as? [Any])?.count ?? 0,
       (root["events"] as? [Any])?.count ?? 0
     )

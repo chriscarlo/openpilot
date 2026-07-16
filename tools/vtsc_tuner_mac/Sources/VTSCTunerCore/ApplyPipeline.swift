@@ -106,6 +106,37 @@ public struct ApplyRequest: Sendable {
   }
 }
 
+public struct ResumePostflightAction: Sendable {
+  public static let label = "Resume Pending Outdoor Postflight"
+  public static let description =
+    "Load the existing rebooted deployment journal and perform only read-only identity, safety, and real-GPS whole-curve checks. This never applies, commits, deploys, changes Params, or reboots."
+}
+
+public struct ResumePostflightRequest: Sendable {
+  public var tune: Tune
+  public var repositoryRoot: URL
+  public var expectedBranch: String
+  public var mapdReleaseManifestURL: URL?
+  public var journalURL: URL?
+  public var timeout: TimeInterval
+
+  public init(
+    tune: Tune,
+    repositoryRoot: URL,
+    expectedBranch: String = "chauffeur-exp01",
+    mapdReleaseManifestURL: URL? = nil,
+    journalURL: URL? = nil,
+    timeout: TimeInterval = 120
+  ) {
+    self.tune = tune
+    self.repositoryRoot = repositoryRoot
+    self.expectedBranch = expectedBranch
+    self.mapdReleaseManifestURL = mapdReleaseManifestURL
+    self.journalURL = journalURL
+    self.timeout = timeout
+  }
+}
+
 enum ProductionTilePlan: Equatable, Sendable {
   case unchanged
   case validateExplicit(URL)
@@ -317,6 +348,169 @@ public actor ApplyPipeline {
         continuation.finish()
       }
       continuation.onTermination = { @Sendable _ in worker.cancel() }
+    }
+  }
+
+  /// Continue only the final proof for a deployment that already rebooted.
+  /// The worker performs no source, Git, tici, mapd, tile, Param, or reboot
+  /// mutation; its sole write is the final atomic `completed=true` journal
+  /// replacement after every current identity and profile check succeeds.
+  public nonisolated func resumePostflightEvents(
+    for request: ResumePostflightRequest
+  ) -> AsyncStream<ApplyEvent> {
+    AsyncStream { continuation in
+      let worker = Task {
+        _ = await self.resumePendingPostflight(request) { event in
+          continuation.yield(event)
+        }
+        continuation.finish()
+      }
+      continuation.onTermination = { @Sendable _ in worker.cancel() }
+    }
+  }
+
+  @discardableResult
+  public func resumePendingPostflight(
+    _ request: ResumePostflightRequest,
+    progress: @escaping ApplyProgressHandler
+  ) async -> Bool {
+    await emit(.running, id: 0, text: "Loading the existing pending deployment journal…", progress: progress)
+    do {
+      try Task.checkCancellation()
+      try RepositoryLocator.validate(request.repositoryRoot)
+      try validateExactSourceTune(
+        repositoryRoot: request.repositoryRoot,
+        tune: request.tune
+      )
+      guard request.expectedBranch.range(of: #"^[A-Za-z0-9._/-]+$"#, options: .regularExpression) != nil,
+            !request.expectedBranch.contains(".."), !request.expectedBranch.hasPrefix("/")
+      else { throw ApplyPipelineError.invalidBranch(request.expectedBranch) }
+
+      let loaded = try DeploymentRollbackJournal.loadPendingPostflight(from: request.journalURL)
+      var journal = loaded.journal
+      try validateProfile(journal.profile)
+      guard journal.branch == request.expectedBranch else {
+        throw ApplyPipelineError.invalidBranch(journal.branch)
+      }
+      let git = try await gitDeploymentPreflight(
+        repositoryRoot: request.repositoryRoot,
+        expectedBranch: request.expectedBranch
+      )
+      let gitIdentity = try await validateResumePostflightGitIdentity(
+        journal: journal,
+        git: git,
+        repositoryRoot: request.repositoryRoot
+      )
+      let release = try MapdReleaseArtifact.load(from: request.mapdReleaseManifestURL).validated()
+      guard await probeProfile(journal.profile) else {
+        throw ApplyPipelineError.noReachableTici(lastADBTransportDetail)
+      }
+      let profile = journal.profile
+      let preflight = RuntimeDeploymentPreflight(
+        git: git,
+        profile: profile,
+        mapdRecoveryOutcome: .clean,
+        release: release,
+        tileSet: nil,
+        journal: journal,
+        journalURL: loaded.url
+      )
+      await emit(
+        .succeeded,
+        id: 0,
+        text: "Pending deployment target and exact clean host-only tooling head match",
+        detail: [
+          "journal=\(loaded.url.path)",
+          "deployed_target_head=\(gitIdentity.deployedTargetHead)",
+          "tooling_head=\(gitIdentity.toolingHead)",
+          "host_only_paths=\(gitIdentity.hostOnlyPaths.joined(separator: ","))",
+          "profile=\(profile)",
+        ].joined(separator: "\n"),
+        progress: progress
+      )
+
+      await emit(
+        .running,
+        id: 1,
+        text: "Verifying the unchanged tici identity and fresh real-GPS whole-curve profile…",
+        progress: progress
+      )
+      let identity = TuneDeploymentIdentity(tune: request.tune)
+      let postflight = try await waitForResumedProductionPostflight(
+        preflight: preflight,
+        toolingHead: gitIdentity.toolingHead,
+        identity: identity,
+        timeout: request.timeout
+      )
+      await emit(
+        .succeeded,
+        id: 1,
+        text: "Exact deployed identity and native whole-curve validator passed",
+        detail: "profile_points=\(postflight.profilePointCount) profile_events=\(postflight.profileEventCount)",
+        progress: progress
+      )
+
+      try Task.checkCancellation()
+      // Revalidate the on-disk journal immediately before its only permitted
+      // mutation so an external replacement cannot be finalized accidentally.
+      let completionLock = try DeploymentRollbackJournal.acquireCompletionLock(for: loaded.url)
+      defer { completionLock.unlock() }
+      let current = try DeploymentRollbackJournal.load(from: loaded.url)
+      guard current == journal else {
+        throw ApplyPipelineError.postflightMismatch("pending deployment journal changed during read-only verification")
+      }
+      try validateExactSourceTune(repositoryRoot: request.repositoryRoot, tune: request.tune)
+      let finalGit = try await gitDeploymentPreflight(
+        repositoryRoot: request.repositoryRoot,
+        expectedBranch: request.expectedBranch
+      )
+      guard finalGit == git,
+            finalGit.localHead == gitIdentity.toolingHead else {
+        throw ApplyPipelineError.postflightMismatch("clean local/origin tooling identity changed during postflight")
+      }
+      let finalReadback = try await readTiciRuntimePostflight(
+        profile: preflight.profile,
+        context: "final read-only pending postflight safety check"
+      )
+      let finalPostflight = makeProductionPostflight(
+        finalReadback,
+        preflight: preflight,
+        identity: identity
+      )
+      try validatePostflight(
+        finalPostflight,
+        requireNonemptyWholeCurveProfile: true,
+        preflight: preflight,
+        targetHead: gitIdentity.toolingHead,
+        identity: identity,
+        expectedActiveTileSetID: preflight.journal.targetTileSetID ?? preflight.journal.previousTileSetID
+      )
+      try Task.checkCancellation()
+      journal.completed = true
+      journal.completedAt = Date().ISO8601Format()
+      journal.completedToolingHead = gitIdentity.toolingHead
+      journal.completionHostOnlyPaths = gitIdentity.hostOnlyPaths
+      try Task.checkCancellation()
+      try journal.write(to: loaded.url)
+      guard try DeploymentRollbackJournal.load(from: loaded.url) == journal else {
+        throw ApplyPipelineError.postflightMismatch("completed deployment journal did not read back exactly")
+      }
+      await emit(
+        .succeeded,
+        id: 2,
+        text: "The existing deployment journal is now complete",
+        detail: "journal=\(loaded.url.path)\nNo Git, mapd, tile, Param, or reboot mutation was performed.",
+        progress: progress
+      )
+      return await finish(true, progress: progress)
+    } catch {
+      await emitFailure(
+        id: 2,
+        text: "Pending postflight remains incomplete; no deployment mutation or reboot was attempted",
+        error: error,
+        progress: progress
+      )
+      return await finish(false, progress: progress)
     }
   }
 
@@ -661,6 +855,117 @@ public actor ApplyPipeline {
       tileSet: tileSet,
       journal: journal,
       journalURL: journalURL
+    )
+  }
+
+  private func validateExactSourceTune(repositoryRoot: URL, tune: Tune) throws {
+    let physicsURL = repositoryRoot.appendingPathComponent(RepositoryLocator.physicsRelativePath)
+    let qCurveURL = repositoryRoot.appendingPathComponent(RepositoryLocator.qCurveRelativePath)
+    let paramsDefaultsURL = repositoryRoot.appendingPathComponent(RepositoryLocator.paramsDefaultsRelativePath)
+    let physicsPanelURL = repositoryRoot.appendingPathComponent(RepositoryLocator.physicsPanelRelativePath)
+    let physicsText = try String(contentsOf: physicsURL, encoding: .utf8)
+    let qCurveText = try String(contentsOf: qCurveURL, encoding: .utf8)
+    let paramsDefaultsText = try String(contentsOf: paramsDefaultsURL, encoding: .utf8)
+    let physicsPanelText = try String(contentsOf: physicsPanelURL, encoding: .utf8)
+    let current = try SourcePatcher.readParameters(from: repositoryRoot)
+    guard current == VTSCMath.sourceRoundedParameters(tune.params) else {
+      throw ApplyPipelineError.postflightMismatch("checked-in VTSC physics authorities differ from the pending tune")
+    }
+    let patch = try SourcePatcher.makePatch(
+      physicsText: physicsText,
+      qCurveText: qCurveText,
+      paramsDefaultsText: paramsDefaultsText,
+      physicsPanelText: physicsPanelText,
+      parameters: tune.params,
+      bands: tune.bands
+    )
+    guard patch == SourcePatchResult(
+      physicsText: physicsText,
+      qCurveText: qCurveText,
+      paramsDefaultsText: paramsDefaultsText,
+      physicsPanelText: physicsPanelText
+    ) else {
+      throw ApplyPipelineError.postflightMismatch("checked-in VTSC physics/Q source differs from the pending tune")
+    }
+  }
+
+  func validateResumePostflightGitIdentity(
+    journal: DeploymentRollbackJournal,
+    git: GitDeploymentPreflight,
+    repositoryRoot: URL
+  ) async throws -> ResumePostflightGitIdentity {
+    try journal.validatePendingPostflight()
+    guard let deployedTargetHead = journal.targetHead else {
+      throw DeploymentRollbackJournalError.invalidTargetHead("")
+    }
+    guard journal.branch == git.branch else { throw ApplyPipelineError.invalidBranch(journal.branch) }
+    guard git.localHead == git.originHead else {
+      throw ApplyPipelineError.commitMismatch(
+        context: "resume local/origin tooling head",
+        expected: git.originHead,
+        actual: git.localHead
+      )
+    }
+    guard deployedTargetHead != git.localHead else {
+      return ResumePostflightGitIdentity(
+        deployedTargetHead: deployedTargetHead,
+        toolingHead: git.localHead,
+        hostOnlyPaths: []
+      )
+    }
+
+    let relationship = try await processRunner.run(ProcessRequest(
+      executableURL: Self.gitURL,
+      arguments: ["merge-base", "--is-ancestor", deployedTargetHead, git.localHead],
+      currentDirectoryURL: repositoryRoot,
+      timeout: 30
+    ))
+    guard relationship.terminationStatus == 0 else {
+      if relationship.terminationStatus == 1 {
+        throw ApplyPipelineError.commitMismatch(
+          context: "pending deployment target is not an ancestor of the tooling head",
+          expected: deployedTargetHead,
+          actual: git.localHead
+        )
+      }
+      throw ApplyPipelineError.invalidDeploymentOutput(
+        "could not verify pending deployment/tooling ancestry: \(relationship.combinedOutput)"
+      )
+    }
+
+    let changed = try await checked(
+      ProcessRequest(
+        executableURL: Self.gitURL,
+        arguments: [
+          "diff", "--no-ext-diff", "--name-only", "-z",
+          "\(deployedTargetHead)..\(git.localHead)", "--",
+        ],
+        currentDirectoryURL: repositoryRoot,
+        timeout: 30
+      ),
+      context: "prove pending deployment follow-up is host-only tooling"
+    )
+    let paths = changed.standardOutput.split(separator: "\0", omittingEmptySubsequences: true).map(String.init)
+    guard !paths.isEmpty else {
+      throw ApplyPipelineError.invalidDeploymentOutput(
+        "the tooling head differs from the deployed target but Git reported no changed paths"
+      )
+    }
+    let allowedPrefixes = [
+      "tools/vtsc_tuner_mac/",
+      ".codex/skills/vtsc-tuner-app/",
+    ]
+    guard paths.allSatisfy({ path in
+      !path.hasPrefix("/") && !path.contains("..") && allowedPrefixes.contains { path.hasPrefix($0) }
+    }) else {
+      throw ApplyPipelineError.postflightMismatch(
+        "commits after the immutable deployed target are not host-only VTSC tuner changes: \(paths.joined(separator: ", "))"
+      )
+    }
+    return ResumePostflightGitIdentity(
+      deployedTargetHead: deployedTargetHead,
+      toolingHead: git.localHead,
+      hostOnlyPaths: paths.sorted()
     )
   }
 
@@ -1118,10 +1423,48 @@ public actor ApplyPipeline {
         )
         try validatePostflight(
           postflight,
-          request: request,
+          requireNonemptyWholeCurveProfile: request.requireNonemptyWholeCurveProfile,
           preflight: preflight,
           targetHead: targetHead,
+          identity: identity,
+          expectedActiveTileSetID: preflight.tileSet?.manifest.tileSetID ?? preflight.journal.previousTileSetID
+        )
+        return postflight
+      } catch {
+        lastError = error
+      }
+      if Date() < deadline { try await Task.sleep(for: .seconds(2)) }
+    } while Date() < deadline
+    throw lastError
+  }
+
+  private func waitForResumedProductionPostflight(
+    preflight: RuntimeDeploymentPreflight,
+    toolingHead: String,
+    identity: TuneDeploymentIdentity,
+    timeout: TimeInterval
+  ) async throws -> TiciDeploymentPostflight {
+    let deadline = Date().addingTimeInterval(max(0, timeout))
+    var lastError: Error = ApplyPipelineError.postflightMismatch("resumed postflight did not run")
+    repeat {
+      try Task.checkCancellation()
+      do {
+        let readback = try await readTiciRuntimePostflight(
+          profile: preflight.profile,
+          context: "resume pending tici deployment postflight"
+        )
+        let postflight = makeProductionPostflight(
+          readback,
+          preflight: preflight,
           identity: identity
+        )
+        try validatePostflight(
+          postflight,
+          requireNonemptyWholeCurveProfile: true,
+          preflight: preflight,
+          targetHead: toolingHead,
+          identity: identity,
+          expectedActiveTileSetID: preflight.journal.targetTileSetID ?? preflight.journal.previousTileSetID
         )
         return postflight
       } catch {
@@ -1180,7 +1523,9 @@ public actor ApplyPipeline {
       isOffroad: snapshot.isOffroad,
       isOnroad: snapshot.isOnroad,
       mapLookaheadEnabled: snapshot.mapLookaheadEnabled,
+      branch: snapshot.branch,
       head: snapshot.head,
+      dirty: snapshot.dirty,
       physicsMatches: physicsMatches,
       qCurveSHA256: readback.deployment.qCurve.sha256,
       qCurveEnabled: readback.deployment.qCurve.enabled,
@@ -1198,6 +1543,7 @@ public actor ApplyPipeline {
       buildInfoMatches: buildInfoMatches,
       profileEstimatorVersion: profile.estimatorVersion,
       profileRouteFingerprint: profile.routeFingerprint,
+      profileSigmoidHash: profile.sigmoidHash,
       profileFresh: profile.fresh,
       profileValuesFinite: profile.valuesFinite,
       gpsStatus: profile.gpsStatus,
@@ -1216,13 +1562,20 @@ public actor ApplyPipeline {
 
   private func validatePostflight(
     _ result: TiciDeploymentPostflight,
-    request: ApplyRequest,
+    requireNonemptyWholeCurveProfile: Bool,
     preflight: RuntimeDeploymentPreflight,
     targetHead: String,
-    identity: TuneDeploymentIdentity
+    identity: TuneDeploymentIdentity,
+    expectedActiveTileSetID: String?
   ) throws {
     guard result.isOffroad, !result.isOnroad else { throw ApplyPipelineError.ticiNotOffroad }
     guard !result.mapLookaheadEnabled else { throw ApplyPipelineError.mapLookaheadMustRemainDisabled }
+    guard result.branch == preflight.journal.branch else {
+      throw ApplyPipelineError.invalidBranch(result.branch)
+    }
+    guard !result.dirty else {
+      throw ApplyPipelineError.repositoryDirty("tici checkout is dirty during postflight")
+    }
     guard result.head == targetHead else {
       throw ApplyPipelineError.commitMismatch(context: "tici postflight", expected: targetHead, actual: result.head)
     }
@@ -1244,7 +1597,12 @@ public actor ApplyPipeline {
     guard result.profileEstimatorVersion == release.estimatorVersion else {
       throw ApplyPipelineError.postflightMismatch("whole-curve estimator version is missing or mismatched")
     }
-    if request.requireNonemptyWholeCurveProfile {
+    guard result.profileSigmoidHash == identity.tileSigmoidHash else {
+      throw ApplyPipelineError.postflightMismatch(
+        "whole-curve profile sigmoid hash is \(result.profileSigmoidHash), expected \(identity.tileSigmoidHash)"
+      )
+    }
+    if requireNonemptyWholeCurveProfile {
       guard result.gpsStatus == "valid" else {
         throw ApplyPipelineError.postflightMismatch("whole-curve profile pending real GPS: \(result.gpsStatus)")
       }
@@ -1258,12 +1616,10 @@ public actor ApplyPipeline {
         )
       }
     }
-    if let expectedTileSetID = preflight.tileSet?.manifest.tileSetID {
-      guard result.activeTileSetID == expectedTileSetID else {
-        throw ApplyPipelineError.postflightMismatch("active tile-set identity is not \(expectedTileSetID)")
-      }
-    } else if result.activeTileSetID != preflight.journal.previousTileSetID {
-      throw ApplyPipelineError.postflightMismatch("tile identity changed even though no replacement was requested")
+    guard result.activeTileSetID == expectedActiveTileSetID else {
+      throw ApplyPipelineError.postflightMismatch(
+        "active tile-set identity is \(result.activeTileSetID ?? "<none>"), expected \(expectedActiveTileSetID ?? "<none>")"
+      )
     }
   }
 

@@ -64,6 +64,8 @@ final class TunerSession: ObservableObject {
   @Published var repositoryURL: URL?
   @Published var pendingApplyAction: ApplyAction?
   @Published var runningApplyAction: ApplyAction?
+  @Published var pendingResumePostflight = false
+  @Published var runningResumePostflight = false
   @Published var applySteps: [ApplyStepEvent] = []
   @Published var applySucceeded: Bool?
 
@@ -310,6 +312,45 @@ final class TunerSession: ObservableObject {
     }
   }
 
+  func confirmResumePostflight() {
+    guard workspace == .curveLab else {
+      pendingResumePostflight = false
+      status("Postflight resume is only available in Curve Lab.", error: true)
+      return
+    }
+    guard let repositoryURL else {
+      pendingResumePostflight = false
+      status("Choose a Chauffeur repository before resuming postflight.", error: true)
+      return
+    }
+    let request = ResumePostflightRequest(
+      tune: Tune(params: parameters, bands: bands, knobs: knobs),
+      repositoryRoot: repositoryURL
+    )
+    pendingResumePostflight = false
+    runningResumePostflight = true
+    applySteps = []
+    applySucceeded = nil
+    applyTask?.cancel()
+    let pipeline = ApplyPipeline()
+    applyTask = Task { [weak self] in
+      for await event in pipeline.resumePostflightEvents(for: request) {
+        guard let self else { return }
+        switch event {
+        case let .step(step): self.upsertStep(step)
+        case let .finished(success):
+          self.applySucceeded = success
+          self.status(
+            success
+              ? "Pending outdoor postflight completed without redeploying or rebooting."
+              : "Pending outdoor postflight remains incomplete; nothing was redeployed or rebooted.",
+            error: !success
+          )
+        }
+      }
+    }
+  }
+
   func cancelApply() {
     applyTask?.cancel()
     applyTask = nil
@@ -321,6 +362,19 @@ final class TunerSession: ObservableObject {
     applyTask?.cancel()
     applyTask = nil
     runningApplyAction = nil
+  }
+
+  func closeResumePostflight() {
+    applyTask?.cancel()
+    applyTask = nil
+    runningResumePostflight = false
+  }
+
+  func cancelResumePostflight() {
+    applyTask?.cancel()
+    applyTask = nil
+    applySucceeded = false
+    status("Pending outdoor postflight cancelled; the deployment journal remains unchanged.", error: true)
   }
 
   private func upsertStep(_ step: ApplyStepEvent) {

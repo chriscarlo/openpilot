@@ -55,6 +55,8 @@ struct VTSCTunerApp: App {
           ForEach(ApplyAction.allCases) { action in
             Button(action.label) { session.pendingApplyAction = action }
           }
+          Divider()
+          Button(ResumePostflightAction.label) { session.pendingResumePostflight = true }
         } else {
           Text("Whole-curve study is read-only")
         }

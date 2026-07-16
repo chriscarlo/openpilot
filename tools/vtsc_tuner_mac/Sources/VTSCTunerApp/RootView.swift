@@ -31,6 +31,8 @@ struct RootView: View {
               ForEach(ApplyAction.allCases) { action in
                 Button(action.label) { session.pendingApplyAction = action }
               }
+              Divider()
+              Button(ResumePostflightAction.label) { session.pendingResumePostflight = true }
             }
           } else {
             Picker(
@@ -115,6 +117,12 @@ struct RootView: View {
       }
       .sheet(item: $session.runningApplyAction) { action in
         ApplyProgressView(session: session, action: action)
+      }
+      .sheet(isPresented: $session.pendingResumePostflight) {
+        ResumePostflightConfirmationView(session: session)
+      }
+      .sheet(isPresented: $session.runningResumePostflight) {
+        ResumePostflightProgressView(session: session)
       }
       .onExitCommand {
         if session.workspace == .mapPreview {
@@ -556,6 +564,83 @@ struct ApplyProgressView: View {
     }
     .padding(24)
     .frame(width: 640, height: 380)
+    .interactiveDismissDisabled(session.applySucceeded == nil)
+  }
+}
+
+struct ResumePostflightConfirmationView: View {
+  @ObservedObject var session: TunerSession
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 16) {
+      Label(ResumePostflightAction.label, systemImage: "checkmark.shield")
+        .font(.title2.weight(.semibold))
+      Text(ResumePostflightAction.description)
+      Label(session.repositoryURL?.path ?? "No Chauffeur repository selected", systemImage: "folder")
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .textSelection(.enabled)
+      Label(
+        "Outdoors after a normal GPS/profile-producing drive: stop safely with ignition still on, click Verify and Complete, then turn ignition off. The app polls until IsOffroad=1 while the profile/GPS are still fresh (about 3 seconds). Failure keeps the original journal pending.",
+        systemImage: "location.viewfinder"
+      )
+      .foregroundStyle(.orange)
+      HStack {
+        Spacer()
+        Button("Cancel", role: .cancel) { session.pendingResumePostflight = false }
+        Button("Verify and Complete") { session.confirmResumePostflight() }
+          .keyboardShortcut(.defaultAction)
+      }
+    }
+    .padding(24)
+    .frame(width: 560)
+  }
+}
+
+struct ResumePostflightProgressView: View {
+  @ObservedObject var session: TunerSession
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 14) {
+      Text(ResumePostflightAction.label).font(.title2.weight(.semibold))
+      ScrollView {
+        LazyVStack(alignment: .leading, spacing: 12) {
+          ForEach(session.applySteps, id: \.id) { step in
+            HStack(alignment: .top, spacing: 10) {
+              Group {
+                switch step.status {
+                case .running: ProgressView().controlSize(.small)
+                case .succeeded: Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                case .failed: Image(systemName: "xmark.circle.fill").foregroundStyle(.red)
+                }
+              }
+              .frame(width: 18)
+              VStack(alignment: .leading, spacing: 4) {
+                Text(step.text)
+                if !step.detail.isEmpty {
+                  Text(step.detail)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                }
+              }
+            }
+          }
+        }
+      }
+      .frame(minHeight: 220)
+      HStack {
+        if session.applySucceeded == nil {
+          Button("Cancel", role: .cancel) { session.cancelResumePostflight() }
+        }
+        Spacer()
+        Button("Close") { session.closeResumePostflight() }
+          .disabled(session.applySucceeded == nil)
+          .keyboardShortcut(.defaultAction)
+      }
+    }
+    .padding(24)
+    .frame(width: 680, height: 400)
     .interactiveDismissDisabled(session.applySucceeded == nil)
   }
 }

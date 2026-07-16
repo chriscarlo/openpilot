@@ -7,6 +7,12 @@ struct GitDeploymentPreflight: Equatable, Sendable {
   var upstream: String
 }
 
+struct ResumePostflightGitIdentity: Equatable, Sendable {
+  var deployedTargetHead: String
+  var toolingHead: String
+  var hostOnlyPaths: [String]
+}
+
 struct TiciDeploymentSnapshot: Codable, Equatable, Sendable {
   var isOffroad: Bool
   var isOnroad: Bool
@@ -43,7 +49,9 @@ struct TiciDeploymentPostflight: Codable, Equatable, Sendable {
   var isOffroad: Bool
   var isOnroad: Bool
   var mapLookaheadEnabled: Bool
+  var branch: String
   var head: String
+  var dirty: Bool
   var physicsMatches: Bool
   var qCurveSHA256: String
   var qCurveEnabled: Bool
@@ -58,6 +66,7 @@ struct TiciDeploymentPostflight: Codable, Equatable, Sendable {
   var buildInfoMatches: Bool
   var profileEstimatorVersion: String
   var profileRouteFingerprint: String
+  var profileSigmoidHash: String
   var profileFresh: Bool
   var profileValuesFinite: Bool
   var gpsStatus: String
@@ -70,7 +79,7 @@ struct TiciDeploymentPostflight: Codable, Equatable, Sendable {
     case isOffroad = "is_offroad"
     case isOnroad = "is_onroad"
     case mapLookaheadEnabled = "map_lookahead_enabled"
-    case head
+    case branch, head, dirty
     case physicsMatches = "physics_matches"
     case qCurveSHA256 = "q_curve_sha256"
     case qCurveEnabled = "q_curve_enabled"
@@ -85,6 +94,7 @@ struct TiciDeploymentPostflight: Codable, Equatable, Sendable {
     case buildInfoMatches = "build_info_matches"
     case profileEstimatorVersion = "profile_estimator_version"
     case profileRouteFingerprint = "profile_route_fingerprint"
+    case profileSigmoidHash = "profile_sigmoid_hash"
     case profileFresh = "profile_fresh"
     case profileValuesFinite = "profile_values_finite"
     case gpsStatus = "gps_status"

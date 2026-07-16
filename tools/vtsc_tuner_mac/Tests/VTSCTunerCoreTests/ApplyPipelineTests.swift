@@ -91,6 +91,259 @@ import Testing
   }
 }
 
+@Test func resumePostflightKeepsImmutableDeploymentTargetAndOnlyCompletesExistingJournal() async throws {
+  let fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  let runner = ResumePostflightRunner(fixture: fixture)
+  let collector = ApplyEventCollector()
+
+  let succeeded = await ApplyPipeline(processRunner: runner).resumePendingPostflight(
+    ResumePostflightRequest(
+      tune: fixture.tune,
+      repositoryRoot: fixture.repository,
+      mapdReleaseManifestURL: fixture.releaseURL,
+      journalURL: fixture.journalURL,
+      timeout: 0
+    )
+  ) { event in
+    await collector.append(event)
+  }
+
+  #expect(succeeded)
+  let completed = try DeploymentRollbackJournal.load(from: fixture.journalURL)
+  #expect(completed.completed)
+  #expect(completed.targetHead == fixture.deployedTargetHead)
+  #expect(completed.deploymentID == fixture.journal.deploymentID)
+  #expect(completed.completedAt != nil)
+  #expect(completed.completedToolingHead == fixture.toolingHead)
+  #expect(completed.completionHostOnlyPaths == fixture.changedPaths.sorted())
+
+  let requests = await runner.requests
+  #expect(requests.contains {
+    $0.executableURL == ApplyPipeline.gitURL &&
+      $0.arguments == ["merge-base", "--is-ancestor", fixture.deployedTargetHead, fixture.toolingHead]
+  })
+  #expect(requests.contains {
+    $0.executableURL == ApplyPipeline.gitURL &&
+      $0.arguments.contains("\(fixture.deployedTargetHead)..\(fixture.toolingHead)")
+  })
+  #expect(requests.contains {
+    $0.executableURL == ApplyPipeline.sshURL &&
+      $0.arguments.last?.contains("memory_params_root=/dev/shm/params/d") == true
+  })
+  #expect(!requests.contains { $0.executableURL == ApplyPipeline.rsyncURL })
+  #expect(!requests.contains { request in
+    let command = request.arguments.joined(separator: " ")
+    return command.contains("sudo reboot") || command.contains("git fetch --no-tags") ||
+      command.contains("flock -x 9") || command.contains(".mapd-release-")
+  })
+}
+
+@Test func cancellingResumedPostflightKeepsThePendingJournalByteForByte() async throws {
+  let fixture = try resumePostflightFixture(validGPS: false)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  let before = try Data(contentsOf: fixture.journalURL)
+  let runner = ResumePostflightRunner(fixture: fixture)
+  let pipeline = ApplyPipeline(processRunner: runner)
+  let task = Task {
+    await pipeline.resumePendingPostflight(
+      ResumePostflightRequest(
+        tune: fixture.tune,
+        repositoryRoot: fixture.repository,
+        mapdReleaseManifestURL: fixture.releaseURL,
+        journalURL: fixture.journalURL,
+        timeout: 120
+      )
+    ) { _ in }
+  }
+  try await Task.sleep(for: .milliseconds(50))
+  task.cancel()
+  #expect(await task.value == false)
+  #expect(try Data(contentsOf: fixture.journalURL) == before)
+}
+
+@Test func completionLockAllowsOnlyOneTunerInstancePerJournal() throws {
+  let root = FileManager.default.temporaryDirectory
+    .appendingPathComponent("vtsc-journal-lock-\(UUID().uuidString)", isDirectory: true)
+  try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+  defer { try? FileManager.default.removeItem(at: root) }
+  let journalURL = root.appendingPathComponent("pending.json")
+  try Data("pending".utf8).write(to: journalURL)
+
+  let first = try DeploymentRollbackJournal.acquireCompletionLock(for: journalURL)
+  #expect(throws: DeploymentRollbackJournalError.completionLocked(journalURL.standardizedFileURL)) {
+    try DeploymentRollbackJournal.acquireCompletionLock(for: journalURL)
+  }
+  first.unlock()
+  let second = try DeploymentRollbackJournal.acquireCompletionLock(for: journalURL)
+  second.unlock()
+}
+
+@Test func resumePostflightFailsClosedForNonToolingFollowupAndRetainsJournal() async throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  fixture.changedPaths = ["selfdrive/controls/lib/longitudinal_planner.py"]
+  let runner = ResumePostflightRunner(fixture: fixture)
+
+  let succeeded = await ApplyPipeline(processRunner: runner).resumePendingPostflight(
+    ResumePostflightRequest(
+      tune: fixture.tune,
+      repositoryRoot: fixture.repository,
+      mapdReleaseManifestURL: fixture.releaseURL,
+      journalURL: fixture.journalURL,
+      timeout: 0
+    )
+  ) { _ in }
+
+  #expect(!succeeded)
+  #expect(try DeploymentRollbackJournal.load(from: fixture.journalURL) == fixture.journal)
+  let requests = await runner.requests
+  #expect(!requests.contains { $0.executableURL == ApplyPipeline.sshURL })
+}
+
+@Test func resumePostflightIndoorsRetainsJournalWithoutMutationOrReboot() async throws {
+  let fixture = try resumePostflightFixture(validGPS: false)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  let runner = ResumePostflightRunner(fixture: fixture)
+
+  let succeeded = await ApplyPipeline(processRunner: runner).resumePendingPostflight(
+    ResumePostflightRequest(
+      tune: fixture.tune,
+      repositoryRoot: fixture.repository,
+      mapdReleaseManifestURL: fixture.releaseURL,
+      journalURL: fixture.journalURL,
+      timeout: 0
+    )
+  ) { _ in }
+
+  #expect(!succeeded)
+  #expect(try DeploymentRollbackJournal.load(from: fixture.journalURL) == fixture.journal)
+  let requests = await runner.requests
+  #expect(requests.contains {
+    $0.executableURL == ApplyPipeline.sshURL &&
+      $0.arguments.last?.contains("remote_epoch_milliseconds") == true
+  })
+  #expect(!requests.contains { request in
+    let command = request.arguments.joined(separator: " ")
+    return command.contains("sudo reboot") || command.contains("git fetch --no-tags") ||
+      command.contains("flock -x 9") || command.contains(".mapd-release-")
+  })
+}
+
+@Test func resumePostflightRejectsADeviceThatHasNotReachedTheExactToolingHead() async throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  fixture.runtimeHead = fixture.deployedTargetHead
+  let runner = ResumePostflightRunner(fixture: fixture)
+
+  let succeeded = await ApplyPipeline(processRunner: runner).resumePendingPostflight(
+    ResumePostflightRequest(
+      tune: fixture.tune,
+      repositoryRoot: fixture.repository,
+      mapdReleaseManifestURL: fixture.releaseURL,
+      journalURL: fixture.journalURL,
+      timeout: 0
+    )
+  ) { _ in }
+
+  #expect(!succeeded)
+  #expect(try DeploymentRollbackJournal.load(from: fixture.journalURL) == fixture.journal)
+}
+
+@Test func resumePostflightRejectsDetachedOrDirtyTiciAndRetainsJournal() async throws {
+  for mutation in ["detached", "dirty"] {
+    var fixture = try resumePostflightFixture(validGPS: true)
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    if mutation == "detached" { fixture.runtimeBranch = "" }
+    if mutation == "dirty" { fixture.runtimeDirty = true }
+    let runner = ResumePostflightRunner(fixture: fixture)
+
+    let succeeded = await ApplyPipeline(processRunner: runner).resumePendingPostflight(
+      ResumePostflightRequest(
+        tune: fixture.tune,
+        repositoryRoot: fixture.repository,
+        mapdReleaseManifestURL: fixture.releaseURL,
+        journalURL: fixture.journalURL,
+        timeout: 0
+      )
+    ) { _ in }
+
+    #expect(!succeeded)
+    #expect(try DeploymentRollbackJournal.load(from: fixture.journalURL) == fixture.journal)
+  }
+}
+
+@Test func resumePostflightRejectsSelfConsistentProfileForTheWrongTuneHash() async throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  let wrongHash = "0123456789ab"
+  #expect(wrongHash != TuneDeploymentIdentity(tune: fixture.tune).tileSigmoidHash)
+  fixture.profileData = try resumeWholeCurveProfileData(
+    now: Date(timeIntervalSince1970: 1_800_000_000),
+    sigmoidHash: wrongHash
+  )
+  let runner = ResumePostflightRunner(fixture: fixture)
+
+  let succeeded = await ApplyPipeline(processRunner: runner).resumePendingPostflight(
+    ResumePostflightRequest(
+      tune: fixture.tune,
+      repositoryRoot: fixture.repository,
+      mapdReleaseManifestURL: fixture.releaseURL,
+      journalURL: fixture.journalURL,
+      timeout: 0
+    )
+  ) { _ in }
+
+  #expect(!succeeded)
+  #expect(try DeploymentRollbackJournal.load(from: fixture.journalURL) == fixture.journal)
+}
+
+@Test func pendingPostflightJournalMustBeSchemaOneRebootedIncompleteAndTargeted() throws {
+  let root = FileManager.default.temporaryDirectory
+    .appendingPathComponent("vtsc-pending-journal-contract-\(UUID().uuidString)", isDirectory: true)
+  defer { try? FileManager.default.removeItem(at: root) }
+  var journal = DeploymentRollbackJournal(
+    profile: "commaAdb",
+    branch: "chauffeur-exp01",
+    previousHead: String(repeating: "a", count: 40),
+    targetHead: String(repeating: "b", count: 40),
+    previousPhysicsParams: [:],
+    previousQCurveSHA256: String(repeating: "c", count: 64),
+    previousMapdReleaseVersion: nil,
+    previousMapdVersion: nil,
+    previousActiveMapdSHA256: String(repeating: "d", count: 64),
+    previousCachedMapdPath: "",
+    mapdRollbackPath: "/data/media/0/osm/binaries/mapd-rollback-contract"
+  )
+  let url = root.appendingPathComponent("journal.json")
+
+  try journal.write(to: url)
+  #expect(throws: DeploymentRollbackJournalError.notAwaitingPostflight) {
+    try DeploymentRollbackJournal.loadPendingPostflight(from: url)
+  }
+
+  journal.rebootSent = true
+  journal.completed = true
+  try journal.write(to: url)
+  #expect(throws: DeploymentRollbackJournalError.notAwaitingPostflight) {
+    try DeploymentRollbackJournal.loadPendingPostflight(from: url)
+  }
+
+  journal.completed = false
+  journal.targetHead = nil
+  try journal.write(to: url)
+  #expect(throws: DeploymentRollbackJournalError.invalidTargetHead("")) {
+    try DeploymentRollbackJournal.loadPendingPostflight(from: url)
+  }
+
+  journal.targetHead = String(repeating: "b", count: 40)
+  journal.schema = 2
+  try journal.write(to: url)
+  #expect(throws: DeploymentRollbackJournalError.unsupportedSchema(2)) {
+    try DeploymentRollbackJournal.loadPendingPostflight(from: url)
+  }
+}
+
 @Test func mapdConfigDecodesRustCompatiblePaths() throws {
   let data = #"""
   {
@@ -307,6 +560,280 @@ private actor FastForwardRelationshipRunner: ProcessRunning {
     requests.append(request)
     return ProcessResult(terminationStatus: status, standardOutput: "", standardError: "")
   }
+}
+
+private struct ResumePostflightFixture: Sendable {
+  var root: URL
+  var repository: URL
+  var tune: Tune
+  var releaseURL: URL
+  var release: MapdReleaseArtifact
+  var journalURL: URL
+  var journal: DeploymentRollbackJournal
+  var deployedTargetHead: String
+  var toolingHead: String
+  var runtimeHead: String
+  var runtimeBranch: String
+  var runtimeDirty: Bool
+  var changedPaths: [String]
+  var profileData: Data
+  var gpsData: Data?
+}
+
+private func resumePostflightFixture(validGPS: Bool) throws -> ResumePostflightFixture {
+  let root = FileManager.default.temporaryDirectory
+    .appendingPathComponent("vtsc-resume-postflight-\(UUID().uuidString)", isDirectory: true)
+  let repository = root.appendingPathComponent("chauffeur", isDirectory: true)
+  try FileManager.default.createDirectory(
+    at: repository.appendingPathComponent(".git", isDirectory: true),
+    withIntermediateDirectories: true
+  )
+  let tune = Tune(params: .checkoutFallback)
+  let entries = VTSCPhysicsAuthority.entries(for: tune.params)
+  for relativePath in [
+    RepositoryLocator.physicsRelativePath,
+    RepositoryLocator.qCurveRelativePath,
+    RepositoryLocator.paramsDefaultsRelativePath,
+    RepositoryLocator.physicsPanelRelativePath,
+  ] {
+    let url = repository.appendingPathComponent(relativePath)
+    try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+    let contents: String
+    switch relativePath {
+    case RepositoryLocator.physicsRelativePath:
+      contents = entries.map { "\($0.moduleName) = \($0.formattedValue)" }.joined(separator: "\n") + "\n"
+    case RepositoryLocator.qCurveRelativePath:
+      contents = TuneDeploymentIdentity.canonicalQCurveSource(parameters: tune.params, bands: tune.bands)
+    case RepositoryLocator.paramsDefaultsRelativePath:
+      contents = entries.map {
+        "{\"\($0.paramKey)\", {PERSISTENT | BACKUP, FLOAT, \"\($0.formattedValue)\"}},"
+      }.joined(separator: "\n") + "\n"
+    default:
+      contents = entries.flatMap {
+        [
+          "params.put(\"\($0.paramKey)\", \"\($0.formattedValue)\");",
+          "ensure(\"\($0.paramKey)\", \"\($0.formattedValue)\");",
+        ]
+      }.joined(separator: "\n") + "\n"
+    }
+    try contents.write(to: url, atomically: true, encoding: .utf8)
+  }
+
+  let releaseID = "chauffeur-whole-curve-v3"
+  let buildID = "tree-host-tooling-test"
+  let binaryURL = root.appendingPathComponent("mapd")
+  var binary = Data(repeating: 0, count: 128)
+  binary.replaceSubrange(0 ..< 6, with: [0x7f, 0x45, 0x4c, 0x46, 2, 1])
+  binary[18] = 183
+  for marker in [
+    "MapdReleaseID:\(releaseID)",
+    "MapdBuildID:\(buildID)",
+    MapdReleaseArtifact.defaultCapability,
+  ] { binary.append(Data(marker.utf8)) }
+  try binary.write(to: binaryURL)
+  let release = MapdReleaseArtifact(
+    releaseID: releaseID,
+    buildID: buildID,
+    binaryURL: binaryURL,
+    sha256: MapdReleaseArtifact.sha256Hex(binary)
+  )
+  let releaseURL = root.appendingPathComponent("mapd-release.json")
+  try JSONEncoder().encode(release).write(to: releaseURL)
+
+  let deployedTargetHead = String(repeating: "a", count: 40)
+  let toolingHead = String(repeating: "b", count: 40)
+  var journal = DeploymentRollbackJournal(
+    profile: "commaAdb",
+    branch: "chauffeur-exp01",
+    previousHead: String(repeating: "9", count: 40),
+    targetHead: deployedTargetHead,
+    previousPhysicsParams: Dictionary(uniqueKeysWithValues: entries.map { ($0.paramKey, Optional($0.formattedValue)) }),
+    previousQCurveSHA256: TuneDeploymentIdentity(tune: tune).qCurveSHA256,
+    previousMapdReleaseVersion: "chauffeur-whole-curve-v1",
+    previousMapdVersion: "chauffeur-whole-curve-v1",
+    previousActiveMapdSHA256: String(repeating: "c", count: 64),
+    previousCachedMapdPath: "/data/media/0/osm/binaries/mapd-old",
+    mapdRollbackPath: "/data/media/0/osm/binaries/mapd-rollback-test"
+  )
+  journal.rebootSent = true
+  let journalURL = root.appendingPathComponent("journals", isDirectory: true)
+    .appendingPathComponent("\(journal.deploymentID.uuidString).json")
+  try journal.write(to: journalURL)
+
+  let now = Date(timeIntervalSince1970: 1_800_000_000)
+  return ResumePostflightFixture(
+    root: root,
+    repository: repository,
+    tune: tune,
+    releaseURL: releaseURL,
+    release: release,
+    journalURL: journalURL,
+    journal: journal,
+    deployedTargetHead: deployedTargetHead,
+    toolingHead: toolingHead,
+    runtimeHead: toolingHead,
+    runtimeBranch: "chauffeur-exp01",
+    runtimeDirty: false,
+    changedPaths: [
+      ".codex/skills/vtsc-tuner-app/references/changelog.md",
+      "tools/vtsc_tuner_mac/Sources/VTSCTunerCore/ApplyPipeline.swift",
+      "tools/vtsc_tuner_mac/Sources/VTSCTunerCore/TiciSnapshotWireCodec.swift",
+    ],
+    profileData: try resumeWholeCurveProfileData(
+      now: now,
+      sigmoidHash: TuneDeploymentIdentity(tune: tune).tileSigmoidHash
+    ),
+    gpsData: validGPS ? try JSONSerialization.data(withJSONObject: [
+      "latitude": 37.0,
+      "longitude": -122.0,
+      "bearing": 90.0,
+    ]) : nil
+  )
+}
+
+private actor ResumePostflightRunner: ProcessRunning {
+  let fixture: ResumePostflightFixture
+  private(set) var requests: [ProcessRequest] = []
+
+  init(fixture: ResumePostflightFixture) { self.fixture = fixture }
+
+  func run(_ request: ProcessRequest) async throws -> ProcessResult {
+    requests.append(request)
+    if request.executableURL == ApplyPipeline.gitURL {
+      switch request.arguments {
+      case ["branch", "--show-current"]:
+        return success("chauffeur-exp01\n")
+      case ["status", "--porcelain"]:
+        return success("")
+      case ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]:
+        return success("origin/chauffeur-exp01\n")
+      case ["rev-parse", "HEAD"]:
+        return success(fixture.toolingHead + "\n")
+      case ["ls-remote", "--heads", "origin", "refs/heads/chauffeur-exp01"]:
+        return success("\(fixture.toolingHead)\trefs/heads/chauffeur-exp01\n")
+      case ["merge-base", "--is-ancestor", fixture.deployedTargetHead, fixture.toolingHead]:
+        return success("")
+      default:
+        if request.arguments.starts(with: ["diff", "--no-ext-diff", "--name-only", "-z"]) {
+          return success(fixture.changedPaths.joined(separator: "\0") + "\0")
+        }
+        return failure("unexpected git request: \(request.arguments)")
+      }
+    }
+    if request.executableURL == ApplyPipeline.sshURL {
+      if request.arguments.last == "true" { return success("") }
+      if request.arguments.last?.contains("remote_epoch_milliseconds") == true {
+        return success(runtimeWire())
+      }
+      return failure("unexpected ssh request")
+    }
+    return failure("unexpected executable: \(request.executableURL.path)")
+  }
+
+  private func runtimeWire() -> String {
+    let identity = TuneDeploymentIdentity(tune: fixture.tune)
+    let releaseDigest = TuneDeploymentIdentity.sha256Hex(Data(fixture.release.releaseID.utf8))
+    let cachePath = "/data/media/0/osm/binaries/mapd-\(releaseDigest.prefix(16))-\(fixture.release.sha256.prefix(16))"
+    let buildInfo = TiciMapdReleaseBuildInfo(
+      releaseID: fixture.release.releaseID,
+      buildID: fixture.release.buildID,
+      estimatorVersion: fixture.release.estimatorVersion,
+      capabilities: [fixture.release.capability],
+      identityMarkers: [
+        "MapdReleaseID:\(fixture.release.releaseID)",
+        "MapdBuildID:\(fixture.release.buildID)",
+      ]
+    )
+    var fields: [TiciSnapshotWireField: Data] = [
+      .branch: Data(fixture.runtimeBranch.utf8),
+      .head: Data(fixture.runtimeHead.utf8),
+      .dirty: Data((fixture.runtimeDirty ? "1" : "0").utf8),
+      .isOffroad: Data("1".utf8),
+      .isOnroad: Data("0".utf8),
+      .mapLookaheadEnabled: Data("0".utf8),
+      .mapdReleaseVersion: Data(fixture.release.releaseID.utf8),
+      .mapdVersion: Data(fixture.release.releaseID.utf8),
+      .activeMapdSHA256: Data(fixture.release.sha256.utf8),
+      .qCurveFile: Data(TuneDeploymentIdentity.canonicalQCurveSource(
+        parameters: fixture.tune.params,
+        bands: fixture.tune.bands
+      ).utf8),
+      .mapdCacheListing: Data("\(cachePath)\t\(fixture.release.sha256)\n".utf8),
+      .activeMapdBuildInfo: try! JSONEncoder().encode(buildInfo),
+      .activeMapdELFHeader: Data([0x7f, 0x45, 0x4c, 0x46, 2, 1] + Array(repeating: 0, count: 12) + [183, 0]),
+      .mapdRunning: Data("1".utf8),
+      .remoteEpochMilliseconds: Data("1800000000000".utf8),
+      .memoryWholeCurveProfile: fixture.profileData,
+    ]
+    if let gpsData = fixture.gpsData { fields[.memoryLastGPSPosition] = gpsData }
+    for physics in identity.physics {
+      let field: TiciSnapshotWireField = switch physics.paramKey {
+      case "VisionTurnSpeedControlPhysicsAmplitude": .physicsAmplitude
+      case "VisionTurnSpeedControlPhysicsSteepness": .physicsSteepness
+      case "VisionTurnSpeedControlPhysicsCenter": .physicsCenter
+      case "VisionTurnSpeedControlPhysicsBaseline": .physicsBaseline
+      case "VisionTurnSpeedControlPhysicsMinLatAccel": .physicsMinLatAccel
+      default: .physicsMaxLatAccel
+      }
+      fields[field] = Data(physics.value.utf8)
+    }
+    return TiciSnapshotWireCodec.encode(.init(rawValues: fields)) + "\n"
+  }
+
+  private func success(_ output: String) -> ProcessResult {
+    ProcessResult(terminationStatus: 0, standardOutput: output, standardError: "")
+  }
+
+  private func failure(_ output: String) -> ProcessResult {
+    ProcessResult(terminationStatus: 1, standardOutput: "", standardError: output)
+  }
+}
+
+private func resumeWholeCurveProfileData(now: Date, sigmoidHash: String) throws -> Data {
+  let stepDegrees = 5.0 / 6_371_007.2 * 180 / Double.pi
+  let eventID = "0123456789abcdefabcd-a"
+  let points: [[String: Any]] = (0..<5).map { index in
+    [
+      "latitude": 37.0 + Double(index) * stepDegrees,
+      "longitude": -122.0,
+      "distanceMeters": Double(index) * 5,
+      "curvature": [0.0, 0.003, 0.006, 0.003, 0.0][index],
+      "curvatureCoefficient": [1.0, 0.5, 1.0, 0.5, 1.0][index],
+      "baseSafeSpeedMPS": [70.0, 20.0, 14.0, 20.0, 70.0][index],
+      "eventID": (1...3).contains(index) ? eventID : "",
+      "confidence": 1.0,
+      "flags": [],
+    ]
+  }
+  let fingerprint = try TiciWholeCurvePostflightValidator.routeFingerprint(
+    generation: 7,
+    sigmoidHash: sigmoidHash,
+    points: points.map {
+      ($0["latitude"] as! Double, $0["longitude"] as! Double, $0["distanceMeters"] as! Double,
+       $0["curvature"] as! Double, $0["curvatureCoefficient"] as! Double,
+       $0["baseSafeSpeedMPS"] as! Double, $0["eventID"] as! String)
+    }
+  )
+  return try JSONSerialization.data(withJSONObject: [
+    "estimatorVersion": "whole-curve-v3",
+    "generatedAtUnixMillis": now.timeIntervalSince1970 * 1_000,
+    "routeFingerprint": fingerprint,
+    "sigmoidHash": sigmoidHash,
+    "generation": 7,
+    "points": points,
+    "events": [[
+      "eventID": eventID,
+      "startIndex": 1,
+      "endIndex": 3,
+      "apexIndex": 2,
+      "profileApexIndex": 2,
+      "controllingCurvature": 0.006,
+      "maximumApexCoefficient": 1.0,
+      "confidence": 1.0,
+      "flags": [],
+    ]],
+    "fatalAmbiguity": false,
+  ])
 }
 
 private actor CanonicalGenerationRunner: ProcessRunning {
