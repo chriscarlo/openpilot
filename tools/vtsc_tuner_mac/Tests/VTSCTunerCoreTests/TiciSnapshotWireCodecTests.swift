@@ -147,6 +147,10 @@ import Testing
 
   let command = TiciSnapshotWireCommandBuilder.inspectionCommand(includeRuntimePostflight: true)
   #expect(!command.lowercased().contains("python"))
+  #expect(command.contains("memory_params_root=/dev/shm/params/d"))
+  #expect(command.contains(#"emit_file memory_whole_curve_profile "$memory_params_root/MapWholeCurveProfile""#))
+  #expect(command.contains(#"emit_file memory_last_gps_position "$memory_params_root/LastGPSPosition""#))
+  #expect(!command.contains("memory_params_root=/dev/shm/params\n"))
   #expect(command.contains("active_mapd_build_info"))
   #expect(command.contains("memory_whole_curve_profile"))
   #expect(command.contains("mapd_running"))

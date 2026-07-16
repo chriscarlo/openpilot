@@ -149,7 +149,7 @@ public enum TiciSnapshotWireCommandBuilder {
 
     repo=/data/openpilot
     params_root=/data/params/d
-    memory_params_root=/dev/shm/params
+    memory_params_root=/dev/shm/params/d
     cache_root=/data/media/0/osm/binaries
     active_mapd=/data/openpilot/third_party/mapd/mapd
 
