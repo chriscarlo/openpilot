@@ -62,7 +62,10 @@ final class TunerSession: ObservableObject {
   @Published var statusText = "Ready. Drag curve anchors; Shift-click the plot to add a band."
   @Published var statusIsError = false
   @Published var repositoryURL: URL?
+  @Published var applyActionChooserVisible = false
+  @Published var applyChooserSelection: ApplyAction?
   @Published var pendingApplyAction: ApplyAction?
+  @Published var tileDeploymentInfoVisible = false
   @Published var runningApplyAction: ApplyAction?
   @Published var pendingResumePostflight = false
   @Published var runningResumePostflight = false
@@ -83,6 +86,17 @@ final class TunerSession: ObservableObject {
 
   let mapPreview = MapPreviewSession()
 
+  var hasRuntimeOnlyPendingDeployment: Bool {
+    pendingDeployments.contains { !$0.journal.includesTileReplacement }
+  }
+
+  var selectedPendingDeploymentIsRuntimeOnly: Bool {
+    guard let selectedPendingDeploymentURL,
+          let candidate = pendingDeployments.first(where: { $0.url == selectedPendingDeploymentURL })
+    else { return false }
+    return !candidate.journal.includesTileReplacement
+  }
+
   private(set) var checkoutBaseline: SigmoidParameters
 
   private var historyPast: [EditableSnapshot] = []
@@ -90,6 +104,8 @@ final class TunerSession: ObservableObject {
   private var continuousStart: EditableSnapshot?
   private let historyLimit = 200
   private var applyTask: Task<Void, Never>?
+  private var queuedApplyActionAfterChooser: ApplyAction?
+  private var showTileInfoAfterApplyChooser = false
 
   init() {
     let saved = UserDefaults.standard.string(forKey: Self.repositoryDefaultsKey)
@@ -232,7 +248,7 @@ final class TunerSession: ObservableObject {
     }
     workspace = .curveLab
     status(String(
-      format: "Accepted complete fitted curve with %d residual bands (effective-target RMSE %.2f → %.2f mph). Review it, then choose Apply when ready.",
+      format: "Accepted complete fitted curve with %d residual bands (effective-target RMSE %.2f → %.2f mph). Review it, then choose Save or Send Tune when ready.",
       result.bands.count,
       result.beforeRMSEMPH,
       result.afterRMSEMPH
@@ -289,13 +305,88 @@ final class TunerSession: ObservableObject {
     statusIsError = error
   }
 
+  func showApplyActionChooser() {
+    guard workspace == .curveLab else {
+      status("Saving or sending a tune is only available in Curve Lab.", error: true)
+      return
+    }
+    queuedApplyActionAfterChooser = nil
+    showTileInfoAfterApplyChooser = false
+    applyChooserSelection = nil
+    applyActionChooserVisible = true
+  }
+
+  func selectApplyAction(_ action: ApplyAction) {
+    guard action.isAvailable else {
+      applyChooserSelection = nil
+      status(action.unavailableReason ?? "That option is unavailable.", error: true)
+      return
+    }
+    applyChooserSelection = action
+  }
+
+  func reviewSelectedApplyAction() {
+    guard let action = applyChooserSelection, action.isAvailable else { return }
+    queuedApplyActionAfterChooser = action
+    applyActionChooserVisible = false
+  }
+
+  func cancelApplyActionChooser() {
+    queuedApplyActionAfterChooser = nil
+    showTileInfoAfterApplyChooser = false
+    applyChooserSelection = nil
+    applyActionChooserVisible = false
+  }
+
+  func applyActionChooserDidDismiss() {
+    if showTileInfoAfterApplyChooser {
+      showTileInfoAfterApplyChooser = false
+      tileDeploymentInfoVisible = true
+      return
+    }
+    guard let action = queuedApplyActionAfterChooser else { return }
+    queuedApplyActionAfterChooser = nil
+    applyChooserSelection = nil
+    requestApply(action)
+  }
+
+  func showTileDeploymentInfoFromApplyChooser() {
+    queuedApplyActionAfterChooser = nil
+    showTileInfoAfterApplyChooser = true
+    applyActionChooserVisible = false
+  }
+
+  func requestApply(_ action: ApplyAction) {
+    guard workspace == .curveLab else {
+      status("Tune changes can only be saved or sent from Curve Lab.", error: true)
+      return
+    }
+    guard action.isAvailable else {
+      pendingApplyAction = nil
+      tileDeploymentInfoVisible = true
+      status(action.unavailableReason ?? "That apply action is unavailable.")
+      return
+    }
+    pendingApplyAction = action
+  }
+
+  func requestRuntimeDeploymentFromTileInfo() {
+    tileDeploymentInfoVisible = false
+    requestApply(.pullOnTici)
+  }
+
   func confirmApply() {
     guard workspace == .curveLab else {
       pendingApplyAction = nil
-      status("Apply is only available in Curve Lab.", error: true)
+      status("Tune changes can only be saved or sent from Curve Lab.", error: true)
       return
     }
     guard let action = pendingApplyAction else { return }
+    guard action.isAvailable else {
+      pendingApplyAction = nil
+      status(action.unavailableReason ?? "That apply action is unavailable.", error: true)
+      return
+    }
     guard let repositoryURL else {
       pendingApplyAction = nil
       status("Choose a Chauffeur repository before applying.", error: true)
@@ -337,10 +428,13 @@ final class TunerSession: ObservableObject {
       status("Choose a Chauffeur repository before resuming postflight.", error: true)
       return
     }
-    let request = ResumePostflightRequest(
-      tune: Tune(params: parameters, bands: bands, knobs: knobs),
-      repositoryRoot: repositoryURL
-    )
+    guard let request = resumePostflightRequest(repositoryURL: repositoryURL) else {
+      status(
+        "Select a runtime-only pending deployment. Tile-replacement journals are unavailable in this build.",
+        error: true
+      )
+      return
+    }
     pendingResumePostflight = false
     runningResumePostflight = true
     applySteps = []
@@ -380,6 +474,15 @@ final class TunerSession: ObservableObject {
     }
   }
 
+  func resumePostflightRequest(repositoryURL: URL) -> ResumePostflightRequest? {
+    guard let selectedPendingDeploymentURL, selectedPendingDeploymentIsRuntimeOnly else { return nil }
+    return ResumePostflightRequest(
+      tune: Tune(params: parameters, bands: bands, knobs: knobs),
+      repositoryRoot: repositoryURL,
+      journalURL: selectedPendingDeploymentURL
+    )
+  }
+
   func cancelApply() {
     applyTask?.cancel()
     applyTask = nil
@@ -413,9 +516,9 @@ final class TunerSession: ObservableObject {
     status("Cancellation requested; waiting to confirm whether the journal reached its commit point.")
   }
 
-  func refreshRecoverableRollbackState() {
+  func refreshRecoverableRollbackState(directory: URL? = nil) {
     do {
-      recoverableRollbacks = try DeploymentRollbackJournal.recoverableRollbacks()
+      recoverableRollbacks = try DeploymentRollbackJournal.recoverableRollbacks(directory: directory)
       hasRecoverableRollback = !recoverableRollbacks.isEmpty
       if !recoverableRollbacks.contains(where: { $0.url == selectedRollbackJournalURL }) {
         selectedRollbackJournalURL = recoverableRollbacks.first?.url
@@ -426,9 +529,12 @@ final class TunerSession: ObservableObject {
       hasRecoverableRollback = false
     }
     do {
-      pendingDeployments = try DeploymentRollbackJournal.pendingPostflights()
-      if !pendingDeployments.contains(where: { $0.url == selectedPendingDeploymentURL }) {
-        selectedPendingDeploymentURL = pendingDeployments.first?.url
+      pendingDeployments = try DeploymentRollbackJournal.pendingPostflights(directory: directory)
+      let selected = pendingDeployments.first(where: { $0.url == selectedPendingDeploymentURL })
+      if selected == nil || selected?.journal.includesTileReplacement == true {
+        selectedPendingDeploymentURL = pendingDeployments.first {
+          !$0.journal.includesTileReplacement
+        }?.url ?? pendingDeployments.first?.url
       }
     } catch {
       pendingDeployments = []

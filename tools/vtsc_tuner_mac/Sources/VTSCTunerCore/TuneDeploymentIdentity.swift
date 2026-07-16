@@ -172,6 +172,12 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
     resolvedPreviousTileSetID ?? previousTileSetID
   }
 
+  /// Any durable evidence that this journal planned, observed, or resolved a
+  /// tile replacement keeps it outside the runtime-only recovery contract.
+  public var includesTileReplacement: Bool {
+    targetTileSetID != nil || resolvedPreviousTileSetID != nil || tileActivationOutcome != nil
+  }
+
   public func hasSameDeploymentIdentity(as other: Self) -> Bool {
     schema == other.schema &&
       deploymentID == other.deploymentID &&

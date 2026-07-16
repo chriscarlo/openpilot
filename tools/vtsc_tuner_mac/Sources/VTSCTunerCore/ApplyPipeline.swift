@@ -7,28 +7,46 @@ public enum ApplyAction: CaseIterable, Equatable, Sendable {
   case pullOnTici
   case rebuildTilesAndReboot
 
+  /// Canonical replacement of the tici's active tile tree is deliberately
+  /// quarantined in this build. Runtime-only deployment remains available and
+  /// never mutates tiles; existing runtime-only journals remain recoverable.
+  public static let deviceTileReplacementUnavailableReason =
+    "Installing replacement map tiles is temporarily turned off because recovery from an interrupted tile install is not yet safe enough to ship. You can still install and road-test this tune on the car; the tici will keep using its current map tiles. Map Preview and curve calibration still work normally."
+
+  public static var availableCases: [Self] {
+    allCases.filter(\.isAvailable)
+  }
+
+  public var isAvailable: Bool {
+    self != .rebuildTilesAndReboot
+  }
+
+  public var unavailableReason: String? {
+    isAvailable ? nil : Self.deviceTileReplacementUnavailableReason
+  }
+
   public var label: String {
     switch self {
-    case .local: "Apply locally"
-    case .commit: "Apply + commit"
-    case .push: "Apply + commit + push"
-    case .pullOnTici: "Apply + deploy runtime (keep current tiles)"
-    case .rebuildTilesAndReboot: "Apply + deploy runtime + build canonical tiles"
+    case .local: "Update Selected Checkout"
+    case .commit: "Create a Local Commit"
+    case .push: "Push to Git Remote"
+    case .pullOnTici: "Install on the Car (tici)"
+    case .rebuildTilesAndReboot: "Build and Install New Map Tiles"
     }
   }
 
   public var description: String {
     switch self {
     case .local:
-      "Save the tune and update the VTSC physics constants and Q-curve in the selected Chauffeur checkout."
+      "Write this tune into the selected Chauffeur project on this Mac. Nothing is committed, uploaded, or sent to the car."
     case .commit:
-      "Apply locally, then create one git commit on the current branch."
+      "Update the selected project, then save any resulting VTSC changes as a local Git checkpoint. Nothing is uploaded or sent to the car."
     case .push:
-      "Apply and commit, then push the current branch to its configured upstream."
+      "Update the project, save a Git checkpoint when needed, and upload the current branch to its configured Git remote. The car is not changed."
     case .pullOnTici:
-      "Apply, verify, commit, and push, then deploy the exact runtime release to the reachable tici and reboot once without replacing its active tile set."
+      "Run the safety checks, save and upload the exact version, install its VTSC runtime on the reachable tici, and reboot once. The current map tiles stay in place."
     case .rebuildTilesAndReboot:
-      "Preflight mapd.json, generate and fully validate a durable canonical tile set, then deploy the exact runtime and atomically activate those tiles before one reboot."
+      Self.deviceTileReplacementUnavailableReason
     }
   }
 }
@@ -112,7 +130,7 @@ public struct ApplyRequest: Sendable {
 public struct ResumePostflightAction: Sendable {
   public static let label = "Resume Pending Outdoor Postflight"
   public static let description =
-    "Load the existing rebooted deployment journal and perform only read-only identity, safety, and real-GPS whole-curve checks. This never applies, commits, deploys, changes Params, or reboots."
+    "Load an existing runtime-only rebooted deployment journal and perform only read-only identity, safety, and real-GPS whole-curve checks. This never applies, commits, deploys, changes Params, tiles, or reboots."
 }
 
 public struct ResumePostflightRequest: Sendable {
@@ -146,7 +164,7 @@ public struct ResumePostflightRequest: Sendable {
 public struct RollbackRecoveryAction: Sendable {
   public static let label = "Recover Interrupted Production Rollback"
   public static let description =
-    "Load one interrupted or failed rollback journal, recheck the exact recorded identity and fresh parked/kill-switch state, then idempotently finish rollback. This action may restore source, Params, mapd, and tiles and reboot only as part of that recorded rollback."
+    "Load one interrupted or failed runtime-only rollback journal, recheck the exact recorded identity and fresh parked/kill-switch state, then idempotently finish rollback. Historical journals that include tile replacement remain visible but are blocked locally in this build."
 }
 
 public struct RollbackRecoveryRequest: Sendable {
@@ -162,7 +180,7 @@ public struct RollbackRecoveryRequest: Sendable {
 public struct AbortPendingDeploymentAction: Sendable {
   public static let label = "Abort and Roll Back Pending Deployment"
   public static let description =
-    "Explicitly abandon one selected rebooted deployment that cannot pass postflight. This excludes every peer tuner and foreign unresolved journal, binds the current tici to the recorded target, prior head, or a host-proven completion-compatible successor, restores only its recorded prior Git, Params, mapd/cache, and tile identity, then always proves rollback through a fresh reboot."
+    "Explicitly abandon one selected runtime-only rebooted deployment that cannot pass postflight. This excludes every peer tuner and foreign unresolved journal, restores only its recorded prior Git, Params, and mapd/cache identity, then proves rollback through a fresh reboot. Historical tile-replacement journals remain visible but cannot mutate the device in this build."
 }
 
 public struct AbortPendingDeploymentRequest: Sendable {
@@ -468,10 +486,11 @@ public actor ApplyPipeline {
   }
 
   static func productionTilePlan(for request: ApplyRequest) -> ProductionTilePlan {
+    guard request.action == .rebuildTilesAndReboot else { return .unchanged }
     if let tileSetArtifactURL = request.tileSetArtifactURL {
       return .validateExplicit(tileSetArtifactURL.standardizedFileURL)
     }
-    return request.action == .rebuildTilesAndReboot ? .generateCanonical : .unchanged
+    return .generateCanonical
   }
 
   /// Convenience bridge for SwiftUI. Cancelling or discarding the stream stops
@@ -525,6 +544,11 @@ public actor ApplyPipeline {
 
       let loaded = try DeploymentRollbackJournal.loadPendingPostflight(from: request.journalURL)
       var journal = loaded.journal
+      guard !journal.includesTileReplacement else {
+        throw ApplyPipelineError.postflightMismatch(
+          ApplyAction.deviceTileReplacementUnavailableReason
+        )
+      }
       try validateProfile(journal.profile)
       guard journal.branch == request.expectedBranch else {
         throw ApplyPipelineError.invalidBranch(journal.branch)
@@ -716,6 +740,11 @@ public actor ApplyPipeline {
       try Task.checkCancellation()
       try RepositoryLocator.validate(request.repositoryRoot)
       let loaded = try DeploymentRollbackJournal.loadRecoverableRollback(from: request.journalURL)
+      guard !loaded.journal.includesTileReplacement else {
+        throw ApplyPipelineError.postflightMismatch(
+          ApplyAction.deviceTileReplacementUnavailableReason
+        )
+      }
       try validateProfile(loaded.journal.profile)
       guard loaded.journal.branch.range(
         of: #"^[A-Za-z0-9._/-]+$"#,
@@ -793,6 +822,11 @@ public actor ApplyPipeline {
       try Task.checkCancellation()
       try RepositoryLocator.validate(request.repositoryRoot)
       let loaded = try DeploymentRollbackJournal.loadPendingPostflight(from: request.journalURL)
+      guard !loaded.journal.includesTileReplacement else {
+        throw ApplyPipelineError.postflightMismatch(
+          ApplyAction.deviceTileReplacementUnavailableReason
+        )
+      }
       try validateProfile(loaded.journal.profile)
       await emit(
         .succeeded,
@@ -854,6 +888,18 @@ public actor ApplyPipeline {
     _ request: ApplyRequest,
     progress: @escaping ApplyProgressHandler
   ) async -> Bool {
+    if let unavailableReason = request.action.unavailableReason ??
+      (request.tileSetArtifactURL == nil ? nil : ApplyAction.deviceTileReplacementUnavailableReason)
+    {
+      await emit(
+        .failed,
+        id: 0,
+        text: "On-device tile replacement is unavailable; nothing was changed",
+        detail: unavailableReason,
+        progress: progress
+      )
+      return await finish(false, progress: progress)
+    }
     // Every car-facing prerequisite is read and verified before tune/source,
     // Git, Params, binary, or tile mutation. Runtime-only deployment leaves
     // tiles unchanged; the rebuild action must produce or receive one exact,
@@ -1053,6 +1099,11 @@ public actor ApplyPipeline {
   }
 
   func productionPreflight(_ request: ApplyRequest) async throws -> RuntimeDeploymentPreflight {
+    guard request.action == .pullOnTici, request.tileSetArtifactURL == nil else {
+      throw ApplyPipelineError.postflightMismatch(
+        ApplyAction.deviceTileReplacementUnavailableReason
+      )
+    }
     try RepositoryLocator.validate(request.repositoryRoot)
     _ = try SourcePatcher.readParameters(from: request.repositoryRoot)
     _ = try SourcePatcher.makePatch(
@@ -1698,6 +1749,16 @@ public actor ApplyPipeline {
     progress: @escaping ApplyProgressHandler
   ) async -> Bool {
     var deployment = preflight
+    guard deployment.tileSet == nil, !deployment.journal.includesTileReplacement else {
+      await emit(
+        .failed,
+        id: 5,
+        text: "On-device tile replacement is unavailable; nothing was changed",
+        detail: ApplyAction.deviceTileReplacementUnavailableReason,
+        progress: progress
+      )
+      return await finish(false, progress: progress)
+    }
     guard let productionOwnerLock = deployment.productionOwnerLock else {
       await emit(
         .failed,
@@ -3118,6 +3179,13 @@ public actor ApplyPipeline {
     }
     if loadedCurrent.completed, loadedCurrent.effectiveResolution == .rolledBack {
       return .rolledBack("rollback already completed for this exact deployment journal")
+    }
+    guard !loadedCurrent.includesTileReplacement else {
+      return .rollbackFailed(
+        "tile rollback or its exact target binding failed before Git/Params/mapd restoration: " +
+          ApplyAction.deviceTileReplacementUnavailableReason + "\n" +
+          "journal=" + context.journalURL.path
+      )
     }
     do {
       try await validateExclusiveRollbackOwnership(selectedJournalURL: context.journalURL)

@@ -66,5 +66,5 @@ import VTSCTunerCore
   #expect(session.pendingApplyAction == nil)
   #expect(session.runningApplyAction == nil)
   #expect(session.statusIsError)
-  #expect(session.statusText == "Apply is only available in Curve Lab.")
+  #expect(session.statusText == "Tune changes can only be saved or sent from Curve Lab.")
 }

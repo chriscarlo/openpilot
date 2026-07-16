@@ -347,6 +347,7 @@ import Testing
   #expect(decoded.text(for: .head) == head)
 
   let suite = ProductionVerificationSuite.requests(repositoryRoot: URL(fileURLWithPath: "/repo"))
+  #expect(!suite.contains { $0.arguments.contains("scripts/build_tile_transaction_helper.sh") })
   let go = suite.first { $0.executableURL.lastPathComponent == "go" }
   #expect(go?.executableURL.path == "/repo/tools/vtsc_tuner_mac/.build-tools/go-1.26.5-darwin-arm64/bin/go")
   #expect(go?.environment["CGO_ENABLED"] == "0")
@@ -357,6 +358,37 @@ import Testing
     "-m", "pytest", "--noconftest", "-o", "addopts=",
     "sunnypilot/selfdrive/controls/lib/tests/vtsc",
   ])
+}
+
+@Test func packagedAppOmitsTheOnDeviceTileTransactionHelper() throws {
+  let package = URL(fileURLWithPath: #filePath)
+    .deletingLastPathComponent()
+    .deletingLastPathComponent()
+    .deletingLastPathComponent()
+  let script = try String(
+    contentsOf: package.appendingPathComponent("scripts/build_app.sh"),
+    encoding: .utf8
+  )
+
+  #expect(!script.contains("build_tile_transaction_helper.sh"))
+  #expect(!script.contains("vtsc-tile-transaction"))
+  #expect(script.contains("build_tile_decoder.sh"))
+  #expect(script.contains("vtsc-tile-decoder"))
+}
+
+@Test func productionTileTransactionHelperLookupIsDisabledEvenWithAnExecutableOverride() throws {
+  let directory = temporaryDirectory("vtsc-disabled-tile-helper")
+  defer { try? FileManager.default.removeItem(at: directory) }
+  let helper = directory.appendingPathComponent("vtsc-tile-transaction")
+  #expect(FileManager.default.createFile(atPath: helper.path, contents: Data()))
+  try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: helper.path)
+
+  #expect(throws: TiciTileTransactionHelperError.disabled) {
+    try TiciTileTransactionHelperLocator.bundledURL(
+      environment: ["VTSC_TILE_TRANSACTION_HELPER": helper.path],
+      currentDirectoryURL: directory
+    )
+  }
 }
 
 @Test func tileTransactionHelperCommandsArePinnedToTheVerifiedHelper() throws {

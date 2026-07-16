@@ -12,13 +12,47 @@ The native macOS pipeline in `tools/vtsc_tuner_mac/` is authoritative for produc
 | `commit` | yes | yes | yes | no | no | no |
 | `push` | yes | yes | yes | yes | no | no |
 | `pullOnTici` | yes | yes | yes | yes | yes | unchanged |
-| `rebuildTilesAndReboot` | yes | yes | yes | yes | yes | build, verify, activate |
+| `rebuildTilesAndReboot` | unavailable | unavailable | unavailable | unavailable | unavailable | quarantined before I/O |
 
-The runtime whole-curve-v3 profile uses existing raw map geometry, then route-bakes estimator-aligned physics speeds when mapd publishes the selected continuous route. `pullOnTici` is therefore the normal first-road-test action: it installs the v3 runtime/release while intentionally proving that the active tile identity did not change. `rebuildTilesAndReboot` remains reserved for a requested canonical tile generation.
+The runtime whole-curve-v3 profile uses existing raw map geometry, then route-bakes estimator-aligned physics speeds when mapd publishes the selected continuous route. `pullOnTici` is therefore the supported road-test action: it installs the v3 runtime/release while intentionally proving that the active tile identity did not change.
+
+The SwiftUI product presents these as one **Save or Send This Tune** chooser rather than exposing pipeline jargon in a dropdown:
+
+- **Update Selected Checkout** — this Mac only; no commit.
+- **Create a Local Commit** — this Mac plus local Git history; nothing is pushed.
+- **Push to Git Remote** — the configured remote is updated; the tici is unchanged.
+- **Install on the Car (tici)** — the recommended road-test choice; it includes the preceding save/Git work, installs the runtime, and keeps current tiles.
+
+Selecting a destination only opens its review sheet. It does not start work until the user confirms there.
+
+## Current tile-replacement quarantine
+
+The native product currently offers only Local, Commit, Push, and PullOnTici.
+The old combined `rebuildTilesAndReboot` case remains in the source model only
+for compatibility; it is not a supported action:
+
+- SwiftUI omits it from selectable actions and presents an explanatory sheet.
+- `ApplyPipeline.apply` rejects rebuild and any injected `tileSetArtifactURL`
+  before tune, source, journal, process, Git, network, or device work.
+- `productionPreflight` repeats the guard, and `deployProductionRuntime`
+  requires both `tileSet == nil` and `journal.targetTileSetID == nil`.
+- PullOnTici always resolves to `.unchanged`, even when an API caller supplies
+  an explicit artifact.
+- Resume, Abort, and Recover keep tile-bearing historical journals visible for
+  audit but fail locally before probing transport or changing journal bytes.
+- The internal rollback orchestrator repeats that journal guard before any
+  device snapshot, helper request, journal normalization, or other I/O.
+- The signed app includes the map decoder but intentionally omits the Linux
+  `vtsc-tile-transaction` helper.
+
+Map Preview, familiar-curve calibration, fitting, proposed tile-bake overlays,
+Mac-side tile sync, and the canonical builder library remain available. The
+generation/activation material below documents dormant implementation history;
+it does not authorize on-device tile replacement in the current build.
 
 ## No-mutation preflight
 
-Every car-facing action verifies all prerequisites before saving or patching the tune, committing, writing Params, replacing binaries, activating tiles, or rebooting:
+Every enabled car-facing action verifies all prerequisites before saving or patching the tune, committing, writing Params, replacing binaries, or rebooting:
 
 - acquire the authoritative journal-directory global production-owner lock and durably publish this transaction's released-reader-unknown `preflightReserved` record as the first namespace action;
 - prove no other exact VTSC Tuner process is alive before pruning or scanning, exclude only the exact live reservation from those operations, and reject every other unresolved journal;
@@ -27,9 +61,9 @@ Every car-facing action verifies all prerequisites before saving or patching the
 - branch is exactly `chauffeur-exp01`, upstream is `origin/chauffeur-exp01`, the checkout is clean, and local/origin HEADs match;
 - the immutable mapd manifest and host artifact pass SHA-256, Linux ARM64 ELF, release/build marker, estimator, and capability checks;
 - a reachable SSH profile reports the same clean branch/HEAD, `IsOffroad=1`, `IsOnroad=0`, and `MTSCLookaheadEnabled=0`;
-- for rebuild only, `mapd.json`, prepared PBF, native Darwin generator, selected regions, bundled decoder, and durable set root are valid.
+- the active tile identity is read-only evidence and must remain unchanged throughout runtime-only deployment.
 
-Rebuild generation happens during this no-device-mutation phase. The generator writes a clean temporary `offline/` tree with all six source-rounded `--phys-*` values. `CanonicalTileSetBuilder` hashes the PBF and every tile, decodes every file, verifies schema/bounds/finiteness/sigmoid identity/regions, writes `tile-set-manifest.json`, and moves the finished artifact to:
+The dormant canonical builder can still generate a Mac-side artifact for library tests. It writes a clean temporary `offline/` tree with all six source-rounded `--phys-*` values. `CanonicalTileSetBuilder` hashes the PBF and every tile, decodes every file, verifies schema/bounds/finiteness/sigmoid identity/regions, writes `tile-set-manifest.json`, and moves the finished artifact to:
 
 ```text
 ~/Library/Application Support/vtsc_tuner/map_tiles/sets/<tile-set-id>/
@@ -59,7 +93,7 @@ The app persists a rollback journal before remote mutation. It then:
 2. Fetches `chauffeur-exp01`, requires the exact pushed object, and fast-forwards with `git merge --ff-only <exact-head>`.
 3. Transfers the immutable mapd artifact to a temporary path outside the active binary, verifies SHA-256/ELF/markers and `--build-info`, seeds the identity-keyed persistent cache under `/data/media/0/osm/binaries/`, and atomically replaces the disposable checkout binary.
 4. Writes and reads back all six physics Params with `tools/vtsc/apply_physics_params.py`; verifies the exact checked-in Q source and enable state.
-5. If requested, transfers the canonical tile artifact only to an empty remote partial set, checks every manifest entry and digest on-device, installs one immutable generation at `/data/media/0/osm/tile-generations/<tile-set-id>/`, and atomically switches the active `offline` pointer while retaining the prior generation. Before creating a generation or publishing a switch link, the helper writes a separately durable immutable authority for exact target/legacy/build/switch/retained paths, preexistence observations, and content digests; the mutable phase transaction must match that authority byte-for-byte. Activate retries resume the authorized generation/switch intent, while rollback alone may clean it. A direct legacy tree preserves a valid adjacent logical identity or creates `legacy-*`; its immutable container ID, logical tile ID, target provenance, and tree digest remain distinct and are all validated. The app journals the exact prior topology/content and explicit `switched` / `notSwitched` result. Pre-exchange rollback revalidates and preserves preexisting generations, atomically renames only helper-owned trees to deterministic same-filesystem tombstones, and clears transaction authority only after every artifact parent and the tile root are re-synced; interrupted recursive deletion or a lost transaction-removal fsync therefore replays safely, while older transactions lacking ownership authority fail closed. Same-target activation is a no-switch only when the host-recorded baseline matches and complete canonical or direct content equals the staged artifact; rollback re-proves that exact baseline under the parked/Git/tile lock and skips the exchange helper. Snapshot/postflight distinguishes canonical, target-bound legacy migration, direct-identified, and direct-unidentified topology and binds each to its tree digest. A nil prior identity is valid only for a clean direct-unidentified tree; dangling/non-regular manifests, canonical/direct same-ID drift, missing/broken/unsafe links, or direct trees with pointer/authority/transaction/generation/cleanup artifacts are invalid.
+5. Proves the active tile identity is unchanged. No canonical artifact is transferred, staged, activated, or rolled back by the supported runtime-only transaction.
 6. Rechecks parked/offroad/kill-switch state, captures a valid Linux `boot_id`, durably journals it with reboot intent, and only then sends one reboot after every artifact is ready.
 7. Durably hands the transaction to `awaitingOutdoorPostflight`, releases mutation ownership, waits for the tici, and requires a different valid boot ID, stable parked-state brackets, and exact Git/tune/release/cache/build/manager/mapd/tile identity before reporting install success. A failed return/static proof reports failure, retains the pending journal, and never auto-rolls back. It does not claim controller acceptance from a raw parked profile. Every successful rollback restoration after `mutationInProgress`/`rollbackInProgress` always captures and durably journals a separate immediately-pre-rollback-reboot boot ID, sends a reboot, and requires a changed final ID through the static identity contract; liveMapData/profile/GPS remain exclusive to outdoor Resume. Only untouched `preflightReserved` cleanup is mutation- and reboot-free.
 

@@ -52,15 +52,20 @@ struct VTSCTunerApp: App {
         if session.workspace == .curveLab {
           Button("Revert to Checkout Baseline") { session.revertToCheckoutBaseline() }
           Divider()
-          ForEach(ApplyAction.allCases) { action in
-            Button(action.label) { session.pendingApplyAction = action }
-          }
+          Button("Save or Send Tune…") { session.showApplyActionChooser() }
           Divider()
-          Button(ResumePostflightAction.label) { session.pendingResumePostflight = true }
-          Button(AbortPendingDeploymentAction.label) { session.pendingAbortPendingDeployment = true }
-            .disabled(session.pendingDeployments.isEmpty)
-          Button(RollbackRecoveryAction.label) { session.pendingRollbackRecovery = true }
-            .disabled(!session.hasRecoverableRollback)
+          Menu("Deployment Tasks") {
+            Button(ResumePostflightAction.label) { session.pendingResumePostflight = true }
+              .disabled(!session.hasRuntimeOnlyPendingDeployment)
+            Button(AbortPendingDeploymentAction.label) { session.pendingAbortPendingDeployment = true }
+              .disabled(session.pendingDeployments.isEmpty)
+            Button(RollbackRecoveryAction.label) { session.pendingRollbackRecovery = true }
+              .disabled(!session.hasRecoverableRollback)
+            Divider()
+            Button("Why Is Map Tile Rebuilding Unavailable?") {
+              session.tileDeploymentInfoVisible = true
+            }
+          }
         } else {
           Text("Whole-curve study is read-only")
         }

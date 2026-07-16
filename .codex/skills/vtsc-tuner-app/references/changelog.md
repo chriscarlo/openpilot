@@ -2,6 +2,17 @@
 
 Reverse-chronological. Add a new dated section for every substantive change.
 
+## 2026-07-16 — runtime-only product boundary
+
+- Restored the last clean native checkpoint after the attempted tile-transaction hardening pass expanded into an unstable cross-language state-machine rewrite.
+- Kept the five-case source model for compatibility but made only Local, Commit, Push, and PullOnTici selectable.
+- Replaced the technical Apply dropdown with a dedicated **Save or Send This Tune** modal. Its four cumulative destinations say exactly whether the result stays on this Mac, enters local Git history, reaches the Git remote, or is installed on the car; tici installation is visibly recommended for road testing and selecting it still requires a separate review confirmation.
+- Moved Resume/Abort/Recover into a separate **Deployment Tasks** menu and moved the unavailable tile path into explanatory copy instead of presenting it as a broken peer action.
+- Added three independent fail-closed layers: public apply rejects rebuild or an injected tile artifact before tune/journal/process/network work; production preflight repeats the restriction; final runtime deployment requires both the prepared tile set and journal target tile identity to be nil.
+- Made action semantics authoritative: `PullOnTici` always plans unchanged tiles even if a caller supplies a tile artifact. Tile-bearing historical Resume, Abort, Recover, and internal rollback requests remain visible for audit but fail locally with byte-identical journals and zero transport requests.
+- Removed the tile-transaction helper from the production verification suite and signed app bundle. The map decoder, Map Preview, Mac tile sync, calibration bank/fitter, proposed bake overlays, and canonical builder library remain intact.
+- Added focused Core and App coverage for selectable actions, stale/injected UI state, explanatory routing, pre-I/O rejection, explicit-artifact smuggling, byte-exact historical journal blocking, and bundle/helper omission. Incremental verification passes 210 Core tests, 42 App tests, and both pinned Go helper suites; clean release verification follows before the local-only freeze.
+
 ## 2026-07-16 — whole-curve-v3 continuous local curvature
 
 - Split immutable tile activation ownership from mutable phase state. A separately synced pre-creation authority now binds every path, preexistence observation, and digest; activation resumes the exact authorized intent while rollback alone performs verified cleanup. Missing, altered, or phase-overwritten authority fails closed.

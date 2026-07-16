@@ -27,16 +27,23 @@ struct RootView: View {
             Button("Revert", action: session.revertToCheckoutBaseline)
               .help("Revert to the selected checkout's parsed VTSC baseline. This is undoable.")
             Toggle("Advanced", isOn: $session.advancedVisible)
-            Menu("Apply", systemImage: "paperplane") {
-              ForEach(ApplyAction.allCases) { action in
-                Button(action.label) { session.pendingApplyAction = action }
-              }
-              Divider()
+            Button {
+              session.showApplyActionChooser()
+            } label: {
+              Label("Save or Send Tune…", systemImage: "paperplane")
+            }
+            .help("Choose whether this tune stays on this Mac, goes to Git, or is installed on the car.")
+            Menu("Deployment Tasks", systemImage: "wrench.and.screwdriver") {
               Button(ResumePostflightAction.label) { session.pendingResumePostflight = true }
+                .disabled(!session.hasRuntimeOnlyPendingDeployment)
               Button(AbortPendingDeploymentAction.label) { session.pendingAbortPendingDeployment = true }
                 .disabled(session.pendingDeployments.isEmpty)
               Button(RollbackRecoveryAction.label) { session.pendingRollbackRecovery = true }
                 .disabled(!session.hasRecoverableRollback)
+              Divider()
+              Button("Why Is Map Tile Rebuilding Unavailable?") {
+                session.tileDeploymentInfoVisible = true
+              }
             }
           } else {
             Picker(
@@ -119,8 +126,17 @@ struct RootView: View {
       .sheet(item: $session.pendingApplyAction) { action in
         ApplyConfirmationView(session: session, action: action)
       }
+      .sheet(
+        isPresented: $session.applyActionChooserVisible,
+        onDismiss: session.applyActionChooserDidDismiss
+      ) {
+        ApplyActionChooserView(session: session)
+      }
       .sheet(item: $session.runningApplyAction) { action in
         ApplyProgressView(session: session, action: action)
+      }
+      .sheet(isPresented: $session.tileDeploymentInfoVisible) {
+        TileDeploymentUnavailableView(session: session)
       }
       .sheet(isPresented: $session.pendingResumePostflight) {
         ResumePostflightConfirmationView(session: session)
@@ -504,36 +520,222 @@ struct AdvancedParametersView: View {
   }
 }
 
+extension ApplyAction {
+  var chooserSystemImage: String {
+    switch self {
+    case .local: "macbook"
+    case .commit: "checkmark.circle"
+    case .push: "icloud.and.arrow.up"
+    case .pullOnTici: "car.side"
+    case .rebuildTilesAndReboot: "map"
+    }
+  }
+
+  var chooserDestination: String {
+    switch self {
+    case .local: "THIS MAC ONLY"
+    case .commit: "THIS MAC + LOCAL GIT"
+    case .push: "THIS MAC + GIT REMOTE"
+    case .pullOnTici: "THIS MAC + GIT + CAR"
+    case .rebuildTilesAndReboot: "UNAVAILABLE"
+    }
+  }
+
+  var isRecommendedForRoadTesting: Bool { self == .pullOnTici }
+
+  var reviewButtonLabel: String {
+    switch self {
+    case .local: "Review Mac-Only Update…"
+    case .commit: "Review Local Commit…"
+    case .push: "Review Git Push…"
+    case .pullOnTici: "Review Car Installation…"
+    case .rebuildTilesAndReboot: "Unavailable"
+    }
+  }
+}
+
+struct ApplyActionChooserView: View {
+  @ObservedObject var session: TunerSession
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 18) {
+      VStack(alignment: .leading, spacing: 6) {
+        Label("Save or Send This Tune", systemImage: "paperplane.fill")
+          .font(.title2.weight(.semibold))
+        Text("Choose the furthest place this version should go. Each choice includes the steps above it.")
+          .foregroundStyle(.secondary)
+      }
+
+      VStack(spacing: 10) {
+        ForEach(ApplyAction.availableCases) { action in
+          applyChoice(action)
+        }
+      }
+
+      HStack(alignment: .top, spacing: 10) {
+        Image(systemName: "map")
+          .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 3) {
+          Text("Map tiles stay unchanged for now.")
+            .fontWeight(.medium)
+          Text("That does not prevent installing and road-testing a new runtime tune.")
+            .foregroundStyle(.secondary)
+          Button("Why is map tile rebuilding unavailable?") {
+            session.showTileDeploymentInfoFromApplyChooser()
+          }
+          .buttonStyle(.link)
+        }
+      }
+      .font(.callout)
+
+      HStack {
+        Spacer()
+        Button("Cancel", role: .cancel) { session.cancelApplyActionChooser() }
+        Button(session.applyChooserSelection?.reviewButtonLabel ?? "Choose an Option") {
+          session.reviewSelectedApplyAction()
+        }
+        .disabled(session.applyChooserSelection == nil)
+        .keyboardShortcut(.defaultAction)
+      }
+    }
+    .padding(24)
+    .frame(width: 680)
+    .accessibilityElement(children: .contain)
+    .accessibilityLabel("Apply current VTSC tune")
+  }
+
+  private func applyChoice(_ action: ApplyAction) -> some View {
+    let selected = session.applyChooserSelection == action
+    return Button {
+      session.selectApplyAction(action)
+    } label: {
+      HStack(alignment: .center, spacing: 14) {
+        Image(systemName: action.chooserSystemImage)
+          .font(.title2)
+          .frame(width: 30)
+          .foregroundStyle(selected ? Color.accentColor : .primary)
+        VStack(alignment: .leading, spacing: 4) {
+          HStack(spacing: 8) {
+            Text(action.label)
+              .font(.headline)
+            if action.isRecommendedForRoadTesting {
+              Text("RECOMMENDED FOR ROAD TESTING")
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(Color.accentColor)
+            }
+          }
+          Text(action.description)
+            .font(.callout)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+        Spacer(minLength: 12)
+        VStack(alignment: .trailing, spacing: 8) {
+          Text(action.chooserDestination)
+            .font(.caption2.weight(.bold))
+            .foregroundStyle(.secondary)
+            .multilineTextAlignment(.trailing)
+          Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+            .font(.title3)
+            .foregroundStyle(selected ? Color.accentColor : Color.secondary)
+        }
+        .frame(width: 145, alignment: .trailing)
+      }
+      .padding(14)
+      .contentShape(Rectangle())
+      .background(
+        RoundedRectangle(cornerRadius: 12, style: .continuous)
+          .fill(selected ? Color.accentColor.opacity(0.12) : Color.primary.opacity(0.045))
+      )
+      .overlay(
+        RoundedRectangle(cornerRadius: 12, style: .continuous)
+          .stroke(selected ? Color.accentColor : Color.secondary.opacity(0.25), lineWidth: selected ? 2 : 1)
+      )
+    }
+    .buttonStyle(.plain)
+    .accessibilityElement(children: .ignore)
+    .accessibilityLabel(
+      action.isRecommendedForRoadTesting
+        ? "Recommended for road testing. \(action.label)"
+        : action.label
+    )
+    .accessibilityValue(action.chooserDestination)
+    .accessibilityHint(action.description)
+    .accessibilityAddTraits(selected ? .isSelected : [])
+  }
+}
+
 struct ApplyConfirmationView: View {
   @ObservedObject var session: TunerSession
   let action: ApplyAction
 
   var body: some View {
     VStack(alignment: .leading, spacing: 16) {
-      Label(action.label, systemImage: "paperplane.fill").font(.title2.weight(.semibold))
+      Label(action.label, systemImage: action.chooserSystemImage).font(.title2.weight(.semibold))
       Text(action.description)
+      if let unavailableReason = action.unavailableReason {
+        Label(unavailableReason, systemImage: "lock.shield")
+          .foregroundStyle(.orange)
+      }
       Label(session.repositoryURL?.path ?? "No Chauffeur repository selected", systemImage: "folder")
         .font(.caption)
         .foregroundStyle(.secondary)
         .textSelection(.enabled)
       if action != .local {
-        Text("This uses the selected checkout's current branch and commits the complete VTSC target files. Review any existing edits to those files first.")
+        Text("Before continuing, review any existing changes in the VTSC files. This option may include them in the Git checkpoint.")
           .font(.caption)
           .foregroundStyle(.secondary)
       }
       if action == .pullOnTici || action == .rebuildTilesAndReboot {
-        Label("Run only while parked; this action reboots the tici.", systemImage: "exclamationmark.triangle.fill")
+        Label("Use only while the car is parked and off. The tici reboots once.", systemImage: "exclamationmark.triangle.fill")
           .foregroundStyle(.orange)
+      }
+      if action == .pullOnTici {
+        Label(
+          "Choose this for a real-world road test. It updates the VTSC runtime but keeps the car's current map tiles.",
+          systemImage: "checkmark.shield"
+        )
+        .foregroundStyle(.secondary)
       }
       HStack {
         Spacer()
         Button("Cancel", role: .cancel) { session.pendingApplyAction = nil }
-        Button("Run") { session.confirmApply() }
+        Button(action == .pullOnTici ? "Install on Car" : "Continue") { session.confirmApply() }
+          .disabled(!action.isAvailable)
           .keyboardShortcut(.defaultAction)
       }
     }
     .padding(24)
     .frame(width: 520)
+  }
+}
+
+struct TileDeploymentUnavailableView: View {
+  @ObservedObject var session: TunerSession
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 16) {
+      Label("Why Map Tile Replacement Is Paused", systemImage: "lock.shield")
+        .font(.title2.weight(.semibold))
+      Text(
+        "You can still save this tune, back it up to Git, and install it on the car. The tici will keep using the map tiles it already has. Replacing those tiles is switched off until recovery from an interrupted tile install is fully proven."
+      )
+      Label(
+        "Map Preview, familiar-curve calibration, fitting, and proposed tile-bake overlays remain available.",
+        systemImage: "map"
+      )
+      .foregroundStyle(.secondary)
+      HStack {
+        Spacer()
+        Button("Done", role: .cancel) { session.tileDeploymentInfoVisible = false }
+        Button("Install Tune on Car Using Current Maps…") {
+          session.requestRuntimeDeploymentFromTileInfo()
+        }
+        .keyboardShortcut(.defaultAction)
+      }
+    }
+    .padding(24)
+    .frame(width: 560)
   }
 }
 
@@ -596,6 +798,12 @@ struct ResumePostflightConfirmationView: View {
         .font(.caption)
         .foregroundStyle(.secondary)
         .textSelection(.enabled)
+      Picker("Pending deployment", selection: $session.selectedPendingDeploymentURL) {
+        ForEach(session.pendingDeployments) { candidate in
+          Text("\(candidate.journal.deploymentID.uuidString.prefix(8)) · \(candidate.journal.includesTileReplacement ? "includes tile replacement — unavailable" : "runtime only") · \(candidate.journal.targetHead?.prefix(10) ?? "unknown") · \(candidate.journal.createdAt)")
+            .tag(Optional(candidate.url))
+        }
+      }
       Label(
         "Outdoors after a normal GPS/profile-producing drive: stop safely with ignition still on, then click Verify and Complete. With Map Lookahead still disabled, the app first proves the fresh profile would be accepted by the controller when later enabled. Turn ignition off only after the app explicitly says that proof was captured. It keeps the proof only in memory while polling for IsOffroad=1 and rechecking the unchanged tune/runtime identity. Failure keeps the original journal pending.",
         systemImage: "location.viewfinder"
@@ -605,6 +813,7 @@ struct ResumePostflightConfirmationView: View {
         Spacer()
         Button("Cancel", role: .cancel) { session.pendingResumePostflight = false }
         Button("Verify and Complete") { session.confirmResumePostflight() }
+          .disabled(session.repositoryURL == nil || !session.selectedPendingDeploymentIsRuntimeOnly)
           .keyboardShortcut(.defaultAction)
       }
     }
@@ -683,11 +892,11 @@ struct AbortPendingDeploymentConfirmationView: View {
         systemImage: "exclamationmark.shield.fill"
       )
       .foregroundStyle(.red)
-      Text("The app will acquire global production ownership, recheck that the tici is exactly parked/offroad with Map Lookahead disabled, then restore only the selected journal's Git, Params, mapd/cache, and tile identity. It never starts automatically.")
+      Text("The app will acquire global production ownership, recheck that the tici is exactly parked/offroad with Map Lookahead disabled, then restore only a runtime-only journal's Git, Params, and mapd/cache identity. Tile-replacement journals remain listed for audit but are blocked locally. It never starts automatically.")
         .foregroundStyle(.secondary)
       Picker("Pending deployment", selection: $session.selectedPendingDeploymentURL) {
         ForEach(session.pendingDeployments) { candidate in
-          Text("\(candidate.journal.deploymentID.uuidString.prefix(8)) · \(candidate.journal.targetHead?.prefix(10) ?? "unknown") · \(candidate.journal.createdAt)")
+          Text("\(candidate.journal.deploymentID.uuidString.prefix(8)) · \(candidate.journal.includesTileReplacement ? "includes tile replacement — unavailable" : "runtime only") · \(candidate.journal.targetHead?.prefix(10) ?? "unknown") · \(candidate.journal.createdAt)")
             .tag(Optional(candidate.url))
         }
       }
@@ -758,15 +967,15 @@ struct RollbackRecoveryConfirmationView: View {
     VStack(alignment: .leading, spacing: 16) {
       Text(RollbackRecoveryAction.label).font(.title2.weight(.semibold))
       Label(
-        "An interrupted or failed rollback journal was found. Recovery reuses only that recorded deployment identity, requires a freshly parked/offroad tici with Map Lookahead disabled, and verifies the restored source, Params, mapd/cache, and tile identity.",
+        "An interrupted or failed rollback journal was found. Runtime-only recovery reuses only that recorded deployment identity, requires a freshly parked/offroad tici with Map Lookahead disabled, and verifies the restored source, Params, and mapd/cache identity.",
         systemImage: "exclamationmark.arrow.triangle.2.circlepath"
       )
       .foregroundStyle(.orange)
-      Text("This is an explicit production recovery action. It can restore files and Params and may reboot only if the original deployment had already rebooted. It does not create a new deployment or retarget the journal.")
+      Text("This is an explicit runtime-only recovery action. It can restore files and Params and always proves restored runtime state through its guarded reboot contract. Tile-replacement journals remain listed but are blocked before transport or mutation. It does not create a new deployment or retarget the journal.")
         .foregroundStyle(.secondary)
       Picker("Recorded deployment", selection: $session.selectedRollbackJournalURL) {
         ForEach(session.recoverableRollbacks) { candidate in
-          Text("\(candidate.journal.deploymentID.uuidString.prefix(8)) · \(candidate.journal.effectiveResolution.rawValue) · \(candidate.journal.targetHead?.prefix(10) ?? "unknown") · \(candidate.journal.createdAt)")
+          Text("\(candidate.journal.deploymentID.uuidString.prefix(8)) · \(candidate.journal.includesTileReplacement ? "includes tile replacement — unavailable" : "runtime only") · \(candidate.journal.effectiveResolution.rawValue) · \(candidate.journal.targetHead?.prefix(10) ?? "unknown") · \(candidate.journal.createdAt)")
             .tag(Optional(candidate.url))
         }
       }

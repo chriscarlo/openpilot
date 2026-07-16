@@ -94,7 +94,7 @@ enum TileTransactionRecovery {
 /// Swift owns identity, helper integrity, result parsing, and safety policy.
 /// The static tici helper only supplies the Linux rename-exchange primitive
 /// plus its durable on-device tile journal.
-public struct TiciTileSetDeploymentService: Sendable {
+struct TiciTileSetDeploymentService: Sendable {
   public static let sshURL = URL(fileURLWithPath: "/usr/bin/ssh")
   public static let rsyncURL = URL(fileURLWithPath: "/usr/bin/rsync")
   public static let remoteRoot = "/data/media/0/osm"

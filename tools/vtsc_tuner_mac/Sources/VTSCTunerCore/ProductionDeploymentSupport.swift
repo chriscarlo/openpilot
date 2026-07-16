@@ -220,12 +220,6 @@ enum ProductionVerificationSuite {
         timeout: 600
       ),
       ProcessRequest(
-        executableURL: URL(fileURLWithPath: "/bin/bash"),
-        arguments: ["scripts/build_tile_transaction_helper.sh", "--test"],
-        currentDirectoryURL: app,
-        timeout: 600
-      ),
-      ProcessRequest(
         executableURL: URL(fileURLWithPath: "/usr/bin/swift"),
         arguments: ["test"],
         currentDirectoryURL: app,

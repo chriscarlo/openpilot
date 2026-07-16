@@ -11,8 +11,12 @@ import Testing
     .pullOnTici,
     .rebuildTilesAndReboot,
   ])
-  #expect(ApplyAction.pullOnTici.label.contains("keep current tiles"))
-  #expect(ApplyAction.rebuildTilesAndReboot.label.contains("build canonical tiles"))
+  #expect(ApplyAction.pullOnTici.label == "Install on the Car (tici)")
+  #expect(ApplyAction.pullOnTici.description.contains("current map tiles stay in place"))
+  #expect(ApplyAction.rebuildTilesAndReboot.label == "Build and Install New Map Tiles")
+  #expect(ApplyAction.availableCases == [.local, .commit, .push, .pullOnTici])
+  #expect(ApplyAction.pullOnTici.isAvailable)
+  #expect(!ApplyAction.rebuildTilesAndReboot.isAvailable)
 }
 
 @Test func productionTilePlansSeparateRuntimePullFromCanonicalRebuild() {
@@ -34,13 +38,114 @@ import Testing
     tune: tune,
     repositoryRoot: repository,
     tileSetArtifactURL: explicit
-  )) == .validateExplicit(explicit))
+  )) == .unchanged)
   #expect(ApplyPipeline.productionTilePlan(for: ApplyRequest(
     action: .rebuildTilesAndReboot,
     tune: tune,
     repositoryRoot: repository,
     tileSetArtifactURL: explicit
   )) == .validateExplicit(explicit))
+}
+
+@Test func disabledTileReplacementFailsBeforeAnyFileProcessNetworkOrJournalWork() async {
+  for action in [ApplyAction.rebuildTilesAndReboot, .pullOnTici] {
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent("vtsc-disabled-tile-deployment-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let tuneURL = directory.appendingPathComponent("must-not-exist.tune.json")
+    let journalDirectory = directory.appendingPathComponent("journals", isDirectory: true)
+    let runner = ProductionPreflightRunner(head: String(repeating: "a", count: 40))
+    let collector = ApplyEventCollector()
+    let request = ApplyRequest(
+      action: action,
+      tune: Tune(params: .checkoutFallback),
+      repositoryRoot: URL(fileURLWithPath: "/definitely/not/a/repository"),
+      tuneURL: tuneURL,
+      tileSetArtifactURL: action == .pullOnTici
+        ? directory.appendingPathComponent("injected-tile-set", isDirectory: true)
+        : nil,
+      rollbackJournalDirectoryURL: journalDirectory
+    )
+
+    let succeeded = await ApplyPipeline(processRunner: runner).apply(request) { event in
+      await collector.append(event)
+    }
+
+    #expect(!succeeded)
+    #expect(await runner.requests.isEmpty)
+    #expect(!FileManager.default.fileExists(atPath: tuneURL.path))
+    #expect(!FileManager.default.fileExists(atPath: journalDirectory.path))
+    #expect(await collector.events.contains { event in
+      if case let .step(step) = event {
+        return step.id == 0 && step.status == .failed &&
+          step.detail == ApplyAction.deviceTileReplacementUnavailableReason
+      }
+      return false
+    })
+  }
+}
+
+@Test func tileBearingHistoricalJournalsRemainByteExactAndCannotReachTheDevice() async throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  fixture.journal.targetTileSetID = String(repeating: "f", count: 64)
+  fixture.journal.rebootSent = true
+  fixture.journal.completed = false
+  fixture.journal.resolution = .awaitingPostflight
+  try fixture.journal.write(to: fixture.journalURL)
+  let runner = ProductionPreflightRunner(head: fixture.toolingHead)
+  let pipeline = ApplyPipeline(processRunner: runner)
+
+  var before = try Data(contentsOf: fixture.journalURL)
+  let resumed = await pipeline.resumePendingPostflight(ResumePostflightRequest(
+    tune: fixture.tune,
+    repositoryRoot: fixture.repository,
+    journalURL: fixture.journalURL,
+    timeout: 0.01,
+    pollInterval: 0.001
+  )) { _ in }
+  #expect(!resumed)
+  #expect(try Data(contentsOf: fixture.journalURL) == before)
+  #expect(await runner.requests.isEmpty)
+
+  let aborted = await pipeline.abortPendingDeployment(AbortPendingDeploymentRequest(
+    repositoryRoot: fixture.repository,
+    journalURL: fixture.journalURL
+  )) { _ in }
+  #expect(!aborted)
+  #expect(try Data(contentsOf: fixture.journalURL) == before)
+  #expect(await runner.requests.isEmpty)
+
+  fixture.journal.completed = true
+  fixture.journal.resolution = .rollbackFailed
+  try fixture.journal.write(to: fixture.journalURL)
+  before = try Data(contentsOf: fixture.journalURL)
+  let recovered = await pipeline.recoverPendingRollback(RollbackRecoveryRequest(
+    repositoryRoot: fixture.repository,
+    journalURL: fixture.journalURL
+  )) { _ in }
+  #expect(!recovered)
+  #expect(try Data(contentsOf: fixture.journalURL) == before)
+  #expect(await runner.requests.isEmpty)
+}
+
+@Test func runtimeOnlyJournalClassificationRejectsEveryTileMutationLifecycleSignal() throws {
+  let fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  var journal = fixture.journal
+  journal.previousTileSetID = String(repeating: "1", count: 64)
+  #expect(!journal.includesTileReplacement)
+
+  journal.targetTileSetID = String(repeating: "2", count: 64)
+  #expect(journal.includesTileReplacement)
+  journal.targetTileSetID = nil
+
+  journal.resolvedPreviousTileSetID = "legacy-0123456789abcdef"
+  #expect(journal.includesTileReplacement)
+  journal.resolvedPreviousTileSetID = nil
+
+  journal.tileActivationOutcome = .notSwitched
+  #expect(journal.includesTileReplacement)
 }
 
 @Test func ticiPreflightAcceptsOnlyAnExactHeadOrProvenFastForwardAncestor() async throws {
@@ -1232,7 +1337,7 @@ func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByR
   #expect(settled.effectiveResolution == .rollbackFailed)
 }
 
-@Test func freshProcessRecoveryUsesOnlyDurableTileIdentitiesAndDoesNotInventAPreReboot() async throws {
+@Test func freshProcessTileRecoveryIsQuarantinedBeforeTransportOrJournalMutation() async throws {
   var fixture = try resumePostflightFixture(validGPS: true)
   defer { try? FileManager.default.removeItem(at: fixture.root) }
   let previousTileSetID = String(repeating: "1", count: 64)
@@ -1253,6 +1358,7 @@ func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByR
   fixture.journal.completed = true
   fixture.journal.resolution = .rollbackInProgress
   try fixture.journal.write(to: fixture.journalURL)
+  let journalBytes = try Data(contentsOf: fixture.journalURL)
   let runner = FreshProcessRollbackRecoveryRunner(journal: fixture.journal)
 
   let succeeded = await ApplyPipeline(
@@ -1266,16 +1372,10 @@ func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByR
     )
   ) { _ in }
 
-  #expect(succeeded)
-  #expect(try DeploymentRollbackJournal.load(from: fixture.journalURL).effectiveResolution == .rolledBack)
+  #expect(!succeeded)
+  #expect(try Data(contentsOf: fixture.journalURL) == journalBytes)
   let requests = await runner.requests
-  #expect(requests.contains { request in
-    request.arguments.last?.contains("rollback --root") == true &&
-      request.arguments.last?.contains("--expected-tile-set-id '\(targetTileSetID)'") == true
-  })
-  #expect(requests.contains { $0.arguments.joined(separator: " ").contains("sudo reboot") })
-  let settled = try DeploymentRollbackJournal.load(from: fixture.journalURL)
-  #expect(settled.rollbackPreRebootBootID != nil)
+  #expect(requests.isEmpty)
 }
 
 @Test func watchdogCycleBeforeDeploymentRebootIntentStillForcesRollbackReboot() async throws {
@@ -1648,7 +1748,7 @@ func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByR
   #expect(!requests.contains { $0.arguments.last?.contains("sudo reboot") == true })
 }
 
-@Test func tileRollbackFailureStopsGitParamsAndMapdRestoration() async throws {
+@Test func tileBearingInternalRollbackStopsBeforeHelperGitParamsMapdAndReboot() async throws {
   var fixture = try resumePostflightFixture(validGPS: true)
   defer { try? FileManager.default.removeItem(at: fixture.root) }
   fixture.journal.completed = true
@@ -1656,6 +1756,7 @@ func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByR
   fixture.journal.targetTileSetID = String(repeating: "f", count: 64)
   fixture.journal.previousTileSetID = String(repeating: "e", count: 64)
   try fixture.journal.write(to: fixture.journalURL)
+  let journalBefore = try Data(contentsOf: fixture.journalURL)
   let runner = FreshProcessRollbackRecoveryRunner(
     journal: fixture.journal,
     runtimeActiveTileSetID: fixture.journal.targetTileSetID,
@@ -1672,14 +1773,13 @@ func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByR
   )
 
   guard case let .rollbackFailed(detail) = result else {
-    Issue.record("tile precondition failure did not retain rollback failure")
+    Issue.record("quarantined tile-bearing rollback did not fail closed")
     return
   }
   #expect(detail.contains("before Git/Params/mapd restoration"))
-  let requests = await runner.requests
-  #expect(requests.contains { $0.arguments.last?.contains("rollback --root") == true })
-  #expect(!requests.contains { $0.arguments.last?.contains(TiciProductionRollbackCommandBuilder.resultMarker) == true })
-  #expect(!requests.contains { $0.arguments.last?.contains("sudo reboot") == true })
+  #expect(detail.contains(ApplyAction.deviceTileReplacementUnavailableReason))
+  #expect(try Data(contentsOf: fixture.journalURL) == journalBefore)
+  #expect(await runner.requests.isEmpty)
 }
 
 @Test func legacyDirectTileActivationIdentityIsDurableBeforeContinuation() async throws {
@@ -1758,7 +1858,7 @@ func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByR
   }
 }
 
-@Test func sameTargetNoSwitchLaterFailureRollsBackSourceAndReplaysAsTerminalSuccess() async throws {
+@Test func sameTargetNoSwitchProductionRollbackRemainsQuarantined() async throws {
   var fixture = try resumePostflightFixture(validGPS: true)
   defer { try? FileManager.default.removeItem(at: fixture.root) }
   let target = String(repeating: "f", count: 64)
@@ -1790,6 +1890,7 @@ func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByR
   var rollbackJournal = reconciled
   rollbackJournal.resolution = .rollbackInProgress
   try rollbackJournal.write(to: fixture.journalURL)
+  let journalBefore = try Data(contentsOf: fixture.journalURL)
   fixture.journal = rollbackJournal
   let runner = FreshProcessRollbackRecoveryRunner(
     journal: rollbackJournal,
@@ -1806,30 +1907,16 @@ func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByR
     preflight: try resumeRuntimePreflight(fixture),
     tilesActivated: false
   )
-  guard case .rolledBack = firstOutcome else {
-    Issue.record("same-target verified no-switch did not complete source/Params/mapd rollback: \(firstOutcome)")
+  guard case let .rollbackFailed(detail) = firstOutcome else {
+    Issue.record("same-target tile rollback escaped quarantine: \(firstOutcome)")
     return
   }
-  let settled = try DeploymentRollbackJournal.load(from: fixture.journalURL)
-  #expect(settled.effectiveResolution == .rolledBack)
-  #expect(settled.tileActivationOutcome == .notSwitched)
-  #expect(settled.effectivePreviousTileSetID == target)
-  let firstRequests = await runner.requests.count
-  #expect((await runner.requests).contains { $0.arguments.last?.contains(TiciProductionRollbackCommandBuilder.resultMarker) == true })
-  #expect((await runner.requests).contains { $0.arguments.last?.contains("sudo reboot") == true })
-  #expect(!(await runner.requests).contains { $0.arguments.last?.contains("rollback --root") == true })
-
-  guard case .rolledBack = await pipeline.rollbackProductionDeploymentIfJournalPending(
-    preflight: try resumeRuntimePreflight(fixture),
-    tilesActivated: false
-  ) else {
-    Issue.record("fresh same-target rollback retry did not return terminal rolledBack")
-    return
-  }
-  #expect(await runner.requests.count == firstRequests)
+  #expect(detail.contains(ApplyAction.deviceTileReplacementUnavailableReason))
+  #expect(try Data(contentsOf: fixture.journalURL) == journalBefore)
+  #expect(await runner.requests.isEmpty)
 }
 
-@Test func durableNoSwitchTopologyDriftFailsBeforeAnyRollbackMutation() async throws {
+@Test func durableNoSwitchJournalIsQuarantinedBeforeTopologyProbe() async throws {
   var fixture = try resumePostflightFixture(validGPS: true)
   defer { try? FileManager.default.removeItem(at: fixture.root) }
   let target = String(repeating: "f", count: 64)
@@ -1848,6 +1935,7 @@ func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByR
   fixture.journal.previousCachedMapdPath = ""
   fixture.journal.previousCachedMapdSHA256 = nil
   try fixture.journal.write(to: fixture.journalURL)
+  let journalBefore = try Data(contentsOf: fixture.journalURL)
   let runner = FreshProcessRollbackRecoveryRunner(
     journal: fixture.journal,
     runtimeActiveTileSetID: target,
@@ -1864,17 +1952,15 @@ func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByR
   )
 
   guard case let .rollbackFailed(detail) = outcome else {
-    Issue.record("tampered same-ID topology did not fail closed: \(outcome)")
+    Issue.record("durable no-switch journal escaped quarantine: \(outcome)")
     return
   }
-  #expect(detail.contains("tile rollback or its exact target binding failed"))
-  let requests = await runner.requests
-  #expect(!requests.contains { $0.arguments.last?.contains("rollback --root") == true })
-  #expect(!requests.contains { $0.arguments.last?.contains(TiciProductionRollbackCommandBuilder.resultMarker) == true })
-  #expect(!requests.contains { $0.arguments.last?.contains("sudo reboot") == true })
+  #expect(detail.contains(ApplyAction.deviceTileReplacementUnavailableReason))
+  #expect(try Data(contentsOf: fixture.journalURL) == journalBefore)
+  #expect(await runner.requests.isEmpty)
 }
 
-@Test func beforeJournalDirectIdentityNoSwitchCompletesFullRollbackAndPostflight() async throws {
+@Test func beforeJournalDirectIdentityTileRollbackRemainsQuarantined() async throws {
   var fixture = try resumePostflightFixture(validGPS: true)
   defer { try? FileManager.default.removeItem(at: fixture.root) }
   let previous = String(repeating: "c", count: 64)
@@ -1887,6 +1973,7 @@ func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByR
   fixture.journal.previousCachedMapdPath = ""
   fixture.journal.previousCachedMapdSHA256 = nil
   try fixture.journal.write(to: fixture.journalURL)
+  let journalBefore = try Data(contentsOf: fixture.journalURL)
   let runner = FreshProcessRollbackRecoveryRunner(
     journal: fixture.journal,
     runtimeActiveTileSetID: previous,
@@ -1902,20 +1989,17 @@ func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByR
     tilesActivated: false
   )
 
-  guard case .rolledBack = result else {
-    Issue.record("before-journal direct identity did not complete coherent rollback: \(result)")
+  guard case let .rollbackFailed(detail) = result else {
+    Issue.record("before-journal tile rollback escaped quarantine: \(result)")
     return
   }
-  let settled = try DeploymentRollbackJournal.load(from: fixture.journalURL)
-  #expect(settled.effectiveResolution == .rolledBack)
-  #expect(settled.effectivePreviousTileSetID == previous)
-  #expect(settled.tileActivationOutcome == .notSwitched)
-  #expect((await runner.requests).contains { $0.arguments.last?.contains(TiciProductionRollbackCommandBuilder.resultMarker) == true })
-  #expect((await runner.requests).contains { $0.arguments.last?.contains("sudo reboot") == true })
+  #expect(detail.contains(ApplyAction.deviceTileReplacementUnavailableReason))
+  #expect(try Data(contentsOf: fixture.journalURL) == journalBefore)
+  #expect(await runner.requests.isEmpty)
 }
 
 @Test(arguments: [false, true])
-func legacyDirectTileActivationRollbackAndInterruptedRetrySettle(
+func legacyDirectTileActivationRollbackAndInterruptedRetryRemainQuarantined(
   tileActivationAlreadyRolledBack: Bool
 ) async throws {
   var fixture = try resumePostflightFixture(validGPS: true)
@@ -1937,6 +2021,7 @@ func legacyDirectTileActivationRollbackAndInterruptedRetrySettle(
   fixture.journal.previousCachedMapdPath = ""
   fixture.journal.previousCachedMapdSHA256 = nil
   try fixture.journal.write(to: fixture.journalURL)
+  let journalBefore = try Data(contentsOf: fixture.journalURL)
   let runner = FreshProcessRollbackRecoveryRunner(
     journal: fixture.journal,
     runtimeActiveTileSetID: legacy,
@@ -1953,18 +2038,16 @@ func legacyDirectTileActivationRollbackAndInterruptedRetrySettle(
     tilesActivated: true
   )
 
-  guard case .rolledBack = result else {
-    Issue.record("legacy direct-tree rollback did not settle after helper identity resolution: \(result)")
+  guard case let .rollbackFailed(detail) = result else {
+    Issue.record("legacy direct-tree rollback escaped quarantine: \(result)")
     return
   }
-  let settled = try DeploymentRollbackJournal.load(from: fixture.journalURL)
-  #expect(settled.effectiveResolution == .rolledBack)
-  #expect(settled.previousTileSetID == nil)
-  #expect(settled.resolvedPreviousTileSetID == legacy)
-  #expect((await runner.requests).contains { $0.arguments.last?.contains("sudo reboot") == true })
+  #expect(detail.contains(ApplyAction.deviceTileReplacementUnavailableReason))
+  #expect(try Data(contentsOf: fixture.journalURL) == journalBefore)
+  #expect(await runner.requests.isEmpty)
 }
 
-@Test func preservedCanonicalLegacyIdentityReconcilesAfterActivationReplyWasLost() async throws {
+@Test func preservedCanonicalLegacyIdentityRollbackRemainsQuarantined() async throws {
   var fixture = try resumePostflightFixture(validGPS: true)
   defer { try? FileManager.default.removeItem(at: fixture.root) }
   let target = String(repeating: "f", count: 64)
@@ -1977,6 +2060,7 @@ func legacyDirectTileActivationRollbackAndInterruptedRetrySettle(
   fixture.journal.previousCachedMapdPath = ""
   fixture.journal.previousCachedMapdSHA256 = nil
   try fixture.journal.write(to: fixture.journalURL)
+  let journalBefore = try Data(contentsOf: fixture.journalURL)
   let runner = FreshProcessRollbackRecoveryRunner(
     journal: fixture.journal,
     runtimeActiveTileSetID: preservedCanonical,
@@ -1992,14 +2076,13 @@ func legacyDirectTileActivationRollbackAndInterruptedRetrySettle(
     tilesActivated: true
   )
 
-  guard case .rolledBack = result else {
-    Issue.record("preserved canonical legacy identity did not reconcile: \(result)")
+  guard case let .rollbackFailed(detail) = result else {
+    Issue.record("preserved canonical legacy rollback escaped quarantine: \(result)")
     return
   }
-  let settled = try DeploymentRollbackJournal.load(from: fixture.journalURL)
-  #expect(settled.resolvedPreviousTileSetID == preservedCanonical)
-  #expect(settled.effectiveResolution == .rolledBack)
-  #expect((await runner.requests).contains { $0.arguments.last?.contains("sudo reboot") == true })
+  #expect(detail.contains(ApplyAction.deviceTileReplacementUnavailableReason))
+  #expect(try Data(contentsOf: fixture.journalURL) == journalBefore)
+  #expect(await runner.requests.isEmpty)
 }
 
 @Test func arbitraryUnboundPreviousTileIdentityStopsFreshRecoveryBeforeLaterMutation() async throws {
@@ -2012,6 +2095,7 @@ func legacyDirectTileActivationRollbackAndInterruptedRetrySettle(
   fixture.journal.resolvedPreviousTileSetID = nil
   fixture.journal.targetTileSetID = target
   try fixture.journal.write(to: fixture.journalURL)
+  let journalBefore = try Data(contentsOf: fixture.journalURL)
   let runner = FreshProcessRollbackRecoveryRunner(
     journal: fixture.journal,
     runtimeActiveTileSetID: target,
@@ -2030,13 +2114,12 @@ func legacyDirectTileActivationRollbackAndInterruptedRetrySettle(
     return
   }
   #expect(detail.contains("before Git/Params/mapd restoration"))
-  let requests = await runner.requests
-  #expect(!requests.contains { $0.arguments.last?.contains(TiciProductionRollbackCommandBuilder.resultMarker) == true })
-  #expect(!requests.contains { $0.arguments.last?.contains("sudo reboot") == true })
-  #expect(try DeploymentRollbackJournal.load(from: fixture.journalURL).resolvedPreviousTileSetID == nil)
+  #expect(detail.contains(ApplyAction.deviceTileReplacementUnavailableReason))
+  #expect(try Data(contentsOf: fixture.journalURL) == journalBefore)
+  #expect(await runner.requests.isEmpty)
 }
 
-@Test func preActivationTileFailureAllowsSourceRollbackAndKeepsNilPreviousIdentity() async throws {
+@Test func preActivationTileFailureRemainsQuarantinedBeforeSourceRollback() async throws {
   var fixture = try resumePostflightFixture(validGPS: true)
   defer { try? FileManager.default.removeItem(at: fixture.root) }
   fixture.journal.completed = true
@@ -2047,6 +2130,7 @@ func legacyDirectTileActivationRollbackAndInterruptedRetrySettle(
   fixture.journal.previousCachedMapdPath = ""
   fixture.journal.previousCachedMapdSHA256 = nil
   try fixture.journal.write(to: fixture.journalURL)
+  let journalBefore = try Data(contentsOf: fixture.journalURL)
   let runner = FreshProcessRollbackRecoveryRunner(
     journal: fixture.journal,
     tileActivationNeverStarted: true
@@ -2061,16 +2145,13 @@ func legacyDirectTileActivationRollbackAndInterruptedRetrySettle(
     tilesActivated: true
   )
 
-  guard case .rolledBack = result else {
-    Issue.record("pre-activation tile failure did not permit coherent rollback: \(result)")
+  guard case let .rollbackFailed(detail) = result else {
+    Issue.record("pre-activation tile failure escaped quarantine: \(result)")
     return
   }
-  let settled = try DeploymentRollbackJournal.load(from: fixture.journalURL)
-  #expect(settled.effectivePreviousTileSetID == nil)
-  #expect(settled.effectiveResolution == .rolledBack)
-  let requests = await runner.requests
-  #expect(requests.contains { $0.arguments.last?.contains(TiciProductionRollbackCommandBuilder.resultMarker) == true })
-  #expect(requests.contains { $0.arguments.last?.contains("sudo reboot") == true })
+  #expect(detail.contains(ApplyAction.deviceTileReplacementUnavailableReason))
+  #expect(try Data(contentsOf: fixture.journalURL) == journalBefore)
+  #expect(await runner.requests.isEmpty)
 }
 
 @Test func abortRejectsWrongJournalSelectionBeforeAnyRemoteRequest() async throws {

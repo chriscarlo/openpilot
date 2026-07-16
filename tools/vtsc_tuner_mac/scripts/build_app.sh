@@ -11,8 +11,6 @@ APP_BUNDLE="$OUTPUT_DIR/$APP_NAME"
 EXECUTABLE_NAME="VTSCTuner"
 TILE_DECODER_NAME="vtsc-tile-decoder"
 TILE_DECODER_PATH="$PACKAGE_DIR/.build-tools/bin/$TILE_DECODER_NAME"
-TILE_TRANSACTION_NAME="vtsc-tile-transaction"
-TILE_TRANSACTION_PATH="$PACKAGE_DIR/.build-tools/bin/$TILE_TRANSACTION_NAME"
 INSTALL_REQUESTED=0
 OPEN_REQUESTED=0
 
@@ -22,7 +20,8 @@ Usage: bash scripts/build_app.sh [--install] [--open]
 
 Builds the SwiftPM VTSCTuner release product and packages an ad-hoc-signed,
 unsandboxed macOS application at dist/VTSC Tuner.app. The bundle includes the
-native macOS tile decoder and a static Linux ARM64 tile-transaction helper.
+native macOS tile decoder. The on-device tile-transaction helper is
+intentionally omitted while canonical tile replacement is quarantined.
 
 Options:
   --install  Copy the finished app to ~/Applications, or to
@@ -68,9 +67,6 @@ fi
 /bin/echo "Building native map tile decoder…"
 VTSC_TILE_DECODER_OUTPUT="$TILE_DECODER_PATH" \
   /bin/bash "$SCRIPT_DIR/build_tile_decoder.sh"
-VTSC_TILE_TRANSACTION_OUTPUT="$TILE_TRANSACTION_PATH" \
-  /bin/bash "$SCRIPT_DIR/build_tile_transaction_helper.sh"
-
 /bin/echo "Building VTSCTuner (release)…"
 /usr/bin/swift build \
   --package-path "$PACKAGE_DIR" \
@@ -98,11 +94,9 @@ fi
   "$APP_BUNDLE/Contents/Resources"
 /usr/bin/ditto "$BUILT_EXECUTABLE" "$APP_BUNDLE/Contents/MacOS/$EXECUTABLE_NAME"
 /usr/bin/ditto "$TILE_DECODER_PATH" "$APP_BUNDLE/Contents/Helpers/$TILE_DECODER_NAME"
-/usr/bin/ditto "$TILE_TRANSACTION_PATH" "$APP_BUNDLE/Contents/Resources/$TILE_TRANSACTION_NAME"
 /usr/bin/install -m 0644 "$INFO_PLIST" "$APP_BUNDLE/Contents/Info.plist"
 /bin/chmod 0755 "$APP_BUNDLE/Contents/MacOS/$EXECUTABLE_NAME"
 /bin/chmod 0755 "$APP_BUNDLE/Contents/Helpers/$TILE_DECODER_NAME"
-/bin/chmod 0755 "$APP_BUNDLE/Contents/Resources/$TILE_TRANSACTION_NAME"
 
 # A local ad-hoc signature is sufficient for a bundle built and run on this Mac.
 # No sandbox entitlements are supplied: repository and subprocess access are
