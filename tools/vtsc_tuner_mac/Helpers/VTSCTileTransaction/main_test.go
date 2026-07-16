@@ -135,7 +135,7 @@ func TestActivateRollbackAndRecovery(t *testing.T) {
 		t.Fatalf("activation journal still present: %v", err)
 	}
 
-	rolledBack, err := engine.rollback("fresh", "")
+	rolledBack, err := engine.rollback("fresh", "old", "")
 	if err != nil {
 		t.Fatalf("rollback: %v", err)
 	}
@@ -170,6 +170,24 @@ func TestActivationRecoveryAfterPointerExchange(t *testing.T) {
 	assertLinkTarget(t, filepath.Join(root, previousOfflineName), "tile-generations/old/offline")
 	if _, err := os.Lstat(filepath.Join(root, transactionFileName)); !os.IsNotExist(err) {
 		t.Fatalf("recovery journal still present: %v", err)
+	}
+}
+
+func TestRollbackRejectsDriftedPreviousGenerationBeforeExchange(t *testing.T) {
+	root := newTestRoot(t)
+	makeMinimalGeneration(t, root, "fresh")
+	makeMinimalGeneration(t, root, "unrelated")
+	linkGeneration(t, root, activeOfflineName, "fresh")
+	linkGeneration(t, root, previousOfflineName, "unrelated")
+	engine := testEngine(t, root)
+
+	if _, err := engine.rollback("fresh", "old", ""); err == nil {
+		t.Fatal("rollback accepted a previous generation that differed from the recorded identity")
+	}
+	assertLinkTarget(t, filepath.Join(root, activeOfflineName), "tile-generations/fresh/offline")
+	assertLinkTarget(t, filepath.Join(root, previousOfflineName), "tile-generations/unrelated/offline")
+	if _, err := os.Lstat(filepath.Join(root, transactionFileName)); !os.IsNotExist(err) {
+		t.Fatalf("rollback wrote a transaction before rejecting previous identity drift: %v", err)
 	}
 }
 
@@ -247,13 +265,13 @@ func TestRollbackRecoveryAfterPointerExchange(t *testing.T) {
 		t.Fatalf("activate: %v", err)
 	}
 
-	if _, err := engine.rollback("fresh", "after_switch"); err == nil {
+	if _, err := engine.rollback("fresh", "old", "after_switch"); err == nil {
 		t.Fatal("rollback with injected post-switch failure unexpectedly succeeded")
 	}
 	assertLinkTarget(t, filepath.Join(root, activeOfflineName), "tile-generations/old/offline")
 	assertLinkTarget(t, filepath.Join(root, previousOfflineName), "tile-generations/fresh/offline")
 
-	recovered, err := engine.rollback("fresh", "")
+	recovered, err := engine.rollback("fresh", "old", "")
 	if err != nil {
 		t.Fatalf("recover rollback: %v", err)
 	}

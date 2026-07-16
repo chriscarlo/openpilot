@@ -131,6 +131,24 @@ struct RuntimeDeploymentPreflight: Sendable {
   var journalURL: URL
 }
 
+struct ProductionRollbackContext: Sendable {
+  var profile: String
+  var journal: DeploymentRollbackJournal
+  var journalURL: URL
+
+  init(preflight: RuntimeDeploymentPreflight) {
+    profile = preflight.profile
+    journal = preflight.journal
+    journalURL = preflight.journalURL
+  }
+
+  init(journal: DeploymentRollbackJournal, journalURL: URL) {
+    profile = journal.profile
+    self.journal = journal
+    self.journalURL = journalURL
+  }
+}
+
 enum ProductionVerificationSuite {
   static func requests(repositoryRoot: URL) -> [ProcessRequest] {
     let app = repositoryRoot.appendingPathComponent("tools/vtsc_tuner_mac", isDirectory: true)

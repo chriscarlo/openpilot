@@ -71,6 +71,7 @@ public struct ApplyRequest: Sendable {
   public var mapdReleaseManifestURL: URL?
   public var tileSetArtifactURL: URL?
   public var tileSetsRootURL: URL?
+  public var rollbackJournalDirectoryURL: URL?
   public var tileDecoderURL: URL?
   public var verificationRequests: [ProcessRequest]?
   public var requireNonemptyWholeCurveProfile: Bool
@@ -86,6 +87,7 @@ public struct ApplyRequest: Sendable {
     mapdReleaseManifestURL: URL? = nil,
     tileSetArtifactURL: URL? = nil,
     tileSetsRootURL: URL? = nil,
+    rollbackJournalDirectoryURL: URL? = nil,
     tileDecoderURL: URL? = nil,
     verificationRequests: [ProcessRequest]? = nil,
     requireNonemptyWholeCurveProfile: Bool = true
@@ -100,6 +102,7 @@ public struct ApplyRequest: Sendable {
     self.mapdReleaseManifestURL = mapdReleaseManifestURL
     self.tileSetArtifactURL = tileSetArtifactURL
     self.tileSetsRootURL = tileSetsRootURL
+    self.rollbackJournalDirectoryURL = rollbackJournalDirectoryURL
     self.tileDecoderURL = tileDecoderURL
     self.verificationRequests = verificationRequests
     self.requireNonemptyWholeCurveProfile = requireNonemptyWholeCurveProfile
@@ -140,9 +143,47 @@ public struct ResumePostflightRequest: Sendable {
   }
 }
 
+public struct RollbackRecoveryAction: Sendable {
+  public static let label = "Recover Interrupted Production Rollback"
+  public static let description =
+    "Load one interrupted or failed rollback journal, recheck the exact recorded identity and fresh parked/kill-switch state, then idempotently finish rollback. This action may restore source, Params, mapd, and tiles and reboot only as part of that recorded rollback."
+}
+
+public struct RollbackRecoveryRequest: Sendable {
+  public var repositoryRoot: URL
+  public var journalURL: URL?
+
+  public init(repositoryRoot: URL, journalURL: URL? = nil) {
+    self.repositoryRoot = repositoryRoot
+    self.journalURL = journalURL
+  }
+}
+
 private struct ResumedPostflightObservation: Sendable {
   var controllerReady: TiciDeploymentPostflight
   var offroad: TiciDeploymentPostflight
+}
+
+private enum ResumedPostflightWaitState: LocalizedError, Sendable {
+  case controllerEvidence(String)
+  case offroadTransition
+  case transport(String)
+
+  var errorDescription: String? {
+    switch self {
+    case let .controllerEvidence(reason): reason
+    case .offroadTransition:
+      "Profile acceptance was proven. Turn ignition off; waiting for a stable IsOffroad=1 / IsOnroad=0 observation."
+    case let .transport(reason):
+      "Tici transport/runtime is not ready yet: \(reason)"
+    }
+  }
+}
+
+enum ProductionRollbackResolution: Sendable {
+  case alreadyCompleted(String)
+  case rolledBack(String)
+  case rollbackFailed(String)
 }
 
 enum ProductionTilePlan: Equatable, Sendable {
@@ -169,6 +210,7 @@ public enum ApplyPipelineError: LocalizedError, Sendable {
   case mapLookaheadMustRemainDisabled
   case invalidDeploymentOutput(String)
   case postflightMismatch(String)
+  case unresolvedProductionRollbacks([URL])
 
   public var errorDescription: String? {
     switch self {
@@ -209,6 +251,8 @@ public enum ApplyPipelineError: LocalizedError, Sendable {
       "Could not decode deployment verification output: \(output)"
     case let .postflightMismatch(reason):
       "Tici postflight verification failed: \(reason)"
+    case let .unresolvedProductionRollbacks(urls):
+      "Resolve the recorded production rollback before starting another car-facing deployment: \(urls.map(\.lastPathComponent).joined(separator: ", "))."
     }
   }
 }
@@ -321,21 +365,35 @@ public actor ApplyPipeline {
 
   private let processRunner: any ProcessRunning
   private let adbURL: URL?
+  private let journalWriter: @Sendable (DeploymentRollbackJournal, URL) throws -> Void
   private var lastADBTransportDetail: String?
 
   public init() {
     processRunner = SystemProcessRunner()
     adbURL = ADBExecutableLocator.resolve()
+    journalWriter = { journal, url in try journal.write(to: url) }
   }
 
   public init(processRunner: any ProcessRunning) {
     self.processRunner = processRunner
     adbURL = nil
+    journalWriter = { journal, url in try journal.write(to: url) }
   }
 
   public init(processRunner: any ProcessRunning, adbURL: URL?) {
     self.processRunner = processRunner
     self.adbURL = adbURL
+    journalWriter = { journal, url in try journal.write(to: url) }
+  }
+
+  init(
+    processRunner: any ProcessRunning,
+    adbURL: URL? = nil,
+    journalWriter: @escaping @Sendable (DeploymentRollbackJournal, URL) throws -> Void
+  ) {
+    self.processRunner = processRunner
+    self.adbURL = adbURL
+    self.journalWriter = journalWriter
   }
 
   static func productionTilePlan(for request: ApplyRequest) -> ProductionTilePlan {
@@ -440,7 +498,7 @@ public actor ApplyPipeline {
       await emit(
         .running,
         id: 1,
-        text: "Capturing controller-ready curve evidence, then waiting for the clean offroad transition…",
+        text: "Proving the profile would be accepted when Map Lookahead is later enabled, then waiting for the clean offroad transition…",
         progress: progress
       )
       let identity = TuneDeploymentIdentity(tune: request.tune)
@@ -455,7 +513,7 @@ public actor ApplyPipeline {
       await emit(
         .succeeded,
         id: 1,
-        text: "Controller-ready evidence and the subsequent clean offroad identity both passed",
+        text: "Profile acceptance and the subsequent clean offroad identity both passed",
         detail: "profile_points=\(observation.controllerReady.profilePointCount) profile_events=\(observation.controllerReady.profileEventCount)",
         progress: progress
       )
@@ -463,11 +521,26 @@ public actor ApplyPipeline {
       try Task.checkCancellation()
       // Revalidate the on-disk journal immediately before its only permitted
       // mutation so an external replacement cannot be finalized accidentally.
-      let completionLock = try DeploymentRollbackJournal.acquireCompletionLock(for: loaded.url)
+      let completionLock = try await acquireJournalResolutionLock(for: loaded.url)
       defer { completionLock.unlock() }
       let current = try DeploymentRollbackJournal.load(from: loaded.url)
-      guard current == journal else {
+      guard current.hasSameDeploymentIdentity(as: journal) else {
         throw ApplyPipelineError.postflightMismatch("pending deployment journal changed during read-only verification")
+      }
+      try current.validateResolutionConsistency()
+      let completionAlreadyWon: Bool
+      switch current.effectiveResolution {
+      case .awaitingPostflight:
+        completionAlreadyWon = false
+      case .completed:
+        guard current.completed else {
+          throw ApplyPipelineError.postflightMismatch("completed resolution lacks its legacy completion sentinel")
+        }
+        completionAlreadyWon = true
+      case .rollbackInProgress, .rolledBack, .rollbackFailed:
+        throw ApplyPipelineError.postflightMismatch(
+          "deployment rollback already owns or settled this journal; completion is forbidden"
+        )
       }
       try validateExactSourceTune(repositoryRoot: request.repositoryRoot, tune: request.tune)
       let finalGit = try await gitDeploymentPreflight(
@@ -495,13 +568,38 @@ public actor ApplyPipeline {
         identity: identity,
         expectedActiveTileSetID: preflight.journal.targetTileSetID ?? preflight.journal.previousTileSetID
       )
+      await emit(
+        .running,
+        id: 2,
+        text: "Final safety checks passed; atomically completing the existing journal…",
+        detail: "This is the non-cancellable commit point. The app will report the exact journal readback result.",
+        progress: progress
+      )
       try Task.checkCancellation()
+      if completionAlreadyWon {
+        await emit(
+          .succeeded,
+          id: 2,
+          text: "The identical deployment completion was already recorded",
+          detail: "journal=\(loaded.url.path)\nNo journal rewrite or deployment mutation was performed.",
+          progress: progress
+        )
+        return await finish(true, progress: progress)
+      }
       journal.completed = true
       journal.completedAt = Date().ISO8601Format()
       journal.completedToolingHead = gitIdentity.toolingHead
       journal.completionHostOnlyPaths = gitIdentity.hostOnlyPaths
-      try Task.checkCancellation()
-      try journal.write(to: loaded.url)
+      journal.resolution = .completed
+      // No cancellation check or suspension is permitted after this commit
+      // point. A late cancellation request must resolve from the exact atomic
+      // readback below instead of claiming that the journal stayed pending.
+      do {
+        try journalWriter(journal, loaded.url)
+      } catch let durabilityError as DeploymentRollbackJournalError {
+        guard case .committedButNotDurable = durabilityError else { throw durabilityError }
+        guard try DeploymentRollbackJournal.load(from: loaded.url) == journal else { throw durabilityError }
+      }
       guard try DeploymentRollbackJournal.load(from: loaded.url) == journal else {
         throw ApplyPipelineError.postflightMismatch("completed deployment journal did not read back exactly")
       }
@@ -517,6 +615,73 @@ public actor ApplyPipeline {
       await emitFailure(
         id: 2,
         text: "Pending postflight remains incomplete; no deployment mutation or reboot was attempted",
+        error: error,
+        progress: progress
+      )
+      return await finish(false, progress: progress)
+    }
+  }
+
+  @discardableResult
+  public func recoverPendingRollback(
+    _ request: RollbackRecoveryRequest,
+    progress: @escaping ApplyProgressHandler
+  ) async -> Bool {
+    await emit(.running, id: 0, text: "Loading the recorded interrupted rollback identity…", progress: progress)
+    do {
+      try Task.checkCancellation()
+      try RepositoryLocator.validate(request.repositoryRoot)
+      let loaded = try DeploymentRollbackJournal.loadRecoverableRollback(from: request.journalURL)
+      try validateProfile(loaded.journal.profile)
+      guard loaded.journal.branch.range(
+        of: #"^[A-Za-z0-9._/-]+$"#,
+        options: .regularExpression
+      ) != nil,
+      !loaded.journal.branch.contains(".."),
+      !loaded.journal.branch.hasPrefix("/")
+      else { throw ApplyPipelineError.invalidBranch(loaded.journal.branch) }
+      guard await probeProfile(loaded.journal.profile) else {
+        throw ApplyPipelineError.noReachableTici(lastADBTransportDetail)
+      }
+      await emit(
+        .succeeded,
+        id: 0,
+        text: "Exact rollback journal and tici transport are available",
+        detail: [
+          "journal=\(loaded.url.path)",
+          "resolution=\(loaded.journal.effectiveResolution.rawValue)",
+          "profile=\(loaded.journal.profile)",
+          "previous_head=\(loaded.journal.previousHead)",
+          "target_head=\(loaded.journal.targetHead ?? "")",
+          "previous_mapd_sha256=\(loaded.journal.previousActiveMapdSHA256)",
+          "previous_tile_set_id=\(loaded.journal.previousTileSetID ?? "")",
+          "target_tile_set_id=\(loaded.journal.targetTileSetID ?? "")",
+        ].joined(separator: "\n"),
+        progress: progress
+      )
+      await emit(
+        .running,
+        id: 1,
+        text: "Taking guarded rollback ownership and verifying fresh parked safety…",
+        progress: progress
+      )
+      let resolution = await rollbackProductionDeploymentIfJournalPending(
+        context: ProductionRollbackContext(journal: loaded.journal, journalURL: loaded.url)
+      )
+      switch resolution {
+      case let .alreadyCompleted(detail):
+        await emit(.succeeded, id: 1, text: "Deployment was already completed; rollback recovery was not run", detail: detail, progress: progress)
+        return await finish(true, progress: progress)
+      case let .rolledBack(detail):
+        await emit(.succeeded, id: 1, text: "Recorded production rollback recovered and verified", detail: detail, progress: progress)
+        return await finish(true, progress: progress)
+      case let .rollbackFailed(detail):
+        throw ApplyPipelineError.postflightMismatch(detail)
+      }
+    } catch {
+      await emitFailure(
+        id: 1,
+        text: "Rollback recovery remains unresolved; journal retained for another guarded attempt",
         error: error,
         progress: progress
       )
@@ -701,7 +866,7 @@ public actor ApplyPipeline {
       return await finish(false, progress: progress)
     }
     deployment.journal.targetHead = pushedHead
-    do { try deployment.journal.write(to: deployment.journalURL) }
+    do { try journalWriter(deployment.journal, deployment.journalURL) }
     catch {
       await emitFailure(id: 5, text: "Could not persist the rollback journal", error: error, progress: progress)
       return await finish(false, progress: progress)
@@ -715,6 +880,12 @@ public actor ApplyPipeline {
   }
 
   private func productionPreflight(_ request: ApplyRequest) async throws -> RuntimeDeploymentPreflight {
+    let recoverable = try DeploymentRollbackJournal.recoverableRollbacks(
+      directory: request.rollbackJournalDirectoryURL
+    )
+    guard recoverable.isEmpty else {
+      throw ApplyPipelineError.unresolvedProductionRollbacks(recoverable.map(\.url))
+    }
     try RepositoryLocator.validate(request.repositoryRoot)
     _ = try SourcePatcher.readParameters(from: request.repositoryRoot)
     _ = try SourcePatcher.makePatch(
@@ -1289,7 +1460,7 @@ public actor ApplyPipeline {
       await emit(.running, id: 10, text: "Rebooting once after every artifact is ready…", progress: progress)
       _ = try await freshParkedSafetySnapshot(profile: deployment.profile)
       deployment.journal.rebootSent = true
-      try deployment.journal.write(to: deployment.journalURL)
+      try journalWriter(deployment.journal, deployment.journalURL)
       try await sendReboot(profile: deployment.profile)
       await emit(.succeeded, id: 10, text: "Single deployment reboot sent", progress: progress)
 
@@ -1302,30 +1473,49 @@ public actor ApplyPipeline {
         identity: identity,
         timeout: 900
       )
-      deployment.journal.completed = true
-      try deployment.journal.write(to: deployment.journalURL)
+      let completedJournal = try await completeOriginalDeploymentJournal(
+        request: request,
+        preflight: deployment,
+        toolingHead: targetHead,
+        identity: identity
+      )
       await emit(
         .succeeded,
         id: 11,
         text: "Postflight passed: exact commit/release/tune/profile identity is running",
-        detail: "journal=\(deployment.journalURL.path)\nprofile_points=\(postflight.profilePointCount) profile_events=\(postflight.profileEventCount)",
+        detail: [
+          "journal=\(deployment.journalURL.path)",
+          "completed_tooling_head=\(completedJournal.completedToolingHead ?? targetHead)",
+          "profile_points=\(postflight.profilePointCount) profile_events=\(postflight.profileEventCount)",
+        ].joined(separator: "\n"),
         progress: progress
       )
       return await finish(true, progress: progress)
     } catch {
-      await emitFailure(id: 12, text: "Production deployment failed; starting coherent rollback", error: error, progress: progress)
       if remoteMutationStarted {
-        let rollbackDetail = await rollbackProductionDeployment(
+        let resolution = await rollbackProductionDeploymentIfJournalPending(
           preflight: deployment,
           tilesActivated: tilesMayHaveActivated
         )
-        await emit(
-          rollbackDetail.success ? .succeeded : .failed,
-          id: 13,
-          text: rollbackDetail.success ? "Tici rollback completed" : "Tici rollback needs manual attention",
-          detail: rollbackDetail.detail,
-          progress: progress
-        )
+        switch resolution {
+        case let .alreadyCompleted(detail):
+          await emit(
+            .succeeded,
+            id: 12,
+            text: "Deployment completion was already certified by another VTSC Tuner instance",
+            detail: detail,
+            progress: progress
+          )
+          return await finish(true, progress: progress)
+        case let .rolledBack(detail):
+          await emitFailure(id: 12, text: "Production deployment failed", error: error, progress: progress)
+          await emit(.succeeded, id: 13, text: "Tici rollback completed", detail: detail, progress: progress)
+        case let .rollbackFailed(detail):
+          await emitFailure(id: 12, text: "Production deployment failed", error: error, progress: progress)
+          await emit(.failed, id: 13, text: "Tici rollback needs manual attention", detail: detail, progress: progress)
+        }
+      } else {
+        await emitFailure(id: 12, text: "Production deployment failed before remote mutation", error: error, progress: progress)
       }
       return await finish(false, progress: progress)
     }
@@ -1456,22 +1646,45 @@ public actor ApplyPipeline {
     pollInterval: TimeInterval,
     progress: @escaping ApplyProgressHandler
   ) async throws -> ResumedPostflightObservation {
-    let deadline = Date().addingTimeInterval(max(0, timeout))
-    var lastError: Error = ApplyPipelineError.postflightMismatch("resumed postflight did not run")
+    let clock = ContinuousClock()
+    let phaseTimeout = Duration.seconds(max(0, timeout))
+    var phaseDeadline = clock.now.advanced(by: phaseTimeout)
+    var attemptedCurrentPhase = false
+    var lastWait: ResumedPostflightWaitState = .controllerEvidence(
+      "Waiting for fresh real-GPS profile and liveMapDataSP controller-readiness evidence."
+    )
     var controllerEvidence: TiciDeploymentPostflight?
-    repeat {
+    while true {
       try Task.checkCancellation()
+      if attemptedCurrentPhase, clock.now >= phaseDeadline { throw lastWait }
+      let readback: TiciRuntimePostflightRead
       do {
-        let readback = try await readTiciRuntimePostflight(
+        let remaining = phaseDeadline - clock.now
+        let parts = remaining.components
+        let remainingSeconds = max(
+          0.001,
+          Double(parts.seconds) + Double(parts.attoseconds) / 1_000_000_000_000_000_000
+        )
+        readback = try await readTiciRuntimePostflight(
           profile: preflight.profile,
-          context: "resume pending tici deployment postflight"
+          context: "resume pending tici deployment postflight",
+          timeout: min(30, remainingSeconds)
         )
-        let postflight = makeProductionPostflight(
-          readback,
-          preflight: preflight,
-          identity: identity
-        )
-        if let controllerEvidence {
+      } catch {
+        guard isRetryableResumedTransportError(error) else { throw error }
+        lastWait = .transport(error.localizedDescription)
+        attemptedCurrentPhase = true
+        guard clock.now < phaseDeadline else { throw lastWait }
+        try await clock.sleep(for: .seconds(max(0.001, pollInterval)))
+        continue
+      }
+      let postflight = makeProductionPostflight(
+        readback,
+        preflight: preflight,
+        identity: identity
+      )
+      if let controllerEvidence {
+        do {
           try validateResumedOffroadCompletion(
             postflight,
             controllerEvidence: controllerEvidence,
@@ -1481,7 +1694,11 @@ public actor ApplyPipeline {
             expectedActiveTileSetID: preflight.journal.targetTileSetID ?? preflight.journal.previousTileSetID
           )
           return ResumedPostflightObservation(controllerReady: controllerEvidence, offroad: postflight)
-        } else {
+        } catch let wait as ResumedPostflightWaitState {
+          lastWait = wait
+        }
+      } else {
+        do {
           try validateResumedControllerEvidence(
             postflight,
             preflight: preflight,
@@ -1493,30 +1710,33 @@ public actor ApplyPipeline {
           // liveMapDataSP.valid=false cannot erase the controller-ready state
           // observed while ignition was still on.
           controllerEvidence = postflight
+          phaseDeadline = clock.now.advanced(by: phaseTimeout)
+          attemptedCurrentPhase = false
+          lastWait = .offroadTransition
           await emit(
             .running,
             id: 1,
-            text: "Controller-ready profile captured — turn ignition off now",
-            detail: "The proof is retained only in memory while the app waits for the clean offroad transition.",
+            text: "Profile acceptance proven — turn ignition off now",
+            detail: "With Map Lookahead disabled, this proves the profile would be accepted by the controller when later enabled. The proof is retained only in memory while the app waits for the clean offroad transition.",
             progress: progress
           )
-          lastError = ApplyPipelineError.postflightMismatch(
-            "Controller-ready curve evidence captured. Turn ignition off; waiting for IsOffroad=1."
-          )
+          // Phase 2 receives its own full grace window. Poll it immediately
+          // once before sleeping so a just-completed transition is not lost.
+          continue
+        } catch let wait as ResumedPostflightWaitState {
+          lastWait = wait
         }
-      } catch {
-        lastError = error
       }
-      if Date() < deadline {
-        try await Task.sleep(for: .seconds(max(0.001, pollInterval)))
-      }
-    } while Date() < deadline
-    throw lastError
+      attemptedCurrentPhase = true
+      guard clock.now < phaseDeadline else { throw lastWait }
+      try await clock.sleep(for: .seconds(max(0.001, pollInterval)))
+    }
   }
 
   private func readTiciRuntimePostflight(
     profile: String,
-    context: String
+    context: String,
+    timeout: TimeInterval = 30
   ) async throws -> TiciRuntimePostflightRead {
     let result = try await checked(
       ProcessRequest(
@@ -1525,7 +1745,7 @@ public actor ApplyPipeline {
           profile,
           TiciSnapshotWireCommandBuilder.inspectionCommand(includeRuntimePostflight: true),
         ],
-        timeout: 30
+        timeout: max(0.001, min(30, timeout))
       ),
       context: context
     )
@@ -1535,6 +1755,37 @@ public actor ApplyPipeline {
       throw ApplyPipelineError.invalidDeploymentOutput(
         "\(result.standardOutput)\n\(error.localizedDescription)"
       )
+    }
+  }
+
+  private func isRetryableResumedTransportError(_ error: Error) -> Bool {
+    if let runnerError = error as? ProcessRunnerError,
+       case .timedOut = runnerError { return true }
+    guard let pipelineError = error as? ApplyPipelineError else { return false }
+    return switch pipelineError {
+    case let .commandFailed(_, status, _):
+      status == 255
+    case .noReachableTici:
+      true
+    default:
+      false
+    }
+  }
+
+  private func acquireJournalResolutionLock(
+    for journalURL: URL,
+    timeout: Duration = .seconds(180)
+  ) async throws -> DeploymentRollbackJournalCompletionLock {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: timeout)
+    while true {
+      try Task.checkCancellation()
+      do {
+        return try DeploymentRollbackJournal.acquireCompletionLock(for: journalURL)
+      } catch DeploymentRollbackJournalError.completionLocked {
+        guard clock.now < deadline else { throw DeploymentRollbackJournalError.completionLocked(journalURL) }
+        try await clock.sleep(for: .milliseconds(10))
+      }
     }
   }
 
@@ -1726,15 +1977,22 @@ public actor ApplyPipeline {
       identity: identity,
       expectedActiveTileSetID: expectedActiveTileSetID
     )
+    let stableOnroad = result.isOnroad && !result.isOffroad &&
+      result.runtimeEndIsOnroad && !result.runtimeEndIsOffroad
+    let stableOffroad = result.isOffroad && !result.isOnroad &&
+      result.runtimeEndIsOffroad && !result.runtimeEndIsOnroad
+    guard stableOnroad || stableOffroad else {
+      throw ResumedPostflightWaitState.controllerEvidence(
+        "road state changed across the snapshot bracket; waiting for a stable onroad observation"
+      )
+    }
     guard result.profileValidationStatus != "profile_pending", result.gpsStatus == "valid" else {
-      throw ApplyPipelineError.postflightMismatch(
+      throw ResumedPostflightWaitState.controllerEvidence(
         "whole-curve profile pending real GPS/profile: gps=\(result.gpsStatus) profile=\(result.profileValidationStatus)"
       )
     }
-    guard result.isOnroad, !result.isOffroad,
-          result.runtimeEndIsOnroad, !result.runtimeEndIsOffroad
-    else {
-      throw ApplyPipelineError.postflightMismatch(
+    guard stableOnroad else {
+      throw ResumedPostflightWaitState.controllerEvidence(
         "No controller-ready evidence was captured. Start Verify while parked with ignition still on after a normal GPS/profile-producing drive."
       )
     }
@@ -1760,15 +2018,15 @@ public actor ApplyPipeline {
           result.liveMapDataLogMonoTimeNs > 0,
           result.roadGeometryValid
     else {
-      throw ApplyPipelineError.postflightMismatch(
-        "liveMapDataSP is not newly updated, valid, and roadGeometryValid=true; the deployed controller would not consume this profile"
+      throw ResumedPostflightWaitState.controllerEvidence(
+        "liveMapDataSP is not newly updated, valid, and roadGeometryValid=true; waiting to prove this profile would be accepted when Map Lookahead is later enabled"
       )
     }
     guard result.liveMapDataSampleMonoTimeNs >= result.liveMapDataLogMonoTimeNs,
           result.liveMapDataSampleMonoTimeNs - result.liveMapDataLogMonoTimeNs <= 1_500_000_000
     else {
-      throw ApplyPipelineError.postflightMismatch(
-        "liveMapDataSP is stale or from the future relative to the bounded controller probe"
+      throw ResumedPostflightWaitState.controllerEvidence(
+        "liveMapDataSP is stale or from the future relative to the bounded controller probe; waiting for a fresh message"
       )
     }
   }
@@ -1788,9 +2046,14 @@ public actor ApplyPipeline {
       identity: identity,
       expectedActiveTileSetID: expectedActiveTileSetID
     )
-    guard result.isOffroad, !result.isOnroad,
-          result.runtimeEndIsOffroad, !result.runtimeEndIsOnroad
-    else { throw ApplyPipelineError.ticiNotOffroad }
+    let stableOnroad = result.isOnroad && !result.isOffroad &&
+      result.runtimeEndIsOnroad && !result.runtimeEndIsOffroad
+    let stableOffroad = result.isOffroad && !result.isOnroad &&
+      result.runtimeEndIsOffroad && !result.runtimeEndIsOnroad
+    guard stableOnroad || stableOffroad else {
+      throw ResumedPostflightWaitState.offroadTransition
+    }
+    guard stableOffroad else { throw ResumedPostflightWaitState.offroadTransition }
     try validatePostflight(
       result,
       requireNonemptyWholeCurveProfile: true,
@@ -1809,27 +2072,276 @@ public actor ApplyPipeline {
     }
   }
 
+  /// The original deployer and a later resume instance share one stable
+  /// per-journal transaction lock for their only completion write. If resume
+  /// already completed this deployment, preserve its richer tooling metadata
+  /// instead of overwriting it from the older app instance.
+  private func completeOriginalDeploymentJournal(
+    request: ApplyRequest,
+    preflight: RuntimeDeploymentPreflight,
+    toolingHead: String,
+    identity: TuneDeploymentIdentity
+  ) async throws -> DeploymentRollbackJournal {
+    let lock = try await acquireJournalResolutionLock(for: preflight.journalURL)
+    defer { lock.unlock() }
+    let current = try DeploymentRollbackJournal.load(from: preflight.journalURL)
+    guard current.hasSameDeploymentIdentity(as: preflight.journal) else {
+      throw ApplyPipelineError.postflightMismatch(
+        "deployment journal identity changed before original postflight completion"
+      )
+    }
+    try current.validateResolutionConsistency()
+    switch current.effectiveResolution {
+    case .completed:
+      guard current.completed else {
+        throw ApplyPipelineError.postflightMismatch("completed resolution lacks its legacy completion sentinel")
+      }
+      // Any identity-compatible completion wins idempotently. In particular,
+      // preserve the richer host-only metadata written by a resume instance.
+      return current
+    case .awaitingPostflight:
+      break
+    case .rollbackInProgress, .rolledBack, .rollbackFailed:
+      throw ApplyPipelineError.postflightMismatch(
+        "deployment rollback already owns or settled this journal; completion is forbidden"
+      )
+    }
+
+    // The lock protects the terminal decision, but completion still repeats
+    // every hard host/device invariant using fresh evidence inside that short
+    // critical section before performing the awaiting -> completed CAS.
+    try validateExactSourceTune(repositoryRoot: request.repositoryRoot, tune: request.tune)
+    let finalGit = try await gitDeploymentPreflight(
+      repositoryRoot: request.repositoryRoot,
+      expectedBranch: request.expectedBranch
+    )
+    guard finalGit.localHead == toolingHead, finalGit.originHead == toolingHead else {
+      throw ApplyPipelineError.postflightMismatch(
+        "clean local/origin identity changed before original journal completion"
+      )
+    }
+    let finalReadback = try await readTiciRuntimePostflight(
+      profile: preflight.profile,
+      context: "final original deployment journal completion safety check"
+    )
+    try validatePostflight(
+      makeProductionPostflight(finalReadback, preflight: preflight, identity: identity),
+      requireNonemptyWholeCurveProfile: request.requireNonemptyWholeCurveProfile,
+      preflight: preflight,
+      targetHead: toolingHead,
+      identity: identity,
+      expectedActiveTileSetID: preflight.tileSet?.manifest.tileSetID ?? preflight.journal.previousTileSetID
+    )
+    if current.effectiveResolution == .completed { return current }
+
+    var completed = current
+    completed.completed = true
+    completed.completedAt = Date().ISO8601Format()
+    completed.completedToolingHead = toolingHead
+    completed.completionHostOnlyPaths = []
+    completed.resolution = .completed
+    do {
+      try journalWriter(completed, preflight.journalURL)
+    } catch let durabilityError as DeploymentRollbackJournalError {
+      guard case .committedButNotDurable = durabilityError else { throw durabilityError }
+      guard try DeploymentRollbackJournal.load(from: preflight.journalURL) == completed else { throw durabilityError }
+    }
+    guard try DeploymentRollbackJournal.load(from: preflight.journalURL) == completed else {
+      throw ApplyPipelineError.postflightMismatch(
+        "original completed deployment journal did not read back exactly"
+      )
+    }
+    return completed
+  }
+
+  /// Own rollback under the same stable journal transaction lock used by
+  /// resume completion. A stale original app instance must never roll back a
+  /// deployment that another instance has already certified as complete.
+  func rollbackProductionDeploymentIfJournalPending(
+    preflight: RuntimeDeploymentPreflight,
+    tilesActivated _: Bool
+  ) async -> ProductionRollbackResolution {
+    await rollbackProductionDeploymentIfJournalPending(
+      context: ProductionRollbackContext(preflight: preflight)
+    )
+  }
+
+  private func rollbackProductionDeploymentIfJournalPending(
+    context: ProductionRollbackContext
+  ) async -> ProductionRollbackResolution {
+    let claimLock: DeploymentRollbackJournalCompletionLock
+    do {
+      claimLock = try DeploymentRollbackJournal.acquireCompletionLock(for: context.journalURL)
+    } catch {
+      return .rollbackFailed(
+        "rollback mutation was not attempted because journal transaction ownership could not be acquired: \(error.localizedDescription)\n" +
+          "journal retained at \(context.journalURL.path)"
+      )
+    }
+    // Rollback ownership is intentionally held through the complete device
+    // mutation, verification, and terminal journal settlement. A process
+    // crash releases flock and permits orphan recovery; a live owner excludes
+    // every other app instance from concurrent rollback or completion.
+    defer { claimLock.unlock() }
+
+    let loadedCurrent: DeploymentRollbackJournal
+    do {
+      loadedCurrent = try DeploymentRollbackJournal.load(from: context.journalURL)
+    } catch {
+      return .rollbackFailed(
+        "rollback mutation was not attempted because the owned journal could not be reloaded: \(error.localizedDescription)\n" +
+          "journal retained at \(context.journalURL.path)"
+      )
+    }
+    guard loadedCurrent.hasSameDeploymentIdentity(as: context.journal) else {
+      return .rollbackFailed(
+        "rollback mutation was not attempted because the journal deployment identity changed\n" +
+          "journal retained at \(context.journalURL.path)"
+      )
+    }
+    var current = loadedCurrent
+    if current.resolution != nil, !current.completed {
+      switch current.effectiveResolution {
+      case .completed:
+        return .rollbackFailed(
+          "rollback mutation was not attempted because a corrupt completed resolution lacks its proof sentinel"
+        )
+      case .rollbackInProgress, .rolledBack, .rollbackFailed:
+        // Never promote a torn rolledBack/rollbackFailed state directly. Move
+        // it back to rollbackInProgress and replay full device restoration and
+        // verification before any terminal rollback resolution is trusted.
+        current.completed = true
+        current.resolution = .rollbackInProgress
+        do {
+          try journalWriter(current, context.journalURL)
+          guard try DeploymentRollbackJournal.load(from: context.journalURL) == current else {
+            throw ApplyPipelineError.postflightMismatch(
+              "normalized rollback recovery claim did not read back exactly"
+            )
+          }
+        } catch {
+          return .rollbackFailed(
+            "rollback mutation was not attempted because journal recovery normalization failed: \(error.localizedDescription)"
+          )
+        }
+      case .awaitingPostflight:
+        break
+      }
+    }
+    do {
+      try current.validateResolutionConsistency()
+    } catch {
+      return .rollbackFailed(
+        "rollback mutation was not attempted because journal resolution is inconsistent: \(error.localizedDescription)"
+      )
+    }
+    switch current.effectiveResolution {
+    case .completed:
+      return .alreadyCompleted(
+        "rollback skipped: this exact deployment journal was already completed by another VTSC Tuner instance"
+      )
+    case .rolledBack:
+      return .rolledBack("rollback already completed for this exact deployment journal")
+    case .rollbackInProgress:
+      // Holding the nonblocking resolution lock proves that no live owner is
+      // still performing the rollback. Recover the orphaned claim by rerunning
+      // the idempotent rollback path after a fresh parked-state gate.
+      break
+    case .rollbackFailed:
+      // An explicit new invocation is the recovery action. Reacquiring the
+      // resolution lock proves the previous owner is gone; after the fresh
+      // parked gate below, the idempotent rollback may be retried.
+      break
+    case .awaitingPostflight:
+      break
+    }
+
+    do {
+      _ = try await freshParkedSafetySnapshot(profile: context.profile)
+    } catch {
+      return .rollbackFailed(
+        "rollback mutation was not attempted because fresh parked-state verification failed: \(error.localizedDescription)\n" +
+          "journal retained at \(context.journalURL.path)"
+      )
+    }
+
+    if current.effectiveResolution != .rollbackInProgress {
+      var claimed = current
+      // The legacy completed flag is deliberately true for every rollback
+      // resolution. An older schema-1 app therefore rejects the journal as
+      // non-pending even though it does not understand the new resolution key.
+      claimed.completed = true
+      claimed.resolution = .rollbackInProgress
+      do {
+        try journalWriter(claimed, context.journalURL)
+        guard try DeploymentRollbackJournal.load(from: context.journalURL) == claimed else {
+          throw ApplyPipelineError.postflightMismatch("rollback claim did not read back exactly")
+        }
+      } catch {
+        return .rollbackFailed(
+          "rollback mutation was not attempted because its durable journal claim failed: \(error.localizedDescription)"
+        )
+      }
+    }
+
+    let rollbackResult = await rollbackProductionDeployment(
+      context: context
+    )
+    do {
+      var settled = try DeploymentRollbackJournal.load(from: context.journalURL)
+      guard settled.hasSameDeploymentIdentity(as: context.journal),
+            settled.effectiveResolution == .rollbackInProgress
+      else {
+        throw ApplyPipelineError.postflightMismatch(
+          "rollback journal claim changed before terminal settlement"
+        )
+      }
+      settled.resolution = rollbackResult.success ? .rolledBack : .rollbackFailed
+      settled.completed = true
+      try journalWriter(settled, context.journalURL)
+      guard try DeploymentRollbackJournal.load(from: context.journalURL) == settled else {
+        throw ApplyPipelineError.postflightMismatch("settled rollback journal did not read back exactly")
+      }
+    } catch {
+      return .rollbackFailed(
+        rollbackResult.detail + "\nrollback terminal journal settlement failed: \(error.localizedDescription)"
+      )
+    }
+    return rollbackResult.success
+      ? .rolledBack(rollbackResult.detail)
+      : .rollbackFailed(rollbackResult.detail)
+  }
+
   func rollbackProductionDeployment(
     preflight: RuntimeDeploymentPreflight,
-    tilesActivated: Bool
+    tilesActivated _: Bool
+  ) async -> (success: Bool, detail: String) {
+    await rollbackProductionDeployment(
+      context: ProductionRollbackContext(preflight: preflight)
+    )
+  }
+
+  private func rollbackProductionDeployment(
+    context: ProductionRollbackContext
   ) async -> (success: Bool, detail: String) {
     var details: [String] = []
     var succeeded = true
     do {
-      _ = try await freshParkedSafetySnapshot(profile: preflight.profile)
+      _ = try await freshParkedSafetySnapshot(profile: context.profile)
       details.append("fresh pre-rollback parked-state gate passed")
     } catch {
       return (
         false,
         "rollback mutation was not attempted because fresh parked-state verification failed: \(error.localizedDescription)\n" +
-          "journal retained at \(preflight.journalURL.path)"
+          "journal retained at \(context.journalURL.path)"
       )
     }
-    if tilesActivated {
+    if context.journal.targetTileSetID != nil {
       do {
         try await TiciTileSetDeploymentService(processRunner: processRunner).rollback(
-          profile: preflight.profile,
-          expectedActivatedTileSetID: preflight.tileSet?.manifest.tileSetID
+          profile: context.profile,
+          expectedActivatedTileSetID: context.journal.targetTileSetID,
+          expectedRestoredTileSetID: context.journal.previousTileSetID
         )
         details.append("tile activation transaction recovered and prior set restored when needed")
       } catch {
@@ -1842,18 +2354,18 @@ public actor ApplyPipeline {
         ProcessRequest(
           executableURL: Self.sshURL,
           arguments: sshOptions(connectTimeout: 10) + [
-            preflight.profile,
-            try TiciProductionRollbackCommandBuilder.command(journal: preflight.journal),
+            context.profile,
+            try TiciProductionRollbackCommandBuilder.command(journal: context.journal),
           ],
           timeout: 180
         ),
         context: "restore tici source, Params, and mapd"
       )
       let restoredHead = try TiciProductionRollbackCommandBuilder.restoredHead(from: result.standardOutput)
-      guard restoredHead == preflight.journal.previousHead else {
+      guard restoredHead == context.journal.previousHead else {
         throw ApplyPipelineError.commitMismatch(
           context: "tici rollback",
-          expected: preflight.journal.previousHead,
+          expected: context.journal.previousHead,
           actual: restoredHead
         )
       }
@@ -1862,16 +2374,16 @@ public actor ApplyPipeline {
       succeeded = false
       details.append("source/Params/mapd rollback failed: \(error.localizedDescription)")
     }
-    if succeeded {
+    if succeeded, context.journal.rebootSent {
       do {
-        _ = try await freshParkedSafetySnapshot(profile: preflight.profile)
+        _ = try await freshParkedSafetySnapshot(profile: context.profile)
         details.append("fresh pre-reboot parked-state gate passed")
-        try await sendReboot(profile: preflight.profile)
+        try await sendReboot(profile: context.profile)
         details.append("rollback reboot sent")
-        try await waitForTici(profile: preflight.profile, timeout: 300)
+        try await waitForTici(profile: context.profile, timeout: 300)
         let verification = try await waitForRollbackVerification(
-          preflight: preflight,
-          tilesWereTouched: tilesActivated,
+          context: context,
+          tilesWereTouched: context.journal.targetTileSetID != nil,
           timeout: 900
         )
         details.append("post-rollback source/Params/binary/cache/tiles/runtime verification passed")
@@ -1880,15 +2392,28 @@ public actor ApplyPipeline {
         succeeded = false
         details.append("rollback reboot or post-rollback verification failed: \(error.localizedDescription)")
       }
+    } else if succeeded {
+      do {
+        let verification = try await waitForRollbackVerification(
+          context: context,
+          tilesWereTouched: context.journal.targetTileSetID != nil,
+          timeout: 120
+        )
+        details.append("pre-reboot rollback identity verification passed; no rollback reboot was sent")
+        details.append(verification)
+      } catch {
+        succeeded = false
+        details.append("pre-reboot rollback verification failed: \(error.localizedDescription)")
+      }
     } else {
       details.append("rollback reboot suppressed because rollback mutation did not complete")
     }
-    details.append("journal=\(preflight.journalURL.path)")
+    details.append("journal=\(context.journalURL.path)")
     return (succeeded, details.filter { !$0.isEmpty }.joined(separator: "\n"))
   }
 
   private func waitForRollbackVerification(
-    preflight: RuntimeDeploymentPreflight,
+    context: ProductionRollbackContext,
     tilesWereTouched: Bool,
     timeout: TimeInterval
   ) async throws -> String {
@@ -1898,12 +2423,12 @@ public actor ApplyPipeline {
       try Task.checkCancellation()
       do {
         let readback = try await readTiciRuntimePostflight(
-          profile: preflight.profile,
+          profile: context.profile,
           context: "verify complete post-rollback identity"
         )
         try validateRollbackReadback(
           readback,
-          journal: preflight.journal,
+          journal: context.journal,
           tilesWereTouched: tilesWereTouched
         )
         return [

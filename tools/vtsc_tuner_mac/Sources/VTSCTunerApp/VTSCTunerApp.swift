@@ -57,6 +57,8 @@ struct VTSCTunerApp: App {
           }
           Divider()
           Button(ResumePostflightAction.label) { session.pendingResumePostflight = true }
+          Button(RollbackRecoveryAction.label) { session.pendingRollbackRecovery = true }
+            .disabled(!session.hasRecoverableRollback)
         } else {
           Text("Whole-curve study is read-only")
         }

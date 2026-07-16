@@ -4,7 +4,26 @@ import Foundation
 /// It intentionally uses only Git and POSIX file primitives: the device does
 /// not import the openpilot Python package during recovery.
 enum TiciProductionRollbackCommandBuilder {
+  enum MapdRestoreDecision: Equatable, Sendable {
+    case alreadyRestored
+    case restoreRecordedArtifact
+    case failMissingArtifact
+  }
+
   static let resultMarker = "VTSC_ROLLBACK_V1"
+
+  static func mapdRestoreDecision(
+    currentActiveSHA256: String,
+    expectedPreviousSHA256: String,
+    rollbackArtifactPresent: Bool
+  ) -> MapdRestoreDecision {
+    if !expectedPreviousSHA256.isEmpty,
+       currentActiveSHA256 == expectedPreviousSHA256 {
+      return .alreadyRestored
+    }
+    if rollbackArtifactPresent { return .restoreRecordedArtifact }
+    return expectedPreviousSHA256.isEmpty ? .alreadyRestored : .failMissingArtifact
+  }
 
   static func command(journal: DeploymentRollbackJournal) throws -> String {
     try validate(journal)
@@ -47,8 +66,14 @@ enum TiciProductionRollbackCommandBuilder {
     git reset --hard "$previous_head"
     [ "$(git rev-parse HEAD)" = "$previous_head" ] || fail 'git rollback head mismatch'
 
-    if [ -f "$rollback_mapd" ]; then
-      active="$repo/third_party/mapd/mapd"
+    active="$repo/third_party/mapd/mapd"
+    current_active_sha=''
+    if [ -f "$active" ]; then
+      current_active_sha="$(sha256sum "$active" | awk '{print $1}')"
+    fi
+    if [ -n "$expected_active_sha" ] && [ "$current_active_sha" = "$expected_active_sha" ]; then
+      : # mapd is already restored; rollback replay is an exact no-op
+    elif [ -f "$rollback_mapd" ]; then
       active_dir="$(dirname "$active")"
       [ -n "$expected_active_sha" ] && [ "$(sha256sum "$rollback_mapd" | awk '{print $1}')" = "$expected_active_sha" ] || [ -z "$expected_active_sha" ] || fail 'rollback mapd digest mismatch'
       temporary="$(mktemp "$active_dir/.mapd-rollback.XXXXXX")"
@@ -60,7 +85,7 @@ enum TiciProductionRollbackCommandBuilder {
       sync -f "$active_dir" || sync
       [ -z "$expected_active_sha" ] || [ "$(sha256sum "$active" | awk '{print $1}')" = "$expected_active_sha" ] || fail 'restored active mapd digest mismatch'
     elif [ -n "$expected_active_sha" ]; then
-      fail 'rollback mapd artifact is missing'
+      fail 'rollback mapd artifact is missing and active mapd does not match the recorded previous digest'
     fi
 
     desired_present() {

@@ -68,6 +68,13 @@ final class TunerSession: ObservableObject {
   @Published var runningResumePostflight = false
   @Published var applySteps: [ApplyStepEvent] = []
   @Published var applySucceeded: Bool?
+  @Published var resumePostflightCancellationRequested = false
+  @Published var resumePostflightFinalizing = false
+  @Published var pendingRollbackRecovery = false
+  @Published var runningRollbackRecovery = false
+  @Published var hasRecoverableRollback = false
+  @Published var recoverableRollbacks: [DeploymentRollbackJournal.RecoverableRollback] = []
+  @Published var selectedRollbackJournalURL: URL?
 
   let mapPreview = MapPreviewSession()
 
@@ -92,6 +99,7 @@ final class TunerSession: ObservableObject {
     knobs = tune.knobs ?? VTSCMath.knobs(from: tune.params)
     bands = tune.bands
     repositoryURL = detectedRepository
+    refreshRecoverableRollbackState()
     if let detectedRepository {
       let shouldAdoptBaseline = savedTune == nil
       Task { [weak self] in
@@ -331,23 +339,34 @@ final class TunerSession: ObservableObject {
     runningResumePostflight = true
     applySteps = []
     applySucceeded = nil
+    resumePostflightCancellationRequested = false
+    resumePostflightFinalizing = false
     applyTask?.cancel()
     let pipeline = ApplyPipeline()
     applyTask = Task { [weak self] in
-      for await event in pipeline.resumePostflightEvents(for: request) {
-        guard let self else { return }
-        switch event {
-        case let .step(step): self.upsertStep(step)
-        case let .finished(success):
-          self.applySucceeded = success
-          self.status(
-            success
-              ? "Pending outdoor postflight completed without redeploying or rebooting."
-              : "Pending outdoor postflight remains incomplete; nothing was redeployed or rebooted.",
-            error: !success
-          )
+      let success = await pipeline.resumePendingPostflight(request) { [weak self] event in
+        guard case let .step(step) = event else { return }
+        await MainActor.run {
+          guard let self else { return }
+          self.upsertStep(step)
+          if step.id == 2, step.status == .running {
+            self.resumePostflightFinalizing = true
+          }
         }
       }
+      guard let self else { return }
+      let cancellationRequested = self.resumePostflightCancellationRequested
+      self.applySucceeded = success
+      self.resumePostflightCancellationRequested = false
+      self.resumePostflightFinalizing = false
+      self.status(
+        success
+          ? "Pending outdoor postflight completed without redeploying or rebooting."
+          : cancellationRequested
+            ? "Pending outdoor postflight cancelled before the commit point; the deployment journal remains unchanged."
+            : "Pending outdoor postflight remains incomplete; nothing was redeployed or rebooted.",
+        error: !success
+      )
     }
   }
 
@@ -368,13 +387,80 @@ final class TunerSession: ObservableObject {
     applyTask?.cancel()
     applyTask = nil
     runningResumePostflight = false
+    resumePostflightCancellationRequested = false
+    resumePostflightFinalizing = false
   }
 
   func cancelResumePostflight() {
+    guard applySucceeded == nil, !resumePostflightCancellationRequested else { return }
+    guard !resumePostflightFinalizing else {
+      status("Journal finalization has started; waiting for the exact atomic readback.")
+      return
+    }
+    resumePostflightCancellationRequested = true
+    applyTask?.cancel()
+    status("Cancellation requested; waiting to confirm whether the journal reached its commit point.")
+  }
+
+  func refreshRecoverableRollbackState() {
+    do {
+      recoverableRollbacks = try DeploymentRollbackJournal.recoverableRollbacks()
+      hasRecoverableRollback = !recoverableRollbacks.isEmpty
+      if !recoverableRollbacks.contains(where: { $0.url == selectedRollbackJournalURL }) {
+        selectedRollbackJournalURL = recoverableRollbacks.first?.url
+      }
+    } catch {
+      recoverableRollbacks = []
+      selectedRollbackJournalURL = nil
+      hasRecoverableRollback = false
+    }
+  }
+
+  func confirmRollbackRecovery() {
+    guard workspace == .curveLab else {
+      pendingRollbackRecovery = false
+      status("Rollback recovery is only available in Curve Lab.", error: true)
+      return
+    }
+    guard let repositoryURL else {
+      pendingRollbackRecovery = false
+      status("Choose a Chauffeur repository before recovering rollback.", error: true)
+      return
+    }
+    pendingRollbackRecovery = false
+    runningRollbackRecovery = true
+    applySteps = []
+    applySucceeded = nil
+    applyTask?.cancel()
+    let pipeline = ApplyPipeline()
+    let journalURL = selectedRollbackJournalURL
+    applyTask = Task { [weak self] in
+      let success = await pipeline.recoverPendingRollback(
+        RollbackRecoveryRequest(
+          repositoryRoot: repositoryURL,
+          journalURL: journalURL
+        )
+      ) { [weak self] event in
+        guard case let .step(step) = event else { return }
+        await MainActor.run { self?.upsertStep(step) }
+      }
+      guard let self else { return }
+      self.applySucceeded = success
+      self.refreshRecoverableRollbackState()
+      self.status(
+        success
+          ? "Interrupted production rollback recovered and verified."
+          : "Rollback recovery still needs attention; its journal was retained.",
+        error: !success
+      )
+    }
+  }
+
+  func closeRollbackRecovery() {
     applyTask?.cancel()
     applyTask = nil
-    applySucceeded = false
-    status("Pending outdoor postflight cancelled; the deployment journal remains unchanged.", error: true)
+    runningRollbackRecovery = false
+    refreshRecoverableRollbackState()
   }
 
   private func upsertStep(_ step: ApplyStepEvent) {

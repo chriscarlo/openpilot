@@ -204,13 +204,19 @@ public struct TiciTileSetDeploymentService: Sendable {
     return TiciTileActivationResult(tileSetID: staged.tileSetID, commandOutput: result.combinedOutput)
   }
 
-  public func rollback(profile: String, expectedActivatedTileSetID: String? = nil) async throws {
+  public func rollback(
+    profile: String,
+    expectedActivatedTileSetID: String? = nil,
+    expectedRestoredTileSetID: String? = nil
+  ) async throws {
     try Self.validateProfile(profile)
     if let expectedActivatedTileSetID { try Self.validateTileSetID(expectedActivatedTileSetID) }
+    if let expectedRestoredTileSetID { try Self.validateTileSetID(expectedRestoredTileSetID) }
     let helperPath = try await stageTransactionHelper(profile: profile)
     let command = try Self.atomicRollbackCommand(
       helperPath: helperPath,
-      expectedActivatedTileSetID: expectedActivatedTileSetID
+      expectedActivatedTileSetID: expectedActivatedTileSetID,
+      expectedRestoredTileSetID: expectedRestoredTileSetID
     )
     let result = try await checked(
       ProcessRequest(
@@ -226,7 +232,17 @@ public struct TiciTileSetDeploymentService: Sendable {
     }
     if let expectedActivatedTileSetID,
        decoded.tileActivationNotObserved == true {
-      throw TiciTileSetDeploymentError.activationIdentityMissing(expectedActivatedTileSetID)
+      guard let expectedRestoredTileSetID,
+            decoded.activeTileSetID == expectedRestoredTileSetID
+      else {
+        throw TiciTileSetDeploymentError.activationIdentityMissing(expectedActivatedTileSetID)
+      }
+      return
+    }
+    if let expectedRestoredTileSetID, decoded.tileActivationNotSwitched != true {
+      guard decoded.rolledBackTileSetID == expectedRestoredTileSetID else {
+        throw TiciTileSetDeploymentError.activationIdentityMissing(expectedRestoredTileSetID)
+      }
     }
     guard decoded.rolledBackTileSetID != nil || decoded.tileActivationNotSwitched == true else {
       throw TiciTileSetDeploymentError.invalidHelperOutput(result.standardOutput)
@@ -270,16 +286,21 @@ public struct TiciTileSetDeploymentService: Sendable {
   static func atomicRollbackCommand(
     helperPath: String,
     expectedActivatedTileSetID: String? = nil,
+    expectedRestoredTileSetID: String? = nil,
     injectedFailurePoint: String? = nil
   ) throws -> String {
     try validateHelperPath(helperPath)
     if let expectedActivatedTileSetID { try validateTileSetID(expectedActivatedTileSetID) }
+    if let expectedRestoredTileSetID { try validateTileSetID(expectedRestoredTileSetID) }
     let expected = expectedActivatedTileSetID.map {
       " --expected-tile-set-id \(shellQuote($0))"
     } ?? ""
+    let expectedPrevious = expectedRestoredTileSetID.map {
+      " --expected-previous-tile-set-id \(shellQuote($0))"
+    } ?? ""
     return """
     \(parkedMutationPreamble())
-    exec \(shellQuote(helperPath)) rollback --root \(shellQuote(remoteRoot))\(expected)\(try injectionArgument(injectedFailurePoint))
+    exec \(shellQuote(helperPath)) rollback --root \(shellQuote(remoteRoot))\(expected)\(expectedPrevious)\(try injectionArgument(injectedFailurePoint))
     """
   }
 

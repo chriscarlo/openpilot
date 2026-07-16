@@ -77,6 +77,14 @@ public struct TuneDeploymentIdentity: Codable, Equatable, Sendable {
 public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
   public static let schemaVersion = 1
 
+  public enum Resolution: String, Codable, Equatable, Sendable {
+    case awaitingPostflight
+    case completed
+    case rollbackInProgress
+    case rolledBack
+    case rollbackFailed
+  }
+
   public var schema: Int
   public var deploymentID: UUID
   public var createdAt: String
@@ -99,6 +107,52 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
   public var completedAt: String?
   public var completedToolingHead: String?
   public var completionHostOnlyPaths: [String]?
+  /// Added compatibly to schema 1. A legacy journal without this key resolves
+  /// from `completed`, so B174 remains byte-for-byte awaiting postflight until
+  /// a terminal owner actually settles it.
+  public var resolution: Resolution?
+
+  public var effectiveResolution: Resolution {
+    resolution ?? (completed ? .completed : .awaitingPostflight)
+  }
+
+  public func hasSameDeploymentIdentity(as other: Self) -> Bool {
+    schema == other.schema &&
+      deploymentID == other.deploymentID &&
+      createdAt == other.createdAt &&
+      profile == other.profile &&
+      branch == other.branch &&
+      previousHead == other.previousHead &&
+      targetHead == other.targetHead &&
+      previousPhysicsParams == other.previousPhysicsParams &&
+      previousQCurveSHA256 == other.previousQCurveSHA256 &&
+      previousMapdReleaseVersion == other.previousMapdReleaseVersion &&
+      previousMapdVersion == other.previousMapdVersion &&
+      previousActiveMapdSHA256 == other.previousActiveMapdSHA256 &&
+      previousCachedMapdPath == other.previousCachedMapdPath &&
+      previousCachedMapdSHA256 == other.previousCachedMapdSHA256 &&
+      mapdRollbackPath == other.mapdRollbackPath &&
+      previousTileSetID == other.previousTileSetID &&
+      targetTileSetID == other.targetTileSetID &&
+      rebootSent == other.rebootSent
+  }
+
+  public func validateResolutionConsistency() throws {
+    switch effectiveResolution {
+    case .awaitingPostflight:
+      guard !completed else {
+        throw DeploymentRollbackJournalError.inconsistentResolution(
+          "awaitingPostflight requires completed=false"
+        )
+      }
+    case .completed, .rollbackInProgress, .rolledBack, .rollbackFailed:
+      guard completed else {
+        throw DeploymentRollbackJournalError.inconsistentResolution(
+          "\(effectiveResolution.rawValue) requires the legacy completed=true sentinel"
+        )
+      }
+    }
+  }
 
   public init(
     deploymentID: UUID = UUID(),
@@ -121,7 +175,8 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
     completed: Bool = false,
     completedAt: String? = nil,
     completedToolingHead: String? = nil,
-    completionHostOnlyPaths: [String]? = nil
+    completionHostOnlyPaths: [String]? = nil,
+    resolution: Resolution? = nil
   ) {
     schema = Self.schemaVersion
     self.deploymentID = deploymentID
@@ -145,6 +200,7 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
     self.completedAt = completedAt
     self.completedToolingHead = completedToolingHead
     self.completionHostOnlyPaths = completionHostOnlyPaths
+    self.resolution = resolution
   }
 
   public static func defaultDirectory(fileManager: FileManager = .default) throws -> URL {
@@ -199,7 +255,7 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
     var candidates: [(Self, URL)] = []
     for url in urls {
       let journal = try load(from: url, fileManager: fileManager)
-      guard !journal.completed, journal.rebootSent else { continue }
+      guard journal.effectiveResolution == .awaitingPostflight, journal.rebootSent else { continue }
       try journal.validatePendingPostflight()
       candidates.append((journal, url.standardizedFileURL))
     }
@@ -210,11 +266,66 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
     return (candidates[0].0, candidates[0].1)
   }
 
+  public static func loadRecoverableRollback(
+    from explicitURL: URL? = nil,
+    directory explicitDirectory: URL? = nil,
+    fileManager: FileManager = .default
+  ) throws -> (journal: Self, url: URL) {
+    let recoverable = try recoverableRollbacks(
+      from: explicitURL,
+      directory: explicitDirectory,
+      fileManager: fileManager
+    )
+    guard !recoverable.isEmpty else { throw DeploymentRollbackJournalError.noRecoverableRollback }
+    guard recoverable.count == 1 else {
+      throw DeploymentRollbackJournalError.multipleRecoverableRollbacks(recoverable.map(\.url))
+    }
+    return (recoverable[0].journal, recoverable[0].url)
+  }
+
+  public struct RecoverableRollback: Identifiable, Equatable, Sendable {
+    public var journal: DeploymentRollbackJournal
+    public var url: URL
+    public var id: URL { url }
+  }
+
+  public static func recoverableRollbacks(
+    from explicitURL: URL? = nil,
+    directory explicitDirectory: URL? = nil,
+    fileManager: FileManager = .default
+  ) throws -> [RecoverableRollback] {
+    let candidates: [(Self, URL)]
+    if let explicitURL {
+      let url = explicitURL.standardizedFileURL
+      candidates = [(try load(from: url, fileManager: fileManager), url)]
+    } else {
+      let directory = try explicitDirectory?.standardizedFileURL ?? defaultDirectory(fileManager: fileManager)
+      guard fileManager.fileExists(atPath: directory.path) else { return [] }
+      let urls = try fileManager.contentsOfDirectory(
+        at: directory,
+        includingPropertiesForKeys: [.isRegularFileKey],
+        options: [.skipsHiddenFiles]
+      ).filter { $0.pathExtension.lowercased() == "json" }.sorted { $0.path < $1.path }
+      candidates = try urls.map { (try load(from: $0, fileManager: fileManager), $0.standardizedFileURL) }
+    }
+    let recoverable = candidates.filter {
+      $0.0.effectiveResolution == .rollbackInProgress ||
+        $0.0.effectiveResolution == .rollbackFailed ||
+        ($0.0.effectiveResolution == .rolledBack && !$0.0.completed)
+    }
+    return try recoverable.map { journal, url in
+      guard journal.targetHead?.range(of: #"^[0-9a-f]{40}$"#, options: .regularExpression) != nil
+      else { throw DeploymentRollbackJournalError.notRecoverableRollback }
+      return RecoverableRollback(journal: journal, url: url)
+    }
+  }
+
   public func validatePendingPostflight() throws {
     guard schema == Self.schemaVersion else {
       throw DeploymentRollbackJournalError.unsupportedSchema(schema)
     }
-    guard !completed, rebootSent else {
+    try validateResolutionConsistency()
+    guard effectiveResolution == .awaitingPostflight, !completed, rebootSent else {
       throw DeploymentRollbackJournalError.notAwaitingPostflight
     }
     guard let targetHead,
@@ -241,15 +352,140 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
         .appendingPathComponent("\(deploymentID.uuidString).json")
     }
     let directory = url.deletingLastPathComponent()
-    try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+    try Self.ensureDurableDirectory(directory, fileManager: fileManager)
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
     let data = try encoder.encode(self)
-    // Foundation writes a sibling temporary file and atomically renames it over
-    // the destination. There is never a remove-then-move gap where a pending
-    // production journal can disappear between validation and completion.
-    try data.write(to: url, options: .atomic)
+    try Self.durablyReplace(data, at: url, fileManager: fileManager)
     return url
+  }
+
+  /// Make each transaction transition durable before any following device
+  /// mutation: sync a same-directory sibling, atomically rename it, then sync
+  /// the containing directory so crash recovery can trust the visible state.
+  static func durablyReplace(
+    _ data: Data,
+    at url: URL,
+    fileManager: FileManager = .default,
+    directorySync: (Int32) -> Int32 = { Darwin.fsync($0) }
+  ) throws {
+    let directory = url.deletingLastPathComponent()
+    let temporaryURL = directory.appendingPathComponent(
+      ".\(url.lastPathComponent).\(UUID().uuidString.lowercased()).durable-tmp"
+    )
+    var temporaryFD: Int32 = -1
+    var directoryFD: Int32 = -1
+    defer {
+      if temporaryFD >= 0 { Darwin.close(temporaryFD) }
+      if directoryFD >= 0 { Darwin.close(directoryFD) }
+      try? fileManager.removeItem(at: temporaryURL)
+    }
+
+    temporaryFD = Darwin.open(
+      temporaryURL.path,
+      O_WRONLY | O_CREAT | O_EXCL,
+      S_IRUSR | S_IWUSR
+    )
+    guard temporaryFD >= 0 else {
+      throw DeploymentRollbackJournalError.couldNotWrite(url, String(cString: strerror(errno)))
+    }
+    try data.withUnsafeBytes { rawBuffer in
+      guard let base = rawBuffer.baseAddress else { return }
+      var written = 0
+      while written < rawBuffer.count {
+        let count = Darwin.write(
+          temporaryFD,
+          base.advanced(by: written),
+          rawBuffer.count - written
+        )
+        guard count > 0 else {
+          throw DeploymentRollbackJournalError.couldNotWrite(url, String(cString: strerror(errno)))
+        }
+        written += count
+      }
+    }
+    guard Darwin.fsync(temporaryFD) == 0 else {
+      throw DeploymentRollbackJournalError.couldNotWrite(url, String(cString: strerror(errno)))
+    }
+    guard Darwin.fcntl(temporaryFD, F_FULLFSYNC) == 0 else {
+      throw DeploymentRollbackJournalError.couldNotWrite(
+        url,
+        "F_FULLFSYNC failed: \(String(cString: strerror(errno)))"
+      )
+    }
+    guard Darwin.close(temporaryFD) == 0 else {
+      temporaryFD = -1
+      throw DeploymentRollbackJournalError.couldNotWrite(url, String(cString: strerror(errno)))
+    }
+    temporaryFD = -1
+    guard Darwin.rename(temporaryURL.path, url.path) == 0 else {
+      throw DeploymentRollbackJournalError.couldNotWrite(url, String(cString: strerror(errno)))
+    }
+    directoryFD = Darwin.open(directory.path, O_RDONLY)
+    guard directoryFD >= 0 else {
+      throw DeploymentRollbackJournalError.committedButNotDurable(
+        url,
+        "could not open containing directory for fsync: \(String(cString: strerror(errno))); exact_visible=\(((try? Data(contentsOf: url)) == data) ? 1 : 0)"
+      )
+    }
+    var directorySyncSucceeded = false
+    var directorySyncDetail = ""
+    for _ in 0..<3 {
+      if directorySync(directoryFD) == 0 {
+        directorySyncSucceeded = true
+        break
+      }
+      directorySyncDetail = String(cString: strerror(errno))
+    }
+    guard directorySyncSucceeded else {
+      // rename(2) has already made the new journal visible, but readback alone
+      // cannot prove crash durability. Rollback callers must treat this as a
+      // hard barrier before any device mutation.
+      throw DeploymentRollbackJournalError.committedButNotDurable(
+        url,
+        "directory fsync failed after three attempts: \(directorySyncDetail); exact_visible=\(((try? Data(contentsOf: url)) == data) ? 1 : 0)"
+      )
+    }
+  }
+
+  /// Persist directory entries created for a journal before the journal can
+  /// become the durable recovery authority for a following device mutation.
+  private static func ensureDurableDirectory(
+    _ directory: URL,
+    fileManager: FileManager
+  ) throws {
+    var missing: [URL] = []
+    var cursor = directory.standardizedFileURL
+    while !fileManager.fileExists(atPath: cursor.path) {
+      missing.append(cursor)
+      let parent = cursor.deletingLastPathComponent()
+      guard parent.path != cursor.path else {
+        throw DeploymentRollbackJournalError.couldNotWrite(
+          directory,
+          "could not find an existing parent directory"
+        )
+      }
+      cursor = parent
+    }
+    try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+    for created in missing.reversed() {
+      try syncDirectoryEntry(created, journalURL: directory)
+    }
+  }
+
+  private static func syncDirectoryEntry(_ createdDirectory: URL, journalURL: URL) throws {
+    let parent = createdDirectory.deletingLastPathComponent()
+    let fd = Darwin.open(parent.path, O_RDONLY)
+    guard fd >= 0 else {
+      throw DeploymentRollbackJournalError.couldNotWrite(journalURL, String(cString: strerror(errno)))
+    }
+    defer { Darwin.close(fd) }
+    guard Darwin.fsync(fd) == 0 else {
+      throw DeploymentRollbackJournalError.couldNotWrite(
+        journalURL,
+        "parent directory fsync failed: \(String(cString: strerror(errno)))"
+      )
+    }
   }
 }
 
@@ -263,6 +499,12 @@ public enum DeploymentRollbackJournalError: LocalizedError, Equatable, Sendable 
   case invalidTargetHead(String)
   case completionLocked(URL)
   case couldNotLock(URL, String)
+  case inconsistentResolution(String)
+  case couldNotWrite(URL, String)
+  case committedButNotDurable(URL, String)
+  case noRecoverableRollback
+  case multipleRecoverableRollbacks([URL])
+  case notRecoverableRollback
 
   public var errorDescription: String? {
     switch self {
@@ -281,17 +523,30 @@ public enum DeploymentRollbackJournalError: LocalizedError, Equatable, Sendable 
     case let .invalidTargetHead(head):
       "The pending deployment journal has an invalid exact target head: \(head)."
     case let .completionLocked(url):
-      "Another VTSC Tuner instance is already completing the deployment journal at \(url.path)."
+      "Another VTSC Tuner instance already owns the deployment journal transaction at \(url.path)."
     case let .couldNotLock(url, reason):
       "Could not lock the deployment journal at \(url.path): \(reason)"
+    case let .inconsistentResolution(reason):
+      "The deployment journal resolution is inconsistent: \(reason)."
+    case let .couldNotWrite(url, reason):
+      "Could not durably write the deployment journal at \(url.path): \(reason)"
+    case let .committedButNotDurable(url, reason):
+      "The deployment journal transition is visible but crash durability is unconfirmed at \(url.path): \(reason)"
+    case .noRecoverableRollback:
+      "No interrupted or failed production rollback is waiting for guarded recovery."
+    case let .multipleRecoverableRollbacks(urls):
+      "More than one rollback requires recovery; refusing to choose between: \(urls.map(\.lastPathComponent).joined(separator: ", "))."
+    case .notRecoverableRollback:
+      "The selected journal does not contain a complete recoverable deployment identity."
     }
   }
 }
 
 /// A stable sibling advisory lock shared by every app instance. File presence
-/// is harmless; only the kernel-held flock owns the completion critical
-/// section. The lock is intentionally nonblocking so a second app fails closed
-/// instead of waiting on stale evidence gathered before another completion.
+/// is harmless; only the kernel-held flock owns the completion-or-rollback
+/// transaction. The lock is intentionally nonblocking so a second app fails
+/// closed instead of acting on evidence gathered before another owner settled
+/// the deployment journal.
 public final class DeploymentRollbackJournalCompletionLock: @unchecked Sendable {
   public let lockURL: URL
   private var fileDescriptor: Int32

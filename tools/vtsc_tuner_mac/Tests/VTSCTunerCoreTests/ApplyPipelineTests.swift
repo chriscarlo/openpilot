@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Testing
 @testable import VTSCTunerCore
@@ -142,13 +143,13 @@ import Testing
   let events = await collector.events
   let captureIndex = try #require(events.firstIndex { event in
     if case let .step(step) = event {
-      return step.text == "Controller-ready profile captured — turn ignition off now"
+      return step.text == "Profile acceptance proven — turn ignition off now"
     }
     return false
   })
   let completionIndex = try #require(events.firstIndex { event in
     if case let .step(step) = event {
-      return step.text == "Controller-ready evidence and the subsequent clean offroad identity both passed"
+      return step.text == "Profile acceptance and the subsequent clean offroad identity both passed"
     }
     return false
   })
@@ -174,6 +175,100 @@ import Testing
 
   #expect(!succeeded)
   #expect(try Data(contentsOf: fixture.journalURL) == before)
+}
+
+@Test func resumePostflightRetriesOnlyExpectedTransportAndControllerWaitStates() async throws {
+  for waitKind in ["ssh_255", "timeout", "profile_pending"] {
+    var fixture = try resumePostflightFixture(validGPS: true)
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    if waitKind == "ssh_255" { fixture.transientTransportFailures = 1 }
+    else if waitKind == "timeout" { fixture.throwTimedOutOnce = true }
+    else { fixture.controllerPendingReads = 1 }
+    let runner = ResumePostflightRunner(fixture: fixture)
+
+    let succeeded = await ApplyPipeline(processRunner: runner).resumePendingPostflight(
+      ResumePostflightRequest(
+        tune: fixture.tune,
+        repositoryRoot: fixture.repository,
+        mapdReleaseManifestURL: fixture.releaseURL,
+        journalURL: fixture.journalURL,
+        timeout: 0.2,
+        pollInterval: 0.001
+      )
+    ) { _ in }
+
+    #expect(succeeded)
+    #expect(await runner.runtimeReadCount >= 4)
+  }
+}
+
+@Test func resumedPostflightTreatsRemoteSnapshotExitOneAsImmediateTerminal() async throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  fixture.transientTransportFailures = 1
+  fixture.transientTransportStatus = 1
+  let runner = ResumePostflightRunner(fixture: fixture)
+  let before = try Data(contentsOf: fixture.journalURL)
+
+  let succeeded = await ApplyPipeline(processRunner: runner).resumePendingPostflight(
+    ResumePostflightRequest(
+      tune: fixture.tune,
+      repositoryRoot: fixture.repository,
+      mapdReleaseManifestURL: fixture.releaseURL,
+      journalURL: fixture.journalURL,
+      timeout: 1,
+      pollInterval: 0.001
+    )
+  ) { _ in }
+
+  #expect(!succeeded)
+  #expect(await runner.runtimeReadCount == 1)
+  #expect(try Data(contentsOf: fixture.journalURL) == before)
+}
+
+@Test func resumePostflightFailsImmediatelyOnHardIdentityViolationEvenIfNextReadWouldRecover() async throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  fixture.firstRuntimeHead = String(repeating: "e", count: 40)
+  let runner = ResumePostflightRunner(fixture: fixture)
+  let before = try Data(contentsOf: fixture.journalURL)
+
+  let succeeded = await ApplyPipeline(processRunner: runner).resumePendingPostflight(
+    ResumePostflightRequest(
+      tune: fixture.tune,
+      repositoryRoot: fixture.repository,
+      mapdReleaseManifestURL: fixture.releaseURL,
+      journalURL: fixture.journalURL,
+      timeout: 1,
+      pollInterval: 0.001
+    )
+  ) { _ in }
+
+  #expect(!succeeded)
+  #expect(await runner.runtimeReadCount == 1)
+  #expect(try Data(contentsOf: fixture.journalURL) == before)
+}
+
+@Test func resumedPostflightGivesTheOffroadPhaseItsOwnFullDeadline() async throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  fixture.firstRuntimeDelay = .milliseconds(45)
+  fixture.offroadWaitReads = 1
+  let runner = ResumePostflightRunner(fixture: fixture)
+
+  let succeeded = await ApplyPipeline(processRunner: runner).resumePendingPostflight(
+    ResumePostflightRequest(
+      tune: fixture.tune,
+      repositoryRoot: fixture.repository,
+      mapdReleaseManifestURL: fixture.releaseURL,
+      journalURL: fixture.journalURL,
+      timeout: 0.05,
+      pollInterval: 0.03
+    )
+  ) { _ in }
+
+  #expect(succeeded)
+  #expect(await runner.runtimeReadCount >= 4)
 }
 
 @Test func resumePostflightRejectsStaleOrFutureControllerMessages() async throws {
@@ -264,7 +359,8 @@ import Testing
   fixture.offroadProfileData = try JSONSerialization.data(withJSONObject: root)
   let before = try Data(contentsOf: fixture.journalURL)
 
-  let succeeded = await ApplyPipeline(processRunner: ResumePostflightRunner(fixture: fixture))
+  let runner = ResumePostflightRunner(fixture: fixture)
+  let succeeded = await ApplyPipeline(processRunner: runner)
     .resumePendingPostflight(
       ResumePostflightRequest(
         tune: fixture.tune,
@@ -277,6 +373,7 @@ import Testing
     ) { _ in }
 
   #expect(!succeeded)
+  #expect(await runner.runtimeReadCount == 2)
   #expect(try Data(contentsOf: fixture.journalURL) == before)
 }
 
@@ -333,6 +430,367 @@ import Testing
   #expect(try Data(contentsOf: fixture.journalURL) == before)
 }
 
+@Test func cancellingAtTheFinalizingEventStillPrecedesTheJournalCommitPoint() async throws {
+  let fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  let before = try Data(contentsOf: fixture.journalURL)
+  let task = Task {
+    await ApplyPipeline(processRunner: ResumePostflightRunner(fixture: fixture)).resumePendingPostflight(
+      ResumePostflightRequest(
+        tune: fixture.tune,
+        repositoryRoot: fixture.repository,
+        mapdReleaseManifestURL: fixture.releaseURL,
+        journalURL: fixture.journalURL,
+        timeout: 1,
+        pollInterval: 0.001
+      )
+    ) { event in
+      if case let .step(step) = event,
+         step.id == 2, step.status == .running {
+        withUnsafeCurrentTask { $0?.cancel() }
+      }
+    }
+  }
+
+  #expect(await task.value == false)
+  #expect(try Data(contentsOf: fixture.journalURL) == before)
+}
+
+@Test func cancellationAfterTheAtomicCommitReportsCompletedSuccess() async throws {
+  let fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  let task = Task {
+    await ApplyPipeline(processRunner: ResumePostflightRunner(fixture: fixture)).resumePendingPostflight(
+      ResumePostflightRequest(
+        tune: fixture.tune,
+        repositoryRoot: fixture.repository,
+        mapdReleaseManifestURL: fixture.releaseURL,
+        journalURL: fixture.journalURL,
+        timeout: 1,
+        pollInterval: 0.001
+      )
+    ) { event in
+      if case let .step(step) = event,
+         step.id == 2, step.status == .succeeded,
+         step.text == "The existing deployment journal is now complete" {
+        withUnsafeCurrentTask { $0?.cancel() }
+      }
+    }
+  }
+
+  #expect(await task.value)
+  let completed = try DeploymentRollbackJournal.load(from: fixture.journalURL)
+  #expect(completed.completed)
+  #expect(completed.effectiveResolution == .completed)
+}
+
+@Test func completedResumeJournalPreventsAStaleOriginalRollbackWithoutMutation() async throws {
+  let fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  var preparedCompletion = fixture.journal
+  preparedCompletion.completed = true
+  preparedCompletion.completedAt = "2026-07-16T00:00:00Z"
+  preparedCompletion.completedToolingHead = fixture.toolingHead
+  preparedCompletion.completionHostOnlyPaths = fixture.changedPaths.sorted()
+  preparedCompletion.resolution = .completed
+  let completed = preparedCompletion
+  try completed.write(to: fixture.journalURL)
+  let before = try Data(contentsOf: fixture.journalURL)
+  let runner = ResumePostflightRunner(fixture: fixture)
+
+  let result = await ApplyPipeline(processRunner: runner).rollbackProductionDeploymentIfJournalPending(
+    preflight: try resumeRuntimePreflight(fixture),
+    tilesActivated: false
+  )
+
+  guard case let .alreadyCompleted(detail) = result else {
+    Issue.record("expected alreadyCompleted rollback resolution")
+    return
+  }
+  #expect(detail.contains("rollback skipped"))
+  #expect(await runner.requests.isEmpty)
+  #expect(try Data(contentsOf: fixture.journalURL) == before)
+}
+
+@Test func originalCompletionWinningBeforeResumeCASIsIdempotentAndDoesNotRewrite() async throws {
+  let fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  var preparedCompletion = fixture.journal
+  preparedCompletion.completed = true
+  preparedCompletion.completedAt = "2026-07-16T00:00:00Z"
+  preparedCompletion.completedToolingHead = fixture.deployedTargetHead
+  preparedCompletion.completionHostOnlyPaths = []
+  preparedCompletion.resolution = .completed
+  let completed = preparedCompletion
+  let expectedURL = fixture.root.appendingPathComponent("expected-completed.json")
+  try completed.write(to: expectedURL)
+  let expectedBytes = try Data(contentsOf: expectedURL)
+
+  let succeeded = await ApplyPipeline(processRunner: ResumePostflightRunner(fixture: fixture))
+    .resumePendingPostflight(
+      ResumePostflightRequest(
+        tune: fixture.tune,
+        repositoryRoot: fixture.repository,
+        mapdReleaseManifestURL: fixture.releaseURL,
+        journalURL: fixture.journalURL,
+        timeout: 1,
+        pollInterval: 0.001
+      )
+    ) { event in
+      if case let .step(step) = event,
+         step.id == 1, step.status == .succeeded {
+        try! completed.write(to: fixture.journalURL)
+      }
+    }
+
+  #expect(succeeded)
+  #expect(try Data(contentsOf: fixture.journalURL) == expectedBytes)
+}
+
+@Test func twoResumeInstancesSerializeToOneAtomicCompletionWrite() async throws {
+  let fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  let barrier = TwoPartyBarrier()
+  let request = ResumePostflightRequest(
+    tune: fixture.tune,
+    repositoryRoot: fixture.repository,
+    mapdReleaseManifestURL: fixture.releaseURL,
+    journalURL: fixture.journalURL,
+    timeout: 1,
+    pollInterval: 0.001
+  )
+  func runOne() async -> Bool {
+    await ApplyPipeline(processRunner: ResumePostflightRunner(fixture: fixture))
+      .resumePendingPostflight(request) { event in
+        if case let .step(step) = event,
+           step.id == 1, step.status == .succeeded {
+          await barrier.arriveAndWait()
+        }
+      }
+  }
+
+  async let first = runOne()
+  async let second = runOne()
+  let results = await [first, second]
+
+  #expect(results == [true, true])
+  let completed = try DeploymentRollbackJournal.load(from: fixture.journalURL)
+  #expect(completed.effectiveResolution == .completed)
+  #expect(completed.completed)
+  #expect(completed.completedAt != nil)
+}
+
+@Test func DurableRollbackClaimPermanentlyBlocksResumeCompletion() async throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  fixture.journal.completed = true
+  fixture.journal.resolution = .rollbackInProgress
+  try fixture.journal.write(to: fixture.journalURL)
+  let before = try Data(contentsOf: fixture.journalURL)
+  let runner = ResumePostflightRunner(fixture: fixture)
+
+  let succeeded = await ApplyPipeline(processRunner: runner).resumePendingPostflight(
+    ResumePostflightRequest(
+      tune: fixture.tune,
+      repositoryRoot: fixture.repository,
+      mapdReleaseManifestURL: fixture.releaseURL,
+      journalURL: fixture.journalURL,
+      timeout: 1
+    )
+  ) { _ in }
+
+  #expect(!succeeded)
+  #expect(await runner.requests.isEmpty)
+  #expect(try Data(contentsOf: fixture.journalURL) == before)
+}
+
+@Test func rollbackClaimIsNonPendingToAnOlderSchemaOneReader() throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  fixture.journal.completed = true
+  fixture.journal.resolution = .rollbackInProgress
+  try fixture.journal.write(to: fixture.journalURL)
+
+  let legacy = try JSONDecoder().decode(
+    LegacySchemaOnePendingReader.self,
+    from: Data(contentsOf: fixture.journalURL)
+  )
+  #expect(legacy.schema == 1)
+  #expect(!legacy.isPendingPostflight)
+  #expect(try DeploymentRollbackJournal.load(from: fixture.journalURL).effectiveResolution == .rollbackInProgress)
+}
+
+@Test func orphanedRollbackClaimCanBeTakenOverAndSettlesPartialFailure() async throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  fixture.journal.completed = true
+  fixture.journal.resolution = .rollbackInProgress
+  try fixture.journal.write(to: fixture.journalURL)
+  let runner = RollbackClaimRecoveryRunner(failRemoteRollback: true)
+
+  let result = await ApplyPipeline(processRunner: runner).rollbackProductionDeploymentIfJournalPending(
+    preflight: try resumeRuntimePreflight(fixture),
+    tilesActivated: false
+  )
+
+  guard case .rollbackFailed = result else {
+    Issue.record("expected rollbackFailed resolution")
+    return
+  }
+  #expect((await runner.requests).contains {
+    $0.arguments.last?.contains(TiciProductionRollbackCommandBuilder.resultMarker) == true
+  })
+  let settled = try DeploymentRollbackJournal.load(from: fixture.journalURL)
+  #expect(settled.completed)
+  #expect(settled.effectiveResolution == .rollbackFailed)
+}
+
+@Test func freshProcessRecoveryUsesOnlyDurableTileIdentitiesAndDoesNotInventAPreReboot() async throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  let previousTileSetID = String(repeating: "1", count: 64)
+  let targetTileSetID = String(repeating: "2", count: 64)
+  let previousRelease = "chauffeur-whole-curve-v1"
+  let releaseDigest = TuneDeploymentIdentity.sha256Hex(Data(previousRelease.utf8))
+  let previousMapdSHA = String(repeating: "c", count: 64)
+  let previousCacheSHA = String(repeating: "d", count: 64)
+  fixture.journal.previousMapdReleaseVersion = previousRelease
+  fixture.journal.previousMapdVersion = previousRelease
+  fixture.journal.previousActiveMapdSHA256 = previousMapdSHA
+  fixture.journal.previousCachedMapdPath =
+    "/data/media/0/osm/binaries/mapd-\(releaseDigest.prefix(16))-\(previousCacheSHA.prefix(16))"
+  fixture.journal.previousCachedMapdSHA256 = previousCacheSHA
+  fixture.journal.previousTileSetID = previousTileSetID
+  fixture.journal.targetTileSetID = targetTileSetID
+  fixture.journal.rebootSent = false
+  fixture.journal.completed = true
+  fixture.journal.resolution = .rollbackInProgress
+  try fixture.journal.write(to: fixture.journalURL)
+  let runner = FreshProcessRollbackRecoveryRunner(journal: fixture.journal)
+
+  let succeeded = await ApplyPipeline(processRunner: runner).recoverPendingRollback(
+    RollbackRecoveryRequest(
+      repositoryRoot: fixture.repository,
+      journalURL: fixture.journalURL
+    )
+  ) { _ in }
+
+  #expect(succeeded)
+  #expect(try DeploymentRollbackJournal.load(from: fixture.journalURL).effectiveResolution == .rolledBack)
+  let requests = await runner.requests
+  #expect(requests.contains { request in
+    request.arguments.last?.contains("rollback --root") == true &&
+      request.arguments.last?.contains("--expected-tile-set-id '\(targetTileSetID)'") == true
+  })
+  #expect(!requests.contains { $0.arguments.joined(separator: " ").contains("sudo reboot") })
+}
+
+@Test func liveRollbackOwnerExcludesASecondMutatorUntilTerminalSettlement() async throws {
+  let fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  let preflight = try resumeRuntimePreflight(fixture)
+  let ownerRunner = BlockingRollbackOwnerRunner()
+  let ownerTask = Task {
+    await ApplyPipeline(processRunner: ownerRunner).rollbackProductionDeploymentIfJournalPending(
+      preflight: preflight,
+      tilesActivated: false
+    )
+  }
+  await ownerRunner.waitUntilRemoteMutationStarts()
+  let claimed = try DeploymentRollbackJournal.load(from: fixture.journalURL)
+  #expect(claimed.completed)
+  #expect(claimed.effectiveResolution == .rollbackInProgress)
+
+  let contenderRunner = RollbackClaimRecoveryRunner(failRemoteRollback: false)
+  let contender = await ApplyPipeline(processRunner: contenderRunner)
+    .rollbackProductionDeploymentIfJournalPending(
+      preflight: preflight,
+      tilesActivated: false
+    )
+  guard case .rollbackFailed = contender else {
+    Issue.record("live rollback owner should exclude the contender")
+    await ownerRunner.releaseRemoteMutation()
+    _ = await ownerTask.value
+    return
+  }
+  #expect(await contenderRunner.requests.isEmpty)
+
+  await ownerRunner.releaseRemoteMutation()
+  guard case .rollbackFailed = await ownerTask.value else {
+    Issue.record("injected owner failure should settle rollbackFailed")
+    return
+  }
+  #expect(try DeploymentRollbackJournal.load(from: fixture.journalURL).effectiveResolution == .rollbackFailed)
+}
+
+@Test func inconsistentExplicitResolutionRequiresOrRepairsLegacyCompletionSentinel() async throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  fixture.journal.completed = false
+  fixture.journal.resolution = .rollbackInProgress
+  try fixture.journal.write(to: fixture.journalURL)
+  #expect(throws: DeploymentRollbackJournalError.inconsistentResolution(
+    "rollbackInProgress requires the legacy completed=true sentinel"
+  )) {
+    try DeploymentRollbackJournal.loadPendingPostflight(from: fixture.journalURL)
+  }
+
+  let runner = RollbackClaimRecoveryRunner(failRemoteRollback: true)
+  guard case .rollbackFailed = await ApplyPipeline(processRunner: runner)
+    .rollbackProductionDeploymentIfJournalPending(
+      preflight: try resumeRuntimePreflight(fixture),
+      tilesActivated: false
+    )
+  else {
+    Issue.record("expected repaired rollback replay to settle failure")
+    return
+  }
+  let repaired = try DeploymentRollbackJournal.load(from: fixture.journalURL)
+  #expect(repaired.completed)
+  #expect(repaired.effectiveResolution == .rollbackFailed)
+
+  var invalidCompleted = fixture.journal
+  invalidCompleted.resolution = .completed
+  invalidCompleted.completed = false
+  try invalidCompleted.write(to: fixture.journalURL)
+  #expect(throws: DeploymentRollbackJournalError.inconsistentResolution(
+    "completed requires the legacy completed=true sentinel"
+  )) {
+    try DeploymentRollbackJournal.loadPendingPostflight(from: fixture.journalURL)
+  }
+  let beforeInvalidCompletion = try Data(contentsOf: fixture.journalURL)
+  let noProofResult = await ApplyPipeline(processRunner: RollbackClaimRecoveryRunner(failRemoteRollback: false))
+    .rollbackProductionDeploymentIfJournalPending(
+      preflight: try resumeRuntimePreflight(fixture),
+      tilesActivated: false
+    )
+  guard case .rollbackFailed = noProofResult else {
+    Issue.record("corrupt completed resolution must fail closed")
+    return
+  }
+  #expect(try Data(contentsOf: fixture.journalURL) == beforeInvalidCompletion)
+
+  var tornRolledBack = fixture.journal
+  tornRolledBack.resolution = .rolledBack
+  tornRolledBack.completed = false
+  try tornRolledBack.write(to: fixture.journalURL)
+  #expect(try DeploymentRollbackJournal.loadRecoverableRollback(from: fixture.journalURL).journal == tornRolledBack)
+  let replayRunner = RollbackClaimRecoveryRunner(failRemoteRollback: true)
+  guard case .rollbackFailed = await ApplyPipeline(processRunner: replayRunner)
+    .rollbackProductionDeploymentIfJournalPending(
+      preflight: try resumeRuntimePreflight(fixture),
+      tilesActivated: false
+    )
+  else {
+    Issue.record("torn rolledBack resolution must replay restoration")
+    return
+  }
+  #expect((await replayRunner.requests).contains {
+    $0.arguments.last?.contains(TiciProductionRollbackCommandBuilder.resultMarker) == true
+  })
+  #expect(try DeploymentRollbackJournal.load(from: fixture.journalURL).effectiveResolution == .rollbackFailed)
+}
+
 @Test func completionLockAllowsOnlyOneTunerInstancePerJournal() throws {
   let root = FileManager.default.temporaryDirectory
     .appendingPathComponent("vtsc-journal-lock-\(UUID().uuidString)", isDirectory: true)
@@ -348,6 +806,67 @@ import Testing
   first.unlock()
   let second = try DeploymentRollbackJournal.acquireCompletionLock(for: journalURL)
   second.unlock()
+}
+
+@Test func durableJournalWriterReportsVisibleButIndeterminateAfterDirectorySyncFailure() throws {
+  let root = FileManager.default.temporaryDirectory
+    .appendingPathComponent("vtsc-journal-durability-\(UUID().uuidString)", isDirectory: true)
+  try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+  defer { try? FileManager.default.removeItem(at: root) }
+  let url = root.appendingPathComponent("transaction.json")
+  let expected = Data("{\"resolution\":\"rollbackInProgress\"}\n".utf8)
+
+  #expect(throws: DeploymentRollbackJournalError.committedButNotDurable(
+    url.standardizedFileURL,
+    "directory fsync failed after three attempts: Input/output error; exact_visible=1"
+  )) {
+    try DeploymentRollbackJournal.durablyReplace(
+      expected,
+      at: url,
+      directorySync: { _ in
+        errno = EIO
+        return -1
+      }
+    )
+  }
+  #expect(try Data(contentsOf: url) == expected)
+}
+
+@Test func indeterminateRollbackClaimNeverStartsRemoteMutation() async throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  fixture.journal.completed = false
+  fixture.journal.resolution = .rollbackFailed
+  try fixture.journal.write(to: fixture.journalURL)
+  let runner = RollbackClaimRecoveryRunner(failRemoteRollback: false)
+  let pipeline = ApplyPipeline(processRunner: runner) { journal, url in
+    try journal.write(to: url)
+    if journal.effectiveResolution == .rollbackInProgress {
+      throw DeploymentRollbackJournalError.committedButNotDurable(url, "injected")
+    }
+  }
+  guard case .rollbackFailed = await pipeline.rollbackProductionDeploymentIfJournalPending(
+    preflight: try resumeRuntimePreflight(fixture),
+    tilesActivated: false
+  ) else { Issue.record("indeterminate claim must fail closed"); return }
+  #expect(!(await runner.requests).contains {
+    $0.arguments.last?.contains(TiciProductionRollbackCommandBuilder.resultMarker) == true
+  })
+}
+
+@Test func journalWriteCreatesNestedRecoveryDirectoryBeforeItsDurableTransition() throws {
+  let root = FileManager.default.temporaryDirectory
+    .appendingPathComponent("vtsc-journal-parent-durability-\(UUID().uuidString)", isDirectory: true)
+  defer { try? FileManager.default.removeItem(at: root) }
+  let url = root.appendingPathComponent("new/deployment-journals/transaction.json")
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  fixture.journal.completed = true
+  fixture.journal.resolution = .rollbackInProgress
+
+  try fixture.journal.write(to: url)
+
+  #expect(try DeploymentRollbackJournal.load(from: url) == fixture.journal)
 }
 
 @Test func resumePostflightFailsClosedForNonToolingFollowupAndRetainsJournal() async throws {
@@ -711,11 +1230,259 @@ import Testing
   })
 }
 
+@Test func newCarFacingDeploymentIsBlockedByAnyRecoverableRollbackJournal() async throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  fixture.journal.completed = true
+  fixture.journal.resolution = .rollbackFailed
+  try fixture.journal.write(to: fixture.journalURL)
+  let tuneURL = fixture.root.appendingPathComponent("must-not-save.json")
+  let succeeded = await ApplyPipeline().apply(ApplyRequest(
+    action: .pullOnTici,
+    tune: fixture.tune,
+    repositoryRoot: fixture.repository,
+    tuneURL: tuneURL,
+    rollbackJournalDirectoryURL: fixture.journalURL.deletingLastPathComponent()
+  )) { _ in }
+  #expect(!succeeded)
+  #expect(!FileManager.default.fileExists(atPath: tuneURL.path))
+}
+
+@Test func multipleRollbackJournalsAreEnumeratedForExactSelection() throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  fixture.journal.completed = true
+  fixture.journal.resolution = .rollbackFailed
+  try fixture.journal.write(to: fixture.journalURL)
+  var second = fixture.journal
+  second.deploymentID = UUID()
+  second.createdAt = "2026-07-16T03:00:00Z"
+  let secondURL = fixture.journalURL.deletingLastPathComponent()
+    .appendingPathComponent("\(second.deploymentID.uuidString).json")
+  try second.write(to: secondURL)
+
+  let candidates = try DeploymentRollbackJournal.recoverableRollbacks(
+    directory: fixture.journalURL.deletingLastPathComponent()
+  )
+  #expect(candidates.map(\.url) == [fixture.journalURL, secondURL].map(\.standardizedFileURL).sorted { $0.path < $1.path })
+  #expect(try DeploymentRollbackJournal.loadRecoverableRollback(from: secondURL).journal.deploymentID == second.deploymentID)
+}
+
 private actor ApplyEventCollector {
   private(set) var events: [ApplyEvent] = []
 
   func append(_ event: ApplyEvent) {
     events.append(event)
+  }
+}
+
+private actor TwoPartyBarrier {
+  private var arrivals = 0
+  private var waiters: [CheckedContinuation<Void, Never>] = []
+
+  func arriveAndWait() async {
+    arrivals += 1
+    if arrivals == 2 {
+      let pending = waiters
+      waiters.removeAll()
+      pending.forEach { $0.resume() }
+      return
+    }
+    await withCheckedContinuation { continuation in
+      waiters.append(continuation)
+    }
+  }
+}
+
+private struct LegacySchemaOnePendingReader: Decodable {
+  var schema: Int
+  var rebootSent: Bool
+  var completed: Bool
+
+  var isPendingPostflight: Bool { schema == 1 && rebootSent && !completed }
+}
+
+private actor FreshProcessRollbackRecoveryRunner: ProcessRunning {
+  let journal: DeploymentRollbackJournal
+  private(set) var requests: [ProcessRequest] = []
+
+  init(journal: DeploymentRollbackJournal) {
+    self.journal = journal
+  }
+
+  func run(_ request: ProcessRequest) async throws -> ProcessResult {
+    requests.append(request)
+    let command = request.arguments.last ?? ""
+    if request.executableURL == ApplyPipeline.sshURL, command == "true" {
+      return success("")
+    }
+    if request.executableURL == ApplyPipeline.rsyncURL {
+      return success("")
+    }
+    if command.contains("rollback --root") {
+      return success(String(decoding: try JSONSerialization.data(withJSONObject: [
+        "operation": "rollback",
+        "tile_activation_not_observed": true,
+        "active_tile_set_id": journal.previousTileSetID ?? "",
+      ]), as: UTF8.self) + "\n")
+    }
+    if command.contains(TiciProductionRollbackCommandBuilder.resultMarker) {
+      return success(
+        "\(TiciProductionRollbackCommandBuilder.resultMarker)\t" +
+          Data(journal.previousHead.utf8).base64EncodedString() + "\n"
+      )
+    }
+    if command.contains("params_root=/data/params/d") {
+      return success(runtimeWire())
+    }
+    if request.executableURL == ApplyPipeline.sshURL {
+      return success("")
+    }
+    return ProcessResult(
+      terminationStatus: 1,
+      standardOutput: "",
+      standardError: "unexpected recovery request: \(request.executableURL.path) \(request.arguments)"
+    )
+  }
+
+  private func runtimeWire() -> String {
+    var fields: [TiciSnapshotWireField: Data] = [
+      .branch: Data(journal.branch.utf8),
+      .head: Data(journal.previousHead.utf8),
+      .dirty: Data("0".utf8),
+      .isOffroad: Data("1".utf8),
+      .isOnroad: Data("0".utf8),
+      .mapLookaheadEnabled: Data("0".utf8),
+      .qCurveFile: Data(TuneDeploymentIdentity.canonicalQCurveSource(
+        parameters: .checkoutFallback,
+        bands: []
+      ).utf8),
+      .activeMapdSHA256: Data(journal.previousActiveMapdSHA256.utf8),
+      .mapdCacheListing: Data((journal.previousCachedMapdSHA256.map {
+        "\(journal.previousCachedMapdPath)\t\($0)\n"
+      } ?? "").utf8),
+      .activeMapdBuildInfo: Data("{}".utf8),
+      .activeMapdELFHeader: Data([0x7f, 0x45, 0x4c, 0x46, 2, 1]),
+      .mapdRunning: Data("1".utf8),
+      .remoteEpochMilliseconds: Data("1800000000000".utf8),
+      .liveMapDataControllerStatus: Data("0|0|0|0|0".utf8),
+      .runtimeEndIsOffroad: Data("1".utf8),
+      .runtimeEndIsOnroad: Data("0".utf8),
+      .runtimeEndMapLookaheadEnabled: Data("0".utf8),
+    ]
+    if let release = journal.previousMapdReleaseVersion {
+      fields[.mapdReleaseVersion] = Data(release.utf8)
+    }
+    if let version = journal.previousMapdVersion {
+      fields[.mapdVersion] = Data(version.utf8)
+    }
+    if let tileSetID = journal.previousTileSetID {
+      fields[.tileManifest] = try! JSONSerialization.data(withJSONObject: ["tile_set_id": tileSetID])
+    }
+    let physicsFields: [String: TiciSnapshotWireField] = [
+      "VisionTurnSpeedControlPhysicsAmplitude": .physicsAmplitude,
+      "VisionTurnSpeedControlPhysicsSteepness": .physicsSteepness,
+      "VisionTurnSpeedControlPhysicsCenter": .physicsCenter,
+      "VisionTurnSpeedControlPhysicsBaseline": .physicsBaseline,
+      "VisionTurnSpeedControlPhysicsMinLatAccel": .physicsMinLatAccel,
+      "VisionTurnSpeedControlPhysicsMaxLatAccel": .physicsMaxLatAccel,
+    ]
+    for (key, field) in physicsFields {
+      if let value = journal.previousPhysicsParams[key] ?? nil {
+        fields[field] = Data(value.utf8)
+      }
+    }
+    return TiciSnapshotWireCodec.encode(.init(rawValues: fields)) + "\n"
+  }
+
+  private func success(_ output: String) -> ProcessResult {
+    ProcessResult(terminationStatus: 0, standardOutput: output, standardError: "")
+  }
+}
+
+private actor RollbackClaimRecoveryRunner: ProcessRunning {
+  let failRemoteRollback: Bool
+  private(set) var requests: [ProcessRequest] = []
+
+  init(failRemoteRollback: Bool) {
+    self.failRemoteRollback = failRemoteRollback
+  }
+
+  func run(_ request: ProcessRequest) async throws -> ProcessResult {
+    requests.append(request)
+    let command = request.arguments.last ?? ""
+    if command.contains(TiciProductionRollbackCommandBuilder.resultMarker) {
+      return failRemoteRollback
+        ? ProcessResult(terminationStatus: 1, standardOutput: "", standardError: "partial rollback failure")
+        : ProcessResult(terminationStatus: 0, standardOutput: "", standardError: "")
+    }
+    if command.contains("is_offroad") {
+      return ProcessResult(
+        terminationStatus: 0,
+        standardOutput: rollbackSafetyWire(),
+        standardError: ""
+      )
+    }
+    return ProcessResult(terminationStatus: 0, standardOutput: "ok\n", standardError: "")
+  }
+
+  private func rollbackSafetyWire() -> String {
+    TiciSnapshotWireCodec.encode(.init(rawValues: [
+      .branch: Data("chauffeur-exp01".utf8),
+      .head: Data(String(repeating: "9", count: 40).utf8),
+      .dirty: Data("0".utf8),
+      .isOffroad: Data("1".utf8),
+      .isOnroad: Data("0".utf8),
+      .mapLookaheadEnabled: Data("0".utf8),
+      .qCurveFile: Data(TuneDeploymentIdentity.canonicalQCurveSource(
+        parameters: .checkoutFallback,
+        bands: []
+      ).utf8),
+      .activeMapdSHA256: Data(String(repeating: "c", count: 64).utf8),
+      .mapdCacheListing: Data("".utf8),
+    ])) + "\n"
+  }
+}
+
+private actor BlockingRollbackOwnerRunner: ProcessRunning {
+  private var startedWaiters: [CheckedContinuation<Void, Never>] = []
+  private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+  private var remoteMutationStarted = false
+  private var released = false
+
+  func waitUntilRemoteMutationStarts() async {
+    if remoteMutationStarted { return }
+    await withCheckedContinuation { startedWaiters.append($0) }
+  }
+
+  func releaseRemoteMutation() {
+    released = true
+    let waiters = releaseWaiters
+    releaseWaiters.removeAll()
+    waiters.forEach { $0.resume() }
+  }
+
+  func run(_ request: ProcessRequest) async throws -> ProcessResult {
+    let command = request.arguments.last ?? ""
+    if command.contains(TiciProductionRollbackCommandBuilder.resultMarker) {
+      remoteMutationStarted = true
+      let waiters = startedWaiters
+      startedWaiters.removeAll()
+      waiters.forEach { $0.resume() }
+      if !released {
+        await withCheckedContinuation { releaseWaiters.append($0) }
+      }
+      return ProcessResult(
+        terminationStatus: 1,
+        standardOutput: "",
+        standardError: "injected owner rollback failure"
+      )
+    }
+    if command.contains("is_offroad") {
+      let runner = RollbackClaimRecoveryRunner(failRemoteRollback: false)
+      return try await runner.run(request)
+    }
+    return ProcessResult(terminationStatus: 0, standardOutput: "ok\n", standardError: "")
   }
 }
 
@@ -755,6 +1522,13 @@ private struct ResumePostflightFixture: Sendable {
   var offroadEndIsOnroad: Bool
   var controllerEndMapLookaheadEnabled: Bool
   var offroadEndMapLookaheadEnabled: Bool
+  var transientTransportFailures: Int
+  var controllerPendingReads: Int
+  var offroadWaitReads: Int
+  var firstRuntimeHead: String?
+  var firstRuntimeDelay: Duration?
+  var transientTransportStatus: Int32
+  var throwTimedOutOnce: Bool
   var changedPaths: [String]
   var profileData: Data
   var offroadProfileData: Data?
@@ -864,6 +1638,13 @@ private func resumePostflightFixture(validGPS: Bool) throws -> ResumePostflightF
     offroadEndIsOnroad: false,
     controllerEndMapLookaheadEnabled: false,
     offroadEndMapLookaheadEnabled: false,
+    transientTransportFailures: 0,
+    controllerPendingReads: 0,
+    offroadWaitReads: 0,
+    firstRuntimeHead: nil,
+    firstRuntimeDelay: nil,
+    transientTransportStatus: 255,
+    throwTimedOutOnce: false,
     changedPaths: [
       ".codex/skills/vtsc-tuner-app/references/changelog.md",
       "tools/vtsc_tuner_mac/Sources/VTSCTunerCore/ApplyPipeline.swift",
@@ -882,10 +1663,30 @@ private func resumePostflightFixture(validGPS: Bool) throws -> ResumePostflightF
   )
 }
 
+private func resumeRuntimePreflight(
+  _ fixture: ResumePostflightFixture
+) throws -> RuntimeDeploymentPreflight {
+  RuntimeDeploymentPreflight(
+    git: GitDeploymentPreflight(
+      branch: fixture.journal.branch,
+      localHead: fixture.toolingHead,
+      originHead: fixture.toolingHead,
+      upstream: "origin/\(fixture.journal.branch)"
+    ),
+    profile: fixture.journal.profile,
+    mapdRecoveryOutcome: .clean,
+    release: try fixture.release.validated(),
+    tileSet: nil,
+    journal: fixture.journal,
+    journalURL: fixture.journalURL
+  )
+}
+
 private actor ResumePostflightRunner: ProcessRunning {
   let fixture: ResumePostflightFixture
   private(set) var requests: [ProcessRequest] = []
   private(set) var runtimeReadCount = 0
+  private var successfulRuntimeReadCount = 0
 
   init(fixture: ResumePostflightFixture) { self.fixture = fixture }
 
@@ -916,7 +1717,21 @@ private actor ResumePostflightRunner: ProcessRunning {
       if request.arguments.last == "true" { return success("") }
       if request.arguments.last?.contains("remote_epoch_milliseconds") == true {
         runtimeReadCount += 1
-        return success(runtimeWire(readIndex: runtimeReadCount))
+        if fixture.throwTimedOutOnce, runtimeReadCount == 1 {
+          throw ProcessRunnerError.timedOut(request.executableURL, request.timeout ?? 30)
+        }
+        if runtimeReadCount <= fixture.transientTransportFailures {
+          return ProcessResult(
+            terminationStatus: fixture.transientTransportStatus,
+            standardOutput: "",
+            standardError: "tici runtime still starting"
+          )
+        }
+        successfulRuntimeReadCount += 1
+        if successfulRuntimeReadCount == 1, let delay = fixture.firstRuntimeDelay {
+          try await Task.sleep(for: delay)
+        }
+        return success(runtimeWire(readIndex: successfulRuntimeReadCount))
       }
       return failure("unexpected ssh request")
     }
@@ -937,13 +1752,18 @@ private actor ResumePostflightRunner: ProcessRunning {
         "MapdBuildID:\(fixture.release.buildID)",
       ]
     )
-    let controllerPhase = readIndex == 1
+    let evidenceReadIndex = fixture.controllerPendingReads + 1
+    let pendingControllerPhase = readIndex <= fixture.controllerPendingReads
+    let controllerPhase = readIndex <= evidenceReadIndex
+    let waitingOnroadPhase = readIndex > evidenceReadIndex &&
+      readIndex <= evidenceReadIndex + fixture.offroadWaitReads
+    let stableOnroadPhase = controllerPhase || waitingOnroadPhase
     var fields: [TiciSnapshotWireField: Data] = [
       .branch: Data(fixture.runtimeBranch.utf8),
-      .head: Data(fixture.runtimeHead.utf8),
+      .head: Data(((readIndex == 1 ? fixture.firstRuntimeHead : nil) ?? fixture.runtimeHead).utf8),
       .dirty: Data((fixture.runtimeDirty ? "1" : "0").utf8),
-      .isOffroad: Data((controllerPhase ? "0" : "1").utf8),
-      .isOnroad: Data((controllerPhase ? "1" : "0").utf8),
+      .isOffroad: Data((stableOnroadPhase ? "0" : "1").utf8),
+      .isOnroad: Data((stableOnroadPhase ? "1" : "0").utf8),
       .mapLookaheadEnabled: Data("0".utf8),
       .mapdReleaseVersion: Data(fixture.release.releaseID.utf8),
       .mapdVersion: Data(fixture.release.releaseID.utf8),
@@ -957,18 +1777,22 @@ private actor ResumePostflightRunner: ProcessRunning {
       .activeMapdELFHeader: Data([0x7f, 0x45, 0x4c, 0x46, 2, 1] + Array(repeating: 0, count: 12) + [183, 0]),
       .mapdRunning: Data("1".utf8),
       .remoteEpochMilliseconds: Data("1800000000000".utf8),
-      .memoryWholeCurveProfile: controllerPhase ? fixture.profileData : (fixture.offroadProfileData ?? fixture.profileData),
-      .liveMapDataControllerStatus: Data((controllerPhase
+      .memoryWholeCurveProfile: pendingControllerPhase
+        ? Data("{}".utf8)
+        : controllerPhase ? fixture.profileData : (fixture.offroadProfileData ?? fixture.profileData),
+      .liveMapDataControllerStatus: Data((controllerPhase && !pendingControllerPhase
         ? "1|1|\(fixture.controllerLogMonoTimeNs)|\(fixture.controllerRoadGeometryValid ? 1 : 0)|\(fixture.controllerSampleMonoTimeNs)"
         : "1|0|123456790|0|123456999").utf8),
-      .runtimeEndIsOffroad: Data(((controllerPhase
+      .runtimeEndIsOffroad: Data(((stableOnroadPhase
         ? fixture.controllerEndIsOffroad : fixture.offroadEndIsOffroad) ? "1" : "0").utf8),
-      .runtimeEndIsOnroad: Data(((controllerPhase
+      .runtimeEndIsOnroad: Data(((stableOnroadPhase
         ? fixture.controllerEndIsOnroad : fixture.offroadEndIsOnroad) ? "1" : "0").utf8),
-      .runtimeEndMapLookaheadEnabled: Data(((controllerPhase
+      .runtimeEndMapLookaheadEnabled: Data(((stableOnroadPhase
         ? fixture.controllerEndMapLookaheadEnabled : fixture.offroadEndMapLookaheadEnabled) ? "1" : "0").utf8),
     ]
-    if let gpsData = fixture.gpsData { fields[.memoryLastGPSPosition] = gpsData }
+    if !pendingControllerPhase, let gpsData = fixture.gpsData {
+      fields[.memoryLastGPSPosition] = gpsData
+    }
     for physics in identity.physics {
       let field: TiciSnapshotWireField = switch physics.paramKey {
       case "VisionTurnSpeedControlPhysicsAmplitude": .physicsAmplitude

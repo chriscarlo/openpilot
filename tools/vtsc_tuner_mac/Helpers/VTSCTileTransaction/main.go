@@ -163,6 +163,7 @@ func run(arguments []string, output io.Writer) error {
 		flags.SetOutput(io.Discard)
 		root := flags.String("root", "", "OSM root")
 		expectedID := flags.String("expected-tile-set-id", "", "optional tile-set ID expected to be active")
+		expectedPreviousID := flags.String("expected-previous-tile-set-id", "", "optional tile-set ID required in offline.previous")
 		injectedFailure := flags.String("inject-failure", "", "test-only failure point")
 		if err := flags.Parse(arguments); err != nil || flags.NArg() != 0 {
 			return usageError()
@@ -170,11 +171,14 @@ func run(arguments []string, output io.Writer) error {
 		if *expectedID != "" && !isSafeID(*expectedID) {
 			return fmt.Errorf("invalid --expected-tile-set-id")
 		}
+		if *expectedPreviousID != "" && !isSafeID(*expectedPreviousID) {
+			return fmt.Errorf("invalid --expected-previous-tile-set-id")
+		}
 		engine, err := newTransactionEngine(*root)
 		if err != nil {
 			return err
 		}
-		result, err := engine.rollback(*expectedID, *injectedFailure)
+		result, err := engine.rollback(*expectedID, *expectedPreviousID, *injectedFailure)
 		if err != nil {
 			return err
 		}
@@ -185,7 +189,7 @@ func run(arguments []string, output io.Writer) error {
 }
 
 func usageError() error {
-	return errors.New("usage: vtsc-tile-transaction verify --root <artifact-root> --tile-set-id <id> | activate --root <osm-root> --stage <artifact-root> --tile-set-id <id> [--inject-failure <point>] | rollback --root <osm-root> [--expected-tile-set-id <id>] [--inject-failure <point>]")
+	return errors.New("usage: vtsc-tile-transaction verify --root <artifact-root> --tile-set-id <id> | activate --root <osm-root> --stage <artifact-root> --tile-set-id <id> [--inject-failure <point>] | rollback --root <osm-root> [--expected-tile-set-id <id>] [--expected-previous-tile-set-id <id>] [--inject-failure <point>]")
 }
 
 func encodeResult(output io.Writer, result transactionResult) error {
@@ -1123,13 +1127,13 @@ func (e *transactionEngine) activateLocked(stage, tileSetID, injectedFailure str
 	return transactionResult{Operation: "activate", TileSetID: tileSetID, ActivatedTileSetID: tileSetID}, nil
 }
 
-func (e *transactionEngine) rollback(expectedTileSetID, injectedFailure string) (transactionResult, error) {
+func (e *transactionEngine) rollback(expectedTileSetID, expectedPreviousTileSetID, injectedFailure string) (transactionResult, error) {
 	return e.withExclusiveTransactionLock(func() (transactionResult, error) {
-		return e.rollbackLocked(expectedTileSetID, injectedFailure)
+		return e.rollbackLocked(expectedTileSetID, expectedPreviousTileSetID, injectedFailure)
 	})
 }
 
-func (e *transactionEngine) rollbackLocked(expectedTileSetID, injectedFailure string) (transactionResult, error) {
+func (e *transactionEngine) rollbackLocked(expectedTileSetID, expectedPreviousTileSetID, injectedFailure string) (transactionResult, error) {
 	transaction, exists, err := e.readTransaction()
 	if err != nil {
 		return transactionResult{}, err
@@ -1176,6 +1180,9 @@ func (e *transactionEngine) rollbackLocked(expectedTileSetID, injectedFailure st
 				if err != nil {
 					return transactionResult{}, err
 				}
+				if expectedPreviousTileSetID != "" && id != expectedPreviousTileSetID {
+					return transactionResult{}, fmt.Errorf("recovered rollback tile-set ID differs from recorded previous identity")
+				}
 				if err := e.clearTransaction(); err != nil {
 					return transactionResult{}, err
 				}
@@ -1215,11 +1222,15 @@ func (e *transactionEngine) rollbackLocked(expectedTileSetID, injectedFailure st
 		}
 		return transactionResult{}, fmt.Errorf("active generation manifest is missing")
 	}
-	if previousID, present, err := manifestID(e.previousPath()); err != nil || !present || previousID == "" {
+	previousID, present, err := manifestID(e.previousPath())
+	if err != nil || !present || previousID == "" {
 		if err != nil {
 			return transactionResult{}, err
 		}
 		return transactionResult{}, fmt.Errorf("previous generation manifest is missing")
+	}
+	if expectedPreviousTileSetID != "" && previousID != expectedPreviousTileSetID {
+		return transactionResult{}, fmt.Errorf("previous generation tile-set ID differs from recorded rollback identity")
 	}
 
 	transaction = tileTransaction{Kind: "rollback", ActiveTarget: activeTarget, PreviousTarget: previousTarget}

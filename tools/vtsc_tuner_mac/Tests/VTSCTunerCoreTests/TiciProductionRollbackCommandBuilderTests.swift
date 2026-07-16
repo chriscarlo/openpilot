@@ -15,6 +15,9 @@ import Testing
   #expect(command.contains("MapdReleaseVersion"))
   #expect(command.contains("MapdVersion"))
   #expect(command.contains("VisionTurnSpeedControlPhysicsAmplitude"))
+  #expect(command.contains("current_active_sha"))
+  #expect(command.contains("mapd is already restored"))
+  #expect(command.contains("artifact is missing and active mapd does not match"))
   #expect(command.contains("base64 -d"))
   #expect(command.contains(TiciProductionRollbackCommandBuilder.resultMarker))
 
@@ -43,6 +46,25 @@ import Testing
   #expect(throws: (any Error).self) {
     try TiciProductionRollbackCommandBuilder.restoredHead(from: "bad output")
   }
+}
+
+@Test func mapdRollbackReplayNeedsNoArtifactWhenTheActiveBinaryIsAlreadyExact() {
+  let previous = String(repeating: "a", count: 64)
+  #expect(TiciProductionRollbackCommandBuilder.mapdRestoreDecision(
+    currentActiveSHA256: previous,
+    expectedPreviousSHA256: previous,
+    rollbackArtifactPresent: false
+  ) == .alreadyRestored)
+  #expect(TiciProductionRollbackCommandBuilder.mapdRestoreDecision(
+    currentActiveSHA256: String(repeating: "b", count: 64),
+    expectedPreviousSHA256: previous,
+    rollbackArtifactPresent: true
+  ) == .restoreRecordedArtifact)
+  #expect(TiciProductionRollbackCommandBuilder.mapdRestoreDecision(
+    currentActiveSHA256: String(repeating: "b", count: 64),
+    expectedPreviousSHA256: previous,
+    rollbackArtifactPresent: false
+  ) == .failMissingArtifact)
 }
 
 private func rollbackJournalFixture() -> DeploymentRollbackJournal {

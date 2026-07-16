@@ -33,6 +33,8 @@ struct RootView: View {
               }
               Divider()
               Button(ResumePostflightAction.label) { session.pendingResumePostflight = true }
+              Button(RollbackRecoveryAction.label) { session.pendingRollbackRecovery = true }
+                .disabled(!session.hasRecoverableRollback)
             }
           } else {
             Picker(
@@ -123,6 +125,12 @@ struct RootView: View {
       }
       .sheet(isPresented: $session.runningResumePostflight) {
         ResumePostflightProgressView(session: session)
+      }
+      .sheet(isPresented: $session.pendingRollbackRecovery) {
+        RollbackRecoveryConfirmationView(session: session)
+      }
+      .sheet(isPresented: $session.runningRollbackRecovery) {
+        RollbackRecoveryProgressView(session: session)
       }
       .onExitCommand {
         if session.workspace == .mapPreview {
@@ -581,7 +589,7 @@ struct ResumePostflightConfirmationView: View {
         .foregroundStyle(.secondary)
         .textSelection(.enabled)
       Label(
-        "Outdoors after a normal GPS/profile-producing drive: stop safely with ignition still on, then click Verify and Complete. The app first captures a fresh profile that the live controller can consume; when that succeeds, turn ignition off. It keeps that proof only in memory while polling for IsOffroad=1 and rechecking the unchanged tune/runtime identity. Failure keeps the original journal pending.",
+        "Outdoors after a normal GPS/profile-producing drive: stop safely with ignition still on, then click Verify and Complete. With Map Lookahead still disabled, the app first proves the fresh profile would be accepted by the controller when later enabled. Turn ignition off only after the app explicitly says that proof was captured. It keeps the proof only in memory while polling for IsOffroad=1 and rechecking the unchanged tune/runtime identity. Failure keeps the original journal pending.",
         systemImage: "location.viewfinder"
       )
       .foregroundStyle(.orange)
@@ -631,7 +639,15 @@ struct ResumePostflightProgressView: View {
       .frame(minHeight: 220)
       HStack {
         if session.applySucceeded == nil {
-          Button("Cancel", role: .cancel) { session.cancelResumePostflight() }
+          Button(
+            session.resumePostflightFinalizing
+              ? "Finalizing…"
+              : session.resumePostflightCancellationRequested ? "Cancelling…" : "Cancel",
+            role: .cancel
+          ) { session.cancelResumePostflight() }
+            .disabled(
+              session.resumePostflightCancellationRequested || session.resumePostflightFinalizing
+            )
         }
         Spacer()
         Button("Close") { session.closeResumePostflight() }
@@ -641,6 +657,83 @@ struct ResumePostflightProgressView: View {
     }
     .padding(24)
     .frame(width: 680, height: 400)
+    .interactiveDismissDisabled(session.applySucceeded == nil)
+  }
+}
+
+struct RollbackRecoveryConfirmationView: View {
+  @ObservedObject var session: TunerSession
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 16) {
+      Text(RollbackRecoveryAction.label).font(.title2.weight(.semibold))
+      Label(
+        "An interrupted or failed rollback journal was found. Recovery reuses only that recorded deployment identity, requires a freshly parked/offroad tici with Map Lookahead disabled, and verifies the restored source, Params, mapd/cache, and tile identity.",
+        systemImage: "exclamationmark.arrow.triangle.2.circlepath"
+      )
+      .foregroundStyle(.orange)
+      Text("This is an explicit production recovery action. It can restore files and Params and may reboot only if the original deployment had already rebooted. It does not create a new deployment or retarget the journal.")
+        .foregroundStyle(.secondary)
+      Picker("Recorded deployment", selection: $session.selectedRollbackJournalURL) {
+        ForEach(session.recoverableRollbacks) { candidate in
+          Text("\(candidate.journal.deploymentID.uuidString.prefix(8)) · \(candidate.journal.effectiveResolution.rawValue) · \(candidate.journal.targetHead?.prefix(10) ?? "unknown") · \(candidate.journal.createdAt)")
+            .tag(Optional(candidate.url))
+        }
+      }
+      HStack {
+        Spacer()
+        Button("Cancel", role: .cancel) { session.pendingRollbackRecovery = false }
+        Button("Recover Recorded Rollback") { session.confirmRollbackRecovery() }
+          .disabled(session.selectedRollbackJournalURL == nil)
+          .keyboardShortcut(.defaultAction)
+      }
+    }
+    .padding(24)
+    .frame(width: 600)
+  }
+}
+
+struct RollbackRecoveryProgressView: View {
+  @ObservedObject var session: TunerSession
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 14) {
+      Text(RollbackRecoveryAction.label).font(.title2.weight(.semibold))
+      ScrollView {
+        LazyVStack(alignment: .leading, spacing: 12) {
+          ForEach(session.applySteps, id: \.id) { step in
+            HStack(alignment: .top, spacing: 10) {
+              Group {
+                switch step.status {
+                case .running: ProgressView().controlSize(.small)
+                case .succeeded: Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                case .failed: Image(systemName: "xmark.circle.fill").foregroundStyle(.red)
+                }
+              }
+              .frame(width: 18)
+              VStack(alignment: .leading, spacing: 4) {
+                Text(step.text)
+                if !step.detail.isEmpty {
+                  Text(step.detail)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                }
+              }
+            }
+          }
+        }
+      }
+      .frame(minHeight: 240)
+      HStack {
+        Spacer()
+        Button("Close") { session.closeRollbackRecovery() }
+          .disabled(session.applySucceeded == nil)
+          .keyboardShortcut(.defaultAction)
+      }
+    }
+    .padding(24)
+    .frame(width: 700, height: 420)
     .interactiveDismissDisabled(session.applySucceeded == nil)
   }
 }

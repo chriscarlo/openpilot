@@ -197,10 +197,12 @@ import Testing
   let rollback = try TiciTileSetDeploymentService.atomicRollbackCommand(
     helperPath: helperPath,
     expectedActivatedTileSetID: tileSetID,
+    expectedRestoredTileSetID: String(repeating: "e", count: 64),
     injectedFailurePoint: "after_switch"
   )
   #expect(rollback.contains(" rollback --root "))
   #expect(rollback.contains("--expected-tile-set-id '\(tileSetID)'"))
+  #expect(rollback.contains("--expected-previous-tile-set-id '\(String(repeating: "e", count: 64))'"))
   #expect(rollback.contains("--inject-failure 'after_switch'"))
   #expect(!rollback.lowercased().contains("python"))
 }
@@ -355,6 +357,55 @@ import Testing
     #expect(error == .activationIdentityMissing(expectedTileSetID))
   } catch {
     Issue.record("unexpected tile rollback error: \(error)")
+  }
+
+  let previousTileSetID = String(repeating: "e", count: 64)
+  let exact = TiciTileSetDeploymentService(
+    processRunner: TileRollbackRunner(output: """
+    {"operation":"rollback","rolled_back_tile_set_id":"\(previousTileSetID)"}
+    """),
+    transactionHelperURL: helper
+  )
+  try await exact.rollback(
+    profile: "commaAdb",
+    expectedActivatedTileSetID: expectedTileSetID,
+    expectedRestoredTileSetID: previousTileSetID
+  )
+  let wrongReturn = TiciTileSetDeploymentService(
+    processRunner: TileRollbackRunner(output: #"{"operation":"rollback","rolled_back_tile_set_id":"wrong"}"#),
+    transactionHelperURL: helper
+  )
+  await #expect(throws: TiciTileSetDeploymentError.activationIdentityMissing(previousTileSetID)) {
+    try await wrongReturn.rollback(
+      profile: "commaAdb",
+      expectedActivatedTileSetID: expectedTileSetID,
+      expectedRestoredTileSetID: previousTileSetID
+    )
+  }
+  let replayed = TiciTileSetDeploymentService(
+    processRunner: TileRollbackRunner(output: """
+    {"operation":"rollback","active_tile_set_id":"\(previousTileSetID)","tile_activation_not_observed":true}
+    """),
+    transactionHelperURL: helper
+  )
+  try await replayed.rollback(
+    profile: "commaAdb",
+    expectedActivatedTileSetID: expectedTileSetID,
+    expectedRestoredTileSetID: previousTileSetID
+  )
+
+  let unknown = TiciTileSetDeploymentService(
+    processRunner: TileRollbackRunner(output: """
+    {"operation":"rollback","active_tile_set_id":"\(String(repeating: "d", count: 64))","tile_activation_not_observed":true}
+    """),
+    transactionHelperURL: helper
+  )
+  await #expect(throws: TiciTileSetDeploymentError.activationIdentityMissing(expectedTileSetID)) {
+    try await unknown.rollback(
+      profile: "commaAdb",
+      expectedActivatedTileSetID: expectedTileSetID,
+      expectedRestoredTileSetID: previousTileSetID
+    )
   }
 }
 
