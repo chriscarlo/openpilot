@@ -161,7 +161,7 @@ OCCL_VMIN_NUDGE_MPS = 0.50
 
 # ===== Map lookahead helpers =====
 EARTH_R_M = 6371007.2
-MAP_WHOLE_CURVE_ESTIMATOR_VERSION = "whole-curve-v2"
+MAP_WHOLE_CURVE_ESTIMATOR_VERSION = "whole-curve-v3"
 MAP_WHOLE_CURVE_PROFILE_MAX_AGE_S = 3.0
 MAP_WHOLE_CURVE_PROFILE_FUTURE_TOLERANCE_S = 1.0
 MAP_WHOLE_CURVE_PROFILE_MAX_BYTES = 512 * 1024
@@ -211,7 +211,7 @@ def _round_half_away_from_zero_scaled(value: float, scale: float) -> int:
 def _compute_map_whole_curve_route_fingerprint(generation: int,
                                                 sigmoid_hash: str,
                                                 points: tuple[MapWholeCurvePoint, ...] | list[MapWholeCurvePoint]) -> str:
-  """Hash the exact ordered route/control profile using the Go/Swift v2 contract."""
+  """Hash the exact ordered route/control profile using the Go/Swift v3 contract."""
   digest = hashlib.sha256()
   digest.update(f"MapWholeCurveProfile|{MAP_WHOLE_CURVE_ESTIMATOR_VERSION}|{int(generation)}|{sigmoid_hash}\n".encode("utf-8"))
   for point in points:
@@ -2404,9 +2404,9 @@ class VisionTurnController:
 
   @staticmethod
   def _whole_curve_speed(abs_curvature_meters: float) -> float:
-    """Live fallback for v2 hash mismatch, without learned calibration.
+    """Live fallback for v3 hash mismatch, without learned calibration.
 
-    A matching v2 profile supplies its physics-only speed. Until mapd
+    A matching v3 profile supplies its physics-only speed. Until mapd
     republishes after a live physics edit, this path converts the published
     profile curvature with the current sigmoid/Q data instead.
     """
@@ -4833,7 +4833,7 @@ class VisionTurnController:
         raise ValueError(f"point_{index}_distance_range")
       if abs(curvature) > 1.0:
         raise ValueError(f"point_{index}_curvature_range")
-      if not 1.0 <= curvature_coefficient <= 4.0:
+      if not 0.0 < curvature_coefficient <= 4.0:
         raise ValueError(f"point_{index}_curvature_coefficient_range")
       if not 0.0 <= base_safe_speed_mps <= MAX_SPEED_DEFAULT:
         raise ValueError(f"point_{index}_base_safe_speed_range")
@@ -6118,7 +6118,7 @@ class VisionTurnController:
     k_list = k_list[:cut]
     abs_indices = list(range(i0 + 1, len(pts)))[:cut]
 
-    # Whole-curve v2 publishes an estimator-aligned physics speed. Consume it
+    # Whole-curve v3 publishes an estimator-aligned physics speed. Consume it
     # only when its tune hash matches the live sigmoid, then apply the cheap
     # runtime Q/bias layers. A live tune edit fails safely back to conversion
     # until mapd republishes the route profile with the new hash.

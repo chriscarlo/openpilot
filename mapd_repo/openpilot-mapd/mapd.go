@@ -243,7 +243,7 @@ func loop(state *State) {
 	err = PutParam(MAP_TARGET_VELOCITIES, data)
 	logwe(errors.Wrap(err, "could not write curvatures"))
 
-	// The v2 profile remains a separate, versioned route product. mapd bakes
+	// The v3 profile remains a separate, versioned route product. mapd bakes
 	// physics-only speed once per publication; the controller verifies the
 	// sigmoid hash, retains live Q/bias authority, and can fall back to the
 	// unchanged legacy MapCurvatures stream independently.

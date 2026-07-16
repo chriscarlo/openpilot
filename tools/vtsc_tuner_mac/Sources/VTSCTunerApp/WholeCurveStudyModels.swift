@@ -19,7 +19,7 @@ enum MapWholeCurveDisplayMode: String, CaseIterable, Identifiable {
     case .currentMapd:
       "current five-node mapd result along each curve event"
     case .wholeCurve:
-      "one distance-based preview speed for the complete curve event"
+      "continuous local-curvature speed along each complete curve event"
     case .difference:
       "whole-curve preview minus today’s mapd result"
     }

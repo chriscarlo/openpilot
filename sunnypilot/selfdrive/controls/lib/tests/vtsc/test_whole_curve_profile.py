@@ -37,7 +37,7 @@ def _profile_payload(*, now_s: float | None = None, count: int = 40,
       "longitude": -122.0,
       "distanceMeters": 5.0 * index,
       "curvature": kappa,
-      "curvatureCoefficient": 1.5 if event_id else 1.0,
+      "curvatureCoefficient": 0.65 if event_id else 1.0,
       "baseSafeSpeedMPS": 12.5 if event_id else vtc_mod.MAX_SPEED_DEFAULT,
       "eventID": event_id,
       "confidence": 0.9 if event_id else 1.0,
@@ -84,7 +84,7 @@ def test_whole_curve_fingerprint_cross_language_vector():
     MapWholeCurvePoint(37.000090, -122.0, 10.0, 0.0123456785, 1.5, 10.5, "0123456789abcdefabcd-b"),
   ]
   assert _compute_map_whole_curve_route_fingerprint(7, "85a608e68945", points) == \
-    "abf0365f8c349a7eeb7d9cb99a56b134c9a0b88b0c90db7f9ccf231132f5eebd"
+    "a0d4823aa1f16ae4bd70f3d80a1d379f02fd944ac7804ad193b9875ec40710db"
 
 
 def test_source_defaults_match_persisted_whole_curve_production_tune():
@@ -205,7 +205,7 @@ def test_whole_curve_cache_invalidates_on_raw_or_timestamp_change_and_rechecks_f
   (lambda payload: payload.update(fatalAmbiguity=True), "fatal_ambiguity"),
   (lambda payload: payload.update(routeFingerprint="0" * 64), "fingerprint_mismatch"),
   (lambda payload: payload["points"][5].update(curvature=float("nan")), "not_finite"),
-  (lambda payload: payload["points"][5].update(curvatureCoefficient=0.9), "curvature_coefficient_range"),
+  (lambda payload: payload["points"][5].update(curvatureCoefficient=0.0), "curvature_coefficient_range"),
   (lambda payload: payload["points"][5].update(baseSafeSpeedMPS=vtc_mod.MAX_SPEED_DEFAULT + 1.0), "base_safe_speed_range"),
   (lambda payload: payload["points"][5].update(distanceMeters=payload["points"][4]["distanceMeters"]), "nonmonotonic"),
   (lambda payload: payload["points"][5].update(latitude=payload["points"][5]["latitude"] + 0.001), "distance_mismatch"),
@@ -319,7 +319,7 @@ def test_whole_curve_matching_hash_consumes_route_baked_physics_speed(monkeypatc
   monkeypatch.setattr(
     vtsc,
     "_whole_curve_speed",
-    lambda _kappa: pytest.fail("matching v2 hash should not run the live sigmoid"),
+    lambda _kappa: pytest.fail("matching v3 hash should not run the live sigmoid"),
     raising=True,
   )
 
@@ -350,7 +350,7 @@ def test_whole_curve_hash_mismatch_falls_back_to_live_sigmoid(monkeypatch):
   monkeypatch.setattr(
     vtsc,
     "_baked_vsafe_with_runtime_multipliers",
-    lambda _speed, _kappa: pytest.fail("mismatched v2 hash must not consume baked speed"),
+    lambda _speed, _kappa: pytest.fail("mismatched v3 hash must not consume baked speed"),
     raising=True,
   )
 

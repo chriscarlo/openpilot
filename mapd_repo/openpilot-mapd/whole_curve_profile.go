@@ -62,11 +62,11 @@ type WholeCurveProfile struct {
 }
 
 // BuildWholeCurveProfile runs the geometry estimator and materializes one
-// continuous route profile. The event-wide controlling curvature remains the
-// conservative entry/exit floor, while the 60/100 m local scales raise it near
-// tightening or repeated apexes through a bounded coefficient. mapd also bakes
-// the physics-only speed for each resulting point; the controller verifies its
-// sigmoid hash and retains authority over live Q/bias and all arbitration.
+// continuous route profile. Same-sign 60/100 m local curvature shapes every
+// point through entry, apex, and exit; the event-wide controlling value remains
+// a bounded fallback and diagnostic rather than a constant floor. mapd also
+// bakes the physics-only speed for each resulting point; the controller verifies
+// its sigmoid hash and retains authority over live Q/bias and all arbitration.
 func BuildWholeCurveProfile(route DirectionalRoute, pos Position, previous WholeCurveEstimate, now time.Time, sigCfg SigmoidCfg) (WholeCurveProfile, WholeCurveEstimate, error) {
 	if len(route.Nodes) < 3 {
 		return WholeCurveProfile{}, WholeCurveEstimate{}, errors.New("not enough directional route nodes")
@@ -125,16 +125,14 @@ func BuildWholeCurveProfile(route DirectionalRoute, pos Position, previous Whole
 			MaximumSourceGapMeters: event.MaximumSourceGapMeters, SourceKeys: append([]string(nil), event.SourceKeys...),
 			Confidence: confidence, Flags: flags,
 		}
-		maximumCoefficient := 1.0
+		maximumCoefficient := 0.0
+		maximumProfileCurvature := -1.0
 		profileApexIndex := clippedApex
-		detailBaseline := wholeCurveApexDetailBaseline(
-			estimate.Points[event.StartIndex:event.EndIndex+1],
-			event,
-		)
 		for sourceIndex := clippedStart; sourceIndex <= clippedEnd; sourceIndex++ {
 			point := &points[sourceIndex-startIndex]
-			coefficient := wholeCurveApexDetailCoefficient(estimate.Points[sourceIndex], event, detailBaseline, configuration)
-			candidateCurvature := event.ControllingCurvature * coefficient
+			candidateCurvature, coefficient := wholeCurveContinuousProfileCurvature(
+				estimate.Points[sourceIndex], event, configuration,
+			)
 			// Segmented events do not normally overlap. If malformed geometry
 			// ever makes them overlap, keep the more conservative curvature.
 			if point.EventID == "" || math.Abs(candidateCurvature) > math.Abs(point.Curvature) {
@@ -145,9 +143,12 @@ func BuildWholeCurveProfile(route DirectionalRoute, pos Position, previous Whole
 				point.Confidence = confidence
 				point.Flags = append([]WholeCurveFlag(nil), flags...)
 			}
+			if math.Abs(candidateCurvature) > maximumProfileCurvature {
+				maximumProfileCurvature = math.Abs(candidateCurvature)
+				profileApexIndex = sourceIndex
+			}
 			if coefficient > maximumCoefficient {
 				maximumCoefficient = coefficient
-				profileApexIndex = sourceIndex
 			}
 		}
 		profileEvent.ProfileApexIndex = profileApexIndex - startIndex
@@ -167,19 +168,6 @@ func BuildWholeCurveProfile(route DirectionalRoute, pos Position, previous Whole
 	return profile, estimate, nil
 }
 
-func wholeCurveApexDetailBaseline(points []WholeCurveResampledPoint, event WholeCurveEvent) float64 {
-	values := make([]float64, 0, len(points))
-	for _, point := range points {
-		if detail := wholeCurvePointDetailMagnitude(point, event); detail > 0 {
-			values = append(values, detail)
-		}
-	}
-	if baseline := wholeCurveMedian(values); baseline > 1e-12 {
-		return baseline
-	}
-	return math.Abs(event.ControllingCurvature)
-}
-
 func wholeCurvePointDetailMagnitude(point WholeCurveResampledPoint, event WholeCurveEvent) float64 {
 	detail := 0.0
 	for _, candidate := range []*float64{point.Curvature60, point.Curvature100} {
@@ -191,21 +179,18 @@ func wholeCurvePointDetailMagnitude(point WholeCurveResampledPoint, event WholeC
 	return detail
 }
 
-func wholeCurveApexDetailCoefficient(point WholeCurveResampledPoint, event WholeCurveEvent, detailBaseline float64, cfg WholeCurveConfiguration) float64 {
-	baseline := math.Abs(detailBaseline)
-	if baseline <= 1e-12 || cfg.ApexDetailGain <= 0 || cfg.ApexDetailMaximumRatio <= 1.0 {
-		return 1.0
+func wholeCurveContinuousProfileCurvature(point WholeCurveResampledPoint, event WholeCurveEvent, cfg WholeCurveConfiguration) (float64, float64) {
+	controllingMagnitude := math.Abs(event.ControllingCurvature)
+	if controllingMagnitude <= 1e-12 || !wholeCurveIsFinite(controllingMagnitude) {
+		return event.ControllingCurvature, 1.0
 	}
 	detail := wholeCurvePointDetailMagnitude(point, event)
-	if detail <= 0 {
-		return 1.0
+	if detail <= 0 || !wholeCurveIsFinite(detail) {
+		return event.ControllingCurvature, 1.0
 	}
-	rawRatio := detail / baseline
-	if rawRatio < math.Max(1.0, cfg.ApexDetailMinimumRatio) {
-		return 1.0
-	}
-	amplified := 1.0 + cfg.ApexDetailGain*(rawRatio-1.0)
-	return clampFloat(amplified, 1.0, cfg.ApexDetailMaximumRatio)
+	maximumRatio := math.Max(1.0, cfg.LocalProfileMaximumRatio)
+	coefficient := clampFloat(detail/controllingMagnitude, 1e-6, maximumRatio)
+	return math.Copysign(controllingMagnitude*coefficient, event.ControllingCurvature), coefficient
 }
 
 func wholeCurveProfileWindow(points []WholeCurveResampledPoint, egoDistance float64) (int, int) {
@@ -328,7 +313,7 @@ func appendUniqueWholeCurveFlag(flags []WholeCurveFlag, value WholeCurveFlag) []
 }
 
 // WholeCurveRouteFingerprint implements the cross-language, half-away-from-zero
-// v2 contract consumed by vision_turn_controller.py and the Swift deploy gate.
+// v3 contract consumed by vision_turn_controller.py and the Swift deploy gate.
 func WholeCurveRouteFingerprint(generation uint64, sigmoidHash string, points []WholeCurveProfilePoint) (string, error) {
 	var canonical strings.Builder
 	fmt.Fprintf(&canonical, "MapWholeCurveProfile|%s|%d|%s\n", WholeCurveProfileVersion, generation, sigmoidHash)

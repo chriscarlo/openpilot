@@ -12,7 +12,7 @@ import Testing
   bytes[19] = 0
   for marker in [
     "MapdReleaseID:whole-curve-release-v1", "MapdBuildID:build-abc123",
-    "MapWholeCurveProfile:whole-curve-v2",
+    "MapWholeCurveProfile:whole-curve-v3",
   ] {
     bytes.append(Data(marker.utf8))
     bytes.append(0)
@@ -26,7 +26,7 @@ import Testing
     sha256: digest
   )
   let validated = try artifact.validated()
-  #expect(validated.artifact.capability == "MapWholeCurveProfile:whole-curve-v2")
+  #expect(validated.artifact.capability == "MapWholeCurveProfile:whole-curve-v3")
   #expect(validated.byteCount == UInt64(bytes.count))
   #expect(validated.persistentCacheFileName.hasPrefix("mapd-"))
   #expect(validated.persistentCacheFileName.hasSuffix(String(digest.prefix(16))))
@@ -74,7 +74,7 @@ import Testing
   )
   let manifest = TileSetManifest(
     tileSchemaVersion: 1,
-    estimatorVersion: "whole-curve-v2",
+    estimatorVersion: "whole-curve-v3",
     tuneIdentitySHA256: identity.identitySHA256,
     tileSigmoidHash: identity.tileSigmoidHash,
     mapdReleaseID: "whole-curve-release-v1",
@@ -115,7 +115,7 @@ import Testing
   let identity = TuneDeploymentIdentity(tune: Tune(params: .checkoutFallback))
   let manifest = TileSetManifest(
     tileSchemaVersion: 1,
-    estimatorVersion: "whole-curve-v2",
+    estimatorVersion: "whole-curve-v3",
     tuneIdentitySHA256: identity.identitySHA256,
     tileSigmoidHash: identity.tileSigmoidHash,
     mapdReleaseID: "release-v1",
@@ -391,7 +391,7 @@ import Testing
   for marker in [
     "MapdReleaseID:release-v1",
     "MapdBuildID:build-v1",
-    "MapWholeCurveProfile:whole-curve-v2",
+    "MapWholeCurveProfile:whole-curve-v3",
   ] { binaryData.append(Data(marker.utf8)) }
   try binaryData.write(to: binary)
   let releaseURL = repository.appendingPathComponent("mapd-release.json")

@@ -239,9 +239,9 @@ curves identifiable on the map, and the scope button on a row recenters that
 saved sample after you pan elsewhere or relaunch the app.
 
 Calibration never fits the raw vertex circle or stops at the five-node diagnostic.
-Estimator v6 first stitches the unique direction-feasible physical route across
+Estimator v7 first stitches the unique direction-feasible physical route across
 cached tile boundaries, including mapd's 0.0015 merge/split correction, then runs
-the same `whole-curve-v2` estimator used by production mapd. The fitter receives
+the same `whole-curve-v3` estimator used by production mapd. The fitter receives
 the event's profile-apex curvature after its bounded local-detail coefficient,
 so a requested apex speed constrains the same curvature the deployed controller
 will consume. Every saved row retains raw and five-node provenance for audit and
@@ -255,10 +255,13 @@ ineligible instead of silently choosing a branch or substituting a weaker
 curvature estimate.
 
 Schema-v1 `MapPreCurveSpeeds` remain disabled because raw vertex curvature does
-not share the route estimator used by strategic VTSC. `whole-curve-v2` replaces
-that mismatched stream with a continuous route profile: each 5 m point keeps the
-event-wide curvature floor, adds a bounded local apex-detail coefficient, and
-carries a physics-only speed baked by mapd from the active sigmoid. The
+not share the route estimator used by strategic VTSC. `whole-curve-v3` replaces
+that mismatched stream with a continuous route profile: each 5 m point uses the
+strongest finite same-sign 60/100 m curvature, including sub-1.0 ratios while
+curvature relaxes into and out of an ordinary apex. The whole-event value is a
+fallback and diagnostic rather than a constant floor, and a 2.0 ratio ceiling
+guards pathological local overshoot. Each point carries a physics-only speed
+baked by mapd from the active sigmoid. The
 controller verifies the profile's sigmoid hash, caches the remaining Q/bias
 projection, and falls back to live conversion if the tune changes. This is a
 route bake rather than a static tile bake, so the first road test still uses

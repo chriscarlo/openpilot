@@ -2,6 +2,14 @@
 
 Reverse-chronological. Add a new dated section for every substantive change.
 
+## 2026-07-16 — whole-curve-v3 continuous local curvature
+
+- Replaced v2's one-sided `event controlling curvature × coefficient>=1` shape with one generic continuous rule. Every 5 m point now uses the strongest finite same-sign 60/100 m curvature directly; the event-wide controlling value remains event identity/confidence context and a missing-detail fallback rather than a constant speed floor. The local/event coefficient may fall below 1.0 on normal entry and exit shoulders and is capped at 2.0 only against pathological overshoot, eliminating both flat shoulders and double-counted compact apexes.
+- Added route-level shape regressions for an ordinary symmetric entry–single-apex–exit curve, increasing and decreasing radius, two apexes within one continuous event, constant radius, S-curves, and straight roads. These are examples of one geometry rule, not scenario branches: v3 contains no curve-type classifier.
+- Bumped the production profile, capability, controller parser, Swift postflight, release manifest, and installer identity to `whole-curve-v3`. Calibration estimator v7 forces every saved familiar curve through a fresh whole-route audit and fits the v3 profile apex; unresolved samples remain banked but ineligible. The v3 fingerprint continues to bind every per-point curvature, coefficient, baked speed, event identity, route generation, and sigmoid hash.
+- Prepared a local static Linux ARM64 artifact at Application Support release `chauffeur-whole-curve-v3`, build `tree-fc148f05d6574ff4c114`, SHA-256 `6c6911a90722a0defe28263798272b515c9a027ccd23775095d895e2969532f8`, and bound the checked-in installer plus host manifest to that exact identity. It was not published or sent to the tici by this change.
+- Verification: all mapd Go tests and 174 focused controller/strategy/installer Python tests pass; the native Swift suite passes 97 Core and 40 App tests, including explicit sub-1.0 shoulder acceptance in native postflight. The signed Release app and tile decoder are rebuilt and verified separately below before commit. The tici remains untouched at longitudinal ancestor `d654725c3`; its three closing/opening-governor Params and live VTSC tune were not changed.
+
 ## 2026-07-15 — whole-curve-v2 route-baked speed and apex detail
 
 - Replaced the scalar-through-the-entire-event `whole-curve-v1` profile with `whole-curve-v2` while preserving the continuous route and stable v1 event identities. Each event keeps its controlling-curvature floor; each 5 m point applies a bounded coefficient from same-sign 60/100 m local curvature relative to the event's median local detail. Ratios below 1.05 are ignored and the coefficient is capped at 2.0. Decreasing-radius and two-apex fixtures now produce progressively tighter or repeated local target minima inside one event instead of segmented arbitration.

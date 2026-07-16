@@ -23,43 +23,89 @@ func TestWholeCurveFingerprintCrossLanguageVector(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const expected = "abf0365f8c349a7eeb7d9cb99a56b134c9a0b88b0c90db7f9ccf231132f5eebd"
+	const expected = "a0d4823aa1f16ae4bd70f3d80a1d379f02fd944ac7804ad193b9875ec40710db"
 	if fingerprint != expected {
 		t.Fatalf("fingerprint=%s expected=%s", fingerprint, expected)
 	}
 }
 
-func TestWholeCurveApexDetailTracksDecreasingRadiusWithinOneEvent(t *testing.T) {
+func TestWholeCurveContinuousProfileTracksOrdinarySingleApexShoulders(t *testing.T) {
 	cfg := DefaultWholeCurveConfiguration()
-	event := WholeCurveEvent{ControllingCurvature: 0.004}
-	curvatures := []float64{0.004, 0.005, 0.007}
+	event := WholeCurveEvent{ControllingCurvature: 0.006}
+	curvatures := []float64{0.003, 0.0045, 0.006, 0.0045, 0.003}
+	profile := make([]float64, 0, len(curvatures))
 	coefficients := make([]float64, 0, len(curvatures))
 	for _, curvature := range curvatures {
 		curvatureCopy := curvature
 		point := WholeCurveResampledPoint{Curvature60: &curvatureCopy, Curvature100: &curvatureCopy}
-		coefficients = append(coefficients, wholeCurveApexDetailCoefficient(point, event, 0.004, cfg))
+		profileCurvature, coefficient := wholeCurveContinuousProfileCurvature(point, event, cfg)
+		profile = append(profile, profileCurvature)
+		coefficients = append(coefficients, coefficient)
 	}
-	if coefficients[0] != 1.0 || !(coefficients[0] < coefficients[1] && coefficients[1] < coefficients[2]) {
-		t.Fatalf("decreasing-radius detail did not tighten progressively: %v", coefficients)
+	if !(profile[0] < profile[1] && profile[1] < profile[2] && profile[2] > profile[3] && profile[3] > profile[4]) {
+		t.Fatalf("ordinary single-apex profile did not rise and fall: %v", profile)
+	}
+	if coefficients[0] >= 1.0 || coefficients[4] >= 1.0 || math.Abs(coefficients[2]-1.0) > 1e-12 {
+		t.Fatalf("ordinary shoulders did not relax below the event diagnostic: %v", coefficients)
 	}
 }
 
-func TestWholeCurveApexDetailPreservesMultipleApexesWithinOneEvent(t *testing.T) {
+func TestWholeCurveContinuousProfilePreservesMultipleApexesWithinOneEvent(t *testing.T) {
 	cfg := DefaultWholeCurveConfiguration()
-	event := WholeCurveEvent{DirectionalID: "same-event", ControllingCurvature: -0.004}
+	event := WholeCurveEvent{DirectionalID: "same-event", ControllingCurvature: -0.007}
 	curvatures := []float64{-0.0041, -0.0065, -0.0042, -0.0070, -0.0041}
-	coefficients := make([]float64, 0, len(curvatures))
+	profile := make([]float64, 0, len(curvatures))
 	for _, curvature := range curvatures {
 		curvatureCopy := curvature
 		point := WholeCurveResampledPoint{Curvature60: &curvatureCopy, Curvature100: &curvatureCopy}
-		coefficients = append(coefficients, wholeCurveApexDetailCoefficient(point, event, 0.004, cfg))
+		profileCurvature, _ := wholeCurveContinuousProfileCurvature(point, event, cfg)
+		profile = append(profile, math.Abs(profileCurvature))
 	}
-	if !(coefficients[1] > coefficients[0] && coefficients[1] > coefficients[2] &&
-		coefficients[3] > coefficients[2] && coefficients[3] > coefficients[4]) {
-		t.Fatalf("compound curve lost its two local apexes: %v", coefficients)
+	if !(profile[1] > profile[0] && profile[1] > profile[2] &&
+		profile[3] > profile[2] && profile[3] > profile[4]) {
+		t.Fatalf("compound curve lost its two local apexes: %v", profile)
 	}
-	if coefficients[1] <= 1.0 || coefficients[3] <= 1.0 {
-		t.Fatalf("compound apexes did not exceed the event floor: %v", coefficients)
+}
+
+func TestWholeCurveProfileBuildTracksOrdinarySingleApexEntryAndExit(t *testing.T) {
+	route := integratedDirectionalRoute([][2]float64{
+		{150, 0}, {80, 0.0025}, {80, 0.0040}, {80, 0.0060},
+		{80, 0.0040}, {80, 0.0025}, {150, 0},
+	})
+	profile, _, err := BuildWholeCurveProfile(
+		route,
+		Position{Latitude: route.Nodes[0].Latitude, Longitude: route.Nodes[0].Longitude},
+		WholeCurveEstimate{},
+		time.Unix(1_800_000_000, 0),
+		DefaultSigmoidCfg(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(profile.Events) != 1 {
+		t.Fatalf("ordinary bend split into %d events", len(profile.Events))
+	}
+	event := profile.Events[0]
+	maximumCurvature := func(lower, upper float64) float64 {
+		maximum := 0.0
+		for _, point := range profile.Points {
+			if point.DistanceMeters >= lower && point.DistanceMeters <= upper {
+				maximum = math.Max(maximum, math.Abs(point.Curvature))
+			}
+		}
+		return maximum
+	}
+	entry := maximumCurvature(180, 220)
+	apex := maximumCurvature(330, 370)
+	exit := maximumCurvature(480, 520)
+	if !(entry < apex && exit < apex) {
+		t.Fatalf("ordinary profile did not relax around its apex: entry=%g apex=%g exit=%g", entry, apex, exit)
+	}
+	if math.Abs(entry-exit) > 0.00075 {
+		t.Fatalf("symmetric ordinary shoulders diverged: entry=%g exit=%g", entry, exit)
+	}
+	if event.ProfileApexIndex <= event.StartIndex || event.ProfileApexIndex >= event.EndIndex {
+		t.Fatalf("ordinary profile apex not interior: %+v", event)
 	}
 }
 
@@ -82,10 +128,10 @@ func TestWholeCurveProfileBuildRetainsTwoApexesInOneContinuousEvent(t *testing.T
 		t.Fatalf("compound bend split into %d events", len(profile.Events))
 	}
 	maximumInWindow := func(lower, upper float64) float64 {
-		maximum := 1.0
+		maximum := 0.0
 		for _, point := range profile.Points {
 			if point.DistanceMeters >= lower && point.DistanceMeters <= upper {
-				maximum = math.Max(maximum, point.CurvatureCoefficient)
+				maximum = math.Max(maximum, math.Abs(point.Curvature))
 			}
 		}
 		return maximum
@@ -93,11 +139,12 @@ func TestWholeCurveProfileBuildRetainsTwoApexesInOneContinuousEvent(t *testing.T
 	firstApex := maximumInWindow(310, 380)
 	saddle := maximumInWindow(400, 430)
 	secondApex := maximumInWindow(470, 540)
-	if firstApex <= 1 || secondApex <= 1 || firstApex <= saddle || secondApex <= saddle {
+	if firstApex <= saddle || secondApex <= saddle {
 		t.Fatalf("compound profile lost apex detail: first=%g saddle=%g second=%g", firstApex, saddle, secondApex)
 	}
-	if profile.Events[0].MaximumApexCoefficient != math.Max(firstApex, secondApex) {
-		t.Fatalf("profile apex diagnostic=%g first=%g second=%g", profile.Events[0].MaximumApexCoefficient, firstApex, secondApex)
+	profileApex := profile.Points[profile.Events[0].ProfileApexIndex]
+	if math.Abs(profileApex.Curvature) < math.Max(firstApex, secondApex)-1e-12 {
+		t.Fatalf("profile apex diagnostic=%g first=%g second=%g", profileApex.Curvature, firstApex, secondApex)
 	}
 }
 
@@ -167,8 +214,7 @@ func TestWholeCurveProfileMaterializesSignedGeometry(t *testing.T) {
 		if point.EventID == event.EventID {
 			materialized++
 			if math.Signbit(point.Curvature) != math.Signbit(event.ControllingCurvature) ||
-				math.Abs(point.Curvature) < math.Abs(event.ControllingCurvature)-1e-12 ||
-				point.CurvatureCoefficient < 1.0 || point.CurvatureCoefficient > DefaultWholeCurveConfiguration().ApexDetailMaximumRatio ||
+				point.CurvatureCoefficient <= 0.0 || point.CurvatureCoefficient > DefaultWholeCurveConfiguration().LocalProfileMaximumRatio ||
 				index < event.StartIndex || index > event.EndIndex {
 				t.Fatalf("inconsistent materialized point %d: %+v event=%+v", index, point, event)
 			}
@@ -179,7 +225,7 @@ func TestWholeCurveProfileMaterializesSignedGeometry(t *testing.T) {
 		} else if point.Curvature != 0 {
 			t.Fatalf("point outside event carries curvature: %+v", point)
 		} else if point.CurvatureCoefficient != 1.0 || point.BaseSafeSpeedMPS != cfg.MaxSpeedDefault {
-			t.Fatalf("straight point missing neutral v2 values: %+v", point)
+			t.Fatalf("straight point missing neutral v3 values: %+v", point)
 		}
 	}
 	if materialized != event.EndIndex-event.StartIndex+1 {
@@ -347,7 +393,7 @@ func TestBuildInfoContainsRequiredLiteralMarkers(t *testing.T) {
 	for _, marker := range []string{
 		"MapdReleaseID:" + MapdReleaseID,
 		"MapdBuildID:" + MapdBuildID,
-		"MapWholeCurveProfile:whole-curve-v2",
+		"MapWholeCurveProfile:whole-curve-v3",
 	} {
 		if !strings.Contains(joined, marker) {
 			t.Fatalf("missing marker %q", marker)

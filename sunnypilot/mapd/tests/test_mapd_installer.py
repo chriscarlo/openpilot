@@ -67,11 +67,11 @@ def make_release_and_binary(*, machine=mapd_installer.EM_AARCH64,
                             capability_marker=True):
   release = mapd_installer.MapdReleaseSpec(
     version=mapd_installer.DEFAULT_VERSION,
-    release_id="chauffeur-whole-curve-v2",
+    release_id="chauffeur-whole-curve-v3",
     build_id="test-build-20260713",
     sha256="f" * 64,
     capability=mapd_installer.MAP_WHOLE_CURVE_CAPABILITY,
-    binary_url="https://example.test/chauffeur-whole-curve-v2/mapd",
+    binary_url="https://example.test/chauffeur-whole-curve-v3/mapd",
   )
   header = bytearray(256)
   header[:4] = b"\x7fELF"
@@ -123,12 +123,12 @@ def test_target_version_defaults():
 def test_default_release_is_bound_to_the_v2_artifact(monkeypatch):
   monkeypatch.undo()
   assert mapd_installer.DEFAULT_RELEASE == mapd_installer.MapdReleaseSpec(
-    version="chauffeur-whole-curve-v2",
-    release_id="chauffeur-whole-curve-v2",
-    build_id="tree-a1f7f713360f65027097",
-    sha256="d0a372d8c37c1e683db20356c719d9ba4f39d21fe2b91e33728c3dbb7bca43bb",
-    capability="MapWholeCurveProfile:whole-curve-v2",
-    binary_url="https://github.com/chriscarlo/mapd/releases/download/chauffeur-whole-curve-v2/mapd",
+    version="chauffeur-whole-curve-v3",
+    release_id="chauffeur-whole-curve-v3",
+    build_id="tree-fc148f05d6574ff4c114",
+    sha256="6c6911a90722a0defe28263798272b515c9a027ccd23775095d895e2969532f8",
+    capability="MapWholeCurveProfile:whole-curve-v3",
+    binary_url="https://github.com/chriscarlo/mapd/releases/download/chauffeur-whole-curve-v3/mapd",
   )
 
 

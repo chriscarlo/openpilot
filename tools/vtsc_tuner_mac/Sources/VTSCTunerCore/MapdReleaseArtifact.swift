@@ -2,8 +2,8 @@ import CryptoKit
 import Foundation
 
 public struct MapdReleaseArtifact: Codable, Equatable, Sendable {
-  public static let defaultCapability = "MapWholeCurveProfile:whole-curve-v2"
-  public static let defaultEstimatorVersion = "whole-curve-v2"
+  public static let defaultCapability = "MapWholeCurveProfile:whole-curve-v3"
+  public static let defaultEstimatorVersion = "whole-curve-v3"
 
   public var releaseID: String
   public var buildID: String

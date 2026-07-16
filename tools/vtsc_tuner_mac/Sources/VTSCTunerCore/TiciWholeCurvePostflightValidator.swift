@@ -17,7 +17,7 @@ struct TiciWholeCurvePostflightStatus: Equatable, Sendable {
 }
 
 enum TiciWholeCurvePostflightValidator {
-  private static let estimatorVersion = "whole-curve-v2"
+  private static let estimatorVersion = "whole-curve-v3"
   private static let maximumProfileBytes = 512 * 1_024
   private static let maximumPoints = 512
   private static let maximumEvents = 128
@@ -150,7 +150,7 @@ enum TiciWholeCurvePostflightValidator {
     }
   }
 
-  /// The cross-language v2 fingerprint contract is intentionally exposed to
+  /// The cross-language v3 fingerprint contract is intentionally exposed to
   /// tests and to any future snapshot verifier.
   static func routeFingerprint(
     generation: Int,
@@ -355,7 +355,7 @@ enum TiciWholeCurvePostflightValidator {
       }
       guard (0...maximumDistanceMeters).contains(distance) else { throw ValidationError.pointDistanceRange(index) }
       guard abs(curvature) <= 1 else { throw ValidationError.pointCurvatureRange(index) }
-      guard (1...4).contains(curvatureCoefficient) else {
+      guard curvatureCoefficient > 0, curvatureCoefficient <= 4 else {
         throw ValidationError.pointCurvatureCoefficientRange(index)
       }
       guard (0...70).contains(baseSafeSpeed) else {

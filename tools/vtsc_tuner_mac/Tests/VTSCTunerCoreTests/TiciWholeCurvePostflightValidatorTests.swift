@@ -14,11 +14,11 @@ import Testing
   let status = TiciWholeCurvePostflightValidator.inspect(profileData: profile, gpsData: gps, now: now)
   #expect(status.gpsStatus == "valid")
   #expect(status.validationStatus == "valid")
-  #expect(status.estimatorVersion == "whole-curve-v2")
+  #expect(status.estimatorVersion == "whole-curve-v3")
   #expect(status.fresh)
   #expect(status.valuesFinite)
-  #expect(status.pointCount == 3)
-  #expect(status.eventCount == 0)
+  #expect(status.pointCount == 5)
+  #expect(status.eventCount == 1)
 }
 
 @Test func wholeCurvePostflightValidatorRejectsFingerprintAndRouteDistanceDrift() throws {
@@ -96,20 +96,25 @@ import Testing
     (37.000045, -122.0, 5.0, -0.0123456785, 1.25, 11.25, "0123456789abcdefabcd-a"),
     (37.000090, -122.0, 10.0, 0.0123456785, 1.5, 10.5, "0123456789abcdefabcd-b"),
   ])
-  #expect(value == "abf0365f8c349a7eeb7d9cb99a56b134c9a0b88b0c90db7f9ccf231132f5eebd")
+  #expect(value == "a0d4823aa1f16ae4bd70f3d80a1d379f02fd944ac7804ad193b9875ec40710db")
 }
 
 private func wholeCurveProfileData(now: Date) throws -> Data {
   let stepDegrees = 5.0 / 6_371_007.2 * 180 / Double.pi
-  let points: [[String: Any]] = (0..<3).map { index in
-    [
+  let eventID = "0123456789abcdefabcd-a"
+  let curvatures = [0.0, 0.003, 0.006, 0.003, 0.0]
+  let coefficients = [1.0, 0.5, 1.0, 0.5, 1.0]
+  let baseSpeeds = [70.0, 20.0, 14.0, 20.0, 70.0]
+  let points: [[String: Any]] = (0..<5).map { index in
+    let pointEventID = (1...3).contains(index) ? eventID : ""
+    return [
       "latitude": 37.0 + Double(index) * stepDegrees,
       "longitude": -122.0,
       "distanceMeters": Double(index) * 5,
-      "curvature": 0.0,
-      "curvatureCoefficient": 1.0,
-      "baseSafeSpeedMPS": 70.0,
-      "eventID": "",
+      "curvature": curvatures[index],
+      "curvatureCoefficient": coefficients[index],
+      "baseSafeSpeedMPS": baseSpeeds[index],
+      "eventID": pointEventID,
       "confidence": 1.0,
       "flags": [],
     ]
@@ -121,13 +126,23 @@ private func wholeCurveProfileData(now: Date) throws -> Data {
      $0["baseSafeSpeedMPS"] as! Double, $0["eventID"] as! String)
   })
   return try JSONSerialization.data(withJSONObject: [
-    "estimatorVersion": "whole-curve-v2",
+    "estimatorVersion": "whole-curve-v3",
     "generatedAtUnixMillis": now.timeIntervalSince1970 * 1_000,
     "routeFingerprint": fingerprint,
     "sigmoidHash": sigmoidHash,
     "generation": 7,
     "points": points,
-    "events": [],
+    "events": [[
+      "eventID": eventID,
+      "startIndex": 1,
+      "endIndex": 3,
+      "apexIndex": 2,
+      "profileApexIndex": 2,
+      "controllingCurvature": 0.006,
+      "maximumApexCoefficient": 1.0,
+      "confidence": 1.0,
+      "flags": [],
+    ]],
     "fatalAmbiguity": false,
   ])
 }

@@ -298,6 +298,74 @@ private func testMedian(_ values: [Double]) -> Double {
   #expect(abs(estimate.points[event.profileApexIndex].profileCurvature) > abs(event.controllingCurvature))
 }
 
+@Test func wholeCurveProfileRelaxesProgressivelyThroughAnIncreasingRadiusBend() throws {
+  let route = integratedRoute(sections: [
+    (150, 0),
+    (100, 0.0060),
+    (100, 0.0045),
+    (100, 0.0035),
+    (150, 0),
+  ])
+  let estimate = WholeCurveEstimator.estimate(route: route)
+  let event = try #require(estimate.events.first)
+  let eventPoints = Array(estimate.points[event.startIndex ... event.endIndex])
+  let thirds = max(1, eventPoints.count / 3)
+  let earlyMaximum = eventPoints.prefix(thirds).map { abs($0.profileCurvature) }.max() ?? 0
+  let lateMaximum = eventPoints.suffix(thirds).map { abs($0.profileCurvature) }.max() ?? .infinity
+
+  #expect(earlyMaximum > lateMaximum)
+  #expect(event.profileApexIndex < event.startIndex + 2 * thirds)
+}
+
+@Test func wholeCurveProfileTracksAnOrdinarySingleApexThroughEntryAndExit() throws {
+  let route = integratedRoute(sections: [
+    (150, 0),
+    (80, 0.0025),
+    (80, 0.0040),
+    (80, 0.0060),
+    (80, 0.0040),
+    (80, 0.0025),
+    (150, 0),
+  ])
+  let estimate = WholeCurveEstimator.estimate(route: route)
+  let event = try #require(estimate.events.first)
+  #expect(estimate.events.count == 1)
+
+  func maximumCurvature(_ range: ClosedRange<Double>) -> Double {
+    estimate.points.filter { range.contains($0.distanceMeters) }
+      .map { abs($0.profileCurvature) }.max() ?? 0
+  }
+  let entry = maximumCurvature(180 ... 220)
+  let apex = maximumCurvature(330 ... 370)
+  let exit = maximumCurvature(480 ... 520)
+
+  #expect(entry < apex)
+  #expect(exit < apex)
+  #expect(abs(entry - exit) < 0.00075)
+  #expect(estimate.points[event.startIndex].curvatureCoefficient < 1)
+  #expect(estimate.points[event.endIndex].curvatureCoefficient < 1)
+  #expect(event.profileApexIndex > event.startIndex)
+  #expect(event.profileApexIndex < event.endIndex)
+}
+
+@Test func wholeCurveProfileDoesNotInventAnApexOnAConstantRadiusBend() throws {
+  let route = integratedRoute(sections: [
+    (150, 0),
+    (400, 0.0040),
+    (150, 0),
+  ])
+  let estimate = WholeCurveEstimator.estimate(route: route)
+  let event = try #require(estimate.events.first)
+  let interior = estimate.points[event.startIndex ... event.endIndex].filter {
+    $0.distanceMeters >= 220 && $0.distanceMeters <= 480
+  }.map { abs($0.profileCurvature) }
+  let minimum = try #require(interior.min())
+  let maximum = try #require(interior.max())
+
+  #expect(maximum - minimum < 0.0002)
+  #expect(abs(0.004 - 0.5 * (minimum + maximum)) < 0.0003)
+}
+
 @Test func wholeCurveProfileRetainsTwoApexMinimaInsideOneContinuousEvent() throws {
   let route = integratedRoute(sections: [
     (150, 0),
@@ -319,8 +387,6 @@ private func testMedian(_ values: [Double]) -> Double {
   let secondApex = estimate.points.filter { (470...540).contains($0.distanceMeters) }
     .map(\.curvatureCoefficient).max() ?? 1
 
-  #expect(firstApex > 1)
-  #expect(secondApex > 1)
   #expect(firstApex > saddle)
   #expect(secondApex > saddle)
   #expect(event.maximumApexCoefficient == max(firstApex, secondApex))

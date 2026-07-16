@@ -5,15 +5,15 @@ import (
 	"io"
 )
 
-const MapWholeCurveCapability = "MapWholeCurveProfile:whole-curve-v2"
+const MapWholeCurveCapability = "MapWholeCurveProfile:whole-curve-v3"
 
 // Release builds inject a standalone-commit identity with -X. The marker
 // variables are deliberately separate because the installer verifies the raw
 // binary before executing it; release tooling must inject all four together.
 var (
-	MapdReleaseID     = "chauffeur-whole-curve-v2"
+	MapdReleaseID     = "chauffeur-whole-curve-v3"
 	MapdBuildID       = "development"
-	MapdReleaseMarker = "MapdReleaseID:chauffeur-whole-curve-v2"
+	MapdReleaseMarker = "MapdReleaseID:chauffeur-whole-curve-v3"
 	MapdBuildMarker   = "MapdBuildID:development"
 )
 

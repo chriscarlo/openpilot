@@ -61,7 +61,7 @@ private func resolverStudyPath() -> [(Double, Double)] {
   }
 }
 
-@Test func calibrationResolutionUsesTheWholeCurveV2ProfileApex() throws {
+@Test func calibrationResolutionUsesTheWholeCurveV3ProfileApex() throws {
   let coordinates = resolverStudyPath()
   let ways = MapRuntimeCurvatureResolver.resolve(
     ways: [
@@ -99,7 +99,7 @@ private func resolverStudyPath() -> [(Double, Double)] {
     calibrationSamples: [sample]
   )[sample.sourceKey])
 
-  #expect(MapRuntimeCurvatureResolver.estimatorVersion == 6)
+  #expect(MapRuntimeCurvatureResolver.estimatorVersion == 7)
   #expect(resolution.curvature == expected)
   #expect(resolution.supportMeters == event.lengthMeters)
   #expect(resolution.eventID == event.directionalID)

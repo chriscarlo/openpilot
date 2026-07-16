@@ -24,9 +24,7 @@ public struct WholeCurveConfiguration: Equatable, Sendable {
   public var sameSignMergeGapMeters = 30.0
   public var minimumEventLengthMeters = 20.0
   public var duplicatePointDistanceMeters = 0.5
-  public var apexDetailGain = 1.0
-  public var apexDetailMinimumRatio = 1.05
-  public var apexDetailMaximumRatio = 2.0
+  public var localProfileMaximumRatio = 2.0
 
   public init() {}
 }
@@ -200,28 +198,24 @@ public enum WholeCurveEstimator {
       )
     }
     for eventIndex in events.indices {
-      var maximumCoefficient = 1.0
+      var maximumCoefficient = 0.0
+      var maximumProfileCurvature = -1.0
       var profileApexIndex = events[eventIndex].apexIndex
-      let detailBaseline = apexDetailBaseline(
-        points: Array(outputPoints[events[eventIndex].startIndex ... events[eventIndex].endIndex]),
-        event: events[eventIndex]
-      )
       for pointIndex in events[eventIndex].startIndex ... events[eventIndex].endIndex {
-        let coefficient = apexDetailCoefficient(
+        let profile = continuousProfileCurvature(
           point: outputPoints[pointIndex],
           event: events[eventIndex],
-          detailBaseline: detailBaseline,
           configuration: configuration
         )
-        let curvature = events[eventIndex].controllingCurvature * coefficient
-        if abs(curvature) > abs(outputPoints[pointIndex].profileCurvature) {
-          outputPoints[pointIndex].profileCurvature = curvature
-          outputPoints[pointIndex].curvatureCoefficient = coefficient
+        if abs(profile.curvature) > abs(outputPoints[pointIndex].profileCurvature) {
+          outputPoints[pointIndex].profileCurvature = profile.curvature
+          outputPoints[pointIndex].curvatureCoefficient = profile.coefficient
         }
-        if coefficient > maximumCoefficient {
-          maximumCoefficient = coefficient
+        if abs(profile.curvature) > maximumProfileCurvature {
+          maximumProfileCurvature = abs(profile.curvature)
           profileApexIndex = pointIndex
         }
+        maximumCoefficient = max(maximumCoefficient, profile.coefficient)
       }
       events[eventIndex].profileApexIndex = profileApexIndex
       events[eventIndex].maximumApexCoefficient = maximumCoefficient
@@ -229,32 +223,21 @@ public enum WholeCurveEstimator {
     return WholeCurveEstimate(points: outputPoints, events: events)
   }
 
-  private static func apexDetailCoefficient(
+  private static func continuousProfileCurvature(
     point: WholeCurveResampledPoint,
     event: WholeCurveEvent,
-    detailBaseline: Double,
     configuration: WholeCurveConfiguration
-  ) -> Double {
-    let baseline = abs(detailBaseline)
-    guard baseline > 1.0e-12,
-          configuration.apexDetailGain > 0,
-          configuration.apexDetailMaximumRatio > 1
-    else { return 1 }
+  ) -> (curvature: Double, coefficient: Double) {
+    let controllingMagnitude = abs(event.controllingCurvature)
+    guard controllingMagnitude.isFinite, controllingMagnitude > 1.0e-12 else {
+      return (event.controllingCurvature, 1)
+    }
     let detail = pointDetailMagnitude(point: point, event: event)
-    guard detail > 0 else { return 1 }
-    let ratio = detail / baseline
-    guard ratio >= max(1, configuration.apexDetailMinimumRatio) else { return 1 }
-    let amplified = 1 + configuration.apexDetailGain * (ratio - 1)
-    return min(max(amplified, 1), configuration.apexDetailMaximumRatio)
-  }
-
-  private static func apexDetailBaseline(
-    points: [WholeCurveResampledPoint],
-    event: WholeCurveEvent
-  ) -> Double {
-    let values = points.map { pointDetailMagnitude(point: $0, event: event) }.filter { $0 > 0 }
-    let baseline = median(values)
-    return baseline > 1.0e-12 ? baseline : abs(event.controllingCurvature)
+    guard detail.isFinite, detail > 0 else { return (event.controllingCurvature, 1) }
+    let maximumRatio = max(1, configuration.localProfileMaximumRatio)
+    let coefficient = min(max(detail / controllingMagnitude, 1.0e-6), maximumRatio)
+    let curvature = (event.controllingCurvature < 0 ? -1.0 : 1.0) * controllingMagnitude * coefficient
+    return (curvature, coefficient)
   }
 
   private static func pointDetailMagnitude(
