@@ -196,6 +196,17 @@ private enum ResumedPostflightWaitState: LocalizedError, Sendable {
   }
 }
 
+private enum RuntimeStartupWaitState: LocalizedError, Sendable {
+  case processesNotReady(manager: Bool, mapd: Bool)
+
+  var errorDescription: String? {
+    switch self {
+    case let .processesNotReady(manager, mapd):
+      "post-reboot runtime is still starting: manager_running=\(manager ? 1 : 0) mapd_running=\(mapd ? 1 : 0)"
+    }
+  }
+}
+
 enum ProductionRollbackResolution: Sendable {
   case alreadyCompleted(String)
   case rolledBack(String)
@@ -378,12 +389,14 @@ public actor ApplyPipeline {
   public static let sshURL = URL(fileURLWithPath: "/usr/bin/ssh")
   public static let rsyncURL = URL(fileURLWithPath: "/usr/bin/rsync")
   public static let networkSetupURL = URL(fileURLWithPath: "/usr/sbin/networksetup")
+  static let processListURL = URL(fileURLWithPath: "/bin/ps")
 
   private let processRunner: any ProcessRunning
   private let adbURL: URL?
   private let journalWriter: @Sendable (DeploymentRollbackJournal, URL) throws -> Void
   private let rebootInitialDelayNanoseconds: UInt64
   private let rebootPollDelayNanoseconds: UInt64
+  private let currentProcessID: Int32
   private var lastADBTransportDetail: String?
 
   public init() {
@@ -392,6 +405,7 @@ public actor ApplyPipeline {
     journalWriter = { journal, url in try journal.write(to: url) }
     rebootInitialDelayNanoseconds = 15_000_000_000
     rebootPollDelayNanoseconds = 5_000_000_000
+    currentProcessID = getpid()
   }
 
   public init(processRunner: any ProcessRunning) {
@@ -400,6 +414,7 @@ public actor ApplyPipeline {
     journalWriter = { journal, url in try journal.write(to: url) }
     rebootInitialDelayNanoseconds = 15_000_000_000
     rebootPollDelayNanoseconds = 5_000_000_000
+    currentProcessID = getpid()
   }
 
   public init(processRunner: any ProcessRunning, adbURL: URL?) {
@@ -408,6 +423,7 @@ public actor ApplyPipeline {
     journalWriter = { journal, url in try journal.write(to: url) }
     rebootInitialDelayNanoseconds = 15_000_000_000
     rebootPollDelayNanoseconds = 5_000_000_000
+    currentProcessID = getpid()
   }
 
   init(
@@ -420,6 +436,7 @@ public actor ApplyPipeline {
     journalWriter = { journal, url in try journal.write(to: url) }
     self.rebootInitialDelayNanoseconds = rebootInitialDelayNanoseconds
     self.rebootPollDelayNanoseconds = rebootPollDelayNanoseconds
+    currentProcessID = getpid()
   }
 
   init(
@@ -427,13 +444,15 @@ public actor ApplyPipeline {
     adbURL: URL? = nil,
     rebootInitialDelayNanoseconds: UInt64 = 15_000_000_000,
     rebootPollDelayNanoseconds: UInt64 = 5_000_000_000,
-    journalWriter: @escaping @Sendable (DeploymentRollbackJournal, URL) throws -> Void
+    journalWriter: @escaping @Sendable (DeploymentRollbackJournal, URL) throws -> Void,
+    currentProcessID: Int32 = getpid()
   ) {
     self.processRunner = processRunner
     self.adbURL = adbURL
     self.rebootInitialDelayNanoseconds = rebootInitialDelayNanoseconds
     self.rebootPollDelayNanoseconds = rebootPollDelayNanoseconds
     self.journalWriter = journalWriter
+    self.currentProcessID = currentProcessID
   }
 
   static func productionTilePlan(for request: ApplyRequest) -> ProductionTilePlan {
@@ -860,7 +879,7 @@ public actor ApplyPipeline {
     // global transaction.
     defer {
       if let preflight = runtimePreflight {
-        try? DeploymentRollbackJournal.removeOwnedTargetlessPreflightReservation(
+        try? DeploymentRollbackJournal.removeOwnedPreflightReservation(
           matching: preflight.journal,
           at: preflight.journalURL
         )
@@ -1047,6 +1066,7 @@ public actor ApplyPipeline {
       directory: requestedJournalDirectory
     )
     let journalDirectory = productionOwnerLock.directoryURL
+    try await requireNoOtherTunerProcess()
     try DeploymentRollbackJournal.removeAbandonedPreflightReservations(directory: journalDirectory)
     let unresolved = try DeploymentRollbackJournal.unresolvedProductionJournals(
       directory: journalDirectory
@@ -1079,7 +1099,7 @@ public actor ApplyPipeline {
     var handedReservationToRuntime = false
     defer {
       if !handedReservationToRuntime {
-        try? DeploymentRollbackJournal.removeOwnedTargetlessPreflightReservation(
+        try? DeploymentRollbackJournal.removeOwnedPreflightReservation(
           matching: reservation,
           at: journalURL
         )
@@ -1564,6 +1584,7 @@ public actor ApplyPipeline {
       )
       await emit(.succeeded, id: 5, text: "Tici is still parked/offroad with Map Lookahead disabled", progress: progress)
 
+      try await validateExclusiveProductionMutationClaim(deployment)
       let ownerLock = try DeploymentRollbackJournal.acquireCompletionLock(for: deployment.journalURL)
       journalResolutionLock = ownerLock
       deployment.journal = try claimProductionMutation(
@@ -1671,6 +1692,36 @@ public actor ApplyPipeline {
       await emit(.succeeded, id: 10, text: "Single deployment reboot sent", progress: progress)
 
       await emit(
+        .running,
+        id: 11,
+        text: "Waiting for the tici and verifying the installed static identity…",
+        progress: progress
+      )
+      do {
+        try await waitForTici(
+          profile: deployment.profile,
+          timeout: 300,
+          initialDelayNanoseconds: rebootInitialDelayNanoseconds,
+          pollDelayNanoseconds: rebootPollDelayNanoseconds
+        )
+        _ = try await waitForStaticInstalledIdentity(
+          preflight: deployment,
+          targetHead: targetHead,
+          identity: identity,
+          expectedActiveTileSetID: deployment.tileSet?.manifest.tileSetID ?? deployment.journal.previousTileSetID,
+          timeout: 300,
+          pollInterval: max(0.001, Double(rebootPollDelayNanoseconds) / 1_000_000_000)
+        )
+      } catch {
+        await emitFailure(
+          id: 11,
+          text: "Deployment reboot/static identity could not be proven; outdoor postflight remains pending",
+          error: error,
+          progress: progress
+        )
+        return await finish(false, progress: progress)
+      }
+      await emit(
         .succeeded,
         id: 11,
         text: "Deployment installed; outdoor controller-ready proof remains pending",
@@ -1710,6 +1761,26 @@ public actor ApplyPipeline {
         await emitFailure(id: 12, text: "Production deployment failed before remote mutation", error: error, progress: progress)
       }
       return await finish(false, progress: progress)
+    }
+  }
+
+  func validateExclusiveProductionMutationClaim(_ deployment: RuntimeDeploymentPreflight) async throws {
+    guard let productionOwnerLock = deployment.productionOwnerLock else {
+      throw ApplyPipelineError.postflightMismatch("production deployment lost its global transaction owner")
+    }
+    try await requireNoOtherTunerProcess()
+    let unresolved = try DeploymentRollbackJournal.unresolvedProductionJournals(
+      directory: productionOwnerLock.directoryURL
+    ).filter { $0.url != deployment.journalURL.standardizedFileURL }
+    guard unresolved.isEmpty else {
+      throw ApplyPipelineError.unresolvedProductionRollbacks(unresolved.map(\.url))
+    }
+    let current = try DeploymentRollbackJournal.load(from: deployment.journalURL)
+    guard current == deployment.journal,
+          current.effectiveResolution == .preflightReserved,
+          current.completed,
+          !current.rebootSent else {
+      throw ApplyPipelineError.postflightMismatch("production reservation changed before mutation claim")
     }
   }
 
@@ -1921,6 +1992,31 @@ public actor ApplyPipeline {
     }
   }
 
+  private func readTiciStaticPostflight(
+    profile: String,
+    context: String,
+    timeout: TimeInterval = 30
+  ) async throws -> TiciStaticDeploymentPostflightRead {
+    let result = try await checked(
+      ProcessRequest(
+        executableURL: Self.sshURL,
+        arguments: sshOptions(connectTimeout: 10) + [
+          profile,
+          TiciSnapshotWireCommandBuilder.inspectionCommand(includeStaticPostflight: true),
+        ],
+        timeout: max(0.001, min(30, timeout))
+      ),
+      context: context
+    )
+    do {
+      return try TiciDeploymentSnapshotDecoder.decodeStaticPostflight(result.standardOutput)
+    } catch {
+      throw ApplyPipelineError.invalidDeploymentOutput(
+        "\(result.standardOutput)\n\(error.localizedDescription)"
+      )
+    }
+  }
+
   private func isRetryableResumedTransportError(_ error: Error) -> Bool {
     if let runnerError = error as? ProcessRunnerError,
        case .timedOut = runnerError { return true }
@@ -1932,6 +2028,45 @@ public actor ApplyPipeline {
       true
     default:
       false
+    }
+  }
+
+  private func isRetryablePostRebootStartupError(_ error: Error) -> Bool {
+    error is RuntimeStartupWaitState || isRetryableResumedTransportError(error)
+  }
+
+  private func requireNoOtherTunerProcess() async throws {
+    let result = try await checked(
+      ProcessRequest(
+        executableURL: Self.processListURL,
+        arguments: ["-axo", "pid=,command="],
+        timeout: 10
+      ),
+      context: "inspect running VTSC Tuner processes"
+    )
+    let peers = Self.otherTunerProcessLines(
+      result.standardOutput,
+      excluding: currentProcessID
+    )
+    guard peers.isEmpty else {
+      throw ApplyPipelineError.postflightMismatch(
+        "Another VTSC Tuner process is running. Close every other VTSC Tuner window before a car-facing deployment.\n\(peers.joined(separator: "\n"))"
+      )
+    }
+  }
+
+  static func otherTunerProcessLines(_ processList: String, excluding currentPID: Int32) -> [String] {
+    processList.components(separatedBy: .newlines).compactMap { rawLine in
+      let line = rawLine.trimmingCharacters(in: .whitespaces)
+      guard !line.isEmpty else { return nil }
+      let fields = line.split(maxSplits: 1, whereSeparator: \Character.isWhitespace)
+      guard fields.count == 2, let pid = Int32(fields[0]), pid != currentPID else { return nil }
+      let command = String(fields[1])
+      let executableToken = command.split(whereSeparator: \Character.isWhitespace).first.map(String.init) ?? ""
+      let exactBundleExecutable = URL(fileURLWithPath: executableToken).lastPathComponent == "VTSCTuner" ||
+        command.contains("/VTSC Tuner.app/Contents/MacOS/VTSCTuner")
+      guard exactBundleExecutable else { return nil }
+      return "pid=\(pid) \(command)"
     }
   }
 
@@ -2025,6 +2160,7 @@ public actor ApplyPipeline {
       mapdVersion: snapshot.mapdVersion ?? "",
       activeMapdSHA256: snapshot.activeMapdSHA256,
       cachedMapdSHA256: snapshot.cachedMapdSHA256 ?? "",
+      managerRunning: readback.managerRunning,
       mapdRunning: readback.mapdRunning,
       // An exact active digest is a stronger marker check than scanning a
       // moving executable, and the local immutable artifact was marker- and
@@ -2046,6 +2182,61 @@ public actor ApplyPipeline {
       liveMapDataLogMonoTimeNs: readback.liveMapDataControllerStatus.logMonoTimeNs,
       liveMapDataSampleMonoTimeNs: readback.liveMapDataControllerStatus.sampleMonoTimeNs,
       roadGeometryValid: readback.liveMapDataControllerStatus.roadGeometryValid,
+      activeTileSetID: snapshot.activeTileSetID
+    )
+  }
+
+  private func makeStaticProductionPostflight(
+    _ readback: TiciStaticDeploymentPostflightRead,
+    preflight: RuntimeDeploymentPreflight,
+    identity: TuneDeploymentIdentity
+  ) -> TiciDeploymentPostflight {
+    let snapshot = readback.deployment.snapshot
+    let physics = Dictionary(uniqueKeysWithValues: identity.physics.map { ($0.paramKey, $0.value) })
+    let physicsMatches = physics.allSatisfy { snapshot.physicsParams[$0.key] ?? nil == $0.value }
+    let release = preflight.release.artifact
+    let buildInfo = try? JSONDecoder().decode(TiciMapdReleaseBuildInfo.self, from: readback.activeMapdBuildInfo)
+    let buildInfoMatches = buildInfo?.releaseID == release.releaseID &&
+      buildInfo?.buildID == release.buildID &&
+      buildInfo?.estimatorVersion == release.estimatorVersion &&
+      buildInfo?.capabilities.contains(release.capability) == true
+    return TiciDeploymentPostflight(
+      isOffroad: snapshot.isOffroad,
+      isOnroad: snapshot.isOnroad,
+      runtimeEndIsOffroad: readback.runtimeEndIsOffroad,
+      runtimeEndIsOnroad: readback.runtimeEndIsOnroad,
+      runtimeEndMapLookaheadEnabled: readback.runtimeEndMapLookaheadEnabled,
+      mapLookaheadEnabled: snapshot.mapLookaheadEnabled,
+      branch: snapshot.branch,
+      head: snapshot.head,
+      dirty: snapshot.dirty,
+      physicsMatches: physicsMatches,
+      qCurveSHA256: readback.deployment.qCurve.sha256,
+      qCurveEnabled: readback.deployment.qCurve.enabled,
+      qCurvePointCount: readback.deployment.qCurve.pointCount,
+      mapdReleaseVersion: snapshot.mapdReleaseVersion ?? "",
+      mapdVersion: snapshot.mapdVersion ?? "",
+      activeMapdSHA256: snapshot.activeMapdSHA256,
+      cachedMapdSHA256: snapshot.cachedMapdSHA256 ?? "",
+      managerRunning: readback.managerRunning,
+      mapdRunning: readback.mapdRunning,
+      capabilityPresent: snapshot.activeMapdSHA256 == release.sha256,
+      activeELFARM64: isELF64LittleEndianARM64(readback.activeMapdELFHeader),
+      buildInfoMatches: buildInfoMatches,
+      profileEstimatorVersion: "",
+      profileRouteFingerprint: "",
+      profileSigmoidHash: "",
+      profileFresh: false,
+      profileValuesFinite: false,
+      gpsStatus: "not_checked",
+      profileValidationStatus: "not_checked",
+      profilePointCount: 0,
+      profileEventCount: 0,
+      liveMapDataUpdated: false,
+      liveMapDataValid: false,
+      liveMapDataLogMonoTimeNs: 0,
+      liveMapDataSampleMonoTimeNs: 0,
+      roadGeometryValid: false,
       activeTileSetID: snapshot.activeTileSetID
     )
   }
@@ -2092,8 +2283,11 @@ public actor ApplyPipeline {
     guard result.activeMapdSHA256 == release.sha256, result.cachedMapdSHA256 == release.sha256 else {
       throw ApplyPipelineError.postflightMismatch("active and persistent mapd digests are not exact")
     }
-    guard result.mapdRunning, result.capabilityPresent, result.activeELFARM64, result.buildInfoMatches else {
-      throw ApplyPipelineError.postflightMismatch("native mapd is not running with the exact ARM64 build identity/capability")
+    guard result.managerRunning, result.mapdRunning, result.capabilityPresent,
+          result.activeELFARM64, result.buildInfoMatches else {
+      throw ApplyPipelineError.postflightMismatch(
+        "manager/mapd is not running with the exact ARM64 build identity/capability"
+      )
     }
     if requireNonemptyWholeCurveProfile {
       guard result.profileValidationStatus != "profile_pending",
@@ -2130,6 +2324,89 @@ public actor ApplyPipeline {
     }
   }
 
+  private func validateStaticInstalledIdentity(
+    _ result: TiciDeploymentPostflight,
+    preflight: RuntimeDeploymentPreflight,
+    targetHead: String,
+    identity: TuneDeploymentIdentity,
+    expectedActiveTileSetID: String?
+  ) throws {
+    guard result.isOffroad, !result.isOnroad,
+          result.runtimeEndIsOffroad, !result.runtimeEndIsOnroad else {
+      throw ApplyPipelineError.ticiNotOffroad
+    }
+    guard !result.mapLookaheadEnabled, !result.runtimeEndMapLookaheadEnabled else {
+      throw ApplyPipelineError.mapLookaheadMustRemainDisabled
+    }
+    guard result.branch == preflight.journal.branch else { throw ApplyPipelineError.invalidBranch(result.branch) }
+    guard !result.dirty else { throw ApplyPipelineError.repositoryDirty("tici checkout is dirty after reboot") }
+    guard result.head == targetHead else {
+      throw ApplyPipelineError.commitMismatch(context: "tici static post-reboot", expected: targetHead, actual: result.head)
+    }
+    guard result.physicsMatches else { throw ApplyPipelineError.postflightMismatch("physics Params differ from source") }
+    guard result.qCurveSHA256 == identity.qCurveSHA256,
+          result.qCurveEnabled == identity.qCurveEnabled,
+          result.qCurvePointCount == identity.qCurvePointCount else {
+      throw ApplyPipelineError.postflightMismatch("Q curve differs from the exact deployed source")
+    }
+    let release = preflight.release.artifact
+    guard result.mapdReleaseVersion == release.releaseID, result.mapdVersion == release.releaseID else {
+      throw ApplyPipelineError.postflightMismatch("MapdVersion/MapdReleaseVersion do not match \(release.releaseID)")
+    }
+    guard result.activeMapdSHA256 == release.sha256, result.cachedMapdSHA256 == release.sha256 else {
+      throw ApplyPipelineError.postflightMismatch("active and persistent mapd digests are not exact")
+    }
+    guard result.capabilityPresent, result.activeELFARM64, result.buildInfoMatches else {
+      throw ApplyPipelineError.postflightMismatch("native mapd build identity/capability is not exact")
+    }
+    guard result.activeTileSetID == expectedActiveTileSetID else {
+      throw ApplyPipelineError.postflightMismatch("active tile-set identity changed after reboot")
+    }
+    guard result.managerRunning, result.mapdRunning else {
+      throw RuntimeStartupWaitState.processesNotReady(
+        manager: result.managerRunning,
+        mapd: result.mapdRunning
+      )
+    }
+  }
+
+  func waitForStaticInstalledIdentity(
+    preflight: RuntimeDeploymentPreflight,
+    targetHead: String,
+    identity: TuneDeploymentIdentity,
+    expectedActiveTileSetID: String?,
+    timeout: TimeInterval,
+    pollInterval: TimeInterval = 5
+  ) async throws -> TiciDeploymentPostflight {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: .seconds(timeout))
+    var lastError: Error = RuntimeStartupWaitState.processesNotReady(manager: false, mapd: false)
+    repeat {
+      try Task.checkCancellation()
+      do {
+        let readback = try await readTiciStaticPostflight(
+          profile: preflight.profile,
+          context: "verify static post-reboot installation identity"
+        )
+        let postflight = makeStaticProductionPostflight(readback, preflight: preflight, identity: identity)
+        try validateStaticInstalledIdentity(
+          postflight,
+          preflight: preflight,
+          targetHead: targetHead,
+          identity: identity,
+          expectedActiveTileSetID: expectedActiveTileSetID
+        )
+        return postflight
+      } catch {
+        guard isRetryablePostRebootStartupError(error) else { throw error }
+        lastError = error
+      }
+      guard clock.now < deadline else { break }
+      try await Task.sleep(for: .seconds(max(0.001, pollInterval)))
+    } while clock.now < deadline
+    throw lastError
+  }
+
   private func validateResumedStaticIdentity(
     _ result: TiciDeploymentPostflight,
     preflight: RuntimeDeploymentPreflight,
@@ -2158,8 +2435,11 @@ public actor ApplyPipeline {
     guard result.activeMapdSHA256 == release.sha256, result.cachedMapdSHA256 == release.sha256 else {
       throw ApplyPipelineError.postflightMismatch("active and persistent mapd digests are not exact")
     }
-    guard result.mapdRunning, result.capabilityPresent, result.activeELFARM64, result.buildInfoMatches else {
-      throw ApplyPipelineError.postflightMismatch("native mapd is not running with the exact ARM64 build identity/capability")
+    guard result.managerRunning, result.mapdRunning, result.capabilityPresent,
+          result.activeELFARM64, result.buildInfoMatches else {
+      throw ApplyPipelineError.postflightMismatch(
+        "manager/mapd is not running with the exact ARM64 build identity/capability"
+      )
     }
     guard result.activeTileSetID == expectedActiveTileSetID else {
       throw ApplyPipelineError.postflightMismatch("active tile-set identity changed during resumed postflight")
@@ -2701,7 +2981,7 @@ public actor ApplyPipeline {
           "active_tile_set_id=\(readback.deployment.snapshot.activeTileSetID ?? "")",
         ].joined(separator: "\n")
       } catch {
-        guard isRetryableResumedTransportError(error) else { throw error }
+        guard isRetryablePostRebootStartupError(error) else { throw error }
         lastError = error
       }
       if Date() < deadline { try await Task.sleep(for: .seconds(max(0.001, pollInterval))) }
@@ -2754,15 +3034,18 @@ public actor ApplyPipeline {
         throw ApplyPipelineError.postflightMismatch("rollback persistent mapd cache digest differs")
       }
     }
-    guard readback.mapdRunning else {
-      throw ApplyPipelineError.postflightMismatch("mapd is not running after rollback")
-    }
     guard snapshot.activeTileSetID == journal.previousTileSetID else {
       throw ApplyPipelineError.postflightMismatch("rollback tile-set identity differs")
     }
     if tilesWereTouched, let targetTileSetID = journal.targetTileSetID,
        snapshot.activeTileSetID == targetTileSetID {
       throw ApplyPipelineError.postflightMismatch("rolled-back tile set is still active")
+    }
+    guard readback.managerRunning, readback.mapdRunning else {
+      throw RuntimeStartupWaitState.processesNotReady(
+        manager: readback.managerRunning,
+        mapd: readback.mapdRunning
+      )
     }
   }
 

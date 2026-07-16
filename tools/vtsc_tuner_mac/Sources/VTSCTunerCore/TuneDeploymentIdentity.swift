@@ -321,8 +321,6 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
     )
     let recoverable = candidates.filter {
       $0.0.effectiveResolution == .rollbackInProgress ||
-        ($0.0.effectiveResolution == .preflightReserved &&
-          $0.0.targetHead != nil) ||
         $0.0.effectiveResolution == .mutationInProgress ||
         $0.0.effectiveResolution == .rollbackFailed ||
         ($0.0.effectiveResolution == .awaitingPostflight &&
@@ -425,8 +423,13 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
     let directory = try explicitDirectory?.standardizedFileURL ?? defaultDirectory(fileManager: fileManager)
     guard fileManager.fileExists(atPath: directory.path) else { return }
     for (journal, url) in try journalCandidates(directory: directory, fileManager: fileManager) {
+      // The caller owns the canonical global production flock. Acquiring that
+      // lock proves no prior new-version deployment process remains alive, so
+      // either targetless or fully populated preflightReserved is safe to
+      // delete: claimProductionMutation was the durable boundary before any
+      // remote mutation was authorized.
       let orphanedCurrentPreflight = journal.effectiveResolution == .preflightReserved &&
-        journal.completed && !journal.rebootSent && journal.targetHead == nil
+        journal.completed && !journal.rebootSent
       if orphanedCurrentPreflight {
         try durablyRemoveJournal(at: url, fileManager: fileManager)
         continue
@@ -440,7 +443,7 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
     }
   }
 
-  public static func removeOwnedTargetlessPreflightReservation(
+  public static func removeOwnedPreflightReservation(
     matching expected: Self,
     at url: URL,
     fileManager: FileManager = .default
@@ -449,8 +452,7 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
     guard current == expected,
           current.effectiveResolution == .preflightReserved,
           current.completed,
-          !current.rebootSent,
-          current.targetHead == nil else { return }
+          !current.rebootSent else { return }
     try durablyRemoveJournal(at: url, fileManager: fileManager)
   }
 

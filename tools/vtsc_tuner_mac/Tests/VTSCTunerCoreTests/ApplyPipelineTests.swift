@@ -158,6 +158,32 @@ import Testing
   #expect(captureIndex < completionIndex)
 }
 
+@Test(arguments: [[false], [true, false]])
+func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByRead: [Bool]) async throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  fixture.journal.resolution = .awaitingOutdoorPostflight
+  try fixture.journal.write(to: fixture.journalURL)
+  let before = try Data(contentsOf: fixture.journalURL)
+  fixture.managerRunningByRead = managerByRead
+  let runner = ResumePostflightRunner(fixture: fixture)
+
+  let succeeded = await ApplyPipeline(processRunner: runner).resumePendingPostflight(
+    ResumePostflightRequest(
+      tune: fixture.tune,
+      repositoryRoot: fixture.repository,
+      mapdReleaseManifestURL: fixture.releaseURL,
+      journalURL: fixture.journalURL,
+      timeout: 1,
+      pollInterval: 0.001
+    )
+  ) { _ in }
+
+  #expect(!succeeded)
+  #expect(await runner.runtimeReadCount == managerByRead.count)
+  #expect(try Data(contentsOf: fixture.journalURL) == before)
+}
+
 @Test func resumePostflightRequiresControllerReadyRoadGeometryBeforeOffroadCompletion() async throws {
   var fixture = try resumePostflightFixture(validGPS: true)
   defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -683,12 +709,82 @@ import Testing
   #expect(!FileManager.default.fileExists(atPath: fixture.journalURL.path))
 }
 
+@Test func targetBearingPreflightReservationIsRemovedOnlyAfterOwnerCrash() throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  fixture.journal.rebootSent = false
+  fixture.journal.completed = true
+  fixture.journal.resolution = .preflightReserved
+  try fixture.journal.write(to: fixture.journalURL)
+  let directory = fixture.journalURL.deletingLastPathComponent()
+
+  let liveOwner = try DeploymentRollbackJournal.acquireProductionOwnerLock(directory: directory)
+  #expect(throws: DeploymentRollbackJournalError.productionOwnerLocked(
+    directory.appendingPathComponent(".production-owner.lock").standardizedFileURL
+  )) {
+    _ = try DeploymentRollbackJournal.acquireProductionOwnerLock(directory: directory)
+  }
+  #expect(FileManager.default.fileExists(atPath: fixture.journalURL.path))
+  liveOwner.unlock()
+
+  let recoveryOwner = try DeploymentRollbackJournal.acquireProductionOwnerLock(directory: directory)
+  defer { recoveryOwner.unlock() }
+  try DeploymentRollbackJournal.removeAbandonedPreflightReservations(directory: directory)
+  #expect(!FileManager.default.fileExists(atPath: fixture.journalURL.path))
+}
+
+@Test func peerTunerProcessDetectionIsExactAndExcludesCurrentPID() {
+  let lines = """
+      100 /Applications/VTSC Tuner.app/Contents/MacOS/VTSCTuner
+      101 /tmp/VTSCTuner-helper
+      102 /Applications/Other.app/Contents/MacOS/Other --label VTSCTuner
+      103 /Users/test/VTSC Tuner.app/Contents/MacOS/VTSCTuner
+  """
+  let peers = ApplyPipeline.otherTunerProcessLines(lines, excluding: 100)
+  #expect(peers.count == 1)
+  #expect(peers[0].hasPrefix("pid=103 "))
+}
+
+@Test func liveOldTunerPeerPreventsLegacyPruningAndAnyPreflightWork() async throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  fixture.journal.targetHead = nil
+  fixture.journal.rebootSent = false
+  fixture.journal.completed = false
+  fixture.journal.resolution = nil
+  fixture.journal.createdAt = Date(timeIntervalSinceNow: -3_600).ISO8601Format()
+  try fixture.journal.write(to: fixture.journalURL)
+  let runner = ProductionPreflightRunner(
+    head: fixture.toolingHead,
+    processList: "999 /Applications/VTSC Tuner.app/Contents/MacOS/VTSCTuner\n"
+  )
+  await #expect(throws: ApplyPipelineError.self) {
+    _ = try await ApplyPipeline(
+      processRunner: runner,
+      adbURL: nil,
+      journalWriter: { journal, url in try journal.write(to: url) },
+      currentProcessID: 100
+    ).productionPreflight(ApplyRequest(
+      action: .pullOnTici,
+      tune: fixture.tune,
+      repositoryRoot: fixture.repository,
+      preferredTiciProfile: "commaAdb",
+      mapdReleaseManifestURL: fixture.releaseURL,
+      rollbackJournalDirectoryURL: fixture.journalURL.deletingLastPathComponent(),
+      verificationRequests: []
+    ))
+  }
+  #expect(FileManager.default.fileExists(atPath: fixture.journalURL.path))
+  #expect(!(await runner.requests).contains { $0.executableURL == ApplyPipeline.sshURL })
+}
+
 @Test func rollbackVerificationFailsImmediatelyOnHardMismatchEvenIfNextReadWouldHeal() async throws {
   let fixture = try resumePostflightFixture(validGPS: true)
   defer { try? FileManager.default.removeItem(at: fixture.root) }
   let runner = FreshProcessRollbackRecoveryRunner(
     journal: fixture.journal,
-    runtimeBranches: ["wrong-branch", fixture.journal.branch]
+    runtimeBranches: ["wrong-branch", fixture.journal.branch],
+    runtimeProcessReady: [false, true]
   )
   do {
     _ = try await ApplyPipeline(processRunner: runner).waitForRollbackVerification(
@@ -718,6 +814,100 @@ import Testing
     pollInterval: 0.001
   )
   #expect(await runner.runtimeReadCount == 2)
+}
+
+@Test func rollbackVerificationRetriesOnlyRuntimeStartupThenAcceptsExactIdentity() async throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  fixture.journal.previousCachedMapdPath = ""
+  fixture.journal.previousCachedMapdSHA256 = nil
+  let runner = FreshProcessRollbackRecoveryRunner(
+    journal: fixture.journal,
+    runtimeProcessReady: [false, true]
+  )
+  _ = try await ApplyPipeline(processRunner: runner).waitForRollbackVerification(
+    context: ProductionRollbackContext(journal: fixture.journal, journalURL: fixture.journalURL),
+    tilesWereTouched: false,
+    timeout: 1,
+    pollInterval: 0.001
+  )
+  #expect(await runner.runtimeReadCount == 2)
+}
+
+@Test func staticPostRebootInstallationRetriesStartupAndRequiresExactIdentity() async throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  fixture.managerRunningByRead = [false, true]
+  let runner = ResumePostflightRunner(fixture: fixture)
+  _ = try await ApplyPipeline(processRunner: runner).waitForStaticInstalledIdentity(
+    preflight: try resumeRuntimePreflight(fixture),
+    targetHead: fixture.toolingHead,
+    identity: TuneDeploymentIdentity(tune: fixture.tune),
+    expectedActiveTileSetID: nil,
+    timeout: 1,
+    pollInterval: 0.001
+  )
+  #expect(await runner.runtimeReadCount == 2)
+
+  fixture.runtimeBranch = "wrong-branch"
+  fixture.managerRunningByRead = [true, true]
+  let hardRunner = ResumePostflightRunner(fixture: fixture)
+  await #expect(throws: ApplyPipelineError.self) {
+    _ = try await ApplyPipeline(processRunner: hardRunner).waitForStaticInstalledIdentity(
+      preflight: try resumeRuntimePreflight(fixture),
+      targetHead: fixture.toolingHead,
+      identity: TuneDeploymentIdentity(tune: fixture.tune),
+      expectedActiveTileSetID: nil,
+      timeout: 1,
+      pollInterval: 0.001
+    )
+  }
+  #expect(await hardRunner.runtimeReadCount == 1)
+}
+
+@Test func failedStaticPostRebootProofRetainsPendingJournalWithoutRollback() async throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  fixture.journal.rebootSent = false
+  fixture.journal.completed = true
+  fixture.journal.resolution = .preflightReserved
+  try fixture.journal.write(to: fixture.journalURL)
+  let pipeline = ApplyPipeline(processRunner: RollbackClaimRecoveryRunner(failRemoteRollback: false))
+  var claimed = try await pipeline.claimProductionMutation(expected: fixture.journal, at: fixture.journalURL)
+  claimed.rebootSent = true
+  try claimed.write(to: fixture.journalURL)
+  let pending = try await pipeline.handoffToOutdoorPostflight(expected: claimed, at: fixture.journalURL)
+  let before = try Data(contentsOf: fixture.journalURL)
+
+  fixture.runtimeBranch = "wrong-branch"
+  let runner = ResumePostflightRunner(fixture: fixture)
+  await #expect(throws: ApplyPipelineError.self) {
+    _ = try await ApplyPipeline(processRunner: runner).waitForStaticInstalledIdentity(
+      preflight: RuntimeDeploymentPreflight(
+        git: GitDeploymentPreflight(
+          branch: fixture.journal.branch,
+          localHead: fixture.toolingHead,
+          originHead: fixture.toolingHead,
+          upstream: "origin/chauffeur-exp01"
+        ),
+        profile: fixture.journal.profile,
+        mapdRecoveryOutcome: .clean,
+        release: try fixture.release.validated(),
+        tileSet: nil,
+        journal: pending,
+        journalURL: fixture.journalURL
+      ),
+      targetHead: fixture.toolingHead,
+      identity: TuneDeploymentIdentity(tune: fixture.tune),
+      expectedActiveTileSetID: nil,
+      timeout: 1,
+      pollInterval: 0.001
+    )
+  }
+  #expect(try Data(contentsOf: fixture.journalURL) == before)
+  #expect(!(await runner.requests).contains {
+    ($0.arguments.last ?? "").contains(TiciProductionRollbackCommandBuilder.resultMarker)
+  })
 }
 
 @Test func rollbackVerificationRejectsActiveTileWhenRecordedPriorWasNil() async throws {
@@ -1278,6 +1468,37 @@ import Testing
   let first = try await firstTask.value
   defer { first.productionOwnerLock?.unlock() }
   #expect(try jsonFileNames(in: directory).count == 1)
+}
+
+@Test func lateUnresolvedJournalBlocksMutationClaimUnderGlobalOwner() async throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  fixture.journal.rebootSent = false
+  fixture.journal.completed = true
+  fixture.journal.resolution = .preflightReserved
+  try fixture.journal.write(to: fixture.journalURL)
+  let directory = fixture.journalURL.deletingLastPathComponent()
+  let owner = try DeploymentRollbackJournal.acquireProductionOwnerLock(directory: directory)
+  var preflight = try resumeRuntimePreflight(fixture)
+  preflight.productionOwnerLock = owner
+
+  var late = fixture.journal
+  late.deploymentID = UUID()
+  late.createdAt = Date().ISO8601Format()
+  let lateURL = directory.appendingPathComponent("\(late.deploymentID.uuidString).json")
+  try late.write(to: lateURL)
+
+  let runner = ProductionPreflightRunner(head: fixture.toolingHead)
+  await #expect(throws: ApplyPipelineError.self) {
+    try await ApplyPipeline(
+      processRunner: runner,
+      adbURL: nil,
+      journalWriter: { journal, url in try journal.write(to: url) },
+      currentProcessID: 100
+    ).validateExclusiveProductionMutationClaim(preflight)
+  }
+  #expect(try DeploymentRollbackJournal.load(from: fixture.journalURL).effectiveResolution == .preflightReserved)
+  owner.unlock()
 }
 
 @Test func earlyHostFailureDurablyRemovesItsOwnTargetlessPreflightBeforeUnlock() async throws {
@@ -1892,12 +2113,17 @@ private func jsonFileNames(in directory: URL) throws -> [String] {
 
 private actor ProductionPreflightRunner: ProcessRunning {
   let head: String
+  let processList: String
   private(set) var requests: [ProcessRequest] = []
 
-  init(head: String) { self.head = head }
+  init(head: String, processList: String = "") {
+    self.head = head
+    self.processList = processList
+  }
 
   func run(_ request: ProcessRequest) async throws -> ProcessResult {
     requests.append(request)
+    if request.executableURL == ApplyPipeline.processListURL { return success(processList) }
     if request.executableURL == ApplyPipeline.gitURL {
       switch request.arguments {
       case ["branch", "--show-current"]: return success("chauffeur-exp01\n")
@@ -1968,6 +2194,7 @@ private actor BlockingProductionPreflightRunner: ProcessRunning {
   }
 
   func run(_ request: ProcessRequest) async throws -> ProcessResult {
+    if request.executableURL == ApplyPipeline.processListURL { return success("") }
     if request.executableURL == ApplyPipeline.gitURL {
       switch request.arguments {
       case ["branch", "--show-current"]: return success("chauffeur-exp01\n")
@@ -2059,6 +2286,7 @@ private actor FreshProcessRollbackRecoveryRunner: ProcessRunning {
   let runtimeActiveTileSetID: String?
   let runtimeEndOnroad: Bool
   let runtimeEndLookahead: Bool
+  let runtimeProcessReady: [Bool]
   private(set) var requests: [ProcessRequest] = []
   private(set) var runtimeReadCount = 0
 
@@ -2068,7 +2296,8 @@ private actor FreshProcessRollbackRecoveryRunner: ProcessRunning {
     runtimeTransportFailures: Int = 0,
     runtimeActiveTileSetID: String? = nil,
     runtimeEndOnroad: Bool = false,
-    runtimeEndLookahead: Bool = false
+    runtimeEndLookahead: Bool = false,
+    runtimeProcessReady: [Bool] = []
   ) {
     self.journal = journal
     self.runtimeBranches = runtimeBranches
@@ -2076,6 +2305,7 @@ private actor FreshProcessRollbackRecoveryRunner: ProcessRunning {
     self.runtimeActiveTileSetID = runtimeActiveTileSetID
     self.runtimeEndOnroad = runtimeEndOnroad
     self.runtimeEndLookahead = runtimeEndLookahead
+    self.runtimeProcessReady = runtimeProcessReady
   }
 
   func run(_ request: ProcessRequest) async throws -> ProcessResult {
@@ -2137,7 +2367,8 @@ private actor FreshProcessRollbackRecoveryRunner: ProcessRunning {
       } ?? "").utf8),
       .activeMapdBuildInfo: Data("{}".utf8),
       .activeMapdELFHeader: Data([0x7f, 0x45, 0x4c, 0x46, 2, 1]),
-      .mapdRunning: Data("1".utf8),
+      .managerRunning: Data(((runtimeProcessReady.indices.contains(readIndex - 1) && !runtimeProcessReady[readIndex - 1]) ? "0" : "1").utf8),
+      .mapdRunning: Data(((runtimeProcessReady.indices.contains(readIndex - 1) && !runtimeProcessReady[readIndex - 1]) ? "0" : "1").utf8),
       .remoteEpochMilliseconds: Data("1800000000000".utf8),
       .liveMapDataControllerStatus: Data("0|0|0|0|0".utf8),
       .runtimeEndIsOffroad: Data((runtimeEndOnroad ? "0" : "1").utf8),
@@ -2317,6 +2548,7 @@ private struct ResumePostflightFixture: Sendable {
   var runtimeHead: String
   var runtimeBranch: String
   var runtimeDirty: Bool
+  var managerRunningByRead: [Bool]
   var controllerRoadGeometryValid: Bool
   var controllerLogMonoTimeNs: UInt64
   var controllerSampleMonoTimeNs: UInt64
@@ -2433,6 +2665,7 @@ private func resumePostflightFixture(validGPS: Bool) throws -> ResumePostflightF
     runtimeHead: toolingHead,
     runtimeBranch: "chauffeur-exp01",
     runtimeDirty: false,
+    managerRunningByRead: [],
     controllerRoadGeometryValid: true,
     controllerLogMonoTimeNs: 123_456_789,
     controllerSampleMonoTimeNs: 123_456_999,
@@ -2519,7 +2752,8 @@ private actor ResumePostflightRunner: ProcessRunning {
     }
     if request.executableURL == ApplyPipeline.sshURL {
       if request.arguments.last == "true" { return success("") }
-      if request.arguments.last?.contains("remote_epoch_milliseconds") == true {
+      if request.arguments.last?.contains("active_mapd_build_info") == true {
+        let staticRead = request.arguments.last?.contains("remote_epoch_milliseconds") != true
         runtimeReadCount += 1
         if fixture.throwTimedOutOnce, runtimeReadCount == 1 {
           throw ProcessRunnerError.timedOut(request.executableURL, request.timeout ?? 30)
@@ -2535,14 +2769,14 @@ private actor ResumePostflightRunner: ProcessRunning {
         if successfulRuntimeReadCount == 1, let delay = fixture.firstRuntimeDelay {
           try await Task.sleep(for: delay)
         }
-        return success(runtimeWire(readIndex: successfulRuntimeReadCount))
+        return success(runtimeWire(readIndex: successfulRuntimeReadCount, forceOffroad: staticRead))
       }
       return failure("unexpected ssh request")
     }
     return failure("unexpected executable: \(request.executableURL.path)")
   }
 
-  private func runtimeWire(readIndex: Int) -> String {
+  private func runtimeWire(readIndex: Int, forceOffroad: Bool = false) -> String {
     let identity = TuneDeploymentIdentity(tune: fixture.tune)
     let releaseDigest = TuneDeploymentIdentity.sha256Hex(Data(fixture.release.releaseID.utf8))
     let cachePath = "/data/media/0/osm/binaries/mapd-\(releaseDigest.prefix(16))-\(fixture.release.sha256.prefix(16))"
@@ -2561,7 +2795,7 @@ private actor ResumePostflightRunner: ProcessRunning {
     let controllerPhase = readIndex <= evidenceReadIndex
     let waitingOnroadPhase = readIndex > evidenceReadIndex &&
       readIndex <= evidenceReadIndex + fixture.offroadWaitReads
-    let stableOnroadPhase = controllerPhase || waitingOnroadPhase
+    let stableOnroadPhase = !forceOffroad && (controllerPhase || waitingOnroadPhase)
     var fields: [TiciSnapshotWireField: Data] = [
       .branch: Data(fixture.runtimeBranch.utf8),
       .head: Data(((readIndex == 1 ? fixture.firstRuntimeHead : nil) ?? fixture.runtimeHead).utf8),
@@ -2579,6 +2813,8 @@ private actor ResumePostflightRunner: ProcessRunning {
       .mapdCacheListing: Data("\(cachePath)\t\(fixture.release.sha256)\n".utf8),
       .activeMapdBuildInfo: try! JSONEncoder().encode(buildInfo),
       .activeMapdELFHeader: Data([0x7f, 0x45, 0x4c, 0x46, 2, 1] + Array(repeating: 0, count: 12) + [183, 0]),
+      .managerRunning: Data(((fixture.managerRunningByRead.indices.contains(readIndex - 1)
+        ? fixture.managerRunningByRead[readIndex - 1] : true) ? "1" : "0").utf8),
       .mapdRunning: Data("1".utf8),
       .remoteEpochMilliseconds: Data("1800000000000".utf8),
       .memoryWholeCurveProfile: pendingControllerPhase

@@ -33,6 +33,7 @@ public enum TiciSnapshotWireField: String, CaseIterable, Codable, Sendable {
   case liveMapDataControllerStatus = "live_map_data_controller_status"
   case activeMapdBuildInfo = "active_mapd_build_info"
   case activeMapdELFHeader = "active_mapd_elf_header"
+  case managerRunning = "manager_running"
   case mapdRunning = "mapd_running"
   case remoteEpochMilliseconds = "remote_epoch_milliseconds"
 }
@@ -127,7 +128,41 @@ public enum TiciSnapshotWireCodec {
 /// `compact_base64` removes any implementation-specific line wrapping using
 /// POSIX shell built-ins, so a large Q-curve or manifest remains one record.
 public enum TiciSnapshotWireCommandBuilder {
-  public static func inspectionCommand(includeRuntimePostflight: Bool = false) -> String {
+  public static func inspectionCommand(
+    includeRuntimePostflight: Bool = false,
+    includeStaticPostflight: Bool = false
+  ) -> String {
+    let staticRecords: String
+    if includeRuntimePostflight || includeStaticPostflight {
+      staticRecords = """
+      emit_first_bytes active_mapd_elf_header "$active_mapd" 20
+      if [ -x "$active_mapd" ]; then
+        emit_command active_mapd_build_info "$active_mapd" --build-info
+      fi
+      if pgrep -f '[s]ystem/manager/manager.py' >/dev/null 2>&1; then
+        emit_text manager_running 1
+      else
+        emit_text manager_running 0
+      fi
+      if pgrep -x mapd >/dev/null 2>&1; then
+        emit_text mapd_running 1
+      else
+        emit_text mapd_running 0
+      fi
+      """
+    } else {
+      staticRecords = ""
+    }
+    let endStateRecords: String
+    if includeRuntimePostflight || includeStaticPostflight {
+      endStateRecords = """
+      emit_file runtime_end_is_offroad "$params_root/IsOffroad"
+      emit_file runtime_end_is_onroad "$params_root/IsOnroad"
+      emit_file runtime_end_map_lookahead_enabled "$params_root/MTSCLookaheadEnabled"
+      """
+    } else {
+      endStateRecords = ""
+    }
     let runtimeRecords: String
     if includeRuntimePostflight {
       runtimeRecords = """
@@ -136,19 +171,6 @@ public enum TiciSnapshotWireCommandBuilder {
       emit_file persistent_whole_curve_profile "$params_root/MapWholeCurveProfile"
       emit_file memory_last_gps_position "$memory_params_root/LastGPSPosition"
       emit_file persistent_last_gps_position "$params_root/LastGPSPosition"
-      emit_first_bytes active_mapd_elf_header "$active_mapd" 20
-      if [ -x "$active_mapd" ]; then
-        emit_command active_mapd_build_info "$active_mapd" --build-info
-      fi
-      if pgrep -x mapd >/dev/null 2>&1; then
-        emit_text mapd_running 1
-      else
-        emit_text mapd_running 0
-      fi
-      emit_file runtime_end_is_offroad "$params_root/IsOffroad"
-      emit_file runtime_end_is_onroad "$params_root/IsOnroad"
-      emit_file runtime_end_map_lookahead_enabled "$params_root/MTSCLookaheadEnabled"
-      emit_text remote_epoch_milliseconds "$(date +%s%3N)"
       """
     } else {
       runtimeRecords = ""
@@ -240,7 +262,10 @@ public enum TiciSnapshotWireCommandBuilder {
     emit_file q_curve_file "$repo/sunnypilot/selfdrive/controls/lib/vtsc_curve_tuning.py"
     emit_file tile_manifest /data/media/0/osm/offline/.tileset-manifest.json
     emit_text mapd_cache_listing "$(cache_listing)"
+    \(staticRecords)
     \(runtimeRecords)
+    \(endStateRecords)
+    \(includeRuntimePostflight ? "emit_text remote_epoch_milliseconds \"$(date +%s%3N)\"" : "")
     VTSC_SNAPSHOT_SH
     """
   }

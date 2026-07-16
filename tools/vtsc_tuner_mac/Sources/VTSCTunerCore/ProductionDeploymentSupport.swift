@@ -63,6 +63,7 @@ struct TiciDeploymentPostflight: Codable, Equatable, Sendable {
   var mapdVersion: String
   var activeMapdSHA256: String
   var cachedMapdSHA256: String
+  var managerRunning: Bool
   var mapdRunning: Bool
   var capabilityPresent: Bool
   var activeELFARM64: Bool
@@ -99,6 +100,7 @@ struct TiciDeploymentPostflight: Codable, Equatable, Sendable {
     case mapdVersion = "mapd_version"
     case activeMapdSHA256 = "active_mapd_sha256"
     case cachedMapdSHA256 = "cached_mapd_sha256"
+    case managerRunning = "manager_running"
     case mapdRunning = "mapd_running"
     case capabilityPresent = "capability_present"
     case activeELFARM64 = "active_elf_arm64"

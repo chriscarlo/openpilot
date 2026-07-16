@@ -19,11 +19,23 @@ struct TiciRuntimePostflightRead: Equatable, Sendable {
   var deployment: TiciDeploymentSnapshotRead
   var activeMapdBuildInfo: Data
   var activeMapdELFHeader: Data
+  var managerRunning: Bool
   var mapdRunning: Bool
   var remoteEpochMilliseconds: Int64
   var wholeCurveProfile: Data?
   var lastGPSPosition: Data?
   var liveMapDataControllerStatus: TiciLiveMapDataControllerStatus
+  var runtimeEndIsOffroad: Bool
+  var runtimeEndIsOnroad: Bool
+  var runtimeEndMapLookaheadEnabled: Bool
+}
+
+struct TiciStaticDeploymentPostflightRead: Equatable, Sendable {
+  var deployment: TiciDeploymentSnapshotRead
+  var activeMapdBuildInfo: Data
+  var activeMapdELFHeader: Data
+  var managerRunning: Bool
+  var mapdRunning: Bool
   var runtimeEndIsOffroad: Bool
   var runtimeEndIsOnroad: Bool
   var runtimeEndMapLookaheadEnabled: Bool
@@ -100,11 +112,26 @@ enum TiciDeploymentSnapshotDecoder {
       deployment: deployment,
       activeMapdBuildInfo: try requiredData(wire, .activeMapdBuildInfo),
       activeMapdELFHeader: try requiredData(wire, .activeMapdELFHeader),
+      managerRunning: try requiredBool(wire, .managerRunning),
       mapdRunning: try requiredBool(wire, .mapdRunning),
       remoteEpochMilliseconds: try requiredEpochMilliseconds(wire),
       wholeCurveProfile: firstNonempty(wire[.memoryWholeCurveProfile], wire[.persistentWholeCurveProfile]),
       lastGPSPosition: firstNonempty(wire[.memoryLastGPSPosition], wire[.persistentLastGPSPosition]),
       liveMapDataControllerStatus: try requiredLiveMapDataControllerStatus(wire),
+      runtimeEndIsOffroad: try requiredBool(wire, .runtimeEndIsOffroad),
+      runtimeEndIsOnroad: try requiredBool(wire, .runtimeEndIsOnroad),
+      runtimeEndMapLookaheadEnabled: try requiredBool(wire, .runtimeEndMapLookaheadEnabled)
+    )
+  }
+
+  static func decodeStaticPostflight(_ output: String) throws -> TiciStaticDeploymentPostflightRead {
+    let wire = try TiciSnapshotWireCodec.decode(output)
+    return TiciStaticDeploymentPostflightRead(
+      deployment: try decodeRead(wire),
+      activeMapdBuildInfo: try requiredData(wire, .activeMapdBuildInfo),
+      activeMapdELFHeader: try requiredData(wire, .activeMapdELFHeader),
+      managerRunning: try requiredBool(wire, .managerRunning),
+      mapdRunning: try requiredBool(wire, .mapdRunning),
       runtimeEndIsOffroad: try requiredBool(wire, .runtimeEndIsOffroad),
       runtimeEndIsOnroad: try requiredBool(wire, .runtimeEndIsOnroad),
       runtimeEndMapLookaheadEnabled: try requiredBool(wire, .runtimeEndMapLookaheadEnabled)

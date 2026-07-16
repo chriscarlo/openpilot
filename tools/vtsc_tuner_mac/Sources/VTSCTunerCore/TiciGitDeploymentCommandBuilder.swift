@@ -22,16 +22,16 @@ enum TiciGitDeploymentCommandBuilder {
     \(TiciParkedMutationGate.shellFragment(
       refusalMessage: "refusing Git deployment unless tici is exactly offroad and Map Lookahead is disabled"
     ))
-    cd \(shellQuote(repositoryPath)) && \
-    test "$(git branch --show-current)" = \(shellQuote(branch)) && \
-    test -z "$(git status --porcelain)" && \
-    git fetch --no-tags origin refs/heads/\(branch) && \
-    test "$(git rev-parse FETCH_HEAD)" = \(shellQuote(head))
+    cd \(shellQuote(repositoryPath)) || exit 1
+    test "$(git branch --show-current)" = \(shellQuote(branch)) || exit 1
+    test -z "$(git status --porcelain)" || exit 1
+    git fetch --no-tags origin refs/heads/\(branch) || exit 1
+    test "$(git rev-parse FETCH_HEAD)" = \(shellQuote(head)) || exit 1
     \(TiciParkedMutationGate.shellFragment(
       refusalMessage: "refusing Git merge unless tici remains exactly offroad and Map Lookahead is disabled"
     ))
-    git merge --ff-only \(shellQuote(head)) && \
-    test "$(git rev-parse HEAD)" = \(shellQuote(head))
+    git merge --ff-only \(shellQuote(head)) || exit 1
+    test "$(git rev-parse HEAD)" = \(shellQuote(head)) || exit 1
     """
   }
 

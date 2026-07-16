@@ -126,6 +126,7 @@ import Testing
     .activeMapdSHA256: Data(String(repeating: "b", count: 64).utf8),
     .activeMapdBuildInfo: Data("{}".utf8),
     .activeMapdELFHeader: Data([0x7f, 0x45, 0x4c, 0x46, 2, 1] + Array(repeating: 0, count: 12) + [183, 0]),
+    .managerRunning: Data("1".utf8),
     .mapdRunning: Data("1".utf8),
     .remoteEpochMilliseconds: Data("1800000000000".utf8),
     .liveMapDataControllerStatus: Data("1|1|123456789|1|123456999".utf8),
@@ -145,6 +146,7 @@ import Testing
     TiciSnapshotWireCodec.encode(.init(rawValues: raw))
   )
   #expect(read.mapdRunning)
+  #expect(read.managerRunning)
   #expect(read.remoteEpochMilliseconds == 1_800_000_000_000)
   #expect(read.wholeCurveProfile == Data("memory-profile".utf8))
   #expect(read.lastGPSPosition == Data("gps".utf8))
@@ -167,6 +169,15 @@ import Testing
   #expect(command.contains("active_mapd_build_info"))
   #expect(command.contains("memory_whole_curve_profile"))
   #expect(command.contains("mapd_running"))
+  #expect(command.contains("manager_running"))
+  let staticCommand = TiciSnapshotWireCommandBuilder.inspectionCommand(includeStaticPostflight: true)
+  #expect(staticCommand.contains("manager_running"))
+  #expect(staticCommand.contains("mapd_running"))
+  #expect(staticCommand.contains("active_mapd_build_info"))
+  #expect(staticCommand.contains("runtime_end_is_offroad"))
+  #expect(!staticCommand.contains("live_map_data_controller_status"))
+  #expect(!staticCommand.contains("memory_whole_curve_profile"))
+  #expect(!staticCommand.contains("memory_last_gps_position"))
   #expect(command.contains("remote_epoch_milliseconds"))
   #expect(command.contains("date +%s%3N"))
   #expect(command.contains("emit_command live_map_data_controller_status timeout 5"))
@@ -230,6 +241,7 @@ private func runtimeSnapshotMinimumFields() -> [TiciSnapshotWireField: Data] {
     .activeMapdSHA256: Data(String(repeating: "b", count: 64).utf8),
     .activeMapdBuildInfo: Data("{}".utf8),
     .activeMapdELFHeader: Data([0x7f, 0x45, 0x4c, 0x46, 2, 1] + Array(repeating: 0, count: 12) + [183, 0]),
+    .managerRunning: Data("1".utf8),
     .mapdRunning: Data("1".utf8),
     .remoteEpochMilliseconds: Data("1800000000000".utf8),
     .liveMapDataControllerStatus: Data("1|1|123|1|124".utf8),
