@@ -14,6 +14,21 @@ from .pipeline_harness import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _isolate_pipeline_from_persistent_map_lookahead():
+  """These integration cases exercise vision VTSC without a persistent map cap."""
+  params = Params()
+  previous = params.get('MTSCLookaheadEnabled')
+  params.put_bool('MTSCLookaheadEnabled', False)
+  try:
+    yield
+  finally:
+    if previous is None:
+      params.remove('MTSCLookaheadEnabled')
+    else:
+      params.put('MTSCLookaheadEnabled', previous)
+
+
 class _NoOpSLC:
   """SpeedLimitController stub for VTSC-focused tests."""
   def __init__(self, CP):

@@ -177,6 +177,13 @@ enum TiciDeploymentSnapshotDecoder {
     let physics = Dictionary(uniqueKeysWithValues: physicsFields.map { key, field in
       (key, optionalText(wire, field))
     })
+    guard let tileManifest = wire[.tileManifest] else {
+      throw TiciDeploymentSnapshotDecodeError.missingField(.tileManifest)
+    }
+    let tile = try tileIdentity(
+      manifest: tileManifest,
+      topology: try requiredText(wire, .tileTopology)
+    )
 
     return TiciDeploymentSnapshot(
       bootID: try optionalBootID(wire),
@@ -193,7 +200,8 @@ enum TiciDeploymentSnapshotDecoder {
       activeMapdSHA256: optionalText(wire, .activeMapdSHA256) ?? "",
       cachedMapdPath: cached?.path ?? "",
       cachedMapdSHA256: cached?.sha256,
-      activeTileSetID: try tileSetID(from: wire[.tileManifest])
+      activeTileSetID: tile.id,
+      activeTileTopology: tile.topology
     )
   }
 
@@ -339,17 +347,41 @@ enum TiciDeploymentSnapshotDecoder {
       .last
   }
 
-  private static func tileSetID(from raw: Data?) throws -> String? {
-    guard let raw else { return nil }
+  private static func tileIdentity(
+    manifest raw: Data,
+    topology rawTopology: String
+  ) throws -> (id: String?, topology: TiciActiveTileTopology) {
+    if rawTopology == "direct-unidentified" {
+      guard raw.isEmpty else {
+        throw TiciDeploymentSnapshotDecodeError.malformedTileManifest(
+          "direct-unidentified topology carried a manifest"
+        )
+      }
+      return (nil, .directUnidentified)
+    }
     guard !raw.isEmpty,
           let object = try? JSONSerialization.jsonObject(with: raw) as? [String: Any],
           let tileSetID = object["tile_set_id"] as? String,
           tileSetID.range(of: #"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"#, options: .regularExpression) != nil
     else {
       throw TiciDeploymentSnapshotDecodeError.malformedTileManifest(
-        String(decoding: raw, as: UTF8.self)
+        "\(rawTopology):\(String(decoding: raw, as: UTF8.self))"
       )
     }
-    return tileSetID
+    if rawTopology == "direct-identified" {
+      return (tileSetID, .directIdentified)
+    }
+    let prefix = "canonical:"
+    guard rawTopology.hasPrefix(prefix) else {
+      throw TiciDeploymentSnapshotDecodeError.malformedTileManifest(rawTopology)
+    }
+    let linkID = String(rawTopology.dropFirst(prefix.count))
+    guard linkID == tileSetID,
+          linkID.range(of: #"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"#, options: .regularExpression) != nil else {
+      throw TiciDeploymentSnapshotDecodeError.malformedTileManifest(
+        "canonical link identity \(linkID) differs from manifest \(tileSetID)"
+      )
+    }
+    return (tileSetID, .canonical)
   }
 }

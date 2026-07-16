@@ -67,7 +67,8 @@ import Testing
     activeMapdSHA256: "",
     cachedMapdPath: "",
     cachedMapdSHA256: nil,
-    activeTileSetID: nil
+    activeTileSetID: nil,
+    activeTileTopology: .directUnidentified
   )
 
   let acceptedRunner = FastForwardRelationshipRunner(status: 0)
@@ -1755,15 +1756,29 @@ func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByR
   defer { try? FileManager.default.removeItem(at: fixture.root) }
   let target = String(repeating: "f", count: 64)
   fixture.journal.completed = true
-  fixture.journal.resolution = .rollbackInProgress
+  fixture.journal.resolution = .mutationInProgress
   fixture.journal.previousTileSetID = target
   fixture.journal.targetTileSetID = target
-  fixture.journal.tileActivationOutcome = .notSwitched
+  fixture.journal.tileActivationOutcome = nil
   fixture.journal.previousCachedMapdPath = ""
   fixture.journal.previousCachedMapdSHA256 = nil
   try fixture.journal.write(to: fixture.journalURL)
+  let reconciled = try await ApplyPipeline().reconcileTileActivationJournal(
+    expected: fixture.journal,
+    activation: TiciTileActivationResult(
+      tileSetID: target,
+      previousTileSetID: nil,
+      targetAlreadyActive: true,
+      commandOutput: "canonical target already active without pointer mutation"
+    ),
+    at: fixture.journalURL
+  )
+  var rollbackJournal = reconciled
+  rollbackJournal.resolution = .rollbackInProgress
+  try rollbackJournal.write(to: fixture.journalURL)
+  fixture.journal = rollbackJournal
   let runner = FreshProcessRollbackRecoveryRunner(
-    journal: fixture.journal,
+    journal: rollbackJournal,
     runtimeActiveTileSetID: target,
     tileActivationNeverStarted: true
   )
@@ -3100,6 +3115,8 @@ private actor ProductionPreflightRunner: ProcessRunning {
         bands: []
       ).utf8),
       .activeMapdSHA256: Data(String(repeating: "c", count: 64).utf8),
+      .tileManifest: Data(),
+      .tileTopology: Data("direct-unidentified".utf8),
       .mapdCacheListing: Data("".utf8),
       .activeMapdBuildInfo: Data("{}".utf8),
       .activeMapdELFHeader: Data([0x7f, 0x45, 0x4c, 0x46, 2, 1] + Array(repeating: 0, count: 12) + [183, 0]),
@@ -3195,6 +3212,8 @@ private actor OldFirstGapRunner: ProcessRunning {
         bands: []
       ).utf8),
       .activeMapdSHA256: Data(String(repeating: "c", count: 64).utf8),
+      .tileManifest: Data(),
+      .tileTopology: Data("direct-unidentified".utf8),
       .mapdCacheListing: Data("".utf8),
       .activeMapdBuildInfo: Data("{}".utf8),
       .activeMapdELFHeader: Data([0x7f, 0x45, 0x4c, 0x46, 2, 1] + Array(repeating: 0, count: 12) + [183, 0]),
@@ -3277,6 +3296,8 @@ private actor BlockingProductionPreflightRunner: ProcessRunning {
           bands: []
         ).utf8),
         .activeMapdSHA256: Data(String(repeating: "c", count: 64).utf8),
+        .tileManifest: Data(),
+        .tileTopology: Data("direct-unidentified".utf8),
         .mapdCacheListing: Data("".utf8),
         .activeMapdBuildInfo: Data("{}".utf8),
         .activeMapdELFHeader: Data([0x7f, 0x45, 0x4c, 0x46, 2, 1] + Array(repeating: 0, count: 12) + [183, 0]),
@@ -3545,6 +3566,10 @@ private actor FreshProcessRollbackRecoveryRunner: ProcessRunning {
     }
     if let tileSetID = runtimeActiveTileSetID ?? resolvedLegacyTileSetID ?? journal.effectivePreviousTileSetID {
       fields[.tileManifest] = try! JSONSerialization.data(withJSONObject: ["tile_set_id": tileSetID])
+      fields[.tileTopology] = Data("canonical:\(tileSetID)".utf8)
+    } else {
+      fields[.tileManifest] = Data()
+      fields[.tileTopology] = Data("direct-unidentified".utf8)
     }
     let physicsFields: [String: TiciSnapshotWireField] = [
       "VisionTurnSpeedControlPhysicsAmplitude": .physicsAmplitude,
@@ -3589,6 +3614,8 @@ private actor UnsafeAbortRunner: ProcessRunning {
           bands: []
         ).utf8),
         .activeMapdSHA256: Data(String(repeating: "c", count: 64).utf8),
+        .tileManifest: Data(),
+        .tileTopology: Data("direct-unidentified".utf8),
         .mapdCacheListing: Data("".utf8),
       ])) + "\n"
       return ProcessResult(terminationStatus: 0, standardOutput: wire, standardError: "")
@@ -3637,6 +3664,8 @@ private actor RollbackClaimRecoveryRunner: ProcessRunning {
         bands: []
       ).utf8),
       .activeMapdSHA256: Data(String(repeating: "c", count: 64).utf8),
+      .tileManifest: Data(),
+      .tileTopology: Data("direct-unidentified".utf8),
       .mapdCacheListing: Data("".utf8),
     ])) + "\n"
   }
@@ -3977,6 +4006,8 @@ private actor ResumePostflightRunner: ProcessRunning {
       .mapdReleaseVersion: Data(fixture.release.releaseID.utf8),
       .mapdVersion: Data(fixture.release.releaseID.utf8),
       .activeMapdSHA256: Data(fixture.release.sha256.utf8),
+      .tileManifest: Data(),
+      .tileTopology: Data("direct-unidentified".utf8),
       .qCurveFile: Data(TuneDeploymentIdentity.canonicalQCurveSource(
         parameters: fixture.tune.params,
         bands: fixture.tune.bands

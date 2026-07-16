@@ -26,6 +26,12 @@ struct CompletionCompatibleDeviceIdentity: Equatable, Sendable {
   var compatibilityPaths: [String]
 }
 
+enum TiciActiveTileTopology: String, Codable, Equatable, Sendable {
+  case canonical
+  case directIdentified
+  case directUnidentified
+}
+
 struct TiciDeploymentSnapshot: Codable, Equatable, Sendable {
   var bootID: String? = nil
   var isOffroad: Bool
@@ -42,6 +48,7 @@ struct TiciDeploymentSnapshot: Codable, Equatable, Sendable {
   var cachedMapdPath: String
   var cachedMapdSHA256: String?
   var activeTileSetID: String?
+  var activeTileTopology: TiciActiveTileTopology? = nil
 
   enum CodingKeys: String, CodingKey {
     case bootID = "boot_id"
@@ -57,6 +64,7 @@ struct TiciDeploymentSnapshot: Codable, Equatable, Sendable {
     case cachedMapdPath = "cached_mapd_path"
     case cachedMapdSHA256 = "cached_mapd_sha256"
     case activeTileSetID = "active_tile_set_id"
+    case activeTileTopology = "active_tile_topology"
   }
 }
 
@@ -99,6 +107,7 @@ struct TiciDeploymentPostflight: Codable, Equatable, Sendable {
   var liveMapDataSampleMonoTimeNs: UInt64
   var roadGeometryValid: Bool
   var activeTileSetID: String?
+  var activeTileTopology: TiciActiveTileTopology?
 
   enum CodingKeys: String, CodingKey {
     case bootID = "boot_id"
@@ -137,6 +146,7 @@ struct TiciDeploymentPostflight: Codable, Equatable, Sendable {
     case liveMapDataSampleMonoTimeNs = "live_map_data_sample_mono_time_ns"
     case roadGeometryValid = "road_geometry_valid"
     case activeTileSetID = "active_tile_set_id"
+    case activeTileTopology = "active_tile_topology"
   }
 }
 

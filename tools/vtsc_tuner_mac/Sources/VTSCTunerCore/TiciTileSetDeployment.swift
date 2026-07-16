@@ -205,9 +205,13 @@ public struct TiciTileSetDeploymentService: Sendable {
     )
   }
 
-  public func activate(_ staged: TiciStagedTileSet) async throws -> TiciTileActivationResult {
+  public func activate(
+    _ staged: TiciStagedTileSet,
+    expectedCurrentTileSetID: String?
+  ) async throws -> TiciTileActivationResult {
     try Self.validateProfile(staged.profile)
     try Self.validateTileSetID(staged.tileSetID)
+    if let expectedCurrentTileSetID { try Self.validateStoredTileSetID(expectedCurrentTileSetID) }
     guard staged.remoteStagingRoot == Self.stagingRoot(tileSetID: staged.tileSetID) else {
       throw TiciTileSetDeploymentError.invalidStagingRoot(staged.remoteStagingRoot)
     }
@@ -221,7 +225,8 @@ public struct TiciTileSetDeploymentService: Sendable {
     let command = try Self.atomicActivationCommand(
       helperPath: helperPath,
       stagingRoot: staged.remoteStagingRoot,
-      tileSetID: staged.tileSetID
+      tileSetID: staged.tileSetID,
+      expectedCurrentTileSetID: expectedCurrentTileSetID
     )
     let result = try await checked(
       ProcessRequest(
@@ -236,8 +241,10 @@ public struct TiciTileSetDeploymentService: Sendable {
       throw TiciTileSetDeploymentError.activationIdentityMissing(staged.tileSetID)
     }
     if decoded.targetAlreadyActive == true {
-      guard decoded.tileActivationNotSwitched == true,
-            decoded.previousTileSetID == nil,
+      guard expectedCurrentTileSetID == staged.tileSetID,
+            decoded.tileActivationNotSwitched == true,
+            decoded.activeTileSetID == staged.tileSetID,
+            decoded.previousTileSetID == staged.tileSetID,
             decoded.previousTileSetProvenance == nil,
             decoded.previousTileSetTargetID == nil
       else {
@@ -413,6 +420,7 @@ public struct TiciTileSetDeploymentService: Sendable {
     helperPath: String,
     stagingRoot: String,
     tileSetID: String,
+    expectedCurrentTileSetID: String? = nil,
     injectedFailurePoint: String? = nil
   ) throws -> String {
     try validateHelperPath(helperPath)
@@ -420,9 +428,13 @@ public struct TiciTileSetDeploymentService: Sendable {
     guard stagingRoot == Self.stagingRoot(tileSetID: tileSetID) else {
       throw TiciTileSetDeploymentError.invalidStagingRoot(stagingRoot)
     }
+    if let expectedCurrentTileSetID { try validateStoredTileSetID(expectedCurrentTileSetID) }
+    let expectedCurrent = expectedCurrentTileSetID.map {
+      " --expected-current-tile-set-id \(shellQuote($0))"
+    } ?? ""
     return """
     \(parkedMutationPreamble())
-    exec \(shellQuote(helperPath)) activate --root \(shellQuote(remoteRoot)) --params-dir \(shellQuote(TiciParkedMutationGate.defaultParamsDirectory)) --stage \(shellQuote(stagingRoot)) --tile-set-id \(shellQuote(tileSetID))\(try injectionArgument(injectedFailurePoint))
+    exec \(shellQuote(helperPath)) activate --root \(shellQuote(remoteRoot)) --params-dir \(shellQuote(TiciParkedMutationGate.defaultParamsDirectory)) --stage \(shellQuote(stagingRoot)) --tile-set-id \(shellQuote(tileSetID))\(expectedCurrent)\(try injectionArgument(injectedFailurePoint))
     """
   }
 

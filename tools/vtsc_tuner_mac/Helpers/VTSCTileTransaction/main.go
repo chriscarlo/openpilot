@@ -59,18 +59,46 @@ type manifestIdentity struct {
 	LegacyTreeSHA256               string `json:"legacy_tree_sha256,omitempty"`
 }
 
+// Every path that a new activation may create is authorized before the first
+// creation. A pointer makes absence of this block distinguishable from false
+// boolean values in legacy transaction JSON, which must fail closed rather
+// than guessing ownership during cleanup.
+type activationArtifact struct {
+	Path        string `json:"path"`
+	Tombstone   string `json:"tombstone,omitempty"`
+	Preexisting bool   `json:"preexisting"`
+	TreeSHA256  string `json:"treeSHA256,omitempty"`
+}
+
+type activationArtifactAuthority struct {
+	Schema                    int                 `json:"schema"`
+	TargetGeneration          activationArtifact  `json:"targetGeneration"`
+	TargetBuilding            activationArtifact  `json:"targetBuilding"`
+	LegacyMigrationPlanned    bool                `json:"legacyMigrationPlanned"`
+	LegacyGeneration          *activationArtifact `json:"legacyGeneration,omitempty"`
+	LegacyBuilding            *activationArtifact `json:"legacyBuilding,omitempty"`
+	Switch                    activationArtifact  `json:"switch"`
+	PreviousTemporary         activationArtifact  `json:"previousTemporary"`
+	RetainedPrefix            string              `json:"retainedPrefix"`
+	RetainedTombstone         string              `json:"retainedTombstone"`
+	PreviousPointerTarget     string              `json:"previousPointerTarget,omitempty"`
+	PreviousPointerID         string              `json:"previousPointerID,omitempty"`
+	PreviousPointerTreeSHA256 string              `json:"previousPointerTreeSHA256,omitempty"`
+}
+
 // The field names deliberately match the pre-existing Python journal so a
 // helper can recover a transaction written by the old implementation during a
 // rolling upgrade.
 type tileTransaction struct {
-	Kind           string `json:"kind"`
-	NewID          string `json:"newID,omitempty"`
-	NewTarget      string `json:"newTarget,omitempty"`
-	PreviousTarget string `json:"previousTarget,omitempty"`
-	PreviousID     string `json:"previousID,omitempty"`
-	SwitchPath     string `json:"switchPath,omitempty"`
-	ActiveTarget   string `json:"activeTarget,omitempty"`
-	ActiveID       string `json:"activeID,omitempty"`
+	Kind           string                       `json:"kind"`
+	NewID          string                       `json:"newID,omitempty"`
+	NewTarget      string                       `json:"newTarget,omitempty"`
+	PreviousTarget string                       `json:"previousTarget,omitempty"`
+	PreviousID     string                       `json:"previousID,omitempty"`
+	SwitchPath     string                       `json:"switchPath,omitempty"`
+	ActiveTarget   string                       `json:"activeTarget,omitempty"`
+	ActiveID       string                       `json:"activeID,omitempty"`
+	Artifacts      *activationArtifactAuthority `json:"artifacts,omitempty"`
 }
 
 type transactionResult struct {
@@ -180,6 +208,7 @@ func run(arguments []string, output io.Writer) error {
 		paramsDir := flags.String("params-dir", "", "Params data directory")
 		stage := flags.String("stage", "", "verified remote staging root")
 		tileSetID := flags.String("tile-set-id", "", "expected immutable tile-set identifier")
+		expectedCurrentID := flags.String("expected-current-tile-set-id", "", "optional exact active identity captured by the host")
 		injectedFailure := flags.String("inject-failure", "", "test-only failure point")
 		if err := flags.Parse(arguments); err != nil || flags.NArg() != 0 {
 			return usageError()
@@ -188,7 +217,10 @@ func run(arguments []string, output io.Writer) error {
 		if err != nil {
 			return err
 		}
-		result, err := engine.activate(*stage, *tileSetID, *injectedFailure)
+		if *expectedCurrentID != "" && !isSafeID(*expectedCurrentID) {
+			return fmt.Errorf("invalid --expected-current-tile-set-id")
+		}
+		result, err := engine.activate(*stage, *tileSetID, *expectedCurrentID, *injectedFailure)
 		if err != nil {
 			return err
 		}
@@ -246,7 +278,7 @@ func run(arguments []string, output io.Writer) error {
 }
 
 func usageError() error {
-	return errors.New("usage: vtsc-tile-transaction verify --root <artifact-root> --tile-set-id <id> | activate --root <osm-root> --params-dir <params-data-dir> --stage <artifact-root> --tile-set-id <id> [--inject-failure <point>] | rollback --root <osm-root> --params-dir <params-data-dir> --repo-root <checkout> --expected-git-branch <branch> --expected-git-head <head> [--expected-tile-set-id <id>] [--expected-previous-tile-set-id <id>] [--inject-failure <point>]")
+	return errors.New("usage: vtsc-tile-transaction verify --root <artifact-root> --tile-set-id <id> | activate --root <osm-root> --params-dir <params-data-dir> --stage <artifact-root> --tile-set-id <id> [--expected-current-tile-set-id <id>] [--inject-failure <point>] | rollback --root <osm-root> --params-dir <params-data-dir> --repo-root <checkout> --expected-git-branch <branch> --expected-git-head <head> [--expected-tile-set-id <id>] [--expected-previous-tile-set-id <id>] [--inject-failure <point>]")
 }
 
 func currentGitIdentity(repoRoot string) (string, string, bool, error) {
@@ -563,6 +595,19 @@ func validateManifest(manifest tileManifest, expectedTileSetID string) error {
 	return nil
 }
 
+func manifestsEqual(first, second tileManifest) bool {
+	if first.TileSetID != second.TileSetID || first.FileCount != second.FileCount ||
+		first.TotalBytes != second.TotalBytes || len(first.Files) != len(second.Files) {
+		return false
+	}
+	for index := range first.Files {
+		if first.Files[index] != second.Files[index] {
+			return false
+		}
+	}
+	return true
+}
+
 func isSafeID(value string) bool {
 	if value == "" || len(value) > 128 {
 		return false
@@ -857,6 +902,9 @@ func validateTransaction(root string, transaction tileTransaction) error {
 		if filepath.Clean(transaction.SwitchPath) != filepath.Join(root, ".offline-switch-"+transaction.NewID) {
 			return fmt.Errorf("unsafe activation switch path")
 		}
+		if err := validateActivationArtifactAuthority(root, transaction); err != nil {
+			return err
+		}
 	case "rollback":
 		if !isGenerationTarget(transaction.ActiveTarget) || !isGenerationTarget(transaction.PreviousTarget) {
 			return fmt.Errorf("unsafe rollback transaction")
@@ -869,6 +917,111 @@ func validateTransaction(root string, transaction tileTransaction) error {
 		}
 	default:
 		return fmt.Errorf("unknown tile transaction kind")
+	}
+	return nil
+}
+
+func generationContainerPath(root, target string) (string, error) {
+	if !isGenerationTarget(target) {
+		return "", fmt.Errorf("unsafe generation target")
+	}
+	components := strings.Split(target, "/")
+	return filepath.Join(root, generationDirectory, components[1]), nil
+}
+
+func cleanupTombstone(parent, tileSetID, label string) string {
+	return filepath.Join(parent, ".vtsc-cleanup-"+tileSetID+"-"+label)
+}
+
+func validActivationArtifact(
+	artifact activationArtifact,
+	expectedPath, expectedTombstone string,
+	allowPreexisting bool,
+) bool {
+	if filepath.Clean(artifact.Path) != expectedPath || artifact.Tombstone != expectedTombstone {
+		return false
+	}
+	if artifact.Preexisting {
+		return allowPreexisting && isLowerSHA256(artifact.TreeSHA256)
+	}
+	return artifact.TreeSHA256 == ""
+}
+
+func validateActivationArtifactAuthority(root string, transaction tileTransaction) error {
+	authority := transaction.Artifacts
+	if authority == nil {
+		return fmt.Errorf("activation transaction lacks durable artifact ownership authority")
+	}
+	if authority.Schema != 1 {
+		return fmt.Errorf("unsupported activation artifact authority schema")
+	}
+	targetGeneration := filepath.Join(root, generationDirectory, transaction.NewID)
+	targetBuilding := filepath.Join(root, generationDirectory, "."+transaction.NewID+".building")
+	if !validActivationArtifact(
+		authority.TargetGeneration,
+		targetGeneration,
+		cleanupTombstone(filepath.Dir(targetGeneration), transaction.NewID, "target-generation"),
+		true,
+	) || !validActivationArtifact(
+		authority.TargetBuilding,
+		targetBuilding,
+		cleanupTombstone(filepath.Dir(targetBuilding), transaction.NewID, "target-building"),
+		false,
+	) {
+		return fmt.Errorf("activation target artifact ownership/path mismatch")
+	}
+	if authority.TargetBuilding.Preexisting {
+		return fmt.Errorf("activation target build artifact cannot preexist its transaction")
+	}
+	if !validActivationArtifact(authority.Switch, transaction.SwitchPath, "", false) || authority.Switch.Preexisting {
+		return fmt.Errorf("activation switch ownership/path mismatch")
+	}
+	previousTemporary := filepath.Join(root, ".offline-previous-link-"+transaction.NewID)
+	if !validActivationArtifact(authority.PreviousTemporary, previousTemporary, "", false) || authority.PreviousTemporary.Preexisting {
+		return fmt.Errorf("activation previous-link ownership/path mismatch")
+	}
+	retainedPrefix := filepath.Join(root, ".retained-pre-generation-"+transaction.NewID+"-")
+	retainedTombstone := cleanupTombstone(root, transaction.NewID, "retained")
+	if authority.RetainedPrefix != retainedPrefix || authority.RetainedTombstone != retainedTombstone {
+		return fmt.Errorf("activation retained artifact ownership/path mismatch")
+	}
+	if authority.LegacyMigrationPlanned {
+		if authority.LegacyGeneration == nil || authority.LegacyBuilding == nil {
+			return fmt.Errorf("activation legacy artifact ownership is incomplete")
+		}
+		legacyGeneration, err := generationContainerPath(root, transaction.PreviousTarget)
+		if err != nil {
+			return err
+		}
+		legacyID := filepath.Base(legacyGeneration)
+		legacyBuilding := filepath.Join(filepath.Dir(legacyGeneration), "."+legacyID+".building")
+		if !validActivationArtifact(
+			*authority.LegacyGeneration,
+			legacyGeneration,
+			cleanupTombstone(filepath.Dir(legacyGeneration), transaction.NewID, "legacy-generation"),
+			true,
+		) || !validActivationArtifact(
+			*authority.LegacyBuilding,
+			legacyBuilding,
+			cleanupTombstone(filepath.Dir(legacyBuilding), transaction.NewID, "legacy-building"),
+			false,
+		) || authority.LegacyBuilding.Preexisting {
+			return fmt.Errorf("activation legacy artifact ownership/path mismatch")
+		}
+	} else if authority.LegacyGeneration != nil || authority.LegacyBuilding != nil {
+		return fmt.Errorf("activation has legacy artifact ownership without a migration")
+	}
+	if authority.PreviousPointerTarget == "" || authority.PreviousPointerID == "" || authority.PreviousPointerTreeSHA256 == "" {
+		if authority.PreviousPointerTarget != "" || authority.PreviousPointerID != "" || authority.PreviousPointerTreeSHA256 != "" {
+			return fmt.Errorf("activation previous pointer authority is incomplete")
+		}
+	} else if !isGenerationTarget(authority.PreviousPointerTarget) ||
+		!isSafeID(authority.PreviousPointerID) ||
+		!isLowerSHA256(authority.PreviousPointerTreeSHA256) {
+		return fmt.Errorf("activation previous pointer authority is unsafe")
+	}
+	if authority.PreviousPointerTarget == transaction.NewTarget && !authority.TargetGeneration.Preexisting {
+		return fmt.Errorf("activation ownership contradicts its preexisting previous pointer")
 	}
 	return nil
 }
@@ -978,6 +1131,191 @@ func (e *transactionEngine) verifyUnchangedDirectTreeIdentity(expectedPreviousTi
 	return nil
 }
 
+func requirePathAbsent(path, detail string) error {
+	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	return fmt.Errorf("%s already exists before transaction authority", detail)
+}
+
+func (e *transactionEngine) verifyGenerationTargetIdentity(target, expectedID string) (string, error) {
+	container, err := generationContainerPath(e.root, target)
+	if err != nil {
+		return "", err
+	}
+	manifest, present, err := readManifestIdentity(filepath.Join(e.root, target))
+	if err != nil || !present || manifest.TileSetID != expectedID {
+		if err != nil {
+			return "", err
+		}
+		return "", fmt.Errorf("generation target differs from its recorded identity")
+	}
+	if manifest.Legacy {
+		if !isSafeID(manifest.LegacyMigrationTargetTileSetID) {
+			return "", fmt.Errorf("legacy generation target binding is invalid")
+		}
+		if err := verifyLegacyMigrationTree(
+			filepath.Join(e.root, target), manifest, manifest.LegacyMigrationTargetTileSetID,
+		); err != nil {
+			return "", err
+		}
+	} else {
+		if filepath.Base(container) != expectedID {
+			return "", fmt.Errorf("canonical generation container differs from its manifest identity")
+		}
+		if _, err := verifyArtifactRoot(container, expectedID, true); err != nil {
+			return "", err
+		}
+	}
+	return treeSHA256(filepath.Join(e.root, target), "")
+}
+
+func (e *transactionEngine) activationArtifactAuthority(
+	transaction tileTransaction,
+	legacyPlan *legacyMigrationPlan,
+) (*activationArtifactAuthority, error) {
+	targetGeneration := e.generationPath(transaction.NewID)
+	targetBuilding := filepath.Join(e.generationsPath(), "."+transaction.NewID+".building")
+	target := activationArtifact{
+		Path:      targetGeneration,
+		Tombstone: cleanupTombstone(e.generationsPath(), transaction.NewID, "target-generation"),
+	}
+	if _, err := os.Lstat(targetGeneration); err == nil {
+		if err := e.verifyGeneration(transaction.NewID); err != nil {
+			return nil, fmt.Errorf("verify preexisting target generation: %w", err)
+		}
+		digest, err := treeSHA256(targetGeneration, "")
+		if err != nil {
+			return nil, err
+		}
+		target.Preexisting = true
+		target.TreeSHA256 = digest
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	targetBuild := activationArtifact{
+		Path:      targetBuilding,
+		Tombstone: cleanupTombstone(e.generationsPath(), transaction.NewID, "target-building"),
+	}
+	if err := requirePathAbsent(targetBuilding, "target generation build directory"); err != nil {
+		return nil, err
+	}
+	for path, detail := range map[string]string{
+		target.Tombstone:       "target generation cleanup tombstone",
+		targetBuild.Tombstone:  "target build cleanup tombstone",
+		transaction.SwitchPath: "activation switch",
+		filepath.Join(e.root, ".offline-previous-link-"+transaction.NewID): "activation previous-link temporary",
+	} {
+		if err := requirePathAbsent(path, detail); err != nil {
+			return nil, err
+		}
+	}
+	authority := &activationArtifactAuthority{
+		Schema:           1,
+		TargetGeneration: target,
+		TargetBuilding:   targetBuild,
+		Switch: activationArtifact{
+			Path: transaction.SwitchPath,
+		},
+		PreviousTemporary: activationArtifact{
+			Path: filepath.Join(e.root, ".offline-previous-link-"+transaction.NewID),
+		},
+		RetainedPrefix:    filepath.Join(e.root, ".retained-pre-generation-"+transaction.NewID+"-"),
+		RetainedTombstone: cleanupTombstone(e.root, transaction.NewID, "retained"),
+	}
+	retained, err := filepath.Glob(authority.RetainedPrefix + "*")
+	if err != nil {
+		return nil, err
+	}
+	if len(retained) != 0 {
+		return nil, fmt.Errorf("retained activation artifact predates transaction authority")
+	}
+	if err := requirePathAbsent(authority.RetainedTombstone, "retained cleanup tombstone"); err != nil {
+		return nil, err
+	}
+
+	if legacyPlan != nil {
+		authority.LegacyMigrationPlanned = true
+		legacyGeneration := e.generationPath(legacyPlan.ContainerID)
+		legacyBuilding := filepath.Join(e.generationsPath(), "."+legacyPlan.ContainerID+".building")
+		legacy := activationArtifact{
+			Path:      legacyGeneration,
+			Tombstone: cleanupTombstone(e.generationsPath(), transaction.NewID, "legacy-generation"),
+		}
+		if _, err := os.Lstat(legacyGeneration); err == nil {
+			manifest, present, err := readManifestIdentity(filepath.Join(legacyGeneration, activeOfflineName))
+			if err != nil || !present || manifest.TileSetID != legacyPlan.PreviousID {
+				if err != nil {
+					return nil, err
+				}
+				return nil, fmt.Errorf("preexisting legacy generation differs from its migration plan")
+			}
+			if err := verifyLegacyMigrationTree(
+				filepath.Join(legacyGeneration, activeOfflineName), manifest, transaction.NewID,
+			); err != nil {
+				return nil, err
+			}
+			digest, err := treeSHA256(legacyGeneration, "")
+			if err != nil {
+				return nil, err
+			}
+			legacy.Preexisting = true
+			legacy.TreeSHA256 = digest
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+		legacyBuild := activationArtifact{
+			Path:      legacyBuilding,
+			Tombstone: cleanupTombstone(e.generationsPath(), transaction.NewID, "legacy-building"),
+		}
+		for path, detail := range map[string]string{
+			legacyBuilding:        "legacy generation build directory",
+			legacy.Tombstone:      "legacy generation cleanup tombstone",
+			legacyBuild.Tombstone: "legacy build cleanup tombstone",
+		} {
+			if err := requirePathAbsent(path, detail); err != nil {
+				return nil, err
+			}
+		}
+		authority.LegacyGeneration = &legacy
+		authority.LegacyBuilding = &legacyBuild
+	}
+
+	previousTarget, previousIsLink, err := symlinkTarget(e.previousPath())
+	if err != nil {
+		return nil, err
+	}
+	if previousIsLink {
+		if !isGenerationTarget(previousTarget) {
+			return nil, fmt.Errorf("existing previous tile pointer is unsafe")
+		}
+		manifest, present, err := readManifestIdentity(e.previousPath())
+		if err != nil || !present || !isSafeID(manifest.TileSetID) {
+			if err != nil {
+				return nil, err
+			}
+			return nil, fmt.Errorf("existing previous tile pointer has no exact identity")
+		}
+		digest, err := e.verifyGenerationTargetIdentity(previousTarget, manifest.TileSetID)
+		if err != nil {
+			return nil, fmt.Errorf("verify existing previous tile pointer: %w", err)
+		}
+		authority.PreviousPointerTarget = previousTarget
+		authority.PreviousPointerID = manifest.TileSetID
+		authority.PreviousPointerTreeSHA256 = digest
+	} else if _, err := os.Lstat(e.previousPath()); err == nil {
+		return nil, fmt.Errorf("existing previous tile path is not a canonical generation pointer")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	if authority.PreviousPointerTarget == transaction.NewTarget && !authority.TargetGeneration.Preexisting {
+		return nil, fmt.Errorf("previous pointer references a target generation not recorded as preexisting")
+	}
+	return authority, nil
+}
+
 func (e *transactionEngine) clearTransaction() error {
 	err := os.Remove(e.transactionPath())
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -1015,14 +1353,58 @@ func validateOwnedRemovalTree(tree string) error {
 	})
 }
 
-func (e *transactionEngine) removeOwnedTreeDurably(tree string) error {
-	if _, err := os.Lstat(tree); errors.Is(err, os.ErrNotExist) {
-		return nil
+func pathExists(path string) (bool, error) {
+	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+		return false, nil
 	} else if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func validateOwnedTreeArtifactState(
+	artifact activationArtifact,
+	validateSource func(string) error,
+) error {
+	sourceExists, err := pathExists(artifact.Path)
+	if err != nil {
 		return err
 	}
+	tombstoneExists, err := pathExists(artifact.Tombstone)
+	if err != nil {
+		return err
+	}
+	if sourceExists && tombstoneExists {
+		return fmt.Errorf("owned cleanup source and tombstone both exist: %s", artifact.Path)
+	}
+	if artifact.Preexisting {
+		if !sourceExists || tombstoneExists {
+			return fmt.Errorf("preexisting generation topology changed before cleanup: %s", artifact.Path)
+		}
+		if err := validateSource(artifact.Path); err != nil {
+			return err
+		}
+		digest, err := treeSHA256(artifact.Path, "")
+		if err != nil {
+			return err
+		}
+		if digest != artifact.TreeSHA256 {
+			return fmt.Errorf("preexisting generation content changed before cleanup: %s", artifact.Path)
+		}
+		return nil
+	}
+	if sourceExists {
+		return validateSource(artifact.Path)
+	}
+	// A tombstone is already transaction-bound by its exact durable path. Its
+	// source was validated before the same-filesystem rename, so a retry must
+	// not demand intact content after an interrupted recursive delete.
+	return nil
+}
+
+func makeTreeWritable(root string) error {
 	var directories []string
-	if err := filepath.WalkDir(tree, func(current string, entry fs.DirEntry, walkErr error) error {
+	if err := filepath.WalkDir(root, func(current string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
@@ -1038,10 +1420,75 @@ func (e *transactionEngine) removeOwnedTreeDurably(tree string) error {
 			return err
 		}
 	}
-	if err := os.RemoveAll(tree); err != nil {
+	return nil
+}
+
+func removeOneTombstoneFile(tombstone string, syncDirectory directorySyncFunction) error {
+	var selected string
+	err := filepath.WalkDir(tombstone, func(current string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if selected == "" && !entry.IsDir() {
+			selected = current
+		}
+		return nil
+	})
+	if err != nil {
 		return err
 	}
-	return e.syncDir(filepath.Dir(tree))
+	if selected != "" {
+		if err := os.Remove(selected); err != nil {
+			return err
+		}
+		return syncDirectory(filepath.Dir(selected))
+	}
+	return syncDirectory(tombstone)
+}
+
+func (e *transactionEngine) cleanupOwnedTreeArtifact(
+	artifact activationArtifact,
+	label, injectedFailure string,
+) error {
+	if artifact.Preexisting {
+		return nil
+	}
+	sourceExists, err := pathExists(artifact.Path)
+	if err != nil {
+		return err
+	}
+	tombstoneExists, err := pathExists(artifact.Tombstone)
+	if err != nil {
+		return err
+	}
+	if sourceExists && tombstoneExists {
+		return fmt.Errorf("owned cleanup source and tombstone both exist: %s", artifact.Path)
+	}
+	if sourceExists {
+		if err := os.Rename(artifact.Path, artifact.Tombstone); err != nil {
+			return err
+		}
+		if err := e.syncDir(filepath.Dir(artifact.Path)); err != nil {
+			return err
+		}
+		tombstoneExists = true
+	}
+	if !tombstoneExists {
+		return nil
+	}
+	if err := makeTreeWritable(artifact.Tombstone); err != nil {
+		return err
+	}
+	if injectedFailure == "during_cleanup_"+label {
+		if err := removeOneTombstoneFile(artifact.Tombstone, e.syncDir); err != nil {
+			return err
+		}
+		return fmt.Errorf("injected tile cleanup failure: %s", label)
+	}
+	if err := os.RemoveAll(artifact.Tombstone); err != nil {
+		return err
+	}
+	return e.syncDir(filepath.Dir(artifact.Tombstone))
 }
 
 func (e *transactionEngine) validateOwnedSymlink(link, expectedTarget string) error {
@@ -1587,13 +2034,92 @@ func (e *transactionEngine) validateExactPostRollbackTopology(expectedTargetTile
 	return activeManifest, nil
 }
 
+func (e *transactionEngine) validatePreviousPointerAuthority(authority *activationArtifactAuthority) error {
+	target, isLink, err := symlinkTarget(e.previousPath())
+	if err != nil {
+		return err
+	}
+	if authority.PreviousPointerTarget == "" {
+		if isLink {
+			return fmt.Errorf("previous tile pointer appeared after transaction authority")
+		}
+		if _, err := os.Lstat(e.previousPath()); err == nil {
+			return fmt.Errorf("previous tile path appeared after transaction authority")
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+	if !isLink || target != authority.PreviousPointerTarget {
+		return fmt.Errorf("previous tile pointer topology changed during activation")
+	}
+	digest, err := e.verifyGenerationTargetIdentity(target, authority.PreviousPointerID)
+	if err != nil {
+		return err
+	}
+	if digest != authority.PreviousPointerTreeSHA256 {
+		return fmt.Errorf("previous tile pointer content changed during activation")
+	}
+	return nil
+}
+
+func (e *transactionEngine) retainedCleanupArtifact(
+	authority *activationArtifactAuthority,
+	legacyPlan *legacyMigrationPlan,
+) (*activationArtifact, error) {
+	sources, err := filepath.Glob(authority.RetainedPrefix + "*")
+	if err != nil {
+		return nil, err
+	}
+	if len(sources) > 1 {
+		return nil, fmt.Errorf("activation has multiple retained cleanup sources")
+	}
+	tombstoneExists, err := pathExists(authority.RetainedTombstone)
+	if err != nil {
+		return nil, err
+	}
+	if len(sources) == 0 && !tombstoneExists {
+		return nil, nil
+	}
+	if legacyPlan == nil {
+		return nil, fmt.Errorf("activation has a retained artifact without legacy migration authority")
+	}
+	artifact := activationArtifact{Path: authority.RetainedPrefix, Tombstone: authority.RetainedTombstone}
+	if len(sources) == 1 {
+		artifact.Path = sources[0]
+		if tombstoneExists {
+			return nil, fmt.Errorf("retained cleanup source and tombstone both exist")
+		}
+		if err := validateOwnedRemovalTree(artifact.Path); err != nil {
+			return nil, err
+		}
+		digest, err := treeSHA256(artifact.Path, "")
+		if err != nil {
+			return nil, err
+		}
+		if digest != legacyPlan.TreeSHA256 {
+			return nil, fmt.Errorf("retained direct-tree artifact differs from transaction authority")
+		}
+	}
+	return &artifact, nil
+}
+
 // settlePreExchangeActivation removes only artifacts whose exact paths and
-// identities are authorized by the still-durable activation transaction. The
-// transaction is cleared last, after every removal and parent-directory sync,
-// so a crash at any cleanup boundary remains safely replayable.
-func (e *transactionEngine) settlePreExchangeActivation(transaction tileTransaction) error {
+// pre-transaction state are durably authorized. Each owned tree is first
+// atomically renamed to a deterministic same-filesystem tombstone; recursive
+// deletion may then be interrupted and replayed without revalidating partial
+// content. The transaction is cleared only after all source names and
+// tombstones are absent and their parent directories have been synced.
+func (e *transactionEngine) settlePreExchangeActivation(
+	transaction tileTransaction,
+	injectedFailure string,
+) error {
 	if transaction.Kind != "activation" {
 		return fmt.Errorf("pre-exchange settlement requires an activation transaction")
+	}
+	authority := transaction.Artifacts
+	if authority == nil {
+		return fmt.Errorf("activation cleanup ownership is unknown")
 	}
 	activeTarget, activeIsLink, err := symlinkTarget(e.activePath())
 	if err != nil {
@@ -1634,6 +2160,12 @@ func (e *transactionEngine) settlePreExchangeActivation(transaction tileTransact
 		}
 		legacyPlan = &plan
 	}
+	if authority.LegacyMigrationPlanned != (legacyPlan != nil) {
+		return fmt.Errorf("activation legacy ownership differs from active topology")
+	}
+	if err := e.validatePreviousPointerAuthority(authority); err != nil {
+		return err
+	}
 
 	stage := e.stagePath(transaction.NewID)
 	if _, err := os.Lstat(stage); err == nil {
@@ -1643,40 +2175,36 @@ func (e *transactionEngine) settlePreExchangeActivation(transaction tileTransact
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	targetGeneration := e.generationPath(transaction.NewID)
-	if _, err := os.Lstat(targetGeneration); err == nil {
-		if err := e.verifyGeneration(transaction.NewID); err != nil {
-			return fmt.Errorf("verify transaction-owned target generation: %w", err)
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
+	if err := validateOwnedTreeArtifactState(authority.TargetGeneration, func(source string) error {
+		_, err := verifyArtifactRoot(source, transaction.NewID, true)
+		return err
+	}); err != nil {
 		return err
 	}
-	targetBuilding := filepath.Join(e.generationsPath(), "."+transaction.NewID+".building")
-	if err := validateOwnedRemovalTree(targetBuilding); err != nil {
+	if err := validateOwnedTreeArtifactState(authority.TargetBuilding, validateOwnedRemovalTree); err != nil {
 		return err
 	}
 
-	var legacyGeneration, legacyBuilding string
+	var legacyGeneration, legacyBuilding *activationArtifact
 	if legacyPlan != nil {
-		legacyGeneration = e.generationPath(legacyPlan.ContainerID)
-		if _, err := os.Lstat(legacyGeneration); err == nil {
-			manifest, present, err := readManifestIdentity(filepath.Join(legacyGeneration, activeOfflineName))
+		legacyGeneration = authority.LegacyGeneration
+		legacyBuilding = authority.LegacyBuilding
+		if legacyGeneration == nil || legacyBuilding == nil {
+			return fmt.Errorf("activation legacy cleanup ownership is missing")
+		}
+		if err := validateOwnedTreeArtifactState(*legacyGeneration, func(source string) error {
+			manifest, present, err := readManifestIdentity(filepath.Join(source, activeOfflineName))
 			if err != nil || !present || manifest.TileSetID != transaction.PreviousID {
 				if err != nil {
 					return err
 				}
-				return fmt.Errorf("transaction-owned legacy generation differs from its durable previous identity")
+				return fmt.Errorf("legacy generation differs from its durable previous identity")
 			}
-			if err := verifyLegacyMigrationTree(
-				filepath.Join(legacyGeneration, activeOfflineName), manifest, transaction.NewID,
-			); err != nil {
-				return err
-			}
-		} else if !errors.Is(err, os.ErrNotExist) {
+			return verifyLegacyMigrationTree(filepath.Join(source, activeOfflineName), manifest, transaction.NewID)
+		}); err != nil {
 			return err
 		}
-		legacyBuilding = filepath.Join(e.generationsPath(), "."+legacyPlan.ContainerID+".building")
-		if err := validateOwnedRemovalTree(legacyBuilding); err != nil {
+		if err := validateOwnedTreeArtifactState(*legacyBuilding, validateOwnedRemovalTree); err != nil {
 			return err
 		}
 	}
@@ -1688,24 +2216,9 @@ func (e *transactionEngine) settlePreExchangeActivation(transaction tileTransact
 	if err := e.validateOwnedSymlink(previousTemporary, transaction.PreviousTarget); err != nil {
 		return err
 	}
-	retained, err := filepath.Glob(filepath.Join(e.root, ".retained-pre-generation-"+transaction.NewID+"-*"))
+	retained, err := e.retainedCleanupArtifact(authority, legacyPlan)
 	if err != nil {
 		return err
-	}
-	if len(retained) != 0 && legacyPlan == nil {
-		return fmt.Errorf("pre-exchange transaction has unexplained retained direct-tree artifacts")
-	}
-	for _, retainedTree := range retained {
-		if err := validateOwnedRemovalTree(retainedTree); err != nil {
-			return err
-		}
-		digest, err := treeSHA256(retainedTree, "")
-		if err != nil || digest != legacyPlan.TreeSHA256 {
-			if err != nil {
-				return err
-			}
-			return fmt.Errorf("retained direct-tree artifact differs from the transaction migration authority")
-		}
 	}
 
 	if err := e.removeOwnedSymlinkDurably(transaction.SwitchPath); err != nil {
@@ -1715,30 +2228,44 @@ func (e *transactionEngine) settlePreExchangeActivation(transaction tileTransact
 		return err
 	}
 	// The verified transfer stage predates the helper transaction and remains
-	// available for an activation retry. Only mutation artifacts created under
-	// this transaction authority are removed here.
-	for _, tree := range []string{targetBuilding, targetGeneration, legacyBuilding, legacyGeneration} {
-		if tree != "" {
-			if err := e.removeOwnedTreeDurably(tree); err != nil {
-				return err
-			}
+	// available for an activation retry. Preexisting immutable generations and
+	// the recorded offline.previous topology are likewise preserved.
+	if err := e.cleanupOwnedTreeArtifact(authority.TargetBuilding, "target_building", injectedFailure); err != nil {
+		return err
+	}
+	if err := e.cleanupOwnedTreeArtifact(authority.TargetGeneration, "target_generation", injectedFailure); err != nil {
+		return err
+	}
+	if legacyBuilding != nil {
+		if err := e.cleanupOwnedTreeArtifact(*legacyBuilding, "legacy_building", injectedFailure); err != nil {
+			return err
 		}
 	}
-	for _, retainedTree := range retained {
-		if err := e.removeOwnedTreeDurably(retainedTree); err != nil {
+	if legacyGeneration != nil {
+		if err := e.cleanupOwnedTreeArtifact(*legacyGeneration, "legacy_generation", injectedFailure); err != nil {
+			return err
+		}
+	}
+	if retained != nil {
+		if err := e.cleanupOwnedTreeArtifact(*retained, "retained", injectedFailure); err != nil {
 			return err
 		}
 	}
 	return e.clearTransaction()
 }
 
-func (e *transactionEngine) recoverActivation(tileSetID string) (bool, transactionResult, error) {
+func (e *transactionEngine) recoverActivation(
+	tileSetID, expectedCurrentTileSetID string,
+) (bool, transactionResult, error) {
 	transaction, exists, err := e.readTransaction()
 	if err != nil || !exists {
 		return false, transactionResult{}, err
 	}
 	if transaction.Kind != "activation" || transaction.NewID != tileSetID {
 		return false, transactionResult{}, fmt.Errorf("another tile transaction requires recovery")
+	}
+	if expectedCurrentTileSetID != "" && transaction.PreviousID != expectedCurrentTileSetID {
+		return false, transactionResult{}, fmt.Errorf("activation recovery baseline differs from the host snapshot")
 	}
 	activeTarget, activeIsLink, err := symlinkTarget(e.activePath())
 	if err != nil {
@@ -1782,23 +2309,30 @@ func (e *transactionEngine) recoverActivation(tileSetID string) (bool, transacti
 	if activeIsLink && activeTarget != transaction.PreviousTarget {
 		return false, transactionResult{}, fmt.Errorf("active tile pointer diverged during recovery")
 	}
-	if err := e.settlePreExchangeActivation(transaction); err != nil {
+	if err := e.settlePreExchangeActivation(transaction, ""); err != nil {
 		return false, transactionResult{}, err
 	}
 	return false, transactionResult{}, nil
 }
 
-func (e *transactionEngine) activate(stage, tileSetID, injectedFailure string) (transactionResult, error) {
+func (e *transactionEngine) activate(
+	stage, tileSetID, expectedCurrentTileSetID, injectedFailure string,
+) (transactionResult, error) {
 	return e.withExclusiveTransactionLock(func() (transactionResult, error) {
-		return e.activateLocked(stage, tileSetID, injectedFailure)
+		return e.activateLocked(stage, tileSetID, expectedCurrentTileSetID, injectedFailure)
 	})
 }
 
-func (e *transactionEngine) activateLocked(stage, tileSetID, injectedFailure string) (transactionResult, error) {
+func (e *transactionEngine) activateLocked(
+	stage, tileSetID, expectedCurrentTileSetID, injectedFailure string,
+) (transactionResult, error) {
 	if !isSafeID(tileSetID) {
 		return transactionResult{}, fmt.Errorf("invalid tile-set identifier")
 	}
-	if recovered, result, err := e.recoverActivation(tileSetID); err != nil {
+	if expectedCurrentTileSetID != "" && !isSafeID(expectedCurrentTileSetID) {
+		return transactionResult{}, fmt.Errorf("invalid expected current tile-set identifier")
+	}
+	if recovered, result, err := e.recoverActivation(tileSetID, expectedCurrentTileSetID); err != nil {
 		return transactionResult{}, err
 	} else if recovered {
 		return result, nil
@@ -1810,36 +2344,27 @@ func (e *transactionEngine) activateLocked(stage, tileSetID, injectedFailure str
 	if activeID, present, err := manifestID(e.activePath()); err != nil {
 		return transactionResult{}, err
 	} else if present && activeID == tileSetID {
-		if err := e.verifyGeneration(tileSetID); err != nil {
-			return transactionResult{}, err
+		if expectedCurrentTileSetID != tileSetID {
+			return transactionResult{}, fmt.Errorf("already-active target differs from the host-recorded baseline")
 		}
-		previousManifest, previousPresent, err := readManifestIdentity(e.previousPath())
-		if err != nil || !previousPresent || previousManifest.TileSetID == "" {
+		activeTarget, activeIsLink, err := symlinkTarget(e.activePath())
+		if err != nil || !activeIsLink || activeTarget != filepath.ToSlash(filepath.Join(generationDirectory, tileSetID, activeOfflineName)) {
 			if err != nil {
 				return transactionResult{}, err
 			}
-			return transactionResult{}, fmt.Errorf("already active tile set has no exact previous generation identity")
+			return transactionResult{}, fmt.Errorf("already-active target is not the exact canonical generation pointer")
 		}
-		if previousManifest.Legacy {
-			previousTarget, isLink, err := symlinkTarget(e.previousPath())
-			if err != nil || !isLink || !isGenerationTarget(previousTarget) {
-				if err != nil {
-					return transactionResult{}, err
-				}
-				return transactionResult{}, fmt.Errorf("previous tile pointer is not an immutable generation")
-			}
-			if err := verifyLegacyMigrationTree(
-				filepath.Join(e.root, previousTarget), previousManifest, tileSetID,
-			); err != nil {
-				return transactionResult{}, err
-			}
+		generationManifest, err := verifyArtifactRoot(e.generationPath(tileSetID), tileSetID, true)
+		if err != nil {
+			return transactionResult{}, err
 		}
-		if previousManifest.TileSetID == tileSetID {
-			return transactionResult{}, fmt.Errorf("active and previous tile generations share the requested target identity")
+		if !manifestsEqual(stagedManifest, generationManifest) {
+			return transactionResult{}, fmt.Errorf("already-active canonical generation differs from the staged target")
 		}
 		return transactionResult{
 			Operation: "activate", TileSetID: tileSetID, ActivatedTileSetID: tileSetID,
-			PreviousTileSetID: previousManifest.TileSetID, Recovered: true,
+			ActiveTileSetID: tileSetID, PreviousTileSetID: tileSetID,
+			TargetAlreadyActive: true, TileActivationNotSwitched: true,
 		}, nil
 	}
 
@@ -1854,6 +2379,7 @@ func (e *transactionEngine) activateLocked(stage, tileSetID, injectedFailure str
 	}
 	var previousID string
 	var legacyPlan *legacyMigrationPlan
+	directHasAdjacentIdentity := false
 	if activeIsLink {
 		if !isGenerationTarget(previousTarget) {
 			return transactionResult{}, fmt.Errorf("active tile pointer is unsafe")
@@ -1866,6 +2392,9 @@ func (e *transactionEngine) activateLocked(stage, tileSetID, injectedFailure str
 			return transactionResult{}, fmt.Errorf("previous tile generation identity is missing")
 		}
 		previousID = previousManifest.TileSetID
+		if expectedCurrentTileSetID == "" || expectedCurrentTileSetID != previousID {
+			return transactionResult{}, fmt.Errorf("canonical active identity differs from the host-recorded baseline")
+		}
 	} else {
 		info, err := os.Lstat(active)
 		if err != nil {
@@ -1879,6 +2408,9 @@ func (e *transactionEngine) activateLocked(stage, tileSetID, injectedFailure str
 			return transactionResult{}, err
 		}
 		if present && adjacent.TileSetID == tileSetID {
+			if expectedCurrentTileSetID != tileSetID {
+				return transactionResult{}, fmt.Errorf("same-ID direct tree differs from the host-recorded baseline")
+			}
 			if err := e.verifyExactSameTargetDirectTree(tileSetID); err != nil {
 				return transactionResult{}, err
 			}
@@ -1887,6 +2419,7 @@ func (e *transactionEngine) activateLocked(stage, tileSetID, injectedFailure str
 			}
 			return transactionResult{
 				Operation: "activate", TileSetID: tileSetID, ActivatedTileSetID: tileSetID,
+				ActiveTileSetID: tileSetID, PreviousTileSetID: tileSetID,
 				TargetAlreadyActive: true, TileActivationNotSwitched: true,
 			}, nil
 		}
@@ -1897,6 +2430,14 @@ func (e *transactionEngine) activateLocked(stage, tileSetID, injectedFailure str
 		legacyPlan = &plan
 		previousTarget = plan.Target
 		previousID = plan.PreviousID
+		directHasAdjacentIdentity = present
+		if directHasAdjacentIdentity {
+			if expectedCurrentTileSetID != previousID {
+				return transactionResult{}, fmt.Errorf("direct active identity differs from the host-recorded baseline")
+			}
+		} else if expectedCurrentTileSetID != "" {
+			return transactionResult{}, fmt.Errorf("unidentified direct active tree conflicts with the host-recorded baseline")
+		}
 	}
 	if previousID == tileSetID {
 		return transactionResult{}, fmt.Errorf("previous tile identity equals requested target before activation")
@@ -1915,6 +2456,11 @@ func (e *transactionEngine) activateLocked(stage, tileSetID, injectedFailure str
 		Kind: "activation", NewID: tileSetID, NewTarget: newTarget,
 		PreviousTarget: previousTarget, PreviousID: previousID, SwitchPath: switchPath,
 	}
+	authority, err := e.activationArtifactAuthority(transaction, legacyPlan)
+	if err != nil {
+		return transactionResult{}, err
+	}
+	transaction.Artifacts = authority
 	if err := e.writeTransaction(transaction); err != nil {
 		return transactionResult{}, err
 	}
@@ -2014,7 +2560,7 @@ func (e *transactionEngine) rollbackLocked(expectedTileSetID, expectedPreviousTi
 				if expectedPreviousTileSetID != "" && transaction.PreviousID != expectedPreviousTileSetID {
 					return transactionResult{}, fmt.Errorf("activation recovery previous identity differs from the recorded journal")
 				}
-				if err := e.settlePreExchangeActivation(transaction); err != nil {
+				if err := e.settlePreExchangeActivation(transaction, injectedFailure); err != nil {
 					return transactionResult{}, err
 				}
 				result := transactionResult{

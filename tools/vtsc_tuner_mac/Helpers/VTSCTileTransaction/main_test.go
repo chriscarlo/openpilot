@@ -130,7 +130,7 @@ func TestLockWaitStateFlipRejectsActivationBeforeAnyExchange(t *testing.T) {
 
 	result := make(chan error, 1)
 	go func() {
-		_, err := engine.activate(stage, "fresh", "")
+		_, err := engine.activate(stage, "fresh", "old", "")
 		result <- err
 	}()
 	if err := os.WriteFile(filepath.Join(engine.paramsDir, "IsOnroad"), []byte("1"), 0o600); err != nil {
@@ -263,7 +263,7 @@ func TestActivateRollbackAndRecovery(t *testing.T) {
 	}
 	engine := testEngine(t, root)
 
-	activated, err := engine.activate(stage, "fresh", "")
+	activated, err := engine.activate(stage, "fresh", "old", "")
 	if err != nil {
 		t.Fatalf("activate: %v", err)
 	}
@@ -299,12 +299,12 @@ func TestActivationRecoveryAfterPointerExchange(t *testing.T) {
 	stage := writeStage(t, root, "fresh")
 	engine := testEngine(t, root)
 
-	if _, err := engine.activate(stage, "fresh", "after_switch"); err == nil {
+	if _, err := engine.activate(stage, "fresh", "old", "after_switch"); err == nil {
 		t.Fatal("activation with injected post-switch failure unexpectedly succeeded")
 	}
 	assertLinkTarget(t, filepath.Join(root, activeOfflineName), "tile-generations/fresh/offline")
 
-	recovered, err := engine.activate(stage, "fresh", "")
+	recovered, err := engine.activate(stage, "fresh", "old", "")
 	if err != nil {
 		t.Fatalf("recover activation: %v", err)
 	}
@@ -347,7 +347,7 @@ func TestActivationMigratesLegacyDirectoryBeforeExchange(t *testing.T) {
 	stage := writeStage(t, root, "fresh")
 	engine := testEngine(t, root)
 
-	activated, err := engine.activate(stage, "fresh", "")
+	activated, err := engine.activate(stage, "fresh", "", "")
 	if err != nil {
 		t.Fatalf("activate from legacy directory: %v", err)
 	}
@@ -389,14 +389,14 @@ func TestLegacyActivationRecoversBeforePointerExchange(t *testing.T) {
 	stage := writeStage(t, root, "fresh")
 	engine := testEngine(t, root)
 
-	if _, err := engine.activate(stage, "fresh", "after_journal"); err == nil {
+	if _, err := engine.activate(stage, "fresh", "", "after_journal"); err == nil {
 		t.Fatal("legacy activation with injected pre-switch failure unexpectedly succeeded")
 	}
 	if _, isLink, err := symlinkTarget(filepath.Join(root, activeOfflineName)); err != nil || isLink {
 		t.Fatalf("legacy active tree changed before pointer exchange: isLink=%t err=%v", isLink, err)
 	}
 
-	activated, err := engine.activate(stage, "fresh", "")
+	activated, err := engine.activate(stage, "fresh", "", "")
 	if err != nil {
 		t.Fatalf("recover legacy activation: %v", err)
 	}
@@ -425,10 +425,10 @@ func TestLegacyActivationRecoversAfterPointerExchangeWithSamePreviousIdentity(t 
 	stage := writeStage(t, root, "fresh")
 	engine := testEngine(t, root)
 
-	if _, err := engine.activate(stage, "fresh", "after_switch"); err == nil {
+	if _, err := engine.activate(stage, "fresh", "", "after_switch"); err == nil {
 		t.Fatal("legacy activation with injected post-switch failure unexpectedly succeeded")
 	}
-	recovered, err := engine.activate(stage, "fresh", "")
+	recovered, err := engine.activate(stage, "fresh", "", "")
 	if err != nil {
 		t.Fatalf("recover legacy activation after switch: %v", err)
 	}
@@ -462,7 +462,7 @@ func TestLegacyActivationPreservesCanonicalAdjacentIdentityAndFreshRollbackProve
 	stage := writeStage(t, root, "fresh")
 	engine := testEngine(t, root)
 
-	activated, err := engine.activate(stage, "fresh", "")
+	activated, err := engine.activate(stage, "fresh", canonicalPrevious, "")
 	if err != nil {
 		t.Fatalf("activate canonical-manifest legacy tree: %v", err)
 	}
@@ -564,7 +564,7 @@ func TestSameIDDirectTreeReturnsProvenNoSwitchOnlyForExactRequestedContent(t *te
 				return renameExchange(first, second)
 			}
 
-			result, err := engine.activate(stage, "fresh", "")
+			result, err := engine.activate(stage, "fresh", "fresh", "")
 			if mismatch {
 				if err == nil || !strings.Contains(err.Error(), "differs from requested target") {
 					t.Fatalf("same-ID mismatched content error = %v", err)
@@ -581,7 +581,8 @@ func TestSameIDDirectTreeReturnsProvenNoSwitchOnlyForExactRequestedContent(t *te
 					t.Fatalf("same-ID equivalent activation: %v", err)
 				}
 				if !result.TargetAlreadyActive || !result.TileActivationNotSwitched ||
-					result.PreviousTileSetID != "" || result.ActivatedTileSetID != "fresh" {
+					result.ActiveTileSetID != "fresh" || result.PreviousTileSetID != "fresh" ||
+					result.ActivatedTileSetID != "fresh" {
 					t.Fatalf("same-ID no-switch result = %+v", result)
 				}
 				rolledBack, err := engine.rollback("fresh", "fresh", "")
@@ -655,7 +656,7 @@ func TestActivationDurabilityBoundariesAlwaysPermitDeterministicFreshRollback(t 
 			}
 			stage := writeStage(t, root, "fresh")
 			engine := testEngine(t, root)
-			if _, err := engine.activate(stage, "fresh", point); err == nil {
+			if _, err := engine.activate(stage, "fresh", "", point); err == nil {
 				t.Fatalf("injected %s activation unexpectedly succeeded", point)
 			}
 			_, transactionErr := os.Lstat(engine.transactionPath())
@@ -716,7 +717,7 @@ func TestPreExchangeRollbackReportsExactRecordedPreviousIdentity(t *testing.T) {
 	}
 	stage := writeStage(t, root, "fresh")
 	engine := testEngine(t, root)
-	if _, err := engine.activate(stage, "fresh", "after_generation"); err == nil {
+	if _, err := engine.activate(stage, "fresh", previous, "after_generation"); err == nil {
 		t.Fatal("injected activation unexpectedly succeeded")
 	}
 
@@ -743,7 +744,7 @@ func TestPreExchangeRollbackLostReplyReplaysAsExactNoSwitchWithoutOwnedArtifacts
 			}
 			stage := writeStage(t, root, "fresh")
 			engine := testEngine(t, root)
-			if _, err := engine.activate(stage, "fresh", point); err == nil {
+			if _, err := engine.activate(stage, "fresh", "", point); err == nil {
 				t.Fatalf("injected %s activation unexpectedly succeeded", point)
 			}
 
@@ -792,6 +793,238 @@ func TestPreExchangeRollbackLostReplyReplaysAsExactNoSwitchWithoutOwnedArtifacts
 	}
 }
 
+func TestPreexistingTargetReferencedByPreviousSurvivesEveryPreExchangeFault(t *testing.T) {
+	for _, point := range []string{"after_journal", "after_generation", "after_legacy", "after_switch_publish"} {
+		t.Run(point, func(t *testing.T) {
+			root := newTestRoot(t)
+			makeMinimalGeneration(t, root, "old")
+			makeMinimalGeneration(t, root, "target")
+			linkGeneration(t, root, activeOfflineName, "old")
+			linkGeneration(t, root, previousOfflineName, "target")
+			stage := writeStage(t, root, "target")
+			engine := testEngine(t, root)
+			if _, err := engine.activate(stage, "target", "old", point); err == nil {
+				t.Fatalf("injected %s activation unexpectedly succeeded", point)
+			}
+
+			transaction, exists, err := engine.readTransaction()
+			if err != nil || !exists || transaction.Artifacts == nil ||
+				!transaction.Artifacts.TargetGeneration.Preexisting {
+				t.Fatalf("preexisting target ownership was not durable: txn=%+v exists=%t err=%v", transaction, exists, err)
+			}
+			first, err := engine.rollback("target", "old", "")
+			if err != nil || !first.TileActivationNotSwitched {
+				t.Fatalf("rollback after %s = %+v err=%v", point, first, err)
+			}
+			if err := engine.verifyGeneration("target"); err != nil {
+				t.Fatalf("preexisting target was removed/corrupted after %s: %v", point, err)
+			}
+			assertLinkTarget(t, engine.previousPath(), "tile-generations/target/offline")
+			second, err := engine.rollback("target", "old", "")
+			if err != nil || (!second.TileActivationNotSwitched && !second.TileActivationNotObserved) {
+				t.Fatalf("replayed rollback after %s = %+v err=%v", point, second, err)
+			}
+			assertLinkTarget(t, engine.previousPath(), "tile-generations/target/offline")
+		})
+	}
+}
+
+func TestTransactionCreatedTargetIsRemovedButPreviousTopologyIsPreserved(t *testing.T) {
+	root := newTestRoot(t)
+	makeMinimalGeneration(t, root, "old")
+	makeMinimalGeneration(t, root, "older")
+	linkGeneration(t, root, activeOfflineName, "old")
+	linkGeneration(t, root, previousOfflineName, "older")
+	stage := writeStage(t, root, "fresh")
+	engine := testEngine(t, root)
+	if _, err := engine.activate(stage, "fresh", "old", "after_generation"); err == nil {
+		t.Fatal("injected activation unexpectedly succeeded")
+	}
+	transaction, exists, err := engine.readTransaction()
+	if err != nil || !exists || transaction.Artifacts == nil ||
+		transaction.Artifacts.TargetGeneration.Preexisting {
+		t.Fatalf("created target ownership was not durable: txn=%+v exists=%t err=%v", transaction, exists, err)
+	}
+	if _, err := engine.rollback("fresh", "old", ""); err != nil {
+		t.Fatalf("rollback transaction-created target: %v", err)
+	}
+	if _, err := os.Lstat(engine.generationPath("fresh")); !os.IsNotExist(err) {
+		t.Fatalf("transaction-created target survived cleanup: %v", err)
+	}
+	assertLinkTarget(t, engine.previousPath(), "tile-generations/older/offline")
+}
+
+func TestActivationArtifactAuthorityRejectsTamperingAndUnknownLegacyOwnership(t *testing.T) {
+	for _, mutation := range []string{"path", "preexistence", "missing-authority"} {
+		t.Run(mutation, func(t *testing.T) {
+			root := newTestRoot(t)
+			makeMinimalGeneration(t, root, "old")
+			makeMinimalGeneration(t, root, "target")
+			linkGeneration(t, root, activeOfflineName, "old")
+			linkGeneration(t, root, previousOfflineName, "target")
+			stage := writeStage(t, root, "target")
+			engine := testEngine(t, root)
+			if _, err := engine.activate(stage, "target", "old", "after_journal"); err == nil {
+				t.Fatal("injected activation unexpectedly succeeded")
+			}
+			contents, err := os.ReadFile(engine.transactionPath())
+			if err != nil {
+				t.Fatalf("read transaction: %v", err)
+			}
+			var payload map[string]any
+			if err := json.Unmarshal(contents, &payload); err != nil {
+				t.Fatalf("decode transaction: %v", err)
+			}
+			if mutation == "missing-authority" {
+				delete(payload, "artifacts")
+			} else {
+				artifacts := payload["artifacts"].(map[string]any)
+				target := artifacts["targetGeneration"].(map[string]any)
+				if mutation == "path" {
+					target["path"] = filepath.Join(root, generationDirectory, "other")
+				} else {
+					target["preexisting"] = false
+					delete(target, "treeSHA256")
+				}
+			}
+			mutated, _ := json.Marshal(payload)
+			if err := os.WriteFile(engine.transactionPath(), append(mutated, '\n'), 0o600); err != nil {
+				t.Fatalf("write mutated transaction: %v", err)
+			}
+			if _, err := engine.rollback("target", "old", ""); err == nil {
+				t.Fatalf("%s authority mutation was accepted", mutation)
+			}
+			if err := engine.verifyGeneration("target"); err != nil {
+				t.Fatalf("%s mutation deleted preexisting target: %v", mutation, err)
+			}
+			assertLinkTarget(t, engine.previousPath(), "tile-generations/target/offline")
+		})
+	}
+}
+
+func TestCleanupTombstonesReplayAfterInterruptedRecursiveDeletion(t *testing.T) {
+	for _, label := range []string{
+		"target_generation", "legacy_generation", "target_building", "legacy_building", "retained",
+	} {
+		t.Run(label, func(t *testing.T) {
+			root := newTestRoot(t)
+			legacyTile := filepath.Join(root, activeOfflineName, "38", "-121", "legacy-tile")
+			if err := os.MkdirAll(filepath.Dir(legacyTile), 0o755); err != nil {
+				t.Fatalf("create direct tree: %v", err)
+			}
+			if err := os.WriteFile(legacyTile, bytes.Repeat([]byte("legacy"), 20), 0o644); err != nil {
+				t.Fatalf("write direct tree: %v", err)
+			}
+			stage := writeStage(t, root, "fresh")
+			engine := testEngine(t, root)
+			point := "after_journal"
+			if label == "target_generation" {
+				point = "after_generation"
+			} else if label == "legacy_generation" {
+				point = "after_legacy"
+			}
+			if _, err := engine.activate(stage, "fresh", "", point); err == nil {
+				t.Fatalf("injected %s activation unexpectedly succeeded", point)
+			}
+			transaction, exists, err := engine.readTransaction()
+			if err != nil || !exists || transaction.Artifacts == nil {
+				t.Fatalf("load activation authority: exists=%t err=%v", exists, err)
+			}
+			authority := transaction.Artifacts
+			var artifact activationArtifact
+			switch label {
+			case "target_generation":
+				artifact = authority.TargetGeneration
+			case "legacy_generation":
+				artifact = *authority.LegacyGeneration
+			case "target_building":
+				artifact = authority.TargetBuilding
+				if err := os.MkdirAll(filepath.Join(artifact.Path, "nested"), 0o755); err != nil {
+					t.Fatalf("create target build: %v", err)
+				}
+				_ = os.WriteFile(filepath.Join(artifact.Path, "nested", "partial"), []byte("partial"), 0o644)
+			case "legacy_building":
+				artifact = *authority.LegacyBuilding
+				if err := os.MkdirAll(filepath.Join(artifact.Path, "nested"), 0o755); err != nil {
+					t.Fatalf("create legacy build: %v", err)
+				}
+				_ = os.WriteFile(filepath.Join(artifact.Path, "nested", "partial"), []byte("partial"), 0o644)
+			case "retained":
+				artifact = activationArtifact{
+					Path: authority.RetainedPrefix + "fixture", Tombstone: authority.RetainedTombstone,
+				}
+				if err := copyDirectory(engine.activePath(), artifact.Path); err != nil {
+					t.Fatalf("create retained evidence: %v", err)
+				}
+			}
+			if _, err := engine.rollback("fresh", "", "during_cleanup_"+label); err == nil {
+				t.Fatalf("injected %s cleanup unexpectedly succeeded", label)
+			}
+			if _, err := os.Lstat(artifact.Path); !os.IsNotExist(err) {
+				t.Fatalf("%s source was not atomically renamed: %v", label, err)
+			}
+			if _, err := os.Lstat(artifact.Tombstone); err != nil {
+				t.Fatalf("%s tombstone missing after interrupted delete: %v", label, err)
+			}
+			if _, err := engine.rollback("fresh", "", ""); err != nil {
+				t.Fatalf("fresh retry after %s tombstone: %v", label, err)
+			}
+			if _, err := os.Lstat(artifact.Tombstone); !os.IsNotExist(err) {
+				t.Fatalf("%s tombstone survived retry: %v", label, err)
+			}
+			if _, err := os.Lstat(engine.transactionPath()); !os.IsNotExist(err) {
+				t.Fatalf("%s transaction survived settled retry: %v", label, err)
+			}
+		})
+	}
+}
+
+func TestPreexistingCleanupTombstoneBlocksActivationBeforeJournal(t *testing.T) {
+	root := newTestRoot(t)
+	makeMinimalGeneration(t, root, "old")
+	linkGeneration(t, root, activeOfflineName, "old")
+	stage := writeStage(t, root, "fresh")
+	engine := testEngine(t, root)
+	tombstone := cleanupTombstone(engine.generationsPath(), "fresh", "target-generation")
+	if err := os.MkdirAll(tombstone, 0o755); err != nil {
+		t.Fatalf("create malicious tombstone: %v", err)
+	}
+	if _, err := engine.activate(stage, "fresh", "old", ""); err == nil || !strings.Contains(err.Error(), "tombstone") {
+		t.Fatalf("preexisting tombstone error = %v", err)
+	}
+	if _, err := os.Lstat(engine.transactionPath()); !os.IsNotExist(err) {
+		t.Fatalf("preexisting tombstone activation wrote a transaction: %v", err)
+	}
+}
+
+func TestCanonicalAlreadyActiveTargetIsBaselineBoundNoSwitch(t *testing.T) {
+	root := newTestRoot(t)
+	makeMinimalGeneration(t, root, "target")
+	makeMinimalGeneration(t, root, "old")
+	linkGeneration(t, root, activeOfflineName, "target")
+	linkGeneration(t, root, previousOfflineName, "old")
+	stage := writeStage(t, root, "target")
+	engine := testEngine(t, root)
+	result, err := engine.activate(stage, "target", "target", "")
+	if err != nil {
+		t.Fatalf("canonical same-target activation: %v", err)
+	}
+	if !result.TargetAlreadyActive || !result.TileActivationNotSwitched ||
+		result.ActiveTileSetID != "target" || result.PreviousTileSetID != "target" {
+		t.Fatalf("canonical same-target no-switch result = %+v", result)
+	}
+	assertLinkTarget(t, engine.activePath(), "tile-generations/target/offline")
+	assertLinkTarget(t, engine.previousPath(), "tile-generations/old/offline")
+	if _, err := os.Lstat(engine.transactionPath()); !os.IsNotExist(err) {
+		t.Fatalf("canonical same-target no-switch wrote a transaction: %v", err)
+	}
+	if _, err := engine.activate(stage, "target", "old", ""); err == nil || !strings.Contains(err.Error(), "baseline") {
+		t.Fatalf("canonical same-target baseline mismatch error = %v", err)
+	}
+	assertLinkTarget(t, engine.activePath(), "tile-generations/target/offline")
+	assertLinkTarget(t, engine.previousPath(), "tile-generations/old/offline")
+}
+
 func TestTargetInactiveManifestAloneAndWrongPreviousPointerCannotAuthorizeNilPriorRecovery(t *testing.T) {
 	root, engine := completedLegacyRollbackTopology(t)
 	if err := os.Remove(engine.previousPath()); err != nil {
@@ -819,7 +1052,7 @@ func TestRollbackRejectsActivationTransactionForADifferentTargetBeforeMutation(t
 	}
 	stage := writeStage(t, root, "fresh")
 	engine := testEngine(t, root)
-	if _, err := engine.activate(stage, "fresh", "after_switch"); err == nil {
+	if _, err := engine.activate(stage, "fresh", "", "after_switch"); err == nil {
 		t.Fatal("injected activation unexpectedly completed")
 	}
 	assertLinkTarget(t, filepath.Join(root, activeOfflineName), filepath.ToSlash(filepath.Join(generationDirectory, "fresh", activeOfflineName)))
@@ -844,7 +1077,7 @@ func TestRollbackRejectsPreSwitchTransactionForADifferentRecordedPrior(t *testin
 	}
 	stage := writeStage(t, root, "fresh")
 	engine := testEngine(t, root)
-	if _, err := engine.activate(stage, "fresh", "after_journal"); err == nil {
+	if _, err := engine.activate(stage, "fresh", "", "after_journal"); err == nil {
 		t.Fatal("injected pre-switch activation unexpectedly completed")
 	}
 
@@ -900,7 +1133,7 @@ func TestRollbackRecoveryAfterPointerExchange(t *testing.T) {
 	linkGeneration(t, root, previousOfflineName, "older")
 	stage := writeStage(t, root, "fresh")
 	engine := testEngine(t, root)
-	if _, err := engine.activate(stage, "fresh", ""); err != nil {
+	if _, err := engine.activate(stage, "fresh", "old", ""); err != nil {
 		t.Fatalf("activate: %v", err)
 	}
 
@@ -956,13 +1189,19 @@ func writeStage(t *testing.T, root, tileSetID string) string {
 
 func makeMinimalGeneration(t *testing.T, root, tileSetID string) {
 	t.Helper()
-	generation := filepath.Join(root, generationDirectory, tileSetID, activeOfflineName)
-	if err := os.MkdirAll(generation, 0o755); err != nil {
-		t.Fatalf("create generation %s: %v", tileSetID, err)
+	stage := writeStage(t, root, tileSetID)
+	manifest, err := os.ReadFile(filepath.Join(stage, "manifest.json"))
+	if err != nil {
+		t.Fatalf("read generation manifest %s: %v", tileSetID, err)
 	}
-	manifest := fmt.Sprintf("{\"tile_set_id\":%q}\n", tileSetID)
-	if err := os.WriteFile(filepath.Join(generation, embeddedManifestName), []byte(manifest), 0o444); err != nil {
-		t.Fatalf("write generation manifest %s: %v", tileSetID, err)
+	if err := os.WriteFile(filepath.Join(stage, activeOfflineName, embeddedManifestName), manifest, 0o444); err != nil {
+		t.Fatalf("write embedded generation manifest %s: %v", tileSetID, err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, generationDirectory), 0o755); err != nil {
+		t.Fatalf("create generations root: %v", err)
+	}
+	if err := os.Rename(stage, filepath.Join(root, generationDirectory, tileSetID)); err != nil {
+		t.Fatalf("install generation %s: %v", tileSetID, err)
 	}
 }
 
@@ -978,7 +1217,7 @@ func completedLegacyRollbackTopology(t *testing.T) (string, *transactionEngine) 
 	}
 	stage := writeStage(t, root, "fresh")
 	engine := testEngine(t, root)
-	if _, err := engine.activate(stage, "fresh", ""); err != nil {
+	if _, err := engine.activate(stage, "fresh", "", ""); err != nil {
 		t.Fatalf("activate direct legacy tree: %v", err)
 	}
 	if _, err := engine.rollback("fresh", "", ""); err != nil {

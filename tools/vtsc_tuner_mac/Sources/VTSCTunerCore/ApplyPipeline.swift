@@ -1803,7 +1803,10 @@ public actor ApplyPipeline {
         let staged = try await service.stageAndVerify(artifact: tileSet, profile: deployment.profile)
         // Activation can complete remotely even if SSH disconnects before the
         // result arrives. Recovery inspects the durable on-device transaction.
-        let activated = try await service.activate(staged)
+        let activated = try await service.activate(
+          staged,
+          expectedCurrentTileSetID: deployment.journal.effectivePreviousTileSetID
+        )
         deployment.journal = try reconcileTileActivationJournal(
           expected: deployment.journal,
           activation: activated,
@@ -1966,7 +1969,6 @@ public actor ApplyPipeline {
           snapshot.activeMapdSHA256 == journal.previousActiveMapdSHA256,
           snapshot.cachedMapdPath == journal.previousCachedMapdPath,
           snapshot.cachedMapdSHA256 == journal.previousCachedMapdSHA256,
-          snapshot.activeTileSetID == journal.previousTileSetID,
           journal.previousActiveMapdBuildInfoSHA256 ==
             TuneDeploymentIdentity.sha256Hex(readback.activeMapdBuildInfo),
           isELF64LittleEndianARM64(readback.activeMapdELFHeader),
@@ -1976,6 +1978,12 @@ public actor ApplyPipeline {
         "tici source/tune/mapd/tile/boot baseline changed before mutation claim"
       )
     }
+    try validateActiveTileIdentity(
+      id: snapshot.activeTileSetID,
+      topology: snapshot.activeTileTopology,
+      expected: journal.previousTileSetID,
+      context: "pre-mutation baseline"
+    )
   }
 
   private func stageAndInstallMapdRelease(preflight: RuntimeDeploymentPreflight) async throws -> String {
@@ -2479,7 +2487,8 @@ public actor ApplyPipeline {
       liveMapDataLogMonoTimeNs: readback.liveMapDataControllerStatus.logMonoTimeNs,
       liveMapDataSampleMonoTimeNs: readback.liveMapDataControllerStatus.sampleMonoTimeNs,
       roadGeometryValid: readback.liveMapDataControllerStatus.roadGeometryValid,
-      activeTileSetID: snapshot.activeTileSetID
+      activeTileSetID: snapshot.activeTileSetID,
+      activeTileTopology: snapshot.activeTileTopology
     )
   }
 
@@ -2535,7 +2544,8 @@ public actor ApplyPipeline {
       liveMapDataLogMonoTimeNs: 0,
       liveMapDataSampleMonoTimeNs: 0,
       roadGeometryValid: false,
-      activeTileSetID: snapshot.activeTileSetID
+      activeTileSetID: snapshot.activeTileSetID,
+      activeTileTopology: snapshot.activeTileTopology
     )
   }
 
@@ -2543,6 +2553,28 @@ public actor ApplyPipeline {
     guard header.count >= 20 else { return false }
     return Array(header.prefix(6)) == [0x7f, 0x45, 0x4c, 0x46, 2, 1] &&
       header[18] == 183 && header[19] == 0
+  }
+
+  private func validateActiveTileIdentity(
+    id: String?,
+    topology: TiciActiveTileTopology?,
+    expected: String?,
+    context: String
+  ) throws {
+    if let expected {
+      guard id == expected,
+            topology == .canonical || topology == .directIdentified else {
+        throw ApplyPipelineError.postflightMismatch(
+          "\(context) tile identity/topology is \(id ?? "<none>")/\(topology?.rawValue ?? "<missing>"), expected identified \(expected)"
+        )
+      }
+    } else {
+      guard id == nil, topology == .directUnidentified else {
+        throw ApplyPipelineError.postflightMismatch(
+          "\(context) requires an explicit direct-unidentified tile topology"
+        )
+      }
+    }
   }
 
   private func validatePostflight(
@@ -2615,11 +2647,12 @@ public actor ApplyPipeline {
         )
       }
     }
-    guard result.activeTileSetID == expectedActiveTileSetID else {
-      throw ApplyPipelineError.postflightMismatch(
-        "active tile-set identity is \(result.activeTileSetID ?? "<none>"), expected \(expectedActiveTileSetID ?? "<none>")"
-      )
-    }
+    try validateActiveTileIdentity(
+      id: result.activeTileSetID,
+      topology: result.activeTileTopology,
+      expected: expectedActiveTileSetID,
+      context: "production postflight"
+    )
   }
 
   private func validateStaticInstalledIdentity(
@@ -2657,9 +2690,12 @@ public actor ApplyPipeline {
     guard result.capabilityPresent, result.activeELFARM64, result.buildInfoMatches else {
       throw ApplyPipelineError.postflightMismatch("native mapd build identity/capability is not exact")
     }
-    guard result.activeTileSetID == expectedActiveTileSetID else {
-      throw ApplyPipelineError.postflightMismatch("active tile-set identity changed after reboot")
-    }
+    try validateActiveTileIdentity(
+      id: result.activeTileSetID,
+      topology: result.activeTileTopology,
+      expected: expectedActiveTileSetID,
+      context: "static post-reboot"
+    )
     try requireBootTransition(
       current: result.bootID,
       previous: preflight.journal.deploymentPreRebootBootID,
@@ -2744,9 +2780,12 @@ public actor ApplyPipeline {
         "manager/mapd is not running with the exact ARM64 build identity/capability"
       )
     }
-    guard result.activeTileSetID == expectedActiveTileSetID else {
-      throw ApplyPipelineError.postflightMismatch("active tile-set identity changed during resumed postflight")
-    }
+    try validateActiveTileIdentity(
+      id: result.activeTileSetID,
+      topology: result.activeTileTopology,
+      expected: expectedActiveTileSetID,
+      context: "resumed postflight"
+    )
     try requireResumedDeploymentBootTransition(
       current: result.bootID,
       journal: preflight.journal
@@ -3612,9 +3651,12 @@ public actor ApplyPipeline {
         throw ApplyPipelineError.postflightMismatch("rollback persistent mapd cache digest differs")
       }
     }
-    guard snapshot.activeTileSetID == journal.effectivePreviousTileSetID else {
-      throw ApplyPipelineError.postflightMismatch("rollback tile-set identity differs")
-    }
+    try validateActiveTileIdentity(
+      id: snapshot.activeTileSetID,
+      topology: snapshot.activeTileTopology,
+      expected: journal.effectivePreviousTileSetID,
+      context: "rollback"
+    )
     if tilesWereTouched, let targetTileSetID = journal.targetTileSetID,
        snapshot.activeTileSetID == targetTileSetID {
       throw ApplyPipelineError.postflightMismatch("rolled-back tile set is still active")

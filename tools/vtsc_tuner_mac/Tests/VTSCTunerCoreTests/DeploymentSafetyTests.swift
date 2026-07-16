@@ -145,7 +145,10 @@ import Testing
     artifact: CanonicalTileSetArtifact(rootURL: root, manifest: manifest),
     profile: "commaAdb"
   )
-  let activationResult = try await service.activate(staged)
+  let activationResult = try await service.activate(
+    staged,
+    expectedCurrentTileSetID: String(repeating: "e", count: 64)
+  )
   #expect(activationResult.previousTileSetID == String(repeating: "e", count: 64))
   let requests = await runner.requests
   let rsyncRequests = requests.filter { $0.executableURL == TiciTileSetDeploymentService.rsyncURL }
@@ -181,7 +184,7 @@ import Testing
     transactionHelperURL: helper
   )
 
-  let result = try await service.activate(staged)
+  let result = try await service.activate(staged, expectedCurrentTileSetID: identity)
   #expect(result.tileSetID == identity)
   #expect(result.previousTileSetID == nil)
   #expect(result.targetAlreadyActive)
@@ -217,10 +220,12 @@ import Testing
     helperPath: helperPath,
     stagingRoot: TiciTileSetDeploymentService.stagingRoot(tileSetID: tileSetID),
     tileSetID: tileSetID,
+    expectedCurrentTileSetID: String(repeating: "e", count: 64),
     injectedFailurePoint: "after_switch"
   )
   #expect(activation.contains("vtsc-tile-transaction-"))
   #expect(activation.contains("--inject-failure 'after_switch'"))
+  #expect(activation.contains("--expected-current-tile-set-id '\(String(repeating: "e", count: 64))'"))
   #expect(activation.contains("refusing tile mutation unless tici is exactly offroad"))
   let rollback = try TiciTileSetDeploymentService.atomicRollbackCommand(
     helperPath: helperPath,
@@ -789,7 +794,7 @@ private actor DeploymentRecordingRunner: ProcessRunning {
     if command.contains(" activate --root ") {
       if targetAlreadyActive {
         return success("""
-        {"operation":"activate","activated_tile_set_id":"\(identity)","target_already_active":true,"tile_activation_not_switched":true}
+        {"operation":"activate","activated_tile_set_id":"\(identity)","active_tile_set_id":"\(identity)","previous_tile_set_id":"\(identity)","target_already_active":true,"tile_activation_not_switched":true}
         """)
       }
       return success("""
@@ -935,6 +940,8 @@ private func deploymentSnapshotWire(
     .activeMapdSHA256: Data(String(repeating: "d", count: 64).utf8),
     .mapdReleaseVersion: Data("old-release".utf8),
     .mapdVersion: Data("old-release".utf8),
+    .tileManifest: Data(),
+    .tileTopology: Data("direct-unidentified".utf8),
     .mapdCacheListing: Data("/tmp/old-cache\t\(String(repeating: "d", count: 64))\n".utf8),
   ]
   return TiciSnapshotWireCodec.encode(.init(rawValues: values)) + "\n"

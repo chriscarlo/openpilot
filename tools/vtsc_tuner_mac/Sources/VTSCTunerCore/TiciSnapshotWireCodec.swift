@@ -23,6 +23,7 @@ public enum TiciSnapshotWireField: String, CaseIterable, Codable, Sendable {
   case activeMapdSHA256 = "active_mapd_sha256"
   case qCurveFile = "q_curve_file"
   case tileManifest = "tile_manifest"
+  case tileTopology = "tile_topology"
   case mapdCacheListing = "mapd_cache_listing"
   case memoryWholeCurveProfile = "memory_whole_curve_profile"
   case persistentWholeCurveProfile = "persistent_whole_curve_profile"
@@ -134,26 +135,79 @@ public enum TiciSnapshotWireCommandBuilder {
     adjacentManifestPath: String = "/data/media/0/osm/offline.manifest.json"
   ) -> String {
     let offline = shellQuote(offlinePath)
-    let embedded = shellQuote(offlinePath + "/.tileset-manifest.json")
+    let root = shellQuote((offlinePath as NSString).deletingLastPathComponent)
     let adjacent = shellQuote(adjacentManifestPath)
     return """
     tile_offline=\(offline)
-    tile_embedded=\(embedded)
+    tile_root=\(root)
+    tile_generations="$tile_root/tile-generations"
     tile_adjacent=\(adjacent)
+    emit_invalid_tile_topology() {
+      emit_text tile_topology "invalid:$1"
+      emit_text tile_manifest "invalid:$1"
+    }
     if [ -L "$tile_offline" ]; then
-      if [ -f "$tile_embedded" ]; then
+      tile_target=$(readlink "$tile_offline") || tile_target=
+      case "$tile_target" in
+        tile-generations/*/offline)
+          tile_id=${tile_target#tile-generations/}
+          tile_id=${tile_id%/offline}
+          ;;
+        *) tile_id= ;;
+      esac
+      case "$tile_id" in
+        ''|[._-]*|*[!A-Za-z0-9._-]*) tile_id= ;;
+      esac
+      if [ -n "$tile_id" ] && [ "${#tile_id}" -le 128 ]; then
+        tile_generation="$tile_generations/$tile_id"
+        tile_generation_offline="$tile_generation/offline"
+        tile_embedded="$tile_generation_offline/.tileset-manifest.json"
+      else
+        tile_generation=
+        tile_generation_offline=
+        tile_embedded=
+      fi
+      if [ -n "$tile_id" ] &&
+         [ -d "$tile_generations" ] && [ ! -L "$tile_generations" ] &&
+         [ -d "$tile_generation" ] && [ ! -L "$tile_generation" ] &&
+         [ -d "$tile_generation_offline" ] && [ ! -L "$tile_generation_offline" ] &&
+         [ -f "$tile_embedded" ] && [ ! -L "$tile_embedded" ]; then
+        emit_text tile_topology "canonical:$tile_id"
         emit_file tile_manifest "$tile_embedded"
       else
-        emit_text tile_manifest 'invalid:canonical-pointer-missing-embedded-manifest'
+        emit_invalid_tile_topology 'canonical-pointer'
       fi
     elif [ -d "$tile_offline" ] && [ ! -L "$tile_offline" ]; then
-      if [ ! -f "$tile_embedded" ] && [ -f "$tile_adjacent" ]; then
+      tile_embedded="$tile_offline/.tileset-manifest.json"
+      direct_topology_clean=1
+      if [ -e "$tile_root/offline.previous" ] || [ -L "$tile_root/offline.previous" ] ||
+         [ -e "$tile_root/.tileset-transaction.json" ] || [ -L "$tile_root/.tileset-transaction.json" ]; then
+        direct_topology_clean=0
+      fi
+      if [ -e "$tile_generations" ] || [ -L "$tile_generations" ]; then
+        if [ -d "$tile_generations" ] && [ ! -L "$tile_generations" ]; then
+          tile_generation_listing=$(ls -A "$tile_generations") || tile_generation_listing=invalid
+          if [ -n "$tile_generation_listing" ]; then direct_topology_clean=0; fi
+        else
+          direct_topology_clean=0
+        fi
+      fi
+      for tile_artifact in "$tile_root"/.offline-* "$tile_root"/.retained-* "$tile_root"/.vtsc-cleanup-*; do
+        if [ -e "$tile_artifact" ] || [ -L "$tile_artifact" ]; then direct_topology_clean=0; fi
+      done
+      if [ "$direct_topology_clean" = 1 ] &&
+         [ ! -e "$tile_embedded" ] && [ -f "$tile_adjacent" ] && [ ! -L "$tile_adjacent" ]; then
+        emit_text tile_topology 'direct-identified'
         emit_file tile_manifest "$tile_adjacent"
+      elif [ "$direct_topology_clean" = 1 ] &&
+           [ ! -e "$tile_embedded" ] && [ ! -e "$tile_adjacent" ] && [ ! -L "$tile_adjacent" ]; then
+        emit_text tile_topology 'direct-unidentified'
+        emit_text tile_manifest ''
       else
-        emit_text tile_manifest 'invalid:direct-tree-manifest-topology'
+        emit_invalid_tile_topology 'direct-tree-manifest'
       fi
     else
-      emit_text tile_manifest 'invalid:active-offline-path'
+      emit_invalid_tile_topology 'active-offline-path'
     fi
     """
   }

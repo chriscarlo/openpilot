@@ -10,6 +10,7 @@ import Testing
     .physicsAmplitude: Data("4.11".utf8),
     .qCurveFile: Data("Q_CURVE_ENABLED = True\nQ_CURVE_POINTS = [(0.1, 1.0)]\n".utf8),
     .tileManifest: Data("{\"tile_set_id\":\"current\"}".utf8),
+    .tileTopology: Data("canonical:current".utf8),
     .mapdCacheListing: Data("/data/media/0/osm/binaries/mapd-a\tabc123\n".utf8),
   ])
 
@@ -49,7 +50,7 @@ import Testing
   #expect(command.contains("/proc/sys/kernel/random/boot_id"))
   #expect(command.contains("q_curve_file"))
   #expect(command.contains("tile_manifest"))
-  #expect(command.contains("/data/media/0/osm/offline/.tileset-manifest.json"))
+  #expect(command.contains(#"tile_embedded="$tile_generation_offline/.tileset-manifest.json""#))
   #expect(command.contains("/data/media/0/osm/offline.manifest.json"))
   #expect(command.contains(#"[ -L "$tile_offline" ]"#))
   #expect(command.contains(#"[ -d "$tile_offline" ] && [ ! -L "$tile_offline" ]"#))
@@ -67,7 +68,7 @@ import Testing
   #expect(process.terminationStatus == 0)
 }
 
-@Test func tileManifestProbeFallsBackOnlyForARealDirectTree() throws {
+@Test func tileManifestProbeValidatesCanonicalPointersAndDirectIdentityStates() throws {
   let root = FileManager.default.temporaryDirectory
     .appendingPathComponent("vtsc-tile-probe-\(UUID().uuidString)", isDirectory: true)
   defer { try? FileManager.default.removeItem(at: root) }
@@ -80,22 +81,65 @@ import Testing
 
   let direct = try runTileManifestProbeShell(offline: offline, adjacent: adjacent)
   var fields = runtimeSnapshotMinimumFields()
-  fields[.tileManifest] = Data(direct.utf8)
-  #expect(try TiciDeploymentSnapshotDecoder.decodeRead(
+  fields[.tileManifest] = Data(direct.manifest.utf8)
+  fields[.tileTopology] = Data(direct.topology.utf8)
+  let directRead = try TiciDeploymentSnapshotDecoder.decodeRead(
     TiciSnapshotWireCodec.encode(.init(rawValues: fields))
-  ).snapshot.activeTileSetID == tileID)
+  ).snapshot
+  #expect(directRead.activeTileSetID == tileID)
+  #expect(directRead.activeTileTopology == .directIdentified)
+
+  try FileManager.default.removeItem(at: adjacent)
+  let unidentified = try runTileManifestProbeShell(offline: offline, adjacent: adjacent)
+  fields[.tileManifest] = Data(unidentified.manifest.utf8)
+  fields[.tileTopology] = Data(unidentified.topology.utf8)
+  let unidentifiedRead = try TiciDeploymentSnapshotDecoder.decodeRead(
+    TiciSnapshotWireCodec.encode(.init(rawValues: fields))
+  ).snapshot
+  #expect(unidentifiedRead.activeTileSetID == nil)
+  #expect(unidentifiedRead.activeTileTopology == .directUnidentified)
+  try "{\"tile_set_id\":\"\(tileID)\"}\n".write(to: adjacent, atomically: true, encoding: .utf8)
 
   func expectInvalidTopology(_ label: String) throws {
     let result = try runTileManifestProbeShell(offline: offline, adjacent: adjacent)
-    #expect(result.hasPrefix("invalid:"), "\(label) did not emit explicit invalid topology")
+    #expect(result.topology.hasPrefix("invalid:"), "\(label) did not emit explicit invalid topology")
     var invalidFields = runtimeSnapshotMinimumFields()
-    invalidFields[.tileManifest] = Data(result.utf8)
+    invalidFields[.tileManifest] = Data(result.manifest.utf8)
+    invalidFields[.tileTopology] = Data(result.topology.utf8)
     #expect(throws: TiciDeploymentSnapshotDecodeError.self) {
       try TiciDeploymentSnapshotDecoder.decodeRead(
         TiciSnapshotWireCodec.encode(.init(rawValues: invalidFields))
       )
     }
   }
+
+  try FileManager.default.removeItem(at: adjacent)
+  let previous = root.appendingPathComponent("offline.previous")
+  try FileManager.default.createSymbolicLink(at: previous, withDestinationURL: offline)
+  try expectInvalidTopology("direct unidentified tree with previous pointer")
+  try FileManager.default.removeItem(at: previous)
+
+  let generations = root.appendingPathComponent("tile-generations/foreign", isDirectory: true)
+  try FileManager.default.createDirectory(at: generations, withIntermediateDirectories: true)
+  try expectInvalidTopology("direct unidentified tree with generation artifact")
+  try FileManager.default.removeItem(at: root.appendingPathComponent("tile-generations"))
+
+  let transaction = root.appendingPathComponent(".tileset-transaction.json")
+  try "{}\n".write(to: transaction, atomically: true, encoding: .utf8)
+  try expectInvalidTopology("direct unidentified tree with helper transaction")
+  try FileManager.default.removeItem(at: transaction)
+  try FileManager.default.createSymbolicLink(
+    at: transaction,
+    withDestinationURL: root.appendingPathComponent("missing-transaction")
+  )
+  try expectInvalidTopology("direct unidentified tree with broken helper transaction link")
+  try FileManager.default.removeItem(at: transaction)
+
+  let tombstone = root.appendingPathComponent(".vtsc-cleanup-target")
+  try FileManager.default.createDirectory(at: tombstone, withIntermediateDirectories: true)
+  try expectInvalidTopology("direct unidentified tree with cleanup tombstone")
+  try FileManager.default.removeItem(at: tombstone)
+  try "{\"tile_set_id\":\"\(tileID)\"}\n".write(to: adjacent, atomically: true, encoding: .utf8)
 
   try FileManager.default.removeItem(at: offline)
   try expectInvalidTopology("missing active path with stale adjacent manifest")
@@ -107,10 +151,62 @@ import Testing
   try expectInvalidTopology("broken generation symlink")
 
   try FileManager.default.removeItem(at: offline)
-  let generation = root.appendingPathComponent("tile-generations/current/offline", isDirectory: true)
+  let generationID = "current"
+  let generation = root.appendingPathComponent("tile-generations/\(generationID)/offline", isDirectory: true)
   try FileManager.default.createDirectory(at: generation, withIntermediateDirectories: true)
-  try FileManager.default.createSymbolicLink(at: offline, withDestinationURL: generation)
+  try FileManager.default.createSymbolicLink(
+    atPath: offline.path,
+    withDestinationPath: "tile-generations/\(generationID)/offline"
+  )
   try expectInvalidTopology("generation symlink without embedded manifest")
+
+  let embedded = generation.appendingPathComponent(".tileset-manifest.json")
+  try "{\"tile_set_id\":\"\(generationID)\"}\n".write(to: embedded, atomically: true, encoding: .utf8)
+  let canonical = try runTileManifestProbeShell(offline: offline, adjacent: adjacent)
+  #expect(canonical.topology == "canonical:\(generationID)")
+  var canonicalFields = runtimeSnapshotMinimumFields()
+  canonicalFields[.tileManifest] = Data(canonical.manifest.utf8)
+  canonicalFields[.tileTopology] = Data(canonical.topology.utf8)
+  let canonicalRead = try TiciDeploymentSnapshotDecoder.decodeRead(
+    TiciSnapshotWireCodec.encode(.init(rawValues: canonicalFields))
+  ).snapshot
+  #expect(canonicalRead.activeTileSetID == generationID)
+  #expect(canonicalRead.activeTileTopology == .canonical)
+
+  try FileManager.default.removeItem(at: offline)
+  let external = root.appendingPathComponent("external/offline", isDirectory: true)
+  try FileManager.default.createDirectory(at: external, withIntermediateDirectories: true)
+  try "{\"tile_set_id\":\"external\"}\n".write(
+    to: external.appendingPathComponent(".tileset-manifest.json"), atomically: true, encoding: .utf8
+  )
+  try FileManager.default.createSymbolicLink(at: offline, withDestinationURL: external)
+  try expectInvalidTopology("absolute external symlink")
+
+  for (label, target) in [
+    ("traversal symlink", "../tile-generations/\(generationID)/offline"),
+    ("wrong-shape symlink", "tile-generations/\(generationID)/extra/offline"),
+  ] {
+    try FileManager.default.removeItem(at: offline)
+    try FileManager.default.createSymbolicLink(atPath: offline.path, withDestinationPath: target)
+    try expectInvalidTopology(label)
+  }
+
+  try FileManager.default.removeItem(at: offline)
+  try FileManager.default.createSymbolicLink(
+    atPath: offline.path,
+    withDestinationPath: "tile-generations/\(generationID)/offline"
+  )
+  try "{\"tile_set_id\":\"different\"}\n".write(to: embedded, atomically: true, encoding: .utf8)
+  let mismatch = try runTileManifestProbeShell(offline: offline, adjacent: adjacent)
+  #expect(mismatch.topology == "canonical:\(generationID)")
+  var mismatchFields = runtimeSnapshotMinimumFields()
+  mismatchFields[.tileManifest] = Data(mismatch.manifest.utf8)
+  mismatchFields[.tileTopology] = Data(mismatch.topology.utf8)
+  #expect(throws: TiciDeploymentSnapshotDecodeError.self) {
+    try TiciDeploymentSnapshotDecoder.decodeRead(
+      TiciSnapshotWireCodec.encode(.init(rawValues: mismatchFields))
+    )
+  }
 }
 
 @Test func deploymentSnapshotDecoderOwnsQCacheAndManifestInterpretation() throws {
@@ -141,6 +237,7 @@ import Testing
     .activeMapdSHA256: Data(String(repeating: "b", count: 64).utf8),
     .qCurveFile: Data(qSource.utf8),
     .tileManifest: Data("{\"tile_set_id\":\"tiles-v1\"}".utf8),
+    .tileTopology: Data("canonical:tiles-v1".utf8),
     .mapdCacheListing: Data("\(cachePath)\t\(String(repeating: "c", count: 64))\n".utf8),
   ]
   let read = try TiciDeploymentSnapshotDecoder.decodeRead(
@@ -194,6 +291,8 @@ import Testing
     .runtimeEndIsOffroad: Data("1".utf8),
     .runtimeEndIsOnroad: Data("0".utf8),
     .runtimeEndMapLookaheadEnabled: Data("0".utf8),
+    .tileManifest: Data(),
+    .tileTopology: Data("direct-unidentified".utf8),
     .memoryWholeCurveProfile: Data("memory-profile".utf8),
     .persistentWholeCurveProfile: Data("persistent-profile".utf8),
     .persistentLastGPSPosition: Data("gps".utf8),
@@ -397,6 +496,8 @@ private func runtimeSnapshotMinimumFields() -> [TiciSnapshotWireField: Data] {
     .runtimeEndIsOffroad: Data("1".utf8),
     .runtimeEndIsOnroad: Data("0".utf8),
     .runtimeEndMapLookaheadEnabled: Data("0".utf8),
+    .tileManifest: Data(),
+    .tileTopology: Data("direct-unidentified".utf8),
   ]
   for (field, value) in [
     (TiciSnapshotWireField.physicsAmplitude, "-1"),
@@ -426,19 +527,35 @@ private func runManagerProbeShell(repository: URL, procRoot: URL, pgrep: URL) th
   """)
 }
 
-private func runTileManifestProbeShell(offline: URL, adjacent: URL) throws -> String {
+private func runTileManifestProbeShell(
+  offline: URL,
+  adjacent: URL
+) throws -> (topology: String, manifest: String) {
   let fragment = TiciSnapshotWireCommandBuilder.tileManifestProbeShellFragment(
     offlinePath: offline.path,
     adjacentManifestPath: adjacent.path
   )
-  return try runShell("""
+  let output = try runShell("""
   set -eu
-  tile_probe_result=
-  emit_file() { tile_probe_result=$(cat "$2"); }
-  emit_text() { tile_probe_result=$2; }
+  tile_probe_topology=
+  tile_probe_manifest=
+  emit_file() {
+    if [ "$1" = tile_manifest ]; then tile_probe_manifest=$(cat "$2"); fi
+  }
+  emit_text() {
+    if [ "$1" = tile_topology ]; then tile_probe_topology=$2; fi
+    if [ "$1" = tile_manifest ]; then tile_probe_manifest=$2; fi
+  }
   \(fragment)
-  printf '%s' "$tile_probe_result"
+  printf '%s\n%s' "$tile_probe_topology" "$tile_probe_manifest"
   """)
+  guard let separator = output.firstIndex(of: "\n") else {
+    throw NSError(domain: "TileManifestProbe", code: 1)
+  }
+  return (
+    String(output[..<separator]),
+    String(output[output.index(after: separator)...])
+  )
 }
 
 private func runShell(_ script: String) throws -> String {
