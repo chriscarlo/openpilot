@@ -4,6 +4,7 @@ Reverse-chronological. Add a new dated section for every substantive change.
 
 ## 2026-07-16 — runtime-only product boundary
 
+- Fixed explicit pending-deployment Abort bypassing the existing self-healing USB transport. Abort now proves the recorded profile through the reusable probe before taking rollback ownership, so a connected authorized tici with a missing local `tcp:2222 → tcp:22` forward has the bridge recreated before the first parked-state SSH read. A focused regression reproduces the missing-forward state and requires the forward to precede every device safety snapshot.
 - Restored the last clean native checkpoint after the attempted tile-transaction hardening pass expanded into an unstable cross-language state-machine rewrite.
 - Kept the five-case source model for compatibility but made only Local, Commit, Push, and PullOnTici selectable.
 - Replaced the technical Apply dropdown with a dedicated **Save or Send This Tune** modal. Its four cumulative destinations say exactly whether the result stays on this Mac, enters local Git history, reaches the Git remote, or is installed on the car; tici installation is visibly recommended for road testing and selecting it still requires a separate review confirmation.

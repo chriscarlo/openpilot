@@ -134,6 +134,8 @@ Never report final deployment proof at Git push, file transfer, or reboot dispat
 
 The native app uses `/usr/sbin/networksetup` only as an ordering hint, then probes `commaHome`, `commaCar`, and `commaAdb` with absolute `/usr/bin/ssh`, short timeouts, batch mode, and `StrictHostKeyChecking=accept-new`. The first responder is used. Finder's sparse `PATH` therefore does not change Git/SSH behavior.
 
+Every independently launched device workflow—Install, Resume, Abort, Recover, and post-reboot polling—runs through that same profile probe before its first direct SSH inspection. When `commaAdb` is selected but unreachable, the probe locates ADB through Finder-safe paths, requires exactly one authorized device, creates `tcp:2222 → tcp:22`, and retries SSH. Safety and identity checks still run afterward; bridge creation never authorizes a device mutation by itself.
+
 ## Legacy Rust note
 
 `tools/vtsc_tuner/src/apply.rs` still documents its original background-thread step IDs, direct region generation, and two-reboot flow. That implementation is not the safe whole-curve release pipeline. Keep tune math/schema compatibility, but do not copy its direct active-tree rsync, unpinned `git pull`, or multiple-reboot sequencing into native production work.

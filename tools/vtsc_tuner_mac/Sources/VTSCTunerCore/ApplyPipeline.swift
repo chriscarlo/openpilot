@@ -828,6 +828,9 @@ public actor ApplyPipeline {
         )
       }
       try validateProfile(loaded.journal.profile)
+      guard await probeProfile(loaded.journal.profile) else {
+        throw ApplyPipelineError.noReachableTici(lastADBTransportDetail)
+      }
       await emit(
         .succeeded,
         id: 0,

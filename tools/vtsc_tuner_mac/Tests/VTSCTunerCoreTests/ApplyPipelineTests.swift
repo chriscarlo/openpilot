@@ -1494,6 +1494,58 @@ func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByR
   })
 }
 
+@Test func abortRestoresMissingADBForwardBeforeFreshDeviceSafetyRead() async throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  fixture.journal.previousCachedMapdPath = ""
+  fixture.journal.previousCachedMapdSHA256 = nil
+  fixture.journal.resolution = .awaitingOutdoorPostflight
+  try fixture.journal.write(to: fixture.journalURL)
+
+  let adbURL = URL(fileURLWithPath: "/test/bin/adb")
+  let rollbackRunner = FreshProcessRollbackRecoveryRunner(journal: fixture.journal)
+  let runner = AbortADBBridgeRunner(
+    adbURL: adbURL,
+    rollbackRunner: rollbackRunner,
+    deviceList: """
+    List of devices attached
+    e521630c device usb:2-1 transport_id:23
+
+    """
+  )
+  let pipeline = ApplyPipeline(
+    processRunner: runner,
+    adbURL: adbURL,
+    rebootInitialDelayNanoseconds: 0,
+    rebootPollDelayNanoseconds: 1,
+    journalWriter: { journal, url in try journal.write(to: url) }
+  )
+
+  let succeeded = await pipeline.abortPendingDeployment(
+    AbortPendingDeploymentRequest(
+      repositoryRoot: fixture.repository,
+      journalURL: fixture.journalURL
+    )
+  ) { _ in }
+
+  #expect(succeeded)
+  #expect(try DeploymentRollbackJournal.load(from: fixture.journalURL).effectiveResolution == .rolledBack)
+  let requests = await runner.requests
+  let forwardIndex = requests.firstIndex {
+    $0.executableURL == adbURL &&
+      $0.arguments == ["-s", "e521630c", "forward", "tcp:2222", "tcp:22"]
+  }
+  let snapshotIndex = requests.firstIndex {
+    $0.executableURL == ApplyPipeline.sshURL &&
+      ($0.arguments.last ?? "").contains("params_root=/data/params/d")
+  }
+  #expect(forwardIndex != nil)
+  #expect(snapshotIndex != nil)
+  if let forwardIndex, let snapshotIndex {
+    #expect(forwardIndex < snapshotIndex)
+  }
+}
+
 @Test func abortRejectsReleasedTunerPeerBeforeRollbackMutation() async throws {
   var fixture = try resumePostflightFixture(validGPS: true)
   defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -3755,6 +3807,50 @@ private actor FreshProcessRollbackRecoveryRunner: ProcessRunning {
 
   private func success(_ output: String) -> ProcessResult {
     ProcessResult(terminationStatus: 0, standardOutput: output, standardError: "")
+  }
+}
+
+private actor AbortADBBridgeRunner: ProcessRunning {
+  let adbURL: URL
+  let rollbackRunner: FreshProcessRollbackRecoveryRunner
+  let deviceList: String
+  private var forwardReady = false
+  private(set) var requests: [ProcessRequest] = []
+
+  init(
+    adbURL: URL,
+    rollbackRunner: FreshProcessRollbackRecoveryRunner,
+    deviceList: String
+  ) {
+    self.adbURL = adbURL
+    self.rollbackRunner = rollbackRunner
+    self.deviceList = deviceList
+  }
+
+  func run(_ request: ProcessRequest) async throws -> ProcessResult {
+    requests.append(request)
+    if request.executableURL == adbURL {
+      if request.arguments == ["devices", "-l"] {
+        return success(deviceList)
+      }
+      if request.arguments == ["-s", "e521630c", "forward", "tcp:2222", "tcp:22"] {
+        forwardReady = true
+        return success("2222\n")
+      }
+      return failure("unexpected adb request: \(request.arguments)")
+    }
+    if request.executableURL == ApplyPipeline.sshURL {
+      guard forwardReady else { return failure("connection refused", status: 255) }
+    }
+    return try await rollbackRunner.run(request)
+  }
+
+  private func success(_ output: String) -> ProcessResult {
+    ProcessResult(terminationStatus: 0, standardOutput: output, standardError: "")
+  }
+
+  private func failure(_ output: String, status: Int32 = 1) -> ProcessResult {
+    ProcessResult(terminationStatus: status, standardOutput: "", standardError: output)
   }
 }
 
