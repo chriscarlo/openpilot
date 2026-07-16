@@ -573,14 +573,14 @@ public actor ApplyPipeline {
       try current.validateResolutionConsistency()
       let completionAlreadyWon: Bool
       switch current.effectiveResolution {
-      case .awaitingPostflight:
+      case .awaitingPostflight, .awaitingOutdoorPostflight:
         completionAlreadyWon = false
       case .completed:
         guard current.completed else {
           throw ApplyPipelineError.postflightMismatch("completed resolution lacks its legacy completion sentinel")
         }
         completionAlreadyWon = true
-      case .mutationInProgress, .rollbackInProgress, .rolledBack, .rollbackFailed:
+      case .preflightReserved, .mutationInProgress, .rollbackInProgress, .rolledBack, .rollbackFailed:
         throw ApplyPipelineError.postflightMismatch(
           "deployment rollback already owns or settled this journal; completion is forbidden"
         )
@@ -1037,6 +1037,56 @@ public actor ApplyPipeline {
           !request.expectedBranch.contains(".."), !request.expectedBranch.hasPrefix("/")
     else { throw ApplyPipelineError.invalidBranch(request.expectedBranch) }
 
+    // Reserve the one production transaction before any host preflight work
+    // that could overlap an already-running released app. The new lifecycle
+    // value is intentionally unknown to that reader, so it fails closed even
+    // though it does not know this version's global flock.
+    let requestedJournalDirectory = try request.rollbackJournalDirectoryURL?.standardizedFileURL ??
+      DeploymentRollbackJournal.defaultDirectory()
+    let productionOwnerLock = try DeploymentRollbackJournal.acquireProductionOwnerLock(
+      directory: requestedJournalDirectory
+    )
+    let journalDirectory = productionOwnerLock.directoryURL
+    try DeploymentRollbackJournal.removeAbandonedPreflightReservations(directory: journalDirectory)
+    let unresolved = try DeploymentRollbackJournal.unresolvedProductionJournals(
+      directory: journalDirectory
+    )
+    guard unresolved.isEmpty else {
+      throw ApplyPipelineError.unresolvedProductionRollbacks(unresolved.map(\.url))
+    }
+
+    let deploymentID = UUID()
+    let createdAt = Date().ISO8601Format()
+    let rollbackPath = "/data/media/0/osm/binaries/mapd-rollback-\(deploymentID.uuidString.lowercased())"
+    let journalURL = journalDirectory.appendingPathComponent("\(deploymentID.uuidString).json")
+    let reservation = DeploymentRollbackJournal(
+      deploymentID: deploymentID,
+      createdAt: createdAt,
+      profile: request.preferredTiciProfile ?? "",
+      branch: request.expectedBranch,
+      previousHead: "",
+      previousPhysicsParams: [:],
+      previousQCurveSHA256: "",
+      previousMapdReleaseVersion: nil,
+      previousMapdVersion: nil,
+      previousActiveMapdSHA256: "",
+      previousCachedMapdPath: "",
+      mapdRollbackPath: rollbackPath,
+      completed: true,
+      resolution: .preflightReserved
+    )
+    try reservation.write(to: journalURL)
+    var handedReservationToRuntime = false
+    defer {
+      if !handedReservationToRuntime {
+        try? DeploymentRollbackJournal.removeOwnedTargetlessPreflightReservation(
+          matching: reservation,
+          at: journalURL
+        )
+        productionOwnerLock.unlock()
+      }
+    }
+
     let git = try await gitDeploymentPreflight(
       repositoryRoot: request.repositoryRoot,
       expectedBranch: request.expectedBranch
@@ -1072,25 +1122,6 @@ public actor ApplyPipeline {
       explicitTileSet = nil
       rebuildConfig = nil
       decoderURL = nil
-    }
-
-    // One authoritative namespace owns the global production lock, unresolved
-    // scan, abandoned-preflight cleanup, and every newly created journal. The
-    // lock remains held in RuntimeDeploymentPreflight through all subsequent
-    // host/source/Git/device work until durable post-reboot handoff or rollback
-    // terminal settlement.
-    let requestedJournalDirectory = try request.rollbackJournalDirectoryURL?.standardizedFileURL ??
-      DeploymentRollbackJournal.defaultDirectory()
-    let productionOwnerLock = try DeploymentRollbackJournal.acquireProductionOwnerLock(
-      directory: requestedJournalDirectory
-    )
-    let journalDirectory = productionOwnerLock.directoryURL
-    try DeploymentRollbackJournal.removeAbandonedPreflightReservations(directory: journalDirectory)
-    let unresolved = try DeploymentRollbackJournal.unresolvedProductionJournals(
-      directory: journalDirectory
-    )
-    guard unresolved.isEmpty else {
-      throw ApplyPipelineError.unresolvedProductionRollbacks(unresolved.map(\.url))
     }
 
     let profile = try await pickTiciProfile(preferred: request.preferredTiciProfile)
@@ -1153,10 +1184,9 @@ public actor ApplyPipeline {
       }
     }
 
-    let deploymentID = UUID()
-    let rollbackPath = "/data/media/0/osm/binaries/mapd-rollback-\(deploymentID.uuidString.lowercased())"
     let journal = DeploymentRollbackJournal(
       deploymentID: deploymentID,
+      createdAt: createdAt,
       profile: profile,
       branch: git.branch,
       previousHead: snapshot.head,
@@ -1169,11 +1199,12 @@ public actor ApplyPipeline {
       previousCachedMapdSHA256: snapshot.cachedMapdSHA256,
       mapdRollbackPath: rollbackPath,
       previousTileSetID: snapshot.activeTileSetID,
-      targetTileSetID: tileSet?.manifest.tileSetID
+      targetTileSetID: tileSet?.manifest.tileSetID,
+      completed: true,
+      resolution: .preflightReserved
     )
-    let journalURL = journalDirectory.appendingPathComponent("\(deploymentID.uuidString).json")
     try journal.write(to: journalURL)
-    return RuntimeDeploymentPreflight(
+    let runtimePreflight = RuntimeDeploymentPreflight(
       git: git,
       profile: profile,
       mapdRecoveryOutcome: mapdRecoveryOutcome,
@@ -1183,6 +1214,8 @@ public actor ApplyPipeline {
       journalURL: journalURL,
       productionOwnerLock: productionOwnerLock
     )
+    handedReservationToRuntime = true
+    return runtimePreflight
   }
 
   private func validateExactSourceTune(repositoryRoot: URL, tune: Tune) throws {
@@ -1512,7 +1545,6 @@ public actor ApplyPipeline {
     }
     var remoteMutationStarted = false
     var journalResolutionLock: DeploymentRollbackJournalCompletionLock?
-    var handedOffToOutdoorPostflight = false
     defer {
       journalResolutionLock?.unlock()
       productionOwnerLock.unlock()
@@ -1636,51 +1668,22 @@ public actor ApplyPipeline {
       journalResolutionLock?.unlock()
       journalResolutionLock = nil
       productionOwnerLock.unlock()
-      handedOffToOutdoorPostflight = true
       await emit(.succeeded, id: 10, text: "Single deployment reboot sent", progress: progress)
 
-      await emit(.running, id: 11, text: "Waiting for the tici and verifying the complete postflight identity…", progress: progress)
-      try await waitForTici(
-        profile: deployment.profile,
-        timeout: 300,
-        initialDelayNanoseconds: rebootInitialDelayNanoseconds,
-        pollDelayNanoseconds: rebootPollDelayNanoseconds
-      )
-      let postflight = try await waitForProductionPostflight(
-        request: request,
-        preflight: deployment,
-        targetHead: targetHead,
-        identity: identity,
-        timeout: 900
-      )
-      let completedJournal = try await completeOriginalDeploymentJournal(
-        request: request,
-        preflight: deployment,
-        toolingHead: targetHead,
-        identity: identity
-      )
       await emit(
         .succeeded,
         id: 11,
-        text: "Postflight passed: exact commit/release/tune/profile identity is running",
+        text: "Deployment installed; outdoor controller-ready proof remains pending",
         detail: [
           "journal=\(deployment.journalURL.path)",
-          "completed_tooling_head=\(completedJournal.completedToolingHead ?? targetHead)",
-          "profile_points=\(postflight.profilePointCount) profile_events=\(postflight.profileEventCount)",
+          "deployed_target_head=\(targetHead)",
+          "Use Resume Pending Outdoor Postflight after a real-GPS drive.",
+          "Only that two-phase controller-ready then stable-offroad proof can complete this deployment.",
         ].joined(separator: "\n"),
         progress: progress
       )
       return await finish(true, progress: progress)
     } catch {
-      if handedOffToOutdoorPostflight {
-        await emitFailure(
-          id: 11,
-          text: "Deployment is installed; outdoor postflight remains pending",
-          error: error,
-          progress: progress
-        )
-        return await finish(false, progress: progress)
-      }
       if remoteMutationStarted {
         let resolution = await rollbackProductionDeploymentIfJournalPending(
           context: ProductionRollbackContext(preflight: deployment),
@@ -1715,7 +1718,13 @@ public actor ApplyPipeline {
     _ = try await checked(
       ProcessRequest(
         executableURL: Self.sshURL,
-        arguments: sshOptions(connectTimeout: 10) + [preflight.profile, "mkdir -p /data/media/0/osm/binaries && rm -f \(stagedPath)"],
+        arguments: sshOptions(connectTimeout: 10) + [
+          preflight.profile,
+          TiciParkedMutationGate.guardedCommand(
+            "mkdir -p /data/media/0/osm/binaries && rm -f \(stagedPath)",
+            refusalMessage: "refusing mapd staging unless tici is exactly offroad and Map Lookahead is disabled"
+          ),
+        ],
         timeout: 30
       ),
       context: "prepare mapd release staging"
@@ -1725,6 +1734,9 @@ public actor ApplyPipeline {
         executableURL: Self.rsyncURL,
         arguments: [
           "-a", "--partial",
+          "--rsync-path", TiciParkedMutationGate.gatedRsyncPath(
+            refusalMessage: "refusing mapd transfer unless tici is exactly offroad and Map Lookahead is disabled"
+          ),
           "-e", "/usr/bin/ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new",
           preflight.release.artifact.binaryURL.path,
           "\(preflight.profile):\(stagedPath)",
@@ -1787,44 +1799,6 @@ public actor ApplyPipeline {
     return [transfer.combinedOutput, probe.combinedOutput, install.combinedOutput]
       .filter { !$0.isEmpty }
       .joined(separator: "\n")
-  }
-
-  private func waitForProductionPostflight(
-    request: ApplyRequest,
-    preflight: RuntimeDeploymentPreflight,
-    targetHead: String,
-    identity: TuneDeploymentIdentity,
-    timeout: TimeInterval
-  ) async throws -> TiciDeploymentPostflight {
-    let deadline = Date().addingTimeInterval(timeout)
-    var lastError: Error = ApplyPipelineError.postflightMismatch("postflight did not run")
-    repeat {
-      try Task.checkCancellation()
-      do {
-        let readback = try await readTiciRuntimePostflight(
-          profile: preflight.profile,
-          context: "complete tici deployment postflight"
-        )
-        let postflight = makeProductionPostflight(
-          readback,
-          preflight: preflight,
-          identity: identity
-        )
-        try validatePostflight(
-          postflight,
-          requireNonemptyWholeCurveProfile: request.requireNonemptyWholeCurveProfile,
-          preflight: preflight,
-          targetHead: targetHead,
-          identity: identity,
-          expectedActiveTileSetID: preflight.tileSet?.manifest.tileSetID ?? preflight.journal.previousTileSetID
-        )
-        return postflight
-      } catch {
-        lastError = error
-      }
-      if Date() < deadline { try await Task.sleep(for: .seconds(2)) }
-    } while Date() < deadline
-    throw lastError
   }
 
   private func waitForResumedProductionPostflight(
@@ -2090,8 +2064,13 @@ public actor ApplyPipeline {
     identity: TuneDeploymentIdentity,
     expectedActiveTileSetID: String?
   ) throws {
-    guard result.isOffroad, !result.isOnroad else { throw ApplyPipelineError.ticiNotOffroad }
-    guard !result.mapLookaheadEnabled else { throw ApplyPipelineError.mapLookaheadMustRemainDisabled }
+    guard result.isOffroad, !result.isOnroad,
+          result.runtimeEndIsOffroad, !result.runtimeEndIsOnroad else {
+      throw ApplyPipelineError.ticiNotOffroad
+    }
+    guard !result.mapLookaheadEnabled, !result.runtimeEndMapLookaheadEnabled else {
+      throw ApplyPipelineError.mapLookaheadMustRemainDisabled
+    }
     guard result.branch == preflight.journal.branch else {
       throw ApplyPipelineError.invalidBranch(result.branch)
     }
@@ -2296,98 +2275,14 @@ public actor ApplyPipeline {
     }
   }
 
-  /// The original deployer and a later resume instance use the canonical
-  /// global-then-journal lock order for their only completion write. If resume
-  /// already completed this deployment, preserve its richer tooling metadata
-  /// instead of overwriting it from the older app instance.
-  private func completeOriginalDeploymentJournal(
-    request: ApplyRequest,
-    preflight: RuntimeDeploymentPreflight,
-    toolingHead: String,
-    identity: TuneDeploymentIdentity
-  ) async throws -> DeploymentRollbackJournal {
-    let productionOwnerLock = try await acquireGlobalProductionOwnerLock(for: preflight.journalURL)
-    defer { productionOwnerLock.unlock() }
-    let lock = try await acquireJournalResolutionLock(for: preflight.journalURL)
-    defer { lock.unlock() }
-    let current = try DeploymentRollbackJournal.load(from: preflight.journalURL)
-    guard current.hasSameDeploymentIdentity(as: preflight.journal) else {
-      throw ApplyPipelineError.postflightMismatch(
-        "deployment journal identity changed before original postflight completion"
-      )
-    }
-    try current.validateResolutionConsistency()
-    switch current.effectiveResolution {
-    case .completed:
-      guard current.completed else {
-        throw ApplyPipelineError.postflightMismatch("completed resolution lacks its legacy completion sentinel")
-      }
-      // Any identity-compatible completion wins idempotently. In particular,
-      // preserve the richer host-only metadata written by a resume instance.
-      return current
-    case .awaitingPostflight:
-      break
-    case .mutationInProgress, .rollbackInProgress, .rolledBack, .rollbackFailed:
-      throw ApplyPipelineError.postflightMismatch(
-        "deployment rollback already owns or settled this journal; completion is forbidden"
-      )
-    }
-
-    // The lock protects the terminal decision, but completion still repeats
-    // every hard host/device invariant using fresh evidence inside that short
-    // critical section before performing the awaiting -> completed CAS.
-    try validateExactSourceTune(repositoryRoot: request.repositoryRoot, tune: request.tune)
-    let finalGit = try await gitDeploymentPreflight(
-      repositoryRoot: request.repositoryRoot,
-      expectedBranch: request.expectedBranch
-    )
-    guard finalGit.localHead == toolingHead, finalGit.originHead == toolingHead else {
-      throw ApplyPipelineError.postflightMismatch(
-        "clean local/origin identity changed before original journal completion"
-      )
-    }
-    let finalReadback = try await readTiciRuntimePostflight(
-      profile: preflight.profile,
-      context: "final original deployment journal completion safety check"
-    )
-    try validatePostflight(
-      makeProductionPostflight(finalReadback, preflight: preflight, identity: identity),
-      requireNonemptyWholeCurveProfile: request.requireNonemptyWholeCurveProfile,
-      preflight: preflight,
-      targetHead: toolingHead,
-      identity: identity,
-      expectedActiveTileSetID: preflight.tileSet?.manifest.tileSetID ?? preflight.journal.previousTileSetID
-    )
-    if current.effectiveResolution == .completed { return current }
-
-    var completed = current
-    completed.completed = true
-    completed.completedAt = Date().ISO8601Format()
-    completed.completedToolingHead = toolingHead
-    completed.completionHostOnlyPaths = []
-    completed.resolution = .completed
-    do {
-      try journalWriter(completed, preflight.journalURL)
-    } catch let durabilityError as DeploymentRollbackJournalError {
-      guard case .committedButNotDurable = durabilityError else { throw durabilityError }
-      guard try DeploymentRollbackJournal.load(from: preflight.journalURL) == completed else { throw durabilityError }
-    }
-    guard try DeploymentRollbackJournal.load(from: preflight.journalURL) == completed else {
-      throw ApplyPipelineError.postflightMismatch(
-        "original completed deployment journal did not read back exactly"
-      )
-    }
-    return completed
-  }
-
   func claimProductionMutation(
     expected: DeploymentRollbackJournal,
     at url: URL
   ) throws -> DeploymentRollbackJournal {
     let current = try DeploymentRollbackJournal.load(from: url)
     guard current.hasSameDeploymentIdentity(as: expected),
-          current.effectiveResolution == .awaitingPostflight,
-          !current.completed,
+          current.effectiveResolution == .preflightReserved,
+          current.completed,
           !current.rebootSent
     else {
       throw ApplyPipelineError.postflightMismatch(
@@ -2417,7 +2312,7 @@ public actor ApplyPipeline {
     }
     var awaiting = current
     awaiting.completed = false
-    awaiting.resolution = .awaitingPostflight
+    awaiting.resolution = .awaitingOutdoorPostflight
     try durablyWriteLifecycleBarrier(awaiting, at: url)
     return awaiting
   }
@@ -2492,7 +2387,7 @@ public actor ApplyPipeline {
         return .rollbackFailed(
           "rollback mutation was not attempted because a corrupt completed resolution lacks its proof sentinel"
         )
-      case .mutationInProgress, .rollbackInProgress, .rolledBack, .rollbackFailed:
+      case .preflightReserved, .mutationInProgress, .rollbackInProgress, .rolledBack, .rollbackFailed:
         // Never promote a torn rolledBack/rollbackFailed state directly. Move
         // it back to rollbackInProgress and replay full device restoration and
         // verification before any terminal rollback resolution is trusted.
@@ -2510,7 +2405,7 @@ public actor ApplyPipeline {
             "rollback mutation was not attempted because journal recovery normalization failed: \(error.localizedDescription)"
           )
         }
-      case .awaitingPostflight:
+      case .awaitingPostflight, .awaitingOutdoorPostflight:
         break
       }
     }
@@ -2543,7 +2438,11 @@ public actor ApplyPipeline {
       // resolution lock proves the previous owner is gone; after the fresh
       // parked gate below, the idempotent rollback may be retried.
       break
-    case .awaitingPostflight:
+    case .preflightReserved:
+      return .rollbackFailed(
+        "rollback mutation was not attempted because a preflight reservation has no durable mutation identity"
+      )
+    case .awaitingPostflight, .awaitingOutdoorPostflight:
       break
     }
 
@@ -2776,10 +2675,11 @@ public actor ApplyPipeline {
     return (succeeded, details.filter { !$0.isEmpty }.joined(separator: "\n"))
   }
 
-  private func waitForRollbackVerification(
+  func waitForRollbackVerification(
     context: ProductionRollbackContext,
     tilesWereTouched: Bool,
-    timeout: TimeInterval
+    timeout: TimeInterval,
+    pollInterval: TimeInterval = 5
   ) async throws -> String {
     let deadline = Date().addingTimeInterval(timeout)
     var lastError: Error = ApplyPipelineError.postflightMismatch("rollback verification did not run")
@@ -2801,9 +2701,10 @@ public actor ApplyPipeline {
           "active_tile_set_id=\(readback.deployment.snapshot.activeTileSetID ?? "")",
         ].joined(separator: "\n")
       } catch {
+        guard isRetryableResumedTransportError(error) else { throw error }
         lastError = error
       }
-      if Date() < deadline { try await Task.sleep(for: .seconds(5)) }
+      if Date() < deadline { try await Task.sleep(for: .seconds(max(0.001, pollInterval))) }
     } while Date() < deadline
     throw lastError
   }
@@ -2814,8 +2715,13 @@ public actor ApplyPipeline {
     tilesWereTouched: Bool
   ) throws {
     let snapshot = readback.deployment.snapshot
-    guard snapshot.isOffroad, !snapshot.isOnroad, !snapshot.mapLookaheadEnabled else {
+    guard snapshot.isOffroad, !snapshot.isOnroad, !snapshot.mapLookaheadEnabled,
+          readback.runtimeEndIsOffroad, !readback.runtimeEndIsOnroad,
+          !readback.runtimeEndMapLookaheadEnabled else {
       throw ApplyPipelineError.postflightMismatch("rollback parked/offroad/kill-switch state differs")
+    }
+    guard snapshot.branch == journal.branch else {
+      throw ApplyPipelineError.invalidBranch(snapshot.branch)
     }
     guard snapshot.head == journal.previousHead else {
       throw ApplyPipelineError.commitMismatch(
@@ -2851,10 +2757,8 @@ public actor ApplyPipeline {
     guard readback.mapdRunning else {
       throw ApplyPipelineError.postflightMismatch("mapd is not running after rollback")
     }
-    if let expectedTileSetID = journal.previousTileSetID {
-      guard snapshot.activeTileSetID == expectedTileSetID else {
-        throw ApplyPipelineError.postflightMismatch("rollback tile-set identity differs")
-      }
+    guard snapshot.activeTileSetID == journal.previousTileSetID else {
+      throw ApplyPipelineError.postflightMismatch("rollback tile-set identity differs")
     }
     if tilesWereTouched, let targetTileSetID = journal.targetTileSetID,
        snapshot.activeTileSetID == targetTileSetID {

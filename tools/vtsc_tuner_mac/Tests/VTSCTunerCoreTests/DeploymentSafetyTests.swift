@@ -193,7 +193,7 @@ import Testing
   )
   #expect(activation.contains("vtsc-tile-transaction-"))
   #expect(activation.contains("--inject-failure 'after_switch'"))
-  #expect(activation.contains("refusing tile mutation unless tici is offroad"))
+  #expect(activation.contains("refusing tile mutation unless tici is exactly offroad"))
   let rollback = try TiciTileSetDeploymentService.atomicRollbackCommand(
     helperPath: helperPath,
     expectedActivatedTileSetID: tileSetID,

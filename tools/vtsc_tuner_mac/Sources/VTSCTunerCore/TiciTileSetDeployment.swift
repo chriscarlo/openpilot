@@ -104,7 +104,10 @@ public struct TiciTileSetDeploymentService: Sendable {
         executableURL: Self.sshURL,
         arguments: Self.sshOptions(connectTimeout: 10) + [
           profile,
-          "rm -rf \(Self.shellQuote(stagingRoot)) && mkdir -p \(Self.shellQuote(stagingRoot + "/offline"))",
+          TiciParkedMutationGate.guardedCommand(
+            "rm -rf \(Self.shellQuote(stagingRoot)) && mkdir -p \(Self.shellQuote(stagingRoot + "/offline"))",
+            refusalMessage: "refusing tile staging unless tici is exactly offroad and Map Lookahead is disabled"
+          ),
         ],
         timeout: 30
       ),
@@ -115,6 +118,9 @@ public struct TiciTileSetDeploymentService: Sendable {
       executableURL: Self.rsyncURL,
       arguments: [
         "-a", "--delete", "--partial-dir=.rsync-partial",
+        "--rsync-path", TiciParkedMutationGate.gatedRsyncPath(
+          refusalMessage: "refusing tile-data staging unless tici is exactly offroad and Map Lookahead is disabled"
+        ),
         "-e", "/usr/bin/ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new",
         artifact.offlineURL.path + "/",
         "\(profile):\(stagingRoot)/offline/",
@@ -130,6 +136,9 @@ public struct TiciTileSetDeploymentService: Sendable {
         executableURL: Self.rsyncURL,
         arguments: [
           "-a",
+          "--rsync-path", TiciParkedMutationGate.gatedRsyncPath(
+            refusalMessage: "refusing tile-manifest staging unless tici is exactly offroad and Map Lookahead is disabled"
+          ),
           "-e", "/usr/bin/ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new",
           artifact.manifestURL.path,
           "\(profile):\(stagingRoot)/manifest.json",
@@ -279,7 +288,7 @@ public struct TiciTileSetDeploymentService: Sendable {
     }
     return """
     \(parkedMutationPreamble())
-    exec \(shellQuote(helperPath)) activate --root \(shellQuote(remoteRoot)) --stage \(shellQuote(stagingRoot)) --tile-set-id \(shellQuote(tileSetID))\(try injectionArgument(injectedFailurePoint))
+    exec \(shellQuote(helperPath)) activate --root \(shellQuote(remoteRoot)) --params-dir \(shellQuote(TiciParkedMutationGate.defaultParamsDirectory)) --stage \(shellQuote(stagingRoot)) --tile-set-id \(shellQuote(tileSetID))\(try injectionArgument(injectedFailurePoint))
     """
   }
 
@@ -300,7 +309,7 @@ public struct TiciTileSetDeploymentService: Sendable {
     } ?? ""
     return """
     \(parkedMutationPreamble())
-    exec \(shellQuote(helperPath)) rollback --root \(shellQuote(remoteRoot))\(expected)\(expectedPrevious)\(try injectionArgument(injectedFailurePoint))
+    exec \(shellQuote(helperPath)) rollback --root \(shellQuote(remoteRoot)) --params-dir \(shellQuote(TiciParkedMutationGate.defaultParamsDirectory))\(expected)\(expectedPrevious)\(try injectionArgument(injectedFailurePoint))
     """
   }
 
@@ -317,7 +326,10 @@ public struct TiciTileSetDeploymentService: Sendable {
         executableURL: Self.sshURL,
         arguments: Self.sshOptions(connectTimeout: 10) + [
           profile,
-          "mkdir -p \(Self.shellQuote(Self.helperDirectory)) && rm -f \(Self.shellQuote(partialPath))",
+          TiciParkedMutationGate.guardedCommand(
+            "mkdir -p \(Self.shellQuote(Self.helperDirectory)) && rm -f \(Self.shellQuote(partialPath))",
+            refusalMessage: "refusing tile-helper staging unless tici is exactly offroad and Map Lookahead is disabled"
+          ),
         ],
         timeout: 30
       ),
@@ -328,6 +340,9 @@ public struct TiciTileSetDeploymentService: Sendable {
         executableURL: Self.rsyncURL,
         arguments: [
           "-a", "--partial",
+          "--rsync-path", TiciParkedMutationGate.gatedRsyncPath(
+            refusalMessage: "refusing tile-helper transfer unless tici is exactly offroad and Map Lookahead is disabled"
+          ),
           "-e", "/usr/bin/ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new",
           helperURL.path,
           "\(profile):\(partialPath)",
@@ -371,8 +386,8 @@ public struct TiciTileSetDeploymentService: Sendable {
     destinationPath: String,
     sha256: String
   ) -> String {
+    TiciParkedMutationGate.guardedCommand(
     """
-    set -eu
     partial=\(shellQuote(partialPath))
     destination=\(shellQuote(destinationPath))
     expected=\(shellQuote(sha256))
@@ -388,21 +403,18 @@ public struct TiciTileSetDeploymentService: Sendable {
       printf '%s\\n' 'tile transaction helper read-back digest mismatch' >&2
       exit 1
     }
-    """
+    """,
+    refusalMessage: "refusing tile-helper install unless tici is exactly offroad and Map Lookahead is disabled"
+    )
   }
 
   private static func parkedMutationPreamble() -> String {
     """
     set -eu
     params_dir='/data/params/d'
-    [ -d "$params_dir" ] || { printf '%s\\n' 'Params directory is missing' >&2; exit 1; }
-    offroad="$(cat "$params_dir/IsOffroad" 2>/dev/null || true)"
-    onroad="$(cat "$params_dir/IsOnroad" 2>/dev/null || true)"
-    lookahead="$(cat "$params_dir/MTSCLookaheadEnabled" 2>/dev/null || true)"
-    if [ "$offroad" != '1' ] || [ "$onroad" = '1' ] || [ "$lookahead" = '1' ]; then
-      printf '%s\\n' 'refusing tile mutation unless tici is offroad and Map Lookahead is disabled' >&2
-      exit 1
-    fi
+    \(TiciParkedMutationGate.shellFragment(
+      refusalMessage: "refusing tile mutation unless tici is exactly offroad and Map Lookahead is disabled"
+    ))
     """
   }
 

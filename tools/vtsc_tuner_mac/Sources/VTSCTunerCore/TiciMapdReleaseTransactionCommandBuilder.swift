@@ -125,6 +125,7 @@ public enum TiciMapdReleaseTransactionCommandBuilder {
     set -eu
     staged=\(shellQuote(stagedPath))
     expected_sha=\(shellQuote(artifact.sha256))
+    params_dir='/data/params/d'
 
     fail() {
       printf '%s\\n' "$1" >&2
@@ -146,6 +147,9 @@ public enum TiciMapdReleaseTransactionCommandBuilder {
 
     \(markerChecks)
 
+    \(TiciParkedMutationGate.shellFragment(
+      refusalMessage: "refusing mapd probe chmod/execute unless tici is exactly offroad and Map Lookahead is disabled"
+    ))
     chmod 755 "$staged"
     build_info="$("$staged" --build-info)"
     [ -n "$build_info" ] || fail 'mapd --build-info produced no output'
@@ -191,13 +195,9 @@ public enum TiciMapdReleaseTransactionCommandBuilder {
     }
 
     require_safe_state() {
-      [ -d "$params_dir" ] || fail 'Params directory is missing'
-      offroad="$(cat "$params_dir/IsOffroad" 2>/dev/null || true)"
-      onroad="$(cat "$params_dir/IsOnroad" 2>/dev/null || true)"
-      lookahead="$(cat "$params_dir/MTSCLookaheadEnabled" 2>/dev/null || true)"
-      if [ "$offroad" != '1' ] || [ "$onroad" = '1' ] || [ "$lookahead" = '1' ]; then
-        fail 'refusing mapd transaction recovery unless tici is offroad and Map Lookahead is disabled'
-      fi
+      \(TiciParkedMutationGate.shellFragment(
+        refusalMessage: "refusing mapd transaction recovery unless tici is exactly offroad and Map Lookahead is disabled"
+      ))
     }
 
     restore_mapd_params_from_journal() {
@@ -359,13 +359,9 @@ public enum TiciMapdReleaseTransactionCommandBuilder {
     }
 
     require_safe_state() {
-      [ -d "$params_dir" ] || fail 'Params directory is missing'
-      offroad="$(cat "$params_dir/IsOffroad" 2>/dev/null || true)"
-      onroad="$(cat "$params_dir/IsOnroad" 2>/dev/null || true)"
-      lookahead="$(cat "$params_dir/MTSCLookaheadEnabled" 2>/dev/null || true)"
-      if [ "$offroad" != '1' ] || [ "$onroad" = '1' ] || [ "$lookahead" = '1' ]; then
-        fail 'refusing mapd release mutation unless tici is offroad and Map Lookahead is disabled'
-      fi
+      \(TiciParkedMutationGate.shellFragment(
+        refusalMessage: "refusing mapd release mutation unless tici is exactly offroad and Map Lookahead is disabled"
+      ))
     }
 
     journal_is_committed() {

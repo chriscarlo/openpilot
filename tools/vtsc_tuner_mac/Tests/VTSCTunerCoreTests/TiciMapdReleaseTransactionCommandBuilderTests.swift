@@ -47,7 +47,7 @@ import Testing
   #expect(command.contains("params_dir='/data/params/d'"))
   #expect(command.contains("params_lock='/data/params/.lock'"))
   #expect(command.contains("MTSCLookaheadEnabled"))
-  #expect(command.contains("refusing mapd release mutation unless tici is offroad"))
+  #expect(command.contains("refusing mapd release mutation unless tici is exactly offroad"))
   #expect(command.contains("transaction_dir='\(TiciMapdReleaseTransactionCommandBuilder.transactionDirectory)'"))
   #expect(command.contains("transaction_lock=\"$transaction_dir/.lock\""))
   #expect(command.contains("chmod 700 \"$transaction_dir\""))

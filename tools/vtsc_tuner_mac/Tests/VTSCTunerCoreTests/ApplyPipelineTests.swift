@@ -93,8 +93,10 @@ import Testing
 }
 
 @Test func resumePostflightCapturesOnroadControllerEvidenceThenCompletesOffroadWithoutErasingIt() async throws {
-  let fixture = try resumePostflightFixture(validGPS: true)
+  var fixture = try resumePostflightFixture(validGPS: true)
   defer { try? FileManager.default.removeItem(at: fixture.root) }
+  fixture.journal.resolution = .awaitingOutdoorPostflight
+  try fixture.journal.write(to: fixture.journalURL)
   let runner = ResumePostflightRunner(fixture: fixture)
   let collector = ApplyEventCollector()
 
@@ -626,6 +628,141 @@ import Testing
   #expect(try DeploymentRollbackJournal.load(from: fixture.journalURL).effectiveResolution == .rollbackInProgress)
 }
 
+@Test func released5caProductionPreflightFailsClosedForEveryNewUnresolvedLifecycle() throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  for resolution in [
+    DeploymentRollbackJournal.Resolution.preflightReserved,
+    .mutationInProgress,
+    .awaitingOutdoorPostflight,
+  ] {
+    fixture.journal.resolution = resolution
+    fixture.journal.completed = resolution != .awaitingOutdoorPostflight
+    fixture.journal.rebootSent = resolution == .awaitingOutdoorPostflight
+    try fixture.journal.write(to: fixture.journalURL)
+    #expect(throws: (any Error).self) {
+      _ = try JSONDecoder().decode(
+        Released5caDeploymentJournal.self,
+        from: Data(contentsOf: fixture.journalURL)
+      )
+    }
+  }
+
+  for resolution in [
+    DeploymentRollbackJournal.Resolution.rollbackInProgress,
+    .rollbackFailed,
+  ] {
+    fixture.journal.resolution = resolution
+    fixture.journal.completed = true
+    fixture.journal.rebootSent = false
+    try fixture.journal.write(to: fixture.journalURL)
+    let old = try JSONDecoder().decode(
+      Released5caDeploymentJournal.self,
+      from: Data(contentsOf: fixture.journalURL)
+    )
+    #expect(old.blocksProductionPreflight)
+  }
+}
+
+@Test func orphanedCurrentReservationIsRemovedByTheNextGlobalOwnerWithoutAgeDelay() throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  fixture.journal.targetHead = nil
+  fixture.journal.rebootSent = false
+  fixture.journal.completed = true
+  fixture.journal.resolution = .preflightReserved
+  try fixture.journal.write(to: fixture.journalURL)
+
+  let owner = try DeploymentRollbackJournal.acquireProductionOwnerLock(
+    directory: fixture.journalURL.deletingLastPathComponent()
+  )
+  defer { owner.unlock() }
+  try DeploymentRollbackJournal.removeAbandonedPreflightReservations(
+    directory: fixture.journalURL.deletingLastPathComponent()
+  )
+  #expect(!FileManager.default.fileExists(atPath: fixture.journalURL.path))
+}
+
+@Test func rollbackVerificationFailsImmediatelyOnHardMismatchEvenIfNextReadWouldHeal() async throws {
+  let fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  let runner = FreshProcessRollbackRecoveryRunner(
+    journal: fixture.journal,
+    runtimeBranches: ["wrong-branch", fixture.journal.branch]
+  )
+  do {
+    _ = try await ApplyPipeline(processRunner: runner).waitForRollbackVerification(
+      context: ProductionRollbackContext(journal: fixture.journal, journalURL: fixture.journalURL),
+      tilesWereTouched: false,
+      timeout: 1,
+      pollInterval: 0.001
+    )
+    Issue.record("Expected hard rollback branch mismatch to fail immediately")
+  } catch {}
+  #expect(await runner.runtimeReadCount == 1)
+}
+
+@Test func rollbackVerificationRetriesTransportThenAcceptsExactIdentity() async throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  fixture.journal.previousCachedMapdPath = ""
+  fixture.journal.previousCachedMapdSHA256 = nil
+  let runner = FreshProcessRollbackRecoveryRunner(
+    journal: fixture.journal,
+    runtimeTransportFailures: 1
+  )
+  _ = try await ApplyPipeline(processRunner: runner).waitForRollbackVerification(
+    context: ProductionRollbackContext(journal: fixture.journal, journalURL: fixture.journalURL),
+    tilesWereTouched: false,
+    timeout: 1,
+    pollInterval: 0.001
+  )
+  #expect(await runner.runtimeReadCount == 2)
+}
+
+@Test func rollbackVerificationRejectsActiveTileWhenRecordedPriorWasNil() async throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  fixture.journal.previousTileSetID = nil
+  fixture.journal.targetTileSetID = nil
+  let runner = FreshProcessRollbackRecoveryRunner(
+    journal: fixture.journal,
+    runtimeActiveTileSetID: String(repeating: "e", count: 64)
+  )
+  do {
+    _ = try await ApplyPipeline(processRunner: runner).waitForRollbackVerification(
+      context: ProductionRollbackContext(journal: fixture.journal, journalURL: fixture.journalURL),
+      tilesWereTouched: false,
+      timeout: 1,
+      pollInterval: 0.001
+    )
+    Issue.record("Expected unexpected active tile identity to fail rollback verification")
+  } catch {}
+  #expect(await runner.runtimeReadCount == 1)
+}
+
+@Test func rollbackVerificationRejectsOnroadAndLookaheadEndBracketStraddles() async throws {
+  for (endOnroad, endLookahead) in [(true, false), (false, true)] {
+    let fixture = try resumePostflightFixture(validGPS: true)
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let runner = FreshProcessRollbackRecoveryRunner(
+      journal: fixture.journal,
+      runtimeEndOnroad: endOnroad,
+      runtimeEndLookahead: endLookahead
+    )
+    do {
+      _ = try await ApplyPipeline(processRunner: runner).waitForRollbackVerification(
+        context: ProductionRollbackContext(journal: fixture.journal, journalURL: fixture.journalURL),
+        tilesWereTouched: false,
+        timeout: 1,
+        pollInterval: 0.001
+      )
+      Issue.record("Expected unstable rollback end bracket to fail")
+    } catch {}
+    #expect(await runner.runtimeReadCount == 1)
+  }
+}
+
 @Test func orphanedRollbackClaimCanBeTakenOverAndSettlesPartialFailure() async throws {
   var fixture = try resumePostflightFixture(validGPS: true)
   defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -696,6 +833,7 @@ import Testing
   defer { try? FileManager.default.removeItem(at: fixture.root) }
   fixture.journal.previousCachedMapdPath = ""
   fixture.journal.previousCachedMapdSHA256 = nil
+  fixture.journal.resolution = .awaitingOutdoorPostflight
   try fixture.journal.write(to: fixture.journalURL)
   fixture.runtimeDirty = true
   let events = ApplyEventCollector()
@@ -715,7 +853,7 @@ import Testing
     guard case let .step(step) = event else { return false }
     return step.id == 3 && step.text.contains(AbortPendingDeploymentAction.label)
   })
-  #expect(try DeploymentRollbackJournal.load(from: fixture.journalURL).effectiveResolution == .awaitingPostflight)
+  #expect(try DeploymentRollbackJournal.load(from: fixture.journalURL).effectiveResolution == .awaitingOutdoorPostflight)
 
   let runner = FreshProcessRollbackRecoveryRunner(journal: fixture.journal)
   let aborted = await ApplyPipeline(
@@ -1629,6 +1767,8 @@ import Testing
     var fixture = try resumePostflightFixture(validGPS: true)
     defer { try? FileManager.default.removeItem(at: fixture.root) }
     fixture.journal.rebootSent = false
+    fixture.journal.completed = true
+    fixture.journal.resolution = .preflightReserved
     fixture.journal.previousCachedMapdPath = ""
     fixture.journal.previousCachedMapdSHA256 = nil
     try fixture.journal.write(to: fixture.journalURL)
@@ -1659,6 +1799,24 @@ import Testing
     #expect(settled.effectiveResolution == .rolledBack, "wrong resolution at \(boundary)")
     #expect(settled.completed)
   }
+}
+
+@Test func originalDeploymentHandoffCannotCompleteFromRawProfileAndGPSAlone() async throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  fixture.journal.rebootSent = false
+  fixture.journal.completed = true
+  fixture.journal.resolution = .preflightReserved
+  try fixture.journal.write(to: fixture.journalURL)
+  let pipeline = ApplyPipeline(processRunner: RollbackClaimRecoveryRunner(failRemoteRollback: false))
+  var claimed = try await pipeline.claimProductionMutation(expected: fixture.journal, at: fixture.journalURL)
+  claimed.rebootSent = true
+  try claimed.write(to: fixture.journalURL)
+  let handedOff = try await pipeline.handoffToOutdoorPostflight(expected: claimed, at: fixture.journalURL)
+  #expect(handedOff.effectiveResolution == .awaitingOutdoorPostflight)
+  #expect(!handedOff.completed)
+  #expect(handedOff.completedAt == nil)
+  #expect(try DeploymentRollbackJournal.loadPendingPostflight(from: fixture.journalURL).journal == handedOff)
 }
 
 @Test func multipleRollbackJournalsAreEnumeratedForExactSelection() throws {
@@ -1871,12 +2029,53 @@ private struct LegacySchemaOnePendingReader: Decodable {
   var isPendingPostflight: Bool { schema == 1 && rebootSent && !completed }
 }
 
+private struct Released5caDeploymentJournal: Decodable {
+  enum Resolution: String, Decodable {
+    case awaitingPostflight
+    case completed
+    case rollbackInProgress
+    case rolledBack
+    case rollbackFailed
+  }
+
+  var completed: Bool
+  var resolution: Resolution?
+
+  var effectiveResolution: Resolution {
+    resolution ?? (completed ? .completed : .awaitingPostflight)
+  }
+
+  var blocksProductionPreflight: Bool {
+    effectiveResolution == .rollbackInProgress ||
+      effectiveResolution == .rollbackFailed ||
+      (effectiveResolution == .rolledBack && !completed)
+  }
+}
+
 private actor FreshProcessRollbackRecoveryRunner: ProcessRunning {
   let journal: DeploymentRollbackJournal
+  let runtimeBranches: [String]
+  let runtimeTransportFailures: Int
+  let runtimeActiveTileSetID: String?
+  let runtimeEndOnroad: Bool
+  let runtimeEndLookahead: Bool
   private(set) var requests: [ProcessRequest] = []
+  private(set) var runtimeReadCount = 0
 
-  init(journal: DeploymentRollbackJournal) {
+  init(
+    journal: DeploymentRollbackJournal,
+    runtimeBranches: [String] = [],
+    runtimeTransportFailures: Int = 0,
+    runtimeActiveTileSetID: String? = nil,
+    runtimeEndOnroad: Bool = false,
+    runtimeEndLookahead: Bool = false
+  ) {
     self.journal = journal
+    self.runtimeBranches = runtimeBranches
+    self.runtimeTransportFailures = runtimeTransportFailures
+    self.runtimeActiveTileSetID = runtimeActiveTileSetID
+    self.runtimeEndOnroad = runtimeEndOnroad
+    self.runtimeEndLookahead = runtimeEndLookahead
   }
 
   func run(_ request: ProcessRequest) async throws -> ProcessResult {
@@ -1902,7 +2101,11 @@ private actor FreshProcessRollbackRecoveryRunner: ProcessRunning {
       )
     }
     if command.contains("params_root=/data/params/d") {
-      return success(runtimeWire())
+      runtimeReadCount += 1
+      if runtimeReadCount <= runtimeTransportFailures {
+        return ProcessResult(terminationStatus: 255, standardOutput: "", standardError: "transport unavailable")
+      }
+      return success(runtimeWire(readIndex: runtimeReadCount - runtimeTransportFailures))
     }
     if request.executableURL == ApplyPipeline.sshURL {
       return success("")
@@ -1914,9 +2117,11 @@ private actor FreshProcessRollbackRecoveryRunner: ProcessRunning {
     )
   }
 
-  private func runtimeWire() -> String {
+  private func runtimeWire(readIndex: Int) -> String {
+    let branch = runtimeBranches.indices.contains(readIndex - 1)
+      ? runtimeBranches[readIndex - 1] : journal.branch
     var fields: [TiciSnapshotWireField: Data] = [
-      .branch: Data(journal.branch.utf8),
+      .branch: Data(branch.utf8),
       .head: Data(journal.previousHead.utf8),
       .dirty: Data("0".utf8),
       .isOffroad: Data("1".utf8),
@@ -1935,9 +2140,9 @@ private actor FreshProcessRollbackRecoveryRunner: ProcessRunning {
       .mapdRunning: Data("1".utf8),
       .remoteEpochMilliseconds: Data("1800000000000".utf8),
       .liveMapDataControllerStatus: Data("0|0|0|0|0".utf8),
-      .runtimeEndIsOffroad: Data("1".utf8),
-      .runtimeEndIsOnroad: Data("0".utf8),
-      .runtimeEndMapLookaheadEnabled: Data("0".utf8),
+      .runtimeEndIsOffroad: Data((runtimeEndOnroad ? "0" : "1").utf8),
+      .runtimeEndIsOnroad: Data((runtimeEndOnroad ? "1" : "0").utf8),
+      .runtimeEndMapLookaheadEnabled: Data((runtimeEndLookahead ? "1" : "0").utf8),
     ]
     if let release = journal.previousMapdReleaseVersion {
       fields[.mapdReleaseVersion] = Data(release.utf8)
@@ -1945,7 +2150,7 @@ private actor FreshProcessRollbackRecoveryRunner: ProcessRunning {
     if let version = journal.previousMapdVersion {
       fields[.mapdVersion] = Data(version.utf8)
     }
-    if let tileSetID = journal.previousTileSetID {
+    if let tileSetID = runtimeActiveTileSetID ?? journal.previousTileSetID {
       fields[.tileManifest] = try! JSONSerialization.data(withJSONObject: ["tile_set_id": tileSetID])
     }
     let physicsFields: [String: TiciSnapshotWireField] = [

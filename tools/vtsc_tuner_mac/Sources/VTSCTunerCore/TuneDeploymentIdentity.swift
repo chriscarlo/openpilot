@@ -79,7 +79,9 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
 
   public enum Resolution: String, Codable, Equatable, Sendable {
     case awaitingPostflight
+    case preflightReserved
     case mutationInProgress
+    case awaitingOutdoorPostflight
     case completed
     case rollbackInProgress
     case rolledBack
@@ -117,6 +119,11 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
     resolution ?? (completed ? .completed : .awaitingPostflight)
   }
 
+  public var isAwaitingOutdoorPostflight: Bool {
+    effectiveResolution == .awaitingPostflight ||
+      effectiveResolution == .awaitingOutdoorPostflight
+  }
+
   public func hasSameDeploymentIdentity(as other: Self) -> Bool {
     schema == other.schema &&
       deploymentID == other.deploymentID &&
@@ -139,13 +146,13 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
 
   public func validateResolutionConsistency() throws {
     switch effectiveResolution {
-    case .awaitingPostflight:
+    case .awaitingPostflight, .awaitingOutdoorPostflight:
       guard !completed else {
         throw DeploymentRollbackJournalError.inconsistentResolution(
-          "awaitingPostflight requires completed=false"
+          "\(effectiveResolution.rawValue) requires completed=false"
         )
       }
-    case .mutationInProgress, .completed, .rollbackInProgress, .rolledBack, .rollbackFailed:
+    case .preflightReserved, .mutationInProgress, .completed, .rollbackInProgress, .rolledBack, .rollbackFailed:
       guard completed else {
         throw DeploymentRollbackJournalError.inconsistentResolution(
           "\(effectiveResolution.rawValue) requires the legacy completed=true sentinel"
@@ -255,7 +262,7 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
     var candidates: [(Self, URL)] = []
     for url in urls {
       let journal = try load(from: url, fileManager: fileManager)
-      guard journal.effectiveResolution == .awaitingPostflight, journal.rebootSent else { continue }
+      guard journal.isAwaitingOutdoorPostflight, journal.rebootSent else { continue }
       try journal.validatePendingPostflight()
       candidates.append((journal, url.standardizedFileURL))
     }
@@ -294,7 +301,7 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
     fileManager: FileManager = .default
   ) throws -> [RecoverableRollback] {
     try journalCandidates(directory: explicitDirectory, fileManager: fileManager).compactMap { journal, url in
-      guard journal.effectiveResolution == .awaitingPostflight,
+      guard journal.isAwaitingOutdoorPostflight,
             journal.rebootSent,
             !journal.completed else { return nil }
       try journal.validatePendingPostflight()
@@ -314,6 +321,8 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
     )
     let recoverable = candidates.filter {
       $0.0.effectiveResolution == .rollbackInProgress ||
+        ($0.0.effectiveResolution == .preflightReserved &&
+          $0.0.targetHead != nil) ||
         $0.0.effectiveResolution == .mutationInProgress ||
         $0.0.effectiveResolution == .rollbackFailed ||
         ($0.0.effectiveResolution == .awaitingPostflight &&
@@ -336,8 +345,9 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
     fileManager: FileManager = .default
   ) throws -> [RecoverableRollback] {
     try journalCandidates(directory: explicitDirectory, fileManager: fileManager).compactMap { journal, url in
-      let unresolvedAwaiting = journal.effectiveResolution == .awaitingPostflight && journal.rebootSent
+      let unresolvedAwaiting = journal.isAwaitingOutdoorPostflight && journal.rebootSent
       let unresolvedRollback = journal.effectiveResolution == .rollbackInProgress ||
+        journal.effectiveResolution == .preflightReserved ||
         journal.effectiveResolution == .mutationInProgress ||
         journal.effectiveResolution == .rollbackFailed ||
         (journal.effectiveResolution == .awaitingPostflight &&
@@ -374,7 +384,7 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
       throw DeploymentRollbackJournalError.unsupportedSchema(schema)
     }
     try validateResolutionConsistency()
-    guard effectiveResolution == .awaitingPostflight, !completed, rebootSent else {
+    guard isAwaitingOutdoorPostflight, !completed, rebootSent else {
       throw DeploymentRollbackJournalError.notAwaitingPostflight
     }
     guard let targetHead,
@@ -415,6 +425,12 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
     let directory = try explicitDirectory?.standardizedFileURL ?? defaultDirectory(fileManager: fileManager)
     guard fileManager.fileExists(atPath: directory.path) else { return }
     for (journal, url) in try journalCandidates(directory: directory, fileManager: fileManager) {
+      let orphanedCurrentPreflight = journal.effectiveResolution == .preflightReserved &&
+        journal.completed && !journal.rebootSent && journal.targetHead == nil
+      if orphanedCurrentPreflight {
+        try durablyRemoveJournal(at: url, fileManager: fileManager)
+        continue
+      }
       let targetlessLegacyPreflight = journal.effectiveResolution == .awaitingPostflight &&
         !journal.completed && !journal.rebootSent && journal.targetHead == nil
       guard targetlessLegacyPreflight,
@@ -431,8 +447,8 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
   ) throws {
     let current = try load(from: url, fileManager: fileManager)
     guard current == expected,
-          current.effectiveResolution == .awaitingPostflight,
-          !current.completed,
+          current.effectiveResolution == .preflightReserved,
+          current.completed,
           !current.rebootSent,
           current.targetHead == nil else { return }
     try durablyRemoveJournal(at: url, fileManager: fileManager)

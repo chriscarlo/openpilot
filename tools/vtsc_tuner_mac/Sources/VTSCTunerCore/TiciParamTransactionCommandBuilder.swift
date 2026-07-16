@@ -47,21 +47,16 @@ public enum TiciParamTransactionCommandBuilder {
     params_dir='/data/params/d'
     lock_file='/data/params/.lock'
 
-    if [ ! -d "$params_dir" ]; then
-      printf '%s\\n' 'VTSC Param directory is missing' >&2
-      exit 1
-    fi
-    offroad="$(cat "$params_dir/IsOffroad" 2>/dev/null || true)"
-    onroad="$(cat "$params_dir/IsOnroad" 2>/dev/null || true)"
-    lookahead="$(cat "$params_dir/MTSCLookaheadEnabled" 2>/dev/null || true)"
-    if [ "$offroad" != '1' ] || [ "$onroad" = '1' ] || [ "$lookahead" = '1' ]; then
-      printf '%s\\n' 'refusing to change VTSC physics Params unless tici is offroad and Map Lookahead is disabled' >&2
-      exit 1
-    fi
+    \(TiciParkedMutationGate.shellFragment(
+      refusalMessage: "refusing to change VTSC physics Params unless tici is exactly offroad and Map Lookahead is disabled"
+    ))
 
     umask 077
     exec 9>"$lock_file"
     flock -x 9
+    \(TiciParkedMutationGate.shellFragment(
+      refusalMessage: "refusing to change VTSC physics Params after lock wait unless tici remains exactly offroad and Map Lookahead is disabled"
+    ))
     work_dir="$(mktemp -d "$params_dir/.vtsc-physics.XXXXXX")"
     rollback_dir="$work_dir/rollback"
     stage_dir="$work_dir/stage"

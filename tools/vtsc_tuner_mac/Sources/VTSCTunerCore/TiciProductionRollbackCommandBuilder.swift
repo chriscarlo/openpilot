@@ -49,13 +49,9 @@ enum TiciProductionRollbackCommandBuilder {
       exit 1
     }
 
-    [ -d "$params_dir" ] || fail 'Params directory is missing'
-    offroad="$(cat "$params_dir/IsOffroad" 2>/dev/null || true)"
-    onroad="$(cat "$params_dir/IsOnroad" 2>/dev/null || true)"
-    lookahead="$(cat "$params_dir/MTSCLookaheadEnabled" 2>/dev/null || true)"
-    if [ "$offroad" != '1' ] || [ "$onroad" != '0' ] || [ "$lookahead" != '0' ]; then
-      fail 'refusing rollback unless tici is exactly offroad and Map Lookahead is disabled'
-    fi
+    \(TiciParkedMutationGate.shellFragment(
+      refusalMessage: "refusing rollback unless tici is exactly offroad and Map Lookahead is disabled"
+    ))
     for tool in git cat flock mktemp sync mv rm mkdir chmod dirname sha256sum awk base64 tr
     do
       command -v "$tool" >/dev/null 2>&1 || fail "required rollback tool is unavailable: $tool"
@@ -63,6 +59,9 @@ enum TiciProductionRollbackCommandBuilder {
 
     cd "$repo"
     [ "$(git branch --show-current)" = "$expected_branch" ] || fail 'rollback branch changed unexpectedly'
+    \(TiciParkedMutationGate.shellFragment(
+      refusalMessage: "refusing Git rollback unless tici remains exactly offroad and Map Lookahead is disabled"
+    ))
     git reset --hard "$previous_head"
     [ "$(git rev-parse HEAD)" = "$previous_head" ] || fail 'git rollback head mismatch'
 
@@ -76,6 +75,9 @@ enum TiciProductionRollbackCommandBuilder {
     elif [ -f "$rollback_mapd" ]; then
       active_dir="$(dirname "$active")"
       [ -n "$expected_active_sha" ] && [ "$(sha256sum "$rollback_mapd" | awk '{print $1}')" = "$expected_active_sha" ] || [ -z "$expected_active_sha" ] || fail 'rollback mapd digest mismatch'
+      \(TiciParkedMutationGate.shellFragment(
+        refusalMessage: "refusing mapd rollback unless tici remains exactly offroad and Map Lookahead is disabled"
+      ))
       temporary="$(mktemp "$active_dir/.mapd-rollback.XXXXXX")"
       cat "$rollback_mapd" > "$temporary"
       chmod 755 "$temporary"
@@ -105,6 +107,9 @@ enum TiciProductionRollbackCommandBuilder {
     umask 077
     exec 9>"$params_lock"
     flock -x 9
+    \(TiciParkedMutationGate.shellFragment(
+      refusalMessage: "refusing rollback Param writes after lock wait unless tici remains exactly offroad and Map Lookahead is disabled"
+    ))
     work_dir="$(mktemp -d "$params_dir/.vtsc-rollback.XXXXXX")"
     rollback_dir="$work_dir/rollback"
     stage_dir="$work_dir/stage"

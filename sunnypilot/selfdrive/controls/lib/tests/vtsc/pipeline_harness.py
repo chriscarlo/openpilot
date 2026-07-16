@@ -18,6 +18,11 @@ from openpilot.selfdrive.controls.lib.longitudinal_response_model import (
   build_cruise_response_model,
   clip_cruise_speed_profile,
 )
+from openpilot.selfdrive.controls.lib.longitudinal_lead_helpers import (
+  compute_relatch_required_decel,
+  get_low_speed_launch_follow_factor,
+  get_low_speed_launch_follow_max_accel,
+)
 
 
 @dataclass
@@ -213,26 +218,10 @@ def install_fake_long_mpc(*, module_name: str = 'openpilot.selfdrive.controls.li
       float(v_lead) ** 2 / (2.0 * DEFAULT_COMFORT_BRAKE)
     )
 
-  def get_low_speed_launch_follow_factor(_v_ego, _lead, _t_follow) -> float:
-    return 0.0
-
-  def compute_relatch_required_decel(v_ego, lead, t_follow, _tuning=None) -> float:
-    if lead is None or not getattr(lead, 'status', False):
-      return 0.0
-    v_ego = float(v_ego)
-    v_lead = float(getattr(lead, 'vLead', v_ego) or v_ego)
-    v_rel = float(getattr(lead, 'vRel', v_lead - v_ego) or 0.0)
-    closing = max(0.0, v_ego - max(0.0, v_lead), -v_rel)
-    surplus = float(getattr(lead, 'dRel', 0.0) or 0.0) - get_headway_follow_distance(v_ego, t_follow)
-    return closing ** 2 / (2.0 * max(surplus, 0.5))
-
   fake.get_headway_follow_distance = get_headway_follow_distance
   fake.desired_follow_distance = desired_follow_distance
   fake.get_low_speed_launch_follow_factor = get_low_speed_launch_follow_factor
   fake.compute_relatch_required_decel = compute_relatch_required_decel
-
-  def get_low_speed_launch_follow_max_accel(_v_ego, _lead, _t_follow, base_max_accel: float) -> float:
-    return float(base_max_accel)
 
   fake.get_low_speed_launch_follow_max_accel = get_low_speed_launch_follow_max_accel
   sys.modules[module_name] = fake

@@ -20,6 +20,7 @@ The runtime whole-curve-v3 profile uses existing raw map geometry, then route-ba
 
 Every car-facing action verifies all prerequisites before saving or patching the tune, committing, writing Params, replacing binaries, activating tiles, or rebooting:
 
+- acquire the authoritative journal-directory global production-owner lock, reject every unresolved journal, and durably create a legacy-reader-blocking `preflightReserved` record before host preflight work;
 - selected Chauffeur checkout and all four source authorities are parseable and mutually consistent;
 - branch is exactly `chauffeur-exp01`, upstream is `origin/chauffeur-exp01`, the checkout is clean, and local/origin HEADs match;
 - the immutable mapd manifest and host artifact pass SHA-256, Linux ARM64 ELF, release/build marker, estimator, and capability checks;
@@ -58,15 +59,15 @@ The app persists a rollback journal before remote mutation. It then:
 4. Writes and reads back all six physics Params with `tools/vtsc/apply_physics_params.py`; verifies the exact checked-in Q source and enable state.
 5. If requested, transfers the canonical tile artifact only to an empty remote partial set, checks every manifest entry and digest on-device, installs one immutable generation at `/data/media/0/osm/tile-generations/<tile-set-id>/`, and atomically switches the active `offline` pointer while retaining the prior generation.
 6. Rechecks parked/offroad/kill-switch state and sends one reboot only after every artifact is ready.
-7. Waits for the tici and requires exact commit, Params/Q, release/cache/active binary, native mapd process, estimator, real-GPS profile, and tile identity.
+7. Waits for the tici, verifies the installed static Git/tune/release/cache/build/tile identity, then durably hands the transaction to `awaitingOutdoorPostflight`. It does not claim controller acceptance from a raw parked profile.
 
-Postflight validates `MapWholeCurveProfile` through the native Swift production parser: v3 version, freshness, positive curvature coefficients (including sub-1.0 shoulders), ranged baked speeds, sigmoid-bound fingerprint, events, spacing, and proximity to actual `LastGPSPosition`. It reports pending or invalid GPS distinctly; it never imports the controller, depends on device NumPy, or injects a fake route point.
+Final completion belongs only to **Resume Pending Outdoor Postflight**. While ignition remains on after a normal GPS/profile-producing drive, it captures a fresh same-tune profile plus newly updated, valid `liveMapDataSP.roadGeometryValid=true` evidence. Only after the app explicitly reports that controller-ready capture does the user turn ignition off; the observer then requires stable offroad start/end brackets, unchanged static identity, and the same fully parsed profile before atomically completing the journal. It reports pending or invalid GPS distinctly; it never injects a fake route point or mutates the car during proof.
 
 ## Failure and rollback
 
 Failure before remote mutation leaves the tici untouched. Failure after mutation starts coherent rollback from the journal. Before rollback mutation—and again before a rollback reboot—the app freshly requires `IsOffroad=1`, `IsOnroad=0`, and `MTSCLookaheadEnabled=0`. Rollback restores the previous exact Git head, six Params, Q source identity, mapd release/version and binary, and previous tile-generation pointer when one was changed. A reboot is sent only when a deployment reboot occurred and rollback mutation completed.
 
-Never report success at Git push, file transfer, or reboot dispatch. Success means the complete postflight identity passed.
+Never report final deployment proof at Git push, file transfer, or reboot dispatch. The initial transaction reports **installed, outdoor proof pending** after its durable handoff; final success means the two-phase controller-ready outdoor postflight identity passed.
 
 ## Source precision and Q contract
 

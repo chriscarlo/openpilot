@@ -13,13 +13,9 @@ enum TiciRebootCommandBuilder {
     """
     set -eu
     params_dir=\(shellQuote(paramsDirectory))
-    offroad="$(cat "$params_dir/IsOffroad" 2>/dev/null || true)"
-    onroad="$(cat "$params_dir/IsOnroad" 2>/dev/null || true)"
-    lookahead="$(cat "$params_dir/MTSCLookaheadEnabled" 2>/dev/null || true)"
-    if [ "$offroad" != '1' ] || [ "$onroad" != '0' ] || [ "$lookahead" != '0' ]; then
-      printf '%s\n' 'refusing reboot unless tici is exactly offroad and Map Lookahead is disabled' >&2
-      exit 1
-    fi
+    \(TiciParkedMutationGate.shellFragment(
+      refusalMessage: "refusing reboot unless tici is exactly offroad and Map Lookahead is disabled"
+    ))
     \(rebootCommand)
     """
   }

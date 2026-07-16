@@ -64,6 +64,55 @@ import Testing
   #expect(process.terminationStatus == 0)
 }
 
+@Test func paramsLockWaitStateFlipStopsBeforeFirstPhysicsWrite() async throws {
+  let root = FileManager.default.temporaryDirectory
+    .appendingPathComponent("vtsc-param-lock-flip-\(UUID().uuidString)", isDirectory: true)
+  defer { try? FileManager.default.removeItem(at: root) }
+  let params = root.appendingPathComponent("params", isDirectory: true)
+  let bin = root.appendingPathComponent("bin", isDirectory: true)
+  let lock = root.appendingPathComponent("params.lock")
+  let entered = root.appendingPathComponent("flock-entered")
+  let release = root.appendingPathComponent("flock-release")
+  try FileManager.default.createDirectory(at: params, withIntermediateDirectories: true)
+  try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+  for (key, value) in [
+    ("IsOffroad", "1"),
+    ("IsOnroad", "0"),
+    ("MTSCLookaheadEnabled", "0"),
+  ] {
+    try value.write(to: params.appendingPathComponent(key), atomically: true, encoding: .utf8)
+  }
+  let fakeFlock = bin.appendingPathComponent("flock")
+  try """
+  #!/bin/sh
+  /usr/bin/touch '\(entered.path)'
+  while [ ! -e '\(release.path)' ]; do /bin/sleep 0.01; done
+  """
+    .write(to: fakeFlock, atomically: true, encoding: .utf8)
+  try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fakeFlock.path)
+
+  var command = try TiciParamTransactionCommandBuilder.synchronizeAndVerifyCommand(parameters: .checkoutFallback)
+  command = command.replacingOccurrences(of: "params_dir='/data/params/d'", with: "params_dir='\(params.path)'")
+  command = command.replacingOccurrences(of: "lock_file='/data/params/.lock'", with: "lock_file='\(lock.path)'")
+  let process = Process()
+  process.executableURL = URL(fileURLWithPath: "/bin/sh")
+  process.arguments = ["-c", command]
+  process.environment = ["PATH": "\(bin.path):/usr/bin:/bin"]
+  process.standardOutput = FileHandle.nullDevice
+  process.standardError = FileHandle.nullDevice
+  try process.run()
+  while !FileManager.default.fileExists(atPath: entered.path) {
+    try await Task.sleep(for: .milliseconds(5))
+  }
+  try "1".write(to: params.appendingPathComponent("IsOnroad"), atomically: true, encoding: .utf8)
+  FileManager.default.createFile(atPath: release.path, contents: Data())
+  process.waitUntilExit()
+  #expect(process.terminationStatus != 0)
+  #expect(!FileManager.default.fileExists(
+    atPath: params.appendingPathComponent("VisionTurnSpeedControlPhysicsAmplitude").path
+  ))
+}
+
 @Test func transactionBuilderRejectsNonFiniteOutOfRangeAndInvertedValues() {
   do {
     _ = try TiciParamTransactionCommandBuilder.synchronizeAndVerifyCommand(parameters: .init(

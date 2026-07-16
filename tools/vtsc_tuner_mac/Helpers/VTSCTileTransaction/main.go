@@ -85,18 +85,24 @@ type directorySyncFunction func(string) error
 
 type transactionEngine struct {
 	root     string
+	paramsDir string
 	exchange exchangeFunction
 	syncDir  directorySyncFunction
 	now      func() time.Time
 }
 
-func newTransactionEngine(root string) (*transactionEngine, error) {
+func newTransactionEngine(root, paramsDir string) (*transactionEngine, error) {
 	cleanRoot, err := validateRoot(root)
 	if err != nil {
 		return nil, err
 	}
+	cleanParams, err := validateRoot(paramsDir)
+	if err != nil {
+		return nil, fmt.Errorf("invalid Params directory: %w", err)
+	}
 	return &transactionEngine{
 		root:     cleanRoot,
+		paramsDir: cleanParams,
 		exchange: renameExchange,
 		syncDir:  fsyncDirectory,
 		now:      time.Now,
@@ -142,13 +148,14 @@ func run(arguments []string, output io.Writer) error {
 		flags := flag.NewFlagSet("activate", flag.ContinueOnError)
 		flags.SetOutput(io.Discard)
 		root := flags.String("root", "", "OSM root")
+		paramsDir := flags.String("params-dir", "", "Params data directory")
 		stage := flags.String("stage", "", "verified remote staging root")
 		tileSetID := flags.String("tile-set-id", "", "expected immutable tile-set identifier")
 		injectedFailure := flags.String("inject-failure", "", "test-only failure point")
 		if err := flags.Parse(arguments); err != nil || flags.NArg() != 0 {
 			return usageError()
 		}
-		engine, err := newTransactionEngine(*root)
+		engine, err := newTransactionEngine(*root, *paramsDir)
 		if err != nil {
 			return err
 		}
@@ -162,6 +169,7 @@ func run(arguments []string, output io.Writer) error {
 		flags := flag.NewFlagSet("rollback", flag.ContinueOnError)
 		flags.SetOutput(io.Discard)
 		root := flags.String("root", "", "OSM root")
+		paramsDir := flags.String("params-dir", "", "Params data directory")
 		expectedID := flags.String("expected-tile-set-id", "", "optional tile-set ID expected to be active")
 		expectedPreviousID := flags.String("expected-previous-tile-set-id", "", "optional tile-set ID required in offline.previous")
 		injectedFailure := flags.String("inject-failure", "", "test-only failure point")
@@ -174,7 +182,7 @@ func run(arguments []string, output io.Writer) error {
 		if *expectedPreviousID != "" && !isSafeID(*expectedPreviousID) {
 			return fmt.Errorf("invalid --expected-previous-tile-set-id")
 		}
-		engine, err := newTransactionEngine(*root)
+		engine, err := newTransactionEngine(*root, *paramsDir)
 		if err != nil {
 			return err
 		}
@@ -189,7 +197,7 @@ func run(arguments []string, output io.Writer) error {
 }
 
 func usageError() error {
-	return errors.New("usage: vtsc-tile-transaction verify --root <artifact-root> --tile-set-id <id> | activate --root <osm-root> --stage <artifact-root> --tile-set-id <id> [--inject-failure <point>] | rollback --root <osm-root> [--expected-tile-set-id <id>] [--expected-previous-tile-set-id <id>] [--inject-failure <point>]")
+	return errors.New("usage: vtsc-tile-transaction verify --root <artifact-root> --tile-set-id <id> | activate --root <osm-root> --params-dir <params-data-dir> --stage <artifact-root> --tile-set-id <id> [--inject-failure <point>] | rollback --root <osm-root> --params-dir <params-data-dir> [--expected-tile-set-id <id>] [--expected-previous-tile-set-id <id>] [--inject-failure <point>]")
 }
 
 func encodeResult(output io.Writer, result transactionResult) error {
@@ -241,7 +249,28 @@ func (e *transactionEngine) withExclusiveTransactionLock(
 		return transactionResult{}, fmt.Errorf("lock tile transaction: %w", err)
 	}
 	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	if err := e.requireExactParkedState(); err != nil {
+		return transactionResult{}, err
+	}
 	return operation()
+}
+
+func (e *transactionEngine) requireExactParkedState() error {
+	required := map[string]string{
+		"IsOffroad": "1",
+		"IsOnroad": "0",
+		"MTSCLookaheadEnabled": "0",
+	}
+	for key, expected := range required {
+		value, err := os.ReadFile(filepath.Join(e.paramsDir, key))
+		if err != nil {
+			return fmt.Errorf("read parked-state Param %s: %w", key, err)
+		}
+		if string(value) != expected {
+			return fmt.Errorf("refusing tile mutation: %s must equal %q exactly", key, expected)
+		}
+	}
+	return nil
 }
 
 func (e *transactionEngine) generationPath(tileSetID string) string {
@@ -1103,6 +1132,9 @@ func (e *transactionEngine) activateLocked(stage, tileSetID, injectedFailure str
 	if injectedFailure == "after_journal" {
 		return transactionResult{}, errors.New("injected tile activation failure: after_journal")
 	}
+	if err := e.requireExactParkedState(); err != nil {
+		return transactionResult{}, err
+	}
 	if err := e.exchange(switchPath, active); err != nil {
 		return transactionResult{}, fmt.Errorf("renameat2 exchange activation: %w", err)
 	}
@@ -1239,6 +1271,9 @@ func (e *transactionEngine) rollbackLocked(expectedTileSetID, expectedPreviousTi
 	}
 	if injectedFailure == "after_journal" {
 		return transactionResult{}, errors.New("injected tile rollback failure: after_journal")
+	}
+	if err := e.requireExactParkedState(); err != nil {
+		return transactionResult{}, err
 	}
 	if err := e.exchange(e.activePath(), e.previousPath()); err != nil {
 		return transactionResult{}, fmt.Errorf("renameat2 exchange rollback: %w", err)

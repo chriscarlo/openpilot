@@ -107,6 +107,77 @@ func TestTransactionLockSerializesConcurrentMutations(t *testing.T) {
 	}
 }
 
+func TestLockWaitStateFlipRejectsActivationBeforeAnyExchange(t *testing.T) {
+	root := newTestRoot(t)
+	makeMinimalGeneration(t, root, "old")
+	makeMinimalGeneration(t, root, "older")
+	linkGeneration(t, root, activeOfflineName, "old")
+	linkGeneration(t, root, previousOfflineName, "older")
+	stage := writeStage(t, root, "fresh")
+	engine := testEngine(t, root)
+
+	firstEntered := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	go func() {
+		_, _ = engine.withExclusiveTransactionLock(func() (transactionResult, error) {
+			close(firstEntered)
+			<-releaseFirst
+			return transactionResult{}, nil
+		})
+	}()
+	<-firstEntered
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := engine.activate(stage, "fresh", "")
+		result <- err
+	}()
+	if err := os.WriteFile(filepath.Join(engine.paramsDir, "IsOnroad"), []byte("1"), 0o600); err != nil {
+		t.Fatalf("flip onroad Param while helper waits: %v", err)
+	}
+	close(releaseFirst)
+	if err := <-result; err == nil || !strings.Contains(err.Error(), "IsOnroad") {
+		t.Fatalf("activation after state flip error = %v, want exact parked-state rejection", err)
+	}
+	assertLinkTarget(t, filepath.Join(root, activeOfflineName), "tile-generations/old/offline")
+	assertLinkTarget(t, filepath.Join(root, previousOfflineName), "tile-generations/older/offline")
+}
+
+func TestLockWaitStateFlipRejectsRollbackBeforeAnyExchange(t *testing.T) {
+	root := newTestRoot(t)
+	makeMinimalGeneration(t, root, "fresh")
+	makeMinimalGeneration(t, root, "old")
+	linkGeneration(t, root, activeOfflineName, "fresh")
+	linkGeneration(t, root, previousOfflineName, "old")
+	engine := testEngine(t, root)
+
+	firstEntered := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	go func() {
+		_, _ = engine.withExclusiveTransactionLock(func() (transactionResult, error) {
+			close(firstEntered)
+			<-releaseFirst
+			return transactionResult{}, nil
+		})
+	}()
+	<-firstEntered
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := engine.rollback("fresh", "old", "")
+		result <- err
+	}()
+	if err := os.WriteFile(filepath.Join(engine.paramsDir, "MTSCLookaheadEnabled"), []byte("1"), 0o600); err != nil {
+		t.Fatalf("flip lookahead Param while helper waits: %v", err)
+	}
+	close(releaseFirst)
+	if err := <-result; err == nil || !strings.Contains(err.Error(), "MTSCLookaheadEnabled") {
+		t.Fatalf("rollback after state flip error = %v, want exact parked-state rejection", err)
+	}
+	assertLinkTarget(t, filepath.Join(root, activeOfflineName), "tile-generations/fresh/offline")
+	assertLinkTarget(t, filepath.Join(root, previousOfflineName), "tile-generations/old/offline")
+}
+
 func TestActivateRollbackAndRecovery(t *testing.T) {
 	root := newTestRoot(t)
 	makeMinimalGeneration(t, root, "old")
@@ -337,7 +408,20 @@ func linkGeneration(t *testing.T, root, name, tileSetID string) {
 
 func testEngine(t *testing.T, root string) *transactionEngine {
 	t.Helper()
-	engine, err := newTransactionEngine(root)
+	paramsDir := filepath.Join(root, "test-params")
+	if err := os.MkdirAll(paramsDir, 0o755); err != nil {
+		t.Fatalf("create test Params directory: %v", err)
+	}
+	for key, value := range map[string]string{
+		"IsOffroad": "1",
+		"IsOnroad": "0",
+		"MTSCLookaheadEnabled": "0",
+	} {
+		if err := os.WriteFile(filepath.Join(paramsDir, key), []byte(value), 0o600); err != nil {
+			t.Fatalf("write test safety Param %s: %v", key, err)
+		}
+	}
+	engine, err := newTransactionEngine(root, paramsDir)
 	if err != nil {
 		t.Fatalf("new engine: %v", err)
 	}
