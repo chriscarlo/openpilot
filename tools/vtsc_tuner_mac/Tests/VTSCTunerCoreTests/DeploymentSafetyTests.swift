@@ -942,6 +942,7 @@ private func deploymentSnapshotWire(
     .mapdVersion: Data("old-release".utf8),
     .tileManifest: Data(),
     .tileTopology: Data("direct-unidentified".utf8),
+    .tileTreeSHA256: Data(String(repeating: "e", count: 64).utf8),
     .mapdCacheListing: Data("/tmp/old-cache\t\(String(repeating: "d", count: 64))\n".utf8),
   ]
   return TiciSnapshotWireCodec.encode(.init(rawValues: values)) + "\n"

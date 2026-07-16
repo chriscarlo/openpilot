@@ -2,6 +2,17 @@
 
 ## 2026-07-16 — Replay-safe tile no-switch rollback
 
+- Split immutable activation ownership from mutable phase state. A separately
+  synced pre-creation authority binds every path, preexistence observation, and
+  digest; activate resumes that intent while rollback alone performs cleanup.
+- Re-sync every artifact parent and the tile root on settlement replay, even
+  when a crash already removed the source, tombstone, or transaction record.
+- Journal and verify exact tile topology plus content. Migrated legacy state
+  distinguishes immutable container ID from preserved logical tile ID and
+  binds both to target provenance and the computed tree digest. Dangling or
+  non-regular manifests and canonical/direct same-ID drift fail closed.
+- Re-prove a durable same-target no-switch under the parked/Git/tile lock and
+  skip the exchange helper; changed topology stops all later rollback mutation.
 - Added durable ownership/preexistence and content authority for every
   generation/build/switch/retained artifact. Pre-exchange recovery preserves
   exact preexisting generations and rejects missing or tampered authority.
@@ -18,7 +29,7 @@
   persistent `MTSCLookaheadEnabled` value, so the complete randomized 202-test
   production gate cannot inherit a stale strategic-map cap.
 - Verification: both pinned helper Go suites, mapd Go, 63 mapd Python tests plus
-  11 subtests, 202 VTSC Python tests, and a true-clean 207 Core + 40 App Swift
+  11 subtests, 202 VTSC Python tests, and a true-clean 208 Core + 40 App Swift
   run pass. The exact Release app and nested decoder pass strict signing checks;
   the packaged static Linux ARM64 transaction helper matches its built SHA-256.
 - Made pre-exchange tile rollback validate and durably remove every helper-owned

@@ -26,8 +26,9 @@ struct CompletionCompatibleDeviceIdentity: Equatable, Sendable {
   var compatibilityPaths: [String]
 }
 
-enum TiciActiveTileTopology: String, Codable, Equatable, Sendable {
+public enum TiciActiveTileTopology: String, Codable, Equatable, Sendable {
   case canonical
+  case legacyMigration
   case directIdentified
   case directUnidentified
 }
@@ -49,6 +50,9 @@ struct TiciDeploymentSnapshot: Codable, Equatable, Sendable {
   var cachedMapdSHA256: String?
   var activeTileSetID: String?
   var activeTileTopology: TiciActiveTileTopology? = nil
+  var activeTileContainerID: String? = nil
+  var activeTileLegacyMigrationTargetID: String? = nil
+  var activeTileLegacyTreeSHA256: String? = nil
 
   enum CodingKeys: String, CodingKey {
     case bootID = "boot_id"
@@ -65,6 +69,9 @@ struct TiciDeploymentSnapshot: Codable, Equatable, Sendable {
     case cachedMapdSHA256 = "cached_mapd_sha256"
     case activeTileSetID = "active_tile_set_id"
     case activeTileTopology = "active_tile_topology"
+    case activeTileContainerID = "active_tile_container_id"
+    case activeTileLegacyMigrationTargetID = "active_tile_legacy_migration_target_id"
+    case activeTileLegacyTreeSHA256 = "active_tile_legacy_tree_sha256"
   }
 }
 
@@ -108,6 +115,9 @@ struct TiciDeploymentPostflight: Codable, Equatable, Sendable {
   var roadGeometryValid: Bool
   var activeTileSetID: String?
   var activeTileTopology: TiciActiveTileTopology?
+  var activeTileContainerID: String?
+  var activeTileLegacyMigrationTargetID: String?
+  var activeTileLegacyTreeSHA256: String?
 
   enum CodingKeys: String, CodingKey {
     case bootID = "boot_id"
@@ -147,6 +157,9 @@ struct TiciDeploymentPostflight: Codable, Equatable, Sendable {
     case roadGeometryValid = "road_geometry_valid"
     case activeTileSetID = "active_tile_set_id"
     case activeTileTopology = "active_tile_topology"
+    case activeTileContainerID = "active_tile_container_id"
+    case activeTileLegacyMigrationTargetID = "active_tile_legacy_migration_target_id"
+    case activeTileLegacyTreeSHA256 = "active_tile_legacy_tree_sha256"
   }
 }
 

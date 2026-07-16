@@ -10,7 +10,8 @@ import Testing
     .physicsAmplitude: Data("4.11".utf8),
     .qCurveFile: Data("Q_CURVE_ENABLED = True\nQ_CURVE_POINTS = [(0.1, 1.0)]\n".utf8),
     .tileManifest: Data("{\"tile_set_id\":\"current\"}".utf8),
-    .tileTopology: Data("canonical:current".utf8),
+    .tileTopology: Data("generation:current".utf8),
+    .tileTreeSHA256: Data(String(repeating: "e", count: 64).utf8),
     .mapdCacheListing: Data("/data/media/0/osm/binaries/mapd-a\tabc123\n".utf8),
   ])
 
@@ -77,12 +78,14 @@ import Testing
   let adjacent = root.appendingPathComponent("offline.manifest.json")
   let tileID = String(repeating: "a", count: 64)
   try FileManager.default.createDirectory(at: offline, withIntermediateDirectories: true)
+  try Data("tile-data".utf8).write(to: offline.appendingPathComponent("32--122"))
   try "{\"tile_set_id\":\"\(tileID)\"}\n".write(to: adjacent, atomically: true, encoding: .utf8)
 
   let direct = try runTileManifestProbeShell(offline: offline, adjacent: adjacent)
   var fields = runtimeSnapshotMinimumFields()
   fields[.tileManifest] = Data(direct.manifest.utf8)
   fields[.tileTopology] = Data(direct.topology.utf8)
+  fields[.tileTreeSHA256] = Data(direct.treeSHA256.utf8)
   let directRead = try TiciDeploymentSnapshotDecoder.decodeRead(
     TiciSnapshotWireCodec.encode(.init(rawValues: fields))
   ).snapshot
@@ -93,6 +96,7 @@ import Testing
   let unidentified = try runTileManifestProbeShell(offline: offline, adjacent: adjacent)
   fields[.tileManifest] = Data(unidentified.manifest.utf8)
   fields[.tileTopology] = Data(unidentified.topology.utf8)
+  fields[.tileTreeSHA256] = Data(unidentified.treeSHA256.utf8)
   let unidentifiedRead = try TiciDeploymentSnapshotDecoder.decodeRead(
     TiciSnapshotWireCodec.encode(.init(rawValues: fields))
   ).snapshot
@@ -106,12 +110,34 @@ import Testing
     var invalidFields = runtimeSnapshotMinimumFields()
     invalidFields[.tileManifest] = Data(result.manifest.utf8)
     invalidFields[.tileTopology] = Data(result.topology.utf8)
+    invalidFields[.tileTreeSHA256] = Data(String(repeating: "e", count: 64).utf8)
     #expect(throws: TiciDeploymentSnapshotDecodeError.self) {
       try TiciDeploymentSnapshotDecoder.decodeRead(
         TiciSnapshotWireCodec.encode(.init(rawValues: invalidFields))
       )
     }
   }
+
+  let embeddedDirect = offline.appendingPathComponent(".tileset-manifest.json")
+  try FileManager.default.createSymbolicLink(
+    at: embeddedDirect,
+    withDestinationURL: offline.appendingPathComponent("missing-embedded-manifest")
+  )
+  try expectInvalidTopology("direct tree with dangling embedded manifest")
+  try FileManager.default.removeItem(at: embeddedDirect)
+
+  try FileManager.default.removeItem(at: adjacent)
+  try FileManager.default.createSymbolicLink(
+    at: adjacent,
+    withDestinationURL: root.appendingPathComponent("missing-adjacent-manifest")
+  )
+  try expectInvalidTopology("direct tree with dangling adjacent manifest")
+  try FileManager.default.removeItem(at: adjacent)
+  try "{\"tile_set_id\":\"\(tileID)\"}\n".write(to: adjacent, atomically: true, encoding: .utf8)
+
+  try FileManager.default.createDirectory(at: embeddedDirect, withIntermediateDirectories: false)
+  try expectInvalidTopology("direct tree with non-regular embedded manifest")
+  try FileManager.default.removeItem(at: embeddedDirect)
 
   try FileManager.default.removeItem(at: adjacent)
   let previous = root.appendingPathComponent("offline.previous")
@@ -128,6 +154,11 @@ import Testing
   try "{}\n".write(to: transaction, atomically: true, encoding: .utf8)
   try expectInvalidTopology("direct unidentified tree with helper transaction")
   try FileManager.default.removeItem(at: transaction)
+
+  let authority = root.appendingPathComponent(".tileset-activation-authority.json")
+  try "{}\n".write(to: authority, atomically: true, encoding: .utf8)
+  try expectInvalidTopology("direct unidentified tree with helper activation authority")
+  try FileManager.default.removeItem(at: authority)
   try FileManager.default.createSymbolicLink(
     at: transaction,
     withDestinationURL: root.appendingPathComponent("missing-transaction")
@@ -154,6 +185,7 @@ import Testing
   let generationID = "current"
   let generation = root.appendingPathComponent("tile-generations/\(generationID)/offline", isDirectory: true)
   try FileManager.default.createDirectory(at: generation, withIntermediateDirectories: true)
+  try Data("tile-data".utf8).write(to: generation.appendingPathComponent("32--122"))
   try FileManager.default.createSymbolicLink(
     atPath: offline.path,
     withDestinationPath: "tile-generations/\(generationID)/offline"
@@ -163,10 +195,11 @@ import Testing
   let embedded = generation.appendingPathComponent(".tileset-manifest.json")
   try "{\"tile_set_id\":\"\(generationID)\"}\n".write(to: embedded, atomically: true, encoding: .utf8)
   let canonical = try runTileManifestProbeShell(offline: offline, adjacent: adjacent)
-  #expect(canonical.topology == "canonical:\(generationID)")
+  #expect(canonical.topology == "generation:\(generationID)")
   var canonicalFields = runtimeSnapshotMinimumFields()
   canonicalFields[.tileManifest] = Data(canonical.manifest.utf8)
   canonicalFields[.tileTopology] = Data(canonical.topology.utf8)
+  canonicalFields[.tileTreeSHA256] = Data(canonical.treeSHA256.utf8)
   let canonicalRead = try TiciDeploymentSnapshotDecoder.decodeRead(
     TiciSnapshotWireCodec.encode(.init(rawValues: canonicalFields))
   ).snapshot
@@ -174,6 +207,73 @@ import Testing
   #expect(canonicalRead.activeTileTopology == .canonical)
 
   try FileManager.default.removeItem(at: offline)
+  let legacyContainer = "legacy-0123456789abcdef"
+  let logicalLegacyID = String(repeating: "c", count: 64)
+  let legacyTargetID = String(repeating: "d", count: 64)
+  let legacyGeneration = root.appendingPathComponent(
+    "tile-generations/\(legacyContainer)/offline", isDirectory: true
+  )
+  try FileManager.default.createDirectory(at: legacyGeneration, withIntermediateDirectories: true)
+  try Data("preserved-legacy-tile".utf8).write(to: legacyGeneration.appendingPathComponent("32--122"))
+  let legacyEmbedded = legacyGeneration.appendingPathComponent(".tileset-manifest.json")
+  func writeLegacyManifest(treeSHA256: String, container: String = legacyContainer) throws {
+    let payload: [String: Any] = [
+      "tile_set_id": logicalLegacyID,
+      "legacy": true,
+      "legacy_container_id": container,
+      "legacy_migration_target_tile_set_id": legacyTargetID,
+      "legacy_tree_sha256": treeSHA256,
+    ]
+    try JSONSerialization.data(withJSONObject: payload).write(to: legacyEmbedded)
+  }
+  try writeLegacyManifest(treeSHA256: String(repeating: "0", count: 64))
+  try FileManager.default.createSymbolicLink(
+    atPath: offline.path,
+    withDestinationPath: "tile-generations/\(legacyContainer)/offline"
+  )
+  let legacyDigestProbe = try runTileManifestProbeShell(offline: offline, adjacent: adjacent)
+  try writeLegacyManifest(treeSHA256: legacyDigestProbe.treeSHA256)
+  let legacy = try runTileManifestProbeShell(offline: offline, adjacent: adjacent)
+  var legacyFields = runtimeSnapshotMinimumFields()
+  legacyFields[.tileManifest] = Data(legacy.manifest.utf8)
+  legacyFields[.tileTopology] = Data(legacy.topology.utf8)
+  legacyFields[.tileTreeSHA256] = Data(legacy.treeSHA256.utf8)
+  let legacyRead = try TiciDeploymentSnapshotDecoder.decodeRead(
+    TiciSnapshotWireCodec.encode(.init(rawValues: legacyFields))
+  ).snapshot
+  #expect(legacyRead.activeTileSetID == logicalLegacyID)
+  #expect(legacyRead.activeTileTopology == .legacyMigration)
+  #expect(legacyRead.activeTileContainerID == legacyContainer)
+  #expect(legacyRead.activeTileLegacyMigrationTargetID == legacyTargetID)
+  #expect(legacyRead.activeTileLegacyTreeSHA256 == legacy.treeSHA256)
+
+  try writeLegacyManifest(treeSHA256: legacy.treeSHA256, container: "legacy-ffffffffffffffff")
+  let wrongContainer = try runTileManifestProbeShell(offline: offline, adjacent: adjacent)
+  legacyFields[.tileManifest] = Data(wrongContainer.manifest.utf8)
+  #expect(throws: TiciDeploymentSnapshotDecodeError.self) {
+    try TiciDeploymentSnapshotDecoder.decodeRead(
+      TiciSnapshotWireCodec.encode(.init(rawValues: legacyFields))
+    )
+  }
+  for (label, manifestMutation, wireDigest) in [
+    ("migration target", ["legacy_migration_target_tile_set_id": "../unsafe"], legacy.treeSHA256),
+    ("tree digest", ["legacy_tree_sha256": String(repeating: "f", count: 64)], legacy.treeSHA256),
+  ] {
+    var object = try #require(
+      JSONSerialization.jsonObject(with: Data(legacy.manifest.utf8)) as? [String: Any]
+    )
+    for (key, value) in manifestMutation { object[key] = value }
+    legacyFields[.tileManifest] = try JSONSerialization.data(withJSONObject: object)
+    legacyFields[.tileTreeSHA256] = Data(wireDigest.utf8)
+    #expect(throws: TiciDeploymentSnapshotDecodeError.self, "legacy \(label) mismatch was accepted") {
+      try TiciDeploymentSnapshotDecoder.decodeRead(
+        TiciSnapshotWireCodec.encode(.init(rawValues: legacyFields))
+      )
+    }
+  }
+
+  try FileManager.default.removeItem(at: offline)
+
   let external = root.appendingPathComponent("external/offline", isDirectory: true)
   try FileManager.default.createDirectory(at: external, withIntermediateDirectories: true)
   try "{\"tile_set_id\":\"external\"}\n".write(
@@ -198,10 +298,11 @@ import Testing
   )
   try "{\"tile_set_id\":\"different\"}\n".write(to: embedded, atomically: true, encoding: .utf8)
   let mismatch = try runTileManifestProbeShell(offline: offline, adjacent: adjacent)
-  #expect(mismatch.topology == "canonical:\(generationID)")
+  #expect(mismatch.topology == "generation:\(generationID)")
   var mismatchFields = runtimeSnapshotMinimumFields()
   mismatchFields[.tileManifest] = Data(mismatch.manifest.utf8)
   mismatchFields[.tileTopology] = Data(mismatch.topology.utf8)
+  mismatchFields[.tileTreeSHA256] = Data(mismatch.treeSHA256.utf8)
   #expect(throws: TiciDeploymentSnapshotDecodeError.self) {
     try TiciDeploymentSnapshotDecoder.decodeRead(
       TiciSnapshotWireCodec.encode(.init(rawValues: mismatchFields))
@@ -237,7 +338,8 @@ import Testing
     .activeMapdSHA256: Data(String(repeating: "b", count: 64).utf8),
     .qCurveFile: Data(qSource.utf8),
     .tileManifest: Data("{\"tile_set_id\":\"tiles-v1\"}".utf8),
-    .tileTopology: Data("canonical:tiles-v1".utf8),
+    .tileTopology: Data("generation:tiles-v1".utf8),
+    .tileTreeSHA256: Data(String(repeating: "e", count: 64).utf8),
     .mapdCacheListing: Data("\(cachePath)\t\(String(repeating: "c", count: 64))\n".utf8),
   ]
   let read = try TiciDeploymentSnapshotDecoder.decodeRead(
@@ -293,6 +395,7 @@ import Testing
     .runtimeEndMapLookaheadEnabled: Data("0".utf8),
     .tileManifest: Data(),
     .tileTopology: Data("direct-unidentified".utf8),
+    .tileTreeSHA256: Data(String(repeating: "e", count: 64).utf8),
     .memoryWholeCurveProfile: Data("memory-profile".utf8),
     .persistentWholeCurveProfile: Data("persistent-profile".utf8),
     .persistentLastGPSPosition: Data("gps".utf8),
@@ -498,6 +601,7 @@ private func runtimeSnapshotMinimumFields() -> [TiciSnapshotWireField: Data] {
     .runtimeEndMapLookaheadEnabled: Data("0".utf8),
     .tileManifest: Data(),
     .tileTopology: Data("direct-unidentified".utf8),
+    .tileTreeSHA256: Data(String(repeating: "e", count: 64).utf8),
   ]
   for (field, value) in [
     (TiciSnapshotWireField.physicsAmplitude, "-1"),
@@ -530,7 +634,7 @@ private func runManagerProbeShell(repository: URL, procRoot: URL, pgrep: URL) th
 private func runTileManifestProbeShell(
   offline: URL,
   adjacent: URL
-) throws -> (topology: String, manifest: String) {
+) throws -> (topology: String, manifest: String, treeSHA256: String) {
   let fragment = TiciSnapshotWireCommandBuilder.tileManifestProbeShellFragment(
     offlinePath: offline.path,
     adjacentManifestPath: adjacent.path
@@ -539,23 +643,32 @@ private func runTileManifestProbeShell(
   set -eu
   tile_probe_topology=
   tile_probe_manifest=
+  tile_probe_tree_sha256=
+  compact_base64() {
+    while IFS= read -r chunk || [ -n "$chunk" ]; do printf '%s' "$chunk"; done
+  }
+  file_sha256() {
+    /usr/bin/shasum -a 256 "$1" | awk '{ print $1 }'
+  }
+  sha256sum() {
+    /usr/bin/shasum -a 256 "$@"
+  }
   emit_file() {
     if [ "$1" = tile_manifest ]; then tile_probe_manifest=$(cat "$2"); fi
   }
   emit_text() {
     if [ "$1" = tile_topology ]; then tile_probe_topology=$2; fi
     if [ "$1" = tile_manifest ]; then tile_probe_manifest=$2; fi
+    if [ "$1" = tile_tree_sha256 ]; then tile_probe_tree_sha256=$2; fi
   }
   \(fragment)
-  printf '%s\n%s' "$tile_probe_topology" "$tile_probe_manifest"
+  printf '%s\n%s\n%s' "$tile_probe_topology" "$tile_probe_manifest" "$tile_probe_tree_sha256"
   """)
-  guard let separator = output.firstIndex(of: "\n") else {
+  let lines = output.split(separator: "\n", omittingEmptySubsequences: false)
+  guard lines.count >= 3 else {
     throw NSError(domain: "TileManifestProbe", code: 1)
   }
-  return (
-    String(output[..<separator]),
-    String(output[output.index(after: separator)...])
-  )
+  return (String(lines[0]), String(lines[1]), String(lines[2]))
 }
 
 private func runShell(_ script: String) throws -> String {

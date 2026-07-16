@@ -1713,6 +1713,13 @@ func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByR
   fixture.journal.completed = true
   fixture.journal.resolution = .mutationInProgress
   fixture.journal.previousTileSetID = target
+  fixture.journal.previousTileIdentity = TiciTileSnapshotIdentity(
+    logicalID: target,
+    topology: .canonical,
+    containerID: target,
+    legacyMigrationTargetID: nil,
+    treeSHA256: String(repeating: "e", count: 64)
+  )
   fixture.journal.resolvedPreviousTileSetID = nil
   fixture.journal.targetTileSetID = target
   try fixture.journal.write(to: fixture.journalURL)
@@ -1758,6 +1765,13 @@ func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByR
   fixture.journal.completed = true
   fixture.journal.resolution = .mutationInProgress
   fixture.journal.previousTileSetID = target
+  fixture.journal.previousTileIdentity = TiciTileSnapshotIdentity(
+    logicalID: target,
+    topology: .canonical,
+    containerID: target,
+    legacyMigrationTargetID: nil,
+    treeSHA256: String(repeating: "e", count: 64)
+  )
   fixture.journal.targetTileSetID = target
   fixture.journal.tileActivationOutcome = nil
   fixture.journal.previousCachedMapdPath = ""
@@ -1788,11 +1802,12 @@ func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByR
     rebootPollDelayNanoseconds: 1
   )
 
-  guard case .rolledBack = await pipeline.rollbackProductionDeploymentIfJournalPending(
+  let firstOutcome = await pipeline.rollbackProductionDeploymentIfJournalPending(
     preflight: try resumeRuntimePreflight(fixture),
     tilesActivated: false
-  ) else {
-    Issue.record("same-target verified no-switch did not complete source/Params/mapd rollback")
+  )
+  guard case .rolledBack = firstOutcome else {
+    Issue.record("same-target verified no-switch did not complete source/Params/mapd rollback: \(firstOutcome)")
     return
   }
   let settled = try DeploymentRollbackJournal.load(from: fixture.journalURL)
@@ -1802,6 +1817,7 @@ func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByR
   let firstRequests = await runner.requests.count
   #expect((await runner.requests).contains { $0.arguments.last?.contains(TiciProductionRollbackCommandBuilder.resultMarker) == true })
   #expect((await runner.requests).contains { $0.arguments.last?.contains("sudo reboot") == true })
+  #expect(!(await runner.requests).contains { $0.arguments.last?.contains("rollback --root") == true })
 
   guard case .rolledBack = await pipeline.rollbackProductionDeploymentIfJournalPending(
     preflight: try resumeRuntimePreflight(fixture),
@@ -1811,6 +1827,51 @@ func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByR
     return
   }
   #expect(await runner.requests.count == firstRequests)
+}
+
+@Test func durableNoSwitchTopologyDriftFailsBeforeAnyRollbackMutation() async throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  let target = String(repeating: "f", count: 64)
+  fixture.journal.completed = true
+  fixture.journal.resolution = .rollbackInProgress
+  fixture.journal.previousTileSetID = target
+  fixture.journal.previousTileIdentity = TiciTileSnapshotIdentity(
+    logicalID: target,
+    topology: .canonical,
+    containerID: target,
+    legacyMigrationTargetID: nil,
+    treeSHA256: String(repeating: "d", count: 64)
+  )
+  fixture.journal.targetTileSetID = target
+  fixture.journal.tileActivationOutcome = .notSwitched
+  fixture.journal.previousCachedMapdPath = ""
+  fixture.journal.previousCachedMapdSHA256 = nil
+  try fixture.journal.write(to: fixture.journalURL)
+  let runner = FreshProcessRollbackRecoveryRunner(
+    journal: fixture.journal,
+    runtimeActiveTileSetID: target,
+    tileActivationNeverStarted: true
+  )
+
+  let outcome = await ApplyPipeline(
+    processRunner: runner,
+    rebootInitialDelayNanoseconds: 0,
+    rebootPollDelayNanoseconds: 1
+  ).rollbackProductionDeploymentIfJournalPending(
+    preflight: try resumeRuntimePreflight(fixture),
+    tilesActivated: false
+  )
+
+  guard case let .rollbackFailed(detail) = outcome else {
+    Issue.record("tampered same-ID topology did not fail closed: \(outcome)")
+    return
+  }
+  #expect(detail.contains("tile rollback or its exact target binding failed"))
+  let requests = await runner.requests
+  #expect(!requests.contains { $0.arguments.last?.contains("rollback --root") == true })
+  #expect(!requests.contains { $0.arguments.last?.contains(TiciProductionRollbackCommandBuilder.resultMarker) == true })
+  #expect(!requests.contains { $0.arguments.last?.contains("sudo reboot") == true })
 }
 
 @Test func beforeJournalDirectIdentityNoSwitchCompletesFullRollbackAndPostflight() async throws {
@@ -1864,6 +1925,13 @@ func legacyDirectTileActivationRollbackAndInterruptedRetrySettle(
   fixture.journal.completed = true
   fixture.journal.resolution = .rollbackInProgress
   fixture.journal.previousTileSetID = nil
+  fixture.journal.previousTileIdentity = TiciTileSnapshotIdentity(
+    logicalID: nil,
+    topology: .directUnidentified,
+    containerID: nil,
+    legacyMigrationTargetID: nil,
+    treeSHA256: String(repeating: "e", count: 64)
+  )
   fixture.journal.resolvedPreviousTileSetID = nil
   fixture.journal.targetTileSetID = target
   fixture.journal.previousCachedMapdPath = ""
@@ -3117,6 +3185,7 @@ private actor ProductionPreflightRunner: ProcessRunning {
       .activeMapdSHA256: Data(String(repeating: "c", count: 64).utf8),
       .tileManifest: Data(),
       .tileTopology: Data("direct-unidentified".utf8),
+      .tileTreeSHA256: Data(String(repeating: "e", count: 64).utf8),
       .mapdCacheListing: Data("".utf8),
       .activeMapdBuildInfo: Data("{}".utf8),
       .activeMapdELFHeader: Data([0x7f, 0x45, 0x4c, 0x46, 2, 1] + Array(repeating: 0, count: 12) + [183, 0]),
@@ -3214,6 +3283,7 @@ private actor OldFirstGapRunner: ProcessRunning {
       .activeMapdSHA256: Data(String(repeating: "c", count: 64).utf8),
       .tileManifest: Data(),
       .tileTopology: Data("direct-unidentified".utf8),
+      .tileTreeSHA256: Data(String(repeating: "e", count: 64).utf8),
       .mapdCacheListing: Data("".utf8),
       .activeMapdBuildInfo: Data("{}".utf8),
       .activeMapdELFHeader: Data([0x7f, 0x45, 0x4c, 0x46, 2, 1] + Array(repeating: 0, count: 12) + [183, 0]),
@@ -3298,6 +3368,7 @@ private actor BlockingProductionPreflightRunner: ProcessRunning {
         .activeMapdSHA256: Data(String(repeating: "c", count: 64).utf8),
         .tileManifest: Data(),
         .tileTopology: Data("direct-unidentified".utf8),
+        .tileTreeSHA256: Data(String(repeating: "e", count: 64).utf8),
         .mapdCacheListing: Data("".utf8),
         .activeMapdBuildInfo: Data("{}".utf8),
         .activeMapdELFHeader: Data([0x7f, 0x45, 0x4c, 0x46, 2, 1] + Array(repeating: 0, count: 12) + [183, 0]),
@@ -3565,11 +3636,25 @@ private actor FreshProcessRollbackRecoveryRunner: ProcessRunning {
       fields[.mapdVersion] = Data(version.utf8)
     }
     if let tileSetID = runtimeActiveTileSetID ?? resolvedLegacyTileSetID ?? journal.effectivePreviousTileSetID {
-      fields[.tileManifest] = try! JSONSerialization.data(withJSONObject: ["tile_set_id": tileSetID])
-      fields[.tileTopology] = Data("canonical:\(tileSetID)".utf8)
+      let digest = String(repeating: "e", count: 64)
+      if resolvedLegacyTileSetID != nil, tileSetID == resolvedLegacyTileSetID {
+        fields[.tileManifest] = try! JSONSerialization.data(withJSONObject: [
+          "tile_set_id": tileSetID,
+          "legacy": true,
+          "legacy_container_id": "legacy-0123456789abcdef",
+          "legacy_migration_target_tile_set_id": journal.targetTileSetID ?? "target",
+          "legacy_tree_sha256": digest,
+        ])
+        fields[.tileTopology] = Data("generation:legacy-0123456789abcdef".utf8)
+      } else {
+        fields[.tileManifest] = try! JSONSerialization.data(withJSONObject: ["tile_set_id": tileSetID])
+        fields[.tileTopology] = Data("generation:\(tileSetID)".utf8)
+      }
+      fields[.tileTreeSHA256] = Data(digest.utf8)
     } else {
       fields[.tileManifest] = Data()
       fields[.tileTopology] = Data("direct-unidentified".utf8)
+      fields[.tileTreeSHA256] = Data(String(repeating: "e", count: 64).utf8)
     }
     let physicsFields: [String: TiciSnapshotWireField] = [
       "VisionTurnSpeedControlPhysicsAmplitude": .physicsAmplitude,
@@ -3616,6 +3701,7 @@ private actor UnsafeAbortRunner: ProcessRunning {
         .activeMapdSHA256: Data(String(repeating: "c", count: 64).utf8),
         .tileManifest: Data(),
         .tileTopology: Data("direct-unidentified".utf8),
+        .tileTreeSHA256: Data(String(repeating: "e", count: 64).utf8),
         .mapdCacheListing: Data("".utf8),
       ])) + "\n"
       return ProcessResult(terminationStatus: 0, standardOutput: wire, standardError: "")
@@ -3666,6 +3752,7 @@ private actor RollbackClaimRecoveryRunner: ProcessRunning {
       .activeMapdSHA256: Data(String(repeating: "c", count: 64).utf8),
       .tileManifest: Data(),
       .tileTopology: Data("direct-unidentified".utf8),
+      .tileTreeSHA256: Data(String(repeating: "e", count: 64).utf8),
       .mapdCacheListing: Data("".utf8),
     ])) + "\n"
   }
@@ -4008,6 +4095,7 @@ private actor ResumePostflightRunner: ProcessRunning {
       .activeMapdSHA256: Data(fixture.release.sha256.utf8),
       .tileManifest: Data(),
       .tileTopology: Data("direct-unidentified".utf8),
+      .tileTreeSHA256: Data(String(repeating: "e", count: 64).utf8),
       .qCurveFile: Data(TuneDeploymentIdentity.canonicalQCurveSource(
         parameters: fixture.tune.params,
         bands: fixture.tune.bands

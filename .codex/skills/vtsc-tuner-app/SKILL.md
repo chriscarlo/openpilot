@@ -67,7 +67,7 @@ Release rebuilds are ~7–9 s incrementally; full builds ~30 s.
 | `Sources/VTSCTunerApp/TunerSession.swift` | App state, grouped undo/redo, selected checkout, apply stream integration |
 | `Sources/VTSCTunerApp/MapPreview*.swift`, `StrategicMapView.swift` | MapKit context/search/opening location, actual/proposed/delta mapd overlays, apex selection, persistent no-cap curve bank |
 | `Sources/VTSCTunerApp/CurvePlotView.swift`, `RotaryKnob.swift`, `RootView.swift` | Canvas/AppKit plot interaction, controls, workspace chrome, sheets, status |
-| `Helpers/VTSCTileDecoder/`, `scripts/build_tile_decoder.sh` | Native arm64 Cap'n Proto helper and pinned, checksum-verified Go build |
+| `Helpers/VTSCTileDecoder/`, `Helpers/VTSCTileTransaction/`, `scripts/build_tile_{decoder,transaction_helper}.sh` | Pinned Go decoder plus static Linux ARM64 transactional tile activation/rollback helper |
 | `scripts/build_app.sh`, `Support/Info.plist` | Release build, helper packaging, `.app` ad-hoc signing and verification |
 
 ## Legacy Rust module map (`tools/vtsc_tuner/src/`)

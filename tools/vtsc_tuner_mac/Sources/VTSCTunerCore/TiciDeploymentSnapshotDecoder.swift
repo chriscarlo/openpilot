@@ -182,7 +182,8 @@ enum TiciDeploymentSnapshotDecoder {
     }
     let tile = try tileIdentity(
       manifest: tileManifest,
-      topology: try requiredText(wire, .tileTopology)
+      topology: try requiredText(wire, .tileTopology),
+      treeSHA256: try requiredText(wire, .tileTreeSHA256)
     )
 
     return TiciDeploymentSnapshot(
@@ -201,7 +202,10 @@ enum TiciDeploymentSnapshotDecoder {
       cachedMapdPath: cached?.path ?? "",
       cachedMapdSHA256: cached?.sha256,
       activeTileSetID: tile.id,
-      activeTileTopology: tile.topology
+      activeTileTopology: tile.topology,
+      activeTileContainerID: tile.containerID,
+      activeTileLegacyMigrationTargetID: tile.legacyMigrationTargetID,
+      activeTileLegacyTreeSHA256: tile.treeSHA256
     )
   }
 
@@ -349,39 +353,88 @@ enum TiciDeploymentSnapshotDecoder {
 
   private static func tileIdentity(
     manifest raw: Data,
-    topology rawTopology: String
-  ) throws -> (id: String?, topology: TiciActiveTileTopology) {
+    topology rawTopology: String,
+    treeSHA256: String
+  ) throws -> (
+    id: String?,
+    topology: TiciActiveTileTopology,
+    containerID: String?,
+    legacyMigrationTargetID: String?,
+    treeSHA256: String
+  ) {
+    let safeID = { (value: String) in
+      value.range(of: #"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"#, options: .regularExpression) != nil
+    }
+    guard treeSHA256.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil else {
+      throw TiciDeploymentSnapshotDecodeError.malformedTileManifest("missing or invalid tile tree digest")
+    }
     if rawTopology == "direct-unidentified" {
       guard raw.isEmpty else {
         throw TiciDeploymentSnapshotDecodeError.malformedTileManifest(
           "direct-unidentified topology carried a manifest"
         )
       }
-      return (nil, .directUnidentified)
+      return (nil, .directUnidentified, nil, nil, treeSHA256)
     }
     guard !raw.isEmpty,
           let object = try? JSONSerialization.jsonObject(with: raw) as? [String: Any],
           let tileSetID = object["tile_set_id"] as? String,
-          tileSetID.range(of: #"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"#, options: .regularExpression) != nil
+          safeID(tileSetID)
     else {
       throw TiciDeploymentSnapshotDecodeError.malformedTileManifest(
         "\(rawTopology):\(String(decoding: raw, as: UTF8.self))"
       )
     }
     if rawTopology == "direct-identified" {
-      return (tileSetID, .directIdentified)
+      guard object["legacy"] == nil || object["legacy"] as? Bool == false,
+            object["legacy_migration_target_tile_set_id"] == nil,
+            object["legacy_tree_sha256"] == nil else {
+        throw TiciDeploymentSnapshotDecodeError.malformedTileManifest(
+          "direct topology carried legacy-generation provenance"
+        )
+      }
+      return (tileSetID, .directIdentified, nil, nil, treeSHA256)
     }
-    let prefix = "canonical:"
+    let prefix = "generation:"
     guard rawTopology.hasPrefix(prefix) else {
       throw TiciDeploymentSnapshotDecodeError.malformedTileManifest(rawTopology)
     }
-    let linkID = String(rawTopology.dropFirst(prefix.count))
-    guard linkID == tileSetID,
-          linkID.range(of: #"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"#, options: .regularExpression) != nil else {
+    let containerID = String(rawTopology.dropFirst(prefix.count))
+    guard safeID(containerID) else {
+      throw TiciDeploymentSnapshotDecodeError.malformedTileManifest("unsafe generation container identity")
+    }
+    let legacy: Bool
+    if let rawLegacy = object["legacy"] {
+      guard let boolean = rawLegacy as? Bool else {
+        throw TiciDeploymentSnapshotDecodeError.malformedTileManifest(
+          "legacy provenance flag is not a boolean"
+        )
+      }
+      legacy = boolean
+    } else {
+      legacy = false
+    }
+    if !legacy {
+      guard containerID == tileSetID,
+            object["legacy_container_id"] == nil,
+            object["legacy_migration_target_tile_set_id"] == nil,
+            object["legacy_tree_sha256"] == nil else {
+        throw TiciDeploymentSnapshotDecodeError.malformedTileManifest(
+          "ordinary generation container identity (containerID) differs from manifest (tileSetID)"
+        )
+      }
+      return (tileSetID, .canonical, containerID, nil, treeSHA256)
+    }
+    guard containerID.range(of: #"^legacy-[0-9a-f]{16}$"#, options: .regularExpression) != nil,
+          object["legacy_container_id"] as? String == containerID,
+          let migrationTarget = object["legacy_migration_target_tile_set_id"] as? String,
+          safeID(migrationTarget), migrationTarget != tileSetID,
+          let manifestTreeSHA256 = object["legacy_tree_sha256"] as? String,
+          manifestTreeSHA256 == treeSHA256 else {
       throw TiciDeploymentSnapshotDecodeError.malformedTileManifest(
-        "canonical link identity \(linkID) differs from manifest \(tileSetID)"
+        "legacy generation container/provenance/tree digest is not exact"
       )
     }
-    return (tileSetID, .canonical)
+    return (tileSetID, .legacyMigration, containerID, migrationTarget, treeSHA256)
   }
 }

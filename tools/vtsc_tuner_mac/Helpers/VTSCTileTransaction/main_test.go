@@ -635,11 +635,40 @@ func TestNoTransactionRollbackUsesOnlyExactRecordedDirectAdjacentIdentity(t *tes
 	if !result.TileActivationNotSwitched || result.ActiveTileSetID != previous || result.PreviousTileSetID != previous {
 		t.Fatalf("before-journal exact direct rollback = %+v", result)
 	}
+	if _, err := engine.rollback(target, "", ""); err == nil {
+		t.Fatal("direct identified tree was accepted as unidentified nil prior")
+	}
 	if _, err := engine.rollback(target, strings.Repeat("d", 64), ""); err == nil || !strings.Contains(err.Error(), "adjacent previous identity") {
 		t.Fatalf("mismatched recorded direct identity error = %v", err)
 	}
 	if _, isLink, err := symlinkTarget(engine.activePath()); err != nil || isLink {
 		t.Fatalf("direct identity proof changed active topology: isLink=%t err=%v", isLink, err)
+	}
+}
+
+func TestDanglingAndNonRegularDirectManifestPathsFailClosed(t *testing.T) {
+	for _, manifestName := range []string{embeddedManifestName, "offline.manifest.json"} {
+		t.Run(manifestName, func(t *testing.T) {
+			root := newTestRoot(t)
+			tile := filepath.Join(root, activeOfflineName, "38", "-121", "tile")
+			if err := os.MkdirAll(filepath.Dir(tile), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(tile, []byte("tile"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			manifestPath := filepath.Join(root, manifestName)
+			if manifestName == embeddedManifestName {
+				manifestPath = filepath.Join(root, activeOfflineName, embeddedManifestName)
+			}
+			if err := os.Symlink("missing-manifest", manifestPath); err != nil {
+				t.Fatal(err)
+			}
+			engine := testEngine(t, root)
+			if _, err := engine.rollback("target", "", ""); err == nil {
+				t.Fatalf("dangling %s was accepted", manifestName)
+			}
+		})
 	}
 }
 
@@ -855,7 +884,7 @@ func TestTransactionCreatedTargetIsRemovedButPreviousTopologyIsPreserved(t *test
 }
 
 func TestActivationArtifactAuthorityRejectsTamperingAndUnknownLegacyOwnership(t *testing.T) {
-	for _, mutation := range []string{"path", "preexistence", "missing-authority"} {
+	for _, mutation := range []string{"path", "preexistence", "digest", "phase", "authority-digest", "missing-artifacts", "missing-authority"} {
 		t.Run(mutation, func(t *testing.T) {
 			root := newTestRoot(t)
 			makeMinimalGeneration(t, root, "old")
@@ -875,16 +904,26 @@ func TestActivationArtifactAuthorityRejectsTamperingAndUnknownLegacyOwnership(t 
 			if err := json.Unmarshal(contents, &payload); err != nil {
 				t.Fatalf("decode transaction: %v", err)
 			}
-			if mutation == "missing-authority" {
+			if mutation == "missing-artifacts" {
 				delete(payload, "artifacts")
+			} else if mutation == "missing-authority" {
+				if err := os.Remove(engine.authorityPath()); err != nil {
+					t.Fatalf("remove activation authority: %v", err)
+				}
+			} else if mutation == "phase" {
+				payload["phase"] = "cleanup"
+			} else if mutation == "authority-digest" {
+				payload["authoritySHA256"] = strings.Repeat("0", 64)
 			} else {
 				artifacts := payload["artifacts"].(map[string]any)
 				target := artifacts["targetGeneration"].(map[string]any)
 				if mutation == "path" {
 					target["path"] = filepath.Join(root, generationDirectory, "other")
-				} else {
+				} else if mutation == "preexistence" {
 					target["preexisting"] = false
 					delete(target, "treeSHA256")
+				} else {
+					target["treeSHA256"] = strings.Repeat("0", 64)
 				}
 			}
 			mutated, _ := json.Marshal(payload)
@@ -899,6 +938,146 @@ func TestActivationArtifactAuthorityRejectsTamperingAndUnknownLegacyOwnership(t 
 			}
 			assertLinkTarget(t, engine.previousPath(), "tile-generations/target/offline")
 		})
+	}
+}
+
+func TestActivateRetryResumesDurableIntentWhileRollbackSettlesSameBoundaries(t *testing.T) {
+	for _, point := range []string{"after_authority", "after_journal", "after_generation", "after_legacy", "after_switch_publish", "after_switch"} {
+		t.Run("activate-"+point, func(t *testing.T) {
+			root := newTestRoot(t)
+			legacyTile := filepath.Join(root, activeOfflineName, "38", "-121", "legacy-tile")
+			if err := os.MkdirAll(filepath.Dir(legacyTile), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(legacyTile, bytes.Repeat([]byte("legacy"), 20), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			stage := writeStage(t, root, "fresh")
+			engine := testEngine(t, root)
+			if _, err := engine.activate(stage, "fresh", "", point); err == nil {
+				t.Fatalf("injected %s activation unexpectedly succeeded", point)
+			}
+			result, err := engine.activate(stage, "fresh", "", "")
+			if err != nil {
+				t.Fatalf("activate retry after %s: %v", point, err)
+			}
+			if result.ActivatedTileSetID != "fresh" {
+				t.Fatalf("activate retry after %s = %+v", point, result)
+			}
+			assertLinkTarget(t, engine.activePath(), "tile-generations/fresh/offline")
+			if _, err := os.Lstat(engine.transactionPath()); !os.IsNotExist(err) {
+				t.Fatalf("transaction survived activate retry after %s: %v", point, err)
+			}
+			if _, err := os.Lstat(engine.authorityPath()); !os.IsNotExist(err) {
+				t.Fatalf("authority survived activate retry after %s: %v", point, err)
+			}
+		})
+
+		t.Run("rollback-"+point, func(t *testing.T) {
+			root := newTestRoot(t)
+			legacyTile := filepath.Join(root, activeOfflineName, "38", "-121", "legacy-tile")
+			if err := os.MkdirAll(filepath.Dir(legacyTile), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(legacyTile, bytes.Repeat([]byte("legacy"), 20), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			stage := writeStage(t, root, "fresh")
+			engine := testEngine(t, root)
+			if _, err := engine.activate(stage, "fresh", "", point); err == nil {
+				t.Fatalf("injected %s activation unexpectedly succeeded", point)
+			}
+			result, err := engine.rollback("fresh", "", "")
+			if err != nil {
+				t.Fatalf("rollback intent after %s: %v", point, err)
+			}
+			if point == "after_switch" {
+				if result.RolledBackTileSetID == "" {
+					t.Fatalf("rollback after exchange = %+v", result)
+				}
+			} else if !result.TileActivationNotSwitched {
+				t.Fatalf("pre-exchange rollback after %s = %+v", point, result)
+			}
+		})
+	}
+}
+
+func TestAbsentTransactionAndArtifactCleanupReplayDurabilityBarriers(t *testing.T) {
+	root := newTestRoot(t)
+	makeMinimalGeneration(t, root, "old")
+	linkGeneration(t, root, activeOfflineName, "old")
+	stage := writeStage(t, root, "fresh")
+	engine := testEngine(t, root)
+	if _, err := engine.activate(stage, "fresh", "old", "after_generation"); err == nil {
+		t.Fatal("injected activation unexpectedly succeeded")
+	}
+	failGenerationSync := true
+	baseSync := engine.syncDir
+	engine.syncDir = func(directory string) error {
+		if failGenerationSync && directory == engine.generationsPath() {
+			if _, sourceErr := os.Lstat(engine.generationPath("fresh")); os.IsNotExist(sourceErr) {
+				failGenerationSync = false
+				return fmt.Errorf("injected post-delete generation fsync failure")
+			}
+		}
+		return baseSync(directory)
+	}
+	if _, err := engine.rollback("fresh", "old", ""); err == nil {
+		t.Fatal("post-delete generation fsync failure was ignored")
+	}
+	generationBarrierObserved := false
+	engine.syncDir = func(directory string) error {
+		if directory == engine.generationsPath() {
+			generationBarrierObserved = true
+		}
+		return baseSync(directory)
+	}
+	if _, err := engine.rollback("fresh", "old", ""); err != nil {
+		t.Fatalf("retry after generation fsync failure: %v", err)
+	}
+	if !generationBarrierObserved {
+		t.Fatal("retry cleared transaction without re-establishing generation-parent barrier")
+	}
+
+	root = newTestRoot(t)
+	legacyTile := filepath.Join(root, activeOfflineName, "38", "-121", "legacy-tile")
+	if err := os.MkdirAll(filepath.Dir(legacyTile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacyTile, bytes.Repeat([]byte("legacy"), 20), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stage = writeStage(t, root, "fresh")
+	engine = testEngine(t, root)
+	if _, err := engine.activate(stage, "fresh", "", "after_journal"); err == nil {
+		t.Fatal("injected activation unexpectedly succeeded")
+	}
+	baseSync = engine.syncDir
+	failRootSync := true
+	engine.syncDir = func(directory string) error {
+		if failRootSync && directory == engine.root {
+			if _, transactionErr := os.Lstat(engine.transactionPath()); os.IsNotExist(transactionErr) {
+				failRootSync = false
+				return fmt.Errorf("injected post-remove transaction root fsync failure")
+			}
+		}
+		return baseSync(directory)
+	}
+	if _, err := engine.rollback("fresh", "", ""); err == nil {
+		t.Fatal("transaction root fsync failure was ignored")
+	}
+	rootBarrierObserved := false
+	engine.syncDir = func(directory string) error {
+		if directory == engine.root {
+			rootBarrierObserved = true
+		}
+		return baseSync(directory)
+	}
+	if _, err := engine.rollback("fresh", "", ""); err != nil {
+		t.Fatalf("retry root barrier: %v", err)
+	}
+	if !rootBarrierObserved {
+		t.Fatal("no-transaction retry did not re-sync root")
 	}
 }
 

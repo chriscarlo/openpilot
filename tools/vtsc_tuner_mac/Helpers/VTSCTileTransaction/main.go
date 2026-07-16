@@ -8,6 +8,7 @@ package main
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -19,6 +20,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -29,6 +31,7 @@ import (
 const (
 	embeddedManifestName = ".tileset-manifest.json"
 	transactionFileName  = ".tileset-transaction.json"
+	authorityFileName    = ".tileset-activation-authority.json"
 	activeOfflineName    = "offline"
 	previousOfflineName  = "offline.previous"
 	generationDirectory  = "tile-generations"
@@ -55,6 +58,7 @@ type tileManifest struct {
 type manifestIdentity struct {
 	TileSetID                      string `json:"tile_set_id"`
 	Legacy                         bool   `json:"legacy,omitempty"`
+	LegacyContainerID              string `json:"legacy_container_id,omitempty"`
 	LegacyMigrationTargetTileSetID string `json:"legacy_migration_target_tile_set_id,omitempty"`
 	LegacyTreeSHA256               string `json:"legacy_tree_sha256,omitempty"`
 }
@@ -86,19 +90,39 @@ type activationArtifactAuthority struct {
 	PreviousPointerTreeSHA256 string              `json:"previousPointerTreeSHA256,omitempty"`
 }
 
+// activationAuthorityRecord is the immutable pre-creation observation. It is
+// written and directory-synced before the mutable phase transaction. The phase
+// record carries its SHA-256 and a byte-for-byte copy of every immutable field,
+// so accidental, torn, or tampered phase state cannot change ownership. This
+// does not claim protection from an adversary able to rewrite both root-owned
+// records; the safety boundary is independent durable records plus exact
+// cross-checking before any cleanup.
+type activationAuthorityRecord struct {
+	Schema         int                         `json:"schema"`
+	Kind           string                      `json:"kind"`
+	NewID          string                      `json:"newID"`
+	NewTarget      string                      `json:"newTarget"`
+	PreviousTarget string                      `json:"previousTarget"`
+	PreviousID     string                      `json:"previousID"`
+	SwitchPath     string                      `json:"switchPath"`
+	Artifacts      activationArtifactAuthority `json:"artifacts"`
+}
+
 // The field names deliberately match the pre-existing Python journal so a
 // helper can recover a transaction written by the old implementation during a
 // rolling upgrade.
 type tileTransaction struct {
-	Kind           string                       `json:"kind"`
-	NewID          string                       `json:"newID,omitempty"`
-	NewTarget      string                       `json:"newTarget,omitempty"`
-	PreviousTarget string                       `json:"previousTarget,omitempty"`
-	PreviousID     string                       `json:"previousID,omitempty"`
-	SwitchPath     string                       `json:"switchPath,omitempty"`
-	ActiveTarget   string                       `json:"activeTarget,omitempty"`
-	ActiveID       string                       `json:"activeID,omitempty"`
-	Artifacts      *activationArtifactAuthority `json:"artifacts,omitempty"`
+	Kind            string                       `json:"kind"`
+	Phase           string                       `json:"phase,omitempty"`
+	NewID           string                       `json:"newID,omitempty"`
+	NewTarget       string                       `json:"newTarget,omitempty"`
+	PreviousTarget  string                       `json:"previousTarget,omitempty"`
+	PreviousID      string                       `json:"previousID,omitempty"`
+	SwitchPath      string                       `json:"switchPath,omitempty"`
+	ActiveTarget    string                       `json:"activeTarget,omitempty"`
+	ActiveID        string                       `json:"activeID,omitempty"`
+	Artifacts       *activationArtifactAuthority `json:"artifacts,omitempty"`
+	AuthoritySHA256 string                       `json:"authoritySHA256,omitempty"`
 }
 
 type transactionResult struct {
@@ -355,6 +379,10 @@ func (e *transactionEngine) generationsPath() string {
 
 func (e *transactionEngine) transactionPath() string {
 	return filepath.Join(e.root, transactionFileName)
+}
+
+func (e *transactionEngine) authorityPath() string {
+	return filepath.Join(e.root, authorityFileName)
 }
 
 // withExclusiveTransactionLock serializes every pointer/journal mutation
@@ -625,6 +653,19 @@ func isSafeID(value string) bool {
 	return true
 }
 
+func isLegacyContainerID(value string) bool {
+	const prefix = "legacy-"
+	if len(value) != len(prefix)+16 || !strings.HasPrefix(value, prefix) {
+		return false
+	}
+	for _, character := range value[len(prefix):] {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
 func isSafeTilePath(value string) bool {
 	if value == "" || strings.HasPrefix(value, "/") || strings.Contains(value, "\\") || strings.ContainsRune(value, '\x00') || path.Clean(value) != value {
 		return false
@@ -724,6 +765,60 @@ func treeSHA256(root, excludedRelativePath string) (string, error) {
 	})
 	if err != nil {
 		return "", err
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+func legacyContentSHA256(root string) (string, error) {
+	info, err := os.Lstat(root)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("legacy tree root is not a real directory")
+	}
+	var records []string
+	err = filepath.WalkDir(root, func(current string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		relative, err := filepath.Rel(root, current)
+		if err != nil {
+			return err
+		}
+		relative = filepath.ToSlash(relative)
+		if relative == "." || relative == embeddedManifestName {
+			return nil
+		}
+		entryInfo, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if entryInfo.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("legacy tree contains a symlink: %s", relative)
+		}
+		encodedPath := base64.StdEncoding.EncodeToString([]byte(relative))
+		if entryInfo.IsDir() {
+			records = append(records, "D\t"+encodedPath+"\n")
+			return nil
+		}
+		if !entryInfo.Mode().IsRegular() {
+			return fmt.Errorf("legacy tree contains a non-regular entry: %s", relative)
+		}
+		digest, err := sha256File(current)
+		if err != nil {
+			return err
+		}
+		records = append(records, "F\t"+encodedPath+"\t"+strconv.FormatInt(entryInfo.Size(), 10)+"\t"+digest+"\n")
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	sort.Strings(records)
+	hash := sha256.New()
+	for _, record := range records {
+		_, _ = io.WriteString(hash, record)
 	}
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }
@@ -860,9 +955,106 @@ func durableWriteFile(destination string, contents []byte, mode fs.FileMode, syn
 	return syncDirectory(directory)
 }
 
+func activationAuthorityFor(transaction tileTransaction) (activationAuthorityRecord, error) {
+	if transaction.Kind != "activation" || transaction.Artifacts == nil {
+		return activationAuthorityRecord{}, fmt.Errorf("activation transaction lacks immutable ownership authority")
+	}
+	return activationAuthorityRecord{
+		Schema: 1, Kind: transaction.Kind, NewID: transaction.NewID, NewTarget: transaction.NewTarget,
+		PreviousTarget: transaction.PreviousTarget, PreviousID: transaction.PreviousID,
+		SwitchPath: transaction.SwitchPath, Artifacts: *transaction.Artifacts,
+	}, nil
+}
+
+func activationAuthorityBytes(authority activationAuthorityRecord) ([]byte, string, error) {
+	contents, err := json.Marshal(authority)
+	if err != nil {
+		return nil, "", err
+	}
+	digest := sha256.Sum256(contents)
+	return append(contents, '\n'), hex.EncodeToString(digest[:]), nil
+}
+
+func (e *transactionEngine) writeActivationAuthority(transaction *tileTransaction) error {
+	authority, err := activationAuthorityFor(*transaction)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Lstat(e.authorityPath()); err == nil {
+		return fmt.Errorf("activation authority already exists")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	contents, digest, err := activationAuthorityBytes(authority)
+	if err != nil {
+		return err
+	}
+	transaction.Phase = "prepared"
+	transaction.AuthoritySHA256 = digest
+	return durableWriteFile(e.authorityPath(), contents, 0o400, e.syncDir)
+}
+
+func (e *transactionEngine) readActivationAuthority() (activationAuthorityRecord, string, bool, error) {
+	info, err := os.Lstat(e.authorityPath())
+	if errors.Is(err, os.ErrNotExist) {
+		return activationAuthorityRecord{}, "", false, nil
+	}
+	if err != nil {
+		return activationAuthorityRecord{}, "", false, err
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return activationAuthorityRecord{}, "", false, fmt.Errorf("activation authority is not a regular file")
+	}
+	contents, err := os.ReadFile(e.authorityPath())
+	if err != nil {
+		return activationAuthorityRecord{}, "", false, err
+	}
+	var authority activationAuthorityRecord
+	if err := decodeSingleJSON(contents, &authority); err != nil {
+		return activationAuthorityRecord{}, "", false, fmt.Errorf("parse activation authority: %w", err)
+	}
+	canonical, digest, err := activationAuthorityBytes(authority)
+	if err != nil {
+		return activationAuthorityRecord{}, "", false, err
+	}
+	if !bytes.Equal(contents, canonical) {
+		return activationAuthorityRecord{}, "", false, fmt.Errorf("activation authority is not canonical")
+	}
+	return authority, digest, true, nil
+}
+
+func transactionFromAuthority(authority activationAuthorityRecord, digest string) tileTransaction {
+	artifacts := authority.Artifacts
+	return tileTransaction{
+		Kind: authority.Kind, Phase: "prepared", NewID: authority.NewID, NewTarget: authority.NewTarget,
+		PreviousTarget: authority.PreviousTarget, PreviousID: authority.PreviousID,
+		SwitchPath: authority.SwitchPath, Artifacts: &artifacts, AuthoritySHA256: digest,
+	}
+}
+
+func (e *transactionEngine) requireMatchingActivationAuthority(transaction tileTransaction) error {
+	authority, digest, exists, err := e.readActivationAuthority()
+	if err != nil {
+		return err
+	}
+	if !exists || transaction.Phase != "prepared" || transaction.AuthoritySHA256 != digest {
+		return fmt.Errorf("activation phase lacks exact immutable authority binding")
+	}
+	expected := transactionFromAuthority(authority, digest)
+	if !reflect.DeepEqual(transaction, expected) {
+		return fmt.Errorf("activation phase differs from immutable ownership authority")
+	}
+	return nil
+}
+
 func (e *transactionEngine) writeTransaction(transaction tileTransaction) error {
 	if err := validateTransaction(e.root, transaction); err != nil {
 		return err
+	}
+	if transaction.Kind == "activation" {
+		if err := e.requireMatchingActivationAuthority(transaction); err != nil {
+			return err
+		}
 	}
 	contents, err := json.Marshal(transaction)
 	if err != nil {
@@ -873,10 +1065,17 @@ func (e *transactionEngine) writeTransaction(transaction tileTransaction) error 
 }
 
 func (e *transactionEngine) readTransaction() (tileTransaction, bool, error) {
-	contents, err := os.ReadFile(e.transactionPath())
+	info, err := os.Lstat(e.transactionPath())
 	if errors.Is(err, os.ErrNotExist) {
 		return tileTransaction{}, false, nil
 	}
+	if err != nil {
+		return tileTransaction{}, false, err
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return tileTransaction{}, false, fmt.Errorf("tile transaction is not a regular file")
+	}
+	contents, err := os.ReadFile(e.transactionPath())
 	if err != nil {
 		return tileTransaction{}, false, err
 	}
@@ -887,12 +1086,39 @@ func (e *transactionEngine) readTransaction() (tileTransaction, bool, error) {
 	if err := validateTransaction(e.root, transaction); err != nil {
 		return tileTransaction{}, false, err
 	}
+	if transaction.Kind == "activation" {
+		if err := e.requireMatchingActivationAuthority(transaction); err != nil {
+			return tileTransaction{}, false, err
+		}
+	}
+	return transaction, true, nil
+}
+
+func (e *transactionEngine) readRecoverableTransaction() (tileTransaction, bool, error) {
+	transaction, exists, err := e.readTransaction()
+	if err != nil || exists {
+		return transaction, exists, err
+	}
+	authority, digest, authorityExists, err := e.readActivationAuthority()
+	if err != nil || !authorityExists {
+		return tileTransaction{}, false, err
+	}
+	transaction = transactionFromAuthority(authority, digest)
+	if err := validateTransaction(e.root, transaction); err != nil {
+		return tileTransaction{}, false, err
+	}
+	if err := e.writeTransaction(transaction); err != nil {
+		return tileTransaction{}, false, err
+	}
 	return transaction, true, nil
 }
 
 func validateTransaction(root string, transaction tileTransaction) error {
 	switch transaction.Kind {
 	case "activation":
+		if transaction.Phase != "prepared" || !isLowerSHA256(transaction.AuthoritySHA256) {
+			return fmt.Errorf("activation transaction lacks an exact authority phase binding")
+		}
 		if !isSafeID(transaction.NewID) || !isGenerationTarget(transaction.NewTarget) || !isGenerationTarget(transaction.PreviousTarget) {
 			return fmt.Errorf("unsafe activation transaction")
 		}
@@ -906,6 +1132,9 @@ func validateTransaction(root string, transaction tileTransaction) error {
 			return err
 		}
 	case "rollback":
+		if transaction.Phase != "" || transaction.AuthoritySHA256 != "" || transaction.Artifacts != nil {
+			return fmt.Errorf("rollback transaction contains activation authority fields")
+		}
 		if !isGenerationTarget(transaction.ActiveTarget) || !isGenerationTarget(transaction.PreviousTarget) {
 			return fmt.Errorf("unsafe rollback transaction")
 		}
@@ -1068,10 +1297,18 @@ func (e *transactionEngine) unchangedDirectLegacyTree() (bool, error) {
 }
 
 func (e *transactionEngine) adjacentManifestIdentity() (manifestIdentity, bool, error) {
-	contents, err := os.ReadFile(filepath.Join(e.root, "offline.manifest.json"))
+	manifestPath := filepath.Join(e.root, "offline.manifest.json")
+	info, err := os.Lstat(manifestPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return manifestIdentity{}, false, nil
 	}
+	if err != nil {
+		return manifestIdentity{}, false, err
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return manifestIdentity{}, false, fmt.Errorf("adjacent offline manifest is not a regular file")
+	}
+	contents, err := os.ReadFile(manifestPath)
 	if err != nil {
 		return manifestIdentity{}, false, err
 	}
@@ -1153,6 +1390,9 @@ func (e *transactionEngine) verifyGenerationTargetIdentity(target, expectedID st
 		return "", fmt.Errorf("generation target differs from its recorded identity")
 	}
 	if manifest.Legacy {
+		if filepath.Base(container) != manifest.LegacyContainerID {
+			return "", fmt.Errorf("legacy generation container differs from its embedded provenance")
+		}
 		if !isSafeID(manifest.LegacyMigrationTargetTileSetID) {
 			return "", fmt.Errorf("legacy generation target binding is invalid")
 		}
@@ -1321,6 +1561,27 @@ func (e *transactionEngine) clearTransaction() error {
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	if err := e.syncDir(e.root); err != nil {
+		return err
+	}
+	err = os.Remove(e.authorityPath())
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return e.syncNoTransactionBarriers()
+}
+
+func (e *transactionEngine) syncNoTransactionBarriers() error {
+	if info, err := os.Lstat(e.generationsPath()); err == nil {
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("tile generation root is not a real directory")
+		}
+		if err := e.syncDir(e.generationsPath()); err != nil {
+			return err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
 	return e.syncDir(e.root)
 }
 
@@ -1451,7 +1712,7 @@ func (e *transactionEngine) cleanupOwnedTreeArtifact(
 	label, injectedFailure string,
 ) error {
 	if artifact.Preexisting {
-		return nil
+		return e.syncDir(filepath.Dir(artifact.Path))
 	}
 	sourceExists, err := pathExists(artifact.Path)
 	if err != nil {
@@ -1474,7 +1735,7 @@ func (e *transactionEngine) cleanupOwnedTreeArtifact(
 		tombstoneExists = true
 	}
 	if !tombstoneExists {
-		return nil
+		return e.syncDir(filepath.Dir(artifact.Path))
 	}
 	if err := makeTreeWritable(artifact.Tombstone); err != nil {
 		return err
@@ -1738,7 +1999,7 @@ func (e *transactionEngine) planLegacyMigration(targetTileSetID string) (legacyM
 	if err != nil {
 		return legacyMigrationPlan{}, err
 	}
-	legacyTreeSHA256, err := treeSHA256(active, "")
+	legacyTreeSHA256, err := legacyContentSHA256(active)
 	if err != nil {
 		return legacyMigrationPlan{}, fmt.Errorf("hash direct legacy tree: %w", err)
 	}
@@ -1805,6 +2066,9 @@ func (e *transactionEngine) materializeLegacyMigration(plan legacyMigrationPlan,
 	if manifest.TileSetID != plan.PreviousID {
 		return fmt.Errorf("legacy generation identity differs from its durable plan")
 	}
+	if manifest.LegacyContainerID != plan.ContainerID {
+		return fmt.Errorf("legacy generation container differs from its durable plan")
+	}
 	if err := verifyLegacyMigrationTree(filepath.Join(legacy, activeOfflineName), manifest, targetTileSetID); err != nil {
 		return err
 	}
@@ -1816,13 +2080,21 @@ func (e *transactionEngine) legacyManifestBytes(
 ) ([]byte, string, error) {
 	payload := map[string]any{"tile_set_id": legacyID, "legacy": true}
 	adjacent := filepath.Join(e.root, "offline.manifest.json")
-	if contents, err := os.ReadFile(adjacent); err == nil {
+	adjacentInfo, adjacentErr := os.Lstat(adjacent)
+	if adjacentErr == nil {
+		if !adjacentInfo.Mode().IsRegular() || adjacentInfo.Mode()&os.ModeSymlink != 0 {
+			return nil, "", fmt.Errorf("adjacent legacy manifest is not a regular file")
+		}
+		contents, err := os.ReadFile(adjacent)
+		if err != nil {
+			return nil, "", err
+		}
 		var candidate map[string]any
 		if decodeSingleJSON(contents, &candidate) == nil {
 			payload = candidate
 		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return nil, "", err
+	} else if !errors.Is(adjacentErr, os.ErrNotExist) {
+		return nil, "", adjacentErr
 	}
 	if tileSetID, ok := payload["tile_set_id"].(string); !ok || tileSetID == "" {
 		payload["tile_set_id"] = legacyID
@@ -1832,6 +2104,7 @@ func (e *transactionEngine) legacyManifestBytes(
 		return nil, "", fmt.Errorf("legacy adjacent manifest has an invalid tile identity")
 	}
 	payload["legacy"] = true
+	payload["legacy_container_id"] = legacyID
 	payload["legacy_migration_target_tile_set_id"] = targetTileSetID
 	payload["legacy_tree_sha256"] = legacyTreeSHA256
 	contents, err := json.Marshal(payload)
@@ -1901,10 +2174,18 @@ func manifestID(tree string) (string, bool, error) {
 }
 
 func readManifestIdentity(tree string) (manifestIdentity, bool, error) {
-	contents, err := os.ReadFile(filepath.Join(tree, embeddedManifestName))
+	manifestPath := filepath.Join(tree, embeddedManifestName)
+	info, err := os.Lstat(manifestPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return manifestIdentity{}, false, nil
 	}
+	if err != nil {
+		return manifestIdentity{}, false, err
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return manifestIdentity{}, false, fmt.Errorf("embedded tile manifest is not a regular file")
+	}
+	contents, err := os.ReadFile(manifestPath)
 	if err != nil {
 		return manifestIdentity{}, false, err
 	}
@@ -1920,6 +2201,7 @@ func readManifestIdentity(tree string) (manifestIdentity, bool, error) {
 
 func requireLegacyMigrationProof(manifest manifestIdentity, expectedTargetTileSetID string) error {
 	if !manifest.Legacy ||
+		!isLegacyContainerID(manifest.LegacyContainerID) ||
 		manifest.LegacyMigrationTargetTileSetID == "" ||
 		manifest.LegacyMigrationTargetTileSetID != expectedTargetTileSetID ||
 		!isLowerSHA256(manifest.LegacyTreeSHA256) {
@@ -1936,7 +2218,7 @@ func verifyLegacyMigrationTree(
 	if err := requireLegacyMigrationProof(manifest, expectedTargetTileSetID); err != nil {
 		return err
 	}
-	digest, err := treeSHA256(tree, embeddedManifestName)
+	digest, err := legacyContentSHA256(tree)
 	if err != nil {
 		return err
 	}
@@ -2016,7 +2298,7 @@ func (e *transactionEngine) validateExactPostRollbackTopology(expectedTargetTile
 	if len(retained) != 1 || !strings.HasPrefix(filepath.Base(retained[0]), expectedPrefix) {
 		return manifestIdentity{}, fmt.Errorf("post-rollback topology lacks its exact retained direct-tree evidence")
 	}
-	retainedDigest, err := treeSHA256(retained[0], "")
+	retainedDigest, err := legacyContentSHA256(retained[0])
 	if err != nil {
 		return manifestIdentity{}, err
 	}
@@ -2028,6 +2310,9 @@ func (e *transactionEngine) validateExactPostRollbackTopology(expectedTargetTile
 		return manifestIdentity{}, err
 	}
 	activeContainer := strings.Split(activeTarget, "/")[1]
+	if activeManifest.LegacyContainerID != activeContainer {
+		return manifestIdentity{}, fmt.Errorf("restored prior generation container differs from embedded provenance")
+	}
 	if activeContainer != legacyContainerID(retainedInfo, expectedTargetTileSetID, retainedDigest) {
 		return manifestIdentity{}, fmt.Errorf("restored prior generation container differs from target-bound migration evidence")
 	}
@@ -2093,7 +2378,7 @@ func (e *transactionEngine) retainedCleanupArtifact(
 		if err := validateOwnedRemovalTree(artifact.Path); err != nil {
 			return nil, err
 		}
-		digest, err := treeSHA256(artifact.Path, "")
+		digest, err := legacyContentSHA256(artifact.Path)
 		if err != nil {
 			return nil, err
 		}
@@ -2200,6 +2485,9 @@ func (e *transactionEngine) settlePreExchangeActivation(
 				}
 				return fmt.Errorf("legacy generation differs from its durable previous identity")
 			}
+			if manifest.LegacyContainerID != filepath.Base(source) {
+				return fmt.Errorf("legacy generation container differs from its durable provenance")
+			}
 			return verifyLegacyMigrationTree(filepath.Join(source, activeOfflineName), manifest, transaction.NewID)
 		}); err != nil {
 			return err
@@ -2255,9 +2543,9 @@ func (e *transactionEngine) settlePreExchangeActivation(
 }
 
 func (e *transactionEngine) recoverActivation(
-	tileSetID, expectedCurrentTileSetID string,
+	stage, tileSetID, expectedCurrentTileSetID, injectedFailure string,
 ) (bool, transactionResult, error) {
-	transaction, exists, err := e.readTransaction()
+	transaction, exists, err := e.readRecoverableTransaction()
 	if err != nil || !exists {
 		return false, transactionResult{}, err
 	}
@@ -2309,10 +2597,113 @@ func (e *transactionEngine) recoverActivation(
 	if activeIsLink && activeTarget != transaction.PreviousTarget {
 		return false, transactionResult{}, fmt.Errorf("active tile pointer diverged during recovery")
 	}
-	if err := e.settlePreExchangeActivation(transaction, ""); err != nil {
-		return false, transactionResult{}, err
+	result, err := e.continueActivation(stage, transaction, injectedFailure)
+	return err == nil, result, err
+}
+
+func (e *transactionEngine) continueActivation(
+	stage string,
+	transaction tileTransaction,
+	injectedFailure string,
+) (transactionResult, error) {
+	var legacyPlan *legacyMigrationPlan
+	activeTarget, activeIsLink, err := symlinkTarget(e.activePath())
+	if err != nil {
+		return transactionResult{}, err
 	}
-	return false, transactionResult{}, nil
+	if activeIsLink {
+		if activeTarget != transaction.PreviousTarget {
+			return transactionResult{}, fmt.Errorf("activation baseline pointer changed")
+		}
+	} else {
+		plan, err := e.planLegacyMigration(transaction.NewID)
+		if err != nil {
+			return transactionResult{}, err
+		}
+		if plan.Target != transaction.PreviousTarget || plan.PreviousID != transaction.PreviousID {
+			return transactionResult{}, fmt.Errorf("activation baseline differs from immutable legacy authority")
+		}
+		legacyPlan = &plan
+	}
+	if _, err := os.Lstat(e.generationPath(transaction.NewID)); errors.Is(err, os.ErrNotExist) {
+		if stage == "" {
+			return transactionResult{}, fmt.Errorf("authorized target generation is absent and no trusted stage remains")
+		}
+		if _, err := e.ensureGeneration(stage, transaction.NewID); err != nil {
+			return transactionResult{}, err
+		}
+	} else if err != nil {
+		return transactionResult{}, err
+	} else if err := e.verifyGeneration(transaction.NewID); err != nil {
+		return transactionResult{}, fmt.Errorf("verify authorized target generation: %w", err)
+	}
+	if injectedFailure == "after_generation" {
+		return transactionResult{}, errors.New("injected tile activation failure: after_generation")
+	}
+	if legacyPlan != nil {
+		if err := e.materializeLegacyMigration(*legacyPlan, transaction.NewID); err != nil {
+			return transactionResult{}, err
+		}
+	}
+	if injectedFailure == "after_legacy" {
+		return transactionResult{}, errors.New("injected tile activation failure: after_legacy")
+	}
+	if target, isLink, err := symlinkTarget(transaction.SwitchPath); err != nil {
+		return transactionResult{}, err
+	} else if isLink {
+		if target != transaction.NewTarget {
+			return transactionResult{}, fmt.Errorf("activation switch differs from immutable authority")
+		}
+	} else if _, err := os.Lstat(transaction.SwitchPath); errors.Is(err, os.ErrNotExist) {
+		if err := os.Symlink(transaction.NewTarget, transaction.SwitchPath); err != nil {
+			return transactionResult{}, err
+		}
+		if err := e.syncDir(e.root); err != nil {
+			return transactionResult{}, err
+		}
+	} else if err != nil {
+		return transactionResult{}, err
+	} else {
+		return transactionResult{}, fmt.Errorf("activation switch is not a symlink")
+	}
+	if injectedFailure == "after_switch_publish" {
+		return transactionResult{}, errors.New("injected tile activation failure: after_switch_publish")
+	}
+	if err := e.requireExactParkedState(); err != nil {
+		return transactionResult{}, err
+	}
+	if err := e.exchange(transaction.SwitchPath, e.activePath()); err != nil {
+		return transactionResult{}, fmt.Errorf("renameat2 exchange activation: %w", err)
+	}
+	if err := e.syncDir(e.root); err != nil {
+		return transactionResult{}, err
+	}
+	if injectedFailure == "after_switch" {
+		return transactionResult{}, errors.New("injected tile activation failure: after_switch")
+	}
+	previousManifest, present, err := readManifestIdentity(filepath.Join(e.root, transaction.PreviousTarget))
+	if err != nil || !present || previousManifest.TileSetID != transaction.PreviousID {
+		if err != nil {
+			return transactionResult{}, err
+		}
+		return transactionResult{}, fmt.Errorf("activation previous generation identity changed")
+	}
+	if err := e.installPreviousLink(transaction.PreviousTarget, transaction.NewID); err != nil {
+		return transactionResult{}, err
+	}
+	if injectedFailure == "after_previous" {
+		return transactionResult{}, errors.New("injected tile activation failure: after_previous")
+	}
+	if err := e.cleanupExchange(transaction.SwitchPath, transaction.NewID); err != nil {
+		return transactionResult{}, err
+	}
+	if err := e.clearTransaction(); err != nil {
+		return transactionResult{}, err
+	}
+	return transactionResult{
+		Operation: "activate", TileSetID: transaction.NewID, ActivatedTileSetID: transaction.NewID,
+		PreviousTileSetID: transaction.PreviousID,
+	}, nil
 }
 
 func (e *transactionEngine) activate(
@@ -2332,7 +2723,7 @@ func (e *transactionEngine) activateLocked(
 	if expectedCurrentTileSetID != "" && !isSafeID(expectedCurrentTileSetID) {
 		return transactionResult{}, fmt.Errorf("invalid expected current tile-set identifier")
 	}
-	if recovered, result, err := e.recoverActivation(tileSetID, expectedCurrentTileSetID); err != nil {
+	if recovered, result, err := e.recoverActivation(stage, tileSetID, expectedCurrentTileSetID, injectedFailure); err != nil {
 		return transactionResult{}, err
 	} else if recovered {
 		return result, nil
@@ -2461,63 +2852,19 @@ func (e *transactionEngine) activateLocked(
 		return transactionResult{}, err
 	}
 	transaction.Artifacts = authority
+	if err := e.writeActivationAuthority(&transaction); err != nil {
+		return transactionResult{}, err
+	}
+	if injectedFailure == "after_authority" {
+		return transactionResult{}, errors.New("injected tile activation failure: after_authority")
+	}
 	if err := e.writeTransaction(transaction); err != nil {
 		return transactionResult{}, err
 	}
 	if injectedFailure == "after_journal" {
 		return transactionResult{}, errors.New("injected tile activation failure: after_journal")
 	}
-	if _, err := e.ensureGeneration(stage, tileSetID); err != nil {
-		return transactionResult{}, err
-	}
-	if injectedFailure == "after_generation" {
-		return transactionResult{}, errors.New("injected tile activation failure: after_generation")
-	}
-	if legacyPlan != nil {
-		if err := e.materializeLegacyMigration(*legacyPlan, tileSetID); err != nil {
-			return transactionResult{}, err
-		}
-	}
-	if injectedFailure == "after_legacy" {
-		return transactionResult{}, errors.New("injected tile activation failure: after_legacy")
-	}
-	if err := os.Symlink(newTarget, switchPath); err != nil {
-		return transactionResult{}, err
-	}
-	if err := e.syncDir(e.root); err != nil {
-		return transactionResult{}, err
-	}
-	if injectedFailure == "after_switch_publish" {
-		return transactionResult{}, errors.New("injected tile activation failure: after_switch_publish")
-	}
-	if err := e.requireExactParkedState(); err != nil {
-		return transactionResult{}, err
-	}
-	if err := e.exchange(switchPath, active); err != nil {
-		return transactionResult{}, fmt.Errorf("renameat2 exchange activation: %w", err)
-	}
-	if err := e.syncDir(e.root); err != nil {
-		return transactionResult{}, err
-	}
-	if injectedFailure == "after_switch" {
-		return transactionResult{}, errors.New("injected tile activation failure: after_switch")
-	}
-	if err := e.installPreviousLink(previousTarget, tileSetID); err != nil {
-		return transactionResult{}, err
-	}
-	if injectedFailure == "after_previous" {
-		return transactionResult{}, errors.New("injected tile activation failure: after_previous")
-	}
-	if err := e.cleanupExchange(switchPath, tileSetID); err != nil {
-		return transactionResult{}, err
-	}
-	if err := e.clearTransaction(); err != nil {
-		return transactionResult{}, err
-	}
-	return transactionResult{
-		Operation: "activate", TileSetID: tileSetID, ActivatedTileSetID: tileSetID,
-		PreviousTileSetID: previousID,
-	}, nil
+	return e.continueActivation(stage, transaction, injectedFailure)
 }
 
 func (e *transactionEngine) rollback(expectedTileSetID, expectedPreviousTileSetID, injectedFailure string) (transactionResult, error) {
@@ -2542,7 +2889,7 @@ func (e *transactionEngine) rollbackBound(
 }
 
 func (e *transactionEngine) rollbackLocked(expectedTileSetID, expectedPreviousTileSetID, injectedFailure string) (transactionResult, error) {
-	transaction, exists, err := e.readTransaction()
+	transaction, exists, err := e.readRecoverableTransaction()
 	if err != nil {
 		return transactionResult{}, err
 	}
@@ -2662,6 +3009,9 @@ func (e *transactionEngine) rollbackLocked(expectedTileSetID, expectedPreviousTi
 			return transactionResult{}, fmt.Errorf("unknown tile transaction requires manual recovery")
 		}
 	}
+	if err := e.syncNoTransactionBarriers(); err != nil {
+		return transactionResult{}, err
+	}
 
 	if expectedTileSetID != "" {
 		activeManifest, present, err := readManifestIdentity(e.activePath())
@@ -2683,7 +3033,11 @@ func (e *transactionEngine) rollbackLocked(expectedTileSetID, expectedPreviousTi
 				if err != nil {
 					return transactionResult{}, err
 				}
-				if unchanged {
+				adjacent, adjacentPresent, adjacentErr := e.adjacentManifestIdentity()
+				if adjacentErr != nil {
+					return transactionResult{}, adjacentErr
+				}
+				if unchanged && !adjacentPresent && adjacent.TileSetID == "" {
 					return transactionResult{
 						Operation: "rollback", TileActivationNotSwitched: true,
 					}, nil

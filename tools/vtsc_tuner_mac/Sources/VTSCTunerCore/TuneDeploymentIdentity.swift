@@ -74,6 +74,28 @@ public struct TuneDeploymentIdentity: Codable, Equatable, Sendable {
   }
 }
 
+public struct TiciTileSnapshotIdentity: Codable, Equatable, Sendable {
+  public var logicalID: String?
+  public var topology: TiciActiveTileTopology
+  public var containerID: String?
+  public var legacyMigrationTargetID: String?
+  public var treeSHA256: String
+
+  public init(
+    logicalID: String?,
+    topology: TiciActiveTileTopology,
+    containerID: String?,
+    legacyMigrationTargetID: String?,
+    treeSHA256: String
+  ) {
+    self.logicalID = logicalID
+    self.topology = topology
+    self.containerID = containerID
+    self.legacyMigrationTargetID = legacyMigrationTargetID
+    self.treeSHA256 = treeSHA256
+  }
+}
+
 public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
   public static let schemaVersion = 1
 
@@ -106,6 +128,7 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
   public var previousCachedMapdSHA256: String?
   public var mapdRollbackPath: String
   public var previousTileSetID: String?
+  public var previousTileIdentity: TiciTileSnapshotIdentity?
   public var targetTileSetID: String?
   /// Helper-resolved immutable identity for a legacy direct `offline/` tree.
   /// This is lifecycle evidence, not part of the original deployment
@@ -168,6 +191,7 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
       previousCachedMapdSHA256 == other.previousCachedMapdSHA256 &&
       mapdRollbackPath == other.mapdRollbackPath &&
       previousTileSetID == other.previousTileSetID &&
+      previousTileIdentity == other.previousTileIdentity &&
       targetTileSetID == other.targetTileSetID
   }
 
@@ -206,6 +230,7 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
     previousCachedMapdSHA256: String? = nil,
     mapdRollbackPath: String,
     previousTileSetID: String? = nil,
+    previousTileIdentity: TiciTileSnapshotIdentity? = nil,
     targetTileSetID: String? = nil,
     resolvedPreviousTileSetID: String? = nil,
     tileActivationOutcome: TiciTileActivationOutcome? = nil,
@@ -237,6 +262,7 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
     self.previousCachedMapdSHA256 = previousCachedMapdSHA256
     self.mapdRollbackPath = mapdRollbackPath
     self.previousTileSetID = previousTileSetID
+    self.previousTileIdentity = previousTileIdentity
     self.targetTileSetID = targetTileSetID
     self.resolvedPreviousTileSetID = resolvedPreviousTileSetID
     self.tileActivationOutcome = tileActivationOutcome

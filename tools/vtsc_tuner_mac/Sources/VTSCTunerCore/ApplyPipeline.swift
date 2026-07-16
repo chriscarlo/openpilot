@@ -1267,6 +1267,7 @@ public actor ApplyPipeline {
       previousCachedMapdSHA256: snapshot.cachedMapdSHA256,
       mapdRollbackPath: rollbackPath,
       previousTileSetID: snapshot.activeTileSetID,
+      previousTileIdentity: try tileSnapshotIdentity(snapshot),
       targetTileSetID: tileSet?.manifest.tileSetID,
       completed: true,
       resolution: .preflightReserved
@@ -1981,7 +1982,11 @@ public actor ApplyPipeline {
     try validateActiveTileIdentity(
       id: snapshot.activeTileSetID,
       topology: snapshot.activeTileTopology,
+      containerID: snapshot.activeTileContainerID,
+      legacyMigrationTargetID: snapshot.activeTileLegacyMigrationTargetID,
+      treeSHA256: snapshot.activeTileLegacyTreeSHA256,
       expected: journal.previousTileSetID,
+      exactExpected: journal.previousTileIdentity,
       context: "pre-mutation baseline"
     )
   }
@@ -2488,7 +2493,10 @@ public actor ApplyPipeline {
       liveMapDataSampleMonoTimeNs: readback.liveMapDataControllerStatus.sampleMonoTimeNs,
       roadGeometryValid: readback.liveMapDataControllerStatus.roadGeometryValid,
       activeTileSetID: snapshot.activeTileSetID,
-      activeTileTopology: snapshot.activeTileTopology
+      activeTileTopology: snapshot.activeTileTopology,
+      activeTileContainerID: snapshot.activeTileContainerID,
+      activeTileLegacyMigrationTargetID: snapshot.activeTileLegacyMigrationTargetID,
+      activeTileLegacyTreeSHA256: snapshot.activeTileLegacyTreeSHA256
     )
   }
 
@@ -2545,7 +2553,10 @@ public actor ApplyPipeline {
       liveMapDataSampleMonoTimeNs: 0,
       roadGeometryValid: false,
       activeTileSetID: snapshot.activeTileSetID,
-      activeTileTopology: snapshot.activeTileTopology
+      activeTileTopology: snapshot.activeTileTopology,
+      activeTileContainerID: snapshot.activeTileContainerID,
+      activeTileLegacyMigrationTargetID: snapshot.activeTileLegacyMigrationTargetID,
+      activeTileLegacyTreeSHA256: snapshot.activeTileLegacyTreeSHA256
     )
   }
 
@@ -2558,23 +2569,117 @@ public actor ApplyPipeline {
   private func validateActiveTileIdentity(
     id: String?,
     topology: TiciActiveTileTopology?,
+    containerID: String?,
+    legacyMigrationTargetID: String?,
+    treeSHA256: String?,
     expected: String?,
+    exactExpected: TiciTileSnapshotIdentity? = nil,
+    requiredCanonicalID: String? = nil,
+    requiredLegacyMigrationTargetID: String? = nil,
+    requiredTreeSHA256: String? = nil,
     context: String
   ) throws {
-    if let expected {
-      guard id == expected,
-            topology == .canonical || topology == .directIdentified else {
-        throw ApplyPipelineError.postflightMismatch(
-          "\(context) tile identity/topology is \(id ?? "<none>")/\(topology?.rawValue ?? "<missing>"), expected identified \(expected)"
-        )
+    guard let topology, let treeSHA256 else {
+      throw ApplyPipelineError.postflightMismatch("\(context) tile topology/digest is missing")
+    }
+    let actual = TiciTileSnapshotIdentity(
+      logicalID: id,
+      topology: topology,
+      containerID: containerID,
+      legacyMigrationTargetID: legacyMigrationTargetID,
+      treeSHA256: treeSHA256
+    )
+    if let exactExpected, actual != exactExpected {
+      throw ApplyPipelineError.postflightMismatch("\(context) tile topology/content changed from its durable baseline")
+    }
+    if let requiredCanonicalID {
+      guard actual.logicalID == requiredCanonicalID,
+            actual.topology == .canonical,
+            actual.containerID == requiredCanonicalID,
+            actual.legacyMigrationTargetID == nil else {
+        throw ApplyPipelineError.postflightMismatch("\(context) requires exact canonical generation \(requiredCanonicalID)")
+      }
+      return
+    }
+    if let requiredLegacyMigrationTargetID {
+      guard actual.logicalID == expected,
+            actual.topology == .legacyMigration,
+            actual.legacyMigrationTargetID == requiredLegacyMigrationTargetID,
+            requiredTreeSHA256 == nil || actual.treeSHA256 == requiredTreeSHA256 else {
+        throw ApplyPipelineError.postflightMismatch("\(context) lacks exact target-bound legacy migration topology")
+      }
+      return
+    }
+    guard actual.logicalID == expected else {
+      throw ApplyPipelineError.postflightMismatch("\(context) tile logical identity differs")
+    }
+  }
+
+  private func tileSnapshotIdentity(_ result: TiciDeploymentPostflight) throws -> TiciTileSnapshotIdentity {
+    guard let topology = result.activeTileTopology,
+          let digest = result.activeTileLegacyTreeSHA256 else {
+      throw ApplyPipelineError.postflightMismatch("active tile topology/digest is missing")
+    }
+    return TiciTileSnapshotIdentity(
+      logicalID: result.activeTileSetID,
+      topology: topology,
+      containerID: result.activeTileContainerID,
+      legacyMigrationTargetID: result.activeTileLegacyMigrationTargetID,
+      treeSHA256: digest
+    )
+  }
+
+  private func tileSnapshotIdentity(_ snapshot: TiciDeploymentSnapshot) throws -> TiciTileSnapshotIdentity {
+    guard let topology = snapshot.activeTileTopology,
+          let digest = snapshot.activeTileLegacyTreeSHA256 else {
+      throw ApplyPipelineError.postflightMismatch("active tile topology/digest is missing")
+    }
+    return TiciTileSnapshotIdentity(
+      logicalID: snapshot.activeTileSetID,
+      topology: topology,
+      containerID: snapshot.activeTileContainerID,
+      legacyMigrationTargetID: snapshot.activeTileLegacyMigrationTargetID,
+      treeSHA256: digest
+    )
+  }
+
+  private func validateDeployedTileIdentity(
+    _ result: TiciDeploymentPostflight,
+    journal: DeploymentRollbackJournal,
+    expectedID: String?,
+    context: String
+  ) throws {
+    let exactExpected: TiciTileSnapshotIdentity?
+    let requiredCanonicalID: String?
+    if let target = journal.targetTileSetID {
+      switch journal.tileActivationOutcome {
+      case .switched:
+        exactExpected = nil
+        requiredCanonicalID = target
+      case .notSwitched:
+        guard let previous = journal.previousTileIdentity else {
+          throw ApplyPipelineError.postflightMismatch("\(context) no-switch lacks durable baseline topology")
+        }
+        exactExpected = previous
+        requiredCanonicalID = nil
+      case nil:
+        throw ApplyPipelineError.postflightMismatch("\(context) tile-bearing deployment lacks durable activation outcome")
       }
     } else {
-      guard id == nil, topology == .directUnidentified else {
-        throw ApplyPipelineError.postflightMismatch(
-          "\(context) requires an explicit direct-unidentified tile topology"
-        )
-      }
+      exactExpected = journal.previousTileIdentity
+      requiredCanonicalID = nil
     }
+    try validateActiveTileIdentity(
+      id: result.activeTileSetID,
+      topology: result.activeTileTopology,
+      containerID: result.activeTileContainerID,
+      legacyMigrationTargetID: result.activeTileLegacyMigrationTargetID,
+      treeSHA256: result.activeTileLegacyTreeSHA256,
+      expected: expectedID,
+      exactExpected: exactExpected,
+      requiredCanonicalID: requiredCanonicalID,
+      context: context
+    )
   }
 
   private func validatePostflight(
@@ -2647,10 +2752,10 @@ public actor ApplyPipeline {
         )
       }
     }
-    try validateActiveTileIdentity(
-      id: result.activeTileSetID,
-      topology: result.activeTileTopology,
-      expected: expectedActiveTileSetID,
+    try validateDeployedTileIdentity(
+      result,
+      journal: preflight.journal,
+      expectedID: expectedActiveTileSetID,
       context: "production postflight"
     )
   }
@@ -2690,10 +2795,10 @@ public actor ApplyPipeline {
     guard result.capabilityPresent, result.activeELFARM64, result.buildInfoMatches else {
       throw ApplyPipelineError.postflightMismatch("native mapd build identity/capability is not exact")
     }
-    try validateActiveTileIdentity(
-      id: result.activeTileSetID,
-      topology: result.activeTileTopology,
-      expected: expectedActiveTileSetID,
+    try validateDeployedTileIdentity(
+      result,
+      journal: preflight.journal,
+      expectedID: expectedActiveTileSetID,
       context: "static post-reboot"
     )
     try requireBootTransition(
@@ -2780,10 +2885,10 @@ public actor ApplyPipeline {
         "manager/mapd is not running with the exact ARM64 build identity/capability"
       )
     }
-    try validateActiveTileIdentity(
-      id: result.activeTileSetID,
-      topology: result.activeTileTopology,
-      expected: expectedActiveTileSetID,
+    try validateDeployedTileIdentity(
+      result,
+      journal: preflight.journal,
+      expectedID: expectedActiveTileSetID,
       context: "resumed postflight"
     )
     try requireResumedDeploymentBootTransition(
@@ -3447,29 +3552,51 @@ public actor ApplyPipeline {
     }
     if rollbackJournal.targetTileSetID != nil {
       do {
-        let tileRollback = try await TiciTileSetDeploymentService(processRunner: processRunner).rollbackWithOutcome(
-          profile: context.profile,
-          expectedActivatedTileSetID: rollbackJournal.targetTileSetID,
-          expectedRestoredTileSetID: rollbackJournal.effectivePreviousTileSetID,
-          expectedGitBranch: rollbackJournal.branch,
-          expectedGitHead: expectedRollbackSourceHead
-        )
-        if let resolvedPrevious = tileRollback.restoredTileSetID,
-           let target = rollbackJournal.targetTileSetID,
-           rollbackJournal.effectivePreviousTileSetID == nil {
-          rollbackJournal = try durablyRecordResolvedPreviousTileIdentity(
+        let tileService = TiciTileSetDeploymentService(processRunner: processRunner)
+        if rollbackJournal.tileActivationOutcome == .notSwitched {
+          guard let baseline = rollbackJournal.previousTileIdentity else {
+            throw ApplyPipelineError.postflightMismatch(
+              "durable tile no-switch lacks its exact baseline topology"
+            )
+          }
+          let proof = try await tileService.proveDurableNoSwitch(
+            profile: context.profile,
+            expectedGitBranch: rollbackJournal.branch,
+            expectedGitHead: expectedRollbackSourceHead
+          )
+          let actual = try tileSnapshotIdentity(proof)
+          guard actual == baseline,
+                proof.activeTileSetID == rollbackJournal.targetTileSetID else {
+            throw ApplyPipelineError.postflightMismatch(
+              "durable no-switch topology no longer equals the recorded baseline/target"
+            )
+          }
+          details.append("durable same-target no-switch re-proved under the tile/Git lock; exchange helper skipped")
+        } else {
+          let tileRollback = try await tileService.rollbackWithOutcome(
+            profile: context.profile,
+            expectedActivatedTileSetID: rollbackJournal.targetTileSetID,
+            expectedRestoredTileSetID: rollbackJournal.effectivePreviousTileSetID,
+            expectedGitBranch: rollbackJournal.branch,
+            expectedGitHead: expectedRollbackSourceHead
+          )
+          if let resolvedPrevious = tileRollback.restoredTileSetID,
+             let target = rollbackJournal.targetTileSetID,
+             rollbackJournal.effectivePreviousTileSetID == nil {
+            rollbackJournal = try durablyRecordResolvedPreviousTileIdentity(
+              expected: rollbackJournal,
+              activatedTileSetID: target,
+              resolvedPreviousTileSetID: resolvedPrevious,
+              at: context.journalURL
+            )
+          }
+          rollbackJournal = try durablyRecordTileActivationOutcome(
             expected: rollbackJournal,
-            activatedTileSetID: target,
-            resolvedPreviousTileSetID: resolvedPrevious,
+            outcome: tileRollback.activationOutcome,
             at: context.journalURL
           )
+          details.append("tile activation transaction recovered and prior set restored when needed")
         }
-        rollbackJournal = try durablyRecordTileActivationOutcome(
-          expected: rollbackJournal,
-          outcome: tileRollback.activationOutcome,
-          at: context.journalURL
-        )
-        details.append("tile activation transaction recovered and prior set restored when needed")
       } catch {
         return (
           false,
@@ -3651,10 +3778,31 @@ public actor ApplyPipeline {
         throw ApplyPipelineError.postflightMismatch("rollback persistent mapd cache digest differs")
       }
     }
+    let rollbackExactIdentity: TiciTileSnapshotIdentity?
+    let rollbackLegacyTarget: String?
+    if journal.targetTileSetID == nil || journal.tileActivationOutcome == .notSwitched ||
+       journal.previousTileIdentity?.topology == .canonical {
+      rollbackExactIdentity = journal.previousTileIdentity
+      rollbackLegacyTarget = nil
+    } else if journal.tileActivationOutcome == .switched,
+              (journal.previousTileIdentity?.topology == .directIdentified ||
+                journal.previousTileIdentity?.topology == .directUnidentified) {
+      rollbackExactIdentity = nil
+      rollbackLegacyTarget = journal.targetTileSetID
+    } else {
+      rollbackExactIdentity = nil
+      rollbackLegacyTarget = nil
+    }
     try validateActiveTileIdentity(
       id: snapshot.activeTileSetID,
       topology: snapshot.activeTileTopology,
+      containerID: snapshot.activeTileContainerID,
+      legacyMigrationTargetID: snapshot.activeTileLegacyMigrationTargetID,
+      treeSHA256: snapshot.activeTileLegacyTreeSHA256,
       expected: journal.effectivePreviousTileSetID,
+      exactExpected: rollbackExactIdentity,
+      requiredLegacyMigrationTargetID: rollbackLegacyTarget,
+      requiredTreeSHA256: rollbackLegacyTarget == nil ? nil : journal.previousTileIdentity?.treeSHA256,
       context: "rollback"
     )
     if tilesWereTouched, let targetTileSetID = journal.targetTileSetID,

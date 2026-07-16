@@ -24,6 +24,7 @@ public enum TiciSnapshotWireField: String, CaseIterable, Codable, Sendable {
   case qCurveFile = "q_curve_file"
   case tileManifest = "tile_manifest"
   case tileTopology = "tile_topology"
+  case tileTreeSHA256 = "tile_tree_sha256"
   case mapdCacheListing = "mapd_cache_listing"
   case memoryWholeCurveProfile = "memory_whole_curve_profile"
   case persistentWholeCurveProfile = "persistent_whole_curve_profile"
@@ -145,6 +146,38 @@ public enum TiciSnapshotWireCommandBuilder {
     emit_invalid_tile_topology() {
       emit_text tile_topology "invalid:$1"
       emit_text tile_manifest "invalid:$1"
+      emit_text tile_tree_sha256 ''
+    }
+    compute_tile_tree_digest() {
+      tree_root=$1
+      excluded=$2
+      tile_tree_records=$(
+        find "$tree_root" -mindepth 1 ! -path "$excluded" -exec sh -c '
+          root=$1
+          shift
+          for candidate do
+            case "$candidate" in "$root"/*) relative=${candidate#"$root"/} ;; *) exit 91 ;; esac
+            if [ -L "$candidate" ]; then exit 92; fi
+            encoded=$(printf "%s" "$relative" | base64 | tr -d '\\n') || exit 93
+            if [ -d "$candidate" ]; then
+              printf "D\\t%s\\n" "$encoded"
+            elif [ -f "$candidate" ]; then
+              size=$(wc -c < "$candidate") || exit 94
+              digest=$(sha256sum "$candidate") || exit 95
+              set -- $digest
+              digest=$1
+              printf "F\\t%s\\t%s\\t%s\\n" "$encoded" "$size" "$digest"
+            else
+              exit 96
+            fi
+          done
+        ' sh "$tree_root" {} +
+      ) || return 1
+      [ -n "$tile_tree_records" ] || return 1
+      tile_tree_digest=$(printf '%s\n' "$tile_tree_records" | LC_ALL=C sort | sha256sum) || return 1
+      set -- $tile_tree_digest
+      [ -n "$1" ] || return 1
+      printf '%s' "$1"
     }
     if [ -L "$tile_offline" ]; then
       tile_target=$(readlink "$tile_offline") || tile_target=
@@ -172,8 +205,10 @@ public enum TiciSnapshotWireCommandBuilder {
          [ -d "$tile_generation" ] && [ ! -L "$tile_generation" ] &&
          [ -d "$tile_generation_offline" ] && [ ! -L "$tile_generation_offline" ] &&
          [ -f "$tile_embedded" ] && [ ! -L "$tile_embedded" ]; then
-        emit_text tile_topology "canonical:$tile_id"
+        tile_tree_digest=$(compute_tile_tree_digest "$tile_generation_offline" "$tile_embedded") || tile_tree_digest=
+        emit_text tile_topology "generation:$tile_id"
         emit_file tile_manifest "$tile_embedded"
+        emit_text tile_tree_sha256 "$tile_tree_digest"
       else
         emit_invalid_tile_topology 'canonical-pointer'
       fi
@@ -181,7 +216,8 @@ public enum TiciSnapshotWireCommandBuilder {
       tile_embedded="$tile_offline/.tileset-manifest.json"
       direct_topology_clean=1
       if [ -e "$tile_root/offline.previous" ] || [ -L "$tile_root/offline.previous" ] ||
-         [ -e "$tile_root/.tileset-transaction.json" ] || [ -L "$tile_root/.tileset-transaction.json" ]; then
+         [ -e "$tile_root/.tileset-transaction.json" ] || [ -L "$tile_root/.tileset-transaction.json" ] ||
+         [ -e "$tile_root/.tileset-activation-authority.json" ] || [ -L "$tile_root/.tileset-activation-authority.json" ]; then
         direct_topology_clean=0
       fi
       if [ -e "$tile_generations" ] || [ -L "$tile_generations" ]; then
@@ -196,13 +232,19 @@ public enum TiciSnapshotWireCommandBuilder {
         if [ -e "$tile_artifact" ] || [ -L "$tile_artifact" ]; then direct_topology_clean=0; fi
       done
       if [ "$direct_topology_clean" = 1 ] &&
-         [ ! -e "$tile_embedded" ] && [ -f "$tile_adjacent" ] && [ ! -L "$tile_adjacent" ]; then
+         [ ! -e "$tile_embedded" ] && [ ! -L "$tile_embedded" ] &&
+         [ -f "$tile_adjacent" ] && [ ! -L "$tile_adjacent" ]; then
+        tile_tree_digest=$(compute_tile_tree_digest "$tile_offline" "$tile_embedded") || tile_tree_digest=
         emit_text tile_topology 'direct-identified'
         emit_file tile_manifest "$tile_adjacent"
+        emit_text tile_tree_sha256 "$tile_tree_digest"
       elif [ "$direct_topology_clean" = 1 ] &&
-           [ ! -e "$tile_embedded" ] && [ ! -e "$tile_adjacent" ] && [ ! -L "$tile_adjacent" ]; then
+           [ ! -e "$tile_embedded" ] && [ ! -L "$tile_embedded" ] &&
+           [ ! -e "$tile_adjacent" ] && [ ! -L "$tile_adjacent" ]; then
+        tile_tree_digest=$(compute_tile_tree_digest "$tile_offline" "$tile_embedded") || tile_tree_digest=
         emit_text tile_topology 'direct-unidentified'
         emit_text tile_manifest ''
+        emit_text tile_tree_sha256 "$tile_tree_digest"
       else
         emit_invalid_tile_topology 'direct-tree-manifest'
       fi

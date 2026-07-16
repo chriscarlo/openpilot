@@ -399,6 +399,28 @@ public struct TiciTileSetDeploymentService: Sendable {
     return TiciTileRollbackResult(restoredTileSetID: restored, activationOutcome: .switched)
   }
 
+  func proveDurableNoSwitch(
+    profile: String,
+    expectedGitBranch: String,
+    expectedGitHead: String
+  ) async throws -> TiciDeploymentSnapshot {
+    try Self.validateProfile(profile)
+    try Self.validateGitBinding(branch: expectedGitBranch, head: expectedGitHead)
+    let command = try Self.lockedNoSwitchInspectionCommand(
+      expectedGitBranch: expectedGitBranch,
+      expectedGitHead: expectedGitHead
+    )
+    let result = try await checked(
+      ProcessRequest(
+        executableURL: Self.sshURL,
+        arguments: Self.sshOptions(connectTimeout: 10) + [profile, command],
+        timeout: 60
+      ),
+      context: "prove unchanged no-switch tile topology"
+    )
+    return try TiciDeploymentSnapshotDecoder.decodeRead(result.standardOutput).snapshot
+  }
+
   public static func stagingRoot(tileSetID: String) -> String {
     "\(remoteRoot)/.tileset-\(tileSetID).partial"
   }
@@ -465,6 +487,33 @@ public struct TiciTileSetDeploymentService: Sendable {
     [ "$(git -C "$repo" rev-parse HEAD)" = "$expected_git_head" ] || { printf '%s\n' 'tile rollback head is not the host-proven identity' >&2; exit 1; }
     [ -z "$(git -C "$repo" status --porcelain)" ] || { printf '%s\n' 'tile rollback checkout is dirty' >&2; exit 1; }
     exec \(shellQuote(helperPath)) rollback --root \(shellQuote(remoteRoot)) --params-dir \(shellQuote(TiciParkedMutationGate.defaultParamsDirectory)) --repo-root "$repo" --expected-git-branch "$expected_git_branch" --expected-git-head "$expected_git_head"\(expected)\(expectedPrevious)\(try injectionArgument(injectedFailurePoint))
+    """
+  }
+
+  static func lockedNoSwitchInspectionCommand(
+    expectedGitBranch: String,
+    expectedGitHead: String
+  ) throws -> String {
+    try validateGitBinding(branch: expectedGitBranch, head: expectedGitHead)
+    return """
+    set -eu
+    params_dir='/data/params/d'
+    \(TiciParkedMutationGate.shellFragment(
+      refusalMessage: "refusing no-switch proof unless tici is exactly offroad and Map Lookahead is disabled"
+    ))
+    exec 8>\(shellQuote(remoteRoot + "/.tileset-transaction.lock"))
+    flock -x 8
+    \(TiciParkedMutationGate.shellFragment(
+      refusalMessage: "refusing no-switch proof after lock unless tici is exactly offroad and Map Lookahead is disabled"
+    ))
+    repo='/data/openpilot'
+    branch=$(git -C "$repo" branch --show-current) || exit 1
+    [ "$branch" = \(shellQuote(expectedGitBranch)) ] || exit 1
+    head=$(git -C "$repo" rev-parse HEAD) || exit 1
+    [ "$head" = \(shellQuote(expectedGitHead)) ] || exit 1
+    status=$(git -C "$repo" status --porcelain) || exit 1
+    [ -z "$status" ] || exit 1
+    \(TiciSnapshotWireCommandBuilder.inspectionCommand())
     """
   }
 
