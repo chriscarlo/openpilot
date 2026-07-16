@@ -216,16 +216,25 @@ public struct TiciTileSetDeploymentService: Sendable {
   public func rollback(
     profile: String,
     expectedActivatedTileSetID: String? = nil,
-    expectedRestoredTileSetID: String? = nil
+    expectedRestoredTileSetID: String? = nil,
+    expectedGitBranch: String,
+    expectedGitHead: String
   ) async throws {
     try Self.validateProfile(profile)
     if let expectedActivatedTileSetID { try Self.validateTileSetID(expectedActivatedTileSetID) }
     if let expectedRestoredTileSetID { try Self.validateTileSetID(expectedRestoredTileSetID) }
-    let helperPath = try await stageTransactionHelper(profile: profile)
+    try Self.validateGitBinding(branch: expectedGitBranch, head: expectedGitHead)
+    let helperPath = try await stageTransactionHelper(
+      profile: profile,
+      expectedGitBranch: expectedGitBranch,
+      expectedGitHead: expectedGitHead
+    )
     let command = try Self.atomicRollbackCommand(
       helperPath: helperPath,
       expectedActivatedTileSetID: expectedActivatedTileSetID,
-      expectedRestoredTileSetID: expectedRestoredTileSetID
+      expectedRestoredTileSetID: expectedRestoredTileSetID,
+      expectedGitBranch: expectedGitBranch,
+      expectedGitHead: expectedGitHead
     )
     let result = try await checked(
       ProcessRequest(
@@ -296,11 +305,14 @@ public struct TiciTileSetDeploymentService: Sendable {
     helperPath: String,
     expectedActivatedTileSetID: String? = nil,
     expectedRestoredTileSetID: String? = nil,
+    expectedGitBranch: String,
+    expectedGitHead: String,
     injectedFailurePoint: String? = nil
   ) throws -> String {
     try validateHelperPath(helperPath)
     if let expectedActivatedTileSetID { try validateTileSetID(expectedActivatedTileSetID) }
     if let expectedRestoredTileSetID { try validateTileSetID(expectedRestoredTileSetID) }
+    try validateGitBinding(branch: expectedGitBranch, head: expectedGitHead)
     let expected = expectedActivatedTileSetID.map {
       " --expected-tile-set-id \(shellQuote($0))"
     } ?? ""
@@ -309,11 +321,26 @@ public struct TiciTileSetDeploymentService: Sendable {
     } ?? ""
     return """
     \(parkedMutationPreamble())
-    exec \(shellQuote(helperPath)) rollback --root \(shellQuote(remoteRoot)) --params-dir \(shellQuote(TiciParkedMutationGate.defaultParamsDirectory))\(expected)\(expectedPrevious)\(try injectionArgument(injectedFailurePoint))
+    repo='/data/openpilot'
+    expected_git_branch=\(shellQuote(expectedGitBranch))
+    expected_git_head=\(shellQuote(expectedGitHead))
+    [ "$(git -C "$repo" branch --show-current)" = "$expected_git_branch" ] || { printf '%s\n' 'tile rollback branch is not the host-proven identity' >&2; exit 1; }
+    [ "$(git -C "$repo" rev-parse HEAD)" = "$expected_git_head" ] || { printf '%s\n' 'tile rollback head is not the host-proven identity' >&2; exit 1; }
+    exec \(shellQuote(helperPath)) rollback --root \(shellQuote(remoteRoot)) --params-dir \(shellQuote(TiciParkedMutationGate.defaultParamsDirectory)) --repo-root "$repo" --expected-git-branch "$expected_git_branch" --expected-git-head "$expected_git_head"\(expected)\(expectedPrevious)\(try injectionArgument(injectedFailurePoint))
     """
   }
 
-  private func stageTransactionHelper(profile: String) async throws -> String {
+  private func stageTransactionHelper(
+    profile: String,
+    expectedGitBranch: String? = nil,
+    expectedGitHead: String? = nil
+  ) async throws -> String {
+    if expectedGitBranch != nil || expectedGitHead != nil {
+      guard let expectedGitBranch, let expectedGitHead else {
+        throw TiciTileSetDeploymentError.invalidHelperOutput("incomplete rollback Git binding")
+      }
+      try Self.validateGitBinding(branch: expectedGitBranch, head: expectedGitHead)
+    }
     let helperURL = try resolvedTransactionHelperURL()
     let digest = try FileSHA256.hex(helperURL)
     guard digest.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil else {
@@ -326,9 +353,10 @@ public struct TiciTileSetDeploymentService: Sendable {
         executableURL: Self.sshURL,
         arguments: Self.sshOptions(connectTimeout: 10) + [
           profile,
-          TiciParkedMutationGate.guardedCommand(
+          Self.helperStagingCommand(
             "mkdir -p \(Self.shellQuote(Self.helperDirectory)) && rm -f \(Self.shellQuote(partialPath))",
-            refusalMessage: "refusing tile-helper staging unless tici is exactly offroad and Map Lookahead is disabled"
+            expectedGitBranch: expectedGitBranch,
+            expectedGitHead: expectedGitHead
           ),
         ],
         timeout: 30
@@ -340,8 +368,9 @@ public struct TiciTileSetDeploymentService: Sendable {
         executableURL: Self.rsyncURL,
         arguments: [
           "-a", "--partial",
-          "--rsync-path", TiciParkedMutationGate.gatedRsyncPath(
-            refusalMessage: "refusing tile-helper transfer unless tici is exactly offroad and Map Lookahead is disabled"
+          "--rsync-path", Self.helperRsyncPath(
+            expectedGitBranch: expectedGitBranch,
+            expectedGitHead: expectedGitHead
           ),
           "-e", "/usr/bin/ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new",
           helperURL.path,
@@ -359,7 +388,9 @@ public struct TiciTileSetDeploymentService: Sendable {
           Self.installHelperCommand(
             partialPath: partialPath,
             destinationPath: remotePath,
-            sha256: digest
+            sha256: digest,
+            expectedGitBranch: expectedGitBranch,
+            expectedGitHead: expectedGitHead
           ),
         ],
         timeout: 60
@@ -384,9 +415,11 @@ public struct TiciTileSetDeploymentService: Sendable {
   private static func installHelperCommand(
     partialPath: String,
     destinationPath: String,
-    sha256: String
+    sha256: String,
+    expectedGitBranch: String? = nil,
+    expectedGitHead: String? = nil
   ) -> String {
-    TiciParkedMutationGate.guardedCommand(
+    helperStagingCommand(
     """
     partial=\(shellQuote(partialPath))
     destination=\(shellQuote(destinationPath))
@@ -404,8 +437,54 @@ public struct TiciTileSetDeploymentService: Sendable {
       exit 1
     }
     """,
-    refusalMessage: "refusing tile-helper install unless tici is exactly offroad and Map Lookahead is disabled"
+    expectedGitBranch: expectedGitBranch,
+    expectedGitHead: expectedGitHead
     )
+  }
+
+  private static func helperStagingCommand(
+    _ mutation: String,
+    expectedGitBranch: String?,
+    expectedGitHead: String?
+  ) -> String {
+    let identity = rollbackGitIdentityFragment(
+      expectedGitBranch: expectedGitBranch,
+      expectedGitHead: expectedGitHead
+    )
+    return TiciParkedMutationGate.guardedCommand(
+      identity + mutation,
+      refusalMessage: "refusing tile-helper staging unless tici is exactly offroad and Map Lookahead is disabled"
+    )
+  }
+
+  private static func helperRsyncPath(
+    expectedGitBranch: String?,
+    expectedGitHead: String?
+  ) -> String {
+    let body = """
+    params_dir=\(shellQuote(TiciParkedMutationGate.defaultParamsDirectory))
+    \(TiciParkedMutationGate.shellFragment(
+      refusalMessage: "refusing tile-helper transfer unless tici is exactly offroad and Map Lookahead is disabled"
+    ))
+    \(rollbackGitIdentityFragment(
+      expectedGitBranch: expectedGitBranch,
+      expectedGitHead: expectedGitHead
+    ))
+    exec rsync "$@"
+    """
+    return "sh -c \(shellQuote(body)) sh"
+  }
+
+  private static func rollbackGitIdentityFragment(
+    expectedGitBranch: String?,
+    expectedGitHead: String?
+  ) -> String {
+    guard let expectedGitBranch, let expectedGitHead else { return "" }
+    return """
+    repo='/data/openpilot'
+    [ "$(git -C "$repo" branch --show-current)" = \(shellQuote(expectedGitBranch)) ] || { printf '%s\n' 'tile-helper staging branch is not the host-proven identity' >&2; exit 1; }
+    [ "$(git -C "$repo" rev-parse HEAD)" = \(shellQuote(expectedGitHead)) ] || { printf '%s\n' 'tile-helper staging head is not the host-proven identity' >&2; exit 1; }
+    """
   }
 
   private static func parkedMutationPreamble() -> String {
@@ -457,6 +536,14 @@ public struct TiciTileSetDeploymentService: Sendable {
       options: .regularExpression
     ) != nil else {
       throw TiciTileSetDeploymentError.invalidHelperPath(path)
+    }
+  }
+
+  private static func validateGitBinding(branch: String, head: String) throws {
+    guard branch.range(of: #"^[A-Za-z0-9._/-]+$"#, options: .regularExpression) != nil,
+          !branch.contains(".."), !branch.hasPrefix("/"),
+          head.range(of: #"^[0-9a-f]{40}$"#, options: .regularExpression) != nil else {
+      throw TiciTileSetDeploymentError.invalidHelperOutput("unsafe rollback Git identity")
     }
   }
 

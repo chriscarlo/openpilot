@@ -162,7 +162,7 @@ public struct RollbackRecoveryRequest: Sendable {
 public struct AbortPendingDeploymentAction: Sendable {
   public static let label = "Abort and Roll Back Pending Deployment"
   public static let description =
-    "Explicitly abandon one selected rebooted deployment that cannot pass postflight. This rechecks parked/offroad safety, restores only its recorded prior Git, Params, mapd/cache, and tile identity, and reboots only when that journal proves its deployment reboot was sent."
+    "Explicitly abandon one selected rebooted deployment that cannot pass postflight. This excludes every peer tuner and foreign unresolved journal, binds the current tici to the recorded target, prior head, or a host-proven completion-compatible successor, restores only its recorded prior Git, Params, mapd/cache, and tile identity, then always proves rollback through a fresh reboot."
 }
 
 public struct AbortPendingDeploymentRequest: Sendable {
@@ -178,6 +178,7 @@ public struct AbortPendingDeploymentRequest: Sendable {
 private struct ResumedPostflightObservation: Sendable {
   var controllerReady: TiciDeploymentPostflight
   var offroad: TiciDeploymentPostflight
+  var deviceIdentity: CompletionCompatibleDeviceIdentity
 }
 
 private enum ResumedPostflightWaitState: LocalizedError, Sendable {
@@ -543,6 +544,7 @@ public actor ApplyPipeline {
       }
       let profile = journal.profile
       let preflight = RuntimeDeploymentPreflight(
+        repositoryRoot: request.repositoryRoot,
         git: git,
         profile: profile,
         mapdRecoveryOutcome: .clean,
@@ -554,12 +556,11 @@ public actor ApplyPipeline {
       await emit(
         .succeeded,
         id: 0,
-        text: "Pending deployment target and exact clean host-only tooling head match",
+        text: "Pending target and clean host ancestry are ready for exact device compatibility proof",
         detail: [
           "journal=\(loaded.url.path)",
           "deployed_target_head=\(gitIdentity.deployedTargetHead)",
           "tooling_head=\(gitIdentity.toolingHead)",
-          "host_only_paths=\(gitIdentity.hostOnlyPaths.joined(separator: ","))",
           "profile=\(profile)",
         ].joined(separator: "\n"),
         progress: progress
@@ -574,7 +575,7 @@ public actor ApplyPipeline {
       let identity = TuneDeploymentIdentity(tune: request.tune)
       let observation = try await waitForResumedProductionPostflight(
         preflight: preflight,
-        deployedTargetHead: gitIdentity.deployedTargetHead,
+        gitIdentity: gitIdentity,
         identity: identity,
         timeout: request.timeout,
         pollInterval: request.pollInterval,
@@ -637,7 +638,7 @@ public actor ApplyPipeline {
         finalPostflight,
         controllerEvidence: observation.controllerReady,
         preflight: preflight,
-        targetHead: gitIdentity.deployedTargetHead,
+        targetHead: observation.deviceIdentity.deviceHead,
         identity: identity,
         expectedActiveTileSetID: preflight.journal.targetTileSetID ?? preflight.journal.previousTileSetID
       )
@@ -662,7 +663,8 @@ public actor ApplyPipeline {
       journal.completed = true
       journal.completedAt = Date().ISO8601Format()
       journal.completedToolingHead = gitIdentity.toolingHead
-      journal.completionHostOnlyPaths = gitIdentity.hostOnlyPaths
+      journal.completedDeviceHead = observation.deviceIdentity.deviceHead
+      journal.completionHostOnlyPaths = observation.deviceIdentity.compatibilityPaths
       journal.resolution = .completed
       // No cancellation check or suspension is permitted after this commit
       // point. A late cancellation request must resolve from the exact atomic
@@ -749,8 +751,13 @@ public actor ApplyPipeline {
       )
       let productionOwnerLock = try await acquireGlobalProductionOwnerLock(for: loaded.url)
       defer { productionOwnerLock.unlock() }
+      try await validateExclusiveRollbackOwnership(selectedJournalURL: loaded.url)
       let resolution = await rollbackProductionDeploymentIfJournalPending(
-        context: ProductionRollbackContext(journal: loaded.journal, journalURL: loaded.url)
+        context: ProductionRollbackContext(
+          repositoryRoot: request.repositoryRoot,
+          journal: loaded.journal,
+          journalURL: loaded.url
+        )
       )
       switch resolution {
       case let .alreadyCompleted(detail):
@@ -807,6 +814,7 @@ public actor ApplyPipeline {
       )
       let productionOwnerLock = try await acquireGlobalProductionOwnerLock(for: loaded.url)
       defer { productionOwnerLock.unlock() }
+      try await validateExclusiveRollbackOwnership(selectedJournalURL: loaded.url)
       let current = try DeploymentRollbackJournal.load(from: loaded.url)
       guard current == loaded.journal else {
         throw ApplyPipelineError.postflightMismatch(
@@ -814,7 +822,11 @@ public actor ApplyPipeline {
         )
       }
       let resolution = await rollbackProductionDeploymentIfJournalPending(
-        context: ProductionRollbackContext(journal: current, journalURL: loaded.url)
+        context: ProductionRollbackContext(
+          repositoryRoot: request.repositoryRoot,
+          journal: current,
+          journalURL: loaded.url
+        )
       )
       switch resolution {
       case let .alreadyCompleted(detail):
@@ -1261,6 +1273,7 @@ public actor ApplyPipeline {
     )
     try journal.write(to: journalURL)
     let runtimePreflight = RuntimeDeploymentPreflight(
+      repositoryRoot: request.repositoryRoot,
       git: git,
       profile: profile,
       mapdRecoveryOutcome: mapdRecoveryOutcome,
@@ -1325,8 +1338,7 @@ public actor ApplyPipeline {
     guard deployedTargetHead != git.localHead else {
       return ResumePostflightGitIdentity(
         deployedTargetHead: deployedTargetHead,
-        toolingHead: git.localHead,
-        hostOnlyPaths: []
+        toolingHead: git.localHead
       )
     }
 
@@ -1349,22 +1361,85 @@ public actor ApplyPipeline {
       )
     }
 
+    return ResumePostflightGitIdentity(
+      deployedTargetHead: deployedTargetHead,
+      toolingHead: git.localHead
+    )
+  }
+
+  /// Prove the exact device HEAD is either the immutable deployment target or
+  /// a target descendant whose complete target...device diff is confined to
+  /// Mac tuner/skill paths. The host tooling HEAD may contain later production
+  /// changes; those never widen the accepted device identity.
+  func validateCompletionCompatibleDeviceIdentity(
+    deployedTargetHead: String,
+    deviceHead: String,
+    toolingHead: String,
+    repositoryRoot: URL
+  ) async throws -> CompletionCompatibleDeviceIdentity {
+    for head in [deployedTargetHead, deviceHead, toolingHead] {
+      guard head.range(of: #"^[0-9a-f]{40}$"#, options: .regularExpression) != nil else {
+        throw ApplyPipelineError.invalidDeploymentOutput("invalid completion Git identity: \(head)")
+      }
+    }
+    guard deviceHead != deployedTargetHead else {
+      return CompletionCompatibleDeviceIdentity(deviceHead: deviceHead, compatibilityPaths: [])
+    }
+
+    let targetRelationship = try await processRunner.run(ProcessRequest(
+      executableURL: Self.gitURL,
+      arguments: ["merge-base", "--is-ancestor", deployedTargetHead, deviceHead],
+      currentDirectoryURL: repositoryRoot,
+      timeout: 30
+    ))
+    guard targetRelationship.terminationStatus == 0 else {
+      if targetRelationship.terminationStatus == 1 {
+        throw ApplyPipelineError.commitMismatch(
+          context: "device completion successor is not descended from the immutable deployed target",
+          expected: deployedTargetHead,
+          actual: deviceHead
+        )
+      }
+      throw ApplyPipelineError.invalidDeploymentOutput(
+        "could not verify deployed-target/device ancestry: \(targetRelationship.combinedOutput)"
+      )
+    }
+
+    let toolingRelationship = try await processRunner.run(ProcessRequest(
+      executableURL: Self.gitURL,
+      arguments: ["merge-base", "--is-ancestor", deviceHead, toolingHead],
+      currentDirectoryURL: repositoryRoot,
+      timeout: 30
+    ))
+    guard toolingRelationship.terminationStatus == 0 else {
+      if toolingRelationship.terminationStatus == 1 {
+        throw ApplyPipelineError.commitMismatch(
+          context: "device completion successor is not contained in the exact host tooling history",
+          expected: toolingHead,
+          actual: deviceHead
+        )
+      }
+      throw ApplyPipelineError.invalidDeploymentOutput(
+        "could not verify device/tooling ancestry: \(toolingRelationship.combinedOutput)"
+      )
+    }
+
     let changed = try await checked(
       ProcessRequest(
         executableURL: Self.gitURL,
         arguments: [
           "diff", "--no-ext-diff", "--name-only", "-z",
-          "\(deployedTargetHead)..\(git.localHead)", "--",
+          "\(deployedTargetHead)..\(deviceHead)", "--",
         ],
         currentDirectoryURL: repositoryRoot,
         timeout: 30
       ),
-      context: "prove pending deployment follow-up is host-only tooling"
+      context: "prove device successor is completion-compatible"
     )
     let paths = changed.standardOutput.split(separator: "\0", omittingEmptySubsequences: true).map(String.init)
     guard !paths.isEmpty else {
       throw ApplyPipelineError.invalidDeploymentOutput(
-        "the tooling head differs from the deployed target but Git reported no changed paths"
+        "the device successor differs from the deployed target but Git reported no changed paths"
       )
     }
     let allowedPrefixes = [
@@ -1378,10 +1453,43 @@ public actor ApplyPipeline {
         "commits after the immutable deployed target are not host-only VTSC tuner changes: \(paths.joined(separator: ", "))"
       )
     }
-    return ResumePostflightGitIdentity(
+    return CompletionCompatibleDeviceIdentity(
+      deviceHead: deviceHead,
+      compatibilityPaths: paths.sorted()
+    )
+  }
+
+  private func validateRollbackSourceIdentity(
+    snapshot: TiciDeploymentSnapshot,
+    journal: DeploymentRollbackJournal,
+    repositoryRoot: URL
+  ) async throws -> CompletionCompatibleDeviceIdentity {
+    guard snapshot.branch == journal.branch, !snapshot.dirty else {
+      throw ApplyPipelineError.postflightMismatch(
+        "rollback source checkout is on the wrong branch or dirty"
+      )
+    }
+    let currentHead = snapshot.head
+    if currentHead == journal.previousHead {
+      return CompletionCompatibleDeviceIdentity(deviceHead: currentHead, compatibilityPaths: [])
+    }
+    guard let deployedTargetHead = journal.targetHead else {
+      throw ApplyPipelineError.postflightMismatch(
+        "rollback journal has no immutable deployed target identity"
+      )
+    }
+    if currentHead == deployedTargetHead {
+      return CompletionCompatibleDeviceIdentity(deviceHead: currentHead, compatibilityPaths: [])
+    }
+    let git = try await gitDeploymentPreflight(
+      repositoryRoot: repositoryRoot,
+      expectedBranch: journal.branch
+    )
+    return try await validateCompletionCompatibleDeviceIdentity(
       deployedTargetHead: deployedTargetHead,
+      deviceHead: currentHead,
       toolingHead: git.localHead,
-      hostOnlyPaths: paths.sorted()
+      repositoryRoot: repositoryRoot
     )
   }
 
@@ -1953,7 +2061,7 @@ public actor ApplyPipeline {
 
   private func waitForResumedProductionPostflight(
     preflight: RuntimeDeploymentPreflight,
-    deployedTargetHead: String,
+    gitIdentity: ResumePostflightGitIdentity,
     identity: TuneDeploymentIdentity,
     timeout: TimeInterval,
     pollInterval: TimeInterval,
@@ -1967,6 +2075,7 @@ public actor ApplyPipeline {
       "Waiting for fresh real-GPS profile and liveMapDataSP controller-readiness evidence."
     )
     var controllerEvidence: TiciDeploymentPostflight?
+    var compatibleDeviceIdentity: CompletionCompatibleDeviceIdentity?
     while true {
       try Task.checkCancellation()
       if attemptedCurrentPhase, clock.now >= phaseDeadline { throw lastWait }
@@ -1996,17 +2105,32 @@ public actor ApplyPipeline {
         preflight: preflight,
         identity: identity
       )
+      if compatibleDeviceIdentity == nil {
+        compatibleDeviceIdentity = try await validateCompletionCompatibleDeviceIdentity(
+          deployedTargetHead: gitIdentity.deployedTargetHead,
+          deviceHead: postflight.head,
+          toolingHead: gitIdentity.toolingHead,
+          repositoryRoot: preflight.repositoryRoot
+        )
+      }
+      guard let compatibleDeviceIdentity else {
+        throw ApplyPipelineError.postflightMismatch("device completion identity was not established")
+      }
       if let controllerEvidence {
         do {
           try validateResumedOffroadCompletion(
             postflight,
             controllerEvidence: controllerEvidence,
             preflight: preflight,
-            targetHead: deployedTargetHead,
+            targetHead: compatibleDeviceIdentity.deviceHead,
             identity: identity,
             expectedActiveTileSetID: preflight.journal.targetTileSetID ?? preflight.journal.previousTileSetID
           )
-          return ResumedPostflightObservation(controllerReady: controllerEvidence, offroad: postflight)
+          return ResumedPostflightObservation(
+            controllerReady: controllerEvidence,
+            offroad: postflight,
+            deviceIdentity: compatibleDeviceIdentity
+          )
         } catch let wait as ResumedPostflightWaitState {
           lastWait = wait
         }
@@ -2015,7 +2139,7 @@ public actor ApplyPipeline {
           try validateResumedControllerEvidence(
             postflight,
             preflight: preflight,
-            targetHead: deployedTargetHead,
+            targetHead: compatibleDeviceIdentity.deviceHead,
             identity: identity,
             expectedActiveTileSetID: preflight.journal.targetTileSetID ?? preflight.journal.previousTileSetID
           )
@@ -2165,11 +2289,10 @@ public actor ApplyPipeline {
     current: String?,
     journal: DeploymentRollbackJournal
   ) throws {
-    // B174-style schema-1 journals predate boot identity capture and use the
-    // legacy awaitingPostflight lifecycle. Their current supervised onroad
-    // controller evidence remains resumable without fabricating history. New
-    // awaitingOutdoorPostflight journals never receive this exception.
-    if journal.effectiveResolution == .awaitingPostflight,
+    // B174-style schema-1 journals predate both boot identity capture and the
+    // serialized resolution key. Only that raw missing-key shape may use
+    // current supervised controller evidence without fabricating history.
+    if journal.resolution == nil,
        journal.deploymentPreRebootBootID == nil {
       return
     }
@@ -2197,6 +2320,17 @@ public actor ApplyPipeline {
       throw ApplyPipelineError.postflightMismatch(
         "Another VTSC Tuner process is running. Close every other VTSC Tuner window before a car-facing deployment.\n\(peers.joined(separator: "\n"))"
       )
+    }
+  }
+
+  private func validateExclusiveRollbackOwnership(selectedJournalURL: URL) async throws {
+    try await requireNoOtherTunerProcess()
+    let selected = selectedJournalURL.standardizedFileURL
+    let unresolved = try DeploymentRollbackJournal.unresolvedProductionJournals(
+      directory: selected.deletingLastPathComponent()
+    ).filter { $0.url.standardizedFileURL != selected }
+    guard unresolved.isEmpty else {
+      throw ApplyPipelineError.unresolvedProductionRollbacks(unresolved.map(\.url))
     }
   }
 
@@ -2816,6 +2950,22 @@ public actor ApplyPipeline {
           "journal retained at \(context.journalURL.path)"
       )
     }
+    if loadedCurrent.completed, loadedCurrent.effectiveResolution == .completed {
+      return .alreadyCompleted(
+        "rollback skipped: this exact deployment journal was already completed by another VTSC Tuner instance"
+      )
+    }
+    if loadedCurrent.completed, loadedCurrent.effectiveResolution == .rolledBack {
+      return .rolledBack("rollback already completed for this exact deployment journal")
+    }
+    do {
+      try await validateExclusiveRollbackOwnership(selectedJournalURL: context.journalURL)
+    } catch {
+      return .rollbackFailed(
+        "rollback mutation was not attempted because exclusive rollback ownership could not be proven: \(error.localizedDescription)\n" +
+          "journal retained at \(context.journalURL.path)"
+      )
+    }
     var current = loadedCurrent
     if current.resolution != nil, !current.completed {
       switch current.effectiveResolution {
@@ -2883,11 +3033,24 @@ public actor ApplyPipeline {
     }
 
     do {
-      _ = try await freshParkedSafetySnapshot(profile: context.profile)
+      let snapshot = try await freshParkedSafetySnapshot(profile: context.profile)
+      _ = try await validateRollbackSourceIdentity(
+        snapshot: snapshot,
+        journal: current,
+        repositoryRoot: context.repositoryRoot
+      )
     } catch {
       return .rollbackFailed(
-        "rollback mutation was not attempted because fresh parked-state verification failed: \(error.localizedDescription)\n" +
+        "rollback mutation was not attempted because fresh parked-state/target binding failed: \(error.localizedDescription)\n" +
           "journal retained at \(context.journalURL.path)"
+      )
+    }
+
+    do {
+      try await validateExclusiveRollbackOwnership(selectedJournalURL: context.journalURL)
+    } catch {
+      return .rollbackFailed(
+        "rollback mutation was not attempted because peer/journal exclusion changed before claim: \(error.localizedDescription)"
       )
     }
 
@@ -2926,10 +3089,29 @@ public actor ApplyPipeline {
         "rollback mutation was not attempted because its durable lifecycle state could not be reloaded: \(error.localizedDescription)"
       )
     }
-    let durableContext = ProductionRollbackContext(
+    let finalRollbackSource: CompletionCompatibleDeviceIdentity
+    do {
+      try await validateExclusiveRollbackOwnership(selectedJournalURL: context.journalURL)
+      let snapshot = try await freshParkedSafetySnapshot(profile: context.profile)
+      finalRollbackSource = try await validateRollbackSourceIdentity(
+        snapshot: snapshot,
+        journal: durableClaim,
+        repositoryRoot: context.repositoryRoot
+      )
+    } catch {
+      return .rollbackFailed(
+        "rollback device mutation was not attempted because final peer/journal/target binding failed: \(error.localizedDescription)"
+      )
+    }
+    // This second read may legitimately observe previousHead after an earlier
+    // rollback Git leg completed and crashed. Both reads are constrained to
+    // the same immutable journal; no broader head is accepted.
+    var durableContext = ProductionRollbackContext(
+      repositoryRoot: context.repositoryRoot,
       journal: durableClaim,
       journalURL: context.journalURL
     )
+    durableContext.expectedRollbackSourceHead = finalRollbackSource.deviceHead
     let rollbackResult = await rollbackProductionDeployment(
       context: durableContext
     )
@@ -3034,9 +3216,24 @@ public actor ApplyPipeline {
       return (false, "rollback mutation was not attempted because global production ownership could not be acquired: \(error.localizedDescription)")
     }
     defer { productionOwnerLock.unlock() }
-    return await rollbackProductionDeployment(
-      context: ProductionRollbackContext(preflight: preflight)
-    )
+    var context = ProductionRollbackContext(preflight: preflight)
+    do {
+      try await validateExclusiveRollbackOwnership(selectedJournalURL: preflight.journalURL)
+      let snapshot = try await freshParkedSafetySnapshot(profile: preflight.profile)
+      let source = try await validateRollbackSourceIdentity(
+        snapshot: snapshot,
+        journal: preflight.journal,
+        repositoryRoot: preflight.repositoryRoot
+      )
+      context.expectedRollbackSourceHead = source.deviceHead
+    } catch {
+      return (
+        false,
+        "rollback mutation was not attempted because exact ownership/target binding failed: \(error.localizedDescription)\n" +
+          "journal retained at \(preflight.journalURL.path)"
+      )
+    }
+    return await rollbackProductionDeployment(context: context)
   }
 
   private func rollbackProductionDeployment(
@@ -3044,9 +3241,22 @@ public actor ApplyPipeline {
   ) async -> (success: Bool, detail: String) {
     var details: [String] = []
     var succeeded = true
+    guard let expectedRollbackSourceHead = context.expectedRollbackSourceHead else {
+      return (
+        false,
+        "rollback mutation was not attempted because no exact current Git identity was bound"
+      )
+    }
     do {
-      _ = try await freshParkedSafetySnapshot(profile: context.profile)
-      details.append("fresh pre-rollback parked-state gate passed")
+      let snapshot = try await freshParkedSafetySnapshot(profile: context.profile)
+      guard snapshot.head == expectedRollbackSourceHead,
+            snapshot.branch == context.journal.branch,
+            !snapshot.dirty else {
+        throw ApplyPipelineError.postflightMismatch(
+          "rollback source identity changed after host compatibility proof"
+        )
+      }
+      details.append("fresh pre-rollback parked-state and exact Git binding passed")
     } catch {
       return (
         false,
@@ -3059,12 +3269,17 @@ public actor ApplyPipeline {
         try await TiciTileSetDeploymentService(processRunner: processRunner).rollback(
           profile: context.profile,
           expectedActivatedTileSetID: context.journal.targetTileSetID,
-          expectedRestoredTileSetID: context.journal.previousTileSetID
+          expectedRestoredTileSetID: context.journal.previousTileSetID,
+          expectedGitBranch: context.journal.branch,
+          expectedGitHead: expectedRollbackSourceHead
         )
         details.append("tile activation transaction recovered and prior set restored when needed")
       } catch {
-        succeeded = false
-        details.append("tile rollback failed: \(error.localizedDescription)")
+        return (
+          false,
+          "tile rollback or its exact target binding failed before Git/Params/mapd restoration: \(error.localizedDescription)\n" +
+            "journal=\(context.journalURL.path)"
+        )
       }
     }
     do {
@@ -3073,7 +3288,10 @@ public actor ApplyPipeline {
           executableURL: Self.sshURL,
           arguments: sshOptions(connectTimeout: 10) + [
             context.profile,
-            try TiciProductionRollbackCommandBuilder.command(journal: context.journal),
+            try TiciProductionRollbackCommandBuilder.command(
+              journal: context.journal,
+              expectedCurrentHead: expectedRollbackSourceHead
+            ),
           ],
           timeout: 180
         ),
@@ -3104,6 +3322,7 @@ public actor ApplyPipeline {
           at: context.journalURL
         )
         let verificationContext = ProductionRollbackContext(
+          repositoryRoot: context.repositoryRoot,
           journal: rebootJournal,
           journalURL: context.journalURL
         )

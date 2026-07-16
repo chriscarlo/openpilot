@@ -178,6 +178,35 @@ func TestLockWaitStateFlipRejectsRollbackBeforeAnyExchange(t *testing.T) {
 	assertLinkTarget(t, filepath.Join(root, previousOfflineName), "tile-generations/old/offline")
 }
 
+func TestBoundRollbackRejectsGitIdentityDriftBeforeJournalOrExchange(t *testing.T) {
+	root := newTestRoot(t)
+	makeMinimalGeneration(t, root, "fresh")
+	makeMinimalGeneration(t, root, "old")
+	linkGeneration(t, root, activeOfflineName, "fresh")
+	linkGeneration(t, root, previousOfflineName, "old")
+	engine := testEngine(t, root)
+	engine.gitIdentity = func(string) (string, string, error) {
+		return "chauffeur-exp01", strings.Repeat("b", 40), nil
+	}
+
+	_, err := engine.rollbackBound(
+		"fresh",
+		"old",
+		filepath.Join(root, "checkout"),
+		"chauffeur-exp01",
+		strings.Repeat("a", 40),
+		"",
+	)
+	if err == nil || !strings.Contains(err.Error(), "Git identity changed") {
+		t.Fatalf("bound rollback error = %v, want exact Git identity rejection", err)
+	}
+	assertLinkTarget(t, filepath.Join(root, activeOfflineName), "tile-generations/fresh/offline")
+	assertLinkTarget(t, filepath.Join(root, previousOfflineName), "tile-generations/old/offline")
+	if _, err := os.Lstat(filepath.Join(root, transactionFileName)); !os.IsNotExist(err) {
+		t.Fatalf("bound rollback wrote a transaction before rejecting Git drift: %v", err)
+	}
+}
+
 func TestActivateRollbackAndRecovery(t *testing.T) {
 	root := newTestRoot(t)
 	makeMinimalGeneration(t, root, "old")
@@ -413,8 +442,8 @@ func testEngine(t *testing.T, root string) *transactionEngine {
 		t.Fatalf("create test Params directory: %v", err)
 	}
 	for key, value := range map[string]string{
-		"IsOffroad": "1",
-		"IsOnroad": "0",
+		"IsOffroad":            "1",
+		"IsOnroad":             "0",
 		"MTSCLookaheadEnabled": "0",
 	} {
 		if err := os.WriteFile(filepath.Join(paramsDir, key), []byte(value), 0o600); err != nil {

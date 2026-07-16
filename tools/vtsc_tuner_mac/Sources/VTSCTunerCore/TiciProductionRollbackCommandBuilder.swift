@@ -25,8 +25,14 @@ enum TiciProductionRollbackCommandBuilder {
     return expectedPreviousSHA256.isEmpty ? .alreadyRestored : .failMissingArtifact
   }
 
-  static func command(journal: DeploymentRollbackJournal) throws -> String {
+  static func command(
+    journal: DeploymentRollbackJournal,
+    expectedCurrentHead: String
+  ) throws -> String {
     try validate(journal)
+    guard expectedCurrentHead.range(of: #"^[0-9a-f]{40}$"#, options: .regularExpression) != nil else {
+      throw ApplyPipelineError.invalidDeploymentOutput("invalid rollback source Git identity")
+    }
     let values = physicsAndMapdParamValues(journal)
     let keys = values.map(\.key)
     let keyList = shellKeyList(keys)
@@ -40,6 +46,7 @@ enum TiciProductionRollbackCommandBuilder {
     params_dir='/data/params/d'
     params_lock='/data/params/.lock'
     previous_head=\(shellQuote(journal.previousHead))
+    expected_current_head=\(shellQuote(expectedCurrentHead))
     expected_branch=\(shellQuote(journal.branch))
     rollback_mapd=\(shellQuote(journal.mapdRollbackPath))
     expected_active_sha=\(expectedActiveSHA)
@@ -59,9 +66,12 @@ enum TiciProductionRollbackCommandBuilder {
 
     cd "$repo"
     [ "$(git branch --show-current)" = "$expected_branch" ] || fail 'rollback branch changed unexpectedly'
+    [ "$(git rev-parse HEAD)" = "$expected_current_head" ] || fail 'rollback source head is not the host-proven target identity'
     \(TiciParkedMutationGate.shellFragment(
       refusalMessage: "refusing Git rollback unless tici remains exactly offroad and Map Lookahead is disabled"
     ))
+    [ "$(git branch --show-current)" = "$expected_branch" ] || fail 'rollback branch changed immediately before Git mutation'
+    [ "$(git rev-parse HEAD)" = "$expected_current_head" ] || fail 'rollback source head changed immediately before Git mutation'
     git reset --hard "$previous_head"
     [ "$(git rev-parse HEAD)" = "$previous_head" ] || fail 'git rollback head mismatch'
 

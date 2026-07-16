@@ -4,10 +4,15 @@ import Testing
 
 @Test func productionRollbackCommandIsShellOnlyAndRestoresTheCompleteParamSet() throws {
   let journal = rollbackJournalFixture()
-  let command = try TiciProductionRollbackCommandBuilder.command(journal: journal)
+  let command = try TiciProductionRollbackCommandBuilder.command(
+    journal: journal,
+    expectedCurrentHead: String(repeating: "a", count: 40)
+  )
 
   #expect(!command.lowercased().contains("python"))
   #expect(command.contains("git reset --hard \"$previous_head\""))
+  #expect(command.contains("[ \"$(git rev-parse HEAD)\" = \"$expected_current_head\" ]"))
+  #expect(command.range(of: "rollback source head changed immediately before Git mutation")!.lowerBound < command.range(of: "git reset --hard")!.lowerBound)
   #expect(command.contains("MTSCLookaheadEnabled"))
   #expect(command.contains("refusing rollback unless tici is exactly offroad"))
   #expect(command.contains("[ \"$offroad\" != '1' ] || [ \"$onroad\" != '0' ] || [ \"$lookahead\" != '0' ]"))
@@ -39,7 +44,10 @@ import Testing
   var unsafe = rollbackJournalFixture()
   unsafe.previousHead = "not-a-head"
   #expect(throws: (any Error).self) {
-    try TiciProductionRollbackCommandBuilder.command(journal: unsafe)
+    try TiciProductionRollbackCommandBuilder.command(
+      journal: unsafe,
+      expectedCurrentHead: String(repeating: "a", count: 40)
+    )
   }
 
   let head = String(repeating: "a", count: 40)

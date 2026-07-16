@@ -16,6 +16,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"sort"
@@ -82,13 +83,15 @@ type transactionResult struct {
 
 type exchangeFunction func(string, string) error
 type directorySyncFunction func(string) error
+type gitIdentityFunction func(string) (string, string, error)
 
 type transactionEngine struct {
-	root     string
-	paramsDir string
-	exchange exchangeFunction
-	syncDir  directorySyncFunction
-	now      func() time.Time
+	root        string
+	paramsDir   string
+	exchange    exchangeFunction
+	syncDir     directorySyncFunction
+	now         func() time.Time
+	gitIdentity gitIdentityFunction
 }
 
 func newTransactionEngine(root, paramsDir string) (*transactionEngine, error) {
@@ -101,11 +104,12 @@ func newTransactionEngine(root, paramsDir string) (*transactionEngine, error) {
 		return nil, fmt.Errorf("invalid Params directory: %w", err)
 	}
 	return &transactionEngine{
-		root:     cleanRoot,
-		paramsDir: cleanParams,
-		exchange: renameExchange,
-		syncDir:  fsyncDirectory,
-		now:      time.Now,
+		root:        cleanRoot,
+		paramsDir:   cleanParams,
+		exchange:    renameExchange,
+		syncDir:     fsyncDirectory,
+		now:         time.Now,
+		gitIdentity: currentGitIdentity,
 	}, nil
 }
 
@@ -172,6 +176,9 @@ func run(arguments []string, output io.Writer) error {
 		paramsDir := flags.String("params-dir", "", "Params data directory")
 		expectedID := flags.String("expected-tile-set-id", "", "optional tile-set ID expected to be active")
 		expectedPreviousID := flags.String("expected-previous-tile-set-id", "", "optional tile-set ID required in offline.previous")
+		repoRoot := flags.String("repo-root", "", "openpilot Git checkout root")
+		expectedGitBranch := flags.String("expected-git-branch", "", "exact branch permitted at rollback")
+		expectedGitHead := flags.String("expected-git-head", "", "exact Git HEAD permitted at rollback")
 		injectedFailure := flags.String("inject-failure", "", "test-only failure point")
 		if err := flags.Parse(arguments); err != nil || flags.NArg() != 0 {
 			return usageError()
@@ -182,11 +189,28 @@ func run(arguments []string, output io.Writer) error {
 		if *expectedPreviousID != "" && !isSafeID(*expectedPreviousID) {
 			return fmt.Errorf("invalid --expected-previous-tile-set-id")
 		}
+		cleanRepo, err := validateRoot(*repoRoot)
+		if err != nil {
+			return fmt.Errorf("invalid --repo-root: %w", err)
+		}
+		if !isSafeGitBranch(*expectedGitBranch) {
+			return fmt.Errorf("invalid --expected-git-branch")
+		}
+		if !isSafeGitHead(*expectedGitHead) {
+			return fmt.Errorf("invalid --expected-git-head")
+		}
 		engine, err := newTransactionEngine(*root, *paramsDir)
 		if err != nil {
 			return err
 		}
-		result, err := engine.rollback(*expectedID, *expectedPreviousID, *injectedFailure)
+		result, err := engine.rollbackBound(
+			*expectedID,
+			*expectedPreviousID,
+			cleanRepo,
+			*expectedGitBranch,
+			*expectedGitHead,
+			*injectedFailure,
+		)
 		if err != nil {
 			return err
 		}
@@ -197,7 +221,46 @@ func run(arguments []string, output io.Writer) error {
 }
 
 func usageError() error {
-	return errors.New("usage: vtsc-tile-transaction verify --root <artifact-root> --tile-set-id <id> | activate --root <osm-root> --params-dir <params-data-dir> --stage <artifact-root> --tile-set-id <id> [--inject-failure <point>] | rollback --root <osm-root> --params-dir <params-data-dir> [--expected-tile-set-id <id>] [--expected-previous-tile-set-id <id>] [--inject-failure <point>]")
+	return errors.New("usage: vtsc-tile-transaction verify --root <artifact-root> --tile-set-id <id> | activate --root <osm-root> --params-dir <params-data-dir> --stage <artifact-root> --tile-set-id <id> [--inject-failure <point>] | rollback --root <osm-root> --params-dir <params-data-dir> --repo-root <checkout> --expected-git-branch <branch> --expected-git-head <head> [--expected-tile-set-id <id>] [--expected-previous-tile-set-id <id>] [--inject-failure <point>]")
+}
+
+func currentGitIdentity(repoRoot string) (string, string, error) {
+	branchOutput, err := exec.Command("git", "-C", repoRoot, "branch", "--show-current").Output()
+	if err != nil {
+		return "", "", fmt.Errorf("read rollback Git branch: %w", err)
+	}
+	headOutput, err := exec.Command("git", "-C", repoRoot, "rev-parse", "HEAD").Output()
+	if err != nil {
+		return "", "", fmt.Errorf("read rollback Git HEAD: %w", err)
+	}
+	return strings.TrimSpace(string(branchOutput)), strings.TrimSpace(string(headOutput)), nil
+}
+
+func isSafeGitHead(value string) bool {
+	if len(value) != 40 {
+		return false
+	}
+	for _, character := range value {
+		if !((character >= '0' && character <= '9') || (character >= 'a' && character <= 'f')) {
+			return false
+		}
+	}
+	return true
+}
+
+func isSafeGitBranch(value string) bool {
+	if value == "" || strings.HasPrefix(value, "/") || strings.Contains(value, "..") {
+		return false
+	}
+	for _, character := range value {
+		if !((character >= 'a' && character <= 'z') ||
+			(character >= 'A' && character <= 'Z') ||
+			(character >= '0' && character <= '9') ||
+			strings.ContainsRune("._/-", character)) {
+			return false
+		}
+	}
+	return true
 }
 
 func encodeResult(output io.Writer, result transactionResult) error {
@@ -257,8 +320,8 @@ func (e *transactionEngine) withExclusiveTransactionLock(
 
 func (e *transactionEngine) requireExactParkedState() error {
 	required := map[string]string{
-		"IsOffroad": "1",
-		"IsOnroad": "0",
+		"IsOffroad":            "1",
+		"IsOnroad":             "0",
 		"MTSCLookaheadEnabled": "0",
 	}
 	for key, expected := range required {
@@ -1161,6 +1224,21 @@ func (e *transactionEngine) activateLocked(stage, tileSetID, injectedFailure str
 
 func (e *transactionEngine) rollback(expectedTileSetID, expectedPreviousTileSetID, injectedFailure string) (transactionResult, error) {
 	return e.withExclusiveTransactionLock(func() (transactionResult, error) {
+		return e.rollbackLocked(expectedTileSetID, expectedPreviousTileSetID, injectedFailure)
+	})
+}
+
+func (e *transactionEngine) rollbackBound(
+	expectedTileSetID, expectedPreviousTileSetID, repoRoot, expectedBranch, expectedHead, injectedFailure string,
+) (transactionResult, error) {
+	return e.withExclusiveTransactionLock(func() (transactionResult, error) {
+		branch, head, err := e.gitIdentity(repoRoot)
+		if err != nil {
+			return transactionResult{}, err
+		}
+		if branch != expectedBranch || head != expectedHead {
+			return transactionResult{}, fmt.Errorf("rollback Git identity changed before tile mutation")
+		}
 		return e.rollbackLocked(expectedTileSetID, expectedPreviousTileSetID, injectedFailure)
 	})
 }

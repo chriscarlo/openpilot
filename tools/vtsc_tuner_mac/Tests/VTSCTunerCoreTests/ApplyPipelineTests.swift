@@ -120,14 +120,15 @@ import Testing
   #expect(completed.deploymentID == fixture.journal.deploymentID)
   #expect(completed.completedAt != nil)
   #expect(completed.completedToolingHead == fixture.toolingHead)
-  #expect(completed.completionHostOnlyPaths == fixture.changedPaths.sorted())
+  #expect(completed.completedDeviceHead == fixture.deployedTargetHead)
+  #expect(completed.completionHostOnlyPaths == [])
 
   let requests = await runner.requests
   #expect(requests.contains {
     $0.executableURL == ApplyPipeline.gitURL &&
       $0.arguments == ["merge-base", "--is-ancestor", fixture.deployedTargetHead, fixture.toolingHead]
   })
-  #expect(requests.contains {
+  #expect(!requests.contains {
     $0.executableURL == ApplyPipeline.gitURL &&
       $0.arguments.contains("\(fixture.deployedTargetHead)..\(fixture.toolingHead)")
   })
@@ -182,11 +183,13 @@ import Testing
   #expect(try DeploymentRollbackJournal.load(from: fixture.journalURL) == fixture.journal)
 }
 
-@Test func legacyAwaitingPostflightWithoutBootIdentityRemainsResumable() async throws {
+@Test func legacyB174ShapeAtCompletionCompatibleSuccessorRemainsResumable() async throws {
   var fixture = try resumePostflightFixture(validGPS: true)
   defer { try? FileManager.default.removeItem(at: fixture.root) }
+  let compatibleSuccessor = String(repeating: "c", count: 40)
   fixture.journal.resolution = nil
   fixture.journal.deploymentPreRebootBootID = nil
+  fixture.runtimeHead = compatibleSuccessor
   try fixture.journal.write(to: fixture.journalURL)
   let succeeded = await ApplyPipeline(processRunner: ResumePostflightRunner(fixture: fixture))
     .resumePendingPostflight(
@@ -200,7 +203,32 @@ import Testing
       )
     ) { _ in }
   #expect(succeeded)
-  #expect(try DeploymentRollbackJournal.load(from: fixture.journalURL).effectiveResolution == .completed)
+  let completed = try DeploymentRollbackJournal.load(from: fixture.journalURL)
+  #expect(completed.effectiveResolution == .completed)
+  #expect(completed.completedDeviceHead == compatibleSuccessor)
+  #expect(completed.completionHostOnlyPaths == fixture.changedPaths.sorted())
+}
+
+@Test func explicitAwaitingPostflightWithoutBootIdentityIsNotLegacy() async throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  fixture.journal.resolution = .awaitingPostflight
+  fixture.journal.deploymentPreRebootBootID = nil
+  try fixture.journal.write(to: fixture.journalURL)
+  let runner = ResumePostflightRunner(fixture: fixture)
+  let succeeded = await ApplyPipeline(processRunner: runner).resumePendingPostflight(
+    ResumePostflightRequest(
+      tune: fixture.tune,
+      repositoryRoot: fixture.repository,
+      mapdReleaseManifestURL: fixture.releaseURL,
+      journalURL: fixture.journalURL,
+      timeout: 1,
+      pollInterval: 0.001
+    )
+  ) { _ in }
+  #expect(!succeeded)
+  #expect(await runner.runtimeReadCount == 1)
+  #expect(try DeploymentRollbackJournal.load(from: fixture.journalURL) == fixture.journal)
 }
 
 @Test func awaitingOutdoorPostflightWithoutBootIdentityIsNotTreatedAsLegacy() async throws {
@@ -327,6 +355,7 @@ func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByR
   var fixture = try resumePostflightFixture(validGPS: true)
   defer { try? FileManager.default.removeItem(at: fixture.root) }
   fixture.firstRuntimeHead = String(repeating: "e", count: 40)
+  fixture.changedPaths = ["selfdrive/controls/lib/longitudinal_planner.py"]
   let runner = ResumePostflightRunner(fixture: fixture)
   let before = try Data(contentsOf: fixture.journalURL)
 
@@ -890,7 +919,7 @@ func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByR
   )
   do {
     _ = try await ApplyPipeline(processRunner: runner).waitForRollbackVerification(
-      context: ProductionRollbackContext(journal: fixture.journal, journalURL: fixture.journalURL),
+      context: ProductionRollbackContext(repositoryRoot: fixture.repository, journal: fixture.journal, journalURL: fixture.journalURL),
       tilesWereTouched: false,
       timeout: 1,
       pollInterval: 0.001
@@ -910,7 +939,7 @@ func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByR
     runtimeTransportFailures: 1
   )
   _ = try await ApplyPipeline(processRunner: runner).waitForRollbackVerification(
-    context: ProductionRollbackContext(journal: fixture.journal, journalURL: fixture.journalURL),
+    context: ProductionRollbackContext(repositoryRoot: fixture.repository, journal: fixture.journal, journalURL: fixture.journalURL),
     tilesWereTouched: false,
     timeout: 1,
     pollInterval: 0.001
@@ -928,7 +957,7 @@ func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByR
     runtimeProcessReady: [false, true]
   )
   _ = try await ApplyPipeline(processRunner: runner).waitForRollbackVerification(
-    context: ProductionRollbackContext(journal: fixture.journal, journalURL: fixture.journalURL),
+    context: ProductionRollbackContext(repositoryRoot: fixture.repository, journal: fixture.journal, journalURL: fixture.journalURL),
     tilesWereTouched: false,
     timeout: 1,
     pollInterval: 0.001
@@ -1055,7 +1084,7 @@ func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByR
     runtimeBuildEvidenceAvailable: false
   )
   _ = try await ApplyPipeline(processRunner: runner).waitForRollbackVerification(
-    context: ProductionRollbackContext(journal: fixture.journal, journalURL: fixture.journalURL),
+    context: ProductionRollbackContext(repositoryRoot: fixture.repository, journal: fixture.journal, journalURL: fixture.journalURL),
     tilesWereTouched: false,
     timeout: 1,
     pollInterval: 0.001
@@ -1076,7 +1105,7 @@ func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByR
   )
   do {
     _ = try await ApplyPipeline(processRunner: noOpRunner).waitForRollbackVerification(
-      context: ProductionRollbackContext(journal: fixture.journal, journalURL: fixture.journalURL),
+      context: ProductionRollbackContext(repositoryRoot: fixture.repository, journal: fixture.journal, journalURL: fixture.journalURL),
       tilesWereTouched: false,
       timeout: 0.004,
       pollInterval: 0.001
@@ -1107,6 +1136,7 @@ func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByR
   await #expect(throws: ApplyPipelineError.self) {
     _ = try await ApplyPipeline(processRunner: runner).waitForStaticInstalledIdentity(
       preflight: RuntimeDeploymentPreflight(
+        repositoryRoot: fixture.repository,
         git: GitDeploymentPreflight(
           branch: fixture.journal.branch,
           localHead: fixture.toolingHead,
@@ -1144,7 +1174,7 @@ func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByR
   )
   do {
     _ = try await ApplyPipeline(processRunner: runner).waitForRollbackVerification(
-      context: ProductionRollbackContext(journal: fixture.journal, journalURL: fixture.journalURL),
+      context: ProductionRollbackContext(repositoryRoot: fixture.repository, journal: fixture.journal, journalURL: fixture.journalURL),
       tilesWereTouched: false,
       timeout: 1,
       pollInterval: 0.001
@@ -1165,7 +1195,7 @@ func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByR
     )
     do {
       _ = try await ApplyPipeline(processRunner: runner).waitForRollbackVerification(
-        context: ProductionRollbackContext(journal: fixture.journal, journalURL: fixture.journalURL),
+        context: ProductionRollbackContext(repositoryRoot: fixture.repository, journal: fixture.journal, journalURL: fixture.journalURL),
         tilesWereTouched: false,
         timeout: 1,
         pollInterval: 0.001
@@ -1261,7 +1291,7 @@ func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByR
   let finalBoot = "44444444-4444-4444-8444-444444444444"
   let runner = FreshProcessRollbackRecoveryRunner(
     journal: fixture.journal,
-    runtimeBootIDs: [watchdogBoot, watchdogBoot, watchdogBoot, finalBoot]
+    runtimeBootIDs: [watchdogBoot, watchdogBoot, watchdogBoot, watchdogBoot, finalBoot]
   )
 
   let result = await ApplyPipeline(
@@ -1296,7 +1326,7 @@ func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByR
   let finalBoot = "66666666-6666-4666-8666-666666666666"
   let runner = FreshProcessRollbackRecoveryRunner(
     journal: fixture.journal,
-    runtimeBootIDs: [rollbackBoot, rollbackBoot, rollbackBoot, finalBoot]
+    runtimeBootIDs: [rollbackBoot, rollbackBoot, rollbackBoot, rollbackBoot, finalBoot]
   )
 
   let result = await ApplyPipeline(
@@ -1361,6 +1391,197 @@ func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByR
   #expect((await runner.requests).contains {
     $0.arguments.last?.contains(TiciProductionRollbackCommandBuilder.resultMarker) == true
   })
+}
+
+@Test func abortRejectsReleasedTunerPeerBeforeRollbackMutation() async throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  fixture.journal.resolution = .awaitingOutdoorPostflight
+  try fixture.journal.write(to: fixture.journalURL)
+  let runner = FreshProcessRollbackRecoveryRunner(
+    journal: fixture.journal,
+    peerTunerPresent: true
+  )
+
+  let succeeded = await ApplyPipeline(processRunner: runner).abortPendingDeployment(
+    AbortPendingDeploymentRequest(repositoryRoot: fixture.repository, journalURL: fixture.journalURL)
+  ) { _ in }
+
+  #expect(!succeeded)
+  #expect(try DeploymentRollbackJournal.load(from: fixture.journalURL) == fixture.journal)
+  let requests = await runner.requests
+  #expect(!requests.contains { $0.arguments.last?.contains(TiciProductionRollbackCommandBuilder.resultMarker) == true })
+  #expect(!requests.contains { $0.arguments.last?.contains("rollback --root") == true })
+  #expect(!requests.contains { $0.arguments.last?.contains("sudo reboot") == true })
+}
+
+@Test func abortRejectsForeignUnresolvedJournalBeforeRollbackMutation() async throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  fixture.journal.resolution = .awaitingOutdoorPostflight
+  try fixture.journal.write(to: fixture.journalURL)
+  var foreign = fixture.journal
+  foreign.deploymentID = UUID()
+  foreign.createdAt = Date().addingTimeInterval(1).ISO8601Format()
+  let foreignURL = fixture.journalURL.deletingLastPathComponent()
+    .appendingPathComponent("\(foreign.deploymentID.uuidString).json")
+  try foreign.write(to: foreignURL)
+  let runner = FreshProcessRollbackRecoveryRunner(journal: fixture.journal)
+
+  let succeeded = await ApplyPipeline(processRunner: runner).abortPendingDeployment(
+    AbortPendingDeploymentRequest(repositoryRoot: fixture.repository, journalURL: fixture.journalURL)
+  ) { _ in }
+
+  #expect(!succeeded)
+  #expect(try DeploymentRollbackJournal.load(from: fixture.journalURL) == fixture.journal)
+  let requests = await runner.requests
+  #expect(!requests.contains { $0.arguments.last?.contains(TiciProductionRollbackCommandBuilder.resultMarker) == true })
+  #expect(!requests.contains { $0.arguments.last?.contains("rollback --root") == true })
+}
+
+@Test func recoverRejectsReleasedTunerPeerBeforeRollbackMutation() async throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  fixture.journal.completed = true
+  fixture.journal.resolution = .rollbackInProgress
+  try fixture.journal.write(to: fixture.journalURL)
+  let runner = FreshProcessRollbackRecoveryRunner(
+    journal: fixture.journal,
+    peerTunerPresent: true
+  )
+
+  let succeeded = await ApplyPipeline(processRunner: runner).recoverPendingRollback(
+    RollbackRecoveryRequest(repositoryRoot: fixture.repository, journalURL: fixture.journalURL)
+  ) { _ in }
+
+  #expect(!succeeded)
+  #expect(try DeploymentRollbackJournal.load(from: fixture.journalURL) == fixture.journal)
+  let requests = await runner.requests
+  #expect(!requests.contains { $0.arguments.last?.contains(TiciProductionRollbackCommandBuilder.resultMarker) == true })
+  #expect(!requests.contains { $0.arguments.last?.contains("rollback --root") == true })
+}
+
+@Test func recoverRejectsForeignUnresolvedJournalBeforeRollbackMutation() async throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  fixture.journal.completed = true
+  fixture.journal.resolution = .rollbackInProgress
+  try fixture.journal.write(to: fixture.journalURL)
+  var foreign = fixture.journal
+  foreign.deploymentID = UUID()
+  foreign.createdAt = Date().addingTimeInterval(1).ISO8601Format()
+  let foreignURL = fixture.journalURL.deletingLastPathComponent()
+    .appendingPathComponent("\(foreign.deploymentID.uuidString).json")
+  try foreign.write(to: foreignURL)
+  let runner = FreshProcessRollbackRecoveryRunner(journal: fixture.journal)
+
+  let succeeded = await ApplyPipeline(processRunner: runner).recoverPendingRollback(
+    RollbackRecoveryRequest(repositoryRoot: fixture.repository, journalURL: fixture.journalURL)
+  ) { _ in }
+
+  #expect(!succeeded)
+  #expect(try DeploymentRollbackJournal.load(from: fixture.journalURL) == fixture.journal)
+  let requests = await runner.requests
+  #expect(!requests.contains { $0.arguments.last?.contains(TiciProductionRollbackCommandBuilder.resultMarker) == true })
+  #expect(!requests.contains { $0.arguments.last?.contains("rollback --root") == true })
+}
+
+@Test func abortAllowsB174AtHostProvenCompletionCompatibleSuccessor() async throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  let compatibleSuccessor = String(repeating: "c", count: 40)
+  let toolingHead = String(repeating: "d", count: 40)
+  fixture.journal.resolution = nil
+  fixture.journal.deploymentPreRebootBootID = nil
+  fixture.journal.previousCachedMapdPath = ""
+  fixture.journal.previousCachedMapdSHA256 = nil
+  try fixture.journal.write(to: fixture.journalURL)
+  let runner = FreshProcessRollbackRecoveryRunner(
+    journal: fixture.journal,
+    runtimeHeads: Array(repeating: compatibleSuccessor, count: 4),
+    hostToolingHead: toolingHead,
+    gitChangedPaths: [
+      ".codex/skills/vtsc-tuner-app/references/changelog.md",
+      "tools/vtsc_tuner_mac/Sources/VTSCTunerCore/ApplyPipeline.swift",
+    ]
+  )
+
+  let succeeded = await ApplyPipeline(
+    processRunner: runner,
+    rebootInitialDelayNanoseconds: 0,
+    rebootPollDelayNanoseconds: 1
+  ).abortPendingDeployment(
+    AbortPendingDeploymentRequest(repositoryRoot: fixture.repository, journalURL: fixture.journalURL)
+  ) { _ in }
+
+  #expect(succeeded)
+  #expect(try DeploymentRollbackJournal.load(from: fixture.journalURL).effectiveResolution == .rolledBack)
+  let requests = await runner.requests
+  #expect(requests.contains {
+    $0.arguments == ["merge-base", "--is-ancestor", fixture.deployedTargetHead, compatibleSuccessor]
+  })
+  #expect(requests.contains {
+    $0.arguments.last?.contains("expected_current_head='\(compatibleSuccessor)'") == true
+  })
+}
+
+@Test func abortRejectsProductionChangingSuccessorAndWrongHeadWithoutRemoteMutation() async throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  let productionSuccessor = String(repeating: "c", count: 40)
+  fixture.journal.resolution = .awaitingOutdoorPostflight
+  try fixture.journal.write(to: fixture.journalURL)
+  let runner = FreshProcessRollbackRecoveryRunner(
+    journal: fixture.journal,
+    runtimeHeads: [productionSuccessor],
+    hostToolingHead: String(repeating: "d", count: 40),
+    gitChangedPaths: ["selfdrive/controls/lib/longitudinal_lead_helpers.py"]
+  )
+
+  let succeeded = await ApplyPipeline(processRunner: runner).abortPendingDeployment(
+    AbortPendingDeploymentRequest(repositoryRoot: fixture.repository, journalURL: fixture.journalURL)
+  ) { _ in }
+
+  #expect(!succeeded)
+  #expect(try DeploymentRollbackJournal.load(from: fixture.journalURL) == fixture.journal)
+  let requests = await runner.requests
+  #expect(!requests.contains { $0.arguments.last?.contains(TiciProductionRollbackCommandBuilder.resultMarker) == true })
+  #expect(!requests.contains { $0.arguments.last?.contains("rollback --root") == true })
+  #expect(!requests.contains { $0.arguments.last?.contains("sudo reboot") == true })
+}
+
+@Test func tileRollbackFailureStopsGitParamsAndMapdRestoration() async throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  fixture.journal.completed = true
+  fixture.journal.resolution = .rollbackInProgress
+  fixture.journal.targetTileSetID = String(repeating: "f", count: 64)
+  fixture.journal.previousTileSetID = String(repeating: "e", count: 64)
+  try fixture.journal.write(to: fixture.journalURL)
+  let runner = FreshProcessRollbackRecoveryRunner(
+    journal: fixture.journal,
+    runtimeActiveTileSetID: fixture.journal.targetTileSetID,
+    tileRollbackFails: true
+  )
+
+  let result = await ApplyPipeline(
+    processRunner: runner,
+    rebootInitialDelayNanoseconds: 0,
+    rebootPollDelayNanoseconds: 1
+  ).rollbackProductionDeploymentIfJournalPending(
+    preflight: try resumeRuntimePreflight(fixture),
+    tilesActivated: true
+  )
+
+  guard case let .rollbackFailed(detail) = result else {
+    Issue.record("tile precondition failure did not retain rollback failure")
+    return
+  }
+  #expect(detail.contains("before Git/Params/mapd restoration"))
+  let requests = await runner.requests
+  #expect(requests.contains { $0.arguments.last?.contains("rollback --root") == true })
+  #expect(!requests.contains { $0.arguments.last?.contains(TiciProductionRollbackCommandBuilder.resultMarker) == true })
+  #expect(!requests.contains { $0.arguments.last?.contains("sudo reboot") == true })
 }
 
 @Test func abortRejectsWrongJournalSelectionBeforeAnyRemoteRequest() async throws {
@@ -1890,6 +2111,7 @@ func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByR
 @Test func resumePostflightFailsClosedForNonToolingFollowupAndRetainsJournal() async throws {
   var fixture = try resumePostflightFixture(validGPS: true)
   defer { try? FileManager.default.removeItem(at: fixture.root) }
+  fixture.runtimeHead = fixture.toolingHead
   fixture.changedPaths = ["selfdrive/controls/lib/longitudinal_planner.py"]
   let runner = ResumePostflightRunner(fixture: fixture)
 
@@ -1906,7 +2128,7 @@ func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByR
   #expect(!succeeded)
   #expect(try DeploymentRollbackJournal.load(from: fixture.journalURL) == fixture.journal)
   let requests = await runner.requests
-  #expect(!requests.contains { $0.executableURL == ApplyPipeline.sshURL })
+  #expect(requests.contains { $0.executableURL == ApplyPipeline.sshURL })
 }
 
 @Test func resumePostflightIndoorsRetainsJournalWithoutMutationOrReboot() async throws {
@@ -1938,10 +2160,11 @@ func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByR
   })
 }
 
-@Test func resumePostflightRejectsTiciAtHostToolingHeadWhenDeployedTargetDiffers() async throws {
+@Test func resumePostflightRejectsProductionChangingDeviceSuccessor() async throws {
   var fixture = try resumePostflightFixture(validGPS: true)
   defer { try? FileManager.default.removeItem(at: fixture.root) }
   fixture.runtimeHead = fixture.toolingHead
+  fixture.changedPaths = ["selfdrive/controls/lib/longitudinal_lead_helpers.py"]
   let runner = ResumePostflightRunner(fixture: fixture)
 
   let succeeded = await ApplyPipeline(processRunner: runner).resumePendingPostflight(
@@ -2707,6 +2930,11 @@ private actor FreshProcessRollbackRecoveryRunner: ProcessRunning {
   let runtimeProcessReady: [Bool]
   let runtimeBootIDs: [String?]
   let runtimeBuildEvidenceAvailable: Bool
+  let runtimeHeads: [String]
+  let hostToolingHead: String
+  let gitChangedPaths: [String]
+  let peerTunerPresent: Bool
+  let tileRollbackFails: Bool
   private(set) var requests: [ProcessRequest] = []
   private(set) var runtimeReadCount = 0
   private var rollbackMutationObserved = false
@@ -2721,7 +2949,12 @@ private actor FreshProcessRollbackRecoveryRunner: ProcessRunning {
     runtimeEndLookahead: Bool = false,
     runtimeProcessReady: [Bool] = [],
     runtimeBootIDs: [String?] = [],
-    runtimeBuildEvidenceAvailable: Bool = true
+    runtimeBuildEvidenceAvailable: Bool = true,
+    runtimeHeads: [String] = [],
+    hostToolingHead: String? = nil,
+    gitChangedPaths: [String] = [],
+    peerTunerPresent: Bool = false,
+    tileRollbackFails: Bool = false
   ) {
     self.journal = journal
     self.runtimeBranches = runtimeBranches
@@ -2732,11 +2965,44 @@ private actor FreshProcessRollbackRecoveryRunner: ProcessRunning {
     self.runtimeProcessReady = runtimeProcessReady
     self.runtimeBootIDs = runtimeBootIDs
     self.runtimeBuildEvidenceAvailable = runtimeBuildEvidenceAvailable
+    self.runtimeHeads = runtimeHeads
+    self.hostToolingHead = hostToolingHead ?? journal.targetHead ?? journal.previousHead
+    self.gitChangedPaths = gitChangedPaths
+    self.peerTunerPresent = peerTunerPresent
+    self.tileRollbackFails = tileRollbackFails
   }
 
   func run(_ request: ProcessRequest) async throws -> ProcessResult {
     requests.append(request)
     let command = request.arguments.last ?? ""
+    if request.executableURL == ApplyPipeline.processListURL {
+      let peer = peerTunerPresent
+        ? "99999 /Applications/VTSC Tuner.app/Contents/MacOS/VTSCTuner\n"
+        : ""
+      return success("\(ProcessInfo.processInfo.processIdentifier) /tmp/test-runner\n" + peer)
+    }
+    if request.executableURL == ApplyPipeline.gitURL {
+      switch request.arguments {
+      case ["branch", "--show-current"]:
+        return success(journal.branch + "\n")
+      case ["status", "--porcelain"]:
+        return success("")
+      case ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]:
+        return success("origin/\(journal.branch)\n")
+      case ["rev-parse", "HEAD"]:
+        return success(hostToolingHead + "\n")
+      case ["ls-remote", "--heads", "origin", "refs/heads/\(journal.branch)"]:
+        return success("\(hostToolingHead)\trefs/heads/\(journal.branch)\n")
+      default:
+        if request.arguments.starts(with: ["merge-base", "--is-ancestor"]) {
+          return success("")
+        }
+        if request.arguments.starts(with: ["diff", "--no-ext-diff", "--name-only", "-z"]) {
+          return success(gitChangedPaths.joined(separator: "\0") + (gitChangedPaths.isEmpty ? "" : "\0"))
+        }
+        return ProcessResult(terminationStatus: 1, standardOutput: "", standardError: "unexpected recovery Git request")
+      }
+    }
     if request.executableURL == ApplyPipeline.sshURL, command == "true" {
       return success("")
     }
@@ -2744,6 +3010,9 @@ private actor FreshProcessRollbackRecoveryRunner: ProcessRunning {
       return success("")
     }
     if command.contains("rollback --root") {
+      if tileRollbackFails {
+        return ProcessResult(terminationStatus: 1, standardOutput: "", standardError: "injected tile precondition failure")
+      }
       return success(String(decoding: try JSONSerialization.data(withJSONObject: [
         "operation": "rollback",
         "tile_activation_not_observed": true,
@@ -2783,7 +3052,9 @@ private actor FreshProcessRollbackRecoveryRunner: ProcessRunning {
       ? runtimeBranches[readIndex - 1] : journal.branch
     var fields: [TiciSnapshotWireField: Data] = [
       .branch: Data(branch.utf8),
-      .head: Data(journal.previousHead.utf8),
+      .head: Data((rollbackMutationObserved
+        ? journal.previousHead
+        : (runtimeHeads.indices.contains(readIndex - 1) ? runtimeHeads[readIndex - 1] : journal.previousHead)).utf8),
       .dirty: Data("0".utf8),
       .isOffroad: Data("1".utf8),
       .isOnroad: Data("0".utf8),
@@ -3153,6 +3424,7 @@ private func resumeRuntimePreflight(
   _ fixture: ResumePostflightFixture
 ) throws -> RuntimeDeploymentPreflight {
   RuntimeDeploymentPreflight(
+    repositoryRoot: fixture.repository,
     git: GitDeploymentPreflight(
       branch: fixture.journal.branch,
       localHead: fixture.toolingHead,
@@ -3193,6 +3465,9 @@ private actor ResumePostflightRunner: ProcessRunning {
       case ["merge-base", "--is-ancestor", fixture.deployedTargetHead, fixture.toolingHead]:
         return success("")
       default:
+        if request.arguments.starts(with: ["merge-base", "--is-ancestor"]) {
+          return success("")
+        }
         if request.arguments.starts(with: ["diff", "--no-ext-diff", "--name-only", "-z"]) {
           return success(fixture.changedPaths.joined(separator: "\0") + "\0")
         }

@@ -198,11 +198,16 @@ import Testing
     helperPath: helperPath,
     expectedActivatedTileSetID: tileSetID,
     expectedRestoredTileSetID: String(repeating: "e", count: 64),
+    expectedGitBranch: "chauffeur-exp01",
+    expectedGitHead: String(repeating: "a", count: 40),
     injectedFailurePoint: "after_switch"
   )
   #expect(rollback.contains(" rollback --root "))
   #expect(rollback.contains("--expected-tile-set-id '\(tileSetID)'"))
   #expect(rollback.contains("--expected-previous-tile-set-id '\(String(repeating: "e", count: 64))'"))
+  #expect(rollback.contains("--expected-git-branch \"$expected_git_branch\""))
+  #expect(rollback.contains("--expected-git-head \"$expected_git_head\""))
+  #expect(rollback.contains("git -C \"$repo\" rev-parse HEAD"))
   #expect(rollback.contains("--inject-failure 'after_switch'"))
   #expect(!rollback.lowercased().contains("python"))
 }
@@ -259,7 +264,10 @@ import Testing
   let parameterTransaction = try TiciParamTransactionCommandBuilder.synchronizeAndVerifyCommand(
     parameters: .checkoutFallback
   )
-  let rollback = try TiciProductionRollbackCommandBuilder.command(journal: journal)
+  let rollback = try TiciProductionRollbackCommandBuilder.command(
+    journal: journal,
+    expectedCurrentHead: head
+  )
   let reboot = TiciRebootCommandBuilder.command()
 
   let mutatingCommands = [fastForward, mapdRecovery, probe, install, parameterTransaction, rollback, reboot]
@@ -326,7 +334,9 @@ import Testing
   )
   let rollback = try TiciTileSetDeploymentService.atomicRollbackCommand(
     helperPath: helperPath,
-    expectedActivatedTileSetID: tileSetID
+    expectedActivatedTileSetID: tileSetID,
+    expectedGitBranch: "chauffeur-exp01",
+    expectedGitHead: String(repeating: "a", count: 40)
   )
   for command in [verify, activate, rollback] {
     #expect(command.contains(helperPath))
@@ -335,6 +345,7 @@ import Testing
   #expect(verify.contains(" verify --root "))
   #expect(activate.contains(" activate --root "))
   #expect(rollback.contains(" rollback --root "))
+  #expect(rollback.contains("--expected-git-head"))
 }
 
 @Test func tileRollbackAcceptsVerifiedOldGenerationAndRejectsActivationMismatch() async throws {
@@ -347,14 +358,24 @@ import Testing
     processRunner: TileRollbackRunner(output: #"{"operation":"rollback","rolled_back_tile_set_id":"old","tile_activation_not_observed":false}"#),
     transactionHelperURL: helper
   )
-  try await succeeded.rollback(profile: "commaAdb", expectedActivatedTileSetID: expectedTileSetID)
+  try await succeeded.rollback(
+    profile: "commaAdb",
+    expectedActivatedTileSetID: expectedTileSetID,
+    expectedGitBranch: "chauffeur-exp01",
+    expectedGitHead: String(repeating: "a", count: 40)
+  )
 
   let mismatch = TiciTileSetDeploymentService(
     processRunner: TileRollbackRunner(output: #"{"operation":"rollback","rolled_back_tile_set_id":"old","tile_activation_not_observed":true}"#),
     transactionHelperURL: helper
   )
   do {
-    try await mismatch.rollback(profile: "commaAdb", expectedActivatedTileSetID: expectedTileSetID)
+    try await mismatch.rollback(
+      profile: "commaAdb",
+      expectedActivatedTileSetID: expectedTileSetID,
+      expectedGitBranch: "chauffeur-exp01",
+      expectedGitHead: String(repeating: "a", count: 40)
+    )
     Issue.record("expected a tile activation mismatch to stop rollback verification")
   } catch let error as TiciTileSetDeploymentError {
     #expect(error == .activationIdentityMissing(expectedTileSetID))
@@ -372,7 +393,9 @@ import Testing
   try await exact.rollback(
     profile: "commaAdb",
     expectedActivatedTileSetID: expectedTileSetID,
-    expectedRestoredTileSetID: previousTileSetID
+    expectedRestoredTileSetID: previousTileSetID,
+    expectedGitBranch: "chauffeur-exp01",
+    expectedGitHead: String(repeating: "a", count: 40)
   )
   let wrongReturn = TiciTileSetDeploymentService(
     processRunner: TileRollbackRunner(output: #"{"operation":"rollback","rolled_back_tile_set_id":"wrong"}"#),
@@ -382,7 +405,9 @@ import Testing
     try await wrongReturn.rollback(
       profile: "commaAdb",
       expectedActivatedTileSetID: expectedTileSetID,
-      expectedRestoredTileSetID: previousTileSetID
+      expectedRestoredTileSetID: previousTileSetID,
+      expectedGitBranch: "chauffeur-exp01",
+      expectedGitHead: String(repeating: "a", count: 40)
     )
   }
   let replayed = TiciTileSetDeploymentService(
@@ -394,7 +419,9 @@ import Testing
   try await replayed.rollback(
     profile: "commaAdb",
     expectedActivatedTileSetID: expectedTileSetID,
-    expectedRestoredTileSetID: previousTileSetID
+    expectedRestoredTileSetID: previousTileSetID,
+    expectedGitBranch: "chauffeur-exp01",
+    expectedGitHead: String(repeating: "a", count: 40)
   )
 
   let unknown = TiciTileSetDeploymentService(
@@ -407,7 +434,9 @@ import Testing
     try await unknown.rollback(
       profile: "commaAdb",
       expectedActivatedTileSetID: expectedTileSetID,
-      expectedRestoredTileSetID: previousTileSetID
+      expectedRestoredTileSetID: previousTileSetID,
+      expectedGitBranch: "chauffeur-exp01",
+      expectedGitHead: String(repeating: "a", count: 40)
     )
   }
 }
@@ -504,7 +533,7 @@ import Testing
   #expect(!result.success)
   #expect(result.detail.contains("journal retained"))
   let requests = await runner.requests
-  #expect(requests.count == 1)
+  #expect(requests.count == 2)
   #expect(!requests.contains {
     $0.arguments.last?.contains(TiciProductionRollbackCommandBuilder.resultMarker) == true
   })
@@ -513,6 +542,7 @@ import Testing
 
 @Test func rollbackRechecksStateAndSuppressesRebootIfCarStateChanges() async throws {
   let runner = RollbackSafetyRunner(states: [
+    .init(isOffroad: true, isOnroad: false, mapLookaheadEnabled: false),
     .init(isOffroad: true, isOnroad: false, mapLookaheadEnabled: false),
     .init(isOffroad: false, isOnroad: true, mapLookaheadEnabled: false),
   ])
@@ -563,6 +593,7 @@ private func makeRollbackPreflight(rebootSent: Bool) -> RuntimeDeploymentPreflig
   // unrelated rollback scenarios do not contend on a shared /tmp lock.
   let journalDirectory = temporaryDirectory("rollback-journal-\(journal.deploymentID.uuidString)")
   return RuntimeDeploymentPreflight(
+    repositoryRoot: URL(fileURLWithPath: "/tmp/chauffeur"),
     git: GitDeploymentPreflight(
       branch: "chauffeur-exp01",
       localHead: String(repeating: "b", count: 40),

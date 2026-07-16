@@ -50,7 +50,10 @@ import Testing
   let physics = try TiciParamTransactionCommandBuilder.synchronizeAndVerifyCommand(parameters: .checkoutFallback)
   let reboot = TiciRebootCommandBuilder.command()
   let recovery = TiciMapdReleaseTransactionCommandBuilder.recoveryCommand()
-  let rollback = try TiciProductionRollbackCommandBuilder.command(journal: rollbackJournalForGateTest())
+  let rollback = try TiciProductionRollbackCommandBuilder.command(
+    journal: rollbackJournalForGateTest(),
+    expectedCurrentHead: head
+  )
   let tile = try TiciTileSetDeploymentService.atomicActivationCommand(
     helperPath: "/data/media/0/osm/binaries/vtsc-tile-transaction-\(String(repeating: "a", count: 16))",
     stagingRoot: TiciTileSetDeploymentService.stagingRoot(tileSetID: String(repeating: "b", count: 64)),

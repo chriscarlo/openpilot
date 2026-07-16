@@ -19,7 +19,11 @@ struct GitDeploymentPreflight: Equatable, Sendable {
 struct ResumePostflightGitIdentity: Equatable, Sendable {
   var deployedTargetHead: String
   var toolingHead: String
-  var hostOnlyPaths: [String]
+}
+
+struct CompletionCompatibleDeviceIdentity: Equatable, Sendable {
+  var deviceHead: String
+  var compatibilityPaths: [String]
 }
 
 struct TiciDeploymentSnapshot: Codable, Equatable, Sendable {
@@ -137,6 +141,7 @@ struct TiciDeploymentPostflight: Codable, Equatable, Sendable {
 }
 
 struct RuntimeDeploymentPreflight: Sendable {
+  var repositoryRoot: URL
   var git: GitDeploymentPreflight
   var profile: String
   var mapdRecoveryOutcome: TiciMapdReleaseRecoveryOutcome
@@ -151,17 +156,21 @@ struct RuntimeDeploymentPreflight: Sendable {
 }
 
 struct ProductionRollbackContext: Sendable {
+  var repositoryRoot: URL
   var profile: String
   var journal: DeploymentRollbackJournal
   var journalURL: URL
+  var expectedRollbackSourceHead: String? = nil
 
   init(preflight: RuntimeDeploymentPreflight) {
+    repositoryRoot = preflight.repositoryRoot
     profile = preflight.profile
     journal = preflight.journal
     journalURL = preflight.journalURL
   }
 
-  init(journal: DeploymentRollbackJournal, journalURL: URL) {
+  init(repositoryRoot: URL, journal: DeploymentRollbackJournal, journalURL: URL) {
+    self.repositoryRoot = repositoryRoot
     profile = journal.profile
     self.journal = journal
     self.journalURL = journalURL

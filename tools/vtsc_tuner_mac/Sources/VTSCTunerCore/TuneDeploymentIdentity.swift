@@ -118,6 +118,10 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
   public var completed: Bool
   public var completedAt: String?
   public var completedToolingHead: String?
+  /// Exact tici Git identity certified at completion. This may be the
+  /// immutable target or one explicitly host-proven completion-compatible
+  /// successor; it is never inferred from the host tooling HEAD.
+  public var completedDeviceHead: String?
   public var completionHostOnlyPaths: [String]?
   /// Added compatibly to schema 1. A legacy journal without this key resolves
   /// from `completed`, so B174 remains byte-for-byte awaiting postflight until
@@ -197,6 +201,7 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
     completed: Bool = false,
     completedAt: String? = nil,
     completedToolingHead: String? = nil,
+    completedDeviceHead: String? = nil,
     completionHostOnlyPaths: [String]? = nil,
     resolution: Resolution? = nil
   ) {
@@ -225,6 +230,7 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
     self.completed = completed
     self.completedAt = completedAt
     self.completedToolingHead = completedToolingHead
+    self.completedDeviceHead = completedDeviceHead
     self.completionHostOnlyPaths = completionHostOnlyPaths
     self.resolution = resolution
   }
