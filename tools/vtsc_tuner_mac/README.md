@@ -238,25 +238,31 @@ bank item rather than duplicating it. Numbered purple pins keep all selected
 curves identifiable on the map, and the scope button on a row recenters that
 saved sample after you pan elsewhere or relaunch the app.
 
-Calibration never fits the raw vertex circle. The app stitches the unique
-direction-feasible physical route across cached tile boundaries and reproduces mapd's current
-five-node weighted curvature, including mapd's 0.0015 merge/split clamp before
-averaging. Every saved row shows that effective curvature, its five-node route span,
-and target lateral acceleration; a materially larger raw vertex value remains
-visible only as a diagnostic. Schema-1/2 banks migrate to schema 3 by retaining
-IDs and requested speeds but re-resolving geometry before they may fit, and the
-stored estimator version forces re-audit whenever parity logic changes. Missing,
-direction-dependent, or fork-ambiguous route context excludes the unresolved
-row instead of silently choosing a branch or substituting raw curvature. The
-persisted 18-curve bank's peak requested acceleration changed from 9.60 m/s² on
-raw vertices to 5.38 m/s² on runtime-equivalent curvature; one 3→4-lane sample
-fell from an intermediate 4.69 to the correct 1.79 m/s² after transition parity.
+Calibration never fits the raw vertex circle or stops at the five-node diagnostic.
+Estimator v6 first stitches the unique direction-feasible physical route across
+cached tile boundaries, including mapd's 0.0015 merge/split correction, then runs
+the same `whole-curve-v2` estimator used by production mapd. The fitter receives
+the event's profile-apex curvature after its bounded local-detail coefficient,
+so a requested apex speed constrains the same curvature the deployed controller
+will consume. Every saved row retains raw and five-node provenance for audit and
+shows the whole event's support length and target lateral acceleration.
 
-Schema-v1 `MapPreCurveSpeeds` were baked from raw vertex curvature and therefore
-do not share the estimator used by live `MapCurvatures`. The Python controller
-keeps that legacy stream disabled until a versioned tile/runtime pair guarantees
-estimator alignment; the normal live sigmoid path continues to use mapd's
-smoothed curvature.
+Schema-1/2 banks migrate to schema 3 by retaining IDs and requested speeds but
+re-resolving geometry before they may fit, and the stored estimator version forces
+re-audit whenever parity logic changes. Missing, direction-dependent, boundary-
+ambiguous, or fork-ambiguous route context leaves the row visibly banked but
+ineligible instead of silently choosing a branch or substituting a weaker
+curvature estimate.
+
+Schema-v1 `MapPreCurveSpeeds` remain disabled because raw vertex curvature does
+not share the route estimator used by strategic VTSC. `whole-curve-v2` replaces
+that mismatched stream with a continuous route profile: each 5 m point keeps the
+event-wide curvature floor, adds a bounded local apex-detail coefficient, and
+carries a physics-only speed baked by mapd from the active sigmoid. The
+controller verifies the profile's sigmoid hash, caches the remaining Q/bias
+projection, and falls back to live conversion if the tune changes. This is a
+route bake rather than a static tile bake, so the first road test still uses
+**Apply + deploy runtime (keep current tiles)**.
 
 The fitter targets the complete exported runtime curve: a bounded four-knob
 sigmoid backbone followed by a canonical, bounded Q=4 residual curve. It refits

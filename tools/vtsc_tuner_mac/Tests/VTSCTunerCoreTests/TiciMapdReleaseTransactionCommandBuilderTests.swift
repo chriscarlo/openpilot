@@ -213,7 +213,7 @@ private func makeValidatedMapdReleaseFixture() throws -> (
   for marker in [
     "MapdReleaseID:release-v1",
     "MapdBuildID:build-v1",
-    "MapWholeCurveProfile:whole-curve-v1",
+    "MapWholeCurveProfile:whole-curve-v2",
   ] {
     bytes.append(Data(marker.utf8))
     bytes.append(0)

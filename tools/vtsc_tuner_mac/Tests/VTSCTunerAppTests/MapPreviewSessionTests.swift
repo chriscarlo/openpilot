@@ -654,7 +654,7 @@ private func connectedWay(
   let original = try #require(session.calibrationSamples.first)
   #expect(session.calibrationSamples.count == 1)
   #expect(original.desiredSpeedMPH == 42)
-  #expect(original.hasCurrentCurvatureEstimate)
+  #expect(!original.hasCurrentCurvatureEstimate)
   #expect(original.rawCurvature == selection.node.rawCurvature)
   #expect(session.selectionIsQueued)
   #expect(session.selectionQueuedNumber == 1)
@@ -678,11 +678,11 @@ private func connectedWay(
   session.select(curveSelection(id: "ambiguous"))
   session.setDraftDesiredSpeedMPH(50)
   session.queueSelectedCurve()
-  #expect(session.calibrationSamples.allSatisfy { $0.hasCurrentCurvatureEstimate })
+  #expect(session.calibrationSamples.allSatisfy { !$0.hasCurrentCurvatureEstimate })
 
   // A partial viewport is not authoritative for offscreen samples.
   #expect(session.reconcileCalibrationCurvatures(using: []) == 0)
-  #expect(session.calibrationSamples.allSatisfy { $0.hasCurrentCurvatureEstimate })
+  #expect(session.calibrationSamples.allSatisfy { !$0.hasCurrentCurvatureEstimate })
 
   var ambiguousWay = renderedWay(id: "ambiguous")
   ambiguousWay.nodes[1].curvatureContextComplete = false
@@ -692,9 +692,9 @@ private func connectedWay(
   )
 
   #expect(changed == 2)
-  #expect(session.calibrationSamples.allSatisfy { !$0.hasCurrentCurvatureEstimate })
-  #expect(session.calibrationSamples.allSatisfy { $0.curvatureContextComplete == false })
-  #expect(session.calibrationSamples.allSatisfy { $0.curvatureSupportMeters == 0 })
+  #expect(session.calibrationSamples.map(\.hasCurrentCurvatureEstimate) == [false, false])
+  #expect(session.calibrationSamples.map(\.curvatureContextComplete) == [false, false])
+  #expect(session.calibrationSamples.map { $0.curvatureSupportMeters ?? -1 } == [0, 0])
 }
 
 @MainActor
@@ -765,6 +765,10 @@ private func connectedWay(
     session.select(curveSelection(id: "fit-\(index)", curvature: 0.001 + 0.001 * Double(index)))
     session.setDraftDesiredSpeedMPH(Double(28 + index * 3))
     session.queueSelectedCurve()
+    let sampleIndex = session.calibrationSamples.count - 1
+    session.calibrationSamples[sampleIndex].curvatureEstimatorVersion = MapRuntimeCurvatureResolver.estimatorVersion
+    session.calibrationSamples[sampleIndex].curvatureContextComplete = true
+    session.calibrationSamples[sampleIndex].curvatureSupportMeters = 100
     #expect(session.calibrationSamples.count == index)
     #expect(session.canRunFit == (index >= MapPreviewSession.minimumCalibrationSamples))
   }
@@ -799,6 +803,10 @@ private func connectedWay(
     session.select(curveSelection(id: "proposal-\(index)", curvature: 0.001 + 0.0007 * Double(index)))
     session.setDraftDesiredSpeedMPH(Double(30 + index * 2))
     session.queueSelectedCurve()
+    let sampleIndex = session.calibrationSamples.count - 1
+    session.calibrationSamples[sampleIndex].curvatureEstimatorVersion = MapRuntimeCurvatureResolver.estimatorVersion
+    session.calibrationSamples[sampleIndex].curvatureContextComplete = true
+    session.calibrationSamples[sampleIndex].curvatureSupportMeters = 100
   }
   let lastSample = try #require(session.calibrationSamples.last)
 

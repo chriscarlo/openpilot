@@ -20,8 +20,10 @@ EVENT_ID = "0123456789abcdefabcd-a"
 
 
 def _profile_payload(*, now_s: float | None = None, count: int = 40,
-                     curvature: float = -0.02, generation: int = 7) -> dict:
+                     curvature: float = -0.02, generation: int = 7,
+                     sigmoid_hash: str | None = None) -> dict:
   now_s = 1_800_000_000.0 if now_s is None else float(now_s)
+  sigmoid_hash = vtc_mod._compute_runtime_sigmoid_hash() if sigmoid_hash is None else sigmoid_hash
   step_deg = math.degrees(5.0 / EARTH_R_M)
   points = []
   typed_points = []
@@ -35,6 +37,8 @@ def _profile_payload(*, now_s: float | None = None, count: int = 40,
       "longitude": -122.0,
       "distanceMeters": 5.0 * index,
       "curvature": kappa,
+      "curvatureCoefficient": 1.5 if event_id else 1.0,
+      "baseSafeSpeedMPS": 12.5 if event_id else vtc_mod.MAX_SPEED_DEFAULT,
       "eventID": event_id,
       "confidence": 0.9 if event_id else 1.0,
       "flags": [],
@@ -42,12 +46,14 @@ def _profile_payload(*, now_s: float | None = None, count: int = 40,
     points.append(point)
     typed_points.append(MapWholeCurvePoint(
       point["latitude"], point["longitude"], point["distanceMeters"],
-      point["curvature"], point["eventID"], point["confidence"], (),
+      point["curvature"], point["curvatureCoefficient"], point["baseSafeSpeedMPS"],
+      point["eventID"], point["confidence"], (),
     ))
   return {
     "estimatorVersion": MAP_WHOLE_CURVE_ESTIMATOR_VERSION,
     "generatedAtUnixMillis": now_s * 1000.0,
-    "routeFingerprint": _compute_map_whole_curve_route_fingerprint(generation, typed_points),
+    "routeFingerprint": _compute_map_whole_curve_route_fingerprint(generation, sigmoid_hash, typed_points),
+    "sigmoidHash": sigmoid_hash,
     "generation": generation,
     "points": points,
     "events": [{
@@ -73,20 +79,20 @@ def _parse(payload: dict, *, now_s: float):
 
 def test_whole_curve_fingerprint_cross_language_vector():
   points = [
-    MapWholeCurvePoint(37.0, -122.0, 0.0, 0.0, ""),
-    MapWholeCurvePoint(37.000045, -122.0, 5.0, -0.0123456785, "0123456789abcdefabcd-a"),
-    MapWholeCurvePoint(37.000090, -122.0, 10.0, 0.0123456785, "0123456789abcdefabcd-b"),
+    MapWholeCurvePoint(37.0, -122.0, 0.0, 0.0, 1.0, 70.0, ""),
+    MapWholeCurvePoint(37.000045, -122.0, 5.0, -0.0123456785, 1.25, 11.25, "0123456789abcdefabcd-a"),
+    MapWholeCurvePoint(37.000090, -122.0, 10.0, 0.0123456785, 1.5, 10.5, "0123456789abcdefabcd-b"),
   ]
-  assert _compute_map_whole_curve_route_fingerprint(7, points) == \
-    "7a47531720b4846e1ee3094443068a42ac936554efc42b27b07796a3103b2624"
+  assert _compute_map_whole_curve_route_fingerprint(7, "85a608e68945", points) == \
+    "abf0365f8c349a7eeb7d9cb99a56b134c9a0b88b0c90db7f9ccf231132f5eebd"
 
 
 def test_source_defaults_match_persisted_whole_curve_production_tune():
-  assert vtc_mod.PHYSICS_A == pytest.approx(-1.658965, abs=1e-9)
-  assert vtc_mod.PHYSICS_B == pytest.approx(-1395.055546, abs=1e-9)
-  assert vtc_mod.PHYSICS_C == pytest.approx(0.005397, abs=1e-12)
+  assert vtc_mod.PHYSICS_A == pytest.approx(-2.548675, abs=1e-9)
+  assert vtc_mod.PHYSICS_B == pytest.approx(-1024.629261, abs=1e-9)
+  assert vtc_mod.PHYSICS_C == pytest.approx(0.006053, abs=1e-12)
   assert vtc_mod.PHYSICS_D == pytest.approx(4.107103, abs=1e-9)
-  assert vtc_mod.PHYSICS_MIN_LAT_ACCEL == pytest.approx(2.4481, abs=1e-9)
+  assert vtc_mod.PHYSICS_MIN_LAT_ACCEL == pytest.approx(1.5584, abs=1e-9)
   assert vtc_mod.PHYSICS_MAX_LAT_ACCEL == pytest.approx(4.1071, abs=1e-9)
   assert vtc_mod.MAP_PRECURVE_SPEEDS_ESTIMATOR_ALIGNED is False
 
@@ -137,9 +143,9 @@ def test_unchanged_whole_curve_payload_parses_and_fingerprints_once(monkeypatch)
     parse_calls.append(raw_json)
     return original_parse(raw_json, gps_pose, now_s=now_s)
 
-  def counting_fingerprint(generation, points):
-    fingerprint_calls.append((generation, len(points)))
-    return original_fingerprint(generation, points)
+  def counting_fingerprint(generation, sigmoid_hash, points):
+    fingerprint_calls.append((generation, sigmoid_hash, len(points)))
+    return original_fingerprint(generation, sigmoid_hash, points)
 
   monkeypatch.setattr(vtc_mod.time, "time", lambda: now_s)
   monkeypatch.setattr(vtsc, "_parse_map_whole_curve_profile", counting_parse, raising=True)
@@ -151,7 +157,7 @@ def test_unchanged_whole_curve_payload_parses_and_fingerprints_once(monkeypatch)
   assert first is not None
   assert all(profile is first for profile in repeated)
   assert len(parse_calls) == 1
-  assert fingerprint_calls == [(7, 260)]
+  assert fingerprint_calls == [(7, vtc_mod._compute_runtime_sigmoid_hash(), 260)]
 
 
 def test_whole_curve_cache_invalidates_on_raw_or_timestamp_change_and_rechecks_freshness(monkeypatch):
@@ -195,9 +201,12 @@ def test_whole_curve_cache_invalidates_on_raw_or_timestamp_change_and_rechecks_f
 @pytest.mark.parametrize("mutation, expected", [
   (lambda payload: payload.update(estimatorVersion="whole-curve-v0"), "version_mismatch"),
   (lambda payload: payload.update(generatedAtUnixMillis=1.0), "stale"),
+  (lambda payload: payload.pop("sigmoidHash"), "invalid_sigmoid_hash"),
   (lambda payload: payload.update(fatalAmbiguity=True), "fatal_ambiguity"),
   (lambda payload: payload.update(routeFingerprint="0" * 64), "fingerprint_mismatch"),
   (lambda payload: payload["points"][5].update(curvature=float("nan")), "not_finite"),
+  (lambda payload: payload["points"][5].update(curvatureCoefficient=0.9), "curvature_coefficient_range"),
+  (lambda payload: payload["points"][5].update(baseSafeSpeedMPS=vtc_mod.MAX_SPEED_DEFAULT + 1.0), "base_safe_speed_range"),
   (lambda payload: payload["points"][5].update(distanceMeters=payload["points"][4]["distanceMeters"]), "nonmonotonic"),
   (lambda payload: payload["points"][5].update(latitude=payload["points"][5]["latitude"] + 0.001), "distance_mismatch"),
 ])
@@ -290,6 +299,64 @@ def test_whole_curve_path_uses_runtime_sigmoid_q_without_learned_calibration(mon
   expected = curvature_to_speed(kappa, low_speed_sigmoid_scale=1.0)
   assert vtsc._whole_curve_speed(-kappa) == pytest.approx(expected)
   assert vtsc._whole_curve_speed(-kappa) != pytest.approx(vtsc._curve_speed(kappa))
+
+
+def test_whole_curve_matching_hash_consumes_route_baked_physics_speed(monkeypatch):
+  now_s = 1_800_000_000.0
+  payload = _profile_payload(now_s=now_s, count=80)
+  vtsc = mk_vtsc_with_params(value_overrides={"MapWholeCurveProfile": json.dumps(payload)})
+  vtsc._v_ego = 20.0
+  vtsc._v_cruise_setpoint = 30.0
+  baked_calls = []
+  monkeypatch.setattr(vtc_mod.time, "time", lambda: now_s)
+  monkeypatch.setattr(vtsc, "_get_last_gps_pose", lambda: (37.0, -122.0, 0.0), raising=True)
+  monkeypatch.setattr(
+    vtsc,
+    "_baked_vsafe_with_runtime_multipliers",
+    lambda speed, kappa: baked_calls.append((speed, kappa)) or float(speed),
+    raising=True,
+  )
+  monkeypatch.setattr(
+    vtsc,
+    "_whole_curve_speed",
+    lambda _kappa: pytest.fail("matching v2 hash should not run the live sigmoid"),
+    raising=True,
+  )
+
+  vtsc._map_tail_cap()
+
+  assert baked_calls
+  assert any(speed == pytest.approx(12.5) for speed, _kappa in baked_calls)
+  first_call_count = len(baked_calls)
+  vtsc._map_tail_cap()
+  assert len(baked_calls) == first_call_count
+
+
+def test_whole_curve_hash_mismatch_falls_back_to_live_sigmoid(monkeypatch):
+  now_s = 1_800_000_000.0
+  payload = _profile_payload(now_s=now_s, count=80, sigmoid_hash="000000000000")
+  vtsc = mk_vtsc_with_params(value_overrides={"MapWholeCurveProfile": json.dumps(payload)})
+  vtsc._v_ego = 20.0
+  vtsc._v_cruise_setpoint = 30.0
+  live_calls = []
+  monkeypatch.setattr(vtc_mod.time, "time", lambda: now_s)
+  monkeypatch.setattr(vtsc, "_get_last_gps_pose", lambda: (37.0, -122.0, 0.0), raising=True)
+  monkeypatch.setattr(
+    vtsc,
+    "_whole_curve_speed",
+    lambda kappa: live_calls.append(kappa) or 14.0,
+    raising=True,
+  )
+  monkeypatch.setattr(
+    vtsc,
+    "_baked_vsafe_with_runtime_multipliers",
+    lambda _speed, _kappa: pytest.fail("mismatched v2 hash must not consume baked speed"),
+    raising=True,
+  )
+
+  vtsc._map_tail_cap()
+
+  assert live_calls
 
 
 def test_map_lookahead_falling_edge_clears_map_cap_on_first_disabled_tick(monkeypatch):

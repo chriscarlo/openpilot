@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"math"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"capnproto.org/go/capnp/v3"
@@ -18,20 +20,20 @@ var sigmoidPythonReference = []struct {
 	latAccel float64
 	speed    float64
 }{
-	{1e-08, 4.477989606435258, 70.0},
-	{1e-06, 4.477989589946256, 70.0},
-	{1e-05, 4.47798943884124, 70.0},
-	{1e-04, 4.477987801749694, 70.0},
-	{1e-03, 4.477948459035195, 66.91747498998446},
-	{0.005, 4.447277625163357, 29.823740963076236},
-	{0.01, 2.399305397817682, 15.48969140369711},
-	{0.05, 2.3520389999999995, 6.858628142711922},
-	{0.1, 2.3520389999999995, 4.849782469348496},
-	{0.5, 2.3520389999999995, 2.1688886555100053},
-	{1.0, 2.3520389999999995, 1.5336358759496986},
+	{1e-08, 4.1019517724780883, 70.0},
+	{1e-06, 4.1019465550866467, 70.0},
+	{1e-05, 4.1018988817054725, 70.0},
+	{1e-04, 4.1013972770740423, 70.0},
+	{1e-03, 4.0928031259267845, 63.975019546122724},
+	{0.005, 3.4604845674023905, 26.307734860312053},
+	{0.01, 1.60232058746272, 12.658280244419934},
+	{0.05, 1.5584280000000006, 5.5828809767001131},
+	{0.1, 1.5584280000000006, 3.9476929971820258},
+	{0.5, 1.5584280000000006, 1.765461979199779},
+	{1.0, 1.5584280000000006, 1.2483701374191873},
 }
 
-const sigmoidPythonReferenceHash = "f9d38ab3357c"
+const sigmoidPythonReferenceHash = "85a608e68945"
 
 func TestSigmoidMatchesPython(t *testing.T) {
 	cfg := DefaultSigmoidCfg()
@@ -67,6 +69,32 @@ func TestSigmoidHashStableAcrossTrivialChanges(t *testing.T) {
 	cfg3.A = cfg.A + 1e-3 // visible at .6f
 	if cfg3.Hash() == h1 {
 		t.Errorf("visible change should perturb hash")
+	}
+}
+
+func TestActiveSigmoidCfgReadsAndBoundsPersistentParams(t *testing.T) {
+	oldParamsPath := ParamsPath
+	ParamsPath = t.TempDir()
+	t.Cleanup(func() { ParamsPath = oldParamsPath })
+	values := map[string]string{
+		"VisionTurnSpeedControlPhysicsAmplitude":   "-3.25\n",
+		"VisionTurnSpeedControlPhysicsSteepness":   "50000\n",
+		"VisionTurnSpeedControlPhysicsCenter":      "0.008\n",
+		"VisionTurnSpeedControlPhysicsBaseline":    "99\n",
+		"VisionTurnSpeedControlPhysicsMinLatAccel": "4\n",
+		"VisionTurnSpeedControlPhysicsMaxLatAccel": "2.5\n",
+	}
+	for name, value := range values {
+		if err := os.WriteFile(filepath.Join(ParamsPath, name), []byte(value), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := ActiveSigmoidCfg()
+	if cfg.A != -3.25 || cfg.B != -50000 || cfg.C != 0.008 || cfg.D != 6.5 {
+		t.Fatalf("unexpected active sigmoid: %+v", cfg)
+	}
+	if cfg.MinLat != 2.5 || cfg.MaxLat != 3.0 {
+		t.Fatalf("bounded/sorted lateral limits incorrect: %+v", cfg)
 	}
 }
 

@@ -17,7 +17,7 @@ struct TiciWholeCurvePostflightStatus: Equatable, Sendable {
 }
 
 enum TiciWholeCurvePostflightValidator {
-  private static let estimatorVersion = "whole-curve-v1"
+  private static let estimatorVersion = "whole-curve-v2"
   private static let maximumProfileBytes = 512 * 1_024
   private static let maximumPoints = 512
   private static let maximumEvents = 128
@@ -37,12 +37,15 @@ enum TiciWholeCurvePostflightValidator {
     var longitude: Double
     var distanceMeters: Double
     var curvature: Double
+    var curvatureCoefficient: Double
+    var baseSafeSpeedMPS: Double
     var eventID: String
   }
 
   private struct Profile: Equatable, Sendable {
     var estimatorVersion: String
     var routeFingerprint: String
+    var sigmoidHash: String
     var points: [Point]
     var eventCount: Int
   }
@@ -147,16 +150,22 @@ enum TiciWholeCurvePostflightValidator {
     }
   }
 
-  /// The cross-language v1 fingerprint contract is intentionally exposed to
+  /// The cross-language v2 fingerprint contract is intentionally exposed to
   /// tests and to any future snapshot verifier.
-  static func routeFingerprint(generation: Int, points: [(Double, Double, Double, Double, String)]) throws -> String {
-    var text = "MapWholeCurveProfile|\(estimatorVersion)|\(generation)\n"
+  static func routeFingerprint(
+    generation: Int,
+    sigmoidHash: String,
+    points: [(Double, Double, Double, Double, Double, Double, String)]
+  ) throws -> String {
+    var text = "MapWholeCurveProfile|\(estimatorVersion)|\(generation)|\(sigmoidHash)\n"
     for point in points {
       let latitude = try roundHalfAwayFromZero(point.0, scale: 1e7)
       let longitude = try roundHalfAwayFromZero(point.1, scale: 1e7)
       let distance = try roundHalfAwayFromZero(point.2, scale: 1e3)
       let curvature = try roundHalfAwayFromZero(point.3, scale: 1e9)
-      text += "\(latitude),\(longitude),\(distance),\(curvature),\(point.4)\n"
+      let coefficient = try roundHalfAwayFromZero(point.4, scale: 1e6)
+      let baseSafeSpeed = try roundHalfAwayFromZero(point.5, scale: 1e6)
+      text += "\(latitude),\(longitude),\(distance),\(curvature),\(coefficient),\(baseSafeSpeed),\(point.6)\n"
     }
     return TuneDeploymentIdentity.sha256Hex(Data(text.utf8))
   }
@@ -176,6 +185,7 @@ enum TiciWholeCurvePostflightValidator {
     case stale
     case invalidGeneration
     case invalidFingerprint
+    case invalidSigmoidHash
     case fatalAmbiguityInvalid
     case fatalAmbiguity
     case invalidPointCount
@@ -185,6 +195,8 @@ enum TiciWholeCurvePostflightValidator {
     case pointCoordinateRange(Int)
     case pointDistanceRange(Int)
     case pointCurvatureRange(Int)
+    case pointCurvatureCoefficientRange(Int)
+    case pointBaseSafeSpeedRange(Int)
     case pointEventID(Int)
     case pointConfidence(Int)
     case pointFlags(Int)
@@ -228,6 +240,7 @@ enum TiciWholeCurvePostflightValidator {
       case .stale: "stale"
       case .invalidGeneration: "invalid_generation"
       case .invalidFingerprint: "invalid_fingerprint"
+      case .invalidSigmoidHash: "invalid_sigmoid_hash"
       case .fatalAmbiguityInvalid: "invalid_fatal_ambiguity"
       case .fatalAmbiguity: "fatal_ambiguity"
       case .invalidPointCount: "invalid_point_count"
@@ -237,6 +250,8 @@ enum TiciWholeCurvePostflightValidator {
       case let .pointCoordinateRange(index): "point_\(index)_coordinate_range"
       case let .pointDistanceRange(index): "point_\(index)_distance_range"
       case let .pointCurvatureRange(index): "point_\(index)_curvature_range"
+      case let .pointCurvatureCoefficientRange(index): "point_\(index)_curvature_coefficient_range"
+      case let .pointBaseSafeSpeedRange(index): "point_\(index)_base_safe_speed_range"
       case let .pointEventID(index): "point_\(index)_invalid_event_id"
       case let .pointConfidence(index): "point_\(index)_confidence_value"
       case let .pointFlags(index): "point_\(index)_invalid_flags"
@@ -304,6 +319,9 @@ enum TiciWholeCurvePostflightValidator {
     guard let routeFingerprint = root["routeFingerprint"] as? String,
           isHex(routeFingerprint, exactLength: 64), routeFingerprint == routeFingerprint.lowercased()
     else { throw ValidationError.invalidFingerprint }
+    guard let sigmoidHash = root["sigmoidHash"] as? String,
+          isHex(sigmoidHash, exactLength: 12), sigmoidHash == sigmoidHash.lowercased()
+    else { throw ValidationError.invalidSigmoidHash }
     guard let fatalAmbiguity = bool(root["fatalAmbiguity"]) else { throw ValidationError.fatalAmbiguityInvalid }
     guard !fatalAmbiguity else { throw ValidationError.fatalAmbiguity }
 
@@ -314,19 +332,35 @@ enum TiciWholeCurvePostflightValidator {
     var previous: Point?
     for (index, rawPoint) in rawPoints.enumerated() {
       guard let point = rawPoint as? [String: Any],
-            ["latitude", "longitude", "distanceMeters", "curvature"].allSatisfy(point.keys.contains)
+            ["latitude", "longitude", "distanceMeters", "curvature", "curvatureCoefficient", "baseSafeSpeedMPS"]
+              .allSatisfy(point.keys.contains)
       else { throw ValidationError.pointInvalidObject(index) }
-      let allowed = Set(["latitude", "longitude", "distanceMeters", "curvature", "eventID", "confidence", "flags"])
+      let allowed = Set([
+        "latitude", "longitude", "distanceMeters", "curvature", "curvatureCoefficient",
+        "baseSafeSpeedMPS", "eventID", "confidence", "flags",
+      ])
       guard point.keys.allSatisfy(allowed.contains) else { throw ValidationError.pointUnknownField(index) }
       let latitude = try finiteNumber(point["latitude"], error: .pointNumberInvalid(index, "latitude"))
       let longitude = try finiteNumber(point["longitude"], error: .pointNumberInvalid(index, "longitude"))
       let distance = try finiteNumber(point["distanceMeters"], error: .pointNumberInvalid(index, "distance"))
       let curvature = try finiteNumber(point["curvature"], error: .pointNumberInvalid(index, "curvature"))
+      let curvatureCoefficient = try finiteNumber(
+        point["curvatureCoefficient"], error: .pointNumberInvalid(index, "curvature_coefficient")
+      )
+      let baseSafeSpeed = try finiteNumber(
+        point["baseSafeSpeedMPS"], error: .pointNumberInvalid(index, "base_safe_speed")
+      )
       guard (-90...90).contains(latitude), (-180...180).contains(longitude) else {
         throw ValidationError.pointCoordinateRange(index)
       }
       guard (0...maximumDistanceMeters).contains(distance) else { throw ValidationError.pointDistanceRange(index) }
       guard abs(curvature) <= 1 else { throw ValidationError.pointCurvatureRange(index) }
+      guard (1...4).contains(curvatureCoefficient) else {
+        throw ValidationError.pointCurvatureCoefficientRange(index)
+      }
+      guard (0...70).contains(baseSafeSpeed) else {
+        throw ValidationError.pointBaseSafeSpeedRange(index)
+      }
       let eventID: String
       if point["eventID"] == nil || point["eventID"] is NSNull { eventID = "" }
       else if let value = point["eventID"] as? String, isEventID(value) { eventID = value }
@@ -339,6 +373,8 @@ enum TiciWholeCurvePostflightValidator {
         longitude: longitude,
         distanceMeters: distance,
         curvature: curvature,
+        curvatureCoefficient: curvatureCoefficient,
+        baseSafeSpeedMPS: baseSafeSpeed,
         eventID: eventID
       )
       if index == 0 {
@@ -362,7 +398,11 @@ enum TiciWholeCurvePostflightValidator {
 
     let expectedFingerprint = try Self.routeFingerprint(
       generation: generation,
-      points: points.map { ($0.latitude, $0.longitude, $0.distanceMeters, $0.curvature, $0.eventID) }
+      sigmoidHash: sigmoidHash,
+      points: points.map {
+        ($0.latitude, $0.longitude, $0.distanceMeters, $0.curvature,
+         $0.curvatureCoefficient, $0.baseSafeSpeedMPS, $0.eventID)
+      }
     )
     guard routeFingerprint == expectedFingerprint else { throw ValidationError.fingerprintMismatch }
 
@@ -381,7 +421,7 @@ enum TiciWholeCurvePostflightValidator {
       guard let eventID, !eventID.isEmpty, isEventID(eventID) else { throw ValidationError.eventInvalidID(index) }
       guard !seenEventIDs.contains(eventID), pointEventIDs.contains(eventID) else { throw ValidationError.eventIDMismatch(index) }
       seenEventIDs.insert(eventID)
-      for key in ["startIndex", "endIndex", "apexIndex"] {
+      for key in ["startIndex", "endIndex", "apexIndex", "profileApexIndex"] {
         if let value = event[key] {
           guard let integer = strictInteger(value), (0..<points.count).contains(integer) else {
             throw ValidationError.eventIndexRange(index, key)
@@ -412,6 +452,7 @@ enum TiciWholeCurvePostflightValidator {
     return Profile(
       estimatorVersion: estimatorVersion,
       routeFingerprint: routeFingerprint,
+      sigmoidHash: sigmoidHash,
       points: points,
       eventCount: rawEvents.count
     )

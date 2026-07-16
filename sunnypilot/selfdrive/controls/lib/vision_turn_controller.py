@@ -161,7 +161,7 @@ OCCL_VMIN_NUDGE_MPS = 0.50
 
 # ===== Map lookahead helpers =====
 EARTH_R_M = 6371007.2
-MAP_WHOLE_CURVE_ESTIMATOR_VERSION = "whole-curve-v1"
+MAP_WHOLE_CURVE_ESTIMATOR_VERSION = "whole-curve-v2"
 MAP_WHOLE_CURVE_PROFILE_MAX_AGE_S = 3.0
 MAP_WHOLE_CURVE_PROFILE_FUTURE_TOLERANCE_S = 1.0
 MAP_WHOLE_CURVE_PROFILE_MAX_BYTES = 512 * 1024
@@ -182,6 +182,8 @@ class MapWholeCurvePoint:
   longitude: float
   distance_m: float
   curvature: float
+  curvature_coefficient: float
+  base_safe_speed_mps: float
   event_id: str = ""
   confidence: float | str | None = None
   flags: tuple[str, ...] = ()
@@ -191,6 +193,7 @@ class MapWholeCurvePoint:
 class MapWholeCurveProfile:
   generated_at_unix_ms: float
   route_fingerprint: str
+  sigmoid_hash: str
   generation: int
   points: tuple[MapWholeCurvePoint, ...]
   events: tuple[dict, ...]
@@ -206,16 +209,21 @@ def _round_half_away_from_zero_scaled(value: float, scale: float) -> int:
 
 
 def _compute_map_whole_curve_route_fingerprint(generation: int,
+                                                sigmoid_hash: str,
                                                 points: tuple[MapWholeCurvePoint, ...] | list[MapWholeCurvePoint]) -> str:
-  """Hash the exact ordered route/control profile using the Go/Swift v1 contract."""
+  """Hash the exact ordered route/control profile using the Go/Swift v2 contract."""
   digest = hashlib.sha256()
-  digest.update(f"MapWholeCurveProfile|{MAP_WHOLE_CURVE_ESTIMATOR_VERSION}|{int(generation)}\n".encode("utf-8"))
+  digest.update(f"MapWholeCurveProfile|{MAP_WHOLE_CURVE_ESTIMATOR_VERSION}|{int(generation)}|{sigmoid_hash}\n".encode("utf-8"))
   for point in points:
     lat_e7 = _round_half_away_from_zero_scaled(point.latitude, 1e7)
     lon_e7 = _round_half_away_from_zero_scaled(point.longitude, 1e7)
     distance_mm = _round_half_away_from_zero_scaled(point.distance_m, 1e3)
     curvature_e9 = _round_half_away_from_zero_scaled(point.curvature, 1e9)
-    digest.update(f"{lat_e7},{lon_e7},{distance_mm},{curvature_e9},{point.event_id}\n".encode("utf-8"))
+    coefficient_e6 = _round_half_away_from_zero_scaled(point.curvature_coefficient, 1e6)
+    base_speed_e6 = _round_half_away_from_zero_scaled(point.base_safe_speed_mps, 1e6)
+    digest.update(
+      f"{lat_e7},{lon_e7},{distance_mm},{curvature_e9},{coefficient_e6},{base_speed_e6},{point.event_id}\n".encode("utf-8")
+    )
   return digest.hexdigest()
 
 def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -1333,6 +1341,8 @@ class VisionTurnController:
     self._map_whole_curve_cache_raw = None
     self._map_whole_curve_cache: MapWholeCurveProfile | None = None
     self._map_whole_curve_cache_rejection: str | None = None
+    self._map_whole_curve_speed_cache_key = None
+    self._map_whole_curve_speed_cache: list[float] = []
     self._map_whole_curve_last_ts = 0.0
     self._map_whole_curve_reason = "missing"
     self._map_profile_source = "none"
@@ -2394,12 +2404,11 @@ class VisionTurnController:
 
   @staticmethod
   def _whole_curve_speed(abs_curvature_meters: float) -> float:
-    """Apply live source-rounded sigmoid/Q without learned calibration.
+    """Live fallback for v2 hash mismatch, without learned calibration.
 
-    MapWholeCurveProfile publishes curvature, never a baked/final speed. The
-    profile therefore remains responsive to the six live physics Params and
-    source Q/EQ curve while deliberately staying outside the learned VTSC
-    calibration subsystem.
+    A matching v2 profile supplies its physics-only speed. Until mapd
+    republishes after a live physics edit, this path converts the published
+    profile curvature with the current sigmoid/Q data instead.
     """
     return float(curvature_to_speed(abs(float(abs_curvature_meters)), low_speed_sigmoid_scale=1.0))
 
@@ -4778,6 +4787,11 @@ class VisionTurnController:
         route_fingerprint != route_fingerprint.lower() or
         any(ch not in "0123456789abcdef" for ch in route_fingerprint)):
       raise ValueError("invalid_fingerprint")
+    sigmoid_hash = payload.get("sigmoidHash")
+    if (not isinstance(sigmoid_hash, str) or len(sigmoid_hash) != 12 or
+        sigmoid_hash != sigmoid_hash.lower() or
+        any(ch not in "0123456789abcdef" for ch in sigmoid_hash)):
+      raise ValueError("invalid_sigmoid_hash")
     fatal_ambiguity = payload.get("fatalAmbiguity")
     if not isinstance(fatal_ambiguity, bool):
       raise ValueError("invalid_fatal_ambiguity")
@@ -4790,9 +4804,16 @@ class VisionTurnController:
     points: list[MapWholeCurvePoint] = []
     previous_distance = -1.0
     previous_point: MapWholeCurvePoint | None = None
-    allowed_point_keys = {"latitude", "longitude", "distanceMeters", "curvature", "eventID", "confidence", "flags"}
+    allowed_point_keys = {
+      "latitude", "longitude", "distanceMeters", "curvature",
+      "curvatureCoefficient", "baseSafeSpeedMPS", "eventID", "confidence", "flags",
+    }
     for index, item in enumerate(raw_points):
-      if not isinstance(item, dict) or not {"latitude", "longitude", "distanceMeters", "curvature"}.issubset(item):
+      required_point_keys = {
+        "latitude", "longitude", "distanceMeters", "curvature",
+        "curvatureCoefficient", "baseSafeSpeedMPS",
+      }
+      if not isinstance(item, dict) or not required_point_keys.issubset(item):
         raise ValueError(f"point_{index}_invalid_object")
       if any(not isinstance(key, str) or key not in allowed_point_keys for key in item):
         raise ValueError(f"point_{index}_unknown_field")
@@ -4800,12 +4821,22 @@ class VisionTurnController:
       longitude = cls._whole_curve_number(item["longitude"], f"point_{index}_longitude")
       distance_m = cls._whole_curve_number(item["distanceMeters"], f"point_{index}_distance")
       curvature = cls._whole_curve_number(item["curvature"], f"point_{index}_curvature")
+      curvature_coefficient = cls._whole_curve_number(
+        item["curvatureCoefficient"], f"point_{index}_curvature_coefficient"
+      )
+      base_safe_speed_mps = cls._whole_curve_number(
+        item["baseSafeSpeedMPS"], f"point_{index}_base_safe_speed"
+      )
       if not -90.0 <= latitude <= 90.0 or not -180.0 <= longitude <= 180.0:
         raise ValueError(f"point_{index}_coordinate_range")
       if not 0.0 <= distance_m <= MAP_WHOLE_CURVE_PROFILE_MAX_DISTANCE_M:
         raise ValueError(f"point_{index}_distance_range")
       if abs(curvature) > 1.0:
         raise ValueError(f"point_{index}_curvature_range")
+      if not 1.0 <= curvature_coefficient <= 4.0:
+        raise ValueError(f"point_{index}_curvature_coefficient_range")
+      if not 0.0 <= base_safe_speed_mps <= MAX_SPEED_DEFAULT:
+        raise ValueError(f"point_{index}_base_safe_speed_range")
 
       event_id = item.get("eventID", "")
       if event_id is None:
@@ -4830,7 +4861,10 @@ class VisionTurnController:
           raise ValueError(f"point_{index}_invalid_flag")
         flags.append(flag)
 
-      point = MapWholeCurvePoint(latitude, longitude, distance_m, curvature, event_id, confidence, tuple(flags))
+      point = MapWholeCurvePoint(
+        latitude, longitude, distance_m, curvature, curvature_coefficient,
+        base_safe_speed_mps, event_id, confidence, tuple(flags),
+      )
       if index == 0:
         if distance_m > 0.01:
           raise ValueError("first_distance_not_zero")
@@ -4848,7 +4882,7 @@ class VisionTurnController:
       previous_distance = distance_m
       previous_point = point
 
-    expected_fingerprint = _compute_map_whole_curve_route_fingerprint(generation, points)
+    expected_fingerprint = _compute_map_whole_curve_route_fingerprint(generation, sigmoid_hash, points)
     if route_fingerprint != expected_fingerprint:
       raise ValueError("fingerprint_mismatch")
 
@@ -4870,7 +4904,7 @@ class VisionTurnController:
       if event_id in seen_event_ids or event_id not in point_event_ids:
         raise ValueError(f"event_{index}_id_mismatch")
       seen_event_ids.add(event_id)
-      for key in ("startIndex", "endIndex", "apexIndex"):
+      for key in ("startIndex", "endIndex", "apexIndex", "profileApexIndex"):
         if key in event:
           value = event[key]
           if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value < len(points):
@@ -4896,6 +4930,7 @@ class VisionTurnController:
     return MapWholeCurveProfile(
       generated_at_unix_ms=generated_at_ms,
       route_fingerprint=route_fingerprint,
+      sigmoid_hash=sigmoid_hash,
       generation=generation,
       points=tuple(points),
       events=tuple(events),
@@ -5061,11 +5096,10 @@ class VisionTurnController:
   def _baked_vsafe_with_runtime_multipliers(self, baked_v_mps: float, kappa: float) -> float:
     """Apply the live runtime multipliers (low-speed bias, SPEED_INCREASE_FACTOR,
     Q-curve) on top of a baked physics speed. Mirrors the post-sigmoid section of
-    `curvature_to_speed` (vision_turn_controller.py:961-980) so baked tiles get
-    the same Q-curve + bias treatment as the live path. Skipped: low-speed
-    calibration scale — that's already captured in the bake at scale=1.0; if a
-    runtime calibration is non-trivially different, the entire baked path is
-    short-circuited at the call site."""
+    `curvature_to_speed` (vision_turn_controller.py:961-980) so a route-baked
+    profile gets the same Q-curve + bias treatment as the live path. Learned
+    low-speed calibration remains deliberately excluded from whole-curve data;
+    the legacy static-tile caller still short-circuits when it is active."""
     base_speed_mps = max(0.0, float(baked_v_mps))
     base_speed_mph = base_speed_mps * CV.MS_TO_MPH
     if LOW_SPEED_BIAS_MPH != 0.0 and base_speed_mph < LOW_SPEED_BIAS_END_MPH:
@@ -5076,6 +5110,26 @@ class VisionTurnController:
     target_speed_mps = clip(target_speed_mps, 0.0, MAX_SPEED_DEFAULT)
     q = _q_curve_multiplier(kappa)
     return clip(target_speed_mps * q, 0.0, MAX_SPEED_DEFAULT)
+
+  @staticmethod
+  def _whole_curve_speed_cache_signature(profile: MapWholeCurveProfile, runtime_sigmoid_hash: str) -> tuple:
+    q_points = []
+    for point in Q_CURVE_POINTS:
+      try:
+        q_points.append((float(point[0]), float(point[1])))
+      except Exception:
+        q_points.append((repr(point),))
+    return (
+      profile.route_fingerprint,
+      profile.sigmoid_hash,
+      runtime_sigmoid_hash,
+      float(LOW_SPEED_BIAS_MPH),
+      float(LOW_SPEED_BIAS_END_MPH),
+      float(SPEED_INCREASE_FACTOR),
+      float(MAX_SPEED_DEFAULT),
+      bool(Q_CURVE_ENABLED),
+      tuple(q_points),
+    )
 
   def _clear_map_lookahead_state(self, *, clear_latched_output: bool) -> None:
     """Remove every map-owned constraint; optionally clear a falling-edge hold.
@@ -5112,6 +5166,8 @@ class VisionTurnController:
       self._map_whole_curve_cache_raw = None
       self._map_whole_curve_cache = None
       self._map_whole_curve_cache_rejection = None
+      self._map_whole_curve_speed_cache_key = None
+      self._map_whole_curve_speed_cache = []
 
   def _clear_curve_preview(self, *, reset_visible_mainline_counterevidence: bool = True) -> None:
     self._curve_preview_valid = False
@@ -6062,12 +6118,35 @@ class VisionTurnController:
     k_list = k_list[:cut]
     abs_indices = list(range(i0 + 1, len(pts)))[:cut]
 
-    # Whole-curve publishes curvature, never final speed. Apply the current
-    # source-rounded sigmoid and Q/EQ data at runtime without learned
-    # calibration. Legacy data retains its established baked/live fallback.
+    # Whole-curve v2 publishes an estimator-aligned physics speed. Consume it
+    # only when its tune hash matches the live sigmoid, then apply the cheap
+    # runtime Q/bias layers. A live tune edit fails safely back to conversion
+    # until mapd republishes the route profile with the new hash.
     baked = None if use_whole_profile else self._load_map_pre_curve_speeds()
     if use_whole_profile:
-      vsafe = [self._whole_curve_speed(k) for k in k_list]
+      runtime_sigmoid_hash = _compute_runtime_sigmoid_hash()
+      if whole_profile is not None and whole_profile.sigmoid_hash == runtime_sigmoid_hash:
+        speed_cache_key = self._whole_curve_speed_cache_signature(whole_profile, runtime_sigmoid_hash)
+        if (self._map_whole_curve_speed_cache_key != speed_cache_key or
+            len(self._map_whole_curve_speed_cache) != len(whole_profile.points)):
+          self._map_whole_curve_speed_cache = [
+            self._baked_vsafe_with_runtime_multipliers(point.base_safe_speed_mps, abs(point.curvature))
+            for point in whole_profile.points
+          ]
+          self._map_whole_curve_speed_cache_key = speed_cache_key
+        vsafe = self._map_whole_curve_speed_cache[i0 + 1:i0 + 1 + cut]
+      else:
+        self._map_whole_curve_speed_cache_key = None
+        self._map_whole_curve_speed_cache = []
+        vsafe = [self._whole_curve_speed(k) for k in k_list]
+        profile_hash = "" if whole_profile is None else whole_profile.sigmoid_hash
+        mismatch_key = (profile_hash, runtime_sigmoid_hash)
+        if getattr(self, '_last_logged_whole_curve_sigmoid_mismatch', None) != mismatch_key:
+          cloudlog.info(
+            f"vtsc: whole-curve profile sigmoid hash {profile_hash!r} != runtime {runtime_sigmoid_hash!r}; "
+            "falling back to live curvature_to_speed until mapd republishes"
+          )
+          self._last_logged_whole_curve_sigmoid_mismatch = mismatch_key
     elif baked is not None and len(baked) == len(k_list):
       try:
         # Skip baked path when low-speed calibration is non-trivially active —
@@ -6151,6 +6230,7 @@ class VisionTurnController:
       overshoot_phase_offset_s=float(getattr(self, '_overshoot_phase_offset_s', 0.0)),
       reference_speed_mps=float(getattr(self, '_dbg_target_raw', self._v_ego) or self._v_ego),
       winding_profile=winding_profile,
+      precomputed_route_profile=use_whole_profile,
     )
 
     self._map_tail_advisory_cap = advisory_candidate.cap_mps

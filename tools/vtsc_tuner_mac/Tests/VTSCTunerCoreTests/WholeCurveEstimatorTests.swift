@@ -278,6 +278,54 @@ private func testMedian(_ values: [Double]) -> Double {
   #expect(event.apexIndex < event.endIndex)
 }
 
+@Test func wholeCurveProfileTightensProgressivelyThroughADecreasingRadiusBend() throws {
+  let route = integratedRoute(sections: [
+    (150, 0),
+    (100, 0.0035),
+    (100, 0.0045),
+    (100, 0.0060),
+    (150, 0),
+  ])
+  let estimate = WholeCurveEstimator.estimate(route: route)
+  let event = try #require(estimate.events.first)
+  let eventPoints = Array(estimate.points[event.startIndex ... event.endIndex])
+  let thirds = max(1, eventPoints.count / 3)
+  let entryMaximum = eventPoints.prefix(thirds).map(\.curvatureCoefficient).max() ?? 1
+  let apexMaximum = eventPoints.suffix(thirds).map(\.curvatureCoefficient).max() ?? 1
+
+  #expect(apexMaximum > entryMaximum)
+  #expect(event.maximumApexCoefficient == apexMaximum)
+  #expect(abs(estimate.points[event.profileApexIndex].profileCurvature) > abs(event.controllingCurvature))
+}
+
+@Test func wholeCurveProfileRetainsTwoApexMinimaInsideOneContinuousEvent() throws {
+  let route = integratedRoute(sections: [
+    (150, 0),
+    (80, 0.0040),
+    (120, 0.0060),
+    (80, 0.0040),
+    (120, 0.0065),
+    (80, 0.0040),
+    (150, 0),
+  ])
+  let estimate = WholeCurveEstimator.estimate(route: route)
+  let event = try #require(estimate.events.first)
+  #expect(estimate.events.count == 1)
+
+  let firstApex = estimate.points.filter { (310...380).contains($0.distanceMeters) }
+    .map(\.curvatureCoefficient).max() ?? 1
+  let saddle = estimate.points.filter { (400...430).contains($0.distanceMeters) }
+    .map(\.curvatureCoefficient).max() ?? .infinity
+  let secondApex = estimate.points.filter { (470...540).contains($0.distanceMeters) }
+    .map(\.curvatureCoefficient).max() ?? 1
+
+  #expect(firstApex > 1)
+  #expect(secondApex > 1)
+  #expect(firstApex > saddle)
+  #expect(secondApex > saddle)
+  #expect(event.maximumApexCoefficient == max(firstApex, secondApex))
+}
+
 @Test func wholeCurveEstimatorFlagsSparseSourceGeometry() throws {
   let route = constantArc(radius: 250, arcLength: 560, sourceSpacing: 80)
   let event = try #require(WholeCurveEstimator.estimate(route: route).events.first)

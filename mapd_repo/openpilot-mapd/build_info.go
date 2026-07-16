@@ -5,15 +5,15 @@ import (
 	"io"
 )
 
-const MapWholeCurveCapability = "MapWholeCurveProfile:whole-curve-v1"
+const MapWholeCurveCapability = "MapWholeCurveProfile:whole-curve-v2"
 
 // Release builds inject a standalone-commit identity with -X. The marker
 // variables are deliberately separate because the installer verifies the raw
 // binary before executing it; release tooling must inject all four together.
 var (
-	MapdReleaseID     = "chauffeur-whole-curve-v1"
+	MapdReleaseID     = "chauffeur-whole-curve-v2"
 	MapdBuildID       = "development"
-	MapdReleaseMarker = "MapdReleaseID:chauffeur-whole-curve-v1"
+	MapdReleaseMarker = "MapdReleaseID:chauffeur-whole-curve-v2"
 	MapdBuildMarker   = "MapdBuildID:development"
 )
 
@@ -28,7 +28,7 @@ type MapdBuildInfo struct {
 func CurrentMapdBuildInfo() MapdBuildInfo {
 	return MapdBuildInfo{
 		ReleaseID: MapdReleaseID, BuildID: MapdBuildID,
-		EstimatorVersion: WholeCurveEstimatorVersion,
+		EstimatorVersion: WholeCurveProfileVersion,
 		Capabilities:     []string{MapWholeCurveCapability},
 		IdentityMarkers:  []string{MapdReleaseMarker, MapdBuildMarker},
 	}

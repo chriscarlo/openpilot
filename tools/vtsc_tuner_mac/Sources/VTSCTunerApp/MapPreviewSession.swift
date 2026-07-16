@@ -30,6 +30,7 @@ final class MapPreviewSession: ObservableObject {
         isStudyCurveCaptureActive = false
         studyCaptureBankedNumber = nil
         selectedWholeCurveEventID = nil
+        reconcileCalibrationCurvatures(using: ways)
         refreshCalibrationBaselines()
         invalidateFit()
         refreshUncommittedDraftIfNeeded()
@@ -531,9 +532,9 @@ final class MapPreviewSession: ObservableObject {
       longitude: node.longitude,
       curvature: node.curvature,
       rawCurvature: node.rawCurvature,
-      curvatureSupportMeters: node.curvatureSupportMeters,
-      curvatureEstimatorVersion: MapRuntimeCurvatureResolver.estimatorVersion,
-      curvatureContextComplete: node.curvatureContextComplete,
+      curvatureSupportMeters: 0,
+      curvatureEstimatorVersion: max(0, MapRuntimeCurvatureResolver.estimatorVersion - 1),
+      curvatureContextComplete: false,
       bakedSpeedMPH: node.bakedSpeedMPS?.mapMPH,
       proposedSpeedMPH: proposed,
       effectiveSpeedMPH: effective,
@@ -543,6 +544,7 @@ final class MapPreviewSession: ObservableObject {
       var updated = queued
       updated.id = calibrationSamples[index].id
       calibrationSamples[index] = updated
+      reconcileCalibrationCurvatures(using: ways)
       let saved = batchDidChange()
       draftBaselineDesiredSpeedMPH = draftDesiredSpeedMPH
       draftWasEdited = false
@@ -554,6 +556,7 @@ final class MapPreviewSession: ObservableObject {
       return
     }
     calibrationSamples.append(queued)
+    reconcileCalibrationCurvatures(using: ways)
     let saved = batchDidChange()
     if !saved, isStudyCurveCaptureActive {
       calibrationSamples.removeLast()
@@ -1075,7 +1078,7 @@ final class MapPreviewSession: ObservableObject {
            !wholeCurveEvents.contains(where: { $0.id == selectedWholeCurveEventID }) {
           self.selectedWholeCurveEventID = nil
         }
-        let audited = purpose == .calibration
+        let audited = (purpose == .calibration || isStudyCurveCaptureActive)
           ? reconcileCalibrationCurvatures(using: ways)
           : 0
         var selectionLossMessage: String?
@@ -1152,8 +1155,14 @@ final class MapPreviewSession: ObservableObject {
     using resolvedWays: [MapRenderedWay],
     invalidateMissing: Bool = false
   ) -> Int {
-    guard purpose == .calibration, !calibrationSamples.isEmpty else { return 0 }
+    guard (purpose == .calibration || isStudyCurveCaptureActive),
+          !calibrationSamples.isEmpty
+    else { return 0 }
     let wayByID = Dictionary(uniqueKeysWithValues: resolvedWays.map { ($0.id, $0) })
+    let wholeCurveResolutions = MapWholeCurveStudyResolver.calibrationResolutions(
+      ways: resolvedWays,
+      calibrationSamples: calibrationSamples
+    )
     var changedCount = 0
     var migratedLegacyEstimate = false
 
@@ -1175,29 +1184,31 @@ final class MapPreviewSession: ObservableObject {
         continue
       }
       let node = way.nodes[nodeIndex]
-      guard node.curvatureContextComplete else {
+      guard node.curvatureContextComplete,
+            let resolution = wholeCurveResolutions[sample.sourceKey]
+      else {
         if invalidateMissing,
            invalidateCalibrationCurvature(at: index) { changedCount += 1 }
         continue
       }
 
       let needsUpdate = !sample.hasCurrentCurvatureEstimate
-        || abs(sample.curvature - node.curvature) > 1.0e-12
+        || abs(sample.curvature - resolution.curvature) > 1.0e-12
         || abs((sample.rawCurvature ?? .nan) - node.rawCurvature) > 1.0e-12
-        || abs((sample.curvatureSupportMeters ?? .nan) - node.curvatureSupportMeters) > 1.0e-9
+        || abs((sample.curvatureSupportMeters ?? .nan) - resolution.supportMeters) > 1.0e-9
       guard needsUpdate else { continue }
 
       if !sample.hasCurrentCurvatureEstimate { migratedLegacyEstimate = true }
-      calibrationSamples[index].curvature = node.curvature
+      calibrationSamples[index].curvature = resolution.curvature
       calibrationSamples[index].rawCurvature = node.rawCurvature
-      calibrationSamples[index].curvatureSupportMeters = node.curvatureSupportMeters
+      calibrationSamples[index].curvatureSupportMeters = resolution.supportMeters
       calibrationSamples[index].curvatureEstimatorVersion = MapRuntimeCurvatureResolver.estimatorVersion
       calibrationSamples[index].curvatureContextComplete = true
       calibrationSamples[index].bakedSpeedMPH = node.bakedSpeedMPS?.mapMPH
       calibrationSamples[index].proposedSpeedMPH = node.proposedSpeedMPS.mapMPH
       calibrationSamples[index].effectiveSpeedMPH = SigmoidFitter.predictedSpeedMPH(
         parameters: currentParameters,
-        curvature: node.curvature,
+        curvature: resolution.curvature,
         bands: currentBands,
         mode: .effectiveStrategic,
         modifiers: .sourceDefaults

@@ -14,7 +14,7 @@ The native macOS pipeline in `tools/vtsc_tuner_mac/` is authoritative for produc
 | `pullOnTici` | yes | yes | yes | yes | yes | unchanged |
 | `rebuildTilesAndReboot` | yes | yes | yes | yes | yes | build, verify, activate |
 
-The runtime whole-curve profile uses existing raw map geometry. `pullOnTici` is therefore the normal first-road-test action and intentionally proves that the active tile identity did not change. `rebuildTilesAndReboot` is reserved for a requested canonical tile generation.
+The runtime whole-curve-v2 profile uses existing raw map geometry, then route-bakes estimator-aligned physics speeds when mapd publishes the selected continuous route. `pullOnTici` is therefore the normal first-road-test action: it installs the v2 runtime/release while intentionally proving that the active tile identity did not change. `rebuildTilesAndReboot` remains reserved for a requested canonical tile generation.
 
 ## No-mutation preflight
 
@@ -60,7 +60,7 @@ The app persists a rollback journal before remote mutation. It then:
 6. Rechecks parked/offroad/kill-switch state and sends one reboot only after every artifact is ready.
 7. Waits for the tici and requires exact commit, Params/Q, release/cache/active binary, native mapd process, estimator, real-GPS profile, and tile identity.
 
-Postflight validates `MapWholeCurveProfile` through the production parser: version, freshness, finite/ranged points, spacing, fingerprint, events, and proximity to actual `LastGPSPosition`. It reports pending or invalid GPS distinctly; it never injects a fake route point.
+Postflight validates `MapWholeCurveProfile` through the native Swift production parser: v2 version, freshness, finite/ranged curvature coefficients and baked speeds, sigmoid-bound fingerprint, events, spacing, and proximity to actual `LastGPSPosition`. It reports pending or invalid GPS distinctly; it never imports the controller, depends on device NumPy, or injects a fake route point.
 
 ## Failure and rollback
 

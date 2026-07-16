@@ -14,7 +14,7 @@ import Testing
   let status = TiciWholeCurvePostflightValidator.inspect(profileData: profile, gpsData: gps, now: now)
   #expect(status.gpsStatus == "valid")
   #expect(status.validationStatus == "valid")
-  #expect(status.estimatorVersion == "whole-curve-v1")
+  #expect(status.estimatorVersion == "whole-curve-v2")
   #expect(status.fresh)
   #expect(status.valuesFinite)
   #expect(status.pointCount == 3)
@@ -91,12 +91,12 @@ import Testing
 }
 
 @Test func wholeCurveFingerprintMatchesThePythonCrossLanguageVector() throws {
-  let value = try TiciWholeCurvePostflightValidator.routeFingerprint(generation: 7, points: [
-    (37.0, -122.0, 0.0, 0.0, ""),
-    (37.000045, -122.0, 5.0, -0.0123456785, "0123456789abcdefabcd-a"),
-    (37.000090, -122.0, 10.0, 0.0123456785, "0123456789abcdefabcd-b"),
+  let value = try TiciWholeCurvePostflightValidator.routeFingerprint(generation: 7, sigmoidHash: "85a608e68945", points: [
+    (37.0, -122.0, 0.0, 0.0, 1.0, 70.0, ""),
+    (37.000045, -122.0, 5.0, -0.0123456785, 1.25, 11.25, "0123456789abcdefabcd-a"),
+    (37.000090, -122.0, 10.0, 0.0123456785, 1.5, 10.5, "0123456789abcdefabcd-b"),
   ])
-  #expect(value == "7a47531720b4846e1ee3094443068a42ac936554efc42b27b07796a3103b2624")
+  #expect(value == "abf0365f8c349a7eeb7d9cb99a56b134c9a0b88b0c90db7f9ccf231132f5eebd")
 }
 
 private func wholeCurveProfileData(now: Date) throws -> Data {
@@ -107,19 +107,24 @@ private func wholeCurveProfileData(now: Date) throws -> Data {
       "longitude": -122.0,
       "distanceMeters": Double(index) * 5,
       "curvature": 0.0,
+      "curvatureCoefficient": 1.0,
+      "baseSafeSpeedMPS": 70.0,
       "eventID": "",
       "confidence": 1.0,
       "flags": [],
     ]
   }
-  let fingerprint = try TiciWholeCurvePostflightValidator.routeFingerprint(generation: 7, points: points.map {
+  let sigmoidHash = "85a608e68945"
+  let fingerprint = try TiciWholeCurvePostflightValidator.routeFingerprint(generation: 7, sigmoidHash: sigmoidHash, points: points.map {
     ($0["latitude"] as! Double, $0["longitude"] as! Double, $0["distanceMeters"] as! Double,
-     $0["curvature"] as! Double, $0["eventID"] as! String)
+     $0["curvature"] as! Double, $0["curvatureCoefficient"] as! Double,
+     $0["baseSafeSpeedMPS"] as! Double, $0["eventID"] as! String)
   })
   return try JSONSerialization.data(withJSONObject: [
-    "estimatorVersion": "whole-curve-v1",
+    "estimatorVersion": "whole-curve-v2",
     "generatedAtUnixMillis": now.timeIntervalSince1970 * 1_000,
     "routeFingerprint": fingerprint,
+    "sigmoidHash": sigmoidHash,
     "generation": 7,
     "points": points,
     "events": [],

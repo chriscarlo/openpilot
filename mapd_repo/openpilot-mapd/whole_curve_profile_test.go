@@ -15,18 +15,117 @@ import (
 
 func TestWholeCurveFingerprintCrossLanguageVector(t *testing.T) {
 	points := []WholeCurveProfilePoint{
-		{Latitude: 37.0, Longitude: -122.0, DistanceMeters: 0, Curvature: 0},
-		{Latitude: 37.000045, Longitude: -122.0, DistanceMeters: 5, Curvature: -0.0123456785, EventID: "0123456789abcdefabcd-a"},
-		{Latitude: 37.000090, Longitude: -122.0, DistanceMeters: 10, Curvature: 0.0123456785, EventID: "0123456789abcdefabcd-b"},
+		{Latitude: 37.0, Longitude: -122.0, DistanceMeters: 0, Curvature: 0, CurvatureCoefficient: 1, BaseSafeSpeedMPS: 70},
+		{Latitude: 37.000045, Longitude: -122.0, DistanceMeters: 5, Curvature: -0.0123456785, CurvatureCoefficient: 1.25, BaseSafeSpeedMPS: 11.25, EventID: "0123456789abcdefabcd-a"},
+		{Latitude: 37.000090, Longitude: -122.0, DistanceMeters: 10, Curvature: 0.0123456785, CurvatureCoefficient: 1.5, BaseSafeSpeedMPS: 10.5, EventID: "0123456789abcdefabcd-b"},
 	}
-	fingerprint, err := WholeCurveRouteFingerprint(7, points)
+	fingerprint, err := WholeCurveRouteFingerprint(7, sigmoidPythonReferenceHash, points)
 	if err != nil {
 		t.Fatal(err)
 	}
-	const expected = "7a47531720b4846e1ee3094443068a42ac936554efc42b27b07796a3103b2624"
+	const expected = "abf0365f8c349a7eeb7d9cb99a56b134c9a0b88b0c90db7f9ccf231132f5eebd"
 	if fingerprint != expected {
 		t.Fatalf("fingerprint=%s expected=%s", fingerprint, expected)
 	}
+}
+
+func TestWholeCurveApexDetailTracksDecreasingRadiusWithinOneEvent(t *testing.T) {
+	cfg := DefaultWholeCurveConfiguration()
+	event := WholeCurveEvent{ControllingCurvature: 0.004}
+	curvatures := []float64{0.004, 0.005, 0.007}
+	coefficients := make([]float64, 0, len(curvatures))
+	for _, curvature := range curvatures {
+		curvatureCopy := curvature
+		point := WholeCurveResampledPoint{Curvature60: &curvatureCopy, Curvature100: &curvatureCopy}
+		coefficients = append(coefficients, wholeCurveApexDetailCoefficient(point, event, 0.004, cfg))
+	}
+	if coefficients[0] != 1.0 || !(coefficients[0] < coefficients[1] && coefficients[1] < coefficients[2]) {
+		t.Fatalf("decreasing-radius detail did not tighten progressively: %v", coefficients)
+	}
+}
+
+func TestWholeCurveApexDetailPreservesMultipleApexesWithinOneEvent(t *testing.T) {
+	cfg := DefaultWholeCurveConfiguration()
+	event := WholeCurveEvent{DirectionalID: "same-event", ControllingCurvature: -0.004}
+	curvatures := []float64{-0.0041, -0.0065, -0.0042, -0.0070, -0.0041}
+	coefficients := make([]float64, 0, len(curvatures))
+	for _, curvature := range curvatures {
+		curvatureCopy := curvature
+		point := WholeCurveResampledPoint{Curvature60: &curvatureCopy, Curvature100: &curvatureCopy}
+		coefficients = append(coefficients, wholeCurveApexDetailCoefficient(point, event, 0.004, cfg))
+	}
+	if !(coefficients[1] > coefficients[0] && coefficients[1] > coefficients[2] &&
+		coefficients[3] > coefficients[2] && coefficients[3] > coefficients[4]) {
+		t.Fatalf("compound curve lost its two local apexes: %v", coefficients)
+	}
+	if coefficients[1] <= 1.0 || coefficients[3] <= 1.0 {
+		t.Fatalf("compound apexes did not exceed the event floor: %v", coefficients)
+	}
+}
+
+func TestWholeCurveProfileBuildRetainsTwoApexesInOneContinuousEvent(t *testing.T) {
+	route := integratedDirectionalRoute([][2]float64{
+		{150, 0}, {80, 0.0040}, {120, 0.0060}, {80, 0.0040},
+		{120, 0.0065}, {80, 0.0040}, {150, 0},
+	})
+	profile, _, err := BuildWholeCurveProfile(
+		route,
+		Position{Latitude: route.Nodes[0].Latitude, Longitude: route.Nodes[0].Longitude},
+		WholeCurveEstimate{},
+		time.Unix(1_800_000_000, 0),
+		DefaultSigmoidCfg(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(profile.Events) != 1 {
+		t.Fatalf("compound bend split into %d events", len(profile.Events))
+	}
+	maximumInWindow := func(lower, upper float64) float64 {
+		maximum := 1.0
+		for _, point := range profile.Points {
+			if point.DistanceMeters >= lower && point.DistanceMeters <= upper {
+				maximum = math.Max(maximum, point.CurvatureCoefficient)
+			}
+		}
+		return maximum
+	}
+	firstApex := maximumInWindow(310, 380)
+	saddle := maximumInWindow(400, 430)
+	secondApex := maximumInWindow(470, 540)
+	if firstApex <= 1 || secondApex <= 1 || firstApex <= saddle || secondApex <= saddle {
+		t.Fatalf("compound profile lost apex detail: first=%g saddle=%g second=%g", firstApex, saddle, secondApex)
+	}
+	if profile.Events[0].MaximumApexCoefficient != math.Max(firstApex, secondApex) {
+		t.Fatalf("profile apex diagnostic=%g first=%g second=%g", profile.Events[0].MaximumApexCoefficient, firstApex, secondApex)
+	}
+}
+
+func integratedDirectionalRoute(sections [][2]float64) DirectionalRoute {
+	const latitude = 38.73
+	x, y, heading := 0.0, 0.0, 0.0
+	meters := [][2]float64{{x, y}}
+	for _, section := range sections {
+		steps := int(math.Ceil(section[0] / 5.0))
+		for step := 0; step < steps; step++ {
+			distance := math.Min(5.0, section[0]-float64(step)*5.0)
+			heading += 0.5 * section[1] * distance
+			x += math.Cos(heading) * distance
+			y += math.Sin(heading) * distance
+			heading += 0.5 * section[1] * distance
+			meters = append(meters, [2]float64{x, y})
+		}
+	}
+	route := DirectionalRoute{Generation: 11}
+	for index, point := range meters {
+		route.Nodes = append(route.Nodes, DirectionalRouteNode{
+			Latitude:  latitude + point[1]/R*TO_DEGREES,
+			Longitude: -120.75 + point[0]/(R*math.Cos(latitude*TO_RADIANS))*TO_DEGREES,
+			Sources:   []RouteNodeSource{{WayID: "compound", NodeIndex: index, IsForward: true}},
+		})
+	}
+	recomputeRouteDistances(route.Nodes)
+	return route
 }
 
 func TestWholeCurveProfileMaterializesSignedGeometry(t *testing.T) {
@@ -48,11 +147,12 @@ func TestWholeCurveProfileMaterializesSignedGeometry(t *testing.T) {
 	recomputeRouteDistances(route.Nodes)
 	pos := Position{Latitude: golden.Route[5].Latitude, Longitude: golden.Route[5].Longitude}
 	now := time.Unix(1_800_000_000, 123_000_000)
-	profile, estimate, err := BuildWholeCurveProfile(route, pos, WholeCurveEstimate{}, now)
+	cfg := DefaultSigmoidCfg()
+	profile, estimate, err := BuildWholeCurveProfile(route, pos, WholeCurveEstimate{}, now, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if profile.EstimatorVersion != WholeCurveEstimatorVersion || profile.Generation != 9 || profile.GeneratedAtUnixMillis != now.UnixMilli() {
+	if profile.EstimatorVersion != WholeCurveProfileVersion || profile.SigmoidHash != cfg.Hash() || profile.Generation != 9 || profile.GeneratedAtUnixMillis != now.UnixMilli() {
 		t.Fatalf("unexpected profile identity: %+v", profile)
 	}
 	if len(profile.Events) != 1 || len(estimate.Events) != 1 {
@@ -66,17 +166,26 @@ func TestWholeCurveProfileMaterializesSignedGeometry(t *testing.T) {
 	for index, point := range profile.Points {
 		if point.EventID == event.EventID {
 			materialized++
-			if point.Curvature != event.ControllingCurvature || index < event.StartIndex || index > event.EndIndex {
+			if math.Signbit(point.Curvature) != math.Signbit(event.ControllingCurvature) ||
+				math.Abs(point.Curvature) < math.Abs(event.ControllingCurvature)-1e-12 ||
+				point.CurvatureCoefficient < 1.0 || point.CurvatureCoefficient > DefaultWholeCurveConfiguration().ApexDetailMaximumRatio ||
+				index < event.StartIndex || index > event.EndIndex {
 				t.Fatalf("inconsistent materialized point %d: %+v event=%+v", index, point, event)
+			}
+			wantSpeed := CurvatureToSpeed(math.Abs(point.Curvature), cfg)
+			if math.Abs(point.BaseSafeSpeedMPS-wantSpeed) > 1e-9 {
+				t.Fatalf("point %d baked speed=%g want=%g", index, point.BaseSafeSpeedMPS, wantSpeed)
 			}
 		} else if point.Curvature != 0 {
 			t.Fatalf("point outside event carries curvature: %+v", point)
+		} else if point.CurvatureCoefficient != 1.0 || point.BaseSafeSpeedMPS != cfg.MaxSpeedDefault {
+			t.Fatalf("straight point missing neutral v2 values: %+v", point)
 		}
 	}
 	if materialized != event.EndIndex-event.StartIndex+1 {
 		t.Fatalf("materialized=%d expected=%d", materialized, event.EndIndex-event.StartIndex+1)
 	}
-	fingerprint, err := WholeCurveRouteFingerprint(profile.Generation, profile.Points)
+	fingerprint, err := WholeCurveRouteFingerprint(profile.Generation, profile.SigmoidHash, profile.Points)
 	if err != nil || fingerprint != profile.RouteFingerprint {
 		t.Fatalf("fingerprint mismatch got=%s recomputed=%s err=%v", profile.RouteFingerprint, fingerprint, err)
 	}
@@ -101,7 +210,7 @@ func TestBuildInfoJSONAndRawMarkers(t *testing.T) {
 	if err := json.Unmarshal(output.Bytes(), &info); err != nil {
 		t.Fatal(err)
 	}
-	if info.ReleaseID != MapdReleaseID || info.BuildID != MapdBuildID || info.EstimatorVersion != WholeCurveEstimatorVersion {
+	if info.ReleaseID != MapdReleaseID || info.BuildID != MapdBuildID || info.EstimatorVersion != WholeCurveProfileVersion {
 		t.Fatalf("unexpected build info: %+v", info)
 	}
 	if len(info.Capabilities) != 1 || info.Capabilities[0] != MapWholeCurveCapability {
@@ -238,7 +347,7 @@ func TestBuildInfoContainsRequiredLiteralMarkers(t *testing.T) {
 	for _, marker := range []string{
 		"MapdReleaseID:" + MapdReleaseID,
 		"MapdBuildID:" + MapdBuildID,
-		"MapWholeCurveProfile:whole-curve-v1",
+		"MapWholeCurveProfile:whole-curve-v2",
 	} {
 		if !strings.Contains(joined, marker) {
 			t.Fatalf("missing marker %q", marker)

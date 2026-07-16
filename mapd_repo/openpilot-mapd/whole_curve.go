@@ -8,7 +8,14 @@ import (
 	"sort"
 )
 
-const WholeCurveEstimatorVersion = "whole-curve-v1"
+const (
+	// The event detector remains the cross-language v1 geometry estimator. The
+	// route profile layered on top is versioned independently because v2 adds a
+	// continuous apex-detail shape and route-baked speeds without changing event
+	// identity or the checked-in v1 geometry corpus.
+	WholeCurveEstimatorVersion = "whole-curve-v1"
+	WholeCurveProfileVersion   = "whole-curve-v2"
+)
 
 type WholeCurveConfiguration struct {
 	ResampleSpacingMeters        float64 `json:"resampleSpacingMeters"`
@@ -21,6 +28,9 @@ type WholeCurveConfiguration struct {
 	SameSignMergeGapMeters       float64 `json:"sameSignMergeGapMeters"`
 	MinimumEventLengthMeters     float64 `json:"minimumEventLengthMeters"`
 	DuplicatePointDistanceMeters float64 `json:"duplicatePointDistanceMeters"`
+	ApexDetailGain               float64 `json:"apexDetailGain"`
+	ApexDetailMinimumRatio       float64 `json:"apexDetailMinimumRatio"`
+	ApexDetailMaximumRatio       float64 `json:"apexDetailMaximumRatio"`
 }
 
 func DefaultWholeCurveConfiguration() WholeCurveConfiguration {
@@ -35,6 +45,9 @@ func DefaultWholeCurveConfiguration() WholeCurveConfiguration {
 		SameSignMergeGapMeters:       30.0,
 		MinimumEventLengthMeters:     20.0,
 		DuplicatePointDistanceMeters: 0.5,
+		ApexDetailGain:               1.0,
+		ApexDetailMinimumRatio:       1.05,
+		ApexDetailMaximumRatio:       2.0,
 	}
 }
 

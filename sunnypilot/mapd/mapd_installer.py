@@ -55,15 +55,15 @@ class MapdReleaseSpec:
 
 # Immutable Linux ARM64 release identity. A new artifact must use a new version
 # and source build ID; never replace the asset behind this tuple.
-DEFAULT_VERSION = 'chauffeur-whole-curve-v1'
+DEFAULT_VERSION = 'chauffeur-whole-curve-v2'
 DEFAULT_BINARY_URL_TEMPLATE = "https://github.com/chriscarlo/mapd/releases/download/{version}/mapd"
 VERSION = DEFAULT_VERSION
-MAP_WHOLE_CURVE_CAPABILITY = "MapWholeCurveProfile:whole-curve-v1"
+MAP_WHOLE_CURVE_CAPABILITY = "MapWholeCurveProfile:whole-curve-v2"
 DEFAULT_RELEASE = MapdReleaseSpec(
   version=DEFAULT_VERSION,
   release_id=DEFAULT_VERSION,
-  build_id="99e7bb6c75f21977919108a456627aedbfc30070",
-  sha256="6236d99e5f62744541634f1b3e36ca2eec8d2a6b529eef80cb6639137874ffdb",
+  build_id="tree-a1f7f713360f65027097",
+  sha256="d0a372d8c37c1e683db20356c719d9ba4f39d21fe2b91e33728c3dbb7bca43bb",
   capability=MAP_WHOLE_CURVE_CAPABILITY,
   binary_url=DEFAULT_BINARY_URL_TEMPLATE.format(version=DEFAULT_VERSION),
 )

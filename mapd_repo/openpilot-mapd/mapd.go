@@ -243,11 +243,12 @@ func loop(state *State) {
 	err = PutParam(MAP_TARGET_VELOCITIES, data)
 	logwe(errors.Wrap(err, "could not write curvatures"))
 
-	// The new profile remains a separate, versioned geometry product. The
-	// controller owns all sigmoid/Q speed conversion and can fall back to the
+	// The v2 profile remains a separate, versioned route product. mapd bakes
+	// physics-only speed once per publication; the controller verifies the
+	// sigmoid hash, retains live Q/bias authority, and can fall back to the
 	// unchanged legacy MapCurvatures stream independently.
 	if routeErr == nil {
-		profile, estimate, profileErr := BuildWholeCurveProfile(state.Route, pos, state.WholeCurveEstimate, time.Now())
+		profile, estimate, profileErr := BuildWholeCurveProfile(state.Route, pos, state.WholeCurveEstimate, time.Now(), ActiveSigmoidCfg())
 		logde(errors.Wrap(profileErr, "could not build whole-curve profile"))
 		if profileErr == nil {
 			state.WholeCurveEstimate = estimate

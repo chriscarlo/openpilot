@@ -687,6 +687,7 @@ def compute_map_cap_candidate(
   overshoot_phase_offset_s: float = 0.0,
   reference_speed_mps: float | None = None,
   winding_profile: WindingBehaviorProfile | None = None,
+  precomputed_route_profile: bool = False,
 ) -> MapCapCandidate:
   strategy_mode = normalize_map_strategy(mode)
   profile = winding_profile or DEFAULT_WINDING_BEHAVIOR_PROFILE
@@ -768,7 +769,7 @@ def compute_map_cap_candidate(
         if vsafe + STRATEGIC_OVERSHOOT_DELTA_MPS < float(reference_speed):
           effective_distance += float(overshoot_phase_offset) * timing_speed
         effective_distance = max(0.0, effective_distance)
-      if strategy_mode == MAP_STRATEGY_STRATEGIC and response_model is not None:
+      if strategy_mode == MAP_STRATEGY_STRATEGIC and response_model is not None and not precomputed_route_profile:
         try:
           braking_distance = max(0.0, effective_distance - float(v_ego) * float(response_model.actuation_delay_s))
           if braking_distance <= 1e-3:
@@ -818,7 +819,11 @@ def compute_map_cap_candidate(
         v_cap = float(direct_cap)
         _apply_anchor(direct_anchor)
 
-      if response_constraints:
+      # v2 whole-route profiles already provide the complete continuous speed
+      # envelope. Their O(n) backward chain is sufficient and avoids repeating
+      # the expensive response-model binary-search probes in every planner tick.
+      # Legacy inputs retain the probes and their established fallback.
+      if response_constraints and not precomputed_route_profile:
         max_supported_required_decel = predict_average_decel_for_cruise_cap(
           v_ego=float(v_ego),
           cruise_cap=0.0,

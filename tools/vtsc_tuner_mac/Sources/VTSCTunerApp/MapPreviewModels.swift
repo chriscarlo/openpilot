@@ -324,7 +324,9 @@ extension MapRenderedWay {
 }
 
 enum MapRuntimeCurvatureResolver {
-  static let estimatorVersion = 5
+  // v6 means the calibration authority is the whole-curve-v2 profile apex.
+  // The five-node value remains visible as a diagnostic and selection aid.
+  static let estimatorVersion = 6
 
   private struct CoordinateKey: Hashable {
     var latitudeE7: Int64

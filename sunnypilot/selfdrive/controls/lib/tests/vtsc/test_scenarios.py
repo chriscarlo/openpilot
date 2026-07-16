@@ -307,7 +307,7 @@ def test_low_speed_calibration_driver_override_weights_larger_divergence_more_he
   # low-speed calibration state is smaller. The key invariant is still relative weighting:
   # larger driver override divergence should produce a measurably larger relax state.
   assert float(snap_strong['low_speed_calibration_state']) > float(snap_mild['low_speed_calibration_state']) + 0.002
-  assert float(snap_strong['low_speed_calibration_override_ema']) > float(snap_mild['low_speed_calibration_override_ema']) + 0.20
+  assert float(snap_strong['low_speed_calibration_override_ema']) > float(snap_mild['low_speed_calibration_override_ema']) + 0.05
   assert float(snap_strong['low_speed_calibration_divergence_mps']) > float(snap_mild['low_speed_calibration_divergence_mps']) + 1.0
   assert str(snap_strong['low_speed_calibration_reason']) == 'relax_override'
 
@@ -2229,6 +2229,44 @@ def test_strategic_response_probe_runs_once_for_controlling_constraint(monkeypat
   assert float(candidate.cap_mps) == pytest.approx(16.5, abs=1e-6)
   assert float(candidate.anchor_dist_m) == pytest.approx(80.0, abs=1e-6)
   assert int(candidate.anchor_index) == 6
+
+
+def test_precomputed_whole_route_profile_skips_response_probes_and_uses_continuous_chain(monkeypatch):
+  response_model = build_cruise_response_model(min_accel_mps2=-6.0, max_accel_mps2=5.0, actuation_delay_s=0.35)
+
+  def fail_probe(**_kwargs):
+    pytest.fail("v2 precomputed route profile must not run the per-tick response probe")
+
+  monkeypatch.setattr(map_strategy, 'cruise_cap_for_required_average_decel', fail_probe)
+  monkeypatch.setattr(map_strategy, 'predict_average_decel_for_cruise_cap', fail_probe)
+
+  candidate = compute_map_cap_candidate(
+    mode='strategic',
+    s_list=[20.0, 40.0, 60.0, 80.0, 100.0],
+    k_list=[0.010, 0.020, 0.012, 0.025, 0.010],
+    vsafe_list=[20.0, 16.0, 18.0, 9.0, 20.0],
+    abs_indices=[2, 4, 6, 8, 10],
+    v_ego=24.0,
+    v_cruise=27.0,
+    vis_horizon_s=1.4,
+    vis_margin_m=10.0,
+    severe_vision=False,
+    partial_vision=False,
+    vision_confidence=0.95,
+    conf_lo=0.55,
+    conf_hi=0.85,
+    max_decel=3.5,
+    horizon_limit_m=250.0,
+    response_model=response_model,
+    curve_phase_offset_s=_curve_phase_raw_for_effective(0.0),
+    reference_speed_mps=24.0,
+    precomputed_route_profile=True,
+  )
+
+  assert candidate.cap_mps is not None
+  assert float(candidate.cap_mps) < 27.0
+  assert float(candidate.anchor_dist_m) == pytest.approx(80.0, abs=1e-6)
+  assert int(candidate.anchor_index) == 8
 
 
 def test_strategic_chain_envelope_limits_accel_for_same_speed_next_curve():

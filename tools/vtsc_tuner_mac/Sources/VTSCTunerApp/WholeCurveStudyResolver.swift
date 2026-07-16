@@ -1,7 +1,66 @@
 import Foundation
 import VTSCTunerCore
 
+struct MapWholeCurveCalibrationResolution: Equatable, Sendable {
+  var curvature: Double
+  var supportMeters: Double
+  var eventID: String
+}
+
 enum MapWholeCurveStudyResolver {
+  static func calibrationResolutions(
+    ways: [MapRenderedWay],
+    calibrationSamples: [MapCalibrationSample]
+  ) -> [String: MapWholeCurveCalibrationResolution] {
+    guard !ways.isEmpty, !calibrationSamples.isEmpty else { return [:] }
+    let routes = MapRuntimeCurvatureResolver.wholeCurveStudyRoutes(
+      ways: ways,
+      focusSourceKeys: calibrationSamples.map(\.sourceKey)
+    )
+    var resolved: [String: (resolution: MapWholeCurveCalibrationResolution, distance: Double)] = [:]
+    for route in routes {
+      let estimate = WholeCurveEstimator.estimate(route: route.points.map {
+        WholeCurveInputPoint(
+          latitude: $0.node.latitude,
+          longitude: $0.node.longitude,
+          sourceKey: $0.sourceKey
+        )
+      })
+      guard !estimate.events.isEmpty else { continue }
+      let routeSourceKeys = Set(route.points.map(\.sourceKey))
+      for sample in calibrationSamples where routeSourceKeys.contains(sample.sourceKey) {
+        let directMatches = estimate.events.indices.filter {
+          estimate.events[$0].sourceKeys.contains(sample.sourceKey)
+        }
+        guard let eventIndex = directMatches.min(by: {
+          distanceMeters(from: sample, to: estimate.events[$0], points: estimate.points)
+            < distanceMeters(from: sample, to: estimate.events[$1], points: estimate.points)
+        }) else { continue }
+        let event = estimate.events[eventIndex]
+        let totalDistance = estimate.points.last?.distanceMeters ?? 0
+        let startsNearAmbiguity = route.frontIsAmbiguous
+          && estimate.points[event.startIndex].distanceMeters < 160
+        let endsNearAmbiguity = route.backIsAmbiguous
+          && totalDistance - estimate.points[event.endIndex].distanceMeters < 160
+        guard !startsNearAmbiguity, !endsNearAmbiguity,
+              estimate.points.indices.contains(event.profileApexIndex)
+        else { continue }
+        let curvature = abs(estimate.points[event.profileApexIndex].profileCurvature)
+        guard curvature.isFinite, curvature >= 1.0e-7 else { continue }
+        let distance = distanceMeters(from: sample, to: event, points: estimate.points)
+        let candidate = MapWholeCurveCalibrationResolution(
+          curvature: curvature,
+          supportMeters: event.lengthMeters,
+          eventID: event.directionalID
+        )
+        if resolved[sample.sourceKey] == nil || distance < resolved[sample.sourceKey]!.distance {
+          resolved[sample.sourceKey] = (candidate, distance)
+        }
+      }
+    }
+    return resolved.mapValues(\.resolution)
+  }
+
   static func resolve(
     ways: [MapRenderedWay],
     calibrationSamples: [MapCalibrationSample],
@@ -87,11 +146,13 @@ enum MapWholeCurveStudyResolver {
     guard estimatePoints.indices.contains(event.startIndex),
           estimatePoints.indices.contains(event.endIndex),
           estimatePoints.indices.contains(event.apexIndex),
+          estimatePoints.indices.contains(event.profileApexIndex),
           event.startIndex < event.endIndex
     else { return nil }
+    let profileApexCurvature = estimatePoints[event.profileApexIndex].profileCurvature
     let wholeSpeed = SigmoidFitter.predictedSpeedMPH(
       parameters: parameters,
-      curvature: abs(event.controllingCurvature),
+      curvature: abs(profileApexCurvature),
       bands: bands,
       mode: .effectiveStrategic,
       modifiers: .sourceDefaults
@@ -109,19 +170,26 @@ enum MapWholeCurveStudyResolver {
         mode: .effectiveStrategic,
         modifiers: .sourceDefaults
       )
+      let pointWholeSpeed = SigmoidFitter.predictedSpeedMPH(
+        parameters: parameters,
+        curvature: abs(point.profileCurvature),
+        bands: bands,
+        mode: .effectiveStrategic,
+        modifiers: .sourceDefaults
+      )
       return MapWholeCurvePoint(
         latitude: point.latitude,
         longitude: point.longitude,
         distanceMeters: point.distanceMeters - startDistance,
         currentMapdSpeedMPH: currentSpeed,
-        wholeCurveSpeedMPH: wholeSpeed,
+        wholeCurveSpeedMPH: pointWholeSpeed,
         curvature60: point.curvature60,
         curvature100: point.curvature100,
         curvature160: point.curvature160
       )
     }
     guard let firstPoint = studyPoints.first, let lastPoint = studyPoints.last else { return nil }
-    let apex = estimatePoints[event.apexIndex]
+    let apex = estimatePoints[event.profileApexIndex]
     var flags = event.flags.map(\.rawValue)
     let totalDistance = estimatePoints.last?.distanceMeters ?? 0
     if route.frontIsAmbiguous, startDistance < 160 {
@@ -151,7 +219,7 @@ enum MapWholeCurveStudyResolver {
       curvature60: event.curvature60,
       curvature100: event.curvature100,
       curvature160: event.curvature160,
-      controllingCurvature: event.controllingCurvature,
+      controllingCurvature: profileApexCurvature,
       wholeCurveSpeedMPH: wholeSpeed,
       currentMinimumSpeedMPH: currentSpeeds.min() ?? 0,
       currentMaximumSpeedMPH: currentSpeeds.max() ?? 0,

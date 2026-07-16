@@ -24,6 +24,9 @@ public struct WholeCurveConfiguration: Equatable, Sendable {
   public var sameSignMergeGapMeters = 30.0
   public var minimumEventLengthMeters = 20.0
   public var duplicatePointDistanceMeters = 0.5
+  public var apexDetailGain = 1.0
+  public var apexDetailMinimumRatio = 1.05
+  public var apexDetailMaximumRatio = 2.0
 
   public init() {}
 }
@@ -54,6 +57,8 @@ public struct WholeCurveResampledPoint: Equatable, Sendable {
   public var curvature60: Double?
   public var curvature100: Double?
   public var curvature160: Double?
+  public var profileCurvature: Double
+  public var curvatureCoefficient: Double
 }
 
 public struct WholeCurveEvent: Equatable, Identifiable, Sendable {
@@ -63,6 +68,7 @@ public struct WholeCurveEvent: Equatable, Identifiable, Sendable {
   public var startIndex: Int
   public var endIndex: Int
   public var apexIndex: Int
+  public var profileApexIndex: Int
   public var lengthMeters: Double
   public var signedTurnRadians: Double
   public var signCoherence: Double
@@ -70,6 +76,7 @@ public struct WholeCurveEvent: Equatable, Identifiable, Sendable {
   public var curvature100: Double?
   public var curvature160: Double?
   public var controllingCurvature: Double
+  public var maximumApexCoefficient: Double
   public var scaleSpread: Double?
   public var maximumSourceGapMeters: Double
   public var sourceKeys: Set<String>
@@ -160,7 +167,9 @@ public enum WholeCurveEstimator {
         sourceGapMeters: $0.sourceGapMeters,
         curvature60: nil,
         curvature100: nil,
-        curvature160: nil
+        curvature160: nil,
+        profileCurvature: 0,
+        curvatureCoefficient: 1
       )
     }
     for index in samples.indices {
@@ -182,7 +191,7 @@ public enum WholeCurveEstimator {
     }
 
     let runs = eventRuns(points: outputPoints, configuration: configuration)
-    let events = runs.compactMap {
+    var events = runs.compactMap {
       makeEvent(
         run: $0,
         points: outputPoints,
@@ -190,7 +199,74 @@ public enum WholeCurveEstimator {
         configuration: configuration
       )
     }
+    for eventIndex in events.indices {
+      var maximumCoefficient = 1.0
+      var profileApexIndex = events[eventIndex].apexIndex
+      let detailBaseline = apexDetailBaseline(
+        points: Array(outputPoints[events[eventIndex].startIndex ... events[eventIndex].endIndex]),
+        event: events[eventIndex]
+      )
+      for pointIndex in events[eventIndex].startIndex ... events[eventIndex].endIndex {
+        let coefficient = apexDetailCoefficient(
+          point: outputPoints[pointIndex],
+          event: events[eventIndex],
+          detailBaseline: detailBaseline,
+          configuration: configuration
+        )
+        let curvature = events[eventIndex].controllingCurvature * coefficient
+        if abs(curvature) > abs(outputPoints[pointIndex].profileCurvature) {
+          outputPoints[pointIndex].profileCurvature = curvature
+          outputPoints[pointIndex].curvatureCoefficient = coefficient
+        }
+        if coefficient > maximumCoefficient {
+          maximumCoefficient = coefficient
+          profileApexIndex = pointIndex
+        }
+      }
+      events[eventIndex].profileApexIndex = profileApexIndex
+      events[eventIndex].maximumApexCoefficient = maximumCoefficient
+    }
     return WholeCurveEstimate(points: outputPoints, events: events)
+  }
+
+  private static func apexDetailCoefficient(
+    point: WholeCurveResampledPoint,
+    event: WholeCurveEvent,
+    detailBaseline: Double,
+    configuration: WholeCurveConfiguration
+  ) -> Double {
+    let baseline = abs(detailBaseline)
+    guard baseline > 1.0e-12,
+          configuration.apexDetailGain > 0,
+          configuration.apexDetailMaximumRatio > 1
+    else { return 1 }
+    let detail = pointDetailMagnitude(point: point, event: event)
+    guard detail > 0 else { return 1 }
+    let ratio = detail / baseline
+    guard ratio >= max(1, configuration.apexDetailMinimumRatio) else { return 1 }
+    let amplified = 1 + configuration.apexDetailGain * (ratio - 1)
+    return min(max(amplified, 1), configuration.apexDetailMaximumRatio)
+  }
+
+  private static func apexDetailBaseline(
+    points: [WholeCurveResampledPoint],
+    event: WholeCurveEvent
+  ) -> Double {
+    let values = points.map { pointDetailMagnitude(point: $0, event: event) }.filter { $0 > 0 }
+    let baseline = median(values)
+    return baseline > 1.0e-12 ? baseline : abs(event.controllingCurvature)
+  }
+
+  private static func pointDetailMagnitude(
+    point: WholeCurveResampledPoint,
+    event: WholeCurveEvent
+  ) -> Double {
+    [point.curvature60, point.curvature100].compactMap { $0 }
+      .filter {
+        $0.isFinite && abs($0) > 0 && $0.sign == event.controllingCurvature.sign
+      }
+      .map(abs)
+      .max() ?? 0
   }
 
   private static func deduplicate(
@@ -627,6 +703,7 @@ public enum WholeCurveEstimator {
       startIndex: run.start,
       endIndex: run.end,
       apexIndex: apexIndex,
+      profileApexIndex: apexIndex,
       lengthMeters: eventLength,
       signedTurnRadians: turnStats.signed,
       signCoherence: turnStats.coherence,
@@ -634,6 +711,7 @@ public enum WholeCurveEstimator {
       curvature100: peak100,
       curvature160: peak160,
       controllingCurvature: controlling,
+      maximumApexCoefficient: 1,
       scaleSpread: scaleSpread,
       maximumSourceGapMeters: maximumSourceGap,
       sourceKeys: Set(points[run.start ... run.end].flatMap(\.sourceKeys)),

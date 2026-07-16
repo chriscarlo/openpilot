@@ -61,6 +61,50 @@ private func resolverStudyPath() -> [(Double, Double)] {
   }
 }
 
+@Test func calibrationResolutionUsesTheWholeCurveV2ProfileApex() throws {
+  let coordinates = resolverStudyPath()
+  let ways = MapRuntimeCurvatureResolver.resolve(
+    ways: [
+      resolverStudyWay(id: "straight-before", coordinates: Array(coordinates[0 ... 8])),
+      resolverStudyWay(id: "curve", coordinates: Array(coordinates[8 ... 24])),
+      resolverStudyWay(id: "straight-after", coordinates: Array(coordinates[24 ... 32])),
+    ],
+    parameters: .checkoutFallback
+  )
+  let curve = try #require(ways.first { $0.id == "curve" })
+  let sampleNode = curve.nodes[8]
+  let sample = MapCalibrationSample(
+    sourceKey: "curve:8",
+    roadName: curve.name,
+    reference: curve.reference,
+    latitude: sampleNode.latitude,
+    longitude: sampleNode.longitude,
+    curvature: sampleNode.curvature,
+    proposedSpeedMPH: 55,
+    effectiveSpeedMPH: 55,
+    desiredSpeedMPH: 55
+  )
+  let route = try #require(MapRuntimeCurvatureResolver.wholeCurveStudyRoutes(
+    ways: ways,
+    focusSourceKeys: [sample.sourceKey]
+  ).first)
+  let estimate = WholeCurveEstimator.estimate(route: route.points.map {
+    WholeCurveInputPoint(latitude: $0.node.latitude, longitude: $0.node.longitude, sourceKey: $0.sourceKey)
+  })
+  let event = try #require(estimate.events.first { $0.sourceKeys.contains(sample.sourceKey) })
+  let expected = abs(estimate.points[event.profileApexIndex].profileCurvature)
+
+  let resolution = try #require(MapWholeCurveStudyResolver.calibrationResolutions(
+    ways: ways,
+    calibrationSamples: [sample]
+  )[sample.sourceKey])
+
+  #expect(MapRuntimeCurvatureResolver.estimatorVersion == 6)
+  #expect(resolution.curvature == expected)
+  #expect(resolution.supportMeters == event.lengthMeters)
+  #expect(resolution.eventID == event.directionalID)
+}
+
 @Test func wholeCurveStudyRejectsNearbySampleWithoutEventProvenance() throws {
   let coordinates = resolverStudyPath()
   let ways = [
