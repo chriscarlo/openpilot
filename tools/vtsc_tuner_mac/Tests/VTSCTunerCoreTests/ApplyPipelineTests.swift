@@ -42,6 +42,55 @@ import Testing
   )) == .validateExplicit(explicit))
 }
 
+@Test func ticiPreflightAcceptsOnlyAnExactHeadOrProvenFastForwardAncestor() async throws {
+  let currentHead = String(repeating: "a", count: 40)
+  let targetHead = String(repeating: "b", count: 40)
+  let repository = URL(fileURLWithPath: "/repo")
+  let git = GitDeploymentPreflight(
+    branch: "chauffeur-exp01",
+    localHead: targetHead,
+    originHead: targetHead,
+    upstream: "origin/chauffeur-exp01"
+  )
+  let snapshot = TiciDeploymentSnapshot(
+    isOffroad: true,
+    isOnroad: false,
+    mapLookaheadEnabled: false,
+    branch: "chauffeur-exp01",
+    head: currentHead,
+    dirty: false,
+    physicsParams: [:],
+    qCurveSHA256: "",
+    mapdReleaseVersion: nil,
+    mapdVersion: nil,
+    activeMapdSHA256: "",
+    cachedMapdPath: "",
+    cachedMapdSHA256: nil,
+    activeTileSetID: nil
+  )
+
+  let acceptedRunner = FastForwardRelationshipRunner(status: 0)
+  try await ApplyPipeline(processRunner: acceptedRunner).validateTiciPreflight(
+    snapshot,
+    git: git,
+    repositoryRoot: repository
+  )
+  let acceptedRequests = await acceptedRunner.requests
+  #expect(acceptedRequests.count == 1)
+  #expect(acceptedRequests[0].executableURL.path == "/usr/bin/git")
+  #expect(acceptedRequests[0].arguments == ["merge-base", "--is-ancestor", currentHead, targetHead])
+  #expect(acceptedRequests[0].currentDirectoryURL == repository)
+
+  let rejectedRunner = FastForwardRelationshipRunner(status: 1)
+  await #expect(throws: ApplyPipelineError.self) {
+    try await ApplyPipeline(processRunner: rejectedRunner).validateTiciPreflight(
+      snapshot,
+      git: git,
+      repositoryRoot: repository
+    )
+  }
+}
+
 @Test func mapdConfigDecodesRustCompatiblePaths() throws {
   let data = #"""
   {
@@ -243,6 +292,20 @@ private actor ApplyEventCollector {
 
   func append(_ event: ApplyEvent) {
     events.append(event)
+  }
+}
+
+private actor FastForwardRelationshipRunner: ProcessRunning {
+  let status: Int32
+  private(set) var requests: [ProcessRequest] = []
+
+  init(status: Int32) {
+    self.status = status
+  }
+
+  func run(_ request: ProcessRequest) async throws -> ProcessResult {
+    requests.append(request)
+    return ProcessResult(terminationStatus: status, standardOutput: "", standardError: "")
   }
 }
 

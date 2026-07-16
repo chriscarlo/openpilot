@@ -601,7 +601,7 @@ public actor ApplyPipeline {
       context: "read-only tici deployment preflight",
       timeout: 60
     ).snapshot
-    try validateTiciPreflight(snapshot, git: git)
+    try await validateTiciPreflight(snapshot, git: git, repositoryRoot: request.repositoryRoot)
 
     let tileSet: CanonicalTileSetArtifact?
     if let explicitTileSet {
@@ -788,16 +788,39 @@ public actor ApplyPipeline {
     return GitDeploymentPreflight(branch: branch, localHead: localHead, originHead: originHead, upstream: upstream)
   }
 
-  private func validateTiciPreflight(
+  func validateTiciPreflight(
     _ snapshot: TiciDeploymentSnapshot,
-    git: GitDeploymentPreflight
-  ) throws {
+    git: GitDeploymentPreflight,
+    repositoryRoot: URL
+  ) async throws {
     guard snapshot.isOffroad, !snapshot.isOnroad else { throw ApplyPipelineError.ticiNotOffroad }
     guard !snapshot.mapLookaheadEnabled else { throw ApplyPipelineError.mapLookaheadMustRemainDisabled }
     guard snapshot.branch == git.branch else { throw ApplyPipelineError.invalidBranch(snapshot.branch) }
     guard !snapshot.dirty else { throw ApplyPipelineError.repositoryDirty("tici checkout is dirty") }
-    guard snapshot.head == git.localHead else {
-      throw ApplyPipelineError.commitMismatch(context: "dev/origin/tici preflight", expected: git.localHead, actual: snapshot.head)
+    guard snapshot.head.range(of: #"^[0-9a-f]{40}$"#, options: .regularExpression) != nil else {
+      throw ApplyPipelineError.invalidDeploymentOutput("tici preflight returned an invalid Git head: \(snapshot.head)")
+    }
+    if snapshot.head != git.localHead {
+      let relationship = try await processRunner.run(ProcessRequest(
+        executableURL: Self.gitURL,
+        arguments: ["merge-base", "--is-ancestor", snapshot.head, git.localHead],
+        currentDirectoryURL: repositoryRoot,
+        timeout: 30
+      ))
+      switch relationship.terminationStatus {
+      case 0:
+        break
+      case 1:
+        throw ApplyPipelineError.commitMismatch(
+          context: "tici preflight commit is not a fast-forward ancestor of the exact target",
+          expected: git.localHead,
+          actual: snapshot.head
+        )
+      default:
+        throw ApplyPipelineError.invalidDeploymentOutput(
+          "could not verify the tici fast-forward relationship: \(relationship.combinedOutput)"
+        )
+      }
     }
   }
 
@@ -855,7 +878,11 @@ public actor ApplyPipeline {
         context: "final read-only tici safety check",
         timeout: 60
       ).snapshot
-      try validateTiciPreflight(snapshot, git: deployment.git)
+      try await validateTiciPreflight(
+        snapshot,
+        git: deployment.git,
+        repositoryRoot: request.repositoryRoot
+      )
       await emit(.succeeded, id: 5, text: "Tici is still parked/offroad with Map Lookahead disabled", progress: progress)
 
       await emit(.running, id: 6, text: "Fast-forwarding the tici to the exact pushed commit…", progress: progress)
