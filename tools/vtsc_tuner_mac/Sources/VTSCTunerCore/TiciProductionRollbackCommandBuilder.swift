@@ -70,13 +70,15 @@ enum TiciProductionRollbackCommandBuilder {
     cd "$repo"
     [ "$(git branch --show-current)" = "$expected_branch" ] || fail 'rollback branch changed unexpectedly'
     [ "$(git rev-parse HEAD)" = "$expected_current_head" ] || fail 'rollback source head is not the host-proven target identity'
-    [ -z "$(git status --porcelain)" ] || fail 'rollback source checkout is dirty'
+    git_status="$(git status --porcelain)" || fail 'rollback source checkout status could not be read'
+    [ -z "$git_status" ] || fail 'rollback source checkout is dirty'
     \(TiciParkedMutationGate.shellFragment(
       refusalMessage: "refusing Git rollback unless tici remains exactly offroad and Map Lookahead is disabled"
     ))
     [ "$(git branch --show-current)" = "$expected_branch" ] || fail 'rollback branch changed immediately before Git mutation'
     [ "$(git rev-parse HEAD)" = "$expected_current_head" ] || fail 'rollback source head changed immediately before Git mutation'
-    [ -z "$(git status --porcelain)" ] || fail 'rollback source checkout became dirty immediately before Git mutation'
+    git_status="$(git status --porcelain)" || fail 'rollback source checkout status could not be re-read immediately before Git mutation'
+    [ -z "$git_status" ] || fail 'rollback source checkout became dirty immediately before Git mutation'
     git reset --hard "$previous_head"
     [ "$(git rev-parse HEAD)" = "$previous_head" ] || fail 'git rollback head mismatch'
 

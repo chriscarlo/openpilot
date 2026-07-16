@@ -1748,6 +1748,115 @@ func legacyDirectTileActivationRollbackAndInterruptedRetrySettle(
   #expect((await runner.requests).contains { $0.arguments.last?.contains("sudo reboot") == true })
 }
 
+@Test func preservedCanonicalLegacyIdentityReconcilesAfterActivationReplyWasLost() async throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  let target = String(repeating: "f", count: 64)
+  let preservedCanonical = String(repeating: "c", count: 64)
+  fixture.journal.completed = true
+  fixture.journal.resolution = .rollbackInProgress
+  fixture.journal.previousTileSetID = nil
+  fixture.journal.resolvedPreviousTileSetID = nil
+  fixture.journal.targetTileSetID = target
+  fixture.journal.previousCachedMapdPath = ""
+  fixture.journal.previousCachedMapdSHA256 = nil
+  try fixture.journal.write(to: fixture.journalURL)
+  let runner = FreshProcessRollbackRecoveryRunner(
+    journal: fixture.journal,
+    runtimeActiveTileSetID: preservedCanonical,
+    resolvedLegacyTileSetID: preservedCanonical
+  )
+
+  let result = await ApplyPipeline(
+    processRunner: runner,
+    rebootInitialDelayNanoseconds: 0,
+    rebootPollDelayNanoseconds: 1
+  ).rollbackProductionDeploymentIfJournalPending(
+    preflight: try resumeRuntimePreflight(fixture),
+    tilesActivated: true
+  )
+
+  guard case .rolledBack = result else {
+    Issue.record("preserved canonical legacy identity did not reconcile: \(result)")
+    return
+  }
+  let settled = try DeploymentRollbackJournal.load(from: fixture.journalURL)
+  #expect(settled.resolvedPreviousTileSetID == preservedCanonical)
+  #expect(settled.effectiveResolution == .rolledBack)
+  #expect((await runner.requests).contains { $0.arguments.last?.contains("sudo reboot") == true })
+}
+
+@Test func arbitraryUnboundPreviousTileIdentityStopsFreshRecoveryBeforeLaterMutation() async throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  let target = String(repeating: "f", count: 64)
+  fixture.journal.completed = true
+  fixture.journal.resolution = .rollbackInProgress
+  fixture.journal.previousTileSetID = nil
+  fixture.journal.resolvedPreviousTileSetID = nil
+  fixture.journal.targetTileSetID = target
+  try fixture.journal.write(to: fixture.journalURL)
+  let runner = FreshProcessRollbackRecoveryRunner(
+    journal: fixture.journal,
+    runtimeActiveTileSetID: target,
+    resolvedLegacyTileSetID: String(repeating: "c", count: 64),
+    resolvedTileProvenanceTargetID: String(repeating: "d", count: 64)
+  )
+
+  let result = await ApplyPipeline(processRunner: runner)
+    .rollbackProductionDeploymentIfJournalPending(
+      preflight: try resumeRuntimePreflight(fixture),
+      tilesActivated: true
+    )
+
+  guard case let .rollbackFailed(detail) = result else {
+    Issue.record("unbound previous tile identity did not fail closed")
+    return
+  }
+  #expect(detail.contains("before Git/Params/mapd restoration"))
+  let requests = await runner.requests
+  #expect(!requests.contains { $0.arguments.last?.contains(TiciProductionRollbackCommandBuilder.resultMarker) == true })
+  #expect(!requests.contains { $0.arguments.last?.contains("sudo reboot") == true })
+  #expect(try DeploymentRollbackJournal.load(from: fixture.journalURL).resolvedPreviousTileSetID == nil)
+}
+
+@Test func preActivationTileFailureAllowsSourceRollbackAndKeepsNilPreviousIdentity() async throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  fixture.journal.completed = true
+  fixture.journal.resolution = .rollbackInProgress
+  fixture.journal.previousTileSetID = nil
+  fixture.journal.resolvedPreviousTileSetID = nil
+  fixture.journal.targetTileSetID = String(repeating: "f", count: 64)
+  fixture.journal.previousCachedMapdPath = ""
+  fixture.journal.previousCachedMapdSHA256 = nil
+  try fixture.journal.write(to: fixture.journalURL)
+  let runner = FreshProcessRollbackRecoveryRunner(
+    journal: fixture.journal,
+    tileActivationNeverStarted: true
+  )
+
+  let result = await ApplyPipeline(
+    processRunner: runner,
+    rebootInitialDelayNanoseconds: 0,
+    rebootPollDelayNanoseconds: 1
+  ).rollbackProductionDeploymentIfJournalPending(
+    preflight: try resumeRuntimePreflight(fixture),
+    tilesActivated: true
+  )
+
+  guard case .rolledBack = result else {
+    Issue.record("pre-activation tile failure did not permit coherent rollback: \(result)")
+    return
+  }
+  let settled = try DeploymentRollbackJournal.load(from: fixture.journalURL)
+  #expect(settled.effectivePreviousTileSetID == nil)
+  #expect(settled.effectiveResolution == .rolledBack)
+  let requests = await runner.requests
+  #expect(requests.contains { $0.arguments.last?.contains(TiciProductionRollbackCommandBuilder.resultMarker) == true })
+  #expect(requests.contains { $0.arguments.last?.contains("sudo reboot") == true })
+}
+
 @Test func abortRejectsWrongJournalSelectionBeforeAnyRemoteRequest() async throws {
   var fixture = try resumePostflightFixture(validGPS: true)
   defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -3100,7 +3209,9 @@ private actor FreshProcessRollbackRecoveryRunner: ProcessRunning {
   let peerTunerPresent: Bool
   let tileRollbackFails: Bool
   let resolvedLegacyTileSetID: String?
+  let resolvedTileProvenanceTargetID: String?
   let tileActivationAlreadyRolledBack: Bool
+  let tileActivationNeverStarted: Bool
   private(set) var requests: [ProcessRequest] = []
   private(set) var runtimeReadCount = 0
   private var rollbackMutationObserved = false
@@ -3122,7 +3233,9 @@ private actor FreshProcessRollbackRecoveryRunner: ProcessRunning {
     peerTunerPresent: Bool = false,
     tileRollbackFails: Bool = false,
     resolvedLegacyTileSetID: String? = nil,
-    tileActivationAlreadyRolledBack: Bool = false
+    resolvedTileProvenanceTargetID: String? = nil,
+    tileActivationAlreadyRolledBack: Bool = false,
+    tileActivationNeverStarted: Bool = false
   ) {
     self.journal = journal
     self.runtimeBranches = runtimeBranches
@@ -3139,7 +3252,9 @@ private actor FreshProcessRollbackRecoveryRunner: ProcessRunning {
     self.peerTunerPresent = peerTunerPresent
     self.tileRollbackFails = tileRollbackFails
     self.resolvedLegacyTileSetID = resolvedLegacyTileSetID
+    self.resolvedTileProvenanceTargetID = resolvedTileProvenanceTargetID
     self.tileActivationAlreadyRolledBack = tileActivationAlreadyRolledBack
+    self.tileActivationNeverStarted = tileActivationNeverStarted
   }
 
   func run(_ request: ProcessRequest) async throws -> ProcessResult {
@@ -3183,16 +3298,24 @@ private actor FreshProcessRollbackRecoveryRunner: ProcessRunning {
       if tileRollbackFails {
         return ProcessResult(terminationStatus: 1, standardOutput: "", standardError: "injected tile precondition failure")
       }
+      if tileActivationNeverStarted {
+        return success(#"{"operation":"rollback","tile_activation_not_switched":true}"# + "\n")
+      }
       if let resolvedLegacyTileSetID {
+        let target = resolvedTileProvenanceTargetID ?? journal.targetTileSetID ?? ""
         let payload: [String: Any] = tileActivationAlreadyRolledBack ? [
           "operation": "rollback",
           "tile_activation_not_observed": true,
           "active_tile_set_id": resolvedLegacyTileSetID,
           "previous_tile_set_id": resolvedLegacyTileSetID,
+          "previous_tile_set_provenance": "legacy-migration-v1",
+          "previous_tile_set_target_id": target,
         ] : [
           "operation": "rollback",
           "rolled_back_tile_set_id": resolvedLegacyTileSetID,
           "previous_tile_set_id": resolvedLegacyTileSetID,
+          "previous_tile_set_provenance": "legacy-migration-v1",
+          "previous_tile_set_target_id": target,
         ]
         return success(String(decoding: try JSONSerialization.data(withJSONObject: payload), as: UTF8.self) + "\n")
       }

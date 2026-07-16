@@ -77,6 +77,7 @@ public struct TiciTileSetDeploymentService: Sendable {
   public static let rsyncURL = URL(fileURLWithPath: "/usr/bin/rsync")
   public static let remoteRoot = "/data/media/0/osm"
   public static let activeOfflinePath = "/data/media/0/osm/offline"
+  static let legacyMigrationProvenance = "legacy-migration-v1"
   public static let previousOfflinePath = "/data/media/0/osm/offline.previous"
   public static let generationRoot = "/data/media/0/osm/tile-generations"
   public static let embeddedManifestName = ".tileset-manifest.json"
@@ -272,8 +273,11 @@ public struct TiciTileSetDeploymentService: Sendable {
       guard let resolved = decoded.previousTileSetID else {
         throw TiciTileSetDeploymentError.activationIdentityMissing(expectedActivatedTileSetID)
       }
-      try Self.validateLegacyTileSetID(resolved)
-      guard decoded.activeTileSetID == resolved else {
+      try Self.validateStoredTileSetID(resolved)
+      guard decoded.activeTileSetID == resolved,
+            decoded.previousTileSetProvenance == Self.legacyMigrationProvenance,
+            decoded.previousTileSetTargetID == expectedActivatedTileSetID
+      else {
         throw TiciTileSetDeploymentError.activationIdentityMissing(resolved)
       }
       return resolved
@@ -286,7 +290,16 @@ public struct TiciTileSetDeploymentService: Sendable {
     guard decoded.rolledBackTileSetID != nil || decoded.tileActivationNotSwitched == true else {
       throw TiciTileSetDeploymentError.invalidHelperOutput(result.standardOutput)
     }
-    if decoded.tileActivationNotSwitched == true { return expectedRestoredTileSetID }
+    if decoded.tileActivationNotSwitched == true {
+      guard decoded.rolledBackTileSetID == nil,
+            decoded.previousTileSetID == nil,
+            decoded.previousTileSetProvenance == nil,
+            decoded.previousTileSetTargetID == nil
+      else {
+        throw TiciTileSetDeploymentError.invalidHelperOutput(result.standardOutput)
+      }
+      return expectedRestoredTileSetID
+    }
     guard let restored = decoded.rolledBackTileSetID else {
       throw TiciTileSetDeploymentError.invalidHelperOutput(result.standardOutput)
     }
@@ -295,8 +308,14 @@ public struct TiciTileSetDeploymentService: Sendable {
         throw TiciTileSetDeploymentError.activationIdentityMissing(expectedRestoredTileSetID)
       }
     } else {
-      try Self.validateLegacyTileSetID(restored)
-      guard decoded.previousTileSetID == restored else {
+      guard let expectedActivatedTileSetID else {
+        throw TiciTileSetDeploymentError.invalidHelperOutput(result.standardOutput)
+      }
+      try Self.validateStoredTileSetID(restored)
+      guard decoded.previousTileSetID == restored,
+            decoded.previousTileSetProvenance == Self.legacyMigrationProvenance,
+            decoded.previousTileSetTargetID == expectedActivatedTileSetID
+      else {
         throw TiciTileSetDeploymentError.activationIdentityMissing(restored)
       }
     }
@@ -622,6 +641,8 @@ public struct TiciTileSetDeploymentService: Sendable {
     var activatedTileSetID: String?
     var rolledBackTileSetID: String?
     var previousTileSetID: String?
+    var previousTileSetProvenance: String?
+    var previousTileSetTargetID: String?
     var activeTileSetID: String?
     var fileCount: Int?
     var totalBytes: UInt64?
@@ -634,6 +655,8 @@ public struct TiciTileSetDeploymentService: Sendable {
       case activatedTileSetID = "activated_tile_set_id"
       case rolledBackTileSetID = "rolled_back_tile_set_id"
       case previousTileSetID = "previous_tile_set_id"
+      case previousTileSetProvenance = "previous_tile_set_provenance"
+      case previousTileSetTargetID = "previous_tile_set_target_id"
       case activeTileSetID = "active_tile_set_id"
       case fileCount = "file_count"
       case totalBytes = "total_bytes"

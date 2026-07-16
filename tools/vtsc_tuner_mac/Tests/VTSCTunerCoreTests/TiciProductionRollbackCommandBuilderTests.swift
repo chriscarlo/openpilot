@@ -124,6 +124,68 @@ import Testing
   #expect(try String(contentsOf: params.appendingPathComponent("IsOffroad"), encoding: .utf8) == "1")
 }
 
+@Test(arguments: [1, 2])
+func unreadableGitStatusAtEitherRollbackGateStopsBeforeReset(failingRead: Int) throws {
+  let root = FileManager.default.temporaryDirectory
+    .appendingPathComponent("vtsc-unreadable-status-\(failingRead)-\(UUID().uuidString)", isDirectory: true)
+  defer { try? FileManager.default.removeItem(at: root) }
+  let repository = root.appendingPathComponent("repo", isDirectory: true)
+  let params = root.appendingPathComponent("params", isDirectory: true)
+  let bin = root.appendingPathComponent("bin", isDirectory: true)
+  try FileManager.default.createDirectory(at: repository, withIntermediateDirectories: true)
+  try FileManager.default.createDirectory(at: params, withIntermediateDirectories: true)
+  try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+  try "1".write(to: params.appendingPathComponent("IsOffroad"), atomically: true, encoding: .utf8)
+  try "0".write(to: params.appendingPathComponent("IsOnroad"), atomically: true, encoding: .utf8)
+  try "0".write(to: params.appendingPathComponent("MTSCLookaheadEnabled"), atomically: true, encoding: .utf8)
+
+  let statusCount = root.appendingPathComponent("status-count")
+  let resetMarker = root.appendingPathComponent("git-reset-ran")
+  let currentHead = String(repeating: "b", count: 40)
+  let fakeGit = bin.appendingPathComponent("git")
+  try """
+  #!/bin/sh
+  case "$1 $2" in
+    "branch --show-current") printf '%s\\n' chauffeur-exp01 ;;
+    "rev-parse HEAD") printf '%s\\n' '\(currentHead)' ;;
+    "status --porcelain")
+      count="$(cat '\(statusCount.path)' 2>/dev/null || printf 0)"
+      count=$((count + 1))
+      printf '%s' "$count" > '\(statusCount.path)'
+      if [ "$count" -eq '\(failingRead)' ]; then exit 1; fi
+      exit 0
+      ;;
+    "reset --hard") /usr/bin/touch '\(resetMarker.path)' ;;
+    *) exit 1 ;;
+  esac
+  """.write(to: fakeGit, atomically: true, encoding: .utf8)
+  try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fakeGit.path)
+  for tool in ["flock", "sha256sum"] {
+    let url = bin.appendingPathComponent(tool)
+    try "#!/bin/sh\nexit 0\n".write(to: url, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+  }
+
+  let command = try TiciProductionRollbackCommandBuilder.command(
+    journal: rollbackJournalFixture(),
+    expectedCurrentHead: currentHead,
+    repositoryPath: repository.path,
+    paramsDirectory: params.path,
+    paramsLockPath: root.appendingPathComponent("params.lock").path
+  )
+  let process = Process()
+  process.executableURL = URL(fileURLWithPath: "/bin/sh")
+  process.arguments = ["-c", command]
+  process.environment = ["PATH": "\(bin.path):/usr/bin:/bin:/usr/sbin:/sbin"]
+  try process.run()
+  process.waitUntilExit()
+
+  #expect(process.terminationStatus != 0)
+  #expect(!FileManager.default.fileExists(atPath: resetMarker.path))
+  let observedReads = try String(contentsOf: statusCount, encoding: .utf8)
+  #expect(observedReads == String(failingRead))
+}
+
 @Test func mapdRollbackReplayNeedsNoArtifactWhenTheActiveBinaryIsAlreadyExact() {
   let previous = String(repeating: "a", count: 64)
   #expect(TiciProductionRollbackCommandBuilder.mapdRestoreDecision(

@@ -359,7 +359,7 @@ import Testing
 
   let succeeded = TiciTileSetDeploymentService(
     processRunner: TileRollbackRunner(output: """
-    {"operation":"rollback","rolled_back_tile_set_id":"\(legacyTileSetID)","previous_tile_set_id":"\(legacyTileSetID)","tile_activation_not_observed":false}
+    {"operation":"rollback","rolled_back_tile_set_id":"\(legacyTileSetID)","previous_tile_set_id":"\(legacyTileSetID)","previous_tile_set_provenance":"legacy-migration-v1","previous_tile_set_target_id":"\(expectedTileSetID)","tile_activation_not_observed":false}
     """),
     transactionHelperURL: helper
   )
@@ -369,6 +369,61 @@ import Testing
     expectedGitBranch: "chauffeur-exp01",
     expectedGitHead: String(repeating: "a", count: 40)
   )
+
+  let preservedCanonicalID = String(repeating: "c", count: 64)
+  let preservedCanonical = TiciTileSetDeploymentService(
+    processRunner: TileRollbackRunner(output: """
+    {"operation":"rollback","rolled_back_tile_set_id":"\(preservedCanonicalID)","previous_tile_set_id":"\(preservedCanonicalID)","previous_tile_set_provenance":"legacy-migration-v1","previous_tile_set_target_id":"\(expectedTileSetID)"}
+    """),
+    transactionHelperURL: helper
+  )
+  #expect(try await preservedCanonical.rollback(
+    profile: "commaAdb",
+    expectedActivatedTileSetID: expectedTileSetID,
+    expectedGitBranch: "chauffeur-exp01",
+    expectedGitHead: String(repeating: "a", count: 40)
+  ) == preservedCanonicalID)
+
+  let arbitraryCanonical = TiciTileSetDeploymentService(
+    processRunner: TileRollbackRunner(output: """
+    {"operation":"rollback","rolled_back_tile_set_id":"\(preservedCanonicalID)","previous_tile_set_id":"\(preservedCanonicalID)","previous_tile_set_provenance":"legacy-migration-v1","previous_tile_set_target_id":"\(String(repeating: "d", count: 64))"}
+    """),
+    transactionHelperURL: helper
+  )
+  await #expect(throws: TiciTileSetDeploymentError.activationIdentityMissing(preservedCanonicalID)) {
+    try await arbitraryCanonical.rollback(
+      profile: "commaAdb",
+      expectedActivatedTileSetID: expectedTileSetID,
+      expectedGitBranch: "chauffeur-exp01",
+      expectedGitHead: String(repeating: "a", count: 40)
+    )
+  }
+
+  let neverActivated = TiciTileSetDeploymentService(
+    processRunner: TileRollbackRunner(output: #"{"operation":"rollback","tile_activation_not_switched":true}"#),
+    transactionHelperURL: helper
+  )
+  #expect(try await neverActivated.rollback(
+    profile: "commaAdb",
+    expectedActivatedTileSetID: expectedTileSetID,
+    expectedGitBranch: "chauffeur-exp01",
+    expectedGitHead: String(repeating: "a", count: 40)
+  ) == nil)
+
+  let ambiguousNeverActivated = TiciTileSetDeploymentService(
+    processRunner: TileRollbackRunner(output: """
+    {"operation":"rollback","tile_activation_not_switched":true,"previous_tile_set_id":"\(preservedCanonicalID)"}
+    """),
+    transactionHelperURL: helper
+  )
+  await #expect(throws: (any Error).self) {
+    try await ambiguousNeverActivated.rollback(
+      profile: "commaAdb",
+      expectedActivatedTileSetID: expectedTileSetID,
+      expectedGitBranch: "chauffeur-exp01",
+      expectedGitHead: String(repeating: "a", count: 40)
+    )
+  }
 
   let mismatch = TiciTileSetDeploymentService(
     processRunner: TileRollbackRunner(output: #"{"operation":"rollback","rolled_back_tile_set_id":"old","tile_activation_not_observed":true}"#),
