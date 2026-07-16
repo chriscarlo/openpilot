@@ -35,16 +35,19 @@ class FakeSubMaster:
 
   VTSC and the Sunnypilot longitudinal planner expect:
   - `sm.valid` dict for gating some message accesses (notably modelV2/radarState)
+  - `sm.updated` dict for frame-freshness checks (notably radarState)
   - `sm[...]` to return message-like objects with attributes
   """
 
   def __init__(self, data: Dict[str, Any], valid: Dict[str, bool],
                alive: Optional[Dict[str, bool]] = None,
-               recv_time: Optional[Dict[str, float]] = None):
+               recv_time: Optional[Dict[str, float]] = None,
+               updated: Optional[Dict[str, bool]] = None):
     self._data = dict(data)
     self.valid = dict(valid)
     self.alive = {k: self.valid.get(k, False) for k in self._data} if alive is None else dict(alive)
     self.recv_time = {k: 0.0 for k in self._data} if recv_time is None else dict(recv_time)
+    self.updated = {k: self.valid.get(k, False) for k in self._data} if updated is None else dict(updated)
 
   def __getitem__(self, key: str) -> Any:
     return self._data[key]
