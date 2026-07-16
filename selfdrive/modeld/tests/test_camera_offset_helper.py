@@ -2,10 +2,37 @@ import pytest
 
 from openpilot.common.params import Params
 from openpilot.selfdrive.modeld.camera_offset_helper import (
+  CAMERA_OFFSET_AUTO_LEARNED_PARAM,
+  CAMERA_OFFSET_AUTO_RESET_ACK_PARAM,
+  CAMERA_OFFSET_AUTO_RESET_REQUEST_PARAM,
+  CAMERA_OFFSET_AUTO_VERSION,
+  CAMERA_OFFSET_AUTO_VERSION_PARAM,
   CameraOffsetHelper,
   camera_offset_auto_enabled,
   should_persist_auto_offset,
 )
+
+
+class MemoryParams:
+  DEFAULTS = {
+    CAMERA_OFFSET_AUTO_LEARNED_PARAM: 0.0,
+    CAMERA_OFFSET_AUTO_VERSION_PARAM: 0,
+  }
+
+  def __init__(self, values=None, apply_nonblocking=True):
+    self.values = dict(values or {})
+    self.apply_nonblocking = apply_nonblocking
+    self.queued = []
+
+  def get(self, key, return_default=False):
+    if key in self.values:
+      return self.values[key]
+    return self.DEFAULTS.get(key) if return_default else None
+
+  def put_nonblocking(self, key, value):
+    self.queued.append((key, value))
+    if self.apply_nonblocking:
+      self.values[key] = value
 
 
 class TestCameraOffsetHelper:
@@ -43,6 +70,67 @@ class TestCameraOffsetHelper:
     helper.load_auto_tune_offset(1.0)
 
     assert helper.get_auto_tune_offset() == pytest.approx(helper.AUTO_TUNE_MAX_OFFSET)
+
+  def test_load_persisted_auto_tune_keeps_current_state(self):
+    params = MemoryParams({
+      CAMERA_OFFSET_AUTO_VERSION_PARAM: CAMERA_OFFSET_AUTO_VERSION,
+      CAMERA_OFFSET_AUTO_LEARNED_PARAM: 0.06,
+    })
+    helper = CameraOffsetHelper()
+
+    assert helper.load_persisted_auto_tune(params) == pytest.approx(0.06)
+
+  def test_load_persisted_auto_tune_resets_previous_algorithm_version(self):
+    params = MemoryParams({
+      CAMERA_OFFSET_AUTO_VERSION_PARAM: CAMERA_OFFSET_AUTO_VERSION - 1,
+      CAMERA_OFFSET_AUTO_LEARNED_PARAM: -0.07,
+    })
+    helper = CameraOffsetHelper()
+
+    assert helper.load_persisted_auto_tune(params) == pytest.approx(0.0)
+    assert params.get(CAMERA_OFFSET_AUTO_LEARNED_PARAM) == pytest.approx(0.0)
+    assert params.get(CAMERA_OFFSET_AUTO_VERSION_PARAM) == CAMERA_OFFSET_AUTO_VERSION
+
+  def test_load_persisted_auto_tune_consumes_pending_reset(self):
+    params = MemoryParams({
+      CAMERA_OFFSET_AUTO_VERSION_PARAM: CAMERA_OFFSET_AUTO_VERSION,
+      CAMERA_OFFSET_AUTO_LEARNED_PARAM: 0.06,
+      CAMERA_OFFSET_AUTO_RESET_REQUEST_PARAM: "reset-1",
+    })
+    helper = CameraOffsetHelper()
+
+    assert helper.load_persisted_auto_tune(params) == pytest.approx(0.0)
+    assert params.get(CAMERA_OFFSET_AUTO_LEARNED_PARAM) == pytest.approx(0.0)
+    assert params.get(CAMERA_OFFSET_AUTO_RESET_ACK_PARAM) == "reset-1"
+
+  def test_load_persisted_auto_tune_ignores_acknowledged_reset(self):
+    params = MemoryParams({
+      CAMERA_OFFSET_AUTO_VERSION_PARAM: CAMERA_OFFSET_AUTO_VERSION,
+      CAMERA_OFFSET_AUTO_LEARNED_PARAM: 0.06,
+      CAMERA_OFFSET_AUTO_RESET_REQUEST_PARAM: "reset-1",
+      CAMERA_OFFSET_AUTO_RESET_ACK_PARAM: "reset-1",
+    })
+    helper = CameraOffsetHelper()
+
+    assert helper.load_persisted_auto_tune(params) == pytest.approx(0.06)
+
+  def test_consume_auto_tune_reset_queues_zero_before_ack_and_is_idempotent(self):
+    params = MemoryParams({
+      CAMERA_OFFSET_AUTO_RESET_REQUEST_PARAM: "reset-2",
+      CAMERA_OFFSET_AUTO_RESET_ACK_PARAM: "reset-1",
+    }, apply_nonblocking=False)
+    helper = CameraOffsetHelper()
+    helper.load_auto_tune_offset(0.06)
+
+    assert helper.consume_auto_tune_reset(params)
+    assert helper.get_auto_tune_offset() == pytest.approx(0.0)
+    assert params.queued == [
+      (CAMERA_OFFSET_AUTO_LEARNED_PARAM, 0.0),
+      (CAMERA_OFFSET_AUTO_VERSION_PARAM, CAMERA_OFFSET_AUTO_VERSION),
+      (CAMERA_OFFSET_AUTO_RESET_ACK_PARAM, "reset-2"),
+    ]
+    assert not helper.consume_auto_tune_reset(params)
+    assert len(params.queued) == 3
 
 
 def test_should_persist_first_crossing_away_from_zero():

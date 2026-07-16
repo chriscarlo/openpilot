@@ -165,6 +165,7 @@ class TestAutoTune:
         v_ego=33.5,
         lat_active=True,
         blinkers_active=False,
+        lane_change_active=False,
         desired_curvature=hold_curve,
       )
 
@@ -182,6 +183,7 @@ class TestAutoTune:
         v_ego=33.5,
         lat_active=True,
         blinkers_active=False,
+        lane_change_active=False,
         desired_curvature=0.0,
       )
 
@@ -196,6 +198,7 @@ class TestAutoTune:
       v_ego=33.5,
       lat_active=True,
       blinkers_active=False,
+      lane_change_active=False,
       desired_curvature=hold_curve,
     )
 
@@ -208,6 +211,7 @@ class TestAutoTune:
         v_ego=33.5,
         lat_active=True,
         blinkers_active=False,
+        lane_change_active=False,
         desired_curvature=helper.AUTO_TUNE_SLIGHT_CURVATURE,
       )
 
@@ -225,6 +229,7 @@ class TestAutoTune:
         v_ego=33.5,
         lat_active=True,
         blinkers_active=False,
+        lane_change_active=False,
         desired_curvature=0.0,
       )
 
@@ -236,6 +241,7 @@ class TestAutoTune:
       v_ego=33.5,
       lat_active=True,
       blinkers_active=False,
+      lane_change_active=False,
       desired_curvature=hold_curve,
     )
 
@@ -247,6 +253,7 @@ class TestAutoTune:
       v_ego=33.5,
       lat_active=True,
       blinkers_active=False,
+      lane_change_active=False,
       desired_curvature=0.0,
     )
 
@@ -261,10 +268,162 @@ class TestAutoTune:
         v_ego=33.5,
         lat_active=True,
         blinkers_active=False,
+        lane_change_active=False,
         desired_curvature=0.0,
       )
 
     assert helper.auto_camera_offset < 0.0
+
+  def test_auto_tune_post_curve_uses_fresh_center_sign(self, helper):
+    hold_curve = helper.AUTO_TUNE_SLIGHT_CURVATURE + helper.AUTO_TUNE_CURVATURE_HYSTERESIS + 1e-4
+
+    for _ in range(helper.AUTO_TUNE_UPDATE_FRAMES):
+      helper.observe(
+        center_y=0.18,
+        center_prob=0.95,
+        lane_width=3.65,
+        center_valid=True,
+        v_ego=33.5,
+        lat_active=True,
+        blinkers_active=False,
+        lane_change_active=False,
+        desired_curvature=0.0,
+      )
+
+    learned_before_curve = helper.auto_camera_offset
+    assert learned_before_curve < 0.0
+
+    for _ in range(200):
+      helper.observe(
+        center_y=-0.18,
+        center_prob=0.95,
+        lane_width=3.65,
+        center_valid=True,
+        v_ego=33.5,
+        lat_active=True,
+        blinkers_active=False,
+        lane_change_active=False,
+        desired_curvature=hold_curve,
+      )
+
+    for _ in range(helper.AUTO_TUNE_UPDATE_FRAMES):
+      helper.observe(
+        center_y=-0.18,
+        center_prob=0.95,
+        lane_width=3.65,
+        center_valid=True,
+        v_ego=33.5,
+        lat_active=True,
+        blinkers_active=False,
+        lane_change_active=False,
+        desired_curvature=0.0,
+      )
+
+    assert helper.auto_camera_offset > learned_before_curve
+
+  @pytest.mark.parametrize(("blinkers_active", "lane_change_active"), [(True, False), (False, True)])
+  def test_auto_tune_maneuver_requires_fresh_post_maneuver_window(self, helper, blinkers_active, lane_change_active):
+    for _ in range(helper.AUTO_TUNE_UPDATE_FRAMES):
+      helper.observe(
+        center_y=0.18,
+        center_prob=0.95,
+        lane_width=3.65,
+        center_valid=True,
+        v_ego=33.5,
+        lat_active=True,
+        blinkers_active=False,
+        lane_change_active=False,
+        desired_curvature=0.0,
+      )
+
+    learned_before_lane_change = helper.auto_camera_offset
+    assert learned_before_lane_change < 0.0
+
+    for _ in range(helper.AUTO_TUNE_UPDATE_FRAMES * 2):
+      helper.observe(
+        center_y=-0.8,
+        center_prob=0.95,
+        lane_width=3.65,
+        center_valid=True,
+        v_ego=33.5,
+        lat_active=True,
+        blinkers_active=blinkers_active,
+        lane_change_active=lane_change_active,
+        desired_curvature=0.0,
+      )
+
+    assert helper.auto_camera_offset == pytest.approx(learned_before_lane_change)
+
+    for _ in range(helper.AUTO_TUNE_UPDATE_FRAMES - 1):
+      helper.observe(
+        center_y=-0.18,
+        center_prob=0.95,
+        lane_width=3.65,
+        center_valid=True,
+        v_ego=33.5,
+        lat_active=True,
+        blinkers_active=False,
+        lane_change_active=False,
+        desired_curvature=0.0,
+      )
+
+    assert helper.auto_camera_offset == pytest.approx(learned_before_lane_change)
+
+    helper.observe(
+      center_y=-0.18,
+      center_prob=0.95,
+      lane_width=3.65,
+      center_valid=True,
+      v_ego=33.5,
+      lat_active=True,
+      blinkers_active=False,
+      lane_change_active=False,
+      desired_curvature=0.0,
+    )
+
+    assert helper.auto_camera_offset > learned_before_lane_change
+
+  def test_curve_hold_hysteresis_survives_lane_change(self, helper):
+    hold_enter = helper.AUTO_TUNE_SLIGHT_CURVATURE + helper.AUTO_TUNE_CURVATURE_HYSTERESIS + 1e-4
+    hold_band = helper.AUTO_TUNE_SLIGHT_CURVATURE
+
+    helper.observe(
+      center_y=0.18,
+      center_prob=0.95,
+      lane_width=3.65,
+      center_valid=True,
+      v_ego=33.5,
+      lat_active=True,
+      blinkers_active=False,
+      lane_change_active=False,
+      desired_curvature=hold_enter,
+    )
+    helper.observe(
+      center_y=0.18,
+      center_prob=0.95,
+      lane_width=3.65,
+      center_valid=True,
+      v_ego=33.5,
+      lat_active=True,
+      blinkers_active=False,
+      lane_change_active=True,
+      desired_curvature=hold_band,
+    )
+
+    for _ in range(helper.AUTO_TUNE_UPDATE_FRAMES):
+      helper.observe(
+        center_y=0.18,
+        center_prob=0.95,
+        lane_width=3.65,
+        center_valid=True,
+        v_ego=33.5,
+        lat_active=True,
+        blinkers_active=False,
+        lane_change_active=False,
+        desired_curvature=hold_band,
+      )
+
+    assert helper.auto_camera_offset == pytest.approx(0.0)
 
   def test_auto_tune_straight_highway_settles_without_oscillation(self, helper):
     xs = np.array([0.0, 5.0, 10.0, 15.0], dtype=np.float32)
@@ -290,6 +449,7 @@ class TestAutoTune:
         v_ego=75.0 * 0.44704,
         lat_active=True,
         blinkers_active=False,
+        lane_change_active=False,
         desired_curvature=0.0,
       )
       helper.update(transform.copy(), transform.copy(), INTRINSICS, INTRINSICS, HEIGHT)

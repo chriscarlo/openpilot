@@ -11,6 +11,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QStyle>
+#include <QUuid>
 #include <QtConcurrent/QtConcurrent>
 #include <QDir>
 
@@ -77,6 +78,12 @@ QJsonObject readJsonParam(Params &params, const char *key) {
 
 QJsonObject readActiveBundleParam(Params &params) {
   return readJsonParam(params, "ModelManager_ActiveBundle");
+}
+
+void requestCameraOffsetAutoReset(Params &params) {
+  params.put("CameraOffsetAutoResetRequest",
+             QUuid::createUuid().toString(QUuid::WithoutBraces).toStdString());
+  params.put("CameraOffsetAutoLearned", "0.0");
 }
 
 QList<ModelSelectionEntry> readCachedModelEntries(Params &params) {
@@ -272,7 +279,7 @@ ModelsPanel::ModelsPanel(QWidget *parent) : QWidget(parent) {
       tr("Clear the persisted learned auto camera offset and let it relearn from zero."), this);
   connect(reset_auto_offset_btn, &ButtonControlSP::clicked, this, [=]() {
     if (showConfirmationDialog(tr("Are you sure you want to reset the learned auto camera offset?"), tr("Reset Auto Offset"))) {
-      params.remove("CameraOffsetAutoLearned");
+      requestCameraOffsetAutoReset(params);
       updateLabels();
     }
   });
@@ -617,7 +624,7 @@ void ModelsPanel::showResetParamsDialog() {
   if (showConfirmationDialog(content, button_text, false)) {
     params.remove("CalibrationParams");
     params.remove("LiveTorqueParameters");
-    params.remove("CameraOffsetAutoLearned");
+    requestCameraOffsetAutoReset(params);
   }
 }
 

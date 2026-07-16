@@ -6,6 +6,7 @@
 
 #include <QDebug>
 #include <QTimer>
+#include <QUuid>
 
 #include "common/watchdog.h"
 #include "common/util.h"
@@ -293,7 +294,9 @@ DevicePanel::DevicePanel(SettingsWindow *parent) : ListWidget(parent) {
           params.remove("LiveParameters");
           params.remove("LiveParametersV2");
           params.remove("LiveDelay");
-          params.remove("CameraOffsetAutoLearned");
+          params.put("CameraOffsetAutoResetRequest",
+                     QUuid::createUuid().toString(QUuid::WithoutBraces).toStdString());
+          params.put("CameraOffsetAutoLearned", "0.0");
           params.putBool("OnroadCycleRequested", true);
           updateCalibDescription();
         }

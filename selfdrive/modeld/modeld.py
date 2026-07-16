@@ -327,9 +327,8 @@ def main(demo=False):
   meta_extra = FrameMeta()
   camera_offset_helper = CameraOffsetHelper(ModelConstants.MODEL_FREQ)
   camera_offset_helper.set_offset(params.get("CameraOffset", return_default=True))
-  camera_offset_helper.load_auto_tune_offset(params.get(CAMERA_OFFSET_AUTO_LEARNED_PARAM, return_default=True))
+  last_saved_auto_offset = camera_offset_helper.load_persisted_auto_tune(params)
   camera_offset_helper.set_auto_enabled(camera_offset_auto_enabled(params))
-  last_saved_auto_offset = camera_offset_helper.get_auto_tune_offset()
   last_auto_offset_save_t = time.monotonic()
 
 
@@ -390,6 +389,9 @@ def main(demo=False):
     if sm.frame % 10 == 0:
       camera_offset_helper.set_offset(params.get("CameraOffset", return_default=True))
       camera_offset_helper.set_auto_enabled(camera_offset_auto_enabled(params))
+      if camera_offset_helper.consume_auto_tune_reset(params):
+        last_saved_auto_offset = camera_offset_helper.get_auto_tune_offset()
+        last_auto_offset_save_t = time.monotonic()
     # Ensure sane, non-zero delay for any downstream math/model inputs
     lat_delay = max(model.lat_delay + LAT_SMOOTH_SECONDS, 0.01)
     lateral_control_params = np.array([v_ego, lat_delay], dtype=np.float32)
@@ -471,6 +473,7 @@ def main(demo=False):
         v_ego=v_ego,
         lat_active=sm['carControl'].latActive,
         blinkers_active=sm['carState'].leftBlinker or sm['carState'].rightBlinker,
+        lane_change_active=DH.lane_change_state != log.LaneChangeState.off,
         desired_curvature=drivingdata_send.drivingModelData.action.desiredCurvature,
       )
       current_auto_offset = camera_offset_helper.get_auto_tune_offset()

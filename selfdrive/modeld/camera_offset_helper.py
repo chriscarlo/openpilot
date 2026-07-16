@@ -9,6 +9,10 @@ AUTO_TUNE_PERSIST_MIN_DELTA = 0.002
 AUTO_TUNE_PERSIST_INTERVAL_S = 5.0
 CAMERA_OFFSET_AUTO_PARAM = "CameraOffsetAuto"
 CAMERA_OFFSET_AUTO_LEARNED_PARAM = "CameraOffsetAutoLearned"
+CAMERA_OFFSET_AUTO_RESET_ACK_PARAM = "CameraOffsetAutoResetAck"
+CAMERA_OFFSET_AUTO_RESET_REQUEST_PARAM = "CameraOffsetAutoResetRequest"
+CAMERA_OFFSET_AUTO_VERSION_PARAM = "CameraOffsetAutoVersion"
+CAMERA_OFFSET_AUTO_VERSION = 1
 
 
 def camera_offset_auto_enabled(params) -> bool:
@@ -59,6 +63,7 @@ class CameraOffsetHelper:
     self._valid_frames = 0
     self._invalid_frames = 0
     self._curve_hold_active = False
+    self._last_reset_request: str | None = None
     self._center_filter = FirstOrderFilter(0.0, self.AUTO_TUNE_FILTER_RC, 1.0 / model_freq, initialized=False)
 
   def set_offset(self, offset: float):
@@ -76,15 +81,46 @@ class CameraOffsetHelper:
   def get_auto_tune_offset(self) -> float:
     return float(self.auto_camera_offset)
 
-  def reset_runtime_state(self) -> None:
+  def _reset_observation_window(self) -> None:
     self._valid_frames = 0
     self._invalid_frames = 0
-    self._curve_hold_active = False
     self._center_filter.initialized = False
+
+  def reset_runtime_state(self) -> None:
+    self._reset_observation_window()
+    self._curve_hold_active = False
 
   def reset_auto_tune(self) -> None:
     self.auto_camera_offset = 0.0
     self.reset_runtime_state()
+
+  def _reset_persisted_auto_tune(self, params, reset_request: str | None = None) -> None:
+    self.reset_auto_tune()
+    # Keep these writes on modeld's Params queue and acknowledge last. FIFO
+    # ordering ensures an older queued learned-offset write cannot win the reset.
+    params.put_nonblocking(CAMERA_OFFSET_AUTO_LEARNED_PARAM, 0.0)
+    params.put_nonblocking(CAMERA_OFFSET_AUTO_VERSION_PARAM, CAMERA_OFFSET_AUTO_VERSION)
+    if reset_request is not None:
+      self._last_reset_request = reset_request
+      params.put_nonblocking(CAMERA_OFFSET_AUTO_RESET_ACK_PARAM, reset_request)
+
+  def load_persisted_auto_tune(self, params) -> float:
+    stored_version = params.get(CAMERA_OFFSET_AUTO_VERSION_PARAM, return_default=True)
+    reset_request = params.get(CAMERA_OFFSET_AUTO_RESET_REQUEST_PARAM)
+    reset_ack = params.get(CAMERA_OFFSET_AUTO_RESET_ACK_PARAM)
+    reset_pending = reset_request is not None and reset_request not in (reset_ack, self._last_reset_request)
+    if stored_version != CAMERA_OFFSET_AUTO_VERSION or reset_pending:
+      self._reset_persisted_auto_tune(params, reset_request)
+    else:
+      self.load_auto_tune_offset(params.get(CAMERA_OFFSET_AUTO_LEARNED_PARAM, return_default=True))
+    return self.get_auto_tune_offset()
+
+  def consume_auto_tune_reset(self, params) -> bool:
+    reset_request = params.get(CAMERA_OFFSET_AUTO_RESET_REQUEST_PARAM)
+    if reset_request is None or reset_request in (params.get(CAMERA_OFFSET_AUTO_RESET_ACK_PARAM), self._last_reset_request):
+      return False
+    self._reset_persisted_auto_tune(params, reset_request)
+    return True
 
   @property
   def target_camera_offset(self) -> float:
@@ -109,20 +145,21 @@ class CameraOffsetHelper:
 
   def observe(self, center_y: float, center_prob: float, lane_width: float,
               center_valid: bool, v_ego: float, lat_active: bool,
-              blinkers_active: bool, desired_curvature: float) -> None:
+              blinkers_active: bool, lane_change_active: bool,
+              desired_curvature: float) -> None:
     if not self.auto_enabled:
       return
 
-    if self._update_curve_hold_state(desired_curvature):
-      # Hold the current learned offset through anything more than a slight bend.
-      self._valid_frames = 0
-      self._invalid_frames = 0
+    curve_hold_active = self._update_curve_hold_state(desired_curvature)
+    if curve_hold_active or not lat_active or blinkers_active or lane_change_active:
+      # A curve, maneuver, or disengagement changes the observed lane frame.
+      # Hold the learned offset and discard center history so the first update
+      # after the interruption is based only on fresh straight-road samples.
+      self._reset_observation_window()
       return
 
     valid = (
       center_valid and
-      lat_active and
-      not blinkers_active and
       v_ego >= self.AUTO_TUNE_MIN_SPEED and
       math.isfinite(desired_curvature) and
       math.isfinite(center_y) and
