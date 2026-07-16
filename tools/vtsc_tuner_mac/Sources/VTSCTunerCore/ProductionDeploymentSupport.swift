@@ -1,5 +1,14 @@
 import Foundation
 
+enum TiciBootIdentity {
+  static func isValid(_ value: String) -> Bool {
+    value.range(
+      of: #"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"#,
+      options: .regularExpression
+    ) != nil
+  }
+}
+
 struct GitDeploymentPreflight: Equatable, Sendable {
   var branch: String
   var localHead: String
@@ -14,6 +23,7 @@ struct ResumePostflightGitIdentity: Equatable, Sendable {
 }
 
 struct TiciDeploymentSnapshot: Codable, Equatable, Sendable {
+  var bootID: String? = nil
   var isOffroad: Bool
   var isOnroad: Bool
   var mapLookaheadEnabled: Bool
@@ -30,6 +40,7 @@ struct TiciDeploymentSnapshot: Codable, Equatable, Sendable {
   var activeTileSetID: String?
 
   enum CodingKeys: String, CodingKey {
+    case bootID = "boot_id"
     case isOffroad = "is_offroad"
     case isOnroad = "is_onroad"
     case mapLookaheadEnabled = "map_lookahead_enabled"
@@ -46,6 +57,7 @@ struct TiciDeploymentSnapshot: Codable, Equatable, Sendable {
 }
 
 struct TiciDeploymentPostflight: Codable, Equatable, Sendable {
+  var bootID: String?
   var isOffroad: Bool
   var isOnroad: Bool
   var runtimeEndIsOffroad: Bool
@@ -85,6 +97,7 @@ struct TiciDeploymentPostflight: Codable, Equatable, Sendable {
   var activeTileSetID: String?
 
   enum CodingKeys: String, CodingKey {
+    case bootID = "boot_id"
     case isOffroad = "is_offroad"
     case isOnroad = "is_onroad"
     case runtimeEndIsOffroad = "runtime_end_is_offroad"

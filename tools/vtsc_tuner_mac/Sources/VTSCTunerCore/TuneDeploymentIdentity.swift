@@ -93,6 +93,7 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
   public var createdAt: String
   public var profile: String
   public var branch: String
+  public var previousBootID: String?
   public var previousHead: String
   public var targetHead: String?
   public var previousPhysicsParams: [String: String?]
@@ -100,11 +101,19 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
   public var previousMapdReleaseVersion: String?
   public var previousMapdVersion: String?
   public var previousActiveMapdSHA256: String
+  public var previousActiveMapdBuildInfoSHA256: String?
   public var previousCachedMapdPath: String
   public var previousCachedMapdSHA256: String?
   public var mapdRollbackPath: String
   public var previousTileSetID: String?
   public var targetTileSetID: String?
+  /// Exact Linux boot identity captured and durably synced immediately before
+  /// the deployment reboot. Optional only for schema-1 compatibility; a
+  /// missing value can never certify the immediate post-reboot install.
+  public var deploymentPreRebootBootID: String?
+  /// Exact Linux boot identity captured and durably synced immediately before
+  /// a rollback reboot. A rebooted rollback cannot settle without it.
+  public var rollbackPreRebootBootID: String?
   public var rebootSent: Bool
   public var completed: Bool
   public var completedAt: String?
@@ -130,6 +139,7 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
       createdAt == other.createdAt &&
       profile == other.profile &&
       branch == other.branch &&
+      previousBootID == other.previousBootID &&
       previousHead == other.previousHead &&
       targetHead == other.targetHead &&
       previousPhysicsParams == other.previousPhysicsParams &&
@@ -137,6 +147,7 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
       previousMapdReleaseVersion == other.previousMapdReleaseVersion &&
       previousMapdVersion == other.previousMapdVersion &&
       previousActiveMapdSHA256 == other.previousActiveMapdSHA256 &&
+      previousActiveMapdBuildInfoSHA256 == other.previousActiveMapdBuildInfoSHA256 &&
       previousCachedMapdPath == other.previousCachedMapdPath &&
       previousCachedMapdSHA256 == other.previousCachedMapdSHA256 &&
       mapdRollbackPath == other.mapdRollbackPath &&
@@ -166,6 +177,7 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
     createdAt: String = Date().ISO8601Format(),
     profile: String,
     branch: String,
+    previousBootID: String? = nil,
     previousHead: String,
     targetHead: String? = nil,
     previousPhysicsParams: [String: String?],
@@ -173,11 +185,14 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
     previousMapdReleaseVersion: String?,
     previousMapdVersion: String?,
     previousActiveMapdSHA256: String,
+    previousActiveMapdBuildInfoSHA256: String? = nil,
     previousCachedMapdPath: String,
     previousCachedMapdSHA256: String? = nil,
     mapdRollbackPath: String,
     previousTileSetID: String? = nil,
     targetTileSetID: String? = nil,
+    deploymentPreRebootBootID: String? = nil,
+    rollbackPreRebootBootID: String? = nil,
     rebootSent: Bool = false,
     completed: Bool = false,
     completedAt: String? = nil,
@@ -190,6 +205,7 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
     self.createdAt = createdAt
     self.profile = profile
     self.branch = branch
+    self.previousBootID = previousBootID
     self.previousHead = previousHead
     self.targetHead = targetHead
     self.previousPhysicsParams = previousPhysicsParams
@@ -197,11 +213,14 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
     self.previousMapdReleaseVersion = previousMapdReleaseVersion
     self.previousMapdVersion = previousMapdVersion
     self.previousActiveMapdSHA256 = previousActiveMapdSHA256
+    self.previousActiveMapdBuildInfoSHA256 = previousActiveMapdBuildInfoSHA256
     self.previousCachedMapdPath = previousCachedMapdPath
     self.previousCachedMapdSHA256 = previousCachedMapdSHA256
     self.mapdRollbackPath = mapdRollbackPath
     self.previousTileSetID = previousTileSetID
     self.targetTileSetID = targetTileSetID
+    self.deploymentPreRebootBootID = deploymentPreRebootBootID
+    self.rollbackPreRebootBootID = rollbackPreRebootBootID
     self.rebootSent = rebootSent
     self.completed = completed
     self.completedAt = completedAt
@@ -416,13 +435,16 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
   /// app builds lacked the durable mutation claim.
   public static func removeAbandonedPreflightReservations(
     directory explicitDirectory: URL? = nil,
+    excluding excludedURL: URL? = nil,
     fileManager: FileManager = .default,
     olderThan minimumAge: TimeInterval = 600,
     now: Date = Date()
   ) throws {
     let directory = try explicitDirectory?.standardizedFileURL ?? defaultDirectory(fileManager: fileManager)
     guard fileManager.fileExists(atPath: directory.path) else { return }
+    let excluded = excludedURL?.standardizedFileURL
     for (journal, url) in try journalCandidates(directory: directory, fileManager: fileManager) {
+      if url.standardizedFileURL == excluded { continue }
       // The caller owns the canonical global production flock. Acquiring that
       // lock proves no prior new-version deployment process remains alive, so
       // either targetless or fully populated preflightReserved is safe to

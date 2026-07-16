@@ -46,6 +46,7 @@ import Testing
   #expect(command.contains("git -C"))
   #expect(command.contains("sha256sum"))
   #expect(command.contains("/data/params/d"))
+  #expect(command.contains("/proc/sys/kernel/random/boot_id"))
   #expect(command.contains("q_curve_file"))
   #expect(command.contains("tile_manifest"))
   #expect(command.contains("mapd_cache_listing"))
@@ -113,6 +114,16 @@ import Testing
   #expect(read.qCurve.sha256 == TuneDeploymentIdentity.sha256Hex(Data(canonicalSelectedCurve.utf8)))
 }
 
+@Test func deploymentSnapshotRejectsMalformedBootIdentity() throws {
+  var fields = runtimeSnapshotMinimumFields()
+  fields[.bootID] = Data("not-a-linux-boot-id".utf8)
+  #expect(throws: TiciDeploymentSnapshotDecodeError.invalidBootID("not-a-linux-boot-id")) {
+    try TiciDeploymentSnapshotDecoder.decodeRead(
+      TiciSnapshotWireCodec.encode(.init(rawValues: fields))
+    )
+  }
+}
+
 @Test func runtimeSnapshotIncludesRawPostflightInputsAndBoundedControllerProbe() throws {
   let qSource = TuneDeploymentIdentity.canonicalQCurveSource(parameters: .checkoutFallback, bands: [])
   var raw: [TiciSnapshotWireField: Data] = [
@@ -170,6 +181,9 @@ import Testing
   #expect(command.contains("memory_whole_curve_profile"))
   #expect(command.contains("mapd_running"))
   #expect(command.contains("manager_running"))
+  #expect(command.contains(#"[m]anager\.py"#))
+  #expect(command.contains(#"$manager_proc/$manager_pid/cwd"#))
+  #expect(command.contains(#"$manager_repo/system/manager"#))
   let staticCommand = TiciSnapshotWireCommandBuilder.inspectionCommand(includeStaticPostflight: true)
   #expect(staticCommand.contains("manager_running"))
   #expect(staticCommand.contains("mapd_running"))
@@ -204,6 +218,91 @@ import Testing
   #expect(buildInfoIndex < endStateIndex)
   #expect(mapdRunningIndex < endStateIndex)
   #expect(endStateIndex < remoteTimeIndex)
+}
+
+@Test func managerProbeAcceptsOnlyTheActualSupervisedManagerProcess() throws {
+  let root = FileManager.default.temporaryDirectory
+    .appendingPathComponent("vtsc-manager-probe-\(UUID().uuidString)", isDirectory: true)
+  defer { try? FileManager.default.removeItem(at: root) }
+  let repository = root.appendingPathComponent("openpilot", isDirectory: true)
+  let managerDirectory = repository.appendingPathComponent("system/manager", isDirectory: true)
+  let unrelatedDirectory = repository.appendingPathComponent("sunnypilot/models", isDirectory: true)
+  let procRoot = root.appendingPathComponent("proc", isDirectory: true)
+  try FileManager.default.createDirectory(at: managerDirectory, withIntermediateDirectories: true)
+  try FileManager.default.createDirectory(at: unrelatedDirectory, withIntermediateDirectories: true)
+  try FileManager.default.createDirectory(at: procRoot, withIntermediateDirectories: true)
+  let canonicalManagerDirectory = URL(fileURLWithPath: try runShell(
+    "cd '\(managerDirectory.path)' && pwd -P"
+  ).trimmingCharacters(in: .whitespacesAndNewlines))
+
+  func runFixture(pid: Int, cwd: URL, arguments: [String]) throws -> String {
+    let processDirectory = procRoot.appendingPathComponent(String(pid), isDirectory: true)
+    try? FileManager.default.removeItem(at: processDirectory)
+    try FileManager.default.createDirectory(at: processDirectory, withIntermediateDirectories: true)
+    try FileManager.default.createSymbolicLink(
+      at: processDirectory.appendingPathComponent("cwd"),
+      withDestinationURL: cwd
+    )
+    var commandLine = Data()
+    for argument in arguments {
+      commandLine.append(Data(argument.utf8))
+      commandLine.append(0)
+    }
+    try commandLine.write(to: processDirectory.appendingPathComponent("cmdline"))
+    let fakePgrep = root.appendingPathComponent("pgrep")
+    try "#!/bin/sh\nprintf '%s\\n' '\(pid)'\n".write(to: fakePgrep, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fakePgrep.path)
+    return try runManagerProbeShell(
+      repository: repository.resolvingSymlinksInPath(),
+      procRoot: procRoot,
+      pgrep: fakePgrep
+    )
+  }
+
+  let relativeResult = try runFixture(
+    pid: 101,
+    cwd: managerDirectory,
+    arguments: ["python3", "./manager.py"]
+  )
+  #expect(relativeResult == "1")
+  let absoluteResult = try runFixture(
+    pid: 102,
+    cwd: unrelatedDirectory,
+    arguments: [
+      "/usr/bin/python3",
+      canonicalManagerDirectory.appendingPathComponent("manager.py").path,
+    ]
+  )
+  #expect(absoluteResult == "1")
+  let unrelatedResult = try runFixture(
+    pid: 103,
+    cwd: unrelatedDirectory,
+    arguments: ["python3", "./manager.py"]
+  )
+  #expect(unrelatedResult == "0")
+
+  let selfPgrep = root.appendingPathComponent("pgrep-self")
+  let pidFile = root.appendingPathComponent("probe-shell-pid")
+  try "#!/bin/sh\ncat '\(pidFile.path)'\n".write(to: selfPgrep, atomically: true, encoding: .utf8)
+  try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: selfPgrep.path)
+  let fragment = TiciSnapshotWireCommandBuilder.managerProbeShellFragment(
+    repositoryPath: repository.resolvingSymlinksInPath().path,
+    procRoot: procRoot.path,
+    pgrepCommand: selfPgrep.path
+  )
+  let selfScript = """
+  set -eu
+  self_pid=$$
+  printf '%s' "$self_pid" > '\(pidFile.path)'
+  mkdir -p '\(procRoot.path)'/"$self_pid"
+  ln -s '\(managerDirectory.path)' '\(procRoot.path)'/"$self_pid"/cwd
+  printf 'python3\\000./manager.py\\000' > '\(procRoot.path)'/"$self_pid"/cmdline
+  manager_probe_result=
+  emit_text() { manager_probe_result=$2; }
+  \(fragment)
+  printf '%s' "$manager_probe_result"
+  """
+  #expect(try runShell(selfScript) == "0")
 }
 
 @Test func runtimeSnapshotRejectsMalformedControllerProbeOutput() throws {
@@ -260,4 +359,41 @@ private func runtimeSnapshotMinimumFields() -> [TiciSnapshotWireField: Data] {
     raw[field] = Data(value.utf8)
   }
   return raw
+}
+
+private func runManagerProbeShell(repository: URL, procRoot: URL, pgrep: URL) throws -> String {
+  let fragment = TiciSnapshotWireCommandBuilder.managerProbeShellFragment(
+    repositoryPath: repository.path,
+    procRoot: procRoot.path,
+    pgrepCommand: pgrep.path
+  )
+  return try runShell("""
+  set -eu
+  manager_probe_result=
+  emit_text() { manager_probe_result=$2; }
+  \(fragment)
+  printf '%s' "$manager_probe_result"
+  """)
+}
+
+private func runShell(_ script: String) throws -> String {
+  let process = Process()
+  process.executableURL = URL(fileURLWithPath: "/bin/sh")
+  process.arguments = ["-c", script]
+  let output = Pipe()
+  let errors = Pipe()
+  process.standardOutput = output
+  process.standardError = errors
+  try process.run()
+  process.waitUntilExit()
+  let standardOutput = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+  let standardError = String(decoding: errors.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+  guard process.terminationStatus == 0 else {
+    throw NSError(
+      domain: "ManagerProbeShell",
+      code: Int(process.terminationStatus),
+      userInfo: [NSLocalizedDescriptionKey: standardError]
+    )
+  }
+  return standardOutput
 }

@@ -20,8 +20,9 @@ The runtime whole-curve-v3 profile uses existing raw map geometry, then route-ba
 
 Every car-facing action verifies all prerequisites before saving or patching the tune, committing, writing Params, replacing binaries, activating tiles, or rebooting:
 
-- acquire the authoritative journal-directory global production-owner lock, prove no other exact VTSC Tuner process is alive before pruning any legacy/current reservation, reject every unresolved journal, and durably create a legacy-reader-blocking `preflightReserved` record before host preflight work;
-- repeat peer-process and unresolved-journal checks immediately before the durable mutation claim so a released old-first app cannot interleave;
+- acquire the authoritative journal-directory global production-owner lock and durably publish this transaction's released-reader-unknown `preflightReserved` record as the first namespace action;
+- prove no other exact VTSC Tuner process is alive before pruning or scanning, exclude only the exact live reservation from those operations, and reject every other unresolved journal;
+- repeat peer-process and unresolved-journal checks immediately before the durable mutation claim, then freshly require the exact recorded tici boot/Git/Params/Q/mapd-build/cache/tile/parked baseline so a released old-first app cannot interleave or leave a stale rollback authority;
 - selected Chauffeur checkout and all four source authorities are parseable and mutually consistent;
 - branch is exactly `chauffeur-exp01`, upstream is `origin/chauffeur-exp01`, the checkout is clean, and local/origin HEADs match;
 - the immutable mapd manifest and host artifact pass SHA-256, Linux ARM64 ELF, release/build marker, estimator, and capability checks;
@@ -59,8 +60,8 @@ The app persists a rollback journal before remote mutation. It then:
 3. Transfers the immutable mapd artifact to a temporary path outside the active binary, verifies SHA-256/ELF/markers and `--build-info`, seeds the identity-keyed persistent cache under `/data/media/0/osm/binaries/`, and atomically replaces the disposable checkout binary.
 4. Writes and reads back all six physics Params with `tools/vtsc/apply_physics_params.py`; verifies the exact checked-in Q source and enable state.
 5. If requested, transfers the canonical tile artifact only to an empty remote partial set, checks every manifest entry and digest on-device, installs one immutable generation at `/data/media/0/osm/tile-generations/<tile-set-id>/`, and atomically switches the active `offline` pointer while retaining the prior generation.
-6. Rechecks parked/offroad/kill-switch state and sends one reboot only after every artifact is ready.
-7. Durably hands the transaction to `awaitingOutdoorPostflight`, releases mutation ownership, waits for the tici, and requires stable parked-state brackets plus exact Git/tune/release/cache/build/manager/mapd/tile identity before reporting install success. A failed return/static proof reports failure, retains the pending journal, and never auto-rolls back. It does not claim controller acceptance from a raw parked profile.
+6. Rechecks parked/offroad/kill-switch state, captures a valid Linux `boot_id`, durably journals it with reboot intent, and only then sends one reboot after every artifact is ready.
+7. Durably hands the transaction to `awaitingOutdoorPostflight`, releases mutation ownership, waits for the tici, and requires a different valid boot ID, stable parked-state brackets, and exact Git/tune/release/cache/build/manager/mapd/tile identity before reporting install success. A failed return/static proof reports failure, retains the pending journal, and never auto-rolls back. It does not claim controller acceptance from a raw parked profile. Rollback captures and journals a separate immediately-pre-rollback-reboot boot ID and certifies only from the static identity contract; liveMapData/profile/GPS remain exclusive to outdoor Resume.
 
 Final completion belongs only to **Resume Pending Outdoor Postflight**. While ignition remains on after a normal GPS/profile-producing drive, it captures a fresh same-tune profile plus newly updated, valid `liveMapDataSP.roadGeometryValid=true` evidence. Only after the app explicitly reports that controller-ready capture does the user turn ignition off; the observer then requires stable offroad start/end brackets, unchanged static identity, and the same fully parsed profile before atomically completing the journal. It reports pending or invalid GPS distinctly; it never injects a fake route point or mutates the car during proof.
 

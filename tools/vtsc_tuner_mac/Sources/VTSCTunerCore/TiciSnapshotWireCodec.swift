@@ -5,6 +5,7 @@ import Foundation
 /// Values are kept as raw bytes because the Q-curve source, tile manifest, and
 /// persistent Params files must be inspected before any lossy text conversion.
 public enum TiciSnapshotWireField: String, CaseIterable, Codable, Sendable {
+  case bootID = "boot_id"
   case branch
   case head
   case dirty
@@ -128,22 +129,69 @@ public enum TiciSnapshotWireCodec {
 /// `compact_base64` removes any implementation-specific line wrapping using
 /// POSIX shell built-ins, so a large Q-curve or manifest remains one record.
 public enum TiciSnapshotWireCommandBuilder {
+  static func managerProbeShellFragment(
+    repositoryPath: String = "/data/openpilot",
+    procRoot: String = "/proc",
+    pgrepCommand: String = "pgrep"
+  ) -> String {
+    let repository = shellQuote(repositoryPath)
+    let proc = shellQuote(procRoot)
+    let pgrep = shellQuote(pgrepCommand)
+    return """
+    manager_running=0
+    manager_repo_input=\(repository)
+    manager_repo=$(cd "$manager_repo_input" 2>/dev/null && pwd -P || :)
+    manager_proc=\(proc)
+    for manager_pid in $(\(pgrep) -f '(^|[ /])(\\./)?[m]anager\\.py([[:space:]]|$)' 2>/dev/null || :); do
+      [ "$manager_pid" != "$$" ] || continue
+      [ -d "$manager_proc/$manager_pid" ] || continue
+      [ -r "$manager_proc/$manager_pid/cmdline" ] || continue
+      manager_cwd=$(cd "$manager_proc/$manager_pid/cwd" 2>/dev/null && pwd -P || :)
+      manager_cmdline=" $(tr '\\000' ' ' < "$manager_proc/$manager_pid/cmdline" 2>/dev/null || :) "
+      manager_expected_dir="$manager_repo/system/manager"
+      manager_expected_absolute="$manager_expected_dir/manager.py"
+      manager_matches=0
+      case "$manager_cmdline" in
+        *" $manager_expected_absolute "*) manager_matches=1 ;;
+      esac
+      if [ "$manager_cwd" = "$manager_expected_dir" ]; then
+        case "$manager_cmdline" in
+          *" ./manager.py "*) manager_matches=1 ;;
+        esac
+      fi
+      if [ "$manager_matches" = 1 ]; then
+        manager_running=1
+        break
+      fi
+    done
+    emit_text manager_running "$manager_running"
+    """
+  }
+
+  private static func shellQuote(_ value: String) -> String {
+    "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+  }
+
   public static func inspectionCommand(
     includeRuntimePostflight: Bool = false,
-    includeStaticPostflight: Bool = false
+    includeStaticPostflight: Bool = false,
+    includeMapdBuildIdentity: Bool = true
   ) -> String {
-    let staticRecords: String
-    if includeRuntimePostflight || includeStaticPostflight {
-      staticRecords = """
+    let buildIdentityRecords: String
+    if includeRuntimePostflight || (includeStaticPostflight && includeMapdBuildIdentity) {
+      buildIdentityRecords = """
       emit_first_bytes active_mapd_elf_header "$active_mapd" 20
       if [ -x "$active_mapd" ]; then
         emit_command active_mapd_build_info "$active_mapd" --build-info
       fi
-      if pgrep -f '[s]ystem/manager/manager.py' >/dev/null 2>&1; then
-        emit_text manager_running 1
-      else
-        emit_text manager_running 0
-      fi
+      """
+    } else {
+      buildIdentityRecords = ""
+    }
+    let staticRecords: String
+    if includeRuntimePostflight || includeStaticPostflight {
+      staticRecords = """
+      \(managerProbeShellFragment())
       if pgrep -x mapd >/dev/null 2>&1; then
         emit_text mapd_running 1
       else
@@ -244,6 +292,7 @@ public enum TiciSnapshotWireCommandBuilder {
     git_dirty=$(git -C "$repo" status --porcelain 2>/dev/null || :)
     if [ -n "$git_dirty" ]; then dirty=1; else dirty=0; fi
 
+    emit_text boot_id "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || :)"
     emit_text branch "$(git -C "$repo" branch --show-current 2>/dev/null || :)"
     emit_text head "$(git -C "$repo" rev-parse HEAD 2>/dev/null || :)"
     emit_text dirty "$dirty"
@@ -262,6 +311,7 @@ public enum TiciSnapshotWireCommandBuilder {
     emit_file q_curve_file "$repo/sunnypilot/selfdrive/controls/lib/vtsc_curve_tuning.py"
     emit_file tile_manifest /data/media/0/osm/offline/.tileset-manifest.json
     emit_text mapd_cache_listing "$(cache_listing)"
+    \(buildIdentityRecords)
     \(staticRecords)
     \(runtimeRecords)
     \(endStateRecords)

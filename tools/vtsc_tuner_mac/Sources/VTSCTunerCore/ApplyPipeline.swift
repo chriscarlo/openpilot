@@ -207,6 +207,17 @@ private enum RuntimeStartupWaitState: LocalizedError, Sendable {
   }
 }
 
+private enum BootTransitionWaitState: LocalizedError, Sendable {
+  case identityPending(previous: String, current: String?)
+
+  var errorDescription: String? {
+    switch self {
+    case let .identityPending(previous, current):
+      "post-reboot boot identity has not changed: previous=\(previous) current=\(current ?? "missing")"
+    }
+  }
+}
+
 enum ProductionRollbackResolution: Sendable {
   case alreadyCompleted(String)
   case rolledBack(String)
@@ -1066,15 +1077,6 @@ public actor ApplyPipeline {
       directory: requestedJournalDirectory
     )
     let journalDirectory = productionOwnerLock.directoryURL
-    try await requireNoOtherTunerProcess()
-    try DeploymentRollbackJournal.removeAbandonedPreflightReservations(directory: journalDirectory)
-    let unresolved = try DeploymentRollbackJournal.unresolvedProductionJournals(
-      directory: journalDirectory
-    )
-    guard unresolved.isEmpty else {
-      throw ApplyPipelineError.unresolvedProductionRollbacks(unresolved.map(\.url))
-    }
-
     let deploymentID = UUID()
     let createdAt = Date().ISO8601Format()
     let rollbackPath = "/data/media/0/osm/binaries/mapd-rollback-\(deploymentID.uuidString.lowercased())"
@@ -1095,16 +1097,36 @@ public actor ApplyPipeline {
       completed: true,
       resolution: .preflightReserved
     )
-    try reservation.write(to: journalURL)
+    var reservationPublished = false
     var handedReservationToRuntime = false
     defer {
       if !handedReservationToRuntime {
-        try? DeploymentRollbackJournal.removeOwnedPreflightReservation(
-          matching: reservation,
-          at: journalURL
-        )
+        if reservationPublished {
+          try? DeploymentRollbackJournal.removeOwnedPreflightReservation(
+            matching: reservation,
+            at: journalURL
+          )
+        }
         productionOwnerLock.unlock()
       }
+    }
+
+    // Publishing this released-reader-unknown lifecycle is the first durable
+    // journal-namespace action under the global owner. A released app which
+    // scans after this point fails closed even though it does not honor the
+    // current owner's flock.
+    try reservation.write(to: journalURL)
+    reservationPublished = true
+    try await requireNoOtherTunerProcess()
+    try DeploymentRollbackJournal.removeAbandonedPreflightReservations(
+      directory: journalDirectory,
+      excluding: journalURL
+    )
+    let unresolved = try DeploymentRollbackJournal.unresolvedProductionJournals(
+      directory: journalDirectory
+    ).filter { $0.url != journalURL.standardizedFileURL }
+    guard unresolved.isEmpty else {
+      throw ApplyPipelineError.unresolvedProductionRollbacks(unresolved.map(\.url))
     }
 
     let git = try await gitDeploymentPreflight(
@@ -1166,12 +1188,22 @@ public actor ApplyPipeline {
         "\(recovery.standardOutput)\n\(error.localizedDescription)"
       )
     }
-    let snapshot = try await readTiciDeploymentSnapshot(
+    let baselineRead = try await readTiciStaticPostflight(
       profile: profile,
       context: "read-only tici deployment preflight",
       timeout: 60
-    ).snapshot
+    )
+    let snapshot = baselineRead.deployment.snapshot
     try await validateTiciPreflight(snapshot, git: git, repositoryRoot: request.repositoryRoot)
+    guard baselineRead.runtimeEndIsOffroad, !baselineRead.runtimeEndIsOnroad,
+          !baselineRead.runtimeEndMapLookaheadEnabled,
+          baselineRead.managerRunning, baselineRead.mapdRunning,
+          isELF64LittleEndianARM64(baselineRead.activeMapdELFHeader),
+          snapshot.bootID != nil else {
+      throw ApplyPipelineError.postflightMismatch(
+        "tici pre-mutation baseline lacks stable parked state, boot identity, or manager/mapd build evidence"
+      )
+    }
 
     let tileSet: CanonicalTileSetArtifact?
     if let explicitTileSet {
@@ -1209,12 +1241,16 @@ public actor ApplyPipeline {
       createdAt: createdAt,
       profile: profile,
       branch: git.branch,
+      previousBootID: snapshot.bootID,
       previousHead: snapshot.head,
       previousPhysicsParams: snapshot.physicsParams,
       previousQCurveSHA256: snapshot.qCurveSHA256,
       previousMapdReleaseVersion: snapshot.mapdReleaseVersion,
       previousMapdVersion: snapshot.mapdVersion,
       previousActiveMapdSHA256: snapshot.activeMapdSHA256,
+      previousActiveMapdBuildInfoSHA256: TuneDeploymentIdentity.sha256Hex(
+        baselineRead.activeMapdBuildInfo
+      ),
       previousCachedMapdPath: snapshot.cachedMapdPath,
       previousCachedMapdSHA256: snapshot.cachedMapdSHA256,
       mapdRollbackPath: rollbackPath,
@@ -1678,8 +1714,12 @@ public actor ApplyPipeline {
       }
 
       await emit(.running, id: 10, text: "Rebooting once after every artifact is ready…", progress: progress)
-      _ = try await freshParkedSafetySnapshot(profile: deployment.profile)
+      let preRebootSnapshot = try await freshParkedSafetySnapshot(profile: deployment.profile)
+      guard let preRebootBootID = preRebootSnapshot.bootID else {
+        throw ApplyPipelineError.postflightMismatch("tici boot identity is missing before deployment reboot")
+      }
       deployment.journal.rebootSent = true
+      deployment.journal.deploymentPreRebootBootID = preRebootBootID
       try durablyRecordRebootIntent(deployment.journal, at: deployment.journalURL)
       try await sendReboot(profile: deployment.profile)
       deployment.journal = try handoffToOutdoorPostflight(
@@ -1781,6 +1821,45 @@ public actor ApplyPipeline {
           current.completed,
           !current.rebootSent else {
       throw ApplyPipelineError.postflightMismatch("production reservation changed before mutation claim")
+    }
+    let baselineRead = try await readTiciStaticPostflight(
+      profile: deployment.profile,
+      context: "revalidate exact tici pre-mutation baseline",
+      timeout: 60
+    )
+    try validateExactPreMutationBaseline(baselineRead, journal: current)
+  }
+
+  private func validateExactPreMutationBaseline(
+    _ readback: TiciStaticDeploymentPostflightRead,
+    journal: DeploymentRollbackJournal
+  ) throws {
+    let snapshot = readback.deployment.snapshot
+    guard snapshot.isOffroad, !snapshot.isOnroad, !snapshot.mapLookaheadEnabled,
+          readback.runtimeEndIsOffroad, !readback.runtimeEndIsOnroad,
+          !readback.runtimeEndMapLookaheadEnabled else {
+      throw ApplyPipelineError.postflightMismatch("tici parked state changed before mutation claim")
+    }
+    guard !snapshot.dirty,
+          snapshot.branch == journal.branch,
+          snapshot.bootID == journal.previousBootID,
+          snapshot.head == journal.previousHead,
+          snapshot.physicsParams == journal.previousPhysicsParams,
+          readback.deployment.qCurve.sha256 == journal.previousQCurveSHA256,
+          snapshot.mapdReleaseVersion == journal.previousMapdReleaseVersion,
+          snapshot.mapdVersion == journal.previousMapdVersion,
+          snapshot.activeMapdSHA256 == journal.previousActiveMapdSHA256,
+          snapshot.cachedMapdPath == journal.previousCachedMapdPath,
+          snapshot.cachedMapdSHA256 == journal.previousCachedMapdSHA256,
+          snapshot.activeTileSetID == journal.previousTileSetID,
+          journal.previousActiveMapdBuildInfoSHA256 ==
+            TuneDeploymentIdentity.sha256Hex(readback.activeMapdBuildInfo),
+          isELF64LittleEndianARM64(readback.activeMapdELFHeader),
+          readback.managerRunning,
+          readback.mapdRunning else {
+      throw ApplyPipelineError.postflightMismatch(
+        "tici source/tune/mapd/tile/boot baseline changed before mutation claim"
+      )
     }
   }
 
@@ -2017,6 +2096,34 @@ public actor ApplyPipeline {
     }
   }
 
+  private func readTiciRollbackStaticPostflight(
+    profile: String,
+    context: String,
+    timeout: TimeInterval = 30
+  ) async throws -> TiciRollbackStaticPostflightRead {
+    let result = try await checked(
+      ProcessRequest(
+        executableURL: Self.sshURL,
+        arguments: sshOptions(connectTimeout: 10) + [
+          profile,
+          TiciSnapshotWireCommandBuilder.inspectionCommand(
+            includeStaticPostflight: true,
+            includeMapdBuildIdentity: false
+          ),
+        ],
+        timeout: max(0.001, min(30, timeout))
+      ),
+      context: context
+    )
+    do {
+      return try TiciDeploymentSnapshotDecoder.decodeRollbackStaticPostflight(result.standardOutput)
+    } catch {
+      throw ApplyPipelineError.invalidDeploymentOutput(
+        "\(result.standardOutput)\n\(error.localizedDescription)"
+      )
+    }
+  }
+
   private func isRetryableResumedTransportError(_ error: Error) -> Bool {
     if let runnerError = error as? ProcessRunnerError,
        case .timedOut = runnerError { return true }
@@ -2032,7 +2139,26 @@ public actor ApplyPipeline {
   }
 
   private func isRetryablePostRebootStartupError(_ error: Error) -> Bool {
-    error is RuntimeStartupWaitState || isRetryableResumedTransportError(error)
+    error is RuntimeStartupWaitState || error is BootTransitionWaitState ||
+      isRetryableResumedTransportError(error)
+  }
+
+  private func requireBootTransition(
+    current: String?,
+    previous: String?,
+    missingPreviousDetail: String
+  ) throws {
+    guard let previous else {
+      throw ApplyPipelineError.postflightMismatch(missingPreviousDetail)
+    }
+    guard TiciBootIdentity.isValid(previous) else {
+      throw ApplyPipelineError.postflightMismatch(
+        "journal pre-reboot boot identity is invalid; reboot transition cannot be certified"
+      )
+    }
+    guard let current, current != previous else {
+      throw BootTransitionWaitState.identityPending(previous: previous, current: current)
+    }
   }
 
   private func requireNoOtherTunerProcess() async throws {
@@ -2143,6 +2269,7 @@ public actor ApplyPipeline {
       now: Date(timeIntervalSince1970: TimeInterval(readback.remoteEpochMilliseconds) / 1_000)
     )
     return TiciDeploymentPostflight(
+      bootID: snapshot.bootID,
       isOffroad: snapshot.isOffroad,
       isOnroad: snapshot.isOnroad,
       runtimeEndIsOffroad: readback.runtimeEndIsOffroad,
@@ -2201,6 +2328,7 @@ public actor ApplyPipeline {
       buildInfo?.estimatorVersion == release.estimatorVersion &&
       buildInfo?.capabilities.contains(release.capability) == true
     return TiciDeploymentPostflight(
+      bootID: snapshot.bootID,
       isOffroad: snapshot.isOffroad,
       isOnroad: snapshot.isOnroad,
       runtimeEndIsOffroad: readback.runtimeEndIsOffroad,
@@ -2362,6 +2490,11 @@ public actor ApplyPipeline {
     guard result.activeTileSetID == expectedActiveTileSetID else {
       throw ApplyPipelineError.postflightMismatch("active tile-set identity changed after reboot")
     }
+    try requireBootTransition(
+      current: result.bootID,
+      previous: preflight.journal.deploymentPreRebootBootID,
+      missingPreviousDetail: "This deployment journal predates durable boot-transition proof. Use Abort and Roll Back Pending Deployment, then redeploy with the current tuner."
+    )
     guard result.managerRunning, result.mapdRunning else {
       throw RuntimeStartupWaitState.processesNotReady(
         manager: result.managerRunning,
@@ -2812,10 +2945,35 @@ public actor ApplyPipeline {
     _ journal: DeploymentRollbackJournal,
     at url: URL
   ) throws {
-    guard journal.rebootSent else {
-      throw ApplyPipelineError.postflightMismatch("reboot intent must set rebootSent=true")
+    guard journal.rebootSent,
+          journal.deploymentPreRebootBootID.map(TiciBootIdentity.isValid) == true else {
+      throw ApplyPipelineError.postflightMismatch(
+        "deployment reboot intent requires a durable pre-reboot boot identity"
+      )
     }
     try durablyWriteLifecycleBarrier(journal, at: url)
+  }
+
+  private func durablyRecordRollbackRebootIdentity(
+    expected: DeploymentRollbackJournal,
+    bootID: String,
+    at url: URL
+  ) throws -> DeploymentRollbackJournal {
+    guard TiciBootIdentity.isValid(bootID) else {
+      throw ApplyPipelineError.postflightMismatch("rollback pre-reboot boot identity is invalid")
+    }
+    var current = try DeploymentRollbackJournal.load(from: url)
+    guard current.hasSameDeploymentIdentity(as: expected),
+          current.effectiveResolution == .rollbackInProgress,
+          current.completed,
+          current.rebootSent else {
+      throw ApplyPipelineError.postflightMismatch(
+        "rollback journal changed before pre-reboot boot identity could be recorded"
+      )
+    }
+    current.rollbackPreRebootBootID = bootID
+    try durablyWriteLifecycleBarrier(current, at: url)
+    return current
   }
 
   private func durablyWriteLifecycleBarrier(
@@ -2914,7 +3072,19 @@ public actor ApplyPipeline {
     }
     if succeeded, context.journal.rebootSent {
       do {
-        _ = try await freshParkedSafetySnapshot(profile: context.profile)
+        let preRebootSnapshot = try await freshParkedSafetySnapshot(profile: context.profile)
+        guard let preRebootBootID = preRebootSnapshot.bootID else {
+          throw ApplyPipelineError.postflightMismatch("tici boot identity is missing before rollback reboot")
+        }
+        let rebootJournal = try durablyRecordRollbackRebootIdentity(
+          expected: context.journal,
+          bootID: preRebootBootID,
+          at: context.journalURL
+        )
+        let verificationContext = ProductionRollbackContext(
+          journal: rebootJournal,
+          journalURL: context.journalURL
+        )
         details.append("fresh pre-reboot parked-state gate passed")
         try await sendReboot(profile: context.profile)
         details.append("rollback reboot sent")
@@ -2925,7 +3095,7 @@ public actor ApplyPipeline {
           pollDelayNanoseconds: rebootPollDelayNanoseconds
         )
         let verification = try await waitForRollbackVerification(
-          context: context,
+          context: verificationContext,
           tilesWereTouched: context.journal.targetTileSetID != nil,
           timeout: 900
         )
@@ -2966,7 +3136,7 @@ public actor ApplyPipeline {
     repeat {
       try Task.checkCancellation()
       do {
-        let readback = try await readTiciRuntimePostflight(
+        let readback = try await readTiciRollbackStaticPostflight(
           profile: context.profile,
           context: "verify complete post-rollback identity"
         )
@@ -2990,7 +3160,7 @@ public actor ApplyPipeline {
   }
 
   private func validateRollbackReadback(
-    _ readback: TiciRuntimePostflightRead,
+    _ readback: TiciRollbackStaticPostflightRead,
     journal: DeploymentRollbackJournal,
     tilesWereTouched: Bool
   ) throws {
@@ -3040,6 +3210,13 @@ public actor ApplyPipeline {
     if tilesWereTouched, let targetTileSetID = journal.targetTileSetID,
        snapshot.activeTileSetID == targetTileSetID {
       throw ApplyPipelineError.postflightMismatch("rolled-back tile set is still active")
+    }
+    if journal.rebootSent {
+      try requireBootTransition(
+        current: snapshot.bootID,
+        previous: journal.rollbackPreRebootBootID,
+        missingPreviousDetail: "This rollback journal has no durable pre-reboot boot identity. Recovery cannot certify a reboot; retry the explicit Recover Interrupted Production Rollback action."
+      )
     }
     guard readback.managerRunning, readback.mapdRunning else {
       throw RuntimeStartupWaitState.processesNotReady(

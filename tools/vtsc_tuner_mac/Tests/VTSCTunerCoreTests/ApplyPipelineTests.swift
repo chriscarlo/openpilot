@@ -778,6 +778,41 @@ func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByR
   #expect(!(await runner.requests).contains { $0.executableURL == ApplyPipeline.sshURL })
 }
 
+@Test func unknownReservationPrecedesPeerScanAndFreshBaselineStopsOldFirstDrift() async throws {
+  let fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  let journalDirectory = fixture.root.appendingPathComponent("gap-journals", isDirectory: true)
+  let driftedHead = String(repeating: "d", count: 40)
+  let runner = OldFirstGapRunner(
+    baselineHead: fixture.toolingHead,
+    driftedHead: driftedHead,
+    journalDirectory: journalDirectory
+  )
+  let pipeline = ApplyPipeline(processRunner: runner)
+  let preflight = try await pipeline.productionPreflight(ApplyRequest(
+    action: .pullOnTici,
+    tune: fixture.tune,
+    repositoryRoot: fixture.repository,
+    preferredTiciProfile: "commaAdb",
+    mapdReleaseManifestURL: fixture.releaseURL,
+    rollbackJournalDirectoryURL: journalDirectory,
+    verificationRequests: []
+  ))
+  defer {
+    preflight.productionOwnerLock?.unlock()
+    try? FileManager.default.removeItem(at: preflight.journalURL)
+  }
+
+  #expect(await runner.reservationWasPublishedBeforeFirstPeerScan)
+  await #expect(throws: ApplyPipelineError.self) {
+    try await pipeline.validateExclusiveProductionMutationClaim(preflight)
+  }
+  #expect(await runner.staticSnapshotReadCount == 2)
+  let retained = try DeploymentRollbackJournal.load(from: preflight.journalURL)
+  #expect(retained.effectiveResolution == .preflightReserved)
+  #expect(retained.previousHead == fixture.toolingHead)
+}
+
 @Test func rollbackVerificationFailsImmediatelyOnHardMismatchEvenIfNextReadWouldHeal() async throws {
   let fixture = try resumePostflightFixture(validGPS: true)
   defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -863,6 +898,124 @@ func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByR
     )
   }
   #expect(await hardRunner.runtimeReadCount == 1)
+}
+
+@Test func staticInstallRequiresANewBootIdentityAndBoundsNoOpRebootWait() async throws {
+  let oldBootID = "11111111-1111-4111-8111-111111111111"
+  let newBootID = "22222222-2222-4222-8222-222222222222"
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  fixture.journal.deploymentPreRebootBootID = oldBootID
+  fixture.bootIDsByRead = [oldBootID, newBootID]
+  let runner = ResumePostflightRunner(fixture: fixture)
+  _ = try await ApplyPipeline(processRunner: runner).waitForStaticInstalledIdentity(
+    preflight: try resumeRuntimePreflight(fixture),
+    targetHead: fixture.toolingHead,
+    identity: TuneDeploymentIdentity(tune: fixture.tune),
+    expectedActiveTileSetID: nil,
+    timeout: 1,
+    pollInterval: 0.001
+  )
+  #expect(await runner.runtimeReadCount == 2)
+
+  fixture.bootIDsByRead = [oldBootID]
+  let noOpRunner = ResumePostflightRunner(fixture: fixture)
+  do {
+    _ = try await ApplyPipeline(processRunner: noOpRunner).waitForStaticInstalledIdentity(
+      preflight: try resumeRuntimePreflight(fixture),
+      targetHead: fixture.toolingHead,
+      identity: TuneDeploymentIdentity(tune: fixture.tune),
+      expectedActiveTileSetID: nil,
+      timeout: 0.004,
+      pollInterval: 0.001
+    )
+    Issue.record("Expected unchanged boot identity to time out")
+  } catch {
+    #expect(error.localizedDescription.contains("boot identity has not changed"))
+  }
+  #expect(await noOpRunner.runtimeReadCount >= 1)
+}
+
+@Test func staticInstallRetriesMissingPostBootIdentityButRejectsLegacyMissingPreBootProof() async throws {
+  let newBootID = "22222222-2222-4222-8222-222222222222"
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  fixture.bootIDsByRead = [nil, newBootID]
+  let missingThenReady = ResumePostflightRunner(fixture: fixture)
+  _ = try await ApplyPipeline(processRunner: missingThenReady).waitForStaticInstalledIdentity(
+    preflight: try resumeRuntimePreflight(fixture),
+    targetHead: fixture.toolingHead,
+    identity: TuneDeploymentIdentity(tune: fixture.tune),
+    expectedActiveTileSetID: nil,
+    timeout: 1,
+    pollInterval: 0.001
+  )
+  #expect(await missingThenReady.runtimeReadCount == 2)
+
+  fixture.journal.deploymentPreRebootBootID = nil
+  fixture.bootIDsByRead = [newBootID]
+  let legacy = ResumePostflightRunner(fixture: fixture)
+  do {
+    _ = try await ApplyPipeline(processRunner: legacy).waitForStaticInstalledIdentity(
+      preflight: try resumeRuntimePreflight(fixture),
+      targetHead: fixture.toolingHead,
+      identity: TuneDeploymentIdentity(tune: fixture.tune),
+      expectedActiveTileSetID: nil,
+      timeout: 1,
+      pollInterval: 0.001
+    )
+    Issue.record("Expected legacy journal without pre-reboot proof to fail closed")
+  } catch {
+    #expect(error.localizedDescription.contains("predates durable boot-transition proof"))
+  }
+  #expect(await legacy.runtimeReadCount == 1)
+}
+
+@Test func rollbackUsesStaticSnapshotAndRequiresItsOwnBootTransition() async throws {
+  let oldBootID = "11111111-1111-4111-8111-111111111111"
+  let newBootID = "22222222-2222-4222-8222-222222222222"
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  fixture.journal.previousCachedMapdPath = ""
+  fixture.journal.previousCachedMapdSHA256 = nil
+  fixture.journal.rollbackPreRebootBootID = oldBootID
+  let runner = FreshProcessRollbackRecoveryRunner(
+    journal: fixture.journal,
+    runtimeBootIDs: [oldBootID, newBootID],
+    runtimeBuildEvidenceAvailable: false
+  )
+  _ = try await ApplyPipeline(processRunner: runner).waitForRollbackVerification(
+    context: ProductionRollbackContext(journal: fixture.journal, journalURL: fixture.journalURL),
+    tilesWereTouched: false,
+    timeout: 1,
+    pollInterval: 0.001
+  )
+  #expect(await runner.runtimeReadCount == 2)
+  let requests = await runner.requests
+  #expect(requests.contains { request in
+    let command = request.arguments.last ?? ""
+    return command.contains("manager_running") &&
+      !command.contains("active_mapd_build_info") &&
+      !command.contains("live_map_data_controller_status") &&
+      !command.contains("remote_epoch_milliseconds")
+  })
+
+  let noOpRunner = FreshProcessRollbackRecoveryRunner(
+    journal: fixture.journal,
+    runtimeBootIDs: [oldBootID]
+  )
+  do {
+    _ = try await ApplyPipeline(processRunner: noOpRunner).waitForRollbackVerification(
+      context: ProductionRollbackContext(journal: fixture.journal, journalURL: fixture.journalURL),
+      tilesWereTouched: false,
+      timeout: 0.004,
+      pollInterval: 0.001
+    )
+    Issue.record("Expected rollback with unchanged boot identity to time out")
+  } catch {
+    #expect(error.localizedDescription.contains("boot identity has not changed"))
+  }
+  #expect(await noOpRunner.runtimeReadCount >= 1)
 }
 
 @Test func failedStaticPostRebootProofRetainsPendingJournalWithoutRollback() async throws {
@@ -2152,6 +2305,7 @@ private actor ProductionPreflightRunner: ProcessRunning {
 
   private func snapshotWire() -> String {
     TiciSnapshotWireCodec.encode(.init(rawValues: [
+      .bootID: Data("11111111-1111-4111-8111-111111111111".utf8),
       .branch: Data("chauffeur-exp01".utf8),
       .head: Data(head.utf8),
       .dirty: Data("0".utf8),
@@ -2164,6 +2318,108 @@ private actor ProductionPreflightRunner: ProcessRunning {
       ).utf8),
       .activeMapdSHA256: Data(String(repeating: "c", count: 64).utf8),
       .mapdCacheListing: Data("".utf8),
+      .activeMapdBuildInfo: Data("{}".utf8),
+      .activeMapdELFHeader: Data([0x7f, 0x45, 0x4c, 0x46, 2, 1] + Array(repeating: 0, count: 12) + [183, 0]),
+      .managerRunning: Data("1".utf8),
+      .mapdRunning: Data("1".utf8),
+      .runtimeEndIsOffroad: Data("1".utf8),
+      .runtimeEndIsOnroad: Data("0".utf8),
+      .runtimeEndMapLookaheadEnabled: Data("0".utf8),
+    ])) + "\n"
+  }
+
+  private func success(_ output: String) -> ProcessResult {
+    ProcessResult(terminationStatus: 0, standardOutput: output, standardError: "")
+  }
+}
+
+private actor OldFirstGapRunner: ProcessRunning {
+  let baselineHead: String
+  let driftedHead: String
+  let journalDirectory: URL
+  private(set) var reservationWasPublishedBeforeFirstPeerScan = false
+  private(set) var staticSnapshotReadCount = 0
+  private var processListReads = 0
+
+  init(baselineHead: String, driftedHead: String, journalDirectory: URL) {
+    self.baselineHead = baselineHead
+    self.driftedHead = driftedHead
+    self.journalDirectory = journalDirectory
+  }
+
+  func run(_ request: ProcessRequest) async throws -> ProcessResult {
+    if request.executableURL == ApplyPipeline.processListURL {
+      processListReads += 1
+      if processListReads == 1 {
+        let candidates = try FileManager.default.contentsOfDirectory(
+          at: journalDirectory,
+          includingPropertiesForKeys: nil
+        ).filter { $0.pathExtension == "json" }
+        if let ownURL = candidates.first,
+           let own = try? DeploymentRollbackJournal.load(from: ownURL),
+           own.effectiveResolution == .preflightReserved {
+          reservationWasPublishedBeforeFirstPeerScan = true
+          var completedOld = own
+          completedOld.deploymentID = UUID()
+          completedOld.targetHead = baselineHead
+          completedOld.completed = true
+          completedOld.resolution = .completed
+          let oldURL = journalDirectory.appendingPathComponent("\(completedOld.deploymentID.uuidString).json")
+          try completedOld.write(to: oldURL)
+        }
+      }
+      return success("")
+    }
+    if request.executableURL == ApplyPipeline.gitURL {
+      switch request.arguments {
+      case ["branch", "--show-current"]: return success("chauffeur-exp01\n")
+      case ["status", "--porcelain"]: return success("")
+      case ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]:
+        return success("origin/chauffeur-exp01\n")
+      case ["rev-parse", "HEAD"]: return success(baselineHead + "\n")
+      case ["ls-remote", "--heads", "origin", "refs/heads/chauffeur-exp01"]:
+        return success("\(baselineHead)\trefs/heads/chauffeur-exp01\n")
+      default: return success("")
+      }
+    }
+    if request.executableURL == ApplyPipeline.networkSetupURL {
+      return ProcessResult(terminationStatus: 1, standardOutput: "", standardError: "unavailable")
+    }
+    if request.executableURL == ApplyPipeline.sshURL {
+      let command = request.arguments.last ?? ""
+      if command == "true" { return success("") }
+      if command.contains(TiciMapdReleaseTransactionCommandBuilder.recoveryMarker) {
+        return success("\(TiciMapdReleaseTransactionCommandBuilder.recoveryMarker)\tclean\n")
+      }
+      staticSnapshotReadCount += 1
+      let head = staticSnapshotReadCount == 1 ? baselineHead : driftedHead
+      return success(staticWire(head: head))
+    }
+    return success("")
+  }
+
+  private func staticWire(head: String) -> String {
+    TiciSnapshotWireCodec.encode(.init(rawValues: [
+      .bootID: Data("11111111-1111-4111-8111-111111111111".utf8),
+      .branch: Data("chauffeur-exp01".utf8),
+      .head: Data(head.utf8),
+      .dirty: Data("0".utf8),
+      .isOffroad: Data("1".utf8),
+      .isOnroad: Data("0".utf8),
+      .mapLookaheadEnabled: Data("0".utf8),
+      .qCurveFile: Data(TuneDeploymentIdentity.canonicalQCurveSource(
+        parameters: .checkoutFallback,
+        bands: []
+      ).utf8),
+      .activeMapdSHA256: Data(String(repeating: "c", count: 64).utf8),
+      .mapdCacheListing: Data("".utf8),
+      .activeMapdBuildInfo: Data("{}".utf8),
+      .activeMapdELFHeader: Data([0x7f, 0x45, 0x4c, 0x46, 2, 1] + Array(repeating: 0, count: 12) + [183, 0]),
+      .managerRunning: Data("1".utf8),
+      .mapdRunning: Data("1".utf8),
+      .runtimeEndIsOffroad: Data("1".utf8),
+      .runtimeEndIsOnroad: Data("0".utf8),
+      .runtimeEndMapLookaheadEnabled: Data("0".utf8),
     ])) + "\n"
   }
 
@@ -2226,6 +2482,7 @@ private actor BlockingProductionPreflightRunner: ProcessRunning {
         return success("\(TiciMapdReleaseTransactionCommandBuilder.recoveryMarker)\tclean\n")
       }
       return success(TiciSnapshotWireCodec.encode(.init(rawValues: [
+        .bootID: Data("11111111-1111-4111-8111-111111111111".utf8),
         .branch: Data("chauffeur-exp01".utf8),
         .head: Data(head.utf8),
         .dirty: Data("0".utf8),
@@ -2238,6 +2495,13 @@ private actor BlockingProductionPreflightRunner: ProcessRunning {
         ).utf8),
         .activeMapdSHA256: Data(String(repeating: "c", count: 64).utf8),
         .mapdCacheListing: Data("".utf8),
+        .activeMapdBuildInfo: Data("{}".utf8),
+        .activeMapdELFHeader: Data([0x7f, 0x45, 0x4c, 0x46, 2, 1] + Array(repeating: 0, count: 12) + [183, 0]),
+        .managerRunning: Data("1".utf8),
+        .mapdRunning: Data("1".utf8),
+        .runtimeEndIsOffroad: Data("1".utf8),
+        .runtimeEndIsOnroad: Data("0".utf8),
+        .runtimeEndMapLookaheadEnabled: Data("0".utf8),
       ])) + "\n")
     }
     return success("")
@@ -2287,8 +2551,12 @@ private actor FreshProcessRollbackRecoveryRunner: ProcessRunning {
   let runtimeEndOnroad: Bool
   let runtimeEndLookahead: Bool
   let runtimeProcessReady: [Bool]
+  let runtimeBootIDs: [String?]
+  let runtimeBuildEvidenceAvailable: Bool
   private(set) var requests: [ProcessRequest] = []
   private(set) var runtimeReadCount = 0
+  private var rollbackMutationObserved = false
+  private var rebootObserved = false
 
   init(
     journal: DeploymentRollbackJournal,
@@ -2297,7 +2565,9 @@ private actor FreshProcessRollbackRecoveryRunner: ProcessRunning {
     runtimeActiveTileSetID: String? = nil,
     runtimeEndOnroad: Bool = false,
     runtimeEndLookahead: Bool = false,
-    runtimeProcessReady: [Bool] = []
+    runtimeProcessReady: [Bool] = [],
+    runtimeBootIDs: [String?] = [],
+    runtimeBuildEvidenceAvailable: Bool = true
   ) {
     self.journal = journal
     self.runtimeBranches = runtimeBranches
@@ -2306,6 +2576,8 @@ private actor FreshProcessRollbackRecoveryRunner: ProcessRunning {
     self.runtimeEndOnroad = runtimeEndOnroad
     self.runtimeEndLookahead = runtimeEndLookahead
     self.runtimeProcessReady = runtimeProcessReady
+    self.runtimeBootIDs = runtimeBootIDs
+    self.runtimeBuildEvidenceAvailable = runtimeBuildEvidenceAvailable
   }
 
   func run(_ request: ProcessRequest) async throws -> ProcessResult {
@@ -2325,10 +2597,15 @@ private actor FreshProcessRollbackRecoveryRunner: ProcessRunning {
       ]), as: UTF8.self) + "\n")
     }
     if command.contains(TiciProductionRollbackCommandBuilder.resultMarker) {
+      rollbackMutationObserved = true
       return success(
         "\(TiciProductionRollbackCommandBuilder.resultMarker)\t" +
           Data(journal.previousHead.utf8).base64EncodedString() + "\n"
       )
+    }
+    if command.contains("sudo reboot") {
+      rebootObserved = true
+      return success("")
     }
     if command.contains("params_root=/data/params/d") {
       runtimeReadCount += 1
@@ -2365,8 +2642,6 @@ private actor FreshProcessRollbackRecoveryRunner: ProcessRunning {
       .mapdCacheListing: Data((journal.previousCachedMapdSHA256.map {
         "\(journal.previousCachedMapdPath)\t\($0)\n"
       } ?? "").utf8),
-      .activeMapdBuildInfo: Data("{}".utf8),
-      .activeMapdELFHeader: Data([0x7f, 0x45, 0x4c, 0x46, 2, 1]),
       .managerRunning: Data(((runtimeProcessReady.indices.contains(readIndex - 1) && !runtimeProcessReady[readIndex - 1]) ? "0" : "1").utf8),
       .mapdRunning: Data(((runtimeProcessReady.indices.contains(readIndex - 1) && !runtimeProcessReady[readIndex - 1]) ? "0" : "1").utf8),
       .remoteEpochMilliseconds: Data("1800000000000".utf8),
@@ -2375,6 +2650,21 @@ private actor FreshProcessRollbackRecoveryRunner: ProcessRunning {
       .runtimeEndIsOnroad: Data((runtimeEndOnroad ? "1" : "0").utf8),
       .runtimeEndMapLookaheadEnabled: Data((runtimeEndLookahead ? "1" : "0").utf8),
     ]
+    if runtimeBuildEvidenceAvailable {
+      fields[.activeMapdBuildInfo] = Data("{}".utf8)
+      fields[.activeMapdELFHeader] = Data([0x7f, 0x45, 0x4c, 0x46, 2, 1])
+    }
+    let bootID: String?
+    if runtimeBootIDs.indices.contains(readIndex - 1) {
+      bootID = runtimeBootIDs[readIndex - 1]
+    } else if !runtimeBootIDs.isEmpty {
+      bootID = runtimeBootIDs[runtimeBootIDs.count - 1]
+    } else {
+      bootID = rollbackMutationObserved && !rebootObserved
+        ? "11111111-1111-4111-8111-111111111111"
+        : "22222222-2222-4222-8222-222222222222"
+    }
+    if let bootID { fields[.bootID] = Data(bootID.utf8) }
     if let release = journal.previousMapdReleaseVersion {
       fields[.mapdReleaseVersion] = Data(release.utf8)
     }
@@ -2463,6 +2753,7 @@ private actor RollbackClaimRecoveryRunner: ProcessRunning {
 
   private func rollbackSafetyWire() -> String {
     TiciSnapshotWireCodec.encode(.init(rawValues: [
+      .bootID: Data("11111111-1111-4111-8111-111111111111".utf8),
       .branch: Data("chauffeur-exp01".utf8),
       .head: Data(String(repeating: "9", count: 40).utf8),
       .dirty: Data("0".utf8),
@@ -2549,6 +2840,7 @@ private struct ResumePostflightFixture: Sendable {
   var runtimeBranch: String
   var runtimeDirty: Bool
   var managerRunningByRead: [Bool]
+  var bootIDsByRead: [String?]
   var controllerRoadGeometryValid: Bool
   var controllerLogMonoTimeNs: UInt64
   var controllerSampleMonoTimeNs: UInt64
@@ -2644,7 +2936,9 @@ private func resumePostflightFixture(validGPS: Bool) throws -> ResumePostflightF
     previousMapdVersion: "chauffeur-whole-curve-v1",
     previousActiveMapdSHA256: String(repeating: "c", count: 64),
     previousCachedMapdPath: "/data/media/0/osm/binaries/mapd-old",
-    mapdRollbackPath: "/data/media/0/osm/binaries/mapd-rollback-test"
+    mapdRollbackPath: "/data/media/0/osm/binaries/mapd-rollback-test",
+    deploymentPreRebootBootID: "11111111-1111-4111-8111-111111111111",
+    rollbackPreRebootBootID: "11111111-1111-4111-8111-111111111111"
   )
   journal.rebootSent = true
   let journalURL = root.appendingPathComponent("journals", isDirectory: true)
@@ -2666,6 +2960,7 @@ private func resumePostflightFixture(validGPS: Bool) throws -> ResumePostflightF
     runtimeBranch: "chauffeur-exp01",
     runtimeDirty: false,
     managerRunningByRead: [],
+    bootIDsByRead: [],
     controllerRoadGeometryValid: true,
     controllerLogMonoTimeNs: 123_456_789,
     controllerSampleMonoTimeNs: 123_456_999,
@@ -2830,6 +3125,15 @@ private actor ResumePostflightRunner: ProcessRunning {
       .runtimeEndMapLookaheadEnabled: Data(((stableOnroadPhase
         ? fixture.controllerEndMapLookaheadEnabled : fixture.offroadEndMapLookaheadEnabled) ? "1" : "0").utf8),
     ]
+    let bootID: String?
+    if fixture.bootIDsByRead.indices.contains(readIndex - 1) {
+      bootID = fixture.bootIDsByRead[readIndex - 1]
+    } else if !fixture.bootIDsByRead.isEmpty {
+      bootID = fixture.bootIDsByRead[fixture.bootIDsByRead.count - 1]
+    } else {
+      bootID = "22222222-2222-4222-8222-222222222222"
+    }
+    if let bootID { fields[.bootID] = Data(bootID.utf8) }
     if !pendingControllerPhase, let gpsData = fixture.gpsData {
       fields[.memoryLastGPSPosition] = gpsData
     }

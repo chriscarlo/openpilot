@@ -41,6 +41,15 @@ struct TiciStaticDeploymentPostflightRead: Equatable, Sendable {
   var runtimeEndMapLookaheadEnabled: Bool
 }
 
+struct TiciRollbackStaticPostflightRead: Equatable, Sendable {
+  var deployment: TiciDeploymentSnapshotRead
+  var managerRunning: Bool
+  var mapdRunning: Bool
+  var runtimeEndIsOffroad: Bool
+  var runtimeEndIsOnroad: Bool
+  var runtimeEndMapLookaheadEnabled: Bool
+}
+
 struct TiciLiveMapDataControllerStatus: Equatable, Sendable {
   var updated: Bool
   var valid: Bool
@@ -52,6 +61,7 @@ struct TiciLiveMapDataControllerStatus: Equatable, Sendable {
 enum TiciDeploymentSnapshotDecodeError: LocalizedError, Equatable, Sendable {
   case missingField(TiciSnapshotWireField)
   case invalidBoolean(TiciSnapshotWireField, String)
+  case invalidBootID(String)
   case invalidEpochMilliseconds(String)
   case malformedCacheListing(String)
   case qCurveMarkerMissing(String)
@@ -63,6 +73,8 @@ enum TiciDeploymentSnapshotDecodeError: LocalizedError, Equatable, Sendable {
       "The tici snapshot did not contain \(field.rawValue)."
     case let .invalidBoolean(field, value):
       "The tici snapshot reported invalid \(field.rawValue)=\(value.debugDescription)."
+    case let .invalidBootID(value):
+      "The tici snapshot reported invalid boot_id=\(value.debugDescription)."
     case let .invalidEpochMilliseconds(value):
       "The tici snapshot reported invalid remote_epoch_milliseconds=\(value.debugDescription)."
     case let .malformedCacheListing(line):
@@ -138,6 +150,18 @@ enum TiciDeploymentSnapshotDecoder {
     )
   }
 
+  static func decodeRollbackStaticPostflight(_ output: String) throws -> TiciRollbackStaticPostflightRead {
+    let wire = try TiciSnapshotWireCodec.decode(output)
+    return TiciRollbackStaticPostflightRead(
+      deployment: try decodeRead(wire),
+      managerRunning: try requiredBool(wire, .managerRunning),
+      mapdRunning: try requiredBool(wire, .mapdRunning),
+      runtimeEndIsOffroad: try requiredBool(wire, .runtimeEndIsOffroad),
+      runtimeEndIsOnroad: try requiredBool(wire, .runtimeEndIsOnroad),
+      runtimeEndMapLookaheadEnabled: try requiredBool(wire, .runtimeEndMapLookaheadEnabled)
+    )
+  }
+
   static func decode(_ wire: TiciSnapshotWireSnapshot) throws -> TiciDeploymentSnapshot {
     let release = optionalText(wire, .mapdReleaseVersion)
     let version = optionalText(wire, .mapdVersion)
@@ -152,6 +176,7 @@ enum TiciDeploymentSnapshotDecoder {
     })
 
     return TiciDeploymentSnapshot(
+      bootID: try optionalBootID(wire),
       isOffroad: try requiredBool(wire, .isOffroad),
       isOnroad: try requiredBool(wire, .isOnroad),
       mapLookaheadEnabled: try requiredBool(wire, .mapLookaheadEnabled),
@@ -254,6 +279,14 @@ enum TiciDeploymentSnapshotDecoder {
           let value = Int64(text), value > 0
     else { throw TiciDeploymentSnapshotDecodeError.invalidEpochMilliseconds(text) }
     return value
+  }
+
+  private static func optionalBootID(_ wire: TiciSnapshotWireSnapshot) throws -> String? {
+    guard let text = optionalText(wire, .bootID) else { return nil }
+    guard TiciBootIdentity.isValid(text) else {
+      throw TiciDeploymentSnapshotDecodeError.invalidBootID(text)
+    }
+    return text
   }
 
   private static func requiredLiveMapDataControllerStatus(
