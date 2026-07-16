@@ -488,6 +488,15 @@ func TestLegacyActivationPreservesCanonicalAdjacentIdentityAndFreshRollbackProve
 		rolledBack.PreviousTileSetTargetID != "fresh" {
 		t.Fatalf("canonical migrated rollback proof = %+v", rolledBack)
 	}
+	replayed, err := engine.rollback("fresh", "", "")
+	if err != nil {
+		t.Fatalf("replay exact post-rollback topology: %v", err)
+	}
+	if !replayed.TileActivationNotObserved || replayed.ActiveTileSetID != canonicalPrevious ||
+		replayed.PreviousTileSetProvenance != legacyMigrationProvenance ||
+		replayed.PreviousTileSetTargetID != "fresh" {
+		t.Fatalf("post-rollback topology proof = %+v", replayed)
+	}
 }
 
 func TestRollbackWithoutPreviousIdentityRejectsArbitraryManifestEvenWhenMarkedLegacy(t *testing.T) {
@@ -513,12 +522,152 @@ func TestRollbackWithoutPreviousIdentityRejectsArbitraryManifestEvenWhenMarkedLe
 	engine := testEngine(t, root)
 	target := strings.Repeat("f", 64)
 
-	if _, err := engine.rollback(target, "", ""); err == nil || !strings.Contains(err.Error(), "target-bound") {
-		t.Fatalf("arbitrary active identity error = %v, want target-bound provenance rejection", err)
+	if _, err := engine.rollback(target, "", ""); err == nil || !strings.Contains(err.Error(), "pointer topology") {
+		t.Fatalf("arbitrary active identity error = %v, want exact topology rejection", err)
 	}
 	assertLinkTarget(t, filepath.Join(root, activeOfflineName), filepath.ToSlash(filepath.Join(generationDirectory, arbitraryID, activeOfflineName)))
 	if _, err := os.Lstat(filepath.Join(root, transactionFileName)); !os.IsNotExist(err) {
 		t.Fatalf("arbitrary identity rejection wrote transaction: %v", err)
+	}
+}
+
+func TestSameIDDirectTreeReturnsProvenNoSwitchOnlyForExactRequestedContent(t *testing.T) {
+	for _, mismatch := range []bool{false, true} {
+		t.Run(fmt.Sprintf("mismatch=%t", mismatch), func(t *testing.T) {
+			root := newTestRoot(t)
+			stage := writeStage(t, root, "fresh")
+			if err := copyDirectory(filepath.Join(stage, activeOfflineName), filepath.Join(root, activeOfflineName)); err != nil {
+				t.Fatalf("copy requested direct tree: %v", err)
+			}
+			manifestData, err := os.ReadFile(filepath.Join(stage, "manifest.json"))
+			if err != nil {
+				t.Fatalf("read staged manifest: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(root, "offline.manifest.json"), manifestData, 0o644); err != nil {
+				t.Fatalf("write adjacent same-ID manifest: %v", err)
+			}
+			if mismatch {
+				tile := filepath.Join(root, activeOfflineName, "38", "-121", "tile")
+				contents, err := os.ReadFile(tile)
+				if err != nil {
+					t.Fatalf("read direct tile: %v", err)
+				}
+				contents[0] ^= 0xff
+				if err := os.WriteFile(tile, contents, 0o644); err != nil {
+					t.Fatalf("corrupt direct tile: %v", err)
+				}
+			}
+			engine := testEngine(t, root)
+			exchanges := 0
+			engine.exchange = func(first, second string) error {
+				exchanges++
+				return renameExchange(first, second)
+			}
+
+			result, err := engine.activate(stage, "fresh", "")
+			if mismatch {
+				if err == nil || !strings.Contains(err.Error(), "differs from requested target") {
+					t.Fatalf("same-ID mismatched content error = %v", err)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("same-ID equivalent activation: %v", err)
+				}
+				if !result.TargetAlreadyActive || !result.TileActivationNotSwitched ||
+					result.PreviousTileSetID != "" || result.ActivatedTileSetID != "fresh" {
+					t.Fatalf("same-ID no-switch result = %+v", result)
+				}
+				rolledBack, err := engine.rollback("fresh", "fresh", "")
+				if err != nil {
+					t.Fatalf("same-ID no-switch rollback: %v", err)
+				}
+				if !rolledBack.TileActivationNotSwitched || rolledBack.RolledBackTileSetID != "" {
+					t.Fatalf("same-ID rollback result = %+v", rolledBack)
+				}
+			}
+			if exchanges != 0 {
+				t.Fatalf("same-ID case performed %d pointer exchanges", exchanges)
+			}
+			for _, path := range []string{engine.transactionPath(), engine.switchPath("fresh"), engine.generationsPath()} {
+				if _, err := os.Lstat(path); !os.IsNotExist(err) {
+					t.Fatalf("same-ID case created mutation artifact %s: %v", path, err)
+				}
+			}
+			if _, isLink, err := symlinkTarget(engine.activePath()); err != nil || isLink {
+				t.Fatalf("same-ID case changed direct active topology: isLink=%t err=%v", isLink, err)
+			}
+		})
+	}
+}
+
+func TestActivationDurabilityBoundariesAlwaysPermitDeterministicFreshRollback(t *testing.T) {
+	for _, point := range []string{"before_journal", "after_journal", "after_switch_publish", "after_switch"} {
+		t.Run(point, func(t *testing.T) {
+			root := newTestRoot(t)
+			legacyTile := filepath.Join(root, activeOfflineName, "38", "-121", "legacy-tile")
+			if err := os.MkdirAll(filepath.Dir(legacyTile), 0o755); err != nil {
+				t.Fatalf("create direct tree: %v", err)
+			}
+			if err := os.WriteFile(legacyTile, bytes.Repeat([]byte("legacy"), 20), 0o644); err != nil {
+				t.Fatalf("write direct tile: %v", err)
+			}
+			stage := writeStage(t, root, "fresh")
+			engine := testEngine(t, root)
+			if _, err := engine.activate(stage, "fresh", point); err == nil {
+				t.Fatalf("injected %s activation unexpectedly succeeded", point)
+			}
+			_, transactionErr := os.Lstat(engine.transactionPath())
+			if point == "before_journal" {
+				if !os.IsNotExist(transactionErr) {
+					t.Fatalf("pre-journal failure published transaction authority: %v", transactionErr)
+				}
+			} else if transactionErr != nil {
+				t.Fatalf("%s failure did not retain durable transaction authority: %v", point, transactionErr)
+			}
+			if _, switchErr := os.Lstat(engine.switchPath("fresh")); point == "after_switch_publish" || point == "after_switch" {
+				if switchErr != nil {
+					t.Fatalf("%s failure lacks its transaction-authorized switch: %v", point, switchErr)
+				}
+			} else if !os.IsNotExist(switchErr) {
+				t.Fatalf("%s failure published switch before its boundary: %v", point, switchErr)
+			}
+
+			recovered, err := engine.rollback("fresh", "", "")
+			if err != nil {
+				t.Fatalf("fresh rollback after %s: %v", point, err)
+			}
+			if point == "after_switch" {
+				if recovered.RolledBackTileSetID == "" ||
+					recovered.PreviousTileSetProvenance != legacyMigrationProvenance ||
+					recovered.PreviousTileSetTargetID != "fresh" {
+					t.Fatalf("post-exchange recovery = %+v", recovered)
+				}
+			} else if !recovered.TileActivationNotSwitched || recovered.PreviousTileSetID != "" {
+				t.Fatalf("pre-exchange recovery at %s = %+v", point, recovered)
+			}
+			if _, err := os.Lstat(engine.transactionPath()); !os.IsNotExist(err) {
+				t.Fatalf("recovery at %s retained transaction: %v", point, err)
+			}
+			if _, err := os.Lstat(engine.switchPath("fresh")); !os.IsNotExist(err) {
+				t.Fatalf("recovery at %s retained switch: %v", point, err)
+			}
+		})
+	}
+}
+
+func TestTargetInactiveManifestAloneAndWrongPreviousPointerCannotAuthorizeNilPriorRecovery(t *testing.T) {
+	root, engine := completedLegacyRollbackTopology(t)
+	if err := os.Remove(engine.previousPath()); err != nil {
+		t.Fatalf("remove expected previous pointer: %v", err)
+	}
+	if _, err := engine.rollback("fresh", "", ""); err == nil || !strings.Contains(err.Error(), "pointer topology") {
+		t.Fatalf("matching target-bound manifest without previous pointer error = %v", err)
+	}
+
+	makeMinimalGeneration(t, root, "wrong")
+	linkGeneration(t, root, previousOfflineName, "wrong")
+	if _, err := engine.rollback("fresh", "", ""); err == nil || !strings.Contains(err.Error(), "expected deployed target") {
+		t.Fatalf("wrong previous target error = %v", err)
 	}
 }
 
@@ -544,6 +693,32 @@ func TestRollbackRejectsActivationTransactionForADifferentTargetBeforeMutation(t
 	assertLinkTarget(t, filepath.Join(root, activeOfflineName), filepath.ToSlash(filepath.Join(generationDirectory, "fresh", activeOfflineName)))
 	if _, err := os.Lstat(filepath.Join(root, transactionFileName)); err != nil {
 		t.Fatalf("wrong-target rejection destroyed durable transaction: %v", err)
+	}
+}
+
+func TestRollbackRejectsPreSwitchTransactionForADifferentRecordedPrior(t *testing.T) {
+	root := newTestRoot(t)
+	legacyTile := filepath.Join(root, activeOfflineName, "38", "-121", "legacy-tile")
+	if err := os.MkdirAll(filepath.Dir(legacyTile), 0o755); err != nil {
+		t.Fatalf("create legacy tree: %v", err)
+	}
+	if err := os.WriteFile(legacyTile, []byte("legacy"), 0o644); err != nil {
+		t.Fatalf("write legacy tree: %v", err)
+	}
+	stage := writeStage(t, root, "fresh")
+	engine := testEngine(t, root)
+	if _, err := engine.activate(stage, "fresh", "after_journal"); err == nil {
+		t.Fatal("injected pre-switch activation unexpectedly completed")
+	}
+
+	if _, err := engine.rollback("fresh", "recorded-other", ""); err == nil || !strings.Contains(err.Error(), "previous identity") {
+		t.Fatalf("wrong recorded prior error = %v", err)
+	}
+	if _, err := os.Lstat(engine.transactionPath()); err != nil {
+		t.Fatalf("wrong-prior rejection destroyed durable transaction: %v", err)
+	}
+	if _, isLink, err := symlinkTarget(engine.activePath()); err != nil || isLink {
+		t.Fatalf("wrong-prior rejection changed direct active tree: isLink=%t err=%v", isLink, err)
 	}
 }
 
@@ -652,6 +827,27 @@ func makeMinimalGeneration(t *testing.T, root, tileSetID string) {
 	if err := os.WriteFile(filepath.Join(generation, embeddedManifestName), []byte(manifest), 0o444); err != nil {
 		t.Fatalf("write generation manifest %s: %v", tileSetID, err)
 	}
+}
+
+func completedLegacyRollbackTopology(t *testing.T) (string, *transactionEngine) {
+	t.Helper()
+	root := newTestRoot(t)
+	legacyTile := filepath.Join(root, activeOfflineName, "38", "-121", "legacy-tile")
+	if err := os.MkdirAll(filepath.Dir(legacyTile), 0o755); err != nil {
+		t.Fatalf("create direct legacy tree: %v", err)
+	}
+	if err := os.WriteFile(legacyTile, bytes.Repeat([]byte("legacy"), 20), 0o644); err != nil {
+		t.Fatalf("write direct legacy tile: %v", err)
+	}
+	stage := writeStage(t, root, "fresh")
+	engine := testEngine(t, root)
+	if _, err := engine.activate(stage, "fresh", ""); err != nil {
+		t.Fatalf("activate direct legacy tree: %v", err)
+	}
+	if _, err := engine.rollback("fresh", "", ""); err != nil {
+		t.Fatalf("roll back direct legacy activation: %v", err)
+	}
+	return root, engine
 }
 
 func linkGeneration(t *testing.T, root, name, tileSetID string) {

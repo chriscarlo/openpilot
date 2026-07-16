@@ -1804,16 +1804,17 @@ public actor ApplyPipeline {
         // Activation can complete remotely even if SSH disconnects before the
         // result arrives. Recovery inspects the durable on-device transaction.
         let activated = try await service.activate(staged)
-        deployment.journal = try durablyRecordResolvedPreviousTileIdentity(
+        deployment.journal = try reconcileTileActivationJournal(
           expected: deployment.journal,
-          activatedTileSetID: activated.tileSetID,
-          resolvedPreviousTileSetID: activated.previousTileSetID,
+          activation: activated,
           at: deployment.journalURL
         )
         await emit(
           .succeeded,
           id: 9,
-          text: "Requested tile set activated atomically; prior set retained",
+          text: activated.targetAlreadyActive
+            ? "Requested tile content was already active; no pointer exchange was needed"
+            : "Requested tile set activated atomically; prior set retained",
           detail: activated.commandOutput,
           progress: progress
         )
@@ -3230,6 +3231,44 @@ public actor ApplyPipeline {
     }
     current.resolvedPreviousTileSetID = resolvedPreviousTileSetID
     try durablyWriteLifecycleBarrier(current, at: url)
+    return current
+  }
+
+  func reconcileTileActivationJournal(
+    expected: DeploymentRollbackJournal,
+    activation: TiciTileActivationResult,
+    at url: URL
+  ) throws -> DeploymentRollbackJournal {
+    guard activation.tileSetID == expected.targetTileSetID else {
+      throw ApplyPipelineError.postflightMismatch(
+        "tile activation result differs from the durable target identity"
+      )
+    }
+    if let previousTileSetID = activation.previousTileSetID {
+      guard !activation.targetAlreadyActive else {
+        throw ApplyPipelineError.postflightMismatch(
+          "tile activation cannot both retain a prior generation and be a no-switch result"
+        )
+      }
+      return try durablyRecordResolvedPreviousTileIdentity(
+        expected: expected,
+        activatedTileSetID: activation.tileSetID,
+        resolvedPreviousTileSetID: previousTileSetID,
+        at: url
+      )
+    }
+    let current = try DeploymentRollbackJournal.load(from: url)
+    guard activation.targetAlreadyActive,
+          current.hasSameDeploymentIdentity(as: expected),
+          current.completed,
+          current.targetTileSetID == activation.tileSetID,
+          current.effectivePreviousTileSetID == activation.tileSetID,
+          current.effectiveResolution == .mutationInProgress
+    else {
+      throw ApplyPipelineError.postflightMismatch(
+        "tile helper reported no prior generation without a coherent same-target no-switch journal"
+      )
+    }
     return current
   }
 

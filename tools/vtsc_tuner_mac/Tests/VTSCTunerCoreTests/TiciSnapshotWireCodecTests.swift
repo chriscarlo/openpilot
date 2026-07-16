@@ -49,6 +49,8 @@ import Testing
   #expect(command.contains("/proc/sys/kernel/random/boot_id"))
   #expect(command.contains("q_curve_file"))
   #expect(command.contains("tile_manifest"))
+  #expect(command.contains("/data/media/0/osm/offline/.tileset-manifest.json"))
+  #expect(command.contains("/data/media/0/osm/offline.manifest.json"))
   #expect(command.contains("mapd_cache_listing"))
 
   let process = Process()

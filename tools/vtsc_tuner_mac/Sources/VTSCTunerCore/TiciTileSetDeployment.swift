@@ -21,12 +21,19 @@ public struct TiciStagedTileSet: Equatable, Sendable {
 
 public struct TiciTileActivationResult: Equatable, Sendable {
   public var tileSetID: String
-  public var previousTileSetID: String
+  public var previousTileSetID: String?
+  public var targetAlreadyActive: Bool
   public var commandOutput: String
 
-  public init(tileSetID: String, previousTileSetID: String, commandOutput: String) {
+  public init(
+    tileSetID: String,
+    previousTileSetID: String?,
+    targetAlreadyActive: Bool = false,
+    commandOutput: String
+  ) {
     self.tileSetID = tileSetID
     self.previousTileSetID = previousTileSetID
+    self.targetAlreadyActive = targetAlreadyActive
     self.commandOutput = commandOutput
   }
 }
@@ -210,11 +217,29 @@ public struct TiciTileSetDeploymentService: Sendable {
       context: "atomically activate tile set"
     )
     let decoded = try Self.decodeHelperResult(result.standardOutput)
-    guard decoded.operation == "activate",
-          decoded.activatedTileSetID == staged.tileSetID,
-          let previousTileSetID = decoded.previousTileSetID
-    else {
+    guard decoded.operation == "activate", decoded.activatedTileSetID == staged.tileSetID else {
       throw TiciTileSetDeploymentError.activationIdentityMissing(staged.tileSetID)
+    }
+    if decoded.targetAlreadyActive == true {
+      guard decoded.tileActivationNotSwitched == true,
+            decoded.previousTileSetID == nil,
+            decoded.previousTileSetProvenance == nil,
+            decoded.previousTileSetTargetID == nil
+      else {
+        throw TiciTileSetDeploymentError.invalidHelperOutput(result.standardOutput)
+      }
+      return TiciTileActivationResult(
+        tileSetID: staged.tileSetID,
+        previousTileSetID: nil,
+        targetAlreadyActive: true,
+        commandOutput: result.combinedOutput
+      )
+    }
+    guard let previousTileSetID = decoded.previousTileSetID else {
+      throw TiciTileSetDeploymentError.activationIdentityMissing(staged.tileSetID)
+    }
+    guard decoded.tileActivationNotSwitched != true else {
+      throw TiciTileSetDeploymentError.invalidHelperOutput(result.standardOutput)
     }
     try Self.validateStoredTileSetID(previousTileSetID)
     guard previousTileSetID != staged.tileSetID else {
@@ -223,6 +248,7 @@ public struct TiciTileSetDeploymentService: Sendable {
     return TiciTileActivationResult(
       tileSetID: staged.tileSetID,
       previousTileSetID: previousTileSetID,
+      targetAlreadyActive: false,
       commandOutput: result.combinedOutput
     )
   }
@@ -643,6 +669,7 @@ public struct TiciTileSetDeploymentService: Sendable {
     var previousTileSetID: String?
     var previousTileSetProvenance: String?
     var previousTileSetTargetID: String?
+    var targetAlreadyActive: Bool?
     var activeTileSetID: String?
     var fileCount: Int?
     var totalBytes: UInt64?
@@ -657,6 +684,7 @@ public struct TiciTileSetDeploymentService: Sendable {
       case previousTileSetID = "previous_tile_set_id"
       case previousTileSetProvenance = "previous_tile_set_provenance"
       case previousTileSetTargetID = "previous_tile_set_target_id"
+      case targetAlreadyActive = "target_already_active"
       case activeTileSetID = "active_tile_set_id"
       case fileCount = "file_count"
       case totalBytes = "total_bytes"

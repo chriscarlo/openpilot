@@ -309,7 +309,11 @@ public enum TiciSnapshotWireCommandBuilder {
     emit_file mapd_version "$params_root/MapdVersion"
     emit_text active_mapd_sha256 "$(file_sha256 "$active_mapd")"
     emit_file q_curve_file "$repo/sunnypilot/selfdrive/controls/lib/vtsc_curve_tuning.py"
-    emit_file tile_manifest /data/media/0/osm/offline/.tileset-manifest.json
+    if [ -f /data/media/0/osm/offline/.tileset-manifest.json ]; then
+      emit_file tile_manifest /data/media/0/osm/offline/.tileset-manifest.json
+    else
+      emit_file tile_manifest /data/media/0/osm/offline.manifest.json
+    fi
     emit_text mapd_cache_listing "$(cache_listing)"
     \(buildIdentityRecords)
     \(staticRecords)

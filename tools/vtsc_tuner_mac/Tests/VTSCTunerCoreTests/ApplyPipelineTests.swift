@@ -1705,6 +1705,50 @@ func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByR
   #expect(try DeploymentRollbackJournal.load(from: fixture.journalURL) == recorded)
 }
 
+@Test func sameTargetNoSwitchPreservesSamePreviousIdentityAndJournalBytes() async throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  let target = String(repeating: "f", count: 64)
+  fixture.journal.completed = true
+  fixture.journal.resolution = .mutationInProgress
+  fixture.journal.previousTileSetID = target
+  fixture.journal.resolvedPreviousTileSetID = nil
+  fixture.journal.targetTileSetID = target
+  try fixture.journal.write(to: fixture.journalURL)
+  let before = try Data(contentsOf: fixture.journalURL)
+
+  let reconciled = try await ApplyPipeline().reconcileTileActivationJournal(
+    expected: fixture.journal,
+    activation: TiciTileActivationResult(
+      tileSetID: target,
+      previousTileSetID: nil,
+      targetAlreadyActive: true,
+      commandOutput: "target already active"
+    ),
+    at: fixture.journalURL
+  )
+
+  #expect(reconciled == fixture.journal)
+  #expect(reconciled.effectivePreviousTileSetID == target)
+  #expect(try Data(contentsOf: fixture.journalURL) == before)
+
+  var incoherent = fixture.journal
+  incoherent.previousTileSetID = nil
+  try incoherent.write(to: fixture.journalURL)
+  await #expect(throws: ApplyPipelineError.self) {
+    _ = try await ApplyPipeline().reconcileTileActivationJournal(
+      expected: incoherent,
+      activation: TiciTileActivationResult(
+        tileSetID: target,
+        previousTileSetID: nil,
+        targetAlreadyActive: true,
+        commandOutput: "target already active"
+      ),
+      at: fixture.journalURL
+    )
+  }
+}
+
 @Test(arguments: [false, true])
 func legacyDirectTileActivationRollbackAndInterruptedRetrySettle(
   tileActivationAlreadyRolledBack: Bool

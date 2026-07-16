@@ -237,10 +237,7 @@ enum ProductionVerificationSuite {
         executableURL: python,
         arguments: [
           "-m", "pytest", "--noconftest", "-o", "addopts=",
-          "sunnypilot/selfdrive/controls/lib/tests/vtsc/test_scenarios.py",
-          "sunnypilot/selfdrive/controls/lib/tests/vtsc/test_whole_curve_profile.py",
-          "sunnypilot/selfdrive/controls/lib/tests/vtsc/test_longitudinal_response_model.py",
-          "sunnypilot/selfdrive/controls/lib/tests/vtsc/test_longitudinal_planner_vtsc_map_timing.py",
+          "sunnypilot/selfdrive/controls/lib/tests/vtsc",
         ],
         currentDirectoryURL: repositoryRoot,
         timeout: 1_800

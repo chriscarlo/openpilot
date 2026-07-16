@@ -160,6 +160,33 @@ import Testing
   #expect(!activation.lowercased().contains("python"))
 }
 
+@Test func tileActivationAcceptsOnlyAnExplicitSameTargetNoSwitchWithoutAPriorIdentity() async throws {
+  let root = temporaryDirectory("vtsc-same-target-activation")
+  defer { try? FileManager.default.removeItem(at: root) }
+  let identity = String(repeating: "f", count: 64)
+  let helper = try transactionHelperFixture(in: root)
+  let staged = TiciStagedTileSet(
+    profile: "commaAdb",
+    tileSetID: identity,
+    remoteStagingRoot: TiciTileSetDeploymentService.stagingRoot(tileSetID: identity),
+    transactionHelperPath: ""
+  )
+  let service = TiciTileSetDeploymentService(
+    processRunner: DeploymentRecordingRunner(
+      identity: identity,
+      fileCount: 1,
+      totalBytes: 128,
+      targetAlreadyActive: true
+    ),
+    transactionHelperURL: helper
+  )
+
+  let result = try await service.activate(staged)
+  #expect(result.tileSetID == identity)
+  #expect(result.previousTileSetID == nil)
+  #expect(result.targetAlreadyActive)
+}
+
 @Test func immutableTileGenerationRecoversEveryInjectedSwitchBoundary() throws {
   let previous = "tile-generations/old/offline"
   let next = "tile-generations/new/offline"
@@ -318,6 +345,13 @@ import Testing
   let go = suite.first { $0.executableURL.lastPathComponent == "go" }
   #expect(go?.executableURL.path == "/repo/tools/vtsc_tuner_mac/.build-tools/go-1.26.5-darwin-arm64/bin/go")
   #expect(go?.environment["CGO_ENABLED"] == "0")
+  let vtscPython = suite.first {
+    $0.arguments.contains("sunnypilot/selfdrive/controls/lib/tests/vtsc")
+  }
+  #expect(vtscPython?.arguments == [
+    "-m", "pytest", "--noconftest", "-o", "addopts=",
+    "sunnypilot/selfdrive/controls/lib/tests/vtsc",
+  ])
 }
 
 @Test func tileTransactionHelperCommandsArePinnedToTheVerifiedHelper() throws {
@@ -700,12 +734,14 @@ private actor DeploymentRecordingRunner: ProcessRunning {
   let identity: String
   let fileCount: Int
   let totalBytes: UInt64
+  let targetAlreadyActive: Bool
   private(set) var requests: [ProcessRequest] = []
 
-  init(identity: String, fileCount: Int, totalBytes: UInt64) {
+  init(identity: String, fileCount: Int, totalBytes: UInt64, targetAlreadyActive: Bool = false) {
     self.identity = identity
     self.fileCount = fileCount
     self.totalBytes = totalBytes
+    self.targetAlreadyActive = targetAlreadyActive
   }
 
   func run(_ request: ProcessRequest) async throws -> ProcessResult {
@@ -717,6 +753,11 @@ private actor DeploymentRecordingRunner: ProcessRunning {
       """)
     }
     if command.contains(" activate --root ") {
+      if targetAlreadyActive {
+        return success("""
+        {"operation":"activate","activated_tile_set_id":"\(identity)","target_already_active":true,"tile_activation_not_switched":true}
+        """)
+      }
       return success("""
       {"operation":"activate","activated_tile_set_id":"\(identity)","previous_tile_set_id":"\(String(repeating: "e", count: 64))"}
       """)

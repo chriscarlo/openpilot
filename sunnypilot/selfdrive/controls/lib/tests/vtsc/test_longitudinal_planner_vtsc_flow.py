@@ -20,6 +20,21 @@ from .pipeline_harness import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _isolate_vision_flow_from_persistent_map_lookahead():
+  """These tests exercise the vision-to-planner path, not persistent MTSC input."""
+  params = Params()
+  previous = params.get('MTSCLookaheadEnabled')
+  params.put_bool('MTSCLookaheadEnabled', False)
+  try:
+    yield
+  finally:
+    if previous is None:
+      params.remove('MTSCLookaheadEnabled')
+    else:
+      params.put('MTSCLookaheadEnabled', previous)
+
+
 class _NoOpSLC:
   def __init__(self, CP):
     pass
