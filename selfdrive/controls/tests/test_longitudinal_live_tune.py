@@ -16,6 +16,7 @@ from openpilot.selfdrive.controls.lib.longitudinal_live_tune import (
   read_lead_response_tuning_config,
 )
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LongitudinalMpc
+from openpilot.selfdrive.test.longitudinal_harness.config import DEFAULT_PARAM_VALUES, REPLAY_PARAM_MANIFEST_KEYS
 from openpilot.sunnypilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPlannerSP
 
 
@@ -101,6 +102,55 @@ class TestLeadResponseTuneConfig:
     )
     assert config.gap_reclaim_max_accel == pytest.approx(0.0)
 
+  def test_raw_cruise_cap_qualification_cannot_be_disabled_by_live_values(self):
+    params = Params()
+    requests_that_reduce_cap_authority = {
+      "CruiseCapRawLeadAcquireDwellS": 99.0,
+      "CruiseCapRawLeadReleaseHoldS": 0.0,
+      "CruiseCapRawLeadMaxSampleGapS": 0.0,
+      "CruiseCapRawLeadMaxDRelStepM": 0.0,
+      "CruiseCapRawLeadMaxDPathStepM": 0.0,
+      "CruiseCapRawLeadMaxYRelStepM": 0.0,
+      "CruiseCapRawLeadSuspectYRelM": 0.0,
+      "CruiseCapRawLeadSuspectVLatMps": 0.0,
+    }
+    for suffix, value in requests_that_reduce_cap_authority.items():
+      params.put(f"Longitudinal.LiveTune.{suffix}", value)
+
+    config = read_lead_response_tuning_config(params)
+
+    assert config.cruise_cap_raw_lead_acquire_dwell_s == pytest.approx(0.60)
+    assert config.cruise_cap_raw_lead_release_hold_s == pytest.approx(0.50)
+    assert config.cruise_cap_raw_lead_max_sample_gap_s == pytest.approx(0.30)
+    assert config.cruise_cap_raw_lead_max_drel_step_m == pytest.approx(6.0)
+    assert config.cruise_cap_raw_lead_max_dpath_step_m == pytest.approx(0.75)
+    assert config.cruise_cap_raw_lead_max_yrel_step_m == pytest.approx(1.50)
+    assert config.cruise_cap_raw_lead_suspect_yrel_m == pytest.approx(4.0)
+    assert config.cruise_cap_raw_lead_suspect_vlat_mps == pytest.approx(4.0)
+
+  def test_raw_cruise_cap_params_are_in_synthetic_defaults_and_exact_manifest(self):
+    raw_cap_specs = [
+      spec for spec in LEAD_RESPONSE_TUNE_SPECS
+      if spec.attr.startswith("cruise_cap_raw_lead_")
+    ]
+
+    assert len(raw_cap_specs) == 8
+    for spec in raw_cap_specs:
+      assert float(DEFAULT_PARAM_VALUES[spec.key]) == pytest.approx(spec.default)
+      assert spec.key in REPLAY_PARAM_MANIFEST_KEYS
+
+  def test_stopping_release_jerk_only_allows_smoother_tuning(self):
+    params = Params()
+    spec = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["stopping_release_jerk_mps3"]
+
+    params.put(spec.key, 99.0)
+    assert read_lead_response_tuning_config(params).stopping_release_jerk_mps3 == pytest.approx(6.0)
+
+    params.put(spec.key, 0.0)
+    assert read_lead_response_tuning_config(params).stopping_release_jerk_mps3 == pytest.approx(1.0)
+    assert float(DEFAULT_PARAM_VALUES[spec.key]) == pytest.approx(spec.default)
+    assert spec.key in REPLAY_PARAM_MANIFEST_KEYS
+
 
 class TestLiveLeadTuneScript:
   def test_script_show_set_and_reset_cycle(self):
@@ -109,12 +159,14 @@ class TestLiveLeadTuneScript:
       "set",
       "--gap-reclaim-strength", "1.25",
       "--lead-preview-gap-min-m", "2.0",
+      "--cruise-cap-raw-lead-acquire-dwell-s", "0.30",
     )
 
     payload = json.loads(_run_live_tune_script("show", "--json").stdout)
     assert payload["gap_reclaim_strength"]["stored"] == pytest.approx(1.25)
     assert payload["gap_reclaim_strength"]["effective"] == pytest.approx(1.25)
     assert payload["lead_preview_gap_min_m"]["stored"] == pytest.approx(2.0)
+    assert payload["cruise_cap_raw_lead_acquire_dwell_s"]["stored"] == pytest.approx(0.30)
 
     _run_live_tune_script("reset")
     payload = json.loads(_run_live_tune_script("show", "--json").stdout)
@@ -122,6 +174,8 @@ class TestLiveLeadTuneScript:
     assert payload["gap_reclaim_strength"]["effective"] == pytest.approx(
       LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["gap_reclaim_strength"].default,
     )
+    assert payload["cruise_cap_raw_lead_acquire_dwell_s"]["stored"] is None
+    assert payload["cruise_cap_raw_lead_acquire_dwell_s"]["effective"] == pytest.approx(0.60)
 
 
 class TestLongitudinalMpcLiveRefresh:

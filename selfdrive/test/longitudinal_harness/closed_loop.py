@@ -34,7 +34,12 @@ from .config import (
 )
 from .inputs import LeadDirective, StepInput
 from .metrics import summarize_trace
+from .planner_state import (
+  ROUTE_START_REPLAY_METHOD,
+  verify_route_start_initialization_claim,
+)
 from .provenance import exact_planner_state_initialization
+from .replay_contracts import is_exact_supported_radard_replay_contract
 
 
 class HarnessParams:
@@ -171,6 +176,9 @@ class SimulationResult:
   vehicle: dict[str, Any]
   summary: dict[str, Any]
   trace: list[dict[str, Any]]
+  planner_state_initialization_applied: bool = False
+  planner_state_restoration_verified: bool = False
+  planner_state_initialization_provenance: dict[str, Any] | None = None
 
 
 def _to_builtin(value: Any) -> Any:
@@ -307,15 +315,40 @@ def run_harness(*,
     raise ValueError(f"unsupported perception_filter '{perception_filter}'")
   if ego_replay_mode not in ("auto", "recorded", "plant"):
     raise ValueError(f"unsupported ego_replay_mode '{ego_replay_mode}'")
-  if any(
-    isinstance(step.replay_reference.get("plannerStateInitializationProvenance"), dict) and
-    step.replay_reference["plannerStateInitializationProvenance"].get("status") == "exact"
+  route_start_claims = [
+    step.replay_reference.get("plannerStateInitializationProvenance")
     for step in steps
-  ):
+    if isinstance(step.replay_reference.get("plannerStateInitializationProvenance"), dict) and
+    step.replay_reference["plannerStateInitializationProvenance"].get("status") == "diagnostic" and
+    step.replay_reference["plannerStateInitializationProvenance"].get("method") == ROUTE_START_REPLAY_METHOD
+  ]
+  exact_state_claims = [
+    step.replay_reference.get("plannerStateInitializationProvenance")
+    for step in steps
+    if isinstance(step.replay_reference.get("plannerStateInitializationProvenance"), dict) and
+    step.replay_reference["plannerStateInitializationProvenance"].get("status") == "exact"
+  ]
+  if exact_state_claims:
     raise ValueError(
-      "snapshot claims an exact planner/MPC state initializer, but this harness does not yet implement "
-      "state restoration; refusing to promote provenance without applying the captured state"
+      "snapshot claims an exact planner/MPC checkpoint, but this harness does not yet implement state restoration"
     )
+  planner_state_initialization_applied = False
+  planner_state_restoration_verified = False
+  planner_state_claim: dict[str, Any] | None = None
+  if route_start_claims:
+    planner_state_claim = dict(route_start_claims[0])
+    if any(claim != planner_state_claim for claim in route_start_claims) or len(route_start_claims) != len(steps):
+      raise ValueError("route-start diagnostic provenance must be identical on every route-prefix frame")
+    planner_state_initialization_applied = verify_route_start_initialization_claim(
+      planner_state_claim,
+      steps=steps,
+      # Production plannerd constructs LongitudinalPlanner(CP) with defaults.
+      initial_speed_mps=0.0,
+      initial_accel_mps2=0.0,
+      params=vehicle_config.params,
+    )
+    if not planner_state_initialization_applied:
+      raise ValueError("route-start planner-state diagnostic does not match the replay prefix and constructor inputs")
   if perception_filter == "auto":
     # Follow the config's declared fidelity (legacy direct constructions predate
     # the field and always fabricated radarState directly).
@@ -344,7 +377,11 @@ def run_harness(*,
   # constructions at the radar-track value they explicitly carried before.
   a_lead_tau_s = float(getattr(vehicle_config, "a_lead_tau_s", _LEAD_ACCEL_TAU))
 
-  planner = LongitudinalPlanner(vehicle_config.cp, init_v=initial_speed_mps, init_a=initial_accel_mps2)
+  planner = LongitudinalPlanner(
+    vehicle_config.cp,
+    init_v=0.0 if planner_state_initialization_applied else initial_speed_mps,
+    init_a=0.0 if planner_state_initialization_applied else initial_accel_mps2,
+  )
   sim_time_s = [0.0]
   planner.mpc._time_fn = lambda: sim_time_s[0]
   harness_params = HarnessParams(vehicle_config.params)
@@ -397,12 +434,12 @@ def run_harness(*,
     if has_recorded_raw_model and not bool(vehicle_config.cp.radarUnavailable) and not explicit_not_received:
       raise ValueError(
         "recorded raw-model replay cannot substitute empty liveTracks on a radar-capable capture " +
-        "without an exact v1 zero clock"
+        "without an exact supported replay contract with a zero liveTracks clock"
       )
     from openpilot.selfdrive.test.longitudinal_harness.radard_stage import RadardPerceptionStage
     radard_stage = RadardPerceptionStage(vehicle_config.cp, vehicle_config.cp_sp, harness_params)
 
-  long_control = LongControl(vehicle_config.cp)
+  long_control = LongControl(vehicle_config.cp, harness_params, time_fn=lambda: sim_time_s[0])
   hyundai_controller = None
   controller_update_decimation = 1
   if vehicle_config.cp.brand == "hyundai" and vehicle_config.resolved_controller_mode in ("shaped", "device"):
@@ -449,6 +486,11 @@ def run_harness(*,
 
   for step in steps:
     sim_time_s[0] = float(step.t_s)
+    if step.recorded_perception_mode not in (None, "radard", "published_seed"):
+      raise ValueError(f"unsupported recorded perception mode '{step.recorded_perception_mode}'")
+    published_radar_seed = step.recorded_perception_mode == "published_seed"
+    if published_radar_seed and not planner_state_initialization_applied:
+      raise ValueError("published radar scheduler seeds are allowed only under an applied route-start replay")
     planner_cruise_context.update({
       "step": step,
       "generated_mps": None,
@@ -520,7 +562,7 @@ def run_harness(*,
       "carState": None,
       "liveTracks": None,
     }
-    if radard_stage is not None:
+    if radard_stage is not None and not published_radar_seed:
       # The raw fabricated leads become leadsV3-shaped measurements and the planner
       # sees only what the real radard pipeline would publish; ground truth for the
       # metrics keeps flowing from lead_tracks via _current_lead_meta below.
@@ -531,7 +573,7 @@ def run_harness(*,
         raw_model=step.raw_model,
         model_v2_log_mono_time_ns=step.recorded_model_v2_log_mono_time_ns,
         car_state_log_mono_time_ns=step.recorded_car_state_log_mono_time_ns,
-        # RadarState.replayInputs v1 uses zero to mean liveTracks was explicitly
+        # Supported RadarState.replayInputs contracts use zero to mean liveTracks was explicitly
         # not yet received. RadardPerceptionStage represents that exact state as
         # None and installs a zero SubMaster clock internally.
         live_tracks_log_mono_time_ns=(
@@ -581,9 +623,7 @@ def run_harness(*,
         service_provenance[service].get("status") == "exact"
         for service in ("modelV2", "carState", "liveTracks")
       ) and
-      isinstance(service_provenance.get("contract"), dict) and
-      service_provenance["contract"].get("status") == "exact" and
-      service_provenance["contract"].get("version") == 1 and
+      is_exact_supported_radard_replay_contract(service_provenance.get("contract")) and
       service_provenance["liveTracks"].get("emptyPayloadValid") is True
     )
     warmup_ready = step.replay_warmup_status == "ready"
@@ -591,11 +631,9 @@ def run_harness(*,
     planner_service_provenance = step.planner_service_association_provenance
     params_provenance = planner_service_provenance.get("params")
     planner_state_provenance = step.replay_reference.get("plannerStateInitializationProvenance")
-    # No checkpoint restoration exists yet. A well-formed row-level claim is
-    # deliberately insufficient; run_harness rejects such claims above.
     planner_state_exact = exact_planner_state_initialization(
       planner_state_provenance,
-      restoration_verified=False,
+      restoration_verified=planner_state_restoration_verified,
     )
     planner_critical_exact = bool(
       step.planner_context_status == "exact" and
@@ -693,7 +731,8 @@ def run_harness(*,
       sm.logMonoTime["modelV2"] = int(step.recorded_model_v2_log_mono_time_ns or 0)
     if "carState" not in step.recorded_planner_service_log_mono_time_ns:
       sm.logMonoTime["carState"] = int(step.recorded_car_state_log_mono_time_ns or 0)
-    planner.update(sm)
+    if not published_radar_seed:
+      planner.update(sm)
     planner_accel = float(planner.output_a_target)
     planner_source = str(getattr(planner.mpc, "source", ""))
     planner_should_stop = bool(planner.output_should_stop)
@@ -901,7 +940,16 @@ def run_harness(*,
   vehicle_description["noiseProfile"] = profile.name
   vehicle_description["noiseSeeds"] = seeds.as_dict()
   summary = summarize_trace(trace, vehicle=vehicle_description, scenario_name=scenario_name, noise_profile=profile.name)
-  return SimulationResult(vehicle=vehicle_description, summary=summary, trace=trace)
+  return SimulationResult(
+    vehicle=vehicle_description,
+    summary=summary,
+    trace=trace,
+    planner_state_initialization_applied=planner_state_initialization_applied,
+    planner_state_restoration_verified=planner_state_restoration_verified,
+    planner_state_initialization_provenance=(
+      None if planner_state_claim is None else dict(planner_state_claim)
+    ),
+  )
 
 
 def _build_submaster(step: StepInput, state: VehiclePlantState, radar_state, long_control_state, long_active: bool,

@@ -292,6 +292,7 @@ class TestAccelCorrCalmPositionProducer:
     cfg = _cfg()
     track, qualified = _qualified_track(cfg)
     assert qualified["accelCorrCalmPositionValid"] is True
+    assert qualified["accelCorrRawHardBraking"] is False
     assert qualified["accelCorrCalmPositionSlopeMps"] == pytest.approx(0.0, abs=1e-6)
     assert track.accel_corr_calm_position_sample_count >= 40
     assert track.accel_corr_calm_position_window_span_s >= 1.95
@@ -300,12 +301,14 @@ class TestAccelCorrCalmPositionProducer:
     # its dense position slope remained calm. It must remain eligible.
     mild = track.update(_raw_lead(a_lead=-0.35), 2.30, V_EGO, cfg, 0)
     assert mild["accelCorrCalmPositionValid"] is True
+    assert mild["accelCorrRawHardBraking"] is False
     assert track.accel_corr_calm_position_reason == "position_proven"
 
     # Known genuine CD3 evidence is -0.48..-0.54. The fixed -0.40 same-frame
     # raw gate clears all proof state before the published accel EMA can lag it.
     hard = track.update(_raw_lead(a_lead=-0.41), 2.35, V_EGO, cfg, 0)
     assert hard["accelCorrCalmPositionValid"] is False
+    assert hard["accelCorrRawHardBraking"] is True
     assert track.accel_corr_calm_position_reason == "raw_hard_braking"
     assert len(track.accel_corr_position_evidence) == 0
 
@@ -332,12 +335,17 @@ class TestAccelCorrCalmPositionProducer:
     _, lead = _qualified_track()
     msg = log.RadarState.new_message()
     msg.leadOne = lead
+    hard = dict(lead)
+    hard["accelCorrRawHardBraking"] = True
+    msg.leadTwo = hard
     reader = msg.as_reader()
 
     assert reader.leadOne.accelCorrCalmPositionValid
     assert reader.leadOne.accelCorrCalmPositionSlopeMps == pytest.approx(0.0)
-    assert not reader.leadTwo.accelCorrCalmPositionValid
+    assert not reader.leadOne.accelCorrRawHardBraking
+    assert reader.leadTwo.accelCorrCalmPositionValid
     assert reader.leadTwo.accelCorrCalmPositionSlopeMps == pytest.approx(0.0)
+    assert reader.leadTwo.accelCorrRawHardBraking
 
 
 class TestSteadyParityConsumer:

@@ -18,6 +18,7 @@ def _make_raw_lead(status=True, dRel=40.0, yRel=0.0, vRel=-1.0, vLead=25.0,
                    aRel=0.0, fcwSuppressed=False, closingGovernorRecovery=False,
                    accelCorrCalmPositionValid=False,
                    accelCorrCalmPositionSlopeMps=0.0,
+                   accelCorrRawHardBraking=False,
                    radarTrackId=-1001) -> SimpleNamespace:
   return SimpleNamespace(
     status=status, dRel=dRel, yRel=yRel, vRel=vRel, vLead=vLead,
@@ -26,6 +27,7 @@ def _make_raw_lead(status=True, dRel=40.0, yRel=0.0, vRel=-1.0, vLead=25.0,
     closingGovernorRecovery=closingGovernorRecovery,
     accelCorrCalmPositionValid=accelCorrCalmPositionValid,
     accelCorrCalmPositionSlopeMps=accelCorrCalmPositionSlopeMps,
+    accelCorrRawHardBraking=accelCorrRawHardBraking,
     radar=False, radarTrackId=radarTrackId,
   )
 
@@ -474,7 +476,8 @@ class TestLeadAccelCorrBound:
   @staticmethod
   def _run_calm_position_case(*, proof_valid: bool, d_rel: float = 82.0,
                               model_a_lead_k: float = -0.15,
-                              fcw_suppressed: bool = False):
+                              fcw_suppressed: bool = False,
+                              raw_hard_braking: bool = False):
     mpc = _make_mpc(
       accel_corr_margin=0.5,
       accel_corr_amplify_gain=1.0,
@@ -491,6 +494,7 @@ class TestLeadAccelCorrBound:
           dRel=d_rel, vRel=v_lead - 26.0, vLead=v_lead,
           aLeadK=model_a_lead_k,
           fcwSuppressed=fcw_suppressed,
+          accelCorrRawHardBraking=raw_hard_braking,
           accelCorrCalmPositionValid=proof_valid,
           accelCorrCalmPositionSlopeMps=-0.4,
         ),
@@ -499,16 +503,20 @@ class TestLeadAccelCorrBound:
       t += 0.05
     return out0, mpc._lead_stability_state[0]
 
-  def test_calm_position_proof_vetoes_only_extra_amplification_outside_target(self):
+  def test_dense_or_unconfirmed_position_evidence_vetoes_only_extra_mild_amplification_outside_target(self):
     protected, protected_state = self._run_calm_position_case(proof_valid=True)
-    legacy, legacy_state = self._run_calm_position_case(proof_valid=False)
+    sparse, sparse_state = self._run_calm_position_case(proof_valid=False)
 
     assert protected_state.corr_a_meas_lp < -1.0
     assert protected_state.corr_amplify_vetoed
+    assert protected_state.corr_amplify_veto_reason == "calm_position_outside_target"
     assert not protected_state.corr_amplified
     assert protected.aLeadK == pytest.approx(-0.15)
-    assert legacy_state.corr_amplified
-    assert legacy.aLeadK < -1.0
+    assert sparse_state.corr_a_meas_lp < -1.0
+    assert sparse_state.corr_amplify_vetoed
+    assert sparse_state.corr_amplify_veto_reason == "unconfirmed_mild_outside_target"
+    assert not sparse_state.corr_amplified
+    assert sparse.aLeadK == pytest.approx(-0.15)
 
   def test_calm_position_proof_cannot_weaken_inside_target_or_meaningful_brake(self):
     inside, inside_state = self._run_calm_position_case(proof_valid=True, d_rel=40.0)
@@ -521,6 +529,34 @@ class TestLeadAccelCorrBound:
     assert inside.aLeadK < -1.0
     assert genuine_state.corr_amplified
     assert not genuine_state.corr_amplify_vetoed
+    assert genuine.aLeadK < -1.0
+
+  def test_unconfirmed_position_guard_preserves_prompt_cd3_braking(self):
+    # The road CD3 onset publishes about -0.37 before deepening toward -0.54.
+    # That materially stronger model brake must not wait for a rebuilt raw-range
+    # window, even while the lead remains just outside the configured target.
+    genuine, state = self._run_calm_position_case(
+      proof_valid=False, model_a_lead_k=-0.37,
+    )
+
+    assert state.corr_a_meas_lp < -1.0
+    assert state.corr_amplified
+    assert not state.corr_amplify_vetoed
+    assert genuine.aLeadK < -1.0
+
+  def test_producer_attested_raw_brake_bypasses_sparse_position_guard(self):
+    # RadarD asserts steadyParityCurrentThreat on the first raw hard-braking
+    # frame. The genuine -2.0 m/s^2 regression publishes only -0.17 on that
+    # onset frame, so this independent producer evidence must preserve CD3's
+    # prompt amplification while its position history is being cleared.
+    genuine, state = self._run_calm_position_case(
+      proof_valid=False, model_a_lead_k=-0.17,
+      raw_hard_braking=True,
+    )
+
+    assert state.corr_a_meas_lp < -1.0
+    assert state.corr_amplified
+    assert not state.corr_amplify_vetoed
     assert genuine.aLeadK < -1.0
 
   def test_fcw_suppressed_does_not_discard_fresh_independent_position_proof(self):
@@ -560,7 +596,10 @@ class TestLeadAccelCorrBound:
     assert not state.corr_amplify_vetoed
     assert not state.corr_amplified
 
-  def test_zero_model_floor_restores_any_negative_report_amplification(self):
+  def test_zero_model_floor_cannot_disable_unconfirmed_position_safety_guard(self):
     out0, state = self._run_deepening_trend(-0.04, model_min=0.0)
     assert state.corr_a_meas_lp < -1.0
-    assert out0.aLeadK < -1.0
+    assert state.corr_amplify_vetoed
+    assert state.corr_amplify_veto_reason == "unconfirmed_mild_outside_target"
+    assert not state.corr_amplified
+    assert out0.aLeadK == pytest.approx(-0.04)

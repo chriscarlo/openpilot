@@ -12,7 +12,11 @@ from openpilot.system.hardware import HARDWARE
 
 from openpilot.selfdrive.test.longitudinal_harness.closed_loop import run_harness
 from openpilot.selfdrive.test.longitudinal_harness.config import captured_param_manifest, resolve_ev6_vehicle_config
-from openpilot.selfdrive.test.longitudinal_harness.fidelity import evaluate_diagnostic_fidelity, evaluate_fidelity
+from openpilot.selfdrive.test.longitudinal_harness.fidelity import (
+  evaluate_diagnostic_fidelity,
+  evaluate_fidelity,
+  evaluate_harness_fidelity,
+)
 from openpilot.selfdrive.test.longitudinal_harness.inputs import SnapshotBundle, StepInput, load_snapshot_bundle
 from openpilot.selfdrive.test.longitudinal_harness.provenance import classify_replay_provenance
 
@@ -132,13 +136,17 @@ def run_snapshot_fidelity(
   except ValueError as exc:
     evaluation_rows = []
     window_selection = {"status": "not_evaluated", "reason": str(exc)}
-  fidelity = evaluate_fidelity(
-    evaluation_rows,
-    thresholds=thresholds,
-    captured_metadata=bundle.vehicle,
-    replay_metadata=replay_metadata,
-    counterfactual=provenance_mode == "counterfactual",
-    acknowledge_instrumentation_only=provenance_mode == "instrumentation_only",
+  fidelity_kwargs = {
+    "thresholds": thresholds,
+    "captured_metadata": bundle.vehicle,
+    "replay_metadata": replay_metadata,
+    "counterfactual": provenance_mode == "counterfactual",
+    "acknowledge_instrumentation_only": provenance_mode == "instrumentation_only",
+  }
+  fidelity = (
+    evaluate_harness_fidelity(replace(simulation, trace=list(evaluation_rows)), **fidelity_kwargs)
+    if getattr(simulation, "planner_state_restoration_verified", False) is True else
+    evaluate_fidelity(evaluation_rows, **fidelity_kwargs)
   )
   diagnostic_fidelity = evaluate_diagnostic_fidelity(evaluation_rows, thresholds=thresholds)
   if not param_manifest["complete"]:

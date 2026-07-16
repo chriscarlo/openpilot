@@ -17,6 +17,7 @@ from selfdrive.test.longitudinal_harness.config import REPLAY_PARAM_DEFAULT_VALU
 from selfdrive.test.longitudinal_harness.fidelity import NOT_EVALUATED, evaluate_fidelity
 from selfdrive.test.longitudinal_harness.inputs import load_snapshot_bundle
 from selfdrive.test.longitudinal_harness.route_extract import (
+  EpisodeNotReplayableError,
   EXTRACTOR_VERSION,
   detect_episode_candidates,
   extract_ev6_episodes,
@@ -134,6 +135,8 @@ def _write_raw_route(
   conflicting_controls_state_duplicate: bool = False,
   event_frame: int = _EVENT_FRAME,
   planner_radar_lag_frames: int = 0,
+  route_start_process_proof: bool = False,
+  missing_model_at: int | None = None,
 ) -> dict[str, int]:
   segment_dir = route_root / "0"
   segment_dir.mkdir(parents=True, exist_ok=True)
@@ -161,6 +164,33 @@ def _write_raw_route(
     entry.key = key
     entry.value = value.encode()
   messages.append(init_data.as_reader())
+
+  if route_start_process_proof:
+    sentinel = messaging.new_message("sentinel")
+    sentinel.logMonoTime = 925_000_000
+    sentinel.sentinel.type = "startOfRoute"
+    messages.append(sentinel.as_reader())
+
+    proc_log = messaging.new_message("procLog")
+    proc_log.logMonoTime = 940_000_000
+    processes = proc_log.procLog.init("procs", 2)
+    for process, pid, start_time, command in (
+      (processes[0], 41, 0.91, "selfdrive.controls.plannerd"),
+      (processes[1], 42, 0.92, "selfdrive.controls.radard"),
+    ):
+      process.pid = pid
+      process.startTime = start_time
+      process.cmdline = [command]
+    messages.append(proc_log.as_reader())
+
+    manager_state = messaging.new_message("managerState")
+    manager_state.logMonoTime = 945_000_000
+    processes = manager_state.managerState.init("processes", 1)
+    processes[0].name = "plannerd"
+    processes[0].pid = 41
+    processes[0].running = True
+    processes[0].shouldBeRunning = True
+    messages.append(manager_state.as_reader())
 
   car_params = messaging.new_message("carParams")
   car_params.logMonoTime = 950_000_000
@@ -242,13 +272,14 @@ def _write_raw_route(
     messages.append(live_tracks.as_reader())
 
     intended_model_time = frame_base + 10_000_000
-    _append_model(
-      messages,
-      mono_time_ns=intended_model_time,
-      raw_v_rel_mps=raw_v_rel_mps,
-      lead_gap_m=_LEAD_GAP_M,
-      marker_accel_mps2=-0.125,
-    )
+    if frame_idx != missing_model_at:
+      _append_model(
+        messages,
+        mono_time_ns=intended_model_time,
+        raw_v_rel_mps=raw_v_rel_mps,
+        lead_gap_m=_LEAD_GAP_M,
+        marker_accel_mps2=-0.125,
+      )
     # This newer model is deliberately closer in log order/time. A latest-frame
     # association would select it; mdMonoTime must select the intended model.
     _append_model(
@@ -720,21 +751,27 @@ def test_unsupported_radar_contract_version_is_not_gate_eligible(tmp_path: Path)
   assert frame.radard_gate_eligible is False
 
 
-def test_bundle_seeds_warmup_predecessor_and_covers_strict_boundary(tmp_path: Path) -> None:
+@pytest.mark.parametrize("radar_replay_version", (1, 2))
+def test_supported_bundle_replays_serialized_rows_into_formal_radar_fidelity(
+  tmp_path: Path,
+  radar_replay_version: int,
+) -> None:
   log_root = tmp_path / "logs"
   event_frame = 700
+  route_key = f"v{radar_replay_version}_warmup_route"
   _write_raw_route(
-    log_root / "v1_warmup_route",
+    log_root / route_key,
     genuine_closure=False,
     frame_count=event_frame + 101,
     v1_contracts=True,
+    radar_replay_version=radar_replay_version,
     event_frame=event_frame,
     planner_radar_lag_frames=1,
   )
   conn = open_catalog(tmp_path / "catalog.sqlite3")
   try:
     index_ev6_routes(conn, roots=[log_root])
-    route_row = get_route_rows(conn, route_keys=["v1_warmup_route"])[0]
+    route_row = get_route_rows(conn, route_keys=[route_key])[0]
     scan = load_route_scan(conn, route_row)
     candidate = next(
       candidate for candidate in detect_episode_candidates(scan)
@@ -766,6 +803,10 @@ def test_bundle_seeds_warmup_predecessor_and_covers_strict_boundary(tmp_path: Pa
   assert evaluation_steps
   assert all(step.replay_warmup_status == "ready" for step in evaluation_steps)
   assert all(step.radard_gate_eligible for step in evaluation_steps)
+  assert all(
+    step.radard_service_association_provenance["contract"]["version"] == radar_replay_version
+    for step in evaluation_steps
+  )
 
   vehicle = resolve_ev6_vehicle_config(
     topology=str(bundle.vehicle["topology"]),
@@ -793,6 +834,117 @@ def test_bundle_seeds_warmup_predecessor_and_covers_strict_boundary(tmp_path: Pa
     row["planner_state_initialization_provenance"]["status"] == "missing"
     for row in evaluation_trace
   )
+  assert all(row["radard_explicit_service_associations"] is True for row in evaluation_trace)
+  assert all(row["radard_gate_eligible"] is True for row in evaluation_trace)
+
+  fidelity = evaluate_fidelity(evaluation_trace)
+  assert fidelity["radar"]["coverage"]["scorable_samples"] > 0
+  assert "inexact_radard_replay_contract" not in fidelity["radar"]["exclusion_reasons"]
+
+
+def test_route_start_bundle_applies_constructor_state_but_remains_diagnostic(tmp_path: Path) -> None:
+  log_root = tmp_path / "logs"
+  route_key = "route_start_exact"
+  _write_raw_route(
+    log_root / route_key,
+    genuine_closure=False,
+    frame_count=_FRAME_COUNT,
+    v1_contracts=True,
+    radar_replay_version=2,
+    route_start_process_proof=True,
+  )
+  conn = open_catalog(tmp_path / "catalog.sqlite3")
+  try:
+    index_ev6_routes(conn, roots=[log_root])
+    route_row = get_route_rows(conn, route_keys=[route_key])[0]
+    scan = load_route_scan(conn, route_row)
+    assert scan.planner_route_start_provenance["status"] == "diagnostic"
+    candidate = next(
+      candidate for candidate in detect_episode_candidates(scan)
+      if candidate.episode_type == "false_closing"
+    )
+    bundle_path = write_episode_bundle(
+      scan,
+      candidate,
+      tmp_path / "snapshots",
+      route_start_replay=True,
+    )
+  finally:
+    conn.close()
+
+  bundle = load_snapshot_bundle(bundle_path)
+  assert bundle.vehicle["plannerStateInitializationMethod"] == "route_start_replay"
+  claim = bundle.timeline[0].replay_reference["plannerStateInitializationProvenance"]
+  assert claim["status"] == "diagnostic"
+  assert claim["formalFidelityEligible"] is False
+  assert claim["prefixFrameCount"] == len(bundle.timeline)
+
+  vehicle = resolve_ev6_vehicle_config(
+    topology=str(bundle.vehicle["topology"]),
+    controller_mode="auto",
+    tune_source="snapshot",
+    snapshot_vehicle=bundle.vehicle,
+    snapshot_params=bundle.params,
+    livetune_snapshot=None,
+  )
+  result = run_harness(
+    vehicle_config=vehicle,
+    scenario_name=bundle.name,
+    steps=bundle.timeline,
+    initial_speed_mps=bundle.initial_speed_mps,
+    initial_accel_mps2=bundle.initial_accel_mps2,
+    noise_profile="off",
+    perception_filter="auto",
+    ego_replay_mode="auto",
+  )
+
+  assert result.planner_state_initialization_applied is True
+  assert result.planner_state_restoration_verified is False
+  assert not any(row["planner_state_initialization_exact"] for row in result.trace)
+
+
+@pytest.mark.parametrize(
+  ("fixture_kwargs", "reason"),
+  (
+    ({"param_change_at": 100}, "parameter transitions without an exact planner read clock"),
+    ({"missing_model_at": 100}, "partial raw-model coverage"),
+  ),
+  ids=("param-read-clock-missing", "model-frame-missing"),
+)
+def test_route_start_bundle_fails_closed_on_unreconstructable_prefix(
+  tmp_path: Path,
+  fixture_kwargs: dict[str, int],
+  reason: str,
+) -> None:
+  log_root = tmp_path / "logs"
+  route_key = "route_start_incomplete"
+  _write_raw_route(
+    log_root / route_key,
+    genuine_closure=False,
+    frame_count=_FRAME_COUNT,
+    v1_contracts=True,
+    radar_replay_version=2,
+    route_start_process_proof=True,
+    **fixture_kwargs,
+  )
+  conn = open_catalog(tmp_path / "catalog.sqlite3")
+  try:
+    index_ev6_routes(conn, roots=[log_root])
+    route_row = get_route_rows(conn, route_keys=[route_key])[0]
+    scan = load_route_scan(conn, route_row)
+    candidate = next(
+      candidate for candidate in detect_episode_candidates(scan)
+      if candidate.episode_type == "false_closing"
+    )
+    with pytest.raises(EpisodeNotReplayableError, match=reason):
+      write_episode_bundle(
+        scan,
+        candidate,
+        tmp_path / "snapshots",
+        route_start_replay=True,
+      )
+  finally:
+    conn.close()
 
 
 def test_identical_route_wide_core_input_duplicates_keep_v1_join_exact(tmp_path: Path) -> None:

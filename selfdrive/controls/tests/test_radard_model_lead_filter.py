@@ -6,7 +6,8 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from opendbc.car.hyundai.values import HyundaiFlags
+from cereal import car, custom, log
+from opendbc.car.hyundai.values import CAR, HyundaiFlags
 from openpilot.selfdrive.controls.lib.longitudinal_live_tune import LeadResponseTuningConfig
 from openpilot.selfdrive.controls.radard import (
   CLOSING_GOVERNOR_RECOVERY_MIN_RAW_TTC_S,
@@ -16,6 +17,7 @@ from openpilot.selfdrive.controls.radard import (
   ModelLeadTracker,
   OPENING_GOVERNOR_HARD_CLOSING_MPS,
   RADAR_TO_CAMERA,
+  RadarD,
   Track,
   get_lead,
 )
@@ -832,9 +834,9 @@ class TestClosingGovernorCalmRecovery:
 
     if position_times is None:
       position_times = [
-        now - 1.25 + 0.05 * i
-        for i in range(26)
-        if now - 1.25 + 0.05 * i <= now - recent_gap_s + 1e-9
+        now - 2.0 + 0.05 * i
+        for i in range(41)
+        if now - 2.0 + 0.05 * i <= now - recent_gap_s + 1e-9
       ]
     for sample_t in position_times:
       sample_drel = drel + float(position_closing_mps) * (now - float(sample_t))
@@ -862,7 +864,8 @@ class TestClosingGovernorCalmRecovery:
 
   @staticmethod
   def _update(tr, *, now, drel_m, raw_closing_mps, raw_alead_mps2=0.0,
-              raw_prob=1.0, raw_dpath=0.0, raw_vlat=0.0, cfg=None):
+              raw_prob=1.0, raw_dpath=0.0, raw_vlat=0.0, cfg=None,
+              allow_calm_recovery=True):
     return tr._update_closing_governor(
       float(now),
       raw_drel=float(drel_m),
@@ -872,24 +875,142 @@ class TestClosingGovernorCalmRecovery:
       raw_prob=float(raw_prob),
       raw_dpath=float(raw_dpath),
       raw_vlat=float(raw_vlat),
+      allow_calm_recovery=bool(allow_calm_recovery),
     )
 
-  def test_active_hold_recovers_only_after_two_calm_frames_and_full_position_span(self):
+  @staticmethod
+  def _production_radard(*, brand, fingerprint, radar_unavailable):
+    cp = car.CarParams.new_message()
+    cp.brand = str(brand)
+    cp.carFingerprint = str(fingerprint)
+    cp.radarUnavailable = bool(radar_unavailable)
+    return RadarD(cp, custom.CarParamsSP.new_message())
+
+  @staticmethod
+  def _lead_wire_bytes(lead):
+    state = log.RadarState.new_message()
+    state.leadOne = lead
+    return state.to_bytes()
+
+  def _update_through_tracker(self, tracker, tr):
+    # Exercise the same ModelLeadTracker -> ModelLeadTrack propagation RadarD
+    # uses in production while keeping this regression independent of device
+    # Params. A direct tracker constructor remains the explicit reference seam.
+    tr.last_t = self.NOW - 0.05
+    tracker._tracks[tr.identifier] = tr
+    tracker._cfg = self._cfg()
+    tracker._last_param_refresh_t = self.NOW
+    tracker.begin_frame(self.NOW)
+    lead = tracker.update_from_vision(
+      {
+        "dRel": self.DREL_M,
+        "yRel": 0.0,
+        "vRel": -0.4,
+        "vLead": 19.6,
+        "vLeadK": 19.6,
+        "aLeadK": 0.0,
+        "aLeadTau": 0.3,
+        "modelProb": 0.9,
+        "dPath": 0.0,
+        "vLat": 0.0,
+      },
+      now=self.NOW,
+      v_ego=20.0,
+      lead_slot=0,
+    )
+    tracker.end_frame()
+    return lead
+
+  def test_non_hyundai_production_radard_keeps_recovery_disabled_and_byte_exact(self):
+    rd = self._production_radard(
+      brand="toyota",
+      fingerprint="TOYOTA_RAV4",
+      radar_unavailable=True,
+    )
+    assert not rd.model_lead_tracker.allow_closing_governor_calm_recovery
+
+    production = self._track()
+    reference = self._track()
+    for tr in (production, reference):
+      self._seed_histories(tr, raw_closing_mps=0.4, position_closing_mps=0.6)
+      # Isolate CD9's publish clamp from the ordinary filtered vRel. With calm
+      # recovery disabled, the earned 1.8 m/s clamp must remain byte/kinematic
+      # identical to the explicit recovery-disabled reference.
+      tr.vRel = -0.4
+      tr.vLead = 19.6
+      tr.vLeadK = 19.6
+
+    production_lead = self._update_through_tracker(rd.model_lead_tracker, production)
+    reference_tracker = ModelLeadTracker(
+      params=_NoParams(),
+      allow_closing_governor_calm_recovery=False,
+    )
+    reference_lead = self._update_through_tracker(reference_tracker, reference)
+
+    assert production_lead["closingGovernorRecovery"] is False
+    assert production_lead["closingGovernorRecoveryNumericValid"] is False
+    assert production.governor_closing_mps == pytest.approx(1.8)
+    assert production_lead["vRel"] == pytest.approx(-1.8)
+    assert self._lead_wire_bytes(production_lead) == self._lead_wire_bytes(reference_lead)
+
+  @pytest.mark.parametrize(
+    ("brand", "fingerprint", "radar_unavailable"),
+    [
+      ("hyundai", CAR.KIA_EV6, False),
+      ("hyundai", "HYUNDAI_IONIQ_5", True),
+      ("toyota", CAR.KIA_EV6, True),
+    ],
+  )
+  def test_production_recovery_scope_requires_exact_ev6_vision_topology(
+    self, brand, fingerprint, radar_unavailable,
+  ):
+    rd = self._production_radard(
+      brand=brand,
+      fingerprint=fingerprint,
+      radar_unavailable=radar_unavailable,
+    )
+    assert not rd.model_lead_tracker.allow_closing_governor_calm_recovery
+
+  def test_ev6_radar_unavailable_production_radard_still_activates_recovery(self):
+    assert ModelLeadTracker(params=_NoParams()).allow_closing_governor_calm_recovery
+    rd = self._production_radard(
+      brand="hyundai",
+      fingerprint=CAR.KIA_EV6,
+      radar_unavailable=True,
+    )
+    assert rd.model_lead_tracker.allow_closing_governor_calm_recovery
+
+    tr = self._track()
+    self._seed_histories(tr, raw_closing_mps=0.4, position_closing_mps=0.6)
+    tr.vRel = -0.4
+    tr.vLead = 19.6
+    tr.vLeadK = 19.6
+    lead = self._update_through_tracker(rd.model_lead_tracker, tr)
+
+    assert tr.governor_calm_recovery_applied
+    assert tr.governor_closing_mps == pytest.approx(0.6)
+    assert lead["closingGovernorRecovery"] is True
+    assert lead["closingGovernorRecoveryNumericValid"] is True
+    assert lead["vRel"] == pytest.approx(-0.6)
+
+  def test_active_hold_recovers_with_two_nonbraking_high_ttc_frames_and_full_position_span(self):
     tr = self._track()
     self._seed_histories(tr, previous_raw_closing_mps=2.5)
     deadline = tr.governor_hold_until_t
 
-    # Only the current frame is calm; the immediately preceding measured frame
-    # is exactly at the fixed fast-close boundary and cannot establish recovery.
+    # The immediately preceding measured frame is exactly at the fixed
+    # fast-close boundary, but it is non-braking at a 40 s raw TTC. The robust
+    # range proof may therefore remove only stale CD9 excess while retaining
+    # that frame's complete raw velocity authority.
     assert self._update(
       tr, now=self.NOW, drel_m=self.DREL_M, raw_closing_mps=0.4,
     )
-    assert not tr.governor_calm_recovery_applied
-    assert tr.governor_closing_mps == pytest.approx(1.8)
+    assert tr.governor_calm_recovery_applied
+    assert tr.governor_closing_mps == pytest.approx(0.6)
     assert tr.governor_hold_until_t == pytest.approx(deadline)
 
-    # The next 20 Hz sample supplies the second calm measurement. The retained
-    # 1.25 s position history still spans a full second after window trimming.
+    # The next 20 Hz sample retains the earned mode. The two-second position
+    # history still spans 1.6 s after window trimming.
     now = self.NOW + 0.05
     drel = self.DREL_M - 0.6 * 0.05
     assert self._update(tr, now=now, drel_m=drel, raw_closing_mps=0.4)
@@ -935,8 +1056,9 @@ class TestClosingGovernorCalmRecovery:
       tr, now=self.NOW, drel_m=self.DREL_M, raw_closing_mps=0.4, **context,
     )
     state = tr.get_RadarState(self._cfg())
-    # Raw probability/lateral context authorizes only the new numeric proof;
-    # the pre-existing public governor recovery path must remain unchanged.
+    # Probability/lateral context gates only the numeric bridge proof. The
+    # public CD9 clamp remains conservative at max(raw, robust position), and
+    # the planner fails closed when numeric provenance is absent.
     assert state["closingGovernorRecovery"] is True
     assert state["closingGovernorRecoveryNumericValid"] is expected_safe
     assert tr.governor_recovery_position_closing_mps is not None
@@ -1036,10 +1158,10 @@ class TestClosingGovernorCalmRecovery:
       drel_m=self.DREL_M - 0.07,
       raw_closing_mps=0.4,
     )
-    assert tr.governor_calm_recovery_mode is True
+    assert tr.governor_calm_recovery_mode is False
     assert tr.governor_recovery_vrel_floor_mps is None
 
-  def test_recovery_mode_never_raises_extra_clamp_when_current_raw_closing_rises(self):
+  def test_recovery_mode_tracks_current_raw_closing_without_restoring_stale_extra_clamp(self):
     tr = self._track()
     self._seed_histories(tr, raw_closing_mps=0.4, position_closing_mps=0.6)
     deadline = tr.governor_hold_until_t
@@ -1050,9 +1172,9 @@ class TestClosingGovernorCalmRecovery:
     assert tr.governor_calm_recovery_mode
     assert tr.governor_closing_mps == pytest.approx(0.6)
 
-    # Route-422 adversarial shape: current raw closing rises to 1.69 m/s while
-    # the robust position history stays mild. The base filter consumes that raw
-    # measurement; calm recovery must not raise CD9's stale extra clamp.
+    # Current raw closing rises to 1.69 m/s while the robust position history
+    # stays mild. Recovery follows that current raw urgency exactly, but does
+    # not restore the older 1.8 m/s stale CD9 clamp.
     now = self.NOW + 0.05
     assert self._update(
       tr,
@@ -1063,7 +1185,7 @@ class TestClosingGovernorCalmRecovery:
     assert tr.governor_calm_recovery_mode
     assert tr.governor_calm_recovery_applied
     assert tr.governor_recovery_position_closing_mps == pytest.approx(0.6)
-    assert tr.governor_closing_mps == pytest.approx(0.6)
+    assert tr.governor_closing_mps == pytest.approx(1.69)
     assert tr.governor_hold_until_t == pytest.approx(deadline)
 
   def test_inactive_hold_cannot_enter_calm_recovery(self):
@@ -1118,7 +1240,7 @@ class TestClosingGovernorCalmRecovery:
     assert tr.governor_recovery_position_closing_mps is None
     assert tr.governor_closing_mps == pytest.approx(1.8)
 
-  @pytest.mark.parametrize("veto", ("current_braking", "short_ttc", "fast_close", "position"))
+  @pytest.mark.parametrize("veto", ("current_braking", "short_ttc", "position"))
   def test_any_safety_veto_exits_existing_recovery_mode(self, veto):
     tr = self._track(closing_mps=0.6)
     tr.governor_calm_recovery_mode = True
@@ -1126,8 +1248,6 @@ class TestClosingGovernorCalmRecovery:
       drel_m, raw_closing_mps, raw_alead_mps2, position_closing_mps = self.DREL_M, 0.4, -0.21, 0.6
     elif veto == "short_ttc":
       drel_m, raw_closing_mps, raw_alead_mps2, position_closing_mps = 2.4, 0.4, 0.0, 0.1
-    elif veto == "fast_close":
-      drel_m, raw_closing_mps, raw_alead_mps2, position_closing_mps = self.DREL_M, 2.5, 0.0, 0.6
     else:
       drel_m, raw_closing_mps, raw_alead_mps2, position_closing_mps = self.DREL_M, 0.4, 0.0, 1.251
     self._seed_histories(
@@ -1147,19 +1267,38 @@ class TestClosingGovernorCalmRecovery:
     assert not tr.governor_calm_recovery_mode
     assert not tr.governor_calm_recovery_applied
 
+  def test_far_high_ttc_fast_close_keeps_existing_recovery_and_full_raw_urgency(self):
+    tr = self._track(closing_mps=0.6)
+    tr.governor_calm_recovery_mode = True
+    self._seed_histories(
+      tr,
+      raw_closing_mps=3.2,
+      position_closing_mps=0.6,
+    )
+
+    assert self._update(
+      tr,
+      now=self.NOW,
+      drel_m=self.DREL_M,
+      raw_closing_mps=3.2,
+    )
+    assert tr.governor_calm_recovery_mode
+    assert tr.governor_calm_recovery_applied
+    assert tr.governor_closing_mps == pytest.approx(3.2)
+
   @pytest.mark.parametrize("history_shape", ("position_gap", "sparse", "short_span"))
   def test_position_history_gap_sparse_or_short_span_vetoes_recovery(self, history_shape):
     tr = self._track()
-    full_times = [self.NOW - 1.25 + 0.05 * i for i in range(25)]
+    full_times = [self.NOW - 2.0 + 0.05 * i for i in range(40)]
     if history_shape == "position_gap":
       position_times = [
         sample_t for sample_t in full_times
-        if not self.NOW - 0.65 <= sample_t <= self.NOW - 0.55
+        if not self.NOW - 0.95 <= sample_t <= self.NOW - 0.85
       ]
     elif history_shape == "sparse":
-      position_times = list(np.linspace(self.NOW - 1.25, self.NOW - 0.05, 14))
+      position_times = list(np.linspace(self.NOW - 2.0, self.NOW - 0.05, 20))
     else:
-      position_times = [self.NOW - 0.95 + 0.05 * i for i in range(19)]
+      position_times = [self.NOW - 1.55 + 0.05 * i for i in range(31)]
     self._seed_histories(tr, position_times=position_times)
 
     assert self._update(
@@ -1218,8 +1357,8 @@ class TestClosingGovernorCalmRecovery:
     assert self._update(
       tr, now=self.NOW, drel_m=drel_m, raw_closing_mps=0.4,
     )
-    assert tr.governor_calm_recovery_applied is True
-    assert tr.governor_closing_mps == pytest.approx(0.4)
+    assert tr.governor_calm_recovery_applied is expected_recovery
+    assert tr.governor_closing_mps == pytest.approx(0.4 if expected_recovery else 1.8)
     assert (tr.governor_recovery_vrel_floor_mps is not None) is expected_recovery
 
   @pytest.mark.parametrize(

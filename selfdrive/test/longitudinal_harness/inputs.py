@@ -72,6 +72,11 @@ class StepInput:
   long_active: bool | None = None
   personality: int | None = None
   raw_model: dict[str, Any] | None = None
+  # A route-start replay may need one exact published-radar predecessor before
+  # the first modelV2 update. ``published_seed`` installs that recorded
+  # publication in the scheduler cache without advancing reconstructed RadarD.
+  # All ordinary exact frames use ``radard``.
+  recorded_perception_mode: str | None = None
   # Exact service clocks captured from the RadarD input association. These are
   # deliberately separate: RadarD uses the maximum clock as its current time,
   # while publishing the modelV2 and carState clocks back on radarState.
@@ -133,6 +138,10 @@ class StepInput:
       long_active=(None if payload.get("longActive") is None else bool(payload["longActive"])),
       personality=(None if payload.get("personality") is None else int(payload["personality"])),
       raw_model=payload.get("rawModel"),
+      recorded_perception_mode=(
+        None if payload.get("recordedPerceptionMode") is None
+        else str(payload["recordedPerceptionMode"])
+      ),
       recorded_model_v2_log_mono_time_ns=(
         None if payload.get("recordedModelV2LogMonoTimeNs") is None
         else int(payload["recordedModelV2LogMonoTimeNs"])
@@ -228,6 +237,7 @@ class StepInput:
       "longActive": self.long_active,
       "personality": self.personality,
       "rawModel": self.raw_model,
+      "recordedPerceptionMode": self.recorded_perception_mode,
       "recordedModelV2LogMonoTimeNs": self.recorded_model_v2_log_mono_time_ns,
       "recordedCarStateLogMonoTimeNs": self.recorded_car_state_log_mono_time_ns,
       "recordedLiveTracksLogMonoTimeNs": self.recorded_live_tracks_log_mono_time_ns,

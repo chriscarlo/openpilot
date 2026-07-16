@@ -5,6 +5,11 @@ from dataclasses import dataclass
 import re
 from typing import Any, Literal
 
+from openpilot.selfdrive.test.longitudinal_harness.planner_state import (
+  ROUTE_START_REPLAY_METHOD,
+  well_formed_route_start_initialization_claim,
+)
+
 
 ProvenanceStatus = Literal["exact", "instrumentation_only", "counterfactual", "unknown"]
 
@@ -205,6 +210,8 @@ def well_formed_planner_state_initialization_claim(provenance: Any) -> bool:
   """
   if not isinstance(provenance, Mapping):
     return False
+  if provenance.get("method") == ROUTE_START_REPLAY_METHOD:
+    return well_formed_route_start_initialization_claim(provenance)
   digest = _normalize_sha(provenance.get("stateSha256"))
   return bool(
     provenance.get("status") == "exact" and
@@ -219,6 +226,11 @@ def well_formed_planner_state_initialization_claim(provenance: Any) -> bool:
 
 def exact_planner_state_initialization(provenance: Any, *, restoration_verified: bool = False) -> bool:
   """Require both a well-formed claim and independent restoration verification."""
+  # Replaying from a captured process start is not a restorable checkpoint:
+  # existing rlogs cannot attest that the logger captured every producer cycle.
+  # Keep it diagnostic even if the runtime verified and applied its prefix.
+  if isinstance(provenance, Mapping) and provenance.get("method") == ROUTE_START_REPLAY_METHOD:
+    return False
   return restoration_verified and well_formed_planner_state_initialization_claim(provenance)
 
 

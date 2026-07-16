@@ -536,7 +536,7 @@ class TestHyundaiAiLeadStability:
     assert mpc.acc_source_debug["reason"] == "no_control_lead"
     assert mpc._classifier_demotion_hold_until_t is None
 
-  def test_demoted_raw_path_lead_caps_cruise_accel_without_holding_source(self):
+  def test_new_raw_lateral_departure_cannot_cap_cruise(self):
     mpc = _make_hyundai_mpc(v_ego=29.0, a_ego=0.0, time_fn=_MonotonicStub(step=0.1))
 
     departing_path_lead = _make_lead(
@@ -547,6 +547,7 @@ class TestHyundaiAiLeadStability:
       v_rel=-2.0,
       v_lead=27.0,
       model_prob=0.97,
+      radar_track_id=-1036,
     )
     _run_update(mpc, departing_path_lead, _make_lead(status=False))
 
@@ -554,10 +555,334 @@ class TestHyundaiAiLeadStability:
     assert mpc.lead_role_debug["control_status"]["lead0"] is False
     assert mpc.source == "cruise"
     assert mpc.acc_source_debug["reason"] == "no_control_lead"
+    assert mpc.acc_source_debug["lead_present_cruise_accel_cap_source"] is None
+    assert mpc.acc_source_debug["raw_cruise_cap_candidate"]["reason"] == "raw_lateral_departure"
+    assert mpc.cruise_owned_accel_cap is None
+    assert mpc.params[0, 1] == pytest.approx(ACCEL_MAX)
+
+  def test_stable_adjacent_raw_path_requires_dwell_before_capping_cruise(self):
+    mpc = _make_hyundai_mpc(v_ego=29.0, a_ego=0.0, time_fn=_MonotonicStub(step=0.1))
+    absent = _make_lead(status=False)
+    stable_demoted = _make_lead(
+      d_rel=75.0,
+      y_rel=1.7,
+      d_path=1.7,
+      v_lat=0.0,
+      v_rel=-2.0,
+      v_lead=27.0,
+      model_prob=0.97,
+      radar_track_id=-2001,
+    )
+
+    for _ in range(6):
+      _run_update(mpc, stable_demoted, absent)
+      assert mpc.lead_role_debug["reasons"]["lead0"] == "adjacent_lane"
+      assert mpc.source == "cruise"
+      assert mpc.acc_source_debug["lead_present_cruise_accel_cap_source"] is None
+      assert mpc.params[0, 1] == pytest.approx(ACCEL_MAX)
+
+    _run_update(mpc, stable_demoted, absent)
+    assert mpc.acc_source_debug["raw_cruise_cap_candidate"]["reason"] == "dwell_complete"
     assert mpc.acc_source_debug["lead_present_cruise_accel_cap_source"] == "lead0_raw_path"
     assert mpc.cruise_owned_accel_cap == pytest.approx(0.0)
     assert mpc.params[0, 1] == pytest.approx(0.0)
-    assert mpc.last_cruise_response_model.max_accel_mps2 == pytest.approx(0.0)
+
+  @pytest.mark.parametrize(
+    ("decoy_track_id", "decoy_reason", "decoy_phantom"),
+    (
+      (-1, "adjacent_lane", False),
+      (-9101, "adjacent_lane", True),
+      (-9102, "raw_lateral_departure", False),
+    ),
+    ids=("missing_identity", "phantom", "raw_lateral_departure"),
+  )
+  def test_farther_stable_raw_candidate_accumulates_dwell_despite_nearer_rejected_decoy(
+      self, decoy_track_id, decoy_reason, decoy_phantom):
+    mpc = _make_hyundai_mpc(v_ego=29.0, a_ego=0.0)
+    nearer_decoy = _make_lead(
+      d_rel=40.0, y_rel=0.4, d_path=0.4, v_rel=-2.0, v_lead=27.0,
+      model_prob=0.99, radar_track_id=decoy_track_id,
+    )
+    farther_valid = _make_lead(
+      d_rel=75.0, y_rel=1.7, d_path=1.7, v_rel=-2.0, v_lead=27.0,
+      model_prob=0.97, radar_track_id=-9200,
+    )
+    role_debug = {"reasons": {"lead0": decoy_reason, "lead1": "adjacent_lane"}}
+
+    selected = None
+    source = None
+    for sample_idx in range(7):
+      mpc._lead_stability_phantom_slots = (decoy_phantom, False)
+      selected, source = mpc._select_cruise_cap_raw_lead(
+        (nearer_decoy, farther_valid), role_debug, 100.0 + sample_idx * 0.1, "cruise", None,
+      )
+      assert mpc.raw_cruise_cap_debug["source"] == "lead1_raw_path"
+      assert mpc.raw_cruise_cap_debug["track_id"] == -9200
+      if sample_idx < 6:
+        assert selected is None
+        assert source is None
+
+    assert selected is farther_valid
+    assert source == "lead1_raw_path"
+    assert mpc.raw_cruise_cap_debug["reason"] == "dwell_complete"
+
+  def test_farther_stable_raw_path_caps_cruise_despite_nearer_lateral_decoy(self):
+    mpc = _make_hyundai_mpc(v_ego=29.0, a_ego=0.0, time_fn=_MonotonicStub(step=0.1))
+    nearer_decoy = _make_lead(
+      d_rel=40.0, y_rel=-8.0, d_path=0.4, v_lat=12.0,
+      v_rel=-2.0, v_lead=27.0, model_prob=0.99, radar_track_id=-9300,
+    )
+    farther_valid = _make_lead(
+      d_rel=75.0, y_rel=1.7, d_path=1.7, v_lat=0.0,
+      v_rel=-2.0, v_lead=27.0, model_prob=0.97, radar_track_id=-9301,
+    )
+
+    for _ in range(6):
+      _run_update(mpc, nearer_decoy, farther_valid)
+      assert mpc.lead_role_debug["reasons"]["lead0"] == "raw_lateral_departure"
+      assert mpc.lead_role_debug["reasons"]["lead1"] == "adjacent_lane"
+      assert mpc.acc_source_debug["lead_present_cruise_accel_cap_source"] is None
+
+    _run_update(mpc, nearer_decoy, farther_valid)
+    assert mpc.source == "cruise"
+    assert mpc.acc_source_debug["raw_cruise_cap_candidate"]["track_id"] == -9301
+    assert mpc.acc_source_debug["raw_cruise_cap_candidate"]["reason"] == "dwell_complete"
+    assert mpc.acc_source_debug["lead_present_cruise_accel_cap_source"] == "lead1_raw_path"
+    assert mpc.cruise_owned_accel_cap == pytest.approx(0.0)
+    assert mpc.params[0, 1] == pytest.approx(0.0)
+
+  def test_exact_release_track_beats_nearer_rejected_decoy_across_slots(self):
+    mpc = _make_hyundai_mpc(v_ego=29.0, a_ego=0.0)
+    nearer_missing_id_decoy = _make_lead(
+      d_rel=30.0, y_rel=0.4, d_path=0.4, v_rel=-1.0, v_lead=28.0,
+      model_prob=0.99, radar_track_id=-1,
+    )
+    farther_departing_release_track = _make_lead(
+      d_rel=42.0, y_rel=-8.0, d_path=0.4, v_lat=12.0,
+      v_rel=0.5, v_lead=29.5, model_prob=0.99, radar_track_id=-9400,
+    )
+    role_debug = {"reasons": {"lead0": "center", "lead1": "raw_lateral_departure"}}
+
+    selected, source = mpc._select_cruise_cap_raw_lead(
+      (nearer_missing_id_decoy, farther_departing_release_track),
+      role_debug, 100.0, "lead1", -9400,
+    )
+    assert selected is farther_departing_release_track
+    assert source == "lead1_raw_path"
+    assert mpc.raw_cruise_cap_debug["reason"] == "previously_controlled_release"
+    assert mpc.raw_cruise_cap_debug["track_id"] == -9400
+
+    # The same identity remains authoritative for the bounded release even if
+    # its next stabilized sample is a phantom and source has become cruise.
+    mpc._lead_stability_phantom_slots = (False, True)
+    selected, source = mpc._select_cruise_cap_raw_lead(
+      (nearer_missing_id_decoy, farther_departing_release_track),
+      role_debug, 100.1, "cruise", None,
+    )
+    assert selected is farther_departing_release_track
+    assert source == "lead1_raw_path"
+    assert mpc.raw_cruise_cap_debug["reason"] == "previously_controlled_release"
+    assert mpc.raw_cruise_cap_debug["phantom"] is True
+
+  def test_missing_track_identity_never_accumulates_raw_cruise_cap_dwell(self):
+    mpc = _make_hyundai_mpc(v_ego=29.0, a_ego=0.0, time_fn=_MonotonicStub(step=0.1))
+    absent = _make_lead(status=False)
+    unknown_identity = _make_lead(
+      d_rel=75.0,
+      y_rel=1.7,
+      d_path=1.7,
+      v_lat=0.0,
+      v_rel=-2.0,
+      v_lead=27.0,
+      model_prob=0.97,
+      radar_track_id=-1,
+    )
+
+    for _ in range(20):
+      _run_update(mpc, unknown_identity, absent)
+      assert mpc.source == "cruise"
+      assert mpc.acc_source_debug["lead_present_cruise_accel_cap_source"] is None
+      assert mpc.acc_source_debug["raw_cruise_cap_candidate"]["reason"] == "missing_track_identity"
+      assert mpc._raw_cruise_cap_candidate_key is None
+      assert mpc.params[0, 1] == pytest.approx(ACCEL_MAX)
+
+  def test_zero_track_identity_is_preserved_and_can_qualify(self):
+    mpc = _make_hyundai_mpc(v_ego=29.0, a_ego=0.0, time_fn=_MonotonicStub(step=0.1))
+    absent = _make_lead(status=False)
+    valid_zero_identity = _make_lead(
+      d_rel=75.0,
+      y_rel=1.7,
+      d_path=1.7,
+      v_lat=0.0,
+      v_rel=-2.0,
+      v_lead=27.0,
+      model_prob=0.97,
+      radar_track_id=0,
+    )
+
+    for _ in range(6):
+      _run_update(mpc, valid_zero_identity, absent)
+      assert mpc.acc_source_debug["lead_present_cruise_accel_cap_source"] is None
+
+    _run_update(mpc, valid_zero_identity, absent)
+    assert mpc.acc_source_debug["raw_cruise_cap_candidate"]["track_id"] == 0
+    assert mpc.acc_source_debug["raw_cruise_cap_candidate"]["reason"] == "dwell_complete"
+    assert mpc.acc_source_debug["lead_present_cruise_accel_cap_source"] == "lead0_raw_path"
+
+  def test_non_hyundai_unknown_track_keeps_legacy_raw_cap_passthrough(self):
+    mpc = LongitudinalMpc()
+    unknown_identity = _make_lead(
+      d_rel=42.0,
+      y_rel=0.2,
+      d_path=0.2,
+      radar_track_id=-1,
+    )
+
+    selected, source = mpc._select_cruise_cap_raw_lead(
+      (unknown_identity, _make_lead(status=False)), {}, 100.0, "cruise", None,
+    )
+
+    assert selected is unknown_identity
+    assert source == "lead0_raw_path"
+    assert mpc.raw_cruise_cap_debug["reason"] == "non_hyundai_passthrough"
+
+  def test_live_tuned_raw_cap_dwell_is_used_without_restart(self):
+    mpc = _make_hyundai_mpc(v_ego=29.0, a_ego=0.0, time_fn=_MonotonicStub(step=0.1))
+    mpc._live_tune_cfg = build_lead_response_tuning_config({
+      "cruise_cap_raw_lead_acquire_dwell_s": 0.2,
+    })
+    # Keep the test on this already-refreshed snapshot; production refreshes the
+    # same dataclass at the ordinary 0.5 s cadence.
+    mpc._last_live_tune_refresh_t = float("inf")
+    absent = _make_lead(status=False)
+    stable_demoted = _make_lead(
+      d_rel=75.0,
+      y_rel=1.7,
+      d_path=1.7,
+      v_lat=0.0,
+      v_rel=-2.0,
+      v_lead=27.0,
+      model_prob=0.97,
+      radar_track_id=-2002,
+    )
+
+    for _ in range(2):
+      _run_update(mpc, stable_demoted, absent)
+      assert mpc.acc_source_debug["lead_present_cruise_accel_cap_source"] is None
+
+    _run_update(mpc, stable_demoted, absent)
+    assert mpc.acc_source_debug["raw_cruise_cap_candidate"]["required_s"] == pytest.approx(0.2)
+    assert mpc.acc_source_debug["raw_cruise_cap_candidate"]["reason"] == "dwell_complete"
+    assert mpc.acc_source_debug["lead_present_cruise_accel_cap_source"] == "lead0_raw_path"
+
+  def test_20260716_0954_far_lateral_track_churn_does_not_flap_cruise_cap(self):
+    # Measured radarState samples around the two strongest 09:54 PDT flaps.
+    # On-road, -1036 stepped aTarget from +0.256 to -0.176 m/s^2 in 57 ms and
+    # -1041 stepped it from +0.281 to -0.227 in 39 ms while source remained
+    # cruise.  All hypotheses were several metres lateral despite |dPath|<=2m.
+    mpc = _make_hyundai_mpc(v_ego=31.7, a_ego=0.25, time_fn=_MonotonicStub(step=0.05))
+    absent = _make_lead(status=False)
+    for _ in range(20):
+      _run_update_with_state(mpc, absent, absent, v_ego=31.7, a_ego=0.25, v_cruise=32.5)
+
+    # repeat count and following dropout count preserve the important native
+    # dwell/status pattern, including -1036 lasting 0.55 s (just below the new
+    # 0.60 s proof) and -1040 lasting 1.8 s while still explicitly lateral.
+    road_runs = (
+      ((-1036, 83.4, 5.4, 0.06, -9.5, -1.03), 12, 2),
+      ((-1037, 104.0, 9.1, -1.99, -14.2, -0.95), 6, 14),
+      ((-1038, 98.6, 9.5, -1.06, -13.7, -1.23), 18, 0),
+      ((-1039, 102.7, 9.9, -2.00, -13.5, -1.25), 8, 14),
+      ((-1040, 90.1, 8.4, 0.05, -12.4, -0.20), 36, 0),
+      ((-1041, 94.8, 9.0, -1.20, -13.7, -0.12), 15, 5),
+      ((-1042, 70.9, 6.8, 0.50, -11.0, -1.70), 2, 5),
+      ((-1043, 88.8, 8.4, -0.19, -12.8, -0.68), 11, 16),
+      ((-1044, 88.2, 8.5, -0.02, -12.0, -2.36), 9, 5),
+    )
+    cap_sources = []
+    accel_limits = []
+    first_step_jerks = []
+    for (track_id, d_rel, y_rel, d_path, v_lat, v_rel), repeat_count, dropout_count in road_runs:
+      for _ in range(repeat_count):
+        lead0 = _make_lead(
+          d_rel=d_rel, y_rel=y_rel, d_path=d_path, v_lat=v_lat,
+          v_rel=v_rel, v_lead=31.7 + v_rel, model_prob=0.98,
+          radar_track_id=track_id,
+        )
+        lead1 = _make_lead(
+          d_rel=d_rel, y_rel=y_rel, d_path=d_path, v_lat=v_lat + 5.0,
+          v_rel=v_rel, v_lead=31.7 + v_rel, model_prob=0.96,
+          radar_track_id=track_id,
+        )
+        _run_update_with_state(mpc, lead0, lead1, v_ego=31.7, a_ego=0.25, v_cruise=32.5)
+        assert mpc.source == "cruise"
+        cap_sources.append(mpc.acc_source_debug["lead_present_cruise_accel_cap_source"])
+        accel_limits.append(float(mpc.params[0, 1]))
+        first_step_jerks.append(float(mpc.j_solution[0]))
+      for _ in range(dropout_count):
+        _run_update_with_state(mpc, absent, absent, v_ego=31.7, a_ego=0.25, v_cruise=32.5)
+        assert mpc.source == "cruise"
+        cap_sources.append(mpc.acc_source_debug["lead_present_cruise_accel_cap_source"])
+        accel_limits.append(float(mpc.params[0, 1]))
+        first_step_jerks.append(float(mpc.j_solution[0]))
+
+    assert len(cap_sources) == 178
+    assert cap_sources == [None] * len(cap_sources)
+    assert accel_limits == pytest.approx([ACCEL_MAX] * len(accel_limits))
+    assert min(first_step_jerks) > -0.20
+
+  def test_previously_controlled_departure_keeps_bounded_same_track_cap(self):
+    mpc = _make_hyundai_mpc(v_ego=29.0, a_ego=0.0, time_fn=_MonotonicStub(step=0.1))
+    absent = _make_lead(status=False)
+    controlled = _make_lead(
+      d_rel=36.0, y_rel=0.1, d_path=0.1, v_lat=0.0,
+      v_rel=0.0, v_lead=29.0, model_prob=0.99, radar_track_id=-3001,
+    )
+    for _ in range(12):
+      _run_update(mpc, controlled, absent)
+    assert mpc.source == "lead0"
+
+    departing = _make_lead(
+      d_rel=36.5, y_rel=-8.0, d_path=0.4, v_lat=12.0,
+      v_rel=0.5, v_lead=29.5, model_prob=0.99, radar_track_id=-3001,
+    )
+    _run_update(mpc, departing, absent)
+
+    assert mpc.source == "cruise"
+    assert mpc.acc_source_debug["raw_cruise_cap_candidate"]["reason"] == "previously_controlled_release"
+    assert mpc.acc_source_debug["lead_present_cruise_accel_cap_source"] == "lead0_raw_path"
+    assert mpc.acc_source_debug["source_transition_active"] is True
+    assert mpc.cruise_owned_accel_cap is not None
+    assert mpc.params[0, 1] < ACCEL_MAX
+
+    for _ in range(6):
+      _run_update(mpc, departing, absent)
+    assert mpc.acc_source_debug["lead_present_cruise_accel_cap_source"] is None
+    assert mpc.acc_source_debug["raw_cruise_cap_candidate"]["reason"] == "raw_lateral_departure"
+
+  @pytest.mark.parametrize(
+    "lead",
+    (
+      _make_lead(
+        d_rel=36.0, y_rel=0.1, d_path=0.1, v_lat=0.0,
+        v_rel=-1.0, v_lead=28.0, model_prob=0.99, radar_track_id=-4001,
+      ),
+      _make_lead(
+        d_rel=42.0, y_rel=3.2, d_path=3.2, v_lat=-1.2,
+        v_rel=-1.0, v_lead=28.0, model_prob=0.99, radar_track_id=-4002,
+      ),
+    ),
+    ids=("centered_close", "converging_cutin"),
+  )
+  def test_genuine_centered_and_cutin_leads_keep_immediate_control(self, lead):
+    mpc = _make_hyundai_mpc(v_ego=29.0, a_ego=0.0, time_fn=_MonotonicStub(step=0.1))
+    _run_update(mpc, lead, _make_lead(status=False))
+
+    assert mpc.lead_role_debug["control_status"]["lead0"] is True
+    assert mpc.source == "lead0"
+    assert mpc.acc_source_debug["lead_present_cruise_accel_cap_source"] == "lead0_control"
+    assert mpc.acc_source_debug["raw_cruise_cap_candidate"]["reason"] == "control_lead_selected"
+    assert mpc.params[0, 1] == pytest.approx(ACCEL_MAX)
 
   def test_far_closing_lead_stays_cruise_owned_until_target_gap_approaches(self):
     mpc = _make_hyundai_mpc(v_ego=28.5, a_ego=0.0, time_fn=_MonotonicStub(step=0.2))
