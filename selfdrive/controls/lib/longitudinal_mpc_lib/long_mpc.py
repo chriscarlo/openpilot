@@ -302,6 +302,8 @@ CLOSING_DROPOUT_MEMORY_MIN_CLOSING_MPS = 0.50
 CLOSING_DROPOUT_MEMORY_MIN_LEAD_DECEL_MPS2 = 0.15
 CLOSING_DROPOUT_MEMORY_HOLD_S = 5.0
 CLOSING_DROPOUT_MEMORY_ACCEL_CAP = 0.0
+# Gate scale vs the live follow envelope (headway distance at current speed).
+CLOSING_DROPOUT_MEMORY_FOLLOW_MARGIN = 1.15
 LEAD_PRESENT_CRUISE_SPEED_CAP_BP = [0.0, 2.0, 6.0, 10.0, 15.0, 25.0]
 LEAD_PRESENT_CRUISE_SPEED_CAP_V = [0.7, 0.9, 1.3, 1.9, 2.4, ACCEL_MAX]
 LEAD_PRESENT_CRUISE_SURPLUS_BP = [0.0, 2.0, 8.0, 16.0, 28.0]
@@ -3813,8 +3815,17 @@ class LongitudinalMpc:
     if raw_drel < CLOSE_LEAD_MEMORY_DREL_M and self._acc_obstacle_mode != 'cruise':
       self._close_lead_last_seen_t = now
       self._close_lead_last_drel = raw_drel
+    # The dropout seam exists at ordinary following range, which grows with
+    # speed: at 70+ mph the configured follow envelope is 50-65 m, so a fixed
+    # 40 m gate cannot arm for a freeway-speed closing lead that vanishes at
+    # its normal gap.  Scale the gate with the live follow envelope; the fixed
+    # constant remains the floor so low-speed behavior is unchanged.
+    closing_dropout_drel_gate_m = max(
+      CLOSING_DROPOUT_MEMORY_DREL_M,
+      CLOSING_DROPOUT_MEMORY_FOLLOW_MARGIN * get_headway_follow_distance(float(self.x0[1]), self.current_t_follow),
+    )
     if (float(self.x0[1]) >= CLOSING_DROPOUT_MEMORY_MIN_SPEED_MPS and
-        raw_drel < CLOSING_DROPOUT_MEMORY_DREL_M and
+        raw_drel < closing_dropout_drel_gate_m and
         raw_vrel <= -CLOSING_DROPOUT_MEMORY_MIN_CLOSING_MPS and
         raw_alead <= -CLOSING_DROPOUT_MEMORY_MIN_LEAD_DECEL_MPS2):
       self._closing_dropout_last_seen_t = now

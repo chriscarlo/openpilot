@@ -1168,6 +1168,43 @@ class TestHyundaiAiLeadStability:
     assert mpc.last_cruise_response_model is not None
     assert mpc.last_cruise_response_model.max_accel_mps2 == pytest.approx(0.0)
 
+  def test_freeway_closing_follow_dropout_keeps_cruise_from_accelerating(self):
+    """The dropout seam also exists at ordinary freeway following range.
+
+    At 72 mph the configured follow envelope is ~54 m, well outside the fixed
+    40 m memory gate, so a closing lead that vanishes at its normal gap used to
+    hand cruise a +0.3->+0.8 m/s^2 ramp into the blind seam (closed-loop C2
+    reproduction, 2026-07-16 review).  The gate must scale with the live follow
+    envelope.  The approach is kinematically consistent (dRel shrinks with
+    vRel) so steady-parity keeps the closing rate credible, as in the field.
+    """
+    dt = 0.2
+    mpc = _make_hyundai_mpc(v_ego=32.2, a_ego=-0.1, time_fn=_MonotonicStub(step=dt))
+    absent = _make_lead(status=False)
+
+    d_rel = 57.0
+    v_rel = -2.7
+    for _ in range(16):
+      closing_lead = _make_lead(
+        d_rel=d_rel, y_rel=0.04, d_path=0.04, v_lat=0.10,
+        v_rel=v_rel, v_lead=32.2 + v_rel, a_lead=-0.6, model_prob=0.97,
+        radar_track_id=-245,
+      )
+      _run_update_with_state(mpc, closing_lead, absent, v_ego=32.2, a_ego=-0.1, v_cruise=40.0)
+      d_rel += v_rel * dt
+    assert mpc.source == "lead0"
+    # Loss happens beyond the fixed 40 m gate but inside the follow envelope.
+    assert d_rel > 45.0
+
+    for _ in range(20):
+      _run_update_with_state(mpc, absent, absent, v_ego=32.2, a_ego=-0.1, v_cruise=40.0)
+
+    assert mpc.source == "cruise"
+    assert mpc.acc_source_debug["closing_dropout_memory_active"] is True
+    assert mpc.acc_source_debug["source_transition_composed_accel_cap"] == pytest.approx(0.0)
+    assert mpc.last_cruise_response_model is not None
+    assert mpc.last_cruise_response_model.max_accel_mps2 == pytest.approx(0.0)
+
   @staticmethod
   def _run_low_speed_persistent_lead_release(*, release_a_lead: float,
                                              urgent_lead_decel: float | None = None) -> LongitudinalMpc:
