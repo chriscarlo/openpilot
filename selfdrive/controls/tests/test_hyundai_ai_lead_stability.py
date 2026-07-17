@@ -1101,6 +1101,7 @@ class TestHyundaiAiLeadStability:
     assert mpc.source == "cruise"
     assert mpc.acc_source_debug["reason"] == "no_control_lead"
     assert mpc.acc_source_debug["source_transition_active"] is True
+    assert mpc.acc_source_debug["close_lead_memory_active"] is False
     assert mpc.hyundai_virtual_lead_debug["active"] is False
 
   def test_lead_to_cruise_transition_caps_accel_then_expires(self, monkeypatch):
@@ -1135,6 +1136,37 @@ class TestHyundaiAiLeadStability:
     assert mpc.acc_source_debug["source_transition_active"] is False
     assert mpc.last_cruise_response_model is not None
     assert mpc.last_cruise_response_model.max_accel_mps2 > first_cap + 0.20
+
+  def test_rlog_245_closing_follow_dropout_keeps_cruise_from_accelerating(self):
+    """A July-16 freeway lead dropout occurred at normal headway, not 25 m.
+
+    The logged lead was centered and closing at roughly 36.8 m while ego was
+    18.8 m/s.  The association then vanished long enough for the ordinary
+    source-transition ramp to expire, and cruise started accelerating toward
+    the still-stopped physical car.  A closing lead inside the dynamic follow
+    envelope must keep the zero-accel safety memory armed through that gap.
+    """
+    mpc = _make_hyundai_mpc(v_ego=18.8, a_ego=-0.1, time_fn=_MonotonicStub(step=0.2))
+    absent = _make_lead(status=False)
+    closing_lead = _make_lead(
+      d_rel=36.8, y_rel=0.04, d_path=0.04, v_lat=0.10,
+      v_rel=-5.0, v_lead=13.8, a_lead=-0.5, model_prob=0.97,
+      radar_track_id=-245,
+    )
+
+    for _ in range(16):
+      _run_update_with_state(mpc, closing_lead, absent, v_ego=18.8, a_ego=-0.1, v_cruise=40.0)
+    assert mpc.source == "lead0"
+
+    # Outlast both the raw phantom and the three-second normal transition cap.
+    for _ in range(20):
+      _run_update_with_state(mpc, absent, absent, v_ego=18.8, a_ego=-0.1, v_cruise=40.0)
+
+    assert mpc.source == "cruise"
+    assert mpc.acc_source_debug["closing_dropout_memory_active"] is True
+    assert mpc.acc_source_debug["source_transition_composed_accel_cap"] == pytest.approx(0.0)
+    assert mpc.last_cruise_response_model is not None
+    assert mpc.last_cruise_response_model.max_accel_mps2 == pytest.approx(0.0)
 
   @staticmethod
   def _run_low_speed_persistent_lead_release(*, release_a_lead: float,

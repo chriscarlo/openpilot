@@ -290,9 +290,18 @@ HYUNDAI_LEAD_TO_CRUISE_TRANSITION_RAMP_S = 3.0
 HYUNDAI_LEAD_TO_CRUISE_TRANSITION_MIN_ACCEL = 0.25
 # Close-range lead safety memory: if a lead was seen within this distance
 # in the last N seconds, cap cruise accel even if the source flickers to cruise.
-CLOSE_LEAD_MEMORY_DREL_M = 25.0       # leads within this distance are remembered
-CLOSE_LEAD_MEMORY_HOLD_S = 5.0        # remember for this long after last sighting
-CLOSE_LEAD_MEMORY_ACCEL_CAP = 0.30    # max cruise accel while memory is active (m/s²)
+CLOSE_LEAD_MEMORY_DREL_M = 25.0
+CLOSE_LEAD_MEMORY_HOLD_S = 5.0
+CLOSE_LEAD_MEMORY_ACCEL_CAP = 0.30
+# Separate from the general close-lead memory: a freeway-speed, materially
+# closing lead can disappear while still at normal following range.  Preserve
+# only a coast cap for that narrow lead-loss seam.
+CLOSING_DROPOUT_MEMORY_MIN_SPEED_MPS = 12.0
+CLOSING_DROPOUT_MEMORY_DREL_M = 40.0
+CLOSING_DROPOUT_MEMORY_MIN_CLOSING_MPS = 0.50
+CLOSING_DROPOUT_MEMORY_MIN_LEAD_DECEL_MPS2 = 0.15
+CLOSING_DROPOUT_MEMORY_HOLD_S = 5.0
+CLOSING_DROPOUT_MEMORY_ACCEL_CAP = 0.0
 LEAD_PRESENT_CRUISE_SPEED_CAP_BP = [0.0, 2.0, 6.0, 10.0, 15.0, 25.0]
 LEAD_PRESENT_CRUISE_SPEED_CAP_V = [0.7, 0.9, 1.3, 1.9, 2.4, ACCEL_MAX]
 LEAD_PRESENT_CRUISE_SURPLUS_BP = [0.0, 2.0, 8.0, 16.0, 28.0]
@@ -1784,6 +1793,8 @@ class LongitudinalMpc:
     # recently visible nearby, even if the model is currently flickering.
     self._close_lead_last_seen_t: float | None = None
     self._close_lead_last_drel: float = 1e9
+    self._closing_dropout_last_seen_t: float | None = None
+    self._closing_dropout_last_drel: float = 1e9
     self._lead_handoff_until_t = None
     self._lead_handoff_from_source = None
     self._lead_handoff_to_source = None
@@ -3794,12 +3805,23 @@ class LongitudinalMpc:
     self._classifier_demotion_hold_until_t = None
     best_lead_source, best_lead_obstacle = min(lead_candidates, key=lambda item: item[1][0])
     best_lead = self.control_leads[0] if best_lead_source == 'lead0' else self.control_leads[1]
-    # Update close-range lead memory — only when we're actively following a lead
-    # (not when cruise already owns the lead, to avoid overriding cruise's taper)
+    # Update the existing close-range lead memory only when we're actively
+    # following a lead (not when cruise already owns the lead).
     raw_drel = float(getattr(best_lead, 'dRel', 1e9) or 1e9)
+    raw_vrel = float(getattr(best_lead, 'vRel', 0.0) or 0.0)
+    raw_alead = float(getattr(best_lead, 'aLeadK', 0.0) or 0.0)
     if raw_drel < CLOSE_LEAD_MEMORY_DREL_M and self._acc_obstacle_mode != 'cruise':
       self._close_lead_last_seen_t = now
       self._close_lead_last_drel = raw_drel
+    if (float(self.x0[1]) >= CLOSING_DROPOUT_MEMORY_MIN_SPEED_MPS and
+        raw_drel < CLOSING_DROPOUT_MEMORY_DREL_M and
+        raw_vrel <= -CLOSING_DROPOUT_MEMORY_MIN_CLOSING_MPS and
+        raw_alead <= -CLOSING_DROPOUT_MEMORY_MIN_LEAD_DECEL_MPS2):
+      self._closing_dropout_last_seen_t = now
+      self._closing_dropout_last_drel = raw_drel
+    elif raw_vrel > 0.0:
+      self._closing_dropout_last_seen_t = None
+      self._closing_dropout_last_drel = 1e9
     filtered_lead = self._update_hyundai_virtual_lead(now, best_lead_source, best_lead)
     if filtered_lead is None or not getattr(filtered_lead, 'status', False):
       self._acc_obstacle_mode = 'cruise'
@@ -4551,10 +4573,19 @@ class LongitudinalMpc:
         self._close_lead_last_seen_t is not None and
         (now - float(self._close_lead_last_seen_t)) < CLOSE_LEAD_MEMORY_HOLD_S
       )
+      closing_dropout_memory_active = (
+        self._closing_dropout_last_seen_t is not None and
+        (now - float(self._closing_dropout_last_seen_t)) < CLOSING_DROPOUT_MEMORY_HOLD_S
+      )
       if self.source == 'cruise' and lead_present_cruise_cap is not None:
         cruise_owned_accel_cap = float(lead_present_cruise_cap)
 
       transition_accel_cap = self._get_lead_to_cruise_transition_accel_cap(now, float(v_ego), personality_max_accel)
+      if self.source == 'cruise' and closing_dropout_memory_active:
+        transition_accel_cap = (
+          CLOSING_DROPOUT_MEMORY_ACCEL_CAP if transition_accel_cap is None
+          else min(float(transition_accel_cap), CLOSING_DROPOUT_MEMORY_ACCEL_CAP)
+        )
       # Close-lead memory: if the normal transition cap expired but a lead was
       # recently seen nearby, apply the safety cap as a backstop.
       if self.source == 'cruise' and close_lead_memory_active and transition_accel_cap is None:
@@ -4628,6 +4659,10 @@ class LongitudinalMpc:
         self.acc_source_debug["source_transition_elapsed_s"] = transition_elapsed_s
         self.acc_source_debug["close_lead_memory_active"] = bool(close_lead_memory_active)
         self.acc_source_debug["close_lead_memory_drel"] = float(self._close_lead_last_drel) if close_lead_memory_active else None
+        self.acc_source_debug["closing_dropout_memory_active"] = bool(closing_dropout_memory_active)
+        self.acc_source_debug["closing_dropout_memory_drel"] = (
+          float(self._closing_dropout_last_drel) if closing_dropout_memory_active else None
+        )
         self.acc_source_debug["source_transition_accel_cap"] = None if transition_accel_cap is None else float(transition_accel_cap)
         self.acc_source_debug["source_transition_composed_accel_cap"] = (
           None if transition_accel_cap is None else float(cruise_owned_accel_cap)
