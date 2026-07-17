@@ -415,6 +415,22 @@ class TestLeadInteractionHeuristics:
 
     assert cap == pytest.approx(0.0)
 
+  def test_lead_present_cruise_accel_cap_does_not_coast_on_radard_stale_closing_recovery(self):
+    # 2026-07-16 freeway route 243: dRel grew from 60 m to 81 m while the
+    # published vRel still read -0.9..-1.35 m/s. RadarD had explicitly entered
+    # closingGovernorRecovery after proving a dense, calm opening trend, but
+    # this final cruise-cap clamp treated that retained conservative vRel as a
+    # fresh approach and stranded ego at coast. The provenance is intentionally
+    # the only exception: an otherwise identical real closing lead stays at
+    # zero in the preceding regression.
+    stale_recovery = _make_lead(d_rel=90.0, v_lead=23.0, a_lead=0.0)
+    setattr(stale_recovery, "vRel", -2.0)
+    setattr(stale_recovery, "closingGovernorRecovery", True)
+
+    cap = get_lead_present_cruise_accel_cap(25.0, stale_recovery, 1.3, personality_max_accel=3.5)
+
+    assert cap == pytest.approx(0.85)
+
   def test_lead_present_cruise_accel_cap_allowance_sentinels_restore_flat_gentle_cap(self):
     tuning = replace(LeadResponseTuningConfig.defaults(),
                      lead_present_cruise_far_cap_mps2=0.0,

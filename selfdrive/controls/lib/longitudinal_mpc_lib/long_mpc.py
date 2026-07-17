@@ -1395,9 +1395,14 @@ def get_lead_present_cruise_accel_cap(v_ego, lead, t_follow,
   v_lead = float(v_ego if v_lead_raw is None else v_lead_raw)
   v_rel = float(0.0 if v_rel_raw is None else v_rel_raw)
   closing_speed = max(0.0, float(v_ego) - v_lead)
+  # See the coast-clamp note below. This is a producer-owned proof that the
+  # apparent closing velocity is stale, so do not pre-spend the gap allowance
+  # by projecting that disproven velocity forward either.
+  stale_closing_recovery = bool(getattr(lead, 'closingGovernorRecovery', False))
+  reclaim_closing_speed = 0.0 if stale_closing_recovery else closing_speed
   gap_surplus_raw = max(0.0, d_rel - get_headway_follow_distance(float(v_ego), t_follow))
   # Project gap surplus forward: if closing, the gap is shrinking
-  closing_reduction = closing_speed * LEAD_PRESENT_CRUISE_CLOSING_PROJECTION_S
+  closing_reduction = reclaim_closing_speed * LEAD_PRESENT_CRUISE_CLOSING_PROJECTION_S
   gap_surplus = max(0.0, gap_surplus_raw - closing_reduction)
   pullaway_speed = max(0.0, v_lead - float(v_ego), v_rel)
 
@@ -1442,10 +1447,19 @@ def get_lead_present_cruise_accel_cap(v_ego, lead, t_follow,
 
   gap_blend = float(np.interp(gap_surplus, LEAD_PRESENT_CRUISE_SURPLUS_BP, LEAD_PRESENT_CRUISE_SURPLUS_V))
   pullaway_blend = float(np.interp(pullaway_speed, LEAD_PRESENT_CRUISE_PULLAWAY_BP, LEAD_PRESENT_CRUISE_PULLAWAY_V))
-  closing_tighten = float(np.interp(closing_speed, LEAD_PRESENT_CRUISE_CLOSING_TIGHTEN_BP, LEAD_PRESENT_CRUISE_CLOSING_TIGHTEN_V))
+  closing_tighten = float(np.interp(reclaim_closing_speed, LEAD_PRESENT_CRUISE_CLOSING_TIGHTEN_BP, LEAD_PRESENT_CRUISE_CLOSING_TIGHTEN_V))
   blend = max(gap_blend, pullaway_blend) * closing_tighten
   cap = float(comfort_cap + (accel_cap - comfort_cap) * blend)
-  if closing_speed >= LEAD_PRESENT_CRUISE_COAST_CLOSING_MPS and pullaway_speed <= 0.0:
+  # RadarD's calm-recovery provenance is a narrow, producer-owned proof that
+  # a previous CD9 clamp is stale: it has already required a dense, sustained
+  # non-closing range trend, calm current aLead, and safe TTC before exposing
+  # this bit.  Do not re-interpret the deliberately retained conservative
+  # published vRel as a fresh approach here.  In particular, a wide gap that
+  # is demonstrably opening must retain the bounded far-gap allowance instead
+  # of being pinned at coast solely by the stale vLead.  Any ordinary closing
+  # lead (including a real brake/cut-in) still takes the unchanged coast path.
+  if (closing_speed >= LEAD_PRESENT_CRUISE_COAST_CLOSING_MPS and
+      pullaway_speed <= 0.0 and not stale_closing_recovery):
     cap = min(cap, LEAD_PRESENT_CRUISE_COAST_ACCEL_CAP)
   return cap
 
