@@ -309,7 +309,9 @@ import Testing
     #expect(!command.lowercased().contains("python"))
     #expect(!command.contains("openpilot.common.params"))
   }
-  #expect(snapshotCommand.components(separatedBy: "/usr/local/venv/bin/python").count == 2)
+  #expect(snapshotCommand.components(separatedBy: "/usr/local/venv/bin/python3").count == 2)
+  #expect(snapshotCommand.components(separatedBy: "/usr/local/venv/bin/python -c").count == 2)
+  #expect(snapshotCommand.contains("tile_digest_python='/usr/local/venv/bin/python3'"))
   #expect(snapshotCommand.contains("timeout 5 env PYTHONPATH=/data/openpilot"))
   #expect(snapshotCommand.contains("from cereal import messaging"))
   #expect(snapshotCommand.contains("sm.update(2000)"))

@@ -93,7 +93,7 @@ import VTSCTunerCore
   #expect(session.pendingApplyAction == nil)
   #expect(session.runningApplyAction == nil)
   #expect(session.snapshot == draft)
-  #expect(session.statusText == "Finish or undo the previous car install before installing this tune.")
+  #expect(session.statusText == "Resolve the previous car install record before installing this tune.")
   #expect(journal.effectiveResolution == .awaitingPostflight)
   #expect(!journal.includesTileReplacement)
   #expect(try DeploymentRollbackJournal.recoverableRollbacks(directory: directory).isEmpty)
@@ -121,6 +121,29 @@ import VTSCTunerCore
 }
 
 @MainActor
+@Test func pendingInstallKeepCurrentRoutePreservesDraftAndWaitsForExplicitConfirmation() throws {
+  let directory = try populatedJournalDirectory()
+  defer { try? FileManager.default.removeItem(at: directory) }
+  let journalURL = directory.appendingPathComponent("pending.json")
+  try pendingJournal(targetTileSetID: nil).write(to: journalURL)
+  let session = TunerSession()
+  let draft = session.snapshot
+  session.requestApply(.pullOnTici, journalDirectory: directory)
+
+  session.reviewPendingInstallKeepCurrent()
+
+  #expect(!session.pendingInstallResolution)
+  #expect(!session.pendingRetireSupersededDeployment)
+  #expect(session.snapshot == draft)
+  #expect(session.selectedPendingDeploymentURL == journalURL.standardizedFileURL)
+  session.pendingInstallResolutionDidDismiss()
+  #expect(session.pendingRetireSupersededDeployment)
+  #expect(!session.pendingAbortPendingDeployment)
+  #expect(!session.pendingResumePostflight)
+  #expect(session.runningApplyAction == nil)
+}
+
+@MainActor
 @Test func pendingInstallCancellationLeavesEveryResolutionAndApplyActionClosed() throws {
   let directory = try populatedJournalDirectory()
   defer { try? FileManager.default.removeItem(at: directory) }
@@ -133,6 +156,7 @@ import VTSCTunerCore
 
   #expect(!session.pendingInstallResolution)
   #expect(!session.pendingAbortPendingDeployment)
+  #expect(!session.pendingRetireSupersededDeployment)
   #expect(!session.pendingResumePostflight)
   #expect(session.pendingApplyAction == nil)
   #expect(session.runningApplyAction == nil)

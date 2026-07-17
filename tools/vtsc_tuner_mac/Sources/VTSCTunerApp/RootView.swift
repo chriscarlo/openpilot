@@ -38,6 +38,10 @@ struct RootView: View {
                 .disabled(!session.hasRuntimeOnlyPendingDeployment)
               Button(AbortPendingDeploymentAction.label) { session.pendingAbortPendingDeployment = true }
                 .disabled(session.pendingDeployments.isEmpty)
+              Button(RetireSupersededPendingDeploymentAction.label) {
+                session.pendingRetireSupersededDeployment = true
+              }
+              .disabled(session.pendingDeployments.isEmpty)
               Button(RollbackRecoveryAction.label) { session.pendingRollbackRecovery = true }
                 .disabled(!session.hasRecoverableRollback)
               Divider()
@@ -155,6 +159,12 @@ struct RootView: View {
       }
       .sheet(isPresented: $session.runningAbortPendingDeployment) {
         AbortPendingDeploymentProgressView(session: session)
+      }
+      .sheet(isPresented: $session.pendingRetireSupersededDeployment) {
+        RetireSupersededDeploymentConfirmationView(session: session)
+      }
+      .sheet(isPresented: $session.runningRetireSupersededDeployment) {
+        RetireSupersededDeploymentProgressView(session: session)
       }
       .sheet(isPresented: $session.pendingRollbackRecovery) {
         RollbackRecoveryConfirmationView(session: session)
@@ -685,7 +695,7 @@ struct PendingInstallResolutionView: View {
         Label("Previous Car Install Needs Attention", systemImage: "exclamationmark.shield.fill")
           .font(.title2.weight(.semibold))
         Text(
-          "An earlier tune was installed and rebooted, but its final safety verification was never completed. Another car install cannot start until that record is finished or undone."
+          "An earlier tune was installed and rebooted, but its final safety verification was never completed. Another car install cannot start until you resolve that old record below."
         )
         .foregroundStyle(.secondary)
       }
@@ -704,20 +714,33 @@ struct PendingInstallResolutionView: View {
       GroupBox {
         VStack(alignment: .leading, spacing: 10) {
           HStack(spacing: 8) {
-            Text("INSTALL THE NEW TUNE")
+            Text("UNDO THE PREVIOUS INSTALL")
               .font(.caption.weight(.bold))
-            Text("RECOMMENDED")
-              .font(.caption2.weight(.bold))
-              .foregroundStyle(Color.accentColor)
           }
           Text(
-            "First review an undo of the previous install. The guarded rollback restores its recorded prior runtime and reboots the tici. After that succeeds, choose Install on the Car again for this tune."
+            "Use this only when you want to restore the software and tune that were on the car before the recorded install. The guarded rollback restores that older runtime and reboots the tici."
           )
           .foregroundStyle(.secondary)
           Button("Review Undo Previous Install…") {
             session.reviewPendingInstallAbort()
           }
           .buttonStyle(.borderedProminent)
+          .disabled(!session.selectedPendingDeploymentIsRuntimeOnly)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+      }
+
+      GroupBox {
+        VStack(alignment: .leading, spacing: 10) {
+          Text("KEEP WHAT IS CURRENTLY ON THE CAR")
+            .font(.caption.weight(.bold))
+          Text(
+            "Use this when the car is checked out at a newer published Chauffeur version that you want to keep. The app changes nothing on the car; it retires only the obsolete record after proving the clean Mac checkout, Git remote, and parked car all match exactly and the newer version includes vehicle-runtime changes."
+          )
+          .foregroundStyle(.secondary)
+          Button("Check and Keep Current Car Software…") {
+            session.reviewPendingInstallKeepCurrent()
+          }
           .disabled(!session.selectedPendingDeploymentIsRuntimeOnly)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1047,6 +1070,94 @@ struct AbortPendingDeploymentProgressView: View {
         Button("Close") { session.closeAbortPendingDeployment() }
           .disabled(session.applySucceeded == nil)
           .keyboardShortcut(.defaultAction)
+      }
+    }
+    .padding(24)
+    .frame(width: 720, height: 430)
+    .interactiveDismissDisabled(session.applySucceeded == nil)
+  }
+}
+
+struct RetireSupersededDeploymentConfirmationView: View {
+  @ObservedObject var session: TunerSession
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 16) {
+      Text(RetireSupersededPendingDeploymentAction.label)
+        .font(.title2.weight(.semibold))
+      Label(
+        "Use this when the parked car is checked out at a newer published Chauffeur version after this old record was created.",
+        systemImage: "checkmark.shield"
+      )
+      Text(
+        "The app will prove that this Mac's clean checkout, the Git remote, and the parked tici all match the same newer published checkout with vehicle-runtime source changes. If they do, it retires only the obsolete record. It does not change the car, certify either installed runtime, or reboot."
+      )
+      .foregroundStyle(.secondary)
+      Label(session.repositoryURL?.path ?? "No Chauffeur repository selected", systemImage: "folder")
+        .font(.caption.monospaced())
+        .foregroundStyle(.secondary)
+        .textSelection(.enabled)
+      Picker("Old install record", selection: $session.selectedPendingDeploymentURL) {
+        ForEach(session.pendingDeployments) { candidate in
+          Text("\(candidate.journal.deploymentID.uuidString.prefix(8)) · \(candidate.journal.includesTileReplacement ? "includes tile replacement — unavailable" : "runtime only") · \(candidate.journal.targetHead?.prefix(10) ?? "unknown") · \(candidate.journal.createdAt)")
+            .tag(Optional(candidate.url))
+        }
+      }
+      HStack {
+        Spacer()
+        Button("Cancel", role: .cancel) { session.pendingRetireSupersededDeployment = false }
+        Button("Keep Car as Is and Retire Old Record") {
+          session.confirmRetireSupersededDeployment()
+        }
+        .disabled(!session.selectedPendingDeploymentIsRuntimeOnly || session.repositoryURL == nil)
+        .keyboardShortcut(.defaultAction)
+      }
+    }
+    .padding(24)
+    .frame(width: 680)
+  }
+}
+
+struct RetireSupersededDeploymentProgressView: View {
+  @ObservedObject var session: TunerSession
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 14) {
+      Text(RetireSupersededPendingDeploymentAction.label)
+        .font(.title2.weight(.semibold))
+      ScrollView {
+        LazyVStack(alignment: .leading, spacing: 12) {
+          ForEach(session.applySteps, id: \.id) { step in
+            HStack(alignment: .top, spacing: 10) {
+              Group {
+                switch step.status {
+                case .running: ProgressView().controlSize(.small)
+                case .succeeded: Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                case .failed: Image(systemName: "xmark.circle.fill").foregroundStyle(.red)
+                }
+              }
+              .frame(width: 18)
+              VStack(alignment: .leading, spacing: 4) {
+                Text(step.text)
+                if !step.detail.isEmpty {
+                  Text(step.detail)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                }
+              }
+            }
+          }
+        }
+      }
+      .frame(minHeight: 240)
+      HStack {
+        Spacer()
+        Button(session.applySucceeded == true ? "Continue to New Install" : "Close") {
+          session.closeRetireSupersededDeployment()
+        }
+        .disabled(session.applySucceeded == nil)
+        .keyboardShortcut(.defaultAction)
       }
     }
     .padding(24)

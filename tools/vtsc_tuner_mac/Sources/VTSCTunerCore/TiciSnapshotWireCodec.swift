@@ -124,25 +124,30 @@ public enum TiciSnapshotWireCodec {
 }
 
 /// Builds the tici-side snapshot probe. File and process identity stays in
-/// dependency-free shell; the bounded liveMapDataSP record uses the tici's
-/// checked-out cereal runtime because Cap'n Proto interpretation belongs with
-/// the exact deployed schema. Swift still owns every acceptance decision.
+/// shell except for the tile-tree digest, whose single stdlib Python process
+/// avoids thousands of per-file shell subprocesses on the tici. The bounded
+/// liveMapDataSP record uses the checked-out cereal runtime because Cap'n Proto
+/// interpretation belongs with the exact deployed schema. Swift still owns
+/// every acceptance decision.
 ///
 /// `compact_base64` removes any implementation-specific line wrapping using
 /// POSIX shell built-ins, so a large Q-curve or manifest remains one record.
 public enum TiciSnapshotWireCommandBuilder {
   static func tileManifestProbeShellFragment(
     offlinePath: String = "/data/media/0/osm/offline",
-    adjacentManifestPath: String = "/data/media/0/osm/offline.manifest.json"
+    adjacentManifestPath: String = "/data/media/0/osm/offline.manifest.json",
+    pythonCommand: String = "/usr/local/venv/bin/python3"
   ) -> String {
     let offline = shellQuote(offlinePath)
     let root = shellQuote((offlinePath as NSString).deletingLastPathComponent)
     let adjacent = shellQuote(adjacentManifestPath)
+    let python = shellQuote(pythonCommand)
     return """
     tile_offline=\(offline)
     tile_root=\(root)
     tile_generations="$tile_root/tile-generations"
     tile_adjacent=\(adjacent)
+    tile_digest_python=\(python)
     emit_invalid_tile_topology() {
       emit_text tile_topology "invalid:$1"
       emit_text tile_manifest "invalid:$1"
@@ -151,33 +156,48 @@ public enum TiciSnapshotWireCommandBuilder {
     compute_tile_tree_digest() {
       tree_root=$1
       excluded=$2
-      tile_tree_records=$(
-        find "$tree_root" -mindepth 1 ! -path "$excluded" -exec sh -c '
-          root=$1
-          shift
-          for candidate do
-            case "$candidate" in "$root"/*) relative=${candidate#"$root"/} ;; *) exit 91 ;; esac
-            if [ -L "$candidate" ]; then exit 92; fi
-            encoded=$(printf "%s" "$relative" | base64 | tr -d '\\n') || exit 93
-            if [ -d "$candidate" ]; then
-              printf "D\\t%s\\n" "$encoded"
-            elif [ -f "$candidate" ]; then
-              size=$(wc -c < "$candidate") || exit 94
-              digest=$(sha256sum "$candidate") || exit 95
-              set -- $digest
-              digest=$1
-              printf "F\\t%s\\t%s\\t%s\\n" "$encoded" "$size" "$digest"
-            else
-              exit 96
-            fi
-          done
-        ' sh "$tree_root" {} +
-      ) || return 1
-      [ -n "$tile_tree_records" ] || return 1
-      tile_tree_digest=$(printf '%s\n' "$tile_tree_records" | LC_ALL=C sort | sha256sum) || return 1
-      set -- $tile_tree_digest
-      [ -n "$1" ] || return 1
-      printf '%s' "$1"
+      "$tile_digest_python" -c '
+    import base64
+    import hashlib
+    import os
+    import stat
+    import sys
+
+    root = os.path.abspath(sys.argv[1])
+    excluded = os.path.abspath(sys.argv[2])
+    records = []
+
+    def visit(directory):
+      with os.scandir(directory) as entries:
+        for entry in entries:
+          path = entry.path
+          if os.path.abspath(path) == excluded:
+            continue
+          info = entry.stat(follow_symlinks=False)
+          relative = os.path.relpath(path, root)
+          encoded = base64.b64encode(os.fsencode(relative)).decode("ascii")
+          if stat.S_ISLNK(info.st_mode):
+            raise SystemExit(92)
+          if stat.S_ISDIR(info.st_mode):
+            records.append("D\\t{}\\n".format(encoded))
+            visit(path)
+          elif stat.S_ISREG(info.st_mode):
+            digest = hashlib.sha256()
+            with open(path, "rb") as handle:
+              for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+            records.append("F\\t{}\\t{}\\t{}\\n".format(encoded, info.st_size, digest.hexdigest()))
+          else:
+            raise SystemExit(96)
+
+    visit(root)
+    if not records:
+      raise SystemExit(97)
+    result = hashlib.sha256()
+    for record in sorted(records):
+      result.update(record.encode("ascii"))
+    print(result.hexdigest(), end="")
+    ' "$tree_root" "$excluded"
     }
     if [ -L "$tile_offline" ]; then
       tile_target=$(readlink "$tile_offline") || tile_target=
@@ -414,8 +434,9 @@ public enum TiciSnapshotWireCommandBuilder {
       done
     }
 
-    git_dirty=$(git -C "$repo" status --porcelain 2>/dev/null || :)
-    if [ -n "$git_dirty" ]; then dirty=1; else dirty=0; fi
+    git_status_ok=1
+    git_dirty=$(git -C "$repo" status --porcelain 2>/dev/null) || git_status_ok=0
+    if [ "$git_status_ok" = 1 ] && [ -z "$git_dirty" ]; then dirty=0; else dirty=1; fi
 
     emit_text boot_id "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || :)"
     emit_text branch "$(git -C "$repo" branch --show-current 2>/dev/null || :)"

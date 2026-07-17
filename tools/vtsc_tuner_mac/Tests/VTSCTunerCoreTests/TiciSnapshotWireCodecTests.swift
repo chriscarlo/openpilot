@@ -41,11 +41,15 @@ import Testing
   }
 }
 
-@Test func ticiSnapshotWireCommandUsesOnlyShellToolsAndNoPython() throws {
+@Test func ticiSnapshotWireCommandUsesBoundedPythonOnlyForFastTileDigestAndRuntimeProbe() throws {
   let command = TiciSnapshotWireCommandBuilder.inspectionCommand()
-  #expect(!command.lowercased().contains("python"))
+  #expect(command.contains("tile_digest_python='/usr/local/venv/bin/python3'"))
+  #expect(command.contains("hashlib.sha256"))
+  #expect(!command.contains("for candidate do"))
   #expect(command.contains("base64"))
   #expect(command.contains("git -C"))
+  #expect(command.contains(#"git_dirty=$(git -C "$repo" status --porcelain 2>/dev/null) || git_status_ok=0"#))
+  #expect(command.contains(#"[ "$git_status_ok" = 1 ] && [ -z "$git_dirty" ]"#))
   #expect(command.contains("sha256sum"))
   #expect(command.contains("/data/params/d"))
   #expect(command.contains("/proc/sys/kernel/random/boot_id"))
@@ -637,7 +641,8 @@ private func runTileManifestProbeShell(
 ) throws -> (topology: String, manifest: String, treeSHA256: String) {
   let fragment = TiciSnapshotWireCommandBuilder.tileManifestProbeShellFragment(
     offlinePath: offline.path,
-    adjacentManifestPath: adjacent.path
+    adjacentManifestPath: adjacent.path,
+    pythonCommand: "/usr/bin/python3"
   )
   let output = try runShell("""
   set -eu

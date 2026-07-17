@@ -99,6 +99,26 @@ public struct TiciTileSnapshotIdentity: Codable, Equatable, Sendable {
 public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
   public static let schemaVersion = 1
 
+  public struct SupersessionEvidence: Codable, Equatable, Sendable {
+    public enum Reason: String, Codable, Equatable, Sendable {
+      case newerExactPublishedCheckoutWithRuntimeChanges
+    }
+
+    public var reason: Reason
+    public var publishedHead: String
+    public var productionChangedPaths: [String]
+
+    public init(
+      reason: Reason = .newerExactPublishedCheckoutWithRuntimeChanges,
+      publishedHead: String,
+      productionChangedPaths: [String]
+    ) {
+      self.reason = reason
+      self.publishedHead = publishedHead
+      self.productionChangedPaths = productionChangedPaths
+    }
+  }
+
   public enum Resolution: String, Codable, Equatable, Sendable {
     case awaitingPostflight
     case preflightReserved
@@ -154,6 +174,10 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
   /// successor; it is never inferred from the host tooling HEAD.
   public var completedDeviceHead: String?
   public var completionHostOnlyPaths: [String]?
+  /// Proof that an obsolete pending journal was explicitly retired without
+  /// certifying its postflight or changing the tici. The wire resolution stays
+  /// `.completed` so released schema-1 readers also treat it as terminal.
+  public var supersessionEvidence: SupersessionEvidence?
   /// Added compatibly to schema 1. A legacy journal without this key resolves
   /// from `completed`, so B174 remains byte-for-byte awaiting postflight until
   /// a terminal owner actually settles it.
@@ -216,6 +240,29 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
         )
       }
     }
+    if let supersessionEvidence {
+      let paths = supersessionEvidence.productionChangedPaths
+      guard resolution == .completed,
+            completed,
+            supersessionEvidence.publishedHead.range(
+              of: #"^[0-9a-f]{40}$"#,
+              options: .regularExpression
+            ) != nil,
+            completedToolingHead == supersessionEvidence.publishedHead,
+            completedDeviceHead == supersessionEvidence.publishedHead,
+            completionHostOnlyPaths == nil,
+            !paths.isEmpty,
+            paths == Array(Set(paths)).sorted(),
+            paths.allSatisfy({ path in
+              !path.hasPrefix("/") &&
+                !path.split(separator: "/", omittingEmptySubsequences: false).contains("..")
+            })
+      else {
+        throw DeploymentRollbackJournalError.inconsistentResolution(
+          "superseded pending deployment requires exact terminal published-head evidence"
+        )
+      }
+    }
   }
 
   public init(
@@ -248,6 +295,7 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
     completedToolingHead: String? = nil,
     completedDeviceHead: String? = nil,
     completionHostOnlyPaths: [String]? = nil,
+    supersessionEvidence: SupersessionEvidence? = nil,
     resolution: Resolution? = nil
   ) {
     schema = Self.schemaVersion
@@ -280,6 +328,7 @@ public struct DeploymentRollbackJournal: Codable, Equatable, Sendable {
     self.completedToolingHead = completedToolingHead
     self.completedDeviceHead = completedDeviceHead
     self.completionHostOnlyPaths = completionHostOnlyPaths
+    self.supersessionEvidence = supersessionEvidence
     self.resolution = resolution
   }
 

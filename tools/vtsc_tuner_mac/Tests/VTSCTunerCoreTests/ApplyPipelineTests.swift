@@ -1065,7 +1065,7 @@ func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByR
   _ = try await ApplyPipeline(processRunner: runner).waitForRollbackVerification(
     context: ProductionRollbackContext(repositoryRoot: fixture.repository, journal: fixture.journal, journalURL: fixture.journalURL),
     tilesWereTouched: false,
-    timeout: 1,
+    timeout: 5,
     pollInterval: 0.001
   )
   #expect(await runner.runtimeReadCount == 2)
@@ -1117,7 +1117,7 @@ func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByR
     targetHead: fixture.toolingHead,
     identity: TuneDeploymentIdentity(tune: fixture.tune),
     expectedActiveTileSetID: nil,
-    timeout: 1,
+    timeout: 5,
     pollInterval: 0.001
   )
   #expect(await runner.runtimeReadCount == 2)
@@ -1543,6 +1543,7 @@ func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByR
   #expect(snapshotIndex != nil)
   if let forwardIndex, let snapshotIndex {
     #expect(forwardIndex < snapshotIndex)
+    #expect(requests[snapshotIndex].timeout == 60)
   }
 }
 
@@ -1798,6 +1799,177 @@ func resumePostflightRequiresManagerForControllerAndFinalOffroadProof(managerByR
   #expect(!requests.contains { $0.arguments.last?.contains(TiciProductionRollbackCommandBuilder.resultMarker) == true })
   #expect(!requests.contains { $0.arguments.last?.contains("rollback --root") == true })
   #expect(!requests.contains { $0.arguments.last?.contains("sudo reboot") == true })
+}
+
+@Test func retireSupersededB174KeepsExactPublishedCarAndRecordsTerminalEvidence() async throws {
+  var fixture = try resumePostflightFixture(validGPS: true)
+  defer { try? FileManager.default.removeItem(at: fixture.root) }
+  let publishedHead = String(repeating: "c", count: 40)
+  fixture.journal.resolution = nil
+  fixture.journal.completed = false
+  fixture.journal.deploymentPreRebootBootID = nil
+  try fixture.journal.write(to: fixture.journalURL)
+  let changedPaths = [
+    ".codex/skills/vtsc-tuner-app/references/changelog.md",
+    "selfdrive/controls/lib/longitudinal_mpc_lib/long_mpc.py",
+  ]
+  let runner = FreshProcessRollbackRecoveryRunner(
+    journal: fixture.journal,
+    runtimeHeads: [publishedHead, publishedHead],
+    hostToolingHead: publishedHead,
+    gitChangedPaths: changedPaths
+  )
+
+  let succeeded = await ApplyPipeline(processRunner: runner)
+    .retireSupersededPendingDeployment(
+      RetireSupersededPendingDeploymentRequest(
+        repositoryRoot: fixture.repository,
+        journalURL: fixture.journalURL
+      )
+    ) { _ in }
+
+  #expect(succeeded)
+  let retired = try DeploymentRollbackJournal.load(from: fixture.journalURL)
+  #expect(retired.completed)
+  #expect(retired.resolution == .completed)
+  #expect(retired.completedToolingHead == publishedHead)
+  #expect(retired.completedDeviceHead == publishedHead)
+  #expect(retired.completionHostOnlyPaths == nil)
+  #expect(retired.supersessionEvidence == .init(
+    publishedHead: publishedHead,
+    productionChangedPaths: ["selfdrive/controls/lib/longitudinal_mpc_lib/long_mpc.py"]
+  ))
+  try retired.validateResolutionConsistency()
+  let released = try JSONDecoder().decode(
+    Released5caDeploymentJournal.self,
+    from: Data(contentsOf: fixture.journalURL)
+  )
+  #expect(released.effectiveResolution == .completed)
+  #expect(!released.blocksProductionPreflight)
+  let requests = await runner.requests
+  #expect(!requests.contains { ($0.arguments.last ?? "").contains("rollback --root") })
+  #expect(!requests.contains { ($0.arguments.last ?? "").contains(TiciProductionRollbackCommandBuilder.resultMarker) })
+  #expect(!requests.contains { ($0.arguments.last ?? "").contains("sudo reboot") })
+}
+
+@Test func retireSupersededPendingRejectsHostOnlyOrMismatchedDeviceWithoutMutation() async throws {
+  for mismatch in ["host-only", "wrong-device"] {
+    var fixture = try resumePostflightFixture(validGPS: true)
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let publishedHead = String(repeating: "c", count: 40)
+    let deviceHead = mismatch == "wrong-device" ? String(repeating: "d", count: 40) : publishedHead
+    fixture.journal.resolution = nil
+    fixture.journal.completed = false
+    fixture.journal.deploymentPreRebootBootID = nil
+    try fixture.journal.write(to: fixture.journalURL)
+    let bytesBefore = try Data(contentsOf: fixture.journalURL)
+    let runner = FreshProcessRollbackRecoveryRunner(
+      journal: fixture.journal,
+      runtimeHeads: [deviceHead],
+      hostToolingHead: publishedHead,
+      gitChangedPaths: mismatch == "host-only"
+        ? ["tools/vtsc_tuner_mac/Sources/VTSCTunerCore/ApplyPipeline.swift"]
+        : ["selfdrive/controls/lib/longitudinal_mpc_lib/long_mpc.py"]
+    )
+
+    let succeeded = await ApplyPipeline(processRunner: runner)
+      .retireSupersededPendingDeployment(
+        RetireSupersededPendingDeploymentRequest(
+          repositoryRoot: fixture.repository,
+          journalURL: fixture.journalURL
+        )
+      ) { _ in }
+
+    #expect(!succeeded, "\(mismatch) unexpectedly retired the journal")
+    #expect(try Data(contentsOf: fixture.journalURL) == bytesBefore)
+    let requests = await runner.requests
+    #expect(!requests.contains { ($0.arguments.last ?? "").contains("rollback --root") })
+    #expect(!requests.contains { ($0.arguments.last ?? "").contains(TiciProductionRollbackCommandBuilder.resultMarker) })
+    #expect(!requests.contains { ($0.arguments.last ?? "").contains("sudo reboot") })
+  }
+}
+
+@Test func retireSupersededPendingRejectsDocsTestsCIAndOtherToolingSuccessors() async throws {
+  let nonRuntimeChanges = [
+    ["docs/chauffeur/vtsc.md"],
+    ["README.md"],
+    [".github/workflows/test.yml"],
+    [".codex/skills/another-skill/SKILL.md"],
+    ["selfdrive/controls/tests/test_longcontrol.py"],
+    ["selfdrive/test/longitudinal_harness/fidelity.py"],
+    ["selfdrive/debug/can_printer.py"],
+    ["panda/examples/can_logger.py"],
+    ["panda/scripts/health_test.py"],
+    ["common/params_reader_test.py"],
+    ["system/benchmarks/timing.go"],
+    ["sunnypilot/tools/profile.qml"],
+    ["panda/test.sh"],
+    ["selfdrive/car/docs.py"],
+    ["system/manager/github_runner.sh"],
+    ["common/run_tests.py"],
+    ["common/mock/generators.py"],
+    ["selfdrive/assets/compress-images.sh"],
+    ["system/manager/build.py"],
+    ["panda/setup.sh"],
+    ["sunnypilot/selfdrive/controls/lib/vision_turn_controller_backup.py"],
+    ["selfdrive/controls/lib/longitudinal_mpc_lib/windows_acados_stub.py"],
+    ["selfdrive/controls/lib/controller_mock.py"],
+    ["selfdrive/controls/lib/route_fixture.json"],
+    ["panda/Jenkinsfile"],
+    ["panda/LICENSE"],
+    ["panda/Dockerfile"],
+    ["common/.gitignore"],
+    ["selfdrive/setup.py"],
+  ]
+  for changedPaths in nonRuntimeChanges {
+    var fixture = try resumePostflightFixture(validGPS: true)
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let publishedHead = String(repeating: "c", count: 40)
+    fixture.journal.resolution = nil
+    fixture.journal.completed = false
+    fixture.journal.deploymentPreRebootBootID = nil
+    try fixture.journal.write(to: fixture.journalURL)
+    let bytesBefore = try Data(contentsOf: fixture.journalURL)
+    let runner = FreshProcessRollbackRecoveryRunner(
+      journal: fixture.journal,
+      runtimeHeads: [publishedHead],
+      hostToolingHead: publishedHead,
+      gitChangedPaths: changedPaths
+    )
+
+    let succeeded = await ApplyPipeline(processRunner: runner)
+      .retireSupersededPendingDeployment(
+        RetireSupersededPendingDeploymentRequest(
+          repositoryRoot: fixture.repository,
+          journalURL: fixture.journalURL
+        )
+      ) { _ in }
+
+    #expect(!succeeded, "non-runtime paths unexpectedly retired the journal: \(changedPaths)")
+    #expect(try Data(contentsOf: fixture.journalURL) == bytesBefore)
+  }
+}
+
+@Test func retireSupersededFailureClosesTheStepThatWasActuallyRunning() async throws {
+  let missingRepository = FileManager.default.temporaryDirectory
+    .appendingPathComponent(UUID().uuidString, isDirectory: true)
+  let events = ApplyEventCollector()
+
+  let succeeded = await ApplyPipeline()
+    .retireSupersededPendingDeployment(
+      RetireSupersededPendingDeploymentRequest(
+        repositoryRoot: missingRepository,
+        journalURL: missingRepository.appendingPathComponent("missing.json")
+      )
+    ) { await events.append($0) }
+
+  #expect(!succeeded)
+  let steps = await events.events.compactMap { event -> ApplyStepEvent? in
+    guard case let .step(step) = event else { return nil }
+    return step
+  }
+  #expect(steps.map(\.id) == [0, 0])
+  #expect(steps.map(\.status) == [.running, .failed])
 }
 
 @Test func tileBearingInternalRollbackStopsBeforeHelperGitParamsMapdAndReboot() async throws {

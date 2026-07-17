@@ -52,6 +52,7 @@ extension ApplyAction: Identifiable {
 private enum PendingInstallResolutionRoute {
   case resume
   case abort
+  case keepCurrent
 }
 
 @MainActor
@@ -87,6 +88,8 @@ final class TunerSession: ObservableObject {
   @Published var selectedRollbackJournalURL: URL?
   @Published var pendingAbortPendingDeployment = false
   @Published var runningAbortPendingDeployment = false
+  @Published var pendingRetireSupersededDeployment = false
+  @Published var runningRetireSupersededDeployment = false
   @Published var pendingDeployments: [DeploymentRollbackJournal.RecoverableRollback] = []
   @Published var selectedPendingDeploymentURL: URL?
 
@@ -471,6 +474,15 @@ final class TunerSession: ObservableObject {
     pendingInstallResolution = false
   }
 
+  func reviewPendingInstallKeepCurrent() {
+    guard selectedPendingDeploymentIsRuntimeOnly else {
+      status("This recorded install cannot be retired by the current runtime-only build.", error: true)
+      return
+    }
+    queuedPendingInstallResolutionRoute = .keepCurrent
+    pendingInstallResolution = false
+  }
+
   func pendingInstallResolutionDidDismiss() {
     let route = queuedPendingInstallResolutionRoute
     queuedPendingInstallResolutionRoute = nil
@@ -479,6 +491,8 @@ final class TunerSession: ObservableObject {
       pendingResumePostflight = true
     case .abort:
       pendingAbortPendingDeployment = true
+    case .keepCurrent:
+      pendingRetireSupersededDeployment = true
     case nil:
       break
     }
@@ -499,7 +513,7 @@ final class TunerSession: ObservableObject {
     pendingApplyAction = nil
     queuedPendingInstallResolutionRoute = nil
     pendingInstallResolution = true
-    status("Finish or undo the previous car install before installing this tune.")
+    status("Resolve the previous car install record before installing this tune.")
     return true
   }
 
@@ -727,6 +741,56 @@ final class TunerSession: ObservableObject {
     applyTask = nil
     runningAbortPendingDeployment = false
     refreshRecoverableRollbackState()
+  }
+
+  func confirmRetireSupersededDeployment() {
+    guard workspace == .curveLab else {
+      pendingRetireSupersededDeployment = false
+      status("Old install record retirement is only available in Curve Lab.", error: true)
+      return
+    }
+    guard let repositoryURL, let journalURL = selectedPendingDeploymentURL else {
+      pendingRetireSupersededDeployment = false
+      status("Choose a clean Chauffeur repository and an exact pending deployment.", error: true)
+      return
+    }
+    pendingRetireSupersededDeployment = false
+    runningRetireSupersededDeployment = true
+    applySteps = []
+    applySucceeded = nil
+    applyTask?.cancel()
+    let pipeline = ApplyPipeline()
+    applyTask = Task { [weak self] in
+      let success = await pipeline.retireSupersededPendingDeployment(
+        RetireSupersededPendingDeploymentRequest(
+          repositoryRoot: repositoryURL,
+          journalURL: journalURL
+        )
+      ) { [weak self] event in
+        guard case let .step(step) = event else { return }
+        await MainActor.run { self?.upsertStep(step) }
+      }
+      guard let self else { return }
+      self.applySucceeded = success
+      self.refreshRecoverableRollbackState()
+      self.status(
+        success
+          ? "Obsolete install record retired. The current tici software was not changed."
+          : "Old install record was retained; the car was not changed.",
+        error: !success
+      )
+    }
+  }
+
+  func closeRetireSupersededDeployment() {
+    let shouldReturnToInstall = applySucceeded == true
+    applyTask?.cancel()
+    applyTask = nil
+    runningRetireSupersededDeployment = false
+    refreshRecoverableRollbackState()
+    if shouldReturnToInstall {
+      pendingApplyAction = .pullOnTici
+    }
   }
 
   private func upsertStep(_ step: ApplyStepEvent) {

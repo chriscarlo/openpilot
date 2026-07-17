@@ -59,6 +59,10 @@ struct VTSCTunerApp: App {
               .disabled(!session.hasRuntimeOnlyPendingDeployment)
             Button(AbortPendingDeploymentAction.label) { session.pendingAbortPendingDeployment = true }
               .disabled(session.pendingDeployments.isEmpty)
+            Button(RetireSupersededPendingDeploymentAction.label) {
+              session.pendingRetireSupersededDeployment = true
+            }
+            .disabled(session.pendingDeployments.isEmpty)
             Button(RollbackRecoveryAction.label) { session.pendingRollbackRecovery = true }
               .disabled(!session.hasRecoverableRollback)
             Divider()

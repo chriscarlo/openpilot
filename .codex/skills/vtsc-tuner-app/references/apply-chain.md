@@ -35,6 +35,15 @@ awaits outdoor closeout opens **Previous Car Install Needs Attention** instead:
 - **Finish Verifying Previous Install Outdoors…** verifies the earlier tune,
   not the current draft, and is unavailable while the editor differs from the
   checked-in tune.
+- **Check and Keep Current Car Software…** is for an old record whose Git
+  identity a newer published checkout with vehicle-runtime source changes has
+  already superseded. After explicit confirmation,
+  the app proves the clean selected checkout, its current origin branch, and the
+  parked tici all name the same strict descendant of the old target, and that
+  the complete diff contains real vehicle-runtime source changes, excluding
+  docs/tests/CI/tooling-only successors. It then retires only the obsolete
+  journal with exact supersession evidence. It does not certify either installed
+  runtime, change the car, roll back, or reboot.
 - Cancel and either route leave the current editor draft untouched; no recovery
   starts from this explanatory sheet.
 
@@ -79,6 +88,12 @@ Every enabled car-facing action verifies all prerequisites before saving or patc
 - the immutable mapd manifest and host artifact pass SHA-256, Linux ARM64 ELF, release/build marker, estimator, and capability checks;
 - a reachable SSH profile reports the same clean branch/HEAD, `IsOffroad=1`, `IsOnroad=0`, and `MTSCLookaheadEnabled=0`;
 - the active tile identity is read-only evidence and must remain unchanged throughout runtime-only deployment.
+
+The shared parked-state snapshot retains the full tracked-and-untracked Git
+cleanliness check and exact tile-tree identity. Its 60-second envelope includes
+one stdlib Python walk for the legacy/direct tree digest; using one process is a
+performance implementation detail and does not relax the digest or topology
+contract.
 
 The dormant canonical builder can still generate a Mac-side artifact for library tests. It writes a clean temporary `offline/` tree with all six source-rounded `--phys-*` values. `CanonicalTileSetBuilder` hashes the PBF and every tile, decodes every file, verifies schema/bounds/finiteness/sigmoid identity/regions, writes `tile-set-manifest.json`, and moves the finished artifact to:
 

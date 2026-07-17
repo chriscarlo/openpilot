@@ -193,10 +193,31 @@ public struct AbortPendingDeploymentRequest: Sendable {
   }
 }
 
+public struct RetireSupersededPendingDeploymentAction: Sendable {
+  public static let label = "Keep Current Car Software and Retire Old Record"
+  public static let description =
+    "Keep the tici untouched when its clean checkout already names a newer exact published Chauffeur version with vehicle-runtime source changes. The app proves the Mac checkout, Git remote, and parked tici all name that same descendant, then retires only the obsolete pending record. It does not certify either installed runtime or change Git, Params, mapd, tiles, or reboot."
+}
+
+public struct RetireSupersededPendingDeploymentRequest: Sendable {
+  public var repositoryRoot: URL
+  public var journalURL: URL
+
+  public init(repositoryRoot: URL, journalURL: URL) {
+    self.repositoryRoot = repositoryRoot
+    self.journalURL = journalURL.standardizedFileURL
+  }
+}
+
 private struct ResumedPostflightObservation: Sendable {
   var controllerReady: TiciDeploymentPostflight
   var offroad: TiciDeploymentPostflight
   var deviceIdentity: CompletionCompatibleDeviceIdentity
+}
+
+private struct SupersededPendingDeploymentIdentity: Equatable, Sendable {
+  var publishedHead: String
+  var productionChangedPaths: [String]
 }
 
 private enum ResumedPostflightWaitState: LocalizedError, Sendable {
@@ -309,7 +330,7 @@ public enum ApplyPipelineError: LocalizedError, Sendable {
     case let .postflightMismatch(reason):
       "Tici postflight verification failed: \(reason)"
     case let .unresolvedProductionRollbacks(urls):
-      "Resolve the recorded production transaction before starting another car-facing deployment. Use Resume or Abort for a rebooted awaiting journal, Recover Interrupted Production Rollback for a mutation/rollback journal, or wait ten minutes and retry if a fresh targetless preflight may belong to another app instance: \(urls.map(\.lastPathComponent).joined(separator: ", "))."
+      "Resolve the recorded production transaction before starting another car-facing deployment. For a rebooted awaiting journal, use Finish Verification, Undo, or Keep Current Car Software when a newer published version already superseded it. Use Recover Interrupted Production Rollback for a mutation/rollback journal, or wait ten minutes and retry if a fresh targetless preflight may belong to another app instance: \(urls.map(\.lastPathComponent).joined(separator: ", "))."
     }
   }
 }
@@ -879,6 +900,144 @@ public actor ApplyPipeline {
       await emitFailure(
         id: 1,
         text: "Pending deployment was not aborted; its journal remains available for a guarded retry",
+        error: error,
+        progress: progress
+      )
+      return await finish(false, progress: progress)
+    }
+  }
+
+  /// Explicitly retire an obsolete pending journal when a later published
+  /// published checkout with vehicle-runtime source changes has superseded its
+  /// Git identity. This is deliberately
+  /// separate from both postflight completion and rollback: the tici remains
+  /// untouched, and the journal records why it became terminal.
+  @discardableResult
+  public func retireSupersededPendingDeployment(
+    _ request: RetireSupersededPendingDeploymentRequest,
+    progress: @escaping ApplyProgressHandler
+  ) async -> Bool {
+    var activeStepID: UInt32 = 0
+    await emit(.running, id: 0, text: "Loading the selected obsolete install record…", progress: progress)
+    do {
+      try Task.checkCancellation()
+      try RepositoryLocator.validate(request.repositoryRoot)
+      let loaded = try DeploymentRollbackJournal.loadPendingPostflight(from: request.journalURL)
+      guard !loaded.journal.includesTileReplacement else {
+        throw ApplyPipelineError.postflightMismatch(
+          ApplyAction.deviceTileReplacementUnavailableReason
+        )
+      }
+      try validateProfile(loaded.journal.profile)
+      guard await probeProfile(loaded.journal.profile) else {
+        throw ApplyPipelineError.noReachableTici(lastADBTransportDetail)
+      }
+      await emit(
+        .succeeded,
+        id: 0,
+        text: "Selected old record is available for a no-change supersession check",
+        detail: [
+          "journal=\(loaded.url.path)",
+          "old_target_head=\(loaded.journal.targetHead ?? "")",
+          "profile=\(loaded.journal.profile)",
+        ].joined(separator: "\n"),
+        progress: progress
+      )
+
+      await emit(
+        .running,
+        id: 1,
+        text: "Proving the Mac, Git remote, and parked tici all match one newer published version…",
+        progress: progress
+      )
+      activeStepID = 1
+      let productionOwnerLock = try await acquireGlobalProductionOwnerLock(for: loaded.url)
+      defer { productionOwnerLock.unlock() }
+      let completionLock = try await acquireJournalResolutionLock(for: loaded.url)
+      defer { completionLock.unlock() }
+      try await validateExclusiveRollbackOwnership(selectedJournalURL: loaded.url)
+      let current = try DeploymentRollbackJournal.load(from: loaded.url)
+      guard current == loaded.journal else {
+        throw ApplyPipelineError.postflightMismatch(
+          "selected old install record changed before supersession ownership was acquired"
+        )
+      }
+      let firstIdentity = try await validateSupersededPendingDeploymentIdentity(
+        journal: current,
+        repositoryRoot: request.repositoryRoot
+      )
+      await emit(
+        .succeeded,
+        id: 1,
+        text: "The car checkout is a clean published successor with vehicle-runtime changes",
+        detail: [
+          "published_head=\(firstIdentity.publishedHead)",
+          "production_changes=\(firstIdentity.productionChangedPaths.count)",
+          "The car has not been changed or rebooted.",
+        ].joined(separator: "\n"),
+        progress: progress
+      )
+
+      await emit(
+        .running,
+        id: 2,
+        text: "Rechecking the exact state, then retiring only the obsolete record…",
+        progress: progress
+      )
+      activeStepID = 2
+      try Task.checkCancellation()
+      try await validateExclusiveRollbackOwnership(selectedJournalURL: loaded.url)
+      guard try DeploymentRollbackJournal.load(from: loaded.url) == current else {
+        throw ApplyPipelineError.postflightMismatch(
+          "selected old install record changed before final retirement"
+        )
+      }
+      let finalIdentity = try await validateSupersededPendingDeploymentIdentity(
+        journal: current,
+        repositoryRoot: request.repositoryRoot
+      )
+      guard finalIdentity == firstIdentity else {
+        throw ApplyPipelineError.postflightMismatch(
+          "published Mac/tici supersession identity changed during final verification"
+        )
+      }
+      try Task.checkCancellation()
+
+      var retired = current
+      retired.completed = true
+      retired.completedAt = Date().ISO8601Format()
+      retired.completedToolingHead = finalIdentity.publishedHead
+      retired.completedDeviceHead = finalIdentity.publishedHead
+      retired.completionHostOnlyPaths = nil
+      retired.supersessionEvidence = DeploymentRollbackJournal.SupersessionEvidence(
+        publishedHead: finalIdentity.publishedHead,
+        productionChangedPaths: finalIdentity.productionChangedPaths
+      )
+      retired.resolution = .completed
+      try retired.validateResolutionConsistency()
+      do {
+        try journalWriter(retired, loaded.url)
+      } catch let durabilityError as DeploymentRollbackJournalError {
+        guard case .committedButNotDurable = durabilityError else { throw durabilityError }
+        guard try DeploymentRollbackJournal.load(from: loaded.url) == retired else { throw durabilityError }
+      }
+      guard try DeploymentRollbackJournal.load(from: loaded.url) == retired else {
+        throw ApplyPipelineError.postflightMismatch(
+          "retired old install record did not read back exactly"
+        )
+      }
+      await emit(
+        .succeeded,
+        id: 2,
+        text: "Old install record retired; the current car checkout was left unchanged",
+        detail: "journal=\(loaded.url.path)\nNo Git, Params, mapd, tile, or reboot mutation was performed.",
+        progress: progress
+      )
+      return await finish(true, progress: progress)
+    } catch {
+      await emitFailure(
+        id: activeStepID,
+        text: "Old install record was not retired; it remains available for a guarded retry",
         error: error,
         progress: progress
       )
@@ -1512,6 +1671,175 @@ public actor ApplyPipeline {
       deviceHead: deviceHead,
       compatibilityPaths: paths.sorted()
     )
+  }
+
+  private func validateSupersededPendingDeploymentIdentity(
+    journal: DeploymentRollbackJournal,
+    repositoryRoot: URL
+  ) async throws -> SupersededPendingDeploymentIdentity {
+    try journal.validatePendingPostflight()
+    guard let deployedTargetHead = journal.targetHead else {
+      throw DeploymentRollbackJournalError.invalidTargetHead("")
+    }
+    let git = try await gitDeploymentPreflight(
+      repositoryRoot: repositoryRoot,
+      expectedBranch: journal.branch
+    )
+    let snapshot = try await freshParkedSafetySnapshot(profile: journal.profile)
+    guard snapshot.branch == journal.branch, !snapshot.dirty else {
+      throw ApplyPipelineError.postflightMismatch(
+        "the parked tici is on the wrong branch or has uncommitted files"
+      )
+    }
+    guard snapshot.head == git.localHead else {
+      throw ApplyPipelineError.commitMismatch(
+        context: "published Mac/origin and parked tici supersession identity",
+        expected: git.localHead,
+        actual: snapshot.head
+      )
+    }
+    guard deployedTargetHead != snapshot.head else {
+      throw ApplyPipelineError.postflightMismatch(
+        "the tici is still at the pending deployment target; use Finish Verification or Undo instead"
+      )
+    }
+
+    let relationship = try await processRunner.run(ProcessRequest(
+      executableURL: Self.gitURL,
+      arguments: ["merge-base", "--is-ancestor", deployedTargetHead, snapshot.head],
+      currentDirectoryURL: repositoryRoot,
+      timeout: 30
+    ))
+    guard relationship.terminationStatus == 0 else {
+      if relationship.terminationStatus == 1 {
+        throw ApplyPipelineError.commitMismatch(
+          context: "current published car version is not descended from the old pending target",
+          expected: deployedTargetHead,
+          actual: snapshot.head
+        )
+      }
+      throw ApplyPipelineError.invalidDeploymentOutput(
+        "could not verify old-target/current-car ancestry: \(relationship.combinedOutput)"
+      )
+    }
+
+    let changed = try await checked(
+      ProcessRequest(
+        executableURL: Self.gitURL,
+        arguments: [
+          "diff", "--no-ext-diff", "--name-only", "-z",
+          "\(deployedTargetHead)..\(snapshot.head)", "--",
+        ],
+        currentDirectoryURL: repositoryRoot,
+        timeout: 30
+      ),
+      context: "prove obsolete pending Git identity was superseded by vehicle-runtime source changes"
+    )
+    let paths = changed.standardOutput
+      .split(separator: "\0", omittingEmptySubsequences: true)
+      .map(String.init)
+    guard !paths.isEmpty,
+          paths.allSatisfy({ path in
+            !path.hasPrefix("/") &&
+              !path.split(separator: "/", omittingEmptySubsequences: false).contains("..")
+          })
+    else {
+      throw ApplyPipelineError.invalidDeploymentOutput(
+        "the newer car version did not produce a complete safe changed-path set"
+      )
+    }
+    let productionPaths = paths.filter { path in
+      isVehicleRuntimeSourcePath(path)
+    }.sorted()
+    guard !productionPaths.isEmpty else {
+      throw ApplyPipelineError.postflightMismatch(
+        "the newer head contains no vehicle-runtime source changes; docs, tests, CI, and tuner-only changes cannot retire the old install record"
+      )
+    }
+    return SupersededPendingDeploymentIdentity(
+      publishedHead: snapshot.head,
+      productionChangedPaths: Array(Set(productionPaths)).sorted()
+    )
+  }
+
+  private func isVehicleRuntimeSourcePath(_ path: String) -> Bool {
+    // This is intentionally a narrow positive list. Retirement is an escape hatch
+    // for an obsolete deployment record, so an unusual production change may ask
+    // the user to Resume or Undo; tooling-only changes must never clear the record.
+    let runtimePrefixes = [
+      "selfdrive/controls/",
+      "selfdrive/ui/sunnypilot/",
+      "sunnypilot/selfdrive/controls/",
+      "sunnypilot/selfdrive/ui/",
+    ]
+    let components = path.split(separator: "/").map { $0.lowercased() }
+    guard let filename = components.last else { return false }
+    let exactRuntimeFiles = [
+      "cereal/services.py",
+      "common/params_keys.h",
+    ]
+    let isCerealSchema = components.count == 2 && components[0] == "cereal" && filename.hasSuffix(".capnp")
+    guard exactRuntimeFiles.contains(path) ||
+            isCerealSchema ||
+            runtimePrefixes.contains(where: path.hasPrefix)
+    else { return false }
+    let metadataNames = [
+      ".gitignore",
+      "conftest.py",
+      "jenkinsfile",
+      "makefile",
+      "meson.build",
+      "pyproject.toml",
+      "sconstruct",
+      "setup.py",
+    ]
+    let nonRuntimeBasenames = [
+      "ci",
+      "doc",
+      "docs",
+      "example",
+      "examples",
+      "github_runner",
+      "test",
+      "tests",
+    ]
+    let nonRuntimeComponents = [
+      ".circleci",
+      ".github",
+      "benchmarks",
+      "ci",
+      "debug",
+      "docs",
+      "examples",
+      "scripts",
+      "test",
+      "tests",
+      "tools",
+    ]
+    let sourceSuffixes = [
+      ".c", ".capnp", ".cc", ".cpp", ".dbc", ".go", ".h", ".hpp",
+      ".json", ".m", ".mm", ".py", ".qml", ".qrc", ".rs", ".sh",
+      ".toml", ".ui", ".yaml", ".yml",
+    ]
+    let basename = filename.split(separator: ".", omittingEmptySubsequences: true).first.map(String.init) ?? filename
+    guard !components.contains(where: nonRuntimeComponents.contains),
+          !components.contains(where: { $0.hasPrefix("test_") }),
+          !components.contains(where: { $0 == "readme" || $0.hasPrefix("readme.") }),
+          !metadataNames.contains(filename),
+          !nonRuntimeBasenames.contains(basename),
+          !filename.contains("_test."),
+          !filename.contains("_tests."),
+          !filename.contains("_backup."),
+          !filename.contains("_stub."),
+          !filename.contains("_mock."),
+          !filename.contains("_fixture."),
+          !filename.hasPrefix("windows_"),
+          !filename.hasPrefix("dockerfile"),
+          !filename.hasPrefix("license"),
+          !filename.hasPrefix("copying"),
+          sourceSuffixes.contains(where: filename.hasSuffix)
+    else { return false }
+    return true
   }
 
   private func validateRollbackSourceIdentity(
@@ -3897,7 +4225,10 @@ public actor ApplyPipeline {
     let snapshot = try await readTiciDeploymentSnapshot(
       profile: profile,
       context: "fresh parked-state verification",
-      timeout: 20,
+      // The tici's full cleanliness check includes tracked and untracked files.
+      // On a healthy production checkout that Git scan can take about 20 seconds
+      // by itself, so leave enough room for the rest of the fail-closed snapshot.
+      timeout: 60,
       connectTimeout: 5
     ).snapshot
     guard snapshot.isOffroad, !snapshot.isOnroad else { throw ApplyPipelineError.ticiNotOffroad }
