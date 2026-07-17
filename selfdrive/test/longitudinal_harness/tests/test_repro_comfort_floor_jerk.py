@@ -259,10 +259,21 @@ def _release_floor_micro_rollon(result: SimulationResult) -> tuple[dict, dict]:
         release.get("reason") == "gap_recovered"):
       candidates.append((prev, row))
 
-  assert len(candidates) == 1, (
-    f"expected one near_target->gap_recovered release-floor toggle, got "
+  # The hardened CD9 publish stream (2026-07-17) lets the scenario exercise
+  # the near_target->gap_recovered seam twice; only one toggle carries the
+  # vRel-credit mechanism this oracle covers.  Select by mechanism (as the
+  # docstring demands), keep a churn bound on the total count.
+  assert 1 <= len(candidates) <= 2, (
+    f"expected one or two near_target->gap_recovered release-floor toggles, got "
     f"{[(a['t_s'], b['t_s']) for a, b in candidates]}")
-  return candidates[0]
+  credited = [
+    (prev, row) for prev, row in candidates
+    if row["planner_lead_brake_release_debug"].get("vrel_credit_m", 0.0) > 0.0
+  ]
+  assert len(credited) == 1, (
+    f"expected exactly one vrel-credit-carrying toggle, got "
+    f"{[(a['t_s'], b['t_s']) for a, b in credited]}")
+  return credited[0]
 
 
 def _keepup_floor_micro_rollon(fix: SimulationResult, rollback: SimulationResult) -> tuple[dict, dict, dict, dict]:

@@ -12,6 +12,7 @@ from openpilot.selfdrive.controls.lib.longitudinal_live_tune import LeadResponse
 from openpilot.selfdrive.controls.radard import (
   CLOSING_GOVERNOR_RECOVERY_MIN_RAW_TTC_S,
   CLOSING_GOVERNOR_RECOVERY_MAX_POSITION_CLOSING_MPS,
+  CLOSING_GOVERNOR_STALE_DECAY_MPS2,
   KalmanParams,
   ModelLeadTrack,
   ModelLeadTracker,
@@ -1108,7 +1109,8 @@ class TestClosingGovernorCalmRecovery:
     assert tr.opening_position_evidence[0][0] == pytest.approx(self.NOW)
     assert tr.governor_calm_recovery_mode is False
     assert tr.governor_calm_recovery_applied is False
-    assert tr.governor_closing_mps == pytest.approx(1.8)
+    # recovery stays out; only the bounded threat-free stale decay applies
+    assert tr.governor_closing_mps == pytest.approx(1.8 - CLOSING_GOVERNOR_STALE_DECAY_MPS2 * 0.05)
 
   @pytest.mark.parametrize(
     "raw_closing_mps,position_closing_mps,expected_mps",
@@ -1212,7 +1214,7 @@ class TestClosingGovernorCalmRecovery:
     )
     assert not tr.governor_calm_recovery_mode
     assert not tr.governor_calm_recovery_applied
-    assert tr.governor_closing_mps == pytest.approx(1.8)
+    assert tr.governor_closing_mps == pytest.approx(1.8 - CLOSING_GOVERNOR_STALE_DECAY_MPS2 * 0.05)
 
   def test_missed_model_frame_vetoes_recovery_on_the_next_measurement(self):
     tr = self._track()
@@ -1238,7 +1240,8 @@ class TestClosingGovernorCalmRecovery:
     assert active
     assert not tr.governor_calm_recovery_applied
     assert tr.governor_recovery_position_closing_mps is None
-    assert tr.governor_closing_mps == pytest.approx(1.8)
+    # the decay step spans the missed model frame (0.10 s sample gap)
+    assert tr.governor_closing_mps == pytest.approx(1.8 - CLOSING_GOVERNOR_STALE_DECAY_MPS2 * 0.10)
 
   @pytest.mark.parametrize("veto", ("current_braking", "short_ttc", "position"))
   def test_any_safety_veto_exits_existing_recovery_mode(self, veto):
@@ -1306,7 +1309,7 @@ class TestClosingGovernorCalmRecovery:
     )
     assert not tr.governor_calm_recovery_applied
     assert tr.governor_recovery_position_closing_mps is None
-    assert tr.governor_closing_mps == pytest.approx(1.8)
+    assert tr.governor_closing_mps == pytest.approx(1.8 - CLOSING_GOVERNOR_STALE_DECAY_MPS2 * 0.05)
 
   @pytest.mark.parametrize("braking_location", ("current", "window"))
   def test_current_or_windowed_braking_vetoes_recovery(self, braking_location):
@@ -1358,7 +1361,7 @@ class TestClosingGovernorCalmRecovery:
       tr, now=self.NOW, drel_m=drel_m, raw_closing_mps=0.4,
     )
     assert tr.governor_calm_recovery_applied is expected_recovery
-    assert tr.governor_closing_mps == pytest.approx(0.4 if expected_recovery else 1.8)
+    assert tr.governor_closing_mps == pytest.approx(0.4 if expected_recovery else 1.8 - CLOSING_GOVERNOR_STALE_DECAY_MPS2 * 0.05)
     assert (tr.governor_recovery_vrel_floor_mps is not None) is expected_recovery
 
   @pytest.mark.parametrize(
@@ -1406,7 +1409,7 @@ class TestClosingGovernorCalmRecovery:
       tr, now=self.NOW, drel_m=self.DREL_M, raw_closing_mps=0.4,
     )
     assert tr.governor_calm_recovery_applied is expected_recovery
-    assert tr.governor_closing_mps == pytest.approx(position_closing_mps if expected_recovery else 1.8)
+    assert tr.governor_closing_mps == pytest.approx(position_closing_mps if expected_recovery else 1.8 - CLOSING_GOVERNOR_STALE_DECAY_MPS2 * 0.05)
 
   def test_first_braking_onset_vetoes_recovery_before_window_or_position_can_catch_up(self):
     tr = self._track()
@@ -1434,6 +1437,184 @@ class TestClosingGovernorCalmRecovery:
     assert tr.governor_threat_corroborated
     assert tr.governor_closing_mps == pytest.approx(1.8)
     assert tr.governor_hold_until_t == pytest.approx(deadline)
+
+
+class TestClosingGovernorStaleDecayAndSignificance:
+  """CD9 phantom hardening (2026-07-16 review): an active-but-unrearmed hold
+  bleeds toward current velocity evidence at a bounded rate instead of
+  freezing at its historical worst (captured false-closing episodes held
+  -2.9 m/s published closing for 0.6+ s while raw vRel had flipped positive),
+  and position-only arming must clear the measured slope noise of its own
+  window, not just the fixed margin (+-1-1.5 m dRel jitter at 40+ m is
+  1.5-3 m/s of pure endpoint-slope noise).  Both are EV6-scoped via
+  allow_calm_recovery; legacy topologies stay byte-exact."""
+
+  NOW = 10.0
+
+  @staticmethod
+  def _cfg(**overrides):
+    base = {
+      "closing_governor_margin_mps": 0.75,
+      "closing_governor_min_closing_mps": 0.30,
+      "closing_governor_hold_s": 1.0,
+      "closing_governor_accel_onset_mps2": 99.0,
+      "closing_governor_pos_trust_excess_mps": 1.5,
+    }
+    base.update(overrides)
+    return dataclasses.replace(LeadResponseTuningConfig.defaults(), **base)
+
+  def _track(self, *, published_vrel=-0.2, drel_state=44.0):
+    tr = ModelLeadTrack.from_lead_dict(
+      9, {"dRel": drel_state, "yRel": 0.0, "vRel": published_vrel,
+          "vLead": 20.0 + published_vrel, "aLeadK": 0.0, "modelProb": 0.9},
+      self.NOW - 1.0, 0)
+    tr.vRel = float(published_vrel)
+    tr.vLead = 20.0 + float(published_vrel)
+    tr.vLeadK = tr.vLead
+    tr.dRel = float(drel_state)
+    return tr
+
+  def _seed_closing_burst(self, tr, *, drel0=44.0, closing=2.8, n=13):
+    t0 = self.NOW - 0.6
+    for i in range(n):
+      t = t0 + 0.05 * i
+      d = drel0 + closing * (self.NOW - t)
+      tr.closing_evidence.append((t, d, -closing, 0.0))
+      tr.opening_position_evidence.append((t, d))
+
+  def _update(self, tr, *, now, drel_m, raw_closing_mps, raw_alead_mps2=0.0,
+              allow_calm_recovery=True, cfg=None):
+    return tr._update_closing_governor(
+      float(now), raw_drel=float(drel_m), raw_vrel=-float(raw_closing_mps),
+      raw_alead=float(raw_alead_mps2), cfg=cfg or self._cfg(),
+      allow_calm_recovery=bool(allow_calm_recovery),
+    )
+
+  def _arm_velocity_burst(self, *, allow=True):
+    tr = self._track()
+    self._seed_closing_burst(tr)
+    assert self._update(tr, now=self.NOW, drel_m=44.0, raw_closing_mps=2.8,
+                        allow_calm_recovery=allow)
+    assert tr.governor_closing_mps == pytest.approx(2.8, abs=0.05)
+    # published state caught up during the burst (governor forces fast taus),
+    # so the stale window slope cannot re-arm the position path afterwards
+    tr.vRel = -2.7
+    tr.vLead = 20.0 - 2.7
+    tr.vLeadK = tr.vLead
+    return tr
+
+  def test_stale_clamp_decays_to_evidence_and_releases_early(self):
+    tr = self._arm_velocity_burst()
+    armed = float(tr.governor_closing_mps)
+    hold_until = float(tr.governor_hold_until_t)
+
+    # first threat-free calm frame: decay is rate-limited AND floored by the
+    # draining window mean (13x2.8 + 1x0.0)/14 = 2.6
+    active = self._update(tr, now=self.NOW + 0.05, drel_m=44.0, raw_closing_mps=0.0)
+    assert active
+    assert tr.governor_reason == "stale_decay"
+    assert tr.governor_closing_mps == pytest.approx(
+      max(armed - CLOSING_GOVERNOR_STALE_DECAY_MPS2 * 0.05, 2.8 * 13.0 / 14.0), abs=0.02)
+
+    last = float(tr.governor_closing_mps)
+    released_at = None
+    for j in range(2, 18):
+      self._update(tr, now=self.NOW + 0.05 * j, drel_m=44.0, raw_closing_mps=0.0)
+      assert tr.governor_closing_mps <= last + 1e-9
+      if j == 5:
+        # mid-hold the clamp has bled to the draining evidence level instead
+        # of the armed worst (the legacy pin below holds 2.8 at this point)
+        assert tr.governor_closing_mps <= armed - 4 * CLOSING_GOVERNOR_STALE_DECAY_MPS2 * 0.05 + 1e-6
+        # the hold itself must stay alive through the decay: it carries the
+        # same-frame threat-upgrade path
+        assert tr.governor_hold_until_t == pytest.approx(hold_until)
+      last = float(tr.governor_closing_mps)
+      if tr.governor_hold_until_t < 0.0:
+        released_at = self.NOW + 0.05 * j
+        break
+    # once the window mean drains under the release threshold the ordinary
+    # release path clears the hold, well before the natural 1.0 s expiry
+    assert released_at is not None and released_at < hold_until
+    assert tr.governor_closing_mps == pytest.approx(0.0)
+    assert tr.governor_reason == "inactive"
+    assert not tr.governor_threat_corroborated
+
+  def test_threat_during_decayed_hold_restores_full_authority_same_frame(self):
+    tr = self._arm_velocity_burst()
+    for j in range(1, 4):
+      self._update(tr, now=self.NOW + 0.05 * j, drel_m=44.0, raw_closing_mps=0.0)
+    assert tr.governor_reason == "stale_decay"
+    decayed = float(tr.governor_closing_mps)
+    assert decayed < 2.8
+    # short raw TTC lands mid-hold: same-frame upgrade with authority restored
+    # from the current raw closure, never softened by the decayed value
+    active = self._update(tr, now=self.NOW + 0.20, drel_m=12.0, raw_closing_mps=3.0)
+    assert active
+    assert tr.governor_reason == "short_raw_ttc"
+    assert tr.governor_threat_corroborated
+    assert tr.governor_closing_mps >= 3.0 - 1e-6
+
+  def test_stale_clamp_stays_frozen_on_legacy_topologies(self):
+    tr = self._arm_velocity_burst(allow=False)
+    armed = float(tr.governor_closing_mps)
+    for j in range(1, 11):
+      active = self._update(tr, now=self.NOW + 0.05 * j, drel_m=44.0,
+                            raw_closing_mps=0.0, allow_calm_recovery=False)
+      assert active
+      assert tr.governor_closing_mps == pytest.approx(armed)
+    # natural expiry only
+    assert not self._update(tr, now=self.NOW + 1.05, drel_m=44.0,
+                            raw_closing_mps=0.0, allow_calm_recovery=False)
+
+  def test_stale_decay_freezes_through_evidence_dropout(self):
+    tr = self._arm_velocity_burst()
+    armed = float(tr.governor_closing_mps)
+    # a genuine evidence dropout leaves a sparse window: the density gate
+    # early-returns and the hold bridges with the clamp exactly frozen
+    active = self._update(tr, now=self.NOW + 0.55, drel_m=44.0, raw_closing_mps=0.0)
+    assert active
+    assert tr.governor_closing_mps == pytest.approx(armed)
+
+  def test_braking_lead_keeps_clamp_frozen_during_hold(self):
+    tr = self._arm_velocity_burst()
+    armed = float(tr.governor_closing_mps)
+    active = self._update(tr, now=self.NOW + 0.05, drel_m=44.0,
+                          raw_closing_mps=0.0, raw_alead_mps2=-0.25)
+    assert active
+    assert tr.governor_closing_mps == pytest.approx(armed)
+
+  @staticmethod
+  def _jittered_window(tr, now, *, drel0=45.0, jitter):
+    # mild real slope (-0.3 m/s) plus scatter whose endpoint means read
+    # ~2.1 m/s of phantom closing while the residuals scatter +-1.2 m: the
+    # excess clears the fixed margin but not the measured slope noise
+    offsets = [0.5, 0.7, 0.15, -1.2, 1.1, -0.9, 1.2, -1.1, 0.9, -1.2, -0.5, -0.1, -0.75]
+    t0 = now - 0.6
+    for i in range(13):
+      t = t0 + 0.05 * i
+      d = drel0 - 0.3 * (t - t0) + (offsets[i] if jitter else 0.0)
+      tr.closing_evidence.append((t, d, -0.5, 0.0))
+      tr.opening_position_evidence.append((t, d))
+
+  def test_position_arm_requires_significance_under_jitter(self):
+    # jittered window: legacy arms on the phantom slope, EV6 must not
+    tr = self._track()
+    self._jittered_window(tr, self.NOW, jitter=True)
+    assert self._update(tr, now=self.NOW, drel_m=44.0, raw_closing_mps=0.5,
+                        allow_calm_recovery=False)
+    tr_fixed = self._track()
+    self._jittered_window(tr_fixed, self.NOW, jitter=True)
+    assert not self._update(tr_fixed, now=self.NOW, drel_m=44.0, raw_closing_mps=0.5,
+                            allow_calm_recovery=True)
+
+  def test_position_arm_keeps_legacy_sensitivity_on_clean_stream(self):
+    # clean closing stream: residuals ~0, the fixed margin still binds and the
+    # EV6 path arms exactly like legacy
+    tr = self._track()
+    self._seed_closing_burst(tr, closing=1.6)
+    assert self._update(tr, now=self.NOW, drel_m=44.0, raw_closing_mps=1.6,
+                        allow_calm_recovery=True)
+    assert tr.governor_closing_mps > 0.0
 
 
 class TestOpeningGovernor:

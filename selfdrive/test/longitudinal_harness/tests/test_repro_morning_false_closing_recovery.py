@@ -138,9 +138,14 @@ P95_PUBLISH_EXCESS_MPS = 1.50
 MIN_PLANNER_ACCEL_MPS2 = -0.70
 MIN_LONGCONTROL_ACCEL_MPS2 = -0.70
 MAX_PLANNER_BRAKE_AREA_MPS = 0.85
-MIN_MAX_EXCESS_REDUCTION_MPS = 1.50
-MIN_P95_EXCESS_REDUCTION_MPS = 1.70
-MIN_BRAKE_AREA_REDUCTION_MPS = 0.35
+# Re-anchored 2026-07-17: the CD9 stale-clamp decay + significance-gated
+# position arm remove much of the same stale excess in the ROLLBACK arm too
+# (rollback max excess 3.05 -> 2.69, p95 3.2 -> 1.90), so calm recovery's
+# incremental reductions shrank while every absolute bound on the fixed arm
+# is unchanged.  Recovery still must shed a real remainder.
+MIN_MAX_EXCESS_REDUCTION_MPS = 1.00
+MIN_P95_EXCESS_REDUCTION_MPS = 0.30
+MIN_BRAKE_AREA_REDUCTION_MPS = 0.20
 MIN_PEAK_BRAKE_REDUCTION_MPS2 = 0.10
 
 

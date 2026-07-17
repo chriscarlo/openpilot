@@ -230,7 +230,9 @@ def test_sparse_position_guard_removes_only_the_alead_amplifier_tap() -> None:
     for row in fixed_veto
   )
   assert not any(row["mpc_lead_stability_debug"]["slot0"]["accel_corr_amplified"] for row in fixed)
-  assert min(row["mpc_lead_stability_debug"]["slot0"]["accel_corr_a_meas_lp"] for row in fixed) < -1.4
+  # scenario-strength precondition: the sparse excursion still reads clearly
+  # braking (the CD9 hardening trims the published stream, 2026-07-17)
+  assert min(row["mpc_lead_stability_debug"]["slot0"]["accel_corr_a_meas_lp"] for row in fixed) < -1.1
   assert max(row["mpc_acc_source_debug"]["approach_reacquire_lead_decel_mps2"] for row in fixed) < 0.16
   fixed_min_accel = min(row["planner_accel_mps2"] for row in fixed)
   rollback_min_accel = min(row["planner_accel_mps2"] for row in rollback)
@@ -240,10 +242,13 @@ def test_sparse_position_guard_removes_only_the_alead_amplifier_tap() -> None:
   assert fixed_min_accel > -0.45
 
   assert rollback_amp
-  assert min(row["mpc_lead_stability_debug"]["slot0"]["accel_corr_a_meas_lp"] for row in rollback) < -1.4
-  assert max(row["mpc_acc_source_debug"]["approach_reacquire_lead_decel_mps2"] for row in rollback) > 1.4
-  assert rollback_min_accel <= -0.8
-  assert fixed_min_accel - rollback_min_accel >= 0.4
+  assert min(row["mpc_lead_stability_debug"]["slot0"]["accel_corr_a_meas_lp"] for row in rollback) < -1.1
+  assert max(row["mpc_acc_source_debug"]["approach_reacquire_lead_decel_mps2"] for row in rollback) > 1.1
+  # The surrounding CD9 hold shrank with the 2026-07-17 governor hardening
+  # (stale-clamp decay), so the amplifier tap's documented harm reads smaller;
+  # it must still be a distinct brake tap the guard removes.
+  assert rollback_min_accel <= -0.65
+  assert fixed_min_accel - rollback_min_accel >= 0.3
 
 
 def test_jagged_range_genuine_braking_straddles_raw_alead_boundary_without_delaying_response() -> None:

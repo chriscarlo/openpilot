@@ -395,7 +395,15 @@ def _run_unconfirmed_alead_trust(trust_mps: str) -> SimulationResult:
 
 
 def test_unconfirmed_alead_trust_knob_preserves_braking_floor() -> None:
-  """The bounded one-frame bridge is necessary and independently reversible."""
+  """The bounded one-frame bridge is independently reversible without losing the floor.
+
+  Historically the rollback sentinel violated the 1.00 s THW floor, proving the
+  bridge necessary.  Since the CD9 hardening (significance-gated position arm +
+  instant short-raw-TTC arm + stale-clamp decay, 2026-07-17) the corroborated
+  paths carry this scenario on their own: both configurations hold the floor
+  with the same onset, and the bridge remains as defense-in-depth for windows
+  the instant paths do not cover.  The floor itself is the invariant.
+  """
   fix = _measure(_run_unconfirmed_alead_trust(FIX_UNCONFIRMED_ALEAD_TRUST))
   roll = _measure(_run_unconfirmed_alead_trust(ROLLBACK_UNCONFIRMED_ALEAD_TRUST))
 
@@ -405,8 +413,8 @@ def test_unconfirmed_alead_trust_knob_preserves_braking_floor() -> None:
     f"onset {roll['brake_onset_delay_s']}s, min THW {roll['min_thw_s']}s",
   ))
   assert fix["min_thw_s"] is not None and fix["min_thw_s"] >= MIN_THW_FLOOR_S, physics
-  assert roll["min_thw_s"] is not None and roll["min_thw_s"] < MIN_THW_FLOOR_S, physics
-  assert fix["brake_onset_delay_s"] < roll["brake_onset_delay_s"], physics
+  assert roll["min_thw_s"] is not None and roll["min_thw_s"] >= MIN_THW_FLOOR_S, physics
+  assert fix["brake_onset_delay_s"] <= roll["brake_onset_delay_s"], physics
 
 
 def test_steady_follow_noise_stays_calm() -> None:
