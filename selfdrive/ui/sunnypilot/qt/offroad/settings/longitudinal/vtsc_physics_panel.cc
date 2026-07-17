@@ -23,12 +23,12 @@ VTSCPhysicsPanel::VTSCPhysicsPanel(QWidget *parent) : QWidget(parent) {
   list_->addItem(reset_btn);
 
   QObject::connect(reset_btn, &QPushButton::clicked, [=]() {
-    params.put("VisionTurnSpeedControlPhysicsBaseline", "4.107103");
-    params.put("VisionTurnSpeedControlPhysicsAmplitude", "-2.548675");
-    params.put("VisionTurnSpeedControlPhysicsMinLatAccel", "1.5584");
-    params.put("VisionTurnSpeedControlPhysicsMaxLatAccel", "4.1071");
-    params.put("VisionTurnSpeedControlPhysicsCenter", "0.006053");
-    params.put("VisionTurnSpeedControlPhysicsSteepness", "-1024.629261");
+    params.put("VisionTurnSpeedControlPhysicsBaseline", "4.538425");
+    params.put("VisionTurnSpeedControlPhysicsAmplitude", "-3.514849");
+    params.put("VisionTurnSpeedControlPhysicsMinLatAccel", "1.0236");
+    params.put("VisionTurnSpeedControlPhysicsMaxLatAccel", "4.5384");
+    params.put("VisionTurnSpeedControlPhysicsCenter", "0.005966");
+    params.put("VisionTurnSpeedControlPhysicsSteepness", "-4147.818738");
     emit physBaseline->updateLabels();
     emit physAmplitude->updateLabels();
     emit physMinLat->updateLabels();
@@ -37,12 +37,12 @@ VTSCPhysicsPanel::VTSCPhysicsPanel(QWidget *parent) : QWidget(parent) {
 
   // Initialize defaults if unset
   auto ensure = [&](const char *k, const char *v){ if (QString::fromStdString(params.get(k)).isEmpty()) params.put(k, v); };
-  ensure("VisionTurnSpeedControlPhysicsBaseline", "4.107103");
-  ensure("VisionTurnSpeedControlPhysicsAmplitude", "-2.548675");
-  ensure("VisionTurnSpeedControlPhysicsMinLatAccel", "1.5584");
-  ensure("VisionTurnSpeedControlPhysicsMaxLatAccel", "4.1071");
-  ensure("VisionTurnSpeedControlPhysicsCenter", "0.006053");
-  ensure("VisionTurnSpeedControlPhysicsSteepness", "-1024.629261");
+  ensure("VisionTurnSpeedControlPhysicsBaseline", "4.538425");
+  ensure("VisionTurnSpeedControlPhysicsAmplitude", "-3.514849");
+  ensure("VisionTurnSpeedControlPhysicsMinLatAccel", "1.0236");
+  ensure("VisionTurnSpeedControlPhysicsMaxLatAccel", "4.5384");
+  ensure("VisionTurnSpeedControlPhysicsCenter", "0.005966");
+  ensure("VisionTurnSpeedControlPhysicsSteepness", "-4147.818738");
 
   addFloatControl(physBaseline, "VisionTurnSpeedControlPhysicsBaseline",
                   tr("Baseline Lat Accel"), tr("Baseline lateral accel on easy curves."),
