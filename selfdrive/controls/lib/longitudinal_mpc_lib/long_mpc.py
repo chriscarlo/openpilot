@@ -141,6 +141,18 @@ LEAD_KEEPUP_LEAD_DECEL_BLOCK_MPS2 = -0.25
 # ceiling out of crawl speeds so it cannot bypass the gentle stop ramp.
 LEAD_SLOWDOWN_MIN_SPEED = 2.0
 LEAD_SLOWDOWN_MIN_CLOSING_MPS = 0.10
+# Newly engaging the ceiling requires more closing than holding it: 0.10 m/s
+# sits inside published-vRel noise (EV6 vision sigma ~0.3 m/s), so a shared
+# threshold makes the ceiling arm/disarm on noise and own ~30% of the
+# accel-direction flutter at 60-80 mph (2026-07-16 review).  Once engaged the
+# original 0.10 m/s keeps it held so genuine slow approaches are not released
+# early.  The lead-decel arm path is unchanged: aLeadK is already filtered and
+# a braking lead deserves anticipation regardless of closing.
+LEAD_SLOWDOWN_ARM_CLOSING_MPS = 0.30
+# Weak closing (>= MIN, < ARM) engages only after this many consecutive
+# 20 Hz frames, so a genuine gentle dip arms within 0.15 s while single-frame
+# vRel noise does not.
+LEAD_SLOWDOWN_ARM_STREAK_FRAMES = 3
 LEAD_SLOWDOWN_MIN_LEAD_DECEL_MPS2 = 0.15
 LEAD_SLOWDOWN_HORIZON_S = 1.25
 LEAD_SLOWDOWN_SOFT_ACCEL_CAP = 0.08
@@ -1103,7 +1115,8 @@ def get_lead_slowdown_accel_ceiling(v_ego, lead, t_follow,
                                     tuning: LeadResponseTuningConfig | None = None,
                                     min_accel: float = ACCEL_MIN,
                                     max_accel: float = ACCEL_MAX,
-                                    anticipatory_enabled: bool = True) -> float | None:
+                                    anticipatory_enabled: bool = True,
+                                    armed: bool = True) -> float | None:
   tuning = LeadResponseTuningConfig.defaults() if tuning is None else tuning
   v_ego = float(v_ego)
   if lead is None or not getattr(lead, 'status', False) or v_ego < LEAD_SLOWDOWN_MIN_SPEED:
@@ -1119,7 +1132,8 @@ def get_lead_slowdown_accel_ceiling(v_ego, lead, t_follow,
   closing_speed = max(0.0, v_ego - v_lead, -v_rel)
   pullaway_speed = max(0.0, v_lead - v_ego, v_rel)
   lead_decel = max(0.0, -float(getattr(lead, 'aLeadK', 0.0) or 0.0))
-  if closing_speed < LEAD_SLOWDOWN_MIN_CLOSING_MPS and lead_decel < LEAD_SLOWDOWN_MIN_LEAD_DECEL_MPS2:
+  closing_engage_gate = LEAD_SLOWDOWN_MIN_CLOSING_MPS if armed else LEAD_SLOWDOWN_ARM_CLOSING_MPS
+  if closing_speed < closing_engage_gate and lead_decel < LEAD_SLOWDOWN_MIN_LEAD_DECEL_MPS2:
     return None
 
   d_rel = float(getattr(lead, 'dRel', 0.0) or 0.0)
@@ -1742,6 +1756,7 @@ class LongitudinalMpc:
     self.lead_slowdown_accel_ceiling = None
     self._lead_slowdown_accel_ceiling_last = None
     self._lead_slowdown_accel_ceiling_last_t = None
+    self._slowdown_weak_closing_streak = 0
     self.gap_reclaim_obstacle_push = 0.0
     self.gap_reclaim_stabilization_push = 0.0
     self.gap_reclaim_projection_scale = 1.0
@@ -2746,6 +2761,25 @@ class LongitudinalMpc:
     )
     self.gap_reclaim_accel_floor = float(reclaim_intent)
     self.lead_keepup_accel_floor = float(keepup_intent)
+    # Weak closing must persist briefly before it can newly engage the ceiling:
+    # single-frame published-vRel noise (EV6 vision sigma ~0.3 m/s) used to
+    # arm/disarm it at the 0.10 m/s boundary.  Strong closing still arms on the
+    # first frame, and an engaged ceiling keeps the original hold threshold.
+    frame_closing = 0.0
+    for streak_lead in (raw_lead, filtered_lead):
+      if streak_lead is not None and getattr(streak_lead, 'status', False):
+        v_lead_val = float(getattr(streak_lead, 'vLead', 0.0) or 0.0)
+        v_rel_val = float(getattr(streak_lead, 'vRel', v_lead_val - float(self.x0[1])) or 0.0)
+        frame_closing = max(frame_closing, float(self.x0[1]) - v_lead_val, -v_rel_val)
+    if frame_closing >= LEAD_SLOWDOWN_MIN_CLOSING_MPS:
+      self._slowdown_weak_closing_streak += 1
+    else:
+      self._slowdown_weak_closing_streak = 0
+    slowdown_ceiling_armed = (
+      self._lead_slowdown_accel_ceiling_last is not None or
+      frame_closing >= LEAD_SLOWDOWN_ARM_CLOSING_MPS or
+      self._slowdown_weak_closing_streak >= LEAD_SLOWDOWN_ARM_STREAK_FRAMES
+    )
     slowdown_ceilings = [
       get_lead_slowdown_accel_ceiling(
         float(self.x0[1]),
@@ -2755,6 +2789,7 @@ class LongitudinalMpc:
         min_accel=ACCEL_MIN,
         max_accel=ACCEL_MAX,
         anticipatory_enabled=anticipatory_slowdown_enabled,
+        armed=slowdown_ceiling_armed,
       )
       for lead in (raw_lead, filtered_lead)
     ]

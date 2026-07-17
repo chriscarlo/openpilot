@@ -289,6 +289,26 @@ class TestLeadInteractionHeuristics:
     assert ceiling is not None
     assert 0.0 < ceiling < 0.50
 
+  def test_slowdown_ceiling_noise_scale_closing_needs_arming_hysteresis(self):
+    """Published vRel noise on the radarless EV6 is ~0.3 m/s sigma; closing at
+    that scale must not newly engage the ceiling (it churned arm/disarm and
+    owned ~30% of freeway accel flutter), while an already-engaged ceiling
+    keeps the original 0.10 m/s hold so real slow approaches are not dropped."""
+    tuning = LeadResponseTuningConfig(lead_slowdown_max_decel=6.0)
+    noise_closing = _make_lead(d_rel=50.0, v_lead=33.3, a_lead=0.0)
+    setattr(noise_closing, "vRel", -0.20)
+
+    assert get_lead_slowdown_accel_ceiling(33.5, noise_closing, 1.3, tuning, armed=False) is None
+    assert get_lead_slowdown_accel_ceiling(33.5, noise_closing, 1.3, tuning, armed=True) is not None
+
+    real_closing = _make_lead(d_rel=50.0, v_lead=33.15, a_lead=0.0)
+    setattr(real_closing, "vRel", -0.35)
+    assert get_lead_slowdown_accel_ceiling(33.5, real_closing, 1.3, tuning, armed=False) is not None
+
+    braking_hint = _make_lead(d_rel=50.0, v_lead=33.45, a_lead=-0.25)
+    setattr(braking_hint, "vRel", -0.05)
+    assert get_lead_slowdown_accel_ceiling(33.5, braking_hint, 1.3, tuning, armed=False) is not None
+
   def test_slowdown_ceiling_matches_confirmed_lead_decel(self):
     tuning = LeadResponseTuningConfig(lead_slowdown_strength=1.0, lead_slowdown_max_decel=6.0)
     braking_lead = _make_lead(d_rel=48.5, v_lead=32.6, a_lead=-1.2)
