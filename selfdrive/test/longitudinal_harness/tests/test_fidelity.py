@@ -71,6 +71,7 @@ def _row(
   association: str | None = None,
   context: str | None = None,
   nested_statuses: bool = False,
+  radard_contract_version: object = 1,
 ) -> dict:
   plan_reference = {
     "aTargetMps2": expected_a_target_mps2,
@@ -93,7 +94,7 @@ def _row(
     "longitudinalPlan": plan_reference,
     "radardGateEligible": True,
     "radardServiceAssociationProvenance": {
-      "contract": {"status": "exact", "version": 1},
+      "contract": {"status": "exact", "version": radard_contract_version},
       "modelV2": {"status": "exact"},
       "carState": {"status": "exact"},
       "liveTracks": {"status": "exact", "emptyPayloadValid": True},
@@ -151,8 +152,14 @@ def _row(
   }
 
 
-def test_radar_can_pass_while_planner_is_not_evaluated() -> None:
-  result = _evaluate([_row(index) for index in range(40)])
+@pytest.mark.parametrize("radard_contract_version", (1, 2))
+def test_supported_radard_contract_can_pass_while_planner_is_not_evaluated(
+  radard_contract_version: int,
+) -> None:
+  result = _evaluate([
+    _row(index, radard_contract_version=radard_contract_version)
+    for index in range(40)
+  ])
 
   assert result["radar"]["status"] == PASS
   assert result["planner"]["status"] == NOT_EVALUATED
@@ -163,6 +170,24 @@ def test_radar_can_pass_while_planner_is_not_evaluated() -> None:
   }
   assert result["overall"]["status"] == NOT_EVALUATED
   assert result["overall"]["passed"] is False
+
+
+@pytest.mark.parametrize(
+  "radard_contract_version",
+  (0, 3, True, "2", None),
+  ids=("zero", "unsupported", "bool", "string", "missing"),
+)
+def test_unsupported_or_invalid_radard_contract_versions_fail_closed(
+  radard_contract_version: object,
+) -> None:
+  result = _evaluate(
+    [_row(0, radard_contract_version=radard_contract_version)],
+    thresholds=_SHORT_COVERAGE_THRESHOLDS,
+  )
+
+  assert result["radar"]["status"] == NOT_EVALUATED
+  assert result["radar"]["coverage"]["scorable_samples"] == 0
+  assert result["radar"]["exclusion_reasons"] == {"inexact_radard_replay_contract": 2}
 
 
 def test_explicit_exact_planner_metadata_passes() -> None:

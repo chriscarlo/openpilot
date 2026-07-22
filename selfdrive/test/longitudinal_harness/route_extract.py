@@ -30,6 +30,11 @@ from .catalog import (
 )
 from .config import captured_param_manifest, DEFAULT_PARAM_VALUES
 from .inputs import LeadDirective, SnapshotBundle, StepInput, serialize_model_frame, write_snapshot_bundle
+from .planner_state import build_route_start_initialization_claim, ROUTE_START_DIAGNOSTIC_REASON
+from .replay_contracts import (
+  is_supported_radard_replay_version,
+  PLANNER_REPLAY_INPUTS_VERSION,
+)
 
 
 EXTRACTOR_VERSION = "ev6_v11_radard_replay_v2"
@@ -69,11 +74,6 @@ MAX_EXACT_REPLAY_FRAME_GAP_S = 0.075
 RADARD_DEPENDENCY_WARMUP_S = 15.0
 LONGITUDINAL_PLAN_SP_PAIR_MAX_NS = 20_000_000
 MPH_TO_MPS = 0.44704
-PLANNER_REPLAY_INPUTS_VERSION = 1
-RADARD_REPLAY_INPUTS_VERSION = 2
-RADARD_REPLAY_INPUTS_SUPPORTED_VERSIONS = (1, RADARD_REPLAY_INPUTS_VERSION)
-
-
 class EpisodeNotReplayableError(ValueError):
   """A detected episode lacks required recorded dependencies for faithful replay."""
 PLANNER_CRITICAL_SERVICES = (
@@ -247,6 +247,7 @@ class RouteScanResult:
   observed_params: dict[str, str]
   frames: list[EpisodeFrame]
   service_join_diagnostics: dict[str, Any] = field(default_factory=dict)
+  planner_route_start_provenance: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -468,6 +469,133 @@ class RouteReplayIndex:
   planner_input_mono_times_by_service: dict[str, tuple[int, ...]] = field(default_factory=dict)
   conflicting_input_mono_times_by_service: dict[str, tuple[int, ...]] = field(default_factory=dict)
   identical_duplicate_counts_by_service: dict[str, int] = field(default_factory=dict)
+  planner_route_start_provenance: dict[str, Any] = field(default_factory=dict)
+
+
+def _build_planner_route_start_provenance(
+  *,
+  segment_rows,
+  capture_first_log_mono_time_ns: int | None,
+  capture_last_log_mono_time_ns: int | None,
+  start_of_route_mono_times_ns: list[int],
+  process_identities: dict[str, set[tuple[int, int]]],
+  manager_plannerd_observations: list[tuple[int, int, bool, bool]],
+  model_v2_mono_times_ns: list[int],
+  plans: list[CachedLongitudinalPlan],
+  paired_plans: list[CachedLongitudinalPlan],
+  plan_sp_messages: list[CachedLongitudinalPlanSP],
+) -> dict[str, Any]:
+  """Establish a diagnostic replay from the daemons' constructor boundary.
+
+  A route slice cannot satisfy this contract. The capture must begin before
+  both daemon PIDs, contain segment zero and every following segment, and show
+  the first planner publication consuming the first logged model publication.
+  This is intentionally stricter than numerical convergence, but it is not a
+  formal checkpoint: rlogs lack writer-attested publication completeness.
+  """
+  reasons: list[str] = []
+  segment_indices = sorted({int(row["seg_idx"]) for row in segment_rows})
+  segments_contiguous = bool(
+    segment_indices and
+    segment_indices[0] == 0 and
+    segment_indices == list(range(segment_indices[-1] + 1))
+  )
+  if not segments_contiguous:
+    reasons.append("loaded route does not contain a contiguous segment-zero prefix")
+  if capture_first_log_mono_time_ns is None or capture_last_log_mono_time_ns is None:
+    reasons.append("capture has no logMonoTime bounds")
+  if len(start_of_route_mono_times_ns) != 1:
+    reasons.append("capture does not contain exactly one startOfRoute sentinel")
+
+  planner_identities = process_identities.get("plannerd", set())
+  radard_identities = process_identities.get("radard", set())
+  if len(planner_identities) != 1:
+    reasons.append("plannerd process lifetime is missing or non-unique")
+  if len(radard_identities) != 1:
+    reasons.append("radard process lifetime is missing or non-unique")
+  planner_pid, planner_start_ns = next(iter(planner_identities), (0, 0))
+  _, radard_start_ns = next(iter(radard_identities), (0, 0))
+
+  first_plan = min(paired_plans, key=lambda plan: plan.log_mono_time_ns) if paired_plans else None
+  first_model_ns = min(model_v2_mono_times_ns, default=0)
+  first_radar_ns = 0
+  if first_plan is None:
+    reasons.append("capture has no longitudinalPlan publication")
+  else:
+    if first_plan.plan_sp is not None:
+      first_radar_ns = int(first_plan.plan_sp.replay_input_clocks_ns.get("radarState", 0))
+    if int(first_plan.model_mono_time_ns) != first_model_ns:
+      reasons.append("first planner publication does not consume the first logged modelV2 publication")
+    if planner_start_ns > 0 and int(first_plan.log_mono_time_ns) <= planner_start_ns:
+      reasons.append("first planner publication does not follow the captured plannerd process start")
+
+  paired_exactly = bool(
+    plans and
+    len(paired_plans) == len(plans) == len(plan_sp_messages) and
+    len({int(plan.model_mono_time_ns) for plan in plans}) == len(plans) and
+    all(
+      plan.plan_sp is not None and
+      plan.plan_sp.replay_inputs_valid and
+      plan.plan_sp.replay_inputs_version == PLANNER_REPLAY_INPUTS_VERSION and
+      plan.plan_sp.replay_plan_log_mono_time_ns == plan.log_mono_time_ns and
+      plan.plan_sp.replay_input_clocks_ns.get("modelV2") == plan.model_mono_time_ns
+      for plan in paired_plans
+    )
+  )
+  if not paired_exactly:
+    reasons.append("planner publications are not one-to-one paired with exact replayInputs")
+
+  manager_identity_exact = bool(
+    planner_pid > 0 and
+    any(
+      pid == planner_pid and running and should_be_running and
+      (first_plan is None or mono_time_ns <= first_plan.log_mono_time_ns)
+      for mono_time_ns, pid, running, should_be_running in manager_plannerd_observations
+    ) and
+    all(
+      not (running and should_be_running) or pid == planner_pid
+      for _, pid, running, should_be_running in manager_plannerd_observations
+    )
+  )
+  if not manager_identity_exact:
+    reasons.append("managerState does not bind the captured planner publications to one plannerd PID")
+
+  if (
+    capture_first_log_mono_time_ns is not None and
+    (planner_start_ns <= capture_first_log_mono_time_ns or radard_start_ns <= capture_first_log_mono_time_ns)
+  ):
+    reasons.append("capture does not begin before both daemon process starts")
+  if first_plan is not None and any(plan.log_mono_time_ns < planner_start_ns for plan in plans):
+    reasons.append("capture contains planner output predating the proven plannerd process")
+  if first_radar_ns <= 0:
+    reasons.append("first planner publication has no exact radarState dependency")
+
+  proof = {
+    "status": "diagnostic" if not reasons else "missing",
+    "version": 1 if not reasons else 0,
+    "formalFidelityEligible": False,
+    "sourcePublicationCompletenessAttested": False,
+    "loadedSegmentStart": segment_indices[0] if segment_indices else None,
+    "loadedSegmentEnd": segment_indices[-1] if segment_indices else None,
+    "segmentsContiguous": segments_contiguous,
+    "captureFirstLogMonoTimeNs": capture_first_log_mono_time_ns,
+    "captureLastLogMonoTimeNs": capture_last_log_mono_time_ns,
+    "startOfRouteMonoTimeNs": start_of_route_mono_times_ns[0] if len(start_of_route_mono_times_ns) == 1 else None,
+    "plannerProcessPid": planner_pid or None,
+    "plannerProcessStartMonoTimeNs": planner_start_ns or None,
+    "radardProcessStartMonoTimeNs": radard_start_ns or None,
+    "plannerProcessUnique": len(planner_identities) == 1,
+    "radardProcessUnique": len(radard_identities) == 1,
+    "plannerManagerIdentityExact": manager_identity_exact,
+    "plannerPublicationsPairedExactly": paired_exactly,
+    "plannerPublicationCount": len(plans),
+    "firstPlannerPlanMonoTimeNs": None if first_plan is None else int(first_plan.log_mono_time_ns),
+    "firstPlannerModelMonoTimeNs": None if first_plan is None else int(first_plan.model_mono_time_ns),
+    "firstPlannerRadarStateMonoTimeNs": first_radar_ns or None,
+    "firstPlannerModelIsFirstLoggedModel": bool(first_plan is not None and int(first_plan.model_mono_time_ns) == first_model_ns),
+    "reasons": [*reasons, *([] if reasons else [ROUTE_START_DIAGNOSTIC_REASON])],
+  }
+  return proof
 
 
 def _enum_name(value: Any) -> str:
@@ -1138,10 +1266,43 @@ def _cache_route_replay_inputs(segment_rows) -> RouteReplayIndex:
   param_change_mono_times_ns: list[int] = []
   rti_state_count = 0
   rti_zero_threats_proven = True
+  capture_first_log_mono_time_ns: int | None = None
+  capture_last_log_mono_time_ns: int | None = None
+  start_of_route_mono_times_ns: list[int] = []
+  process_identities: dict[str, set[tuple[int, int]]] = {"plannerd": set(), "radard": set()}
+  manager_plannerd_observations: list[tuple[int, int, bool, bool]] = []
+  model_v2_mono_times_ns: list[int] = []
   for segment_row in segment_rows:
     for msg in LogReader(segment_row["rlog_path"]):
       which = msg.which()
       mono_time_ns = int(msg.logMonoTime)
+      if capture_first_log_mono_time_ns is None or mono_time_ns < capture_first_log_mono_time_ns:
+        capture_first_log_mono_time_ns = mono_time_ns
+      if capture_last_log_mono_time_ns is None or mono_time_ns > capture_last_log_mono_time_ns:
+        capture_last_log_mono_time_ns = mono_time_ns
+      if which == "sentinel" and str(msg.sentinel.type) == "startOfRoute":
+        start_of_route_mono_times_ns.append(mono_time_ns)
+      elif which == "procLog":
+        for process in msg.procLog.procs:
+          command = tuple(str(value) for value in process.cmdline)
+          process_key = (
+            "plannerd" if "selfdrive.controls.plannerd" in command else
+            "radard" if "selfdrive.controls.radard" in command else None
+          )
+          if process_key is not None and int(process.pid) > 0 and float(process.startTime) > 0.0:
+            process_identities[process_key].add((
+              int(process.pid),
+              int(round(float(process.startTime) * 1e9)),
+            ))
+      elif which == "managerState":
+        for process in msg.managerState.processes:
+          if str(process.name) == "plannerd":
+            manager_plannerd_observations.append((
+              mono_time_ns,
+              int(process.pid),
+              bool(process.running),
+              bool(process.shouldBeRunning),
+            ))
       if which == "initData":
         cached_params.update(_extract_init_params(msg.initData))
       elif which == "carControlSP":
@@ -1216,6 +1377,7 @@ def _cache_route_replay_inputs(segment_rows) -> RouteReplayIndex:
           identical_duplicate_counts=identical_duplicate_counts,
         )
       elif which == "modelV2":
+        model_v2_mono_times_ns.append(mono_time_ns)
         raw_model = serialize_model_frame(msg.modelV2)
         raw_model["logMonoTimeNs"] = mono_time_ns
         _record_route_core_payload(
@@ -1300,6 +1462,18 @@ def _cache_route_replay_inputs(segment_rows) -> RouteReplayIndex:
         )
 
   paired_plans = _pair_longitudinal_plans_with_sp(plans, plan_sp_messages)
+  planner_route_start_provenance = _build_planner_route_start_provenance(
+    segment_rows=segment_rows,
+    capture_first_log_mono_time_ns=capture_first_log_mono_time_ns,
+    capture_last_log_mono_time_ns=capture_last_log_mono_time_ns,
+    start_of_route_mono_times_ns=start_of_route_mono_times_ns,
+    process_identities=process_identities,
+    manager_plannerd_observations=manager_plannerd_observations,
+    model_v2_mono_times_ns=model_v2_mono_times_ns,
+    plans=plans,
+    paired_plans=paired_plans,
+    plan_sp_messages=plan_sp_messages,
+  )
   plans_by_model_mono_time: dict[int, CachedLongitudinalPlan] = {}
   ambiguous_plan_model_clocks: set[int] = set()
   for plan in paired_plans:
@@ -1330,6 +1504,7 @@ def _cache_route_replay_inputs(segment_rows) -> RouteReplayIndex:
       if clocks
     },
     identical_duplicate_counts_by_service=dict(sorted(identical_duplicate_counts.items())),
+    planner_route_start_provenance=planner_route_start_provenance,
   )
 
 
@@ -1403,7 +1578,7 @@ def load_route_scan(conn, route_row, *, strict_service_joins: bool = False) -> R
         # the exact service clocks introduced by v1 are unchanged, so both
         # versions remain valid dependency contracts for route extraction.
         radar_replay_supported = bool(
-          radar_replay_valid and radar_replay_version in RADARD_REPLAY_INPUTS_SUPPORTED_VERSIONS
+          radar_replay_valid and is_supported_radard_replay_version(radar_replay_version)
         )
         built_in_car_state_clock = int(msg.radarState.carStateMonoTime)
         built_in_model_clock = int(msg.radarState.mdMonoTime)
@@ -1803,13 +1978,15 @@ def load_route_scan(conn, route_row, *, strict_service_joins: bool = False) -> R
     observed_params=observed_params,
     frames=frames,
     service_join_diagnostics=service_join_diagnostics,
+    planner_route_start_provenance=dict(replay_index.planner_route_start_provenance),
   )
 
 
 def extract_ev6_episodes(conn,
                          *,
                          route_keys: list[str] | None = None,
-                         bundle_root: str | Path = ".cache/longitudinal_harness/snapshots") -> list[dict[str, Any]]:
+                         bundle_root: str | Path = ".cache/longitudinal_harness/snapshots",
+                         route_start_replay: bool = False) -> list[dict[str, Any]]:
   bundle_root_path = Path(bundle_root)
   bundle_root_path.mkdir(parents=True, exist_ok=True)
   recorded = []
@@ -1819,7 +1996,12 @@ def extract_ev6_episodes(conn,
     candidates = detect_episode_candidates(scan)
     for candidate in candidates:
       try:
-        bundle_path = write_episode_bundle(scan, candidate, bundle_root_path)
+        bundle_path = write_episode_bundle(
+          scan,
+          candidate,
+          bundle_root_path,
+          **({"route_start_replay": True} if route_start_replay else {}),
+        )
       except EpisodeNotReplayableError as exc:
         recorded.append({
           "routeId": scan.route_id,
@@ -1957,25 +2139,59 @@ def _is_false_closing_sample(frame: EpisodeFrame) -> bool:
   )
 
 
-def write_episode_bundle(scan: RouteScanResult, candidate: EpisodeCandidate, bundle_root: Path) -> Path:
+def write_episode_bundle(
+  scan: RouteScanResult,
+  candidate: EpisodeCandidate,
+  bundle_root: Path,
+  *,
+  route_start_replay: bool = False,
+) -> Path:
   episode_root = bundle_root / f"route_{scan.route_id}_{scan.metadata.route_key}" / f"{candidate.episode_type}_{int(round(candidate.event_t_s * 1000.0)):09d}"
   candidate_first_publish_ns = candidate.frames[0].radar_state_log_mono_time_ns
   candidate_first_idx = next(
     idx for idx, frame in enumerate(scan.frames)
     if frame.radar_state_log_mono_time_ns == candidate_first_publish_ns
   )
-  dependency_start_idx = candidate_first_idx
-  while dependency_start_idx > 0:
-    previous = scan.frames[dependency_start_idx - 1]
-    current = scan.frames[dependency_start_idx]
-    if not (0.0 < current.t_s - previous.t_s <= MAX_EXACT_REPLAY_FRAME_GAP_S):
-      break
-    dependency_start_idx -= 1
-    # Include the first frame that reaches/passes the warmup boundary. At the
-    # normal 20 Hz RadarD cadence, stopping before it leaves the evaluation
-    # window about one frame short of the strict 15.0 s coverage requirement.
-    if candidate.frames[0].t_s - previous.t_s >= RADARD_DEPENDENCY_WARMUP_S:
-      break
+  route_start_seed_times: set[int] = set()
+  if route_start_replay:
+    proof = scan.planner_route_start_provenance
+    if proof.get("status") != "diagnostic":
+      raise EpisodeNotReplayableError(
+        f"route-start planner replay for {candidate.episode_key} is unavailable: " +
+        "; ".join(str(reason) for reason in proof.get("reasons", ["missing process-start diagnostic proof"]))
+      )
+    first_plan_ns = int(proof["firstPlannerPlanMonoTimeNs"])
+    first_planner_idx = next((
+      idx for idx, frame in enumerate(scan.frames)
+      if frame.longitudinal_plan_log_mono_time_ns == first_plan_ns
+    ), None)
+    if first_planner_idx is None:
+      raise EpisodeNotReplayableError("route-start proof names a first planner publication absent from the loaded scan")
+    first_radar_ns = int(proof["firstPlannerRadarStateMonoTimeNs"])
+    seed_idx = next((
+      idx for idx, frame in enumerate(scan.frames[:first_planner_idx + 1])
+      if frame.radar_state_log_mono_time_ns == first_radar_ns
+    ), None)
+    if seed_idx is None or seed_idx > first_planner_idx:
+      raise EpisodeNotReplayableError("route-start proof names a radarState outside the first planner frame")
+    if candidate_first_idx <= first_planner_idx:
+      raise EpisodeNotReplayableError("episode begins before the first proven planner publication")
+    dependency_start_idx = seed_idx
+    if seed_idx < first_planner_idx:
+      route_start_seed_times.add(first_radar_ns)
+  else:
+    dependency_start_idx = candidate_first_idx
+    while dependency_start_idx > 0:
+      previous = scan.frames[dependency_start_idx - 1]
+      current = scan.frames[dependency_start_idx]
+      if not (0.0 < current.t_s - previous.t_s <= MAX_EXACT_REPLAY_FRAME_GAP_S):
+        break
+      dependency_start_idx -= 1
+      # Include the first frame that reaches/passes the warmup boundary. At the
+      # normal 20 Hz RadarD cadence, stopping before it leaves the evaluation
+      # window about one frame short of the strict 15.0 s coverage requirement.
+      if candidate.frames[0].t_s - previous.t_s >= RADARD_DEPENDENCY_WARMUP_S:
+        break
   dependency_frames = scan.frames[dependency_start_idx:candidate_first_idx]
   replay_frames = [*dependency_frames, *candidate.frames]
   replay_publish_times = {frame.radar_state_log_mono_time_ns for frame in replay_frames}
@@ -2006,16 +2222,37 @@ def write_episode_bundle(scan: RouteScanResult, candidate: EpisodeCandidate, bun
     }.values(),
     key=lambda frame: frame.log_mono_time,
   )
+  if route_start_replay:
+    post_start_param_changes = [
+      frame for frame in bundle_frames[1:]
+      if frame.param_updates
+    ]
+    if post_start_param_changes:
+      examples = [
+        {
+          "logMonoTimeNs": frame.log_mono_time,
+          "keys": sorted(frame.param_updates),
+        }
+        for frame in post_start_param_changes[:3]
+      ]
+      raise EpisodeNotReplayableError(
+        "route-start planner replay has behavior-manifest parameter transitions without an exact planner read clock: " +
+        json.dumps(examples, separators=(",", ":"), sort_keys=True)
+      )
   dependency_frame_times = {frame.radar_state_log_mono_time_ns for frame in dependency_frames}
-  scheduler_seed_times = {
+  scheduler_seed_times = route_start_seed_times | {
     frame.radar_state_log_mono_time_ns
     for frame in scheduler_seed_frames
     if frame.radar_state_log_mono_time_ns not in replay_publish_times
   }
   warmup_ready_t_s = bundle_frames[0].t_s + RADARD_DEPENDENCY_WARMUP_S
+  raw_required_frames = [
+    frame for frame in bundle_frames
+    if frame.radar_state_log_mono_time_ns not in route_start_seed_times
+  ]
   raw_frame_complete = [
     frame.raw_model is not None and frame.raw_lead_one is not None and frame.raw_lead_two is not None
-    for frame in bundle_frames
+    for frame in raw_required_frames
   ]
   if any(raw_frame_complete) and not all(raw_frame_complete):
     missing_count = len(raw_frame_complete) - sum(raw_frame_complete)
@@ -2026,17 +2263,17 @@ def write_episode_bundle(scan: RouteScanResult, candidate: EpisodeCandidate, bun
     frame.live_tracks_log_mono_time_ns == 0 and
     isinstance(frame.radard_service_association_provenance.get("liveTracks"), dict) and
     frame.radard_service_association_provenance["liveTracks"].get("status") == "exact"
-    for frame in bundle_frames
+    for frame in raw_required_frames
   )
   if raw_replay and not scan.metadata.radar_unavailable and not exact_live_tracks_not_received:
     raise EpisodeNotReplayableError(
       f"raw RadarD replay for {candidate.episode_key} cannot substitute empty liveTracks on a radar-capable capture " +
-      "without an exact v1 zero clock"
+      "without an exact supported replay contract with a zero liveTracks clock"
     )
   required_service_clocks_complete = [
     frame.model_v2_log_mono_time_ns is not None and frame.model_v2_log_mono_time_ns > 0 and
     frame.car_state_log_mono_time_ns is not None and frame.car_state_log_mono_time_ns > 0
-    for frame in bundle_frames
+    for frame in raw_required_frames
   ]
   if raw_replay and not all(required_service_clocks_complete):
     missing_count = len(required_service_clocks_complete) - sum(required_service_clocks_complete)
@@ -2048,8 +2285,9 @@ def write_episode_bundle(scan: RouteScanResult, candidate: EpisodeCandidate, bun
   prev_status = {"leadOne": False, "leadTwo": False}
   event_marked = False
   for frame_idx, frame in enumerate(bundle_frames):
-    source_lead_one = frame.raw_lead_one if raw_replay else frame.lead_one
-    source_lead_two = frame.raw_lead_two if raw_replay else frame.lead_two
+    published_seed = frame.radar_state_log_mono_time_ns in route_start_seed_times
+    source_lead_one = frame.raw_lead_one if raw_replay and not published_seed else frame.lead_one
+    source_lead_two = frame.raw_lead_two if raw_replay and not published_seed else frame.lead_two
     assert source_lead_one is not None and source_lead_two is not None
     lead_one = _directive_from_frame(
       source_lead_one,
@@ -2120,10 +2358,11 @@ def write_episode_bundle(scan: RouteScanResult, candidate: EpisodeCandidate, bun
       recorded_a_ego_mps2=frame.a_ego_mps2 if raw_replay else None,
       long_active=frame.long_active if raw_replay else None,
       personality=frame.personality if raw_replay else None,
-      raw_model=frame.raw_model if raw_replay else None,
-      recorded_model_v2_log_mono_time_ns=frame.model_v2_log_mono_time_ns if raw_replay else None,
-      recorded_car_state_log_mono_time_ns=frame.car_state_log_mono_time_ns if raw_replay else None,
-      recorded_live_tracks_log_mono_time_ns=frame.live_tracks_log_mono_time_ns if raw_replay else None,
+      raw_model=frame.raw_model if raw_replay and not published_seed else None,
+      recorded_perception_mode="published_seed" if published_seed else "radard" if raw_replay else None,
+      recorded_model_v2_log_mono_time_ns=frame.model_v2_log_mono_time_ns if raw_replay and not published_seed else None,
+      recorded_car_state_log_mono_time_ns=frame.car_state_log_mono_time_ns if raw_replay and not published_seed else None,
+      recorded_live_tracks_log_mono_time_ns=frame.live_tracks_log_mono_time_ns if raw_replay and not published_seed else None,
       radard_service_association_status=frame.radard_service_association_status if raw_replay else None,
       radard_service_association_provenance=(
         dict(frame.radard_service_association_provenance) if raw_replay else {}
@@ -2166,6 +2405,25 @@ def write_episode_bundle(scan: RouteScanResult, candidate: EpisodeCandidate, bun
     prev_status["leadTwo"] = source_lead_two.status
 
   episode_params = dict(bundle_frames[0].params_snapshot or scan.observed_params)
+  planner_state_claim: dict[str, Any] | None = None
+  if route_start_replay:
+    non_seed_steps = [
+      step for step in timeline
+      if step.recorded_perception_mode != "published_seed"
+    ]
+    if not non_seed_steps or any(step.recorded_longitudinal_plan_log_mono_time_ns is None for step in non_seed_steps):
+      raise EpisodeNotReplayableError("route-start prefix contains an unpaired planner update after its scheduler seed")
+    planner_state_claim = build_route_start_initialization_claim(
+      route_start_proof=scan.planner_route_start_provenance,
+      steps=timeline,
+      # Production plannerd constructs LongitudinalPlanner(CP) with these
+      # defaults; the recorded ego state remains a separate replay input.
+      initial_speed_mps=0.0,
+      initial_accel_mps2=0.0,
+      params=episode_params,
+    )
+    for step in timeline:
+      step.replay_reference["plannerStateInitializationProvenance"] = dict(planner_state_claim)
   association_status_counts: dict[str, int] = {}
   for step in timeline:
     status = step.radard_service_association_status or "missing"
@@ -2209,6 +2467,10 @@ def write_episode_bundle(scan: RouteScanResult, candidate: EpisodeCandidate, bun
       "radardReadyFrameCount": len(ready_steps),
       "radardDependencyWarmupS": RADARD_DEPENDENCY_WARMUP_S,
       "dependencyHistoryS": max(0.0, candidate.frames[0].t_s - bundle_frames[0].t_s),
+      "plannerStateInitializationMethod": "route_start_replay" if planner_state_claim is not None else "missing",
+      "plannerRouteStartProvenance": (
+        dict(scan.planner_route_start_provenance) if planner_state_claim is not None else {}
+      ),
       "liveTracksPayloadMode": (
         "empty_not_received" if raw_replay and exact_live_tracks_not_received else
         "empty_radarless" if raw_replay else
@@ -2684,7 +2946,7 @@ def _replay_reference_from_frame(frame: EpisodeFrame) -> dict[str, Any]:
       "version": 0,
       "appliedAtReplayStart": False,
       "reason": (
-        "RadarState/longitudinalPlan replay-inputs v1 captures external service snapshots "
+        "RadarState replay-inputs v1/v2 and longitudinalPlan replay-inputs v1 capture external service snapshots "
         "but not the recurrent LongitudinalPlanner/LongitudinalMpc state"
       ),
     },

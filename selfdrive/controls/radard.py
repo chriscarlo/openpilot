@@ -18,7 +18,7 @@ from openpilot.selfdrive.controls.lib.longitudinal_live_tune import (
 )
 
 from opendbc.car import structs
-from opendbc.car.hyundai.values import HyundaiFlags
+from opendbc.car.hyundai.values import CAR, HyundaiFlags
 from opendbc.sunnypilot.car.hyundai.values import HyundaiFlagsSP
 
 
@@ -71,15 +71,23 @@ OPENING_GOVERNOR_HARD_CLOSING_MPS = MODEL_LEAD_STRONG_CLOSING_MPS
 # not live-tunable: permissive diagnostic values must never turn a sustained
 # closure into an opening-governor comfort case.
 OPENING_GOVERNOR_WEAK_CLOSING_MAX_MPS = 1.0
-# A held CD9 clamp may reconcile to calm current velocity only after a robust
-# longer position horizon independently agrees the closure is mild. The
-# original braking-lead road case closed 2.4-6 m/s on position; today's steady
-# lead false-closing plateaus stayed at or below ~1.1 m/s on this horizon.
-CLOSING_GOVERNOR_RECOVERY_POSITION_WINDOW_S = 1.25
+# A held CD9 clamp may reconcile only after a robust longer position horizon
+# independently agrees the closure is mild. The 2026-07-16 freeway trace had
+# clustered +/-3-6 m raw-range discontinuities (one 12.6 m reversal), so use a
+# Theil-Sen slope over well-separated pairs instead of endpoint means. Keep a
+# separate recent estimator for the actual floor: after a genuine slowdown ends
+# the long proof still contains the old close, while the recent trend must allow
+# a prompt coast/accel transition. The verified stopping-lead road case closed
+# 2.4-6 m/s on both horizons.
+CLOSING_GOVERNOR_RECOVERY_POSITION_WINDOW_S = 2.0
+CLOSING_GOVERNOR_RECOVERY_FLOOR_WINDOW_S = 1.25
 CLOSING_GOVERNOR_RECOVERY_MAX_POSITION_CLOSING_MPS = 1.25
-CLOSING_GOVERNOR_RECOVERY_MIN_POSITION_SPAN_S = 1.0
-CLOSING_GOVERNOR_RECOVERY_MIN_POSITION_SAMPLES = 16
+CLOSING_GOVERNOR_RECOVERY_MIN_POSITION_SPAN_S = 1.6
+CLOSING_GOVERNOR_RECOVERY_MIN_POSITION_SAMPLES = 24
+CLOSING_GOVERNOR_RECOVERY_FLOOR_MIN_POSITION_SPAN_S = 1.0
+CLOSING_GOVERNOR_RECOVERY_FLOOR_MIN_POSITION_SAMPLES = 16
 CLOSING_GOVERNOR_RECOVERY_MAX_SAMPLE_GAP_S = 0.075
+CLOSING_GOVERNOR_RECOVERY_MIN_PAIR_SPAN_S = 0.5
 CLOSING_GOVERNOR_RECOVERY_MIN_RAW_TTC_S = 12.0
 MODEL_LEAD_CENTER_PATH_GATE_M = 2.6
 MODEL_LEAD_CUTIN_VLAT_MPS = 0.7
@@ -275,6 +283,9 @@ class ModelLeadTrack:
   accel_corr_calm_position_sample_count: int = 0
   accel_corr_calm_position_window_span_s: float = 0.0
   accel_corr_calm_position_max_sample_gap_s: float = 0.0
+  # Current-frame raw model braking provenance. Unlike the generic
+  # steady-parity threat bit, this cannot be asserted by a jagged range step.
+  accel_corr_raw_hard_braking: bool = False
 
   @classmethod
   def from_lead_dict(cls, identifier: int, lead_dict: dict[str, Any], now: float, lead_slot: int) -> "ModelLeadTrack":
@@ -349,6 +360,9 @@ class ModelLeadTrack:
     """
     self.accel_corr_calm_position_dense_valid = False
     self.accel_corr_calm_position_valid = False
+    self.accel_corr_raw_hard_braking = bool(
+      float(raw_alead) < -ACCEL_CORR_CALM_POSITION_RAW_ALEAD_HARD_VETO_MPS2
+    )
 
     if self.accel_corr_position_evidence:
       prev_t, prev_drel = self.accel_corr_position_evidence[-1]
@@ -361,7 +375,7 @@ class ModelLeadTrack:
     raw_vlead = float(v_ego) + float(raw_vrel)
     near_threat = float(raw_drel) <= max(10.0, 0.55 * max(0.0, float(v_ego)))
     hard_reason = None
-    if float(raw_alead) < -ACCEL_CORR_CALM_POSITION_RAW_ALEAD_HARD_VETO_MPS2:
+    if self.accel_corr_raw_hard_braking:
       hard_reason = "raw_hard_braking"
     elif abs(float(self.aLeadK)) > ACCEL_CORR_CALM_POSITION_MAX_ALEAD_ABS_MPS2:
       hard_reason = "published_accel"
@@ -654,7 +668,8 @@ class ModelLeadTrack:
     return urgency
 
   def update(self, lead_dict: dict[str, Any], now: float, v_ego: float,
-             cfg: LeadResponseTuningConfig, lead_slot: int) -> dict[str, Any]:
+             cfg: LeadResponseTuningConfig, lead_slot: int, *,
+             allow_closing_governor_calm_recovery: bool = True) -> dict[str, Any]:
     raw_drel = max(0.0, _finite_float(lead_dict.get("dRel"), self.dRel))
     raw_yrel = _finite_float(lead_dict.get("yRel"), self.yRel)
     raw_vrel = _finite_float(lead_dict.get("vRel"), self.vRel)
@@ -671,6 +686,7 @@ class ModelLeadTrack:
       self.opening_position_evidence.clear()
       self._clear_steady_parity("slot_change")
       self._clear_accel_corr_calm_position("slot_change")
+      self.accel_corr_raw_hard_braking = False
 
     dt_s = float(np.clip(float(now) - self.last_t, 0.0, 0.25))
     predicted_drel = self.predict_drel(now)
@@ -697,6 +713,7 @@ class ModelLeadTrack:
     governor_active = self._update_closing_governor(
       now, raw_drel, raw_vrel, raw_alead, cfg,
       raw_prob=raw_prob, raw_dpath=raw_dpath, raw_vlat=raw_vlat,
+      allow_calm_recovery=allow_closing_governor_calm_recovery,
     )
     if governor_active and not fast_closing:
       urgency = 1.0
@@ -807,7 +824,8 @@ class ModelLeadTrack:
   def _update_closing_governor(self, now: float, raw_drel: float, raw_vrel: float,
                                raw_alead: float, cfg: LeadResponseTuningConfig, *,
                                raw_prob: float = 1.0, raw_dpath: float = 0.0,
-                               raw_vlat: float = 0.0) -> bool:
+                               raw_vlat: float = 0.0,
+                               allow_calm_recovery: bool = True) -> bool:
     """CD9 corroborated-closing governor (road 205-6 Event B).
 
     The road near-collision was pure publish-side latency: the model's RAW
@@ -850,6 +868,12 @@ class ModelLeadTrack:
     self.governor_calm_recovery_applied = False
     self.governor_recovery_position_closing_mps = None
     self.governor_recovery_vrel_floor_mps = None
+    if not allow_calm_recovery:
+      # The stale-clamp reconciliation was developed and road-validated for
+      # the radar-less EV6 vision-lead topology. Keep the preexisting closing
+      # governor itself global, but fail this less-urgent recovery state closed
+      # everywhere else in production.
+      self.governor_calm_recovery_mode = False
 
     margin = float(getattr(cfg, 'closing_governor_margin_mps', 99.0))
     if margin >= 99.0:
@@ -902,7 +926,14 @@ class ModelLeadTrack:
     current_braking = float(raw_alead) < -opening_alead_veto
     current_short_ttc = raw_closing > min_closing and raw_collision_ttc_s <= OPENING_GOVERNOR_MIN_PUBLISHED_TTC_S
     current_fast_close = raw_closing >= OPENING_GOVERNOR_HARD_CLOSING_MPS
-    if active and (current_braking or current_short_ttc or current_fast_close):
+    # A far/high-TTC velocity-only spike does not revoke an already-earned calm
+    # recovery mode: recovery_closing below preserves the complete current raw
+    # closure in this same frame. Braking and short TTC still revoke immediately,
+    # and a fast close still blocks initial entry.
+    fast_close_revokes_recovery = current_fast_close and (
+      not allow_calm_recovery or not self.governor_calm_recovery_mode
+    )
+    if active and (current_braking or current_short_ttc or fast_close_revokes_recovery):
       self.governor_threat_corroborated = True
       self.governor_calm_recovery_mode = False
       if current_braking:
@@ -914,14 +945,14 @@ class ModelLeadTrack:
 
     # A model-velocity burst can earn a legitimate closing hold, then recover
     # while that stale clamp remains frozen for up to one second. Reconcile only
-    # an ALREADY-ACTIVE hold after two actual consecutive calm measurements and
-    # a dense, full one-second position history agree the closure is mild. Using
-    # the measured samples themselves (rather than a mutable counter) makes a
-    # miss or scheduler gap fail closed. The base filtered track and the earned
-    # hold deadline stay intact. The evidence defines a ceiling on CD9's EXTRA
-    # one-directional clamp; the ordinary filtered vRel path remains live and
-    # can still publish a stronger closure as current evidence rises.
+    # an ALREADY-ACTIVE hold after two consecutive non-braking/high-TTC samples,
+    # a dense two-second robust trend, and a dense recent trend agree the closure
+    # is mild. A safe newest range step is additionally required on entry. The
+    # base filtered track and earned hold stay intact; current raw vRel remains
+    # authoritative frame by frame once recovery is active.
     long_position_closing: float | None = None
+    recent_position_closing: float | None = None
+    recovery_position_closing: float | None = None
     long_samples = [
       sample for sample in self.opening_position_evidence
       if (now - sample[0]) <= CLOSING_GOVERNOR_RECOVERY_POSITION_WINDOW_S
@@ -933,15 +964,38 @@ class ModelLeadTrack:
       long_span >= CLOSING_GOVERNOR_RECOVERY_MIN_POSITION_SPAN_S and
       long_gaps and max(long_gaps) <= 2.0 * CLOSING_GOVERNOR_RECOVERY_MAX_SAMPLE_GAP_S
     )
+    def robust_position_closing(position_samples: list[tuple[float, float]]) -> float | None:
+      pair_slopes = [
+        (later[1] - earlier[1]) / (later[0] - earlier[0])
+        for i, earlier in enumerate(position_samples)
+        for later in position_samples[i + 1:]
+        if (later[0] - earlier[0]) >= CLOSING_GOVERNOR_RECOVERY_MIN_PAIR_SPAN_S
+      ]
+      return None if not pair_slopes else max(0.0, -float(np.median(pair_slopes)))
+
     if long_dense:
-      long_k = max(2, len(long_samples) // 4)
-      long_first, long_last = long_samples[:long_k], long_samples[-long_k:]
-      long_t_first = sum(sample[0] for sample in long_first) / long_k
-      long_t_last = sum(sample[0] for sample in long_last) / long_k
-      if (long_t_last - long_t_first) > 1e-3:
-        long_d_first = sum(sample[1] for sample in long_first) / long_k
-        long_d_last = sum(sample[1] for sample in long_last) / long_k
-        long_position_closing = max(0.0, -(long_d_last - long_d_first) / (long_t_last - long_t_first))
+      long_position_closing = robust_position_closing(long_samples)
+
+    floor_samples = [
+      sample for sample in long_samples
+      if (now - sample[0]) <= CLOSING_GOVERNOR_RECOVERY_FLOOR_WINDOW_S
+    ]
+    floor_span = floor_samples[-1][0] - floor_samples[0][0] if len(floor_samples) >= 2 else 0.0
+    floor_gaps = [b[0] - a[0] for a, b in zip(floor_samples, floor_samples[1:], strict=False)]
+    floor_dense = bool(
+      len(floor_samples) >= CLOSING_GOVERNOR_RECOVERY_FLOOR_MIN_POSITION_SAMPLES and
+      floor_span >= CLOSING_GOVERNOR_RECOVERY_FLOOR_MIN_POSITION_SPAN_S and
+      floor_gaps and max(floor_gaps) <= 2.0 * CLOSING_GOVERNOR_RECOVERY_MAX_SAMPLE_GAP_S
+    )
+    if floor_dense:
+      recent_position_closing = robust_position_closing(floor_samples)
+    if long_position_closing is not None and recent_position_closing is not None:
+      # The long robust trend is the safety authority that distinguishes the
+      # road's clustered range noise from a sustained closure. The recent trend
+      # may only make its floor less closing after a real close->open change;
+      # it cannot add pessimism from the same short noise burst. Current raw vRel
+      # is independently retained by recovery_closing below, frame for frame.
+      recovery_position_closing = min(long_position_closing, recent_position_closing)
 
     # Recovery's acceleration veto is never weakenable past the fixed 0.2 m/s²
     # safety boundary, even if an opening-governor tune is made permissive.
@@ -952,11 +1006,9 @@ class ModelLeadTrack:
       1e-3 < (recent_samples[1][0] - recent_samples[0][0]) <= CLOSING_GOVERNOR_RECOVERY_MAX_SAMPLE_GAP_S
     )
 
-    # The long-window position estimate owns the recovery floor, but it must
-    # agree with the newest raw range step in this same publication. This veto
-    # catches a genuine closure before the robust one-second window can react;
-    # it never supplies the floor itself, so a single noisy step cannot create
-    # less-urgent evidence.
+    # Entry must also agree with the newest raw range step in this publication.
+    # This catches a genuine closure before either robust horizon can react; the
+    # single step never supplies a less-urgent floor itself.
     recent_position_safe = False
     recent_position_samples = list(self.opening_position_evidence)[-2:]
     if len(recent_position_samples) == 2:
@@ -964,10 +1016,10 @@ class ModelLeadTrack:
       recent_dt = float(recent_t1) - float(recent_t0)
       if (math.isfinite(recent_dt) and math.isfinite(float(recent_d0)) and math.isfinite(float(recent_d1)) and
           1e-3 < recent_dt <= CLOSING_GOVERNOR_RECOVERY_MAX_SAMPLE_GAP_S):
-        recent_position_closing = max(0.0, (float(recent_d0) - float(recent_d1)) / recent_dt)
-        recent_position_ttc_s = float(raw_drel) / max(recent_position_closing, 0.1)
+        recent_step_closing = max(0.0, (float(recent_d0) - float(recent_d1)) / recent_dt)
+        recent_position_ttc_s = float(raw_drel) / max(recent_step_closing, 0.1)
         recent_position_safe = bool(
-          recent_position_closing <= CLOSING_GOVERNOR_RECOVERY_MAX_POSITION_CLOSING_MPS and
+          recent_step_closing <= CLOSING_GOVERNOR_RECOVERY_MAX_POSITION_CLOSING_MPS and
           recent_position_ttc_s > CLOSING_GOVERNOR_RECOVERY_MIN_RAW_TTC_S
         )
 
@@ -977,8 +1029,7 @@ class ModelLeadTrack:
       sample_ttc_s = float(sample_drel) / max(sample_closing, 0.1)
       return bool(
         float(sample_alead) >= -recovery_alead_veto and
-        sample_closing < OPENING_GOVERNOR_HARD_CLOSING_MPS and
-        sample_ttc_s > OPENING_GOVERNOR_MIN_PUBLISHED_TTC_S
+        sample_ttc_s > CLOSING_GOVERNOR_RECOVERY_MIN_RAW_TTC_S
       )
 
     def numeric_recovery_sample_safe(sample: tuple[float, float, float, float]) -> bool:
@@ -998,13 +1049,16 @@ class ModelLeadTrack:
            abs(float(raw_vlat)) >= STEADY_PARITY_MAX_VLAT_MPS)
     )
     calm_recovery = bool(
+      allow_calm_recovery and
       active and
       self.governor_threat_corroborated and
       consecutive_measured and
       all(calm_recovery_sample(sample) for sample in recent_samples) and
       alead_mean >= -recovery_alead_veto and
       long_position_closing is not None and
-      long_position_closing <= CLOSING_GOVERNOR_RECOVERY_MAX_POSITION_CLOSING_MPS
+      long_position_closing <= CLOSING_GOVERNOR_RECOVERY_MAX_POSITION_CLOSING_MPS and
+      recovery_position_closing is not None and
+      recovery_position_closing <= CLOSING_GOVERNOR_RECOVERY_MAX_POSITION_CLOSING_MPS
     )
     numeric_recovery_safe = bool(
       raw_recovery_context_safe and
@@ -1012,27 +1066,26 @@ class ModelLeadTrack:
       all(numeric_recovery_sample_safe(sample) for sample in recent_samples) and
       raw_collision_ttc_s > CLOSING_GOVERNOR_RECOVERY_MIN_RAW_TTC_S
     )
-    recovery_closing = None if long_position_closing is None else max(raw_closing, float(long_position_closing))
+    recovery_closing = None if recovery_position_closing is None else max(raw_closing, float(recovery_position_closing))
     enters_recovery = bool(
-      calm_recovery and recovery_closing is not None and
+      calm_recovery and not current_fast_close and recent_position_safe and recovery_closing is not None and
       self.governor_closing_mps > recovery_closing + 1e-3
     )
     if calm_recovery and recovery_closing is not None and (self.governor_calm_recovery_mode or enters_recovery):
-      # Once reconciliation starts, stale CD9 authority may only decay while
-      # the calm cross-signal contract remains true. Raising this extra clamp
-      # to chase a noisy-but-subcritical raw vRel recreated braking in route
-      # 422; the base filtered vRel already handles that current measurement.
-      self.governor_closing_mps = min(self.governor_closing_mps, recovery_closing)
+      # Shed only stale CD9 excess: the clamp follows the maximum of current raw
+      # velocity and the independent position estimate, so recovery never hides
+      # same-frame closing urgency behind the ordinary filtered vRel path.
+      self.governor_closing_mps = float(recovery_closing)
       self.governor_reason = "calm_recovery_capped"
       self.governor_calm_recovery_mode = True
       self.governor_calm_recovery_applied = True
-      self.governor_recovery_position_closing_mps = float(long_position_closing)
+      self.governor_recovery_position_closing_mps = float(recovery_position_closing)
       # Raw/model vRel is the signal that the independent dense position window
       # has disproven. Publish the position-only correction for the planner's
       # positive brake-release seam; public vRel and the governor's own clamp
       # remain conservative at max(raw, position) above.
       if numeric_recovery_safe:
-        self.governor_recovery_vrel_floor_mps = -float(long_position_closing)
+        self.governor_recovery_vrel_floor_mps = -float(recovery_position_closing)
       return True
     self.governor_calm_recovery_mode = False
 
@@ -1639,6 +1692,7 @@ class ModelLeadTrack:
       "steadyParityCurrentThreat": bool(self.steady_parity_current_threat),
       "accelCorrCalmPositionValid": bool(self.accel_corr_calm_position_valid),
       "accelCorrCalmPositionSlopeMps": float(self.accel_corr_calm_position_slope_mps),
+      "accelCorrRawHardBraking": bool(self.accel_corr_raw_hard_braking),
       "modelProb": float(self.modelProb),
       "status": True,
       "radar": False,
@@ -1686,8 +1740,13 @@ class ModelLeadTrack:
 
 
 class ModelLeadTracker:
-  def __init__(self, params: Params | None = None):
+  def __init__(self, params: Params | None = None, *,
+               allow_closing_governor_calm_recovery: bool = True):
     self.params = params if params is not None else Params()
+    # Direct construction defaults to enabled so the focused tracker and road
+    # replay fixtures retain their concise test seam. RadarD always supplies
+    # the exact production vehicle/topology scope explicitly.
+    self.allow_closing_governor_calm_recovery = bool(allow_closing_governor_calm_recovery)
     self._cfg = LeadResponseTuningConfig.defaults()
     self._last_param_refresh_t = -1e9
     self._tracks: dict[int, ModelLeadTrack] = {}
@@ -1721,6 +1780,7 @@ class ModelLeadTracker:
         track._clear_opening_relax(rearm_after_t=track.last_t)
         track._clear_steady_parity("missed_frame")
         track._clear_accel_corr_calm_position("missed_frame")
+        track.accel_corr_raw_hard_braking = False
       if track.missed > MODEL_LEAD_TRACK_MAX_MISSES:
         self._tracks.pop(identifier, None)
     self._frame_active = False
@@ -1873,7 +1933,10 @@ class ModelLeadTracker:
       return track.get_RadarState(self._cfg)
 
     self._updated_track_ids.add(track.identifier)
-    return track.update(lead_dict, now, v_ego, self._cfg, lead_slot)
+    return track.update(
+      lead_dict, now, v_ego, self._cfg, lead_slot,
+      allow_closing_governor_calm_recovery=self.allow_closing_governor_calm_recovery,
+    )
 
 
 class KalmanParams:
@@ -2218,7 +2281,14 @@ class RadarD:
 
     self.tracks: dict[int, Track] = {}
     self.kalman_params = KalmanParams(DT_MDL)
-    self.model_lead_tracker = ModelLeadTracker()
+    allow_closing_governor_calm_recovery = bool(
+      CP.brand == "hyundai" and
+      CP.carFingerprint == CAR.KIA_EV6 and
+      CP.radarUnavailable
+    )
+    self.model_lead_tracker = ModelLeadTracker(
+      allow_closing_governor_calm_recovery=allow_closing_governor_calm_recovery,
+    )
 
     self.v_ego = 0.0
     self.v_ego_hist = deque([0.0], maxlen=int(round(delay / DT_MDL))+1)

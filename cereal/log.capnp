@@ -837,6 +837,11 @@ struct RadarState @0x9a185389d6fdd05f {
     # false. The planner may use this only to bypass stateful comfort carryover;
     # it does not alter any RadarState kinematic or the producer proof state.
     steadyParityCurrentThreat @27 :Bool;
+    # Current raw model aLead crossed RadarD's fixed hard-braking boundary.
+    # This is evidence-only provenance for the MPC correlation amplifier: it
+    # distinguishes a genuine brake that cleared the calm-position window from
+    # a sparse/jagged position window with only a mild model brake.
+    accelCorrRawHardBraking @28 :Bool;
 
     aLeadDEPRECATED @5 :Float32;
   }

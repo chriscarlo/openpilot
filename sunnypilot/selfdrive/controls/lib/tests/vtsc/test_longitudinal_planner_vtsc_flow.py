@@ -35,6 +35,29 @@ def _isolate_vision_flow_from_persistent_map_lookahead():
       params.put('MTSCLookaheadEnabled', previous)
 
 
+@pytest.fixture(autouse=True)
+def _restore_hijacked_modules():
+  """install_fake_long_mpc replaces the real long_mpc in sys.modules and the
+  planner is then re-imported bound to the fake. Without restoration, any
+  later-collected suite that imports the real module surface (e.g. the
+  longitudinal harness importing get_safe_obstacle_distance) gets the fake and
+  errors — visible as order-dependent collection failures under
+  pytest-randomly. Snapshot both modules and put the originals back."""
+  names = (
+    'openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc',
+    'openpilot.selfdrive.controls.lib.longitudinal_planner',
+  )
+  saved = {name: sys.modules.get(name) for name in names}
+  try:
+    yield
+  finally:
+    for name, mod in saved.items():
+      if mod is not None:
+        sys.modules[name] = mod
+      else:
+        sys.modules.pop(name, None)
+
+
 class _NoOpSLC:
   def __init__(self, CP):
     pass

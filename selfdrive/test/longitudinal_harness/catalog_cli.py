@@ -30,6 +30,11 @@ def build_parser() -> argparse.ArgumentParser:
   )
   extract.add_argument("--route-key", action="append", default=[], help="Restrict extraction to one or more route keys")
   extract.add_argument("--bundle-root", type=Path, default=Path(".cache/longitudinal_harness/snapshots"))
+  extract.add_argument(
+    "--route-start-replay",
+    action="store_true",
+    help="Include the exact segment-zero process prefix required for formal planner-state fidelity",
+  )
 
   list_routes_parser = subparsers.add_parser("list-routes", help="List indexed EV6 routes")
   list_routes_parser.add_argument("--route-key", default=None)
@@ -70,6 +75,7 @@ def main(argv: list[str] | None = None) -> int:
         conn,
         route_keys=args.route_key or None,
         bundle_root=args.bundle_root,
+        route_start_replay=args.route_start_replay,
       )
     elif args.command == "list-routes":
       payload = list_routes(conn, route_key=args.route_key, limit=args.limit)

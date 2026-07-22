@@ -71,6 +71,25 @@ The Hyundai AI-lead-stability path acquires a closing lead when raw TTC-to-headw
 |---|---|---|---|
 | `ApproachReleaseTtcHysteresisS` | 2.5 | 0.0–6.0 | Gap (s) added above the approach-reacquire TTC threshold before a lead-owned, still-closing follow may release to cruise. Sized to the observed ~2.5 s p90 raw TTC frame jitter. Rollback sentinel: 0 restores the shared-threshold (pre-hysteresis) behavior exactly |
 
+## Raw Lead Cruise-Cap Qualification
+
+When the Hyundai classifier correctly leaves the trajectory on `cruise`, a raw lead hypothesis may still cap cruise acceleration, but only after one exact `radarTrackId` produces continuous range and lateral evidence. A missing/invalid track identity (`radarTrackId == -1`) fails closed and cannot accumulate dwell by reusing a lead slot. The sole prompt path is a bounded release hold for the exact track controlled on the immediately preceding frame. New hypotheses classified as a raw lateral departure never acquire this authority; nominal control hypotheses with the measured far-lateral/high-`vLat` signature must pass the same dwell before affecting the cruise-only cap.
+
+These ranges are intentionally one-way toward more conservative cap authority. The road-validated defaults are the most comfort-oriented settings: tuning may shorten acquisition dwell, lengthen release hold, tolerate more continuity gaps/steps, or make fewer nominal control hypotheses wait for dwell. It cannot delay or reject a true cap candidate more than the reviewed defaults. Invalid values fall back to defaults and out-of-range values clamp inside these bounds. Rollback/default restoration is `live_lead_tune.py reset`, which removes overrides and returns all eight values to the defaults below.
+
+The longitudinal harness includes all eight keys in its exact captured-parameter manifest. A legacy bundle that predates these keys is therefore intentionally formal `NOT_EVALUATED`/counterfactual-only rather than silently borrowing current defaults; re-extract from a route whose init-data capture contains the complete current manifest for formal fidelity scoring.
+
+| Param Key | Default | Range | Description |
+|---|---|---|---|
+| `CruiseCapRawLeadAcquireDwellS` | 0.60 | 0.10–0.60 | Continuous same-track evidence required before a classifier-demoted raw hypothesis may cap cruise acceleration. Tuning can only grant cap authority sooner |
+| `CruiseCapRawLeadReleaseHoldS` | 0.50 | 0.50–1.50 | Same-track hold after a previously controlled lead is demoted, preventing an immediate acceleration step during lead-to-cruise release |
+| `CruiseCapRawLeadMaxSampleGapS` | 0.30 | 0.30–0.75 | Largest sample interval still treated as continuous evidence. Tuning can only retain cap eligibility across longer gaps |
+| `CruiseCapRawLeadMaxDRelStepM` | 6.0 | 6.0–12.0 | Largest consecutive same-track `dRel` change accepted while accumulating dwell |
+| `CruiseCapRawLeadMaxDPathStepM` | 0.75 | 0.75–2.0 | Largest consecutive same-track `dPath` change accepted while accumulating dwell |
+| `CruiseCapRawLeadMaxYRelStepM` | 1.50 | 1.50–4.0 | Largest consecutive same-track raw `yRel` change accepted while accumulating dwell |
+| `CruiseCapRawLeadSuspectYRelM` | 4.0 | 4.0–12.0 | Absolute raw `yRel` at/above which a new nominal control hypothesis must pass dwell; higher values apply immediate cap authority more often |
+| `CruiseCapRawLeadSuspectVLatMps` | 4.0 | 4.0–20.0 | Absolute raw `vLat` paired with the suspect-`yRel` threshold; higher values apply immediate cap authority more often |
+
 ## Lead Brake Release
 
 Vibe-follow-only accel floor that prevents continued heavy decel after the Vibe headway target has recovered or is about to recover. Safety gating uses relative closing distance against the planner's available negative accel (`-6 m/s²` on this Hyundai/EV6 GT path), while hard lead decel still blocks release.
@@ -384,6 +403,14 @@ Rollback sentinels: `ComfortJerkLimitMps3 = 0` disables the envelope; a large va
 |---|---|---|---|
 | `ComfortJerkLimitMps3` | 0.8 | 0.0–50.0 | Per-frame DOWNWARD comfort-braking-onset bound (m/s³ × dt) on the final planner output during benign steady lead follow; also bounds UPWARD steps owned by the discrete lead-keepup or lead-brake-release floor. Ordinary MPC, continuous reclaim, and launch accel stay free. 0 or a large value (e.g. 50) disables the envelope (pre-CD7 output) |
 | `ComfortJerkBypassDecelMps2` | −1.5 | −5.0–0.0 | Requested-decel floor (m/s²) at/below which the envelope is bypassed regardless of the lead-object urgency tests (mirrors the flutter/relatch bypass). 0 disables this floor |
+
+## EV6 Rolling Stop-Release Jerk Limit
+
+The Kia EV6 can leave `LongControl.stopping` while it is still rolling, allowing the stopping hold near −2 m/s² to reverse directly into `starting`/PID acceleration. `StoppingReleaseJerkMps3` bounds only that upward edge until the actual command reaches coast (0 m/s²). A new downward request still passes immediately, but the release episode remains armed so a subsequent positive PID request cannot recreate the jump. The guard cancels at the existing start-speed/standstill threshold, where the normal immediate launch behavior resumes. It is gated to exact `KIA_EV6`; every other vehicle remains behavior-identical.
+
+| Param Key | Default | Range | Description |
+|---|---|---|---|
+| `StoppingReleaseJerkMps3` | 6.0 | 1.0–6.0 | EV6-only positive jerk limit (m/s³) during a rolling terminal-stop release. Lower values are smoother/more conservative; values above the validated 6.0 default clamp to 6.0, and the nonzero 1.0 minimum prevents an indefinitely pinned release. Fresh braking and true standstill launch are never delayed |
 
 ## Lead Prob Schmitt Trigger (radard)
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Iterable, Mapping
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 import json
 import math
 from pathlib import Path
@@ -16,6 +16,7 @@ from openpilot.selfdrive.test.longitudinal_harness.fidelity import (
   PASS,
   evaluate_diagnostic_fidelity,
   evaluate_fidelity,
+  evaluate_harness_fidelity,
 )
 from openpilot.selfdrive.test.longitudinal_harness.fidelity_runner import resolve_fidelity_vehicle_config
 from openpilot.selfdrive.test.longitudinal_harness.inputs import SnapshotBundle
@@ -239,6 +240,7 @@ def evaluate_route_prefix_trace(
   thresholds: Any = None,
   convergence_pre_roll_s: float = 2.0,
   recurrent_thresholds: RecurrentDebugThresholds | Mapping[str, Any] | None = None,
+  simulation_result: Any | None = None,
 ) -> dict[str, Any]:
   if provenance_mode not in ("exact", "instrumentation_only", "counterfactual"):
     raise ValueError(f"unsupported provenance_mode '{provenance_mode}'")
@@ -251,13 +253,17 @@ def evaluate_route_prefix_trace(
   for marker in marker_list:
     window_rows = select_marker_trace_rows(rows, marker)
     pre_roll_rows = select_marker_trace_rows(rows, marker, pre_roll_s=convergence_pre_roll_s)
-    formal = evaluate_fidelity(
-      window_rows,
-      thresholds=thresholds,
-      captured_metadata=captured_metadata,
-      replay_metadata=replay_metadata,
-      counterfactual=provenance_mode == "counterfactual",
-      acknowledge_instrumentation_only=provenance_mode == "instrumentation_only",
+    fidelity_kwargs = {
+      "thresholds": thresholds,
+      "captured_metadata": captured_metadata,
+      "replay_metadata": replay_metadata,
+      "counterfactual": provenance_mode == "counterfactual",
+      "acknowledge_instrumentation_only": provenance_mode == "instrumentation_only",
+    }
+    formal = (
+      evaluate_harness_fidelity(replace(simulation_result, trace=list(window_rows)), **fidelity_kwargs)
+      if simulation_result is not None else
+      evaluate_fidelity(window_rows, **fidelity_kwargs)
     )
     diagnostic = evaluate_diagnostic_fidelity(window_rows, thresholds=thresholds)
     pre_roll_diagnostic = evaluate_diagnostic_fidelity(pre_roll_rows, thresholds=thresholds)
@@ -279,7 +285,8 @@ def evaluate_route_prefix_trace(
       accel_convergence["status"],
       recurrent_convergence["status"],
     )
-    window_status = _combined_status(diagnostic["status"], convergence_status)
+    formal_gate_eligible = bool(formal["overall"]["passed"])
+    window_status = formal["status"] if simulation_result is not None else _combined_status(diagnostic["status"], convergence_status)
     selection_status = "selected" if window_rows else NOT_EVALUATED
     window_results.append({
       "marker": {
@@ -296,7 +303,7 @@ def evaluate_route_prefix_trace(
         "traceRowCount": len(window_rows),
       },
       "status": window_status,
-      "gateEligible": False,
+      "gateEligible": formal_gate_eligible,
       "formalFidelity": formal,
       "diagnosticFidelity": diagnostic,
       "convergence": {
@@ -314,11 +321,12 @@ def evaluate_route_prefix_trace(
   diagnostic_statuses = Counter(result["diagnosticFidelity"]["status"] for result in window_results)
   formal_planner_statuses = Counter(result["formalFidelity"]["planner"]["status"] for result in window_results)
   recurrent_statuses = Counter(result["convergence"]["recurrentDebug"]["status"] for result in window_results)
+  formal_mode = simulation_result is not None
   return {
     "schemaVersion": 1,
-    "mode": "route_prefix_diagnostic_non_gating",
+    "mode": "route_prefix_formal" if formal_mode else "route_prefix_diagnostic_non_gating",
     "status": _combined_status(*(result["status"] for result in window_results)),
-    "gateEligible": False,
+    "gateEligible": bool(formal_mode and window_results and all(result["gateEligible"] for result in window_results)),
     "runCount": 1,
     "traceRowCount": len(rows),
     "uniqueReferenceRowCount": len(_unique_reference_rows(rows)),
@@ -328,10 +336,11 @@ def evaluate_route_prefix_trace(
     "diagnosticStatusCounts": dict(sorted(diagnostic_statuses.items())),
     "formalPlannerStatusCounts": dict(sorted(formal_planner_statuses.items())),
     "recurrentDebugStatusCounts": dict(sorted(recurrent_statuses.items())),
-    "formalFidelityCaveat": " ".join((
-      "Route-prefix replay preserves one continuous replay process, but it is not formal planner fidelity unless",
-      "the capture supplies a restored recurrent planner/MPC checkpoint and replay runtime provenance matches.",
-    )),
+    "formalFidelityCaveat": (
+      "Formal planner replay requires a writer-attested complete input stream and a restorable planner checkpoint."
+      if formal_mode else
+      "Route-start replay remains diagnostic because rlogs do not attest publication completeness; a writer checkpoint is required."
+    ),
     "windows": window_results,
   }
 
@@ -370,6 +379,7 @@ def run_route_prefix_convergence(
     perception_filter="auto",
     ego_replay_mode="auto",
   )
+  formal_simulation = simulation if getattr(simulation, "planner_state_restoration_verified", False) is True else None
   report = evaluate_route_prefix_trace(
     simulation.trace,
     marker_list,
@@ -379,6 +389,7 @@ def run_route_prefix_convergence(
     thresholds=thresholds,
     convergence_pre_roll_s=convergence_pre_roll_s,
     recurrent_thresholds=recurrent_thresholds,
+    simulation_result=formal_simulation,
   )
   report.update({
     "scenarioName": bundle.name or bundle.path.name,

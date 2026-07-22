@@ -14,6 +14,9 @@ from openpilot.selfdrive.test.longitudinal_harness.provenance import (
   exact_planner_state_initialization,
   well_formed_planner_state_initialization_claim,
 )
+from openpilot.selfdrive.test.longitudinal_harness.replay_contracts import (
+  is_exact_supported_radard_replay_contract,
+)
 
 
 PASS = "pass"
@@ -107,6 +110,56 @@ def evaluate_fidelity(
   )
 
 
+def evaluate_harness_fidelity(
+  simulation_result: Any,
+  *,
+  thresholds: FidelityThresholds | Mapping[str, Any] | None = None,
+  captured_metadata: Mapping[str, Any] | None = None,
+  replay_metadata: Mapping[str, Any] | None = None,
+  current_commit: str | None = None,
+  current_diff_sha256: str | None = None,
+  current_dirty: bool | None = None,
+  current_diff_empty: bool | None = None,
+  counterfactual: bool = False,
+  acknowledge_instrumentation_only: bool = False,
+) -> dict[str, Any]:
+  """Formal gate for state restoration independently verified by run_harness.
+
+  Unlike ``evaluate_fidelity``, this does not trust a row-authored claim. It
+  requires the exact claim returned by the harness after validating the full
+  route-prefix digest and production constructor inputs, and requires every
+  replay row to carry that same immutable claim.
+  """
+  rows = getattr(simulation_result, "trace", None)
+  claim = getattr(simulation_result, "planner_state_initialization_provenance", None)
+  verified = bool(
+    getattr(simulation_result, "planner_state_restoration_verified", False) is True and
+    isinstance(rows, list) and
+    isinstance(claim, Mapping) and
+    exact_planner_state_initialization(claim, restoration_verified=True) and
+    rows and
+    all(
+      isinstance(row, Mapping) and
+      isinstance(row.get("replay_reference"), Mapping) and
+      row["replay_reference"].get("plannerStateInitializationProvenance") == claim
+      for row in rows
+    )
+  )
+  return _evaluate_fidelity_impl(
+    rows or [],
+    thresholds=thresholds,
+    captured_metadata=captured_metadata,
+    replay_metadata=replay_metadata,
+    current_commit=current_commit,
+    current_diff_sha256=current_diff_sha256,
+    current_dirty=current_dirty,
+    current_diff_empty=current_diff_empty,
+    counterfactual=counterfactual,
+    acknowledge_instrumentation_only=acknowledge_instrumentation_only,
+    planner_state_restoration_verified=verified,
+  )
+
+
 def _evaluate_fidelity_with_test_only_verified_planner_state(
   trace_rows: Iterable[Mapping[str, Any]],
   **kwargs: Any,
@@ -141,8 +194,9 @@ def _evaluate_fidelity_impl(
   scoring, so each recorded frame receives equal weight.
 
   Planner output is intentionally stricter than radar output. It is scored only
-  when the reference carries the v1 external-input contract, an exact radar
-  association and planner context, an explicitly applied captured planner/MPC
+  when the reference carries a supported RadarD dependency contract, the planner
+  v1 external-input contract, an exact radar association and planner context,
+  an explicitly applied captured planner/MPC
   state seed, and matching numerical-runtime provenance. Missing, ambiguous,
   and N/A metadata
   is reported as exclusion evidence and cannot turn a zero-sample planner stage
@@ -623,7 +677,7 @@ def _evaluate_radar(
     if not isinstance(reference, Mapping):
       exclusions["missing_replay_reference"] += 2
       continue
-    if require_exact_contract and not _radard_v1_contract_exact(reference):
+    if require_exact_contract and not _radard_contract_exact(reference):
       exclusions["inexact_radard_replay_contract"] += 2
       continue
     radar_reference = reference.get("radarState")
@@ -1068,14 +1122,14 @@ def _known_ambiguous_status(status: str | None) -> bool:
   return status is not None and any(part in status for part in _AMBIGUOUS_TOKEN_PARTS)
 
 
-def _radard_v1_contract_exact(reference: Mapping[str, Any]) -> bool:
+def _radard_contract_exact(reference: Mapping[str, Any]) -> bool:
   if reference.get("radardGateEligible") is not True:
     return False
   provenance = reference.get("radardServiceAssociationProvenance")
   if not isinstance(provenance, Mapping):
     return False
   contract = provenance.get("contract")
-  if not isinstance(contract, Mapping) or contract.get("status") != "exact" or contract.get("version") != 1:
+  if not is_exact_supported_radard_replay_contract(contract):
     return False
   for service in ("modelV2", "carState", "liveTracks"):
     service_provenance = provenance.get(service)
@@ -1253,5 +1307,6 @@ __all__ = [
   "PlannerFidelityThresholds",
   "RadarFidelityThresholds",
   "evaluate_fidelity",
+  "evaluate_harness_fidelity",
   "evaluate_diagnostic_fidelity",
 ]

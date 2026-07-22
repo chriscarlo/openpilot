@@ -255,6 +255,8 @@ HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_LOW_SPEED_MPS = 12.0
 HYUNDAI_VIRTUAL_LEAD_APPROACH_REACQUIRE_HIGH_SPEED_MPS = 25.0
 HYUNDAI_CRUISE_CAP_RAW_LEAD_MAX_PATH_ABS_M = 2.0
 HYUNDAI_CRUISE_CAP_RAW_LEAD_MAX_DREL_M = 120.0
+# Raw cruise-cap dwell/continuity thresholds live in LeadResponseTuningConfig;
+# the fixed geometric envelope above remains a non-tunable outer bound.
 HYUNDAI_VIRTUAL_LEAD_DROPOUT_STABLE_MIN_S = 3.0
 HYUNDAI_VIRTUAL_LEAD_DROPOUT_HOLD_S = 0.75
 HYUNDAI_VIRTUAL_LEAD_DROPOUT_MAX_ABS_VREL_MPS = 0.35
@@ -334,6 +336,14 @@ DREL_FILTER_SNAP_HOLD_FRAMES = 4
 DREL_FILTER_ALPHA_FAST = 0.5
 
 
+def _coerce_radar_track_id(value: Any) -> int:
+  """Preserve every integer identity, including 0; -1 is the unknown sentinel."""
+  try:
+    return -1 if value is None else int(value)
+  except (TypeError, ValueError, OverflowError):
+    return -1
+
+
 class _StabilizedLead:
   """Mutable duck-type of cereal.RadarState.LeadData.Reader. Mirrors the subset
   of attributes MPC callers read, so downstream code is oblivious to whether
@@ -345,6 +355,7 @@ class _StabilizedLead:
                'steadyParityVRelFloorMps', 'steadyParityHeld',
                'steadyParityCurrentThreat', 'steadyParityThreatRestore',
                'accelCorrCalmPositionValid', 'accelCorrCalmPositionSlopeMps',
+               'accelCorrRawHardBraking',
                'radar', 'radarTrackId')
 
   def __init__(self, status=False, dRel=0.0, yRel=0.0, vRel=0.0, vLead=0.0,
@@ -354,7 +365,8 @@ class _StabilizedLead:
                 steadyParityPositionSlopeMps=0.0, steadyParityVRelFloorMps=0.0,
                 steadyParityHeld=False, steadyParityCurrentThreat=False,
                 accelCorrCalmPositionValid=False,
-                accelCorrCalmPositionSlopeMps=0.0, radar=False, radarTrackId=-1):
+                accelCorrCalmPositionSlopeMps=0.0,
+                accelCorrRawHardBraking=False, radar=False, radarTrackId=-1):
     self.status = bool(status)
     self.dRel = float(dRel)
     self.yRel = float(yRel)
@@ -379,8 +391,9 @@ class _StabilizedLead:
     self.steadyParityThreatRestore = False
     self.accelCorrCalmPositionValid = bool(accelCorrCalmPositionValid)
     self.accelCorrCalmPositionSlopeMps = float(accelCorrCalmPositionSlopeMps)
+    self.accelCorrRawHardBraking = bool(accelCorrRawHardBraking)
     self.radar = bool(radar)
-    self.radarTrackId = int(radarTrackId)
+    self.radarTrackId = _coerce_radar_track_id(radarTrackId)
 
   @staticmethod
   def _safe_attr(src: Any, name: str, default: float = 0.0) -> float:
@@ -418,8 +431,9 @@ class _StabilizedLead:
       steadyParityCurrentThreat=bool(getattr(rd, 'steadyParityCurrentThreat', False)),
       accelCorrCalmPositionValid=bool(getattr(rd, 'accelCorrCalmPositionValid', False)),
       accelCorrCalmPositionSlopeMps=cls._safe_attr(rd, 'accelCorrCalmPositionSlopeMps'),
+      accelCorrRawHardBraking=bool(getattr(rd, 'accelCorrRawHardBraking', False)),
       radar=bool(getattr(rd, 'radar', False)),
-      radarTrackId=int(getattr(rd, 'radarTrackId', -1) or -1),
+      radarTrackId=_coerce_radar_track_id(getattr(rd, 'radarTrackId', -1)),
     )
 
 
@@ -468,6 +482,15 @@ LEAD_ACCEL_CORR_CALM_POSITION_MIN_MODEL_PROB = 0.60
 LEAD_ACCEL_CORR_CALM_POSITION_MAX_DPATH_M = 1.50
 LEAD_ACCEL_CORR_CALM_POSITION_OFFCENTER_DPATH_M = 1.25
 LEAD_ACCEL_CORR_CALM_POSITION_MAX_VLAT_MPS = 0.70
+# A mild model-only brake outside the configured gap cannot authorize CD3's
+# extra deepening while RadarD's independent position proof is unavailable.
+# The 2026-07-16 09:05:22.995 road frame carried only -0.11/-0.12 m/s^2 of
+# published aLeadK while a sparse, jagged range window made the private vLead
+# derivative reach -1.15..-1.44 m/s^2.  Keep the model's own mild brake, but
+# wait for either a materially stronger report or an inside-target gap before
+# amplifying it.  The known genuine CD3 braking case reports -0.37..-0.54 and
+# therefore remains prompt even while position history is rebuilding.
+LEAD_ACCEL_CORR_UNCONFIRMED_MAX_ALEAD_ABS_MPS2 = 0.20
 
 
 class _LeadStabilityState:
@@ -1634,6 +1657,15 @@ class LongitudinalMpc:
     self._lead_to_cruise_transition_t = None
     self._lead_to_cruise_transition_source = None
     self._lead_to_cruise_transition_track_id = None
+    self._raw_cruise_cap_candidate_key = None
+    self._raw_cruise_cap_candidate_since_t = None
+    self._raw_cruise_cap_candidate_last_t = None
+    self._raw_cruise_cap_candidate_last_drel = None
+    self._raw_cruise_cap_candidate_last_dpath = None
+    self._raw_cruise_cap_candidate_last_yrel = None
+    self._raw_cruise_cap_release_track_id = None
+    self._raw_cruise_cap_release_until_t = None
+    self.raw_cruise_cap_debug = {"eligible": False, "reason": "reset"}
     # Close-range lead memory: safety cap on cruise accel when a lead was
     # recently visible nearby, even if the model is currently flickering.
     self._close_lead_last_seen_t: float | None = None
@@ -1980,6 +2012,184 @@ class LongitudinalMpc:
       return False
     d_path = LongitudinalMpc._lead_attr(lead, "dPath", LongitudinalMpc._lead_attr(lead, "yRel"))
     return abs(d_path) <= HYUNDAI_CRUISE_CAP_RAW_LEAD_MAX_PATH_ABS_M
+
+  def _reset_raw_cruise_cap_candidate(self) -> None:
+    self._raw_cruise_cap_candidate_key = None
+    self._raw_cruise_cap_candidate_since_t = None
+    self._raw_cruise_cap_candidate_last_t = None
+    self._raw_cruise_cap_candidate_last_drel = None
+    self._raw_cruise_cap_candidate_last_dpath = None
+    self._raw_cruise_cap_candidate_last_yrel = None
+
+  def _select_cruise_cap_raw_lead(self, raw_leads: tuple[Any, Any], role_debug: dict[str, Any],
+                                  now: float, prev_source: str,
+                                  prev_source_track_id: int | None) -> tuple[Any | None, str | None]:
+    """Select a classifier-demoted raw lead without letting hypotheses chatter.
+
+    Lead-obstacle ownership remains immediate.  A raw path candidate (or a new,
+    far-lateral control hypothesis while cruise still owns the trajectory) must
+    retain one identity and coherent lateral/range samples for a short dwell
+    before it may cap cruise acceleration.  The classifier's
+    explicit raw-lateral-departure verdict cannot acquire this authority: that
+    was the 2026-07-16 09:54 failure mode, where far-lateral synthetic tracks
+    repeatedly appeared inside the model path and stepped the cruise cap on and
+    off while ``source`` correctly remained ``cruise``.
+
+    The only exception is the same track that was controlled on the immediately
+    previous frame.  It receives a bounded release window so a genuine lead
+    leaving the lane cannot create an acceleration step before the ordinary
+    lead-to-cruise transition guard takes over.
+    """
+    plausible: list[tuple[float, str, Any, int]] = []
+    for raw_source, raw_lead in zip(("lead0_raw_path", "lead1_raw_path"), raw_leads, strict=True):
+      if self._is_plausible_cruise_cap_raw_lead(raw_lead):
+        track_id = _coerce_radar_track_id(getattr(raw_lead, "radarTrackId", -1))
+        plausible.append((self._lead_attr(raw_lead, "dRel", 1e9), raw_source, raw_lead, track_id))
+
+    if not plausible:
+      self._reset_raw_cruise_cap_candidate()
+      if self._raw_cruise_cap_release_until_t is not None and now > float(self._raw_cruise_cap_release_until_t):
+        self._raw_cruise_cap_release_track_id = None
+        self._raw_cruise_cap_release_until_t = None
+      self.raw_cruise_cap_debug = {"eligible": False, "reason": "no_plausible_raw_lead"}
+      return None, None
+
+    if not self._hyundai_ai_lead_stability_enabled:
+      _, raw_source, raw_lead, _ = min(plausible, key=lambda item: item[0])
+      self.raw_cruise_cap_debug = {"eligible": True, "reason": "non_hyundai_passthrough"}
+      return raw_lead, raw_source
+
+    reasons = role_debug.get("reasons", {}) if isinstance(role_debug, dict) else {}
+    if self._raw_cruise_cap_release_until_t is not None and now > float(self._raw_cruise_cap_release_until_t):
+      self._raw_cruise_cap_release_track_id = None
+      self._raw_cruise_cap_release_until_t = None
+
+    # Classify every geometrically plausible hypothesis before distance
+    # arbitration.  Otherwise a nearer rejected decoy can repeatedly win the
+    # nearest-lead choice, reset dwell, and starve a farther coherent lead.
+    # The exact previously controlled/release-held object is selected first:
+    # its bounded release authority intentionally survives a phantom sample or
+    # raw-lateral-departure verdict while the ordinary transition guard takes
+    # over.
+    classified: list[tuple[float, str, Any, int, str, bool]] = []
+    for d_rel, raw_source, raw_lead, track_id in plausible:
+      source_key = raw_source.split("_", 1)[0]
+      slot_idx = 0 if source_key == "lead0" else 1
+      lateral_reason = str(reasons.get(source_key, ""))
+      classified.append((
+        d_rel, raw_source, raw_lead, track_id, lateral_reason,
+        bool(self._lead_stability_phantom_slots[slot_idx]),
+      ))
+
+    previous_track_candidates = []
+    if (prev_source in ("lead0", "lead1") and prev_source_track_id is not None and
+        int(prev_source_track_id) != -1):
+      previous_track_candidates = [
+        candidate for candidate in classified if candidate[3] == int(prev_source_track_id)
+      ]
+    if previous_track_candidates:
+      # Prefer the previous slot if duplicate hypotheses temporarily share an
+      # identity; distance is only the tie-breaker within the exact object.
+      release_candidate = min(
+        previous_track_candidates,
+        key=lambda item: (item[1].split("_", 1)[0] != prev_source, item[0]),
+      )
+      self._raw_cruise_cap_release_track_id = int(prev_source_track_id)
+      self._raw_cruise_cap_release_until_t = now + self._live_tune_cfg.cruise_cap_raw_lead_release_hold_s
+    else:
+      release_candidates = []
+      if (self._raw_cruise_cap_release_track_id is not None and
+          int(self._raw_cruise_cap_release_track_id) != -1 and
+          self._raw_cruise_cap_release_until_t is not None):
+        release_candidates = [
+          candidate for candidate in classified
+          if candidate[3] == int(self._raw_cruise_cap_release_track_id)
+          and now <= float(self._raw_cruise_cap_release_until_t)
+        ]
+      release_candidate = min(release_candidates, key=lambda item: item[0]) if release_candidates else None
+
+    if release_candidate is not None:
+      _, raw_source, raw_lead, track_id, lateral_reason, phantom = release_candidate
+      self._reset_raw_cruise_cap_candidate()
+      self.raw_cruise_cap_debug = {
+        "eligible": True,
+        "reason": "previously_controlled_release",
+        "source": raw_source,
+        "track_id": track_id,
+        "lateral_reason": lateral_reason,
+        "phantom": bool(phantom),
+        "remaining_s": max(0.0, float(self._raw_cruise_cap_release_until_t) - now),
+      }
+      return raw_lead, raw_source
+
+    candidates: list[tuple[float, str, Any, int, str, bool]] = []
+    rejected: list[tuple[str, int, str]] = []
+    for candidate in classified:
+      _, raw_source, _, track_id, lateral_reason, phantom = candidate
+      if track_id == -1:
+        rejected.append((raw_source, track_id, "missing_track_identity"))
+      elif phantom:
+        # A held/extrapolated sample can protect an already controlled lead,
+        # but cannot acquire fresh authority over cruise acceleration.
+        rejected.append((raw_source, track_id, "phantom_cannot_acquire"))
+      elif lateral_reason == "raw_lateral_departure":
+        rejected.append((raw_source, track_id, "raw_lateral_departure"))
+      else:
+        candidates.append(candidate)
+
+    if not candidates:
+      self._reset_raw_cruise_cap_candidate()
+      rejection_reasons = tuple(item[2] for item in rejected)
+      reason = rejection_reasons[0] if len(set(rejection_reasons)) == 1 else "no_eligible_raw_lead"
+      self.raw_cruise_cap_debug = {
+        "eligible": False,
+        "reason": reason,
+        "sources": tuple(candidate[1] for candidate in classified),
+        "rejected": tuple({"source": source, "track_id": track_id, "reason": rejected_reason}
+                          for source, track_id, rejected_reason in rejected),
+      }
+      return None, None
+
+    _, raw_source, raw_lead, track_id, lateral_reason, _ = min(candidates, key=lambda item: item[0])
+
+    d_rel = self._lead_attr(raw_lead, "dRel", 1e9)
+    d_path = self._lead_attr(raw_lead, "dPath", self._lead_attr(raw_lead, "yRel"))
+    y_rel = self._lead_attr(raw_lead, "yRel")
+    candidate_key = ("track", track_id)
+    dt_s = None if self._raw_cruise_cap_candidate_last_t is None else now - float(self._raw_cruise_cap_candidate_last_t)
+    continuous = bool(
+      candidate_key == self._raw_cruise_cap_candidate_key and
+      dt_s is not None and 0.0 <= dt_s <= self._live_tune_cfg.cruise_cap_raw_lead_max_sample_gap_s and
+      self._raw_cruise_cap_candidate_last_drel is not None and
+      abs(d_rel - float(self._raw_cruise_cap_candidate_last_drel)) <= self._live_tune_cfg.cruise_cap_raw_lead_max_drel_step_m and
+      self._raw_cruise_cap_candidate_last_dpath is not None and
+      abs(d_path - float(self._raw_cruise_cap_candidate_last_dpath)) <= self._live_tune_cfg.cruise_cap_raw_lead_max_dpath_step_m and
+      self._raw_cruise_cap_candidate_last_yrel is not None and
+      abs(y_rel - float(self._raw_cruise_cap_candidate_last_yrel)) <= self._live_tune_cfg.cruise_cap_raw_lead_max_yrel_step_m
+    )
+    if not continuous:
+      self._raw_cruise_cap_candidate_key = candidate_key
+      self._raw_cruise_cap_candidate_since_t = now
+
+    self._raw_cruise_cap_candidate_last_t = now
+    self._raw_cruise_cap_candidate_last_drel = d_rel
+    self._raw_cruise_cap_candidate_last_dpath = d_path
+    self._raw_cruise_cap_candidate_last_yrel = y_rel
+    age_s = 0.0 if self._raw_cruise_cap_candidate_since_t is None else max(
+      0.0, now - float(self._raw_cruise_cap_candidate_since_t),
+    )
+    eligible = age_s + 1e-6 >= self._live_tune_cfg.cruise_cap_raw_lead_acquire_dwell_s
+    self.raw_cruise_cap_debug = {
+      "eligible": bool(eligible),
+      "reason": "dwell_complete" if eligible else "acquire_dwell",
+      "source": raw_source,
+      "track_id": track_id,
+      "lateral_reason": lateral_reason,
+      "age_s": float(age_s),
+      "required_s": self._live_tune_cfg.cruise_cap_raw_lead_acquire_dwell_s,
+      "continuous": bool(continuous),
+    }
+    return (raw_lead, raw_source) if eligible else (None, None)
 
   @staticmethod
   def _is_hyundai_settled_follow(raw_lead, filtered_lead,
@@ -2874,7 +3084,26 @@ class LongitudinalMpc:
       gap_surplus_m > 0.0 and float(lead.vLead) >= 0.0 and
       float(lead.modelProb) >= LEAD_ACCEL_CORR_CALM_POSITION_MIN_MODEL_PROB and lateral_safe
     )
-    if amplify_candidate and calm_position_veto:
+    # ``proof_valid == False`` is intentionally not treated as positive threat
+    # evidence. It also covers sparse/rebuilding and jagged-reset position
+    # windows, exactly where the private vLead finite-difference is least
+    # independent. Bound this guard to mild, model-only, outside-target cases;
+    # inside-target approaches, radar leads, FCW, materially stronger model
+    # braking, and RadarD's current raw-hard-braking attestation keep the
+    # existing fail-safe amplification path.
+    unconfirmed_mild_outside_target = bool(
+      bool(getattr(self, '_hyundai_ai_lead_stability_enabled', False)) and not proof_valid and
+      not bool(lead.radar) and int(lead.radarTrackId) <= -1001 and
+      not bool(lead.fcw) and not bool(lead.closingGovernorRecovery) and
+      not bool(lead.accelCorrRawHardBraking) and
+      abs(float(lead.aLeadK)) <= LEAD_ACCEL_CORR_UNCONFIRMED_MAX_ALEAD_ABS_MPS2 and
+      gap_surplus_m > 0.0 and float(lead.vLead) >= 0.0 and
+      float(lead.modelProb) >= LEAD_ACCEL_CORR_CALM_POSITION_MIN_MODEL_PROB and lateral_safe
+    )
+    if amplify_candidate and unconfirmed_mild_outside_target:
+      state.corr_amplify_vetoed = True
+      state.corr_amplify_veto_reason = "unconfirmed_mild_outside_target"
+    elif amplify_candidate and calm_position_veto:
       state.corr_amplify_vetoed = True
       state.corr_amplify_veto_reason = "calm_position_outside_target"
     elif amplify_candidate:
@@ -3044,6 +3273,7 @@ class LongitudinalMpc:
         "accel_corr_amplify_veto_reason": str(state.corr_amplify_veto_reason),
         "accel_corr_calm_position_valid": bool(getattr(outs[slot], 'accelCorrCalmPositionValid', False)),
         "accel_corr_calm_position_slope_mps": float(getattr(outs[slot], 'accelCorrCalmPositionSlopeMps', 0.0)),
+        "accel_corr_raw_hard_braking": bool(getattr(outs[slot], 'accelCorrRawHardBraking', False)),
       }
       for slot, state in enumerate(self._lead_stability_state)
     }
@@ -3981,7 +4211,7 @@ class LongitudinalMpc:
     if prev_source_idx is not None and prev_source_idx < len(self.control_leads):
       prev_source_lead = self.control_leads[prev_source_idx]
       if prev_source_lead is not None and bool(getattr(prev_source_lead, 'status', False)):
-        track_id = int(getattr(prev_source_lead, 'radarTrackId', -1) or -1)
+        track_id = _coerce_radar_track_id(getattr(prev_source_lead, 'radarTrackId', -1))
         prev_source_track_id = track_id if track_id != -1 else None
 
     # Get following distance
@@ -4082,14 +4312,49 @@ class LongitudinalMpc:
         lead_for_cruise_cap_source = "lead1_control"
         lead_for_cruise_obstacle = float(lead_1_obstacle[0])
       if lead_for_cruise_cap is None:
-        for raw_source, raw_lead in (("lead0_raw_path", stabilized_lead0), ("lead1_raw_path", stabilized_lead1)):
-          if not self._is_plausible_cruise_cap_raw_lead(raw_lead):
-            continue
-          raw_drel = self._lead_attr(raw_lead, "dRel", 1e9)
-          if raw_drel < lead_for_cruise_obstacle:
-            lead_for_cruise_cap = raw_lead
-            lead_for_cruise_cap_source = raw_source
-            lead_for_cruise_obstacle = raw_drel
+        lead_for_cruise_cap, lead_for_cruise_cap_source = self._select_cruise_cap_raw_lead(
+          (stabilized_lead0, stabilized_lead1), lead_role_debug, now, prev_source, prev_source_track_id,
+        )
+        if lead_for_cruise_cap is not None:
+          lead_for_cruise_obstacle = self._lead_attr(lead_for_cruise_cap, "dRel", 1e9)
+      else:
+        # The classifier can still call a brand-new hypothesis "center" when
+        # dPath is small even though its raw lateral state is several lanes away
+        # and moving at implausible lateral speed.  If that is not the same track
+        # controlled on the previous frame, make it prove the same dwell as a
+        # demoted raw candidate.  Close/cut-in ownership itself is not delayed:
+        # when the lead obstacle wins below, it remains immediate and this
+        # cruise-only cap is irrelevant.
+        selected_track_id = _coerce_radar_track_id(getattr(lead_for_cruise_cap, "radarTrackId", -1))
+        new_control_identity = bool(
+          prev_source == "cruise" or prev_source_track_id is None or
+          selected_track_id != int(prev_source_track_id)
+        )
+        suspect_new_lateral_hypothesis = bool(
+          self._hyundai_ai_lead_stability_enabled and new_control_identity and
+          abs(self._lead_attr(lead_for_cruise_cap, "yRel")) >= self._live_tune_cfg.cruise_cap_raw_lead_suspect_yrel_m and
+          abs(self._lead_attr(lead_for_cruise_cap, "vLat")) >= self._live_tune_cfg.cruise_cap_raw_lead_suspect_vlat_mps
+        )
+        if suspect_new_lateral_hypothesis:
+          selected_idx = 0 if lead_for_cruise_cap_source == "lead0_control" else 1
+          qualifying_leads = (
+            (lead_for_cruise_cap, _StabilizedLead(status=False)) if selected_idx == 0
+            else (_StabilizedLead(status=False), lead_for_cruise_cap)
+          )
+          qualified_lead, _ = self._select_cruise_cap_raw_lead(
+            qualifying_leads, lead_role_debug, now, prev_source, prev_source_track_id,
+          )
+          if qualified_lead is None:
+            lead_for_cruise_cap = None
+            lead_for_cruise_cap_source = None
+            lead_for_cruise_obstacle = 1e9
+        else:
+          self._reset_raw_cruise_cap_candidate()
+          self.raw_cruise_cap_debug = {
+            "eligible": False,
+            "reason": "control_lead_selected",
+            "source": lead_for_cruise_cap_source,
+          }
 
       personality_max_accel = self._get_gap_reclaim_personality_max_accel(float(v_ego))
       lead_present_cruise_cap = get_lead_present_cruise_accel_cap(
@@ -4195,7 +4460,7 @@ class LongitudinalMpc:
         urgent_lead_decel = float(getattr(
           self._live_tune_cfg, "cruise_relatch_urgent_lead_decel_mps2", -1.0,
         ))
-        selected_track_id = int(getattr(lead_for_cruise_cap, "radarTrackId", -1) or -1) \
+        selected_track_id = _coerce_radar_track_id(getattr(lead_for_cruise_cap, "radarTrackId", -1)) \
           if lead_for_cruise_cap is not None else -1
         persistent_lead_matches_release = bool(
           lead_for_cruise_cap is not None and
@@ -4283,6 +4548,7 @@ class LongitudinalMpc:
         self.acc_source_debug["lead_present_cruise_accel_cap_drel_m"] = (
           None if lead_for_cruise_cap is None else self._lead_attr(lead_for_cruise_cap, "dRel", 0.0)
         )
+        self.acc_source_debug["raw_cruise_cap_candidate"] = dict(self.raw_cruise_cap_debug)
 
       self.gap_reclaim_accel_floor = self.get_gap_reclaim_floor()
       self.lead_keepup_accel_floor = self.get_lead_keepup_floor()

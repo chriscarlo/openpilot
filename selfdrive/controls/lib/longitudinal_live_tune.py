@@ -843,6 +843,19 @@ LEAD_RESPONSE_TUNE_SPECS = (
                 "evaluate. Rollback sentinel: 0 disables this floor (lead-object urgency signal only).",
   ),
   LeadResponseTuneSpec(
+    attr="stopping_release_jerk_mps3",
+    key="Longitudinal.LiveTune.StoppingReleaseJerkMps3",
+    cli_name="stopping-release-jerk-mps3",
+    label="stopping_release_jerk_mps3",
+    default=6.0,
+    minimum=1.0,
+    maximum=6.0,
+    description="Kia EV6-only upward jerk limit (m/s^3) for a rolling LongControl terminal-stop release. The default "
+                "spreads the observed -2 to +1 m/s^2 reversal over 0.5 s. Tuning may only lower the limit for a smoother, "
+                "more conservative release; the nonzero minimum prevents an indefinitely pinned brake. Downward braking, "
+                "true standstill launch, other vehicles, and ordinary LongControl transitions are unchanged.",
+  ),
+  LeadResponseTuneSpec(
     attr="lead_prob_enter",
     key="Longitudinal.LiveTune.LeadProbEnter",
     cli_name="lead-prob-enter",
@@ -1805,6 +1818,100 @@ LEAD_RESPONSE_TUNE_SPECS = (
                 "ambiguity, low probability, or an out-of-band position slope. 0 disables the bridge.",
   ),
   LeadResponseTuneSpec(
+    attr="cruise_cap_raw_lead_acquire_dwell_s",
+    key="Longitudinal.LiveTune.CruiseCapRawLeadAcquireDwellS",
+    cli_name="cruise-cap-raw-lead-acquire-dwell-s",
+    label="cruise_cap_raw_acquire_dwell",
+    default=0.60,
+    minimum=0.10,
+    maximum=0.60,
+    description="Hyundai raw cruise-cap qualification: continuous same-track dwell (s) required before a classifier-demoted "
+                "raw hypothesis may cap cruise acceleration. The road-validated default is the maximum: live tuning may "
+                "grant conservative cap authority sooner, but cannot delay it beyond the reviewed 0.60 s window.",
+  ),
+  LeadResponseTuneSpec(
+    attr="cruise_cap_raw_lead_release_hold_s",
+    key="Longitudinal.LiveTune.CruiseCapRawLeadReleaseHoldS",
+    cli_name="cruise-cap-raw-lead-release-hold-s",
+    label="cruise_cap_raw_release_hold",
+    default=0.50,
+    minimum=0.50,
+    maximum=1.50,
+    description="Hyundai raw cruise-cap qualification: bounded same-track hold (s) after a previously controlled lead is "
+                "demoted. It prevents an immediate acceleration step while ordinary lead-to-cruise shaping takes over. "
+                "The minimum preserves the road-validated release guard; this knob cannot disable it.",
+  ),
+  LeadResponseTuneSpec(
+    attr="cruise_cap_raw_lead_max_sample_gap_s",
+    key="Longitudinal.LiveTune.CruiseCapRawLeadMaxSampleGapS",
+    cli_name="cruise-cap-raw-lead-max-sample-gap-s",
+    label="cruise_cap_raw_max_sample_gap",
+    default=0.30,
+    minimum=0.30,
+    maximum=0.75,
+    description="Hyundai raw cruise-cap qualification: largest time gap (s) that still counts as continuous evidence. "
+                "The default is the minimum; tuning can retain conservative cap authority across a longer scheduler gap, "
+                "but cannot make acquisition less available than the reviewed behavior.",
+  ),
+  LeadResponseTuneSpec(
+    attr="cruise_cap_raw_lead_max_drel_step_m",
+    key="Longitudinal.LiveTune.CruiseCapRawLeadMaxDRelStepM",
+    cli_name="cruise-cap-raw-lead-max-drel-step-m",
+    label="cruise_cap_raw_max_drel_step",
+    default=6.0,
+    minimum=6.0,
+    maximum=12.0,
+    description="Hyundai raw cruise-cap qualification: maximum consecutive same-track dRel change (m) allowed while "
+                "accumulating dwell. The default is the minimum; tuning can accept more discontinuity and therefore add "
+                "cap authority, but cannot reject more true-lead samples than the reviewed behavior.",
+  ),
+  LeadResponseTuneSpec(
+    attr="cruise_cap_raw_lead_max_dpath_step_m",
+    key="Longitudinal.LiveTune.CruiseCapRawLeadMaxDPathStepM",
+    cli_name="cruise-cap-raw-lead-max-dpath-step-m",
+    label="cruise_cap_raw_max_dpath_step",
+    default=0.75,
+    minimum=0.75,
+    maximum=2.0,
+    description="Hyundai raw cruise-cap qualification: maximum consecutive same-track dPath change (m) allowed while "
+                "accumulating dwell. The default is the minimum; tuning can only admit more cap candidates.",
+  ),
+  LeadResponseTuneSpec(
+    attr="cruise_cap_raw_lead_max_yrel_step_m",
+    key="Longitudinal.LiveTune.CruiseCapRawLeadMaxYRelStepM",
+    cli_name="cruise-cap-raw-lead-max-yrel-step-m",
+    label="cruise_cap_raw_max_yrel_step",
+    default=1.50,
+    minimum=1.50,
+    maximum=4.0,
+    description="Hyundai raw cruise-cap qualification: maximum consecutive same-track raw yRel change (m) allowed while "
+                "accumulating dwell. The default is the minimum; tuning can only admit more cap candidates.",
+  ),
+  LeadResponseTuneSpec(
+    attr="cruise_cap_raw_lead_suspect_yrel_m",
+    key="Longitudinal.LiveTune.CruiseCapRawLeadSuspectYRelM",
+    cli_name="cruise-cap-raw-lead-suspect-yrel-m",
+    label="cruise_cap_raw_suspect_yrel",
+    default=4.0,
+    minimum=4.0,
+    maximum=12.0,
+    description="Hyundai raw cruise-cap qualification: absolute raw yRel (m) at/above which a new nominal control lead also "
+                "must pass raw-cap dwell when paired with suspect lateral velocity. Raising it applies the immediate "
+                "cruise cap to more hypotheses; tuning cannot delay more candidates than the reviewed default.",
+  ),
+  LeadResponseTuneSpec(
+    attr="cruise_cap_raw_lead_suspect_vlat_mps",
+    key="Longitudinal.LiveTune.CruiseCapRawLeadSuspectVLatMps",
+    cli_name="cruise-cap-raw-lead-suspect-vlat-mps",
+    label="cruise_cap_raw_suspect_vlat",
+    default=4.0,
+    minimum=4.0,
+    maximum=20.0,
+    description="Hyundai raw cruise-cap qualification: absolute raw vLat (m/s) at/above which a new far-lateral nominal "
+                "control lead must pass dwell. Raising it applies the immediate cruise cap to more hypotheses; tuning "
+                "cannot delay more candidates than the reviewed default.",
+  ),
+  LeadResponseTuneSpec(
     attr="launch_release_min_drel_m",
     key="Longitudinal.LiveTune.LaunchReleaseMinDrelM",
     cli_name="launch-release-min-drel",
@@ -1925,6 +2032,7 @@ class LeadResponseTuningConfig:
   approach_release_ttc_hysteresis_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["approach_release_ttc_hysteresis_s"].default
   comfort_jerk_limit_mps3: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["comfort_jerk_limit_mps3"].default
   comfort_jerk_bypass_decel_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["comfort_jerk_bypass_decel_mps2"].default
+  stopping_release_jerk_mps3: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["stopping_release_jerk_mps3"].default
   lead_prob_enter: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_prob_enter"].default
   lead_prob_exit: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_prob_exit"].default
   lead_source_acquire_frames: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["lead_source_acquire_frames"].default
@@ -2006,6 +2114,14 @@ class LeadResponseTuningConfig:
   steady_parity_trust_deficit_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["steady_parity_trust_deficit_mps"].default
   steady_parity_vrel_slew_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["steady_parity_vrel_slew_mps2"].default
   steady_parity_hold_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["steady_parity_hold_s"].default
+  cruise_cap_raw_lead_acquire_dwell_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cruise_cap_raw_lead_acquire_dwell_s"].default
+  cruise_cap_raw_lead_release_hold_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cruise_cap_raw_lead_release_hold_s"].default
+  cruise_cap_raw_lead_max_sample_gap_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cruise_cap_raw_lead_max_sample_gap_s"].default
+  cruise_cap_raw_lead_max_drel_step_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cruise_cap_raw_lead_max_drel_step_m"].default
+  cruise_cap_raw_lead_max_dpath_step_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cruise_cap_raw_lead_max_dpath_step_m"].default
+  cruise_cap_raw_lead_max_yrel_step_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cruise_cap_raw_lead_max_yrel_step_m"].default
+  cruise_cap_raw_lead_suspect_yrel_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cruise_cap_raw_lead_suspect_yrel_m"].default
+  cruise_cap_raw_lead_suspect_vlat_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cruise_cap_raw_lead_suspect_vlat_mps"].default
   launch_release_min_drel_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["launch_release_min_drel_m"].default
   launch_release_depart_gate_m: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["launch_release_depart_gate_m"].default
   launch_follow_accel_floor_max_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["launch_follow_accel_floor_max_mps2"].default
