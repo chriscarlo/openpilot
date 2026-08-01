@@ -136,9 +136,14 @@ Follow limit-cycle fix (2026-07-02, seat report: buck/slow/hold/late-re-accel/ov
 
 ## Virtual Lead EMA Filter
 
+The EV6 planner keeps a private kinematic copy of RadarD's selected model lead. Danger-direction changes remain on the fixed fast path. In the opening direction, `vRel`, `aRel`, `vLead`, and `vLeadK` use the faster recovery tau only after three consecutive publications from the same synthetic model track show positive `vRel`, non-braking `aLeadK`, and no FCW, RadarD closing-recovery, steady-parity threat, hard-braking, or phantom-hold attestation. Any failed gate resets the dwell. `aLeadK` keeps its existing asymmetric filter.
+
 | Param Key | Default | Range | Description |
 |---|---|---|---|
 | `VirtualLeadSlowTauS` | 1.30 | 0.10–3.0 | EMA tau for aLeadK in safe/noise-rejection direction. Sign transitions (decel→accel) use a fixed 0.30s tau regardless |
+| `VirtualLeadOpeningRecoveryTauS` | 0.30 | 0.05–1.0 | EMA tau for confirmed safe opening recovery of planner-private lead velocity fields. Lower releases stale synthetic closure sooner after the three-frame proof. `1.0` is the exact pre-fix kinematic-tau rollback |
+
+For road diagnosis, `longitudinalPlanSP.leadDiagnostics` version 1 logs the selected RadarD input beside the planner-private virtual lead, the raw/filtered/selected/cruise obstacle distances and gap surplus, acceleration-correction decisions, slowdown ceiling, brake-release floor, and opening-recovery state/reason. This message is logging-only and is not read back into control.
 
 ## dRel Noise Filter
 

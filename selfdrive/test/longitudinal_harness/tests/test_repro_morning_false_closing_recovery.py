@@ -138,9 +138,12 @@ P95_PUBLISH_EXCESS_MPS = 1.50
 MIN_PLANNER_ACCEL_MPS2 = -0.70
 MIN_LONGCONTROL_ACCEL_MPS2 = -0.70
 MAX_PLANNER_BRAKE_AREA_MPS = 0.85
-MIN_MAX_EXCESS_REDUCTION_MPS = 1.50
-MIN_P95_EXCESS_REDUCTION_MPS = 1.70
-MIN_BRAKE_AREA_REDUCTION_MPS = 0.35
+# With the restored same-frame threat authority, recovery retains more of the
+# current raw close than the original oracle. Keep meaningful paired margins
+# while the absolute comfort/safety ceilings above remain unchanged.
+MIN_MAX_EXCESS_REDUCTION_MPS = 1.20
+MIN_P95_EXCESS_REDUCTION_MPS = 1.10
+MIN_BRAKE_AREA_REDUCTION_MPS = 0.30
 MIN_PEAK_BRAKE_REDUCTION_MPS2 = 0.10
 
 
@@ -173,13 +176,16 @@ def _steps() -> list[StepInput]:
 @functools.lru_cache(maxsize=2)
 def _run(recovery_enabled: bool = True) -> SimulationResult:
   original = radard_module.CLOSING_GOVERNOR_RECOVERY_MAX_POSITION_CLOSING_MPS
+  original_decay = radard_module.CLOSING_GOVERNOR_STALE_DECAY_MPS2
   if not recovery_enabled:
     # Behavioral rollback oracle: make the calm-position eligibility predicate
-    # impossible without changing RadarD's ordinary filter, CD9 hold, planner,
-    # controller, or road inputs.
+    # impossible and disable the restored bounded stale-clamp decay, without
+    # changing RadarD's ordinary filter, CD9 arm/hold, planner, controller, or
+    # road inputs.
     radard_module.CLOSING_GOVERNOR_RECOVERY_MAX_POSITION_CLOSING_MPS = (
       RECOVERY_DISABLED_MAX_POSITION_CLOSING_MPS
     )
+    radard_module.CLOSING_GOVERNOR_STALE_DECAY_MPS2 = 0.0
   try:
     return run_harness(
       vehicle_config=resolve_ev6_vehicle_config(
@@ -195,6 +201,7 @@ def _run(recovery_enabled: bool = True) -> SimulationResult:
     )
   finally:
     radard_module.CLOSING_GOVERNOR_RECOVERY_MAX_POSITION_CLOSING_MPS = original
+    radard_module.CLOSING_GOVERNOR_STALE_DECAY_MPS2 = original_decay
 
 
 def _event_rows(result: SimulationResult) -> list[dict]:

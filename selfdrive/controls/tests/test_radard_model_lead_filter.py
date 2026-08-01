@@ -1022,6 +1022,71 @@ class TestClosingGovernorCalmRecovery:
     assert tr.governor_hold_until_t == pytest.approx(deadline)
     assert tr.get_RadarState(self._cfg())["closingGovernorRecovery"] is True
 
+  def test_20260726_false_opening_releases_stale_clamp_during_raw_pullaway(self):
+    """Sanitized 11:37 PDT oracle: both raw hypotheses opened while CD9 stayed closing."""
+    tr = self._track(closing_mps=1.8, drel_m=44.0)
+    self._seed_histories(
+      tr,
+      drel_m=44.0,
+      raw_closing_mps=0.25,
+      position_closing_mps=-0.23,
+      position_times=list(np.linspace(self.NOW - 2.0, self.NOW - 0.05, 20)),
+    )
+
+    clamps = []
+    active_states = []
+    for frame, raw_opening_mps in enumerate((0.18, 0.23, 0.53), start=0):
+      now = self.NOW + 0.05 * frame
+      drel = 44.0 + raw_opening_mps * 0.05 * frame
+      active_states.append(self._update(
+        tr,
+        now=now,
+        drel_m=drel,
+        raw_closing_mps=-raw_opening_mps,
+        raw_alead_mps2=0.0,
+      ))
+      clamps.append(float(tr.governor_closing_mps))
+
+    # Strong, sustained opening may fully release the hold on the third frame;
+    # the safety invariant is monotonic removal of stale closing authority.
+    assert active_states[:2] == [True, True]
+    assert active_states[2] is False
+    assert clamps[0] == pytest.approx(1.6)
+    assert clamps[1] <= clamps[0]
+    assert clamps[2] <= clamps[1]
+    assert clamps[2] < 1.4
+
+  def test_20260726_genuine_three_mps_closure_restores_full_current_authority(self):
+    """Sanitized 12:08:43 PDT safety anchor: raw closure ~3 m/s, aLead ~-0.98."""
+    tr = self._track(closing_mps=1.8, drel_m=26.0)
+    self._seed_histories(
+      tr,
+      drel_m=26.0,
+      raw_closing_mps=0.25,
+      position_closing_mps=-0.23,
+      position_times=list(np.linspace(self.NOW - 2.0, self.NOW - 0.05, 20)),
+    )
+    assert self._update(
+      tr,
+      now=self.NOW,
+      drel_m=26.0,
+      raw_closing_mps=-0.18,
+      raw_alead_mps2=0.0,
+    )
+    assert tr.governor_closing_mps < 1.8
+
+    assert self._update(
+      tr,
+      now=self.NOW + 0.05,
+      drel_m=25.85,
+      raw_closing_mps=3.0,
+      raw_alead_mps2=-0.98,
+    )
+    assert tr.governor_threat_corroborated is True
+    assert tr.governor_calm_recovery_mode is False
+    assert tr.governor_closing_mps >= 3.0 - 1e-9
+    assert tr.governor_reason in ("current_braking", "short_ttc", "fast_close")
+
   def test_recovery_provenance_clears_on_safety_veto(self):
     tr = self._track()
     self._seed_histories(tr, raw_closing_mps=0.4, position_closing_mps=0.6)
@@ -1108,7 +1173,10 @@ class TestClosingGovernorCalmRecovery:
     assert tr.opening_position_evidence[0][0] == pytest.approx(self.NOW)
     assert tr.governor_calm_recovery_mode is False
     assert tr.governor_calm_recovery_applied is False
-    assert tr.governor_closing_mps == pytest.approx(1.8)
+    # Slot transition invalidates the independent position proof, but the
+    # still-dense calm velocity window may remove one frame of stale excess.
+    assert tr.governor_closing_mps == pytest.approx(1.6)
+    assert tr.governor_reason == "stale_decay"
 
   @pytest.mark.parametrize(
     "raw_closing_mps,position_closing_mps,expected_mps",
@@ -1212,7 +1280,10 @@ class TestClosingGovernorCalmRecovery:
     )
     assert not tr.governor_calm_recovery_mode
     assert not tr.governor_calm_recovery_applied
-    assert tr.governor_closing_mps == pytest.approx(1.8)
+    # Lack of original threat corroboration blocks the stronger recovery
+    # attestation; it does not let a calm dense window freeze stale excess.
+    assert tr.governor_closing_mps == pytest.approx(1.6)
+    assert tr.governor_reason == "stale_decay"
 
   def test_missed_model_frame_vetoes_recovery_on_the_next_measurement(self):
     tr = self._track()
@@ -1238,7 +1309,10 @@ class TestClosingGovernorCalmRecovery:
     assert active
     assert not tr.governor_calm_recovery_applied
     assert tr.governor_recovery_position_closing_mps is None
-    assert tr.governor_closing_mps == pytest.approx(1.8)
+    # The missed frame invalidates position recovery. The 0.10 s interval to
+    # the next measured sample still bounds stale decay to 0.4 m/s.
+    assert tr.governor_closing_mps == pytest.approx(1.4)
+    assert tr.governor_reason == "stale_decay"
 
   @pytest.mark.parametrize("veto", ("current_braking", "short_ttc", "position"))
   def test_any_safety_veto_exits_existing_recovery_mode(self, veto):
@@ -1306,7 +1380,10 @@ class TestClosingGovernorCalmRecovery:
     )
     assert not tr.governor_calm_recovery_applied
     assert tr.governor_recovery_position_closing_mps is None
-    assert tr.governor_closing_mps == pytest.approx(1.8)
+    # These shapes veto the stronger position-attested recovery only. The
+    # dense calm velocity window still permits one bounded stale-decay step.
+    assert tr.governor_closing_mps == pytest.approx(1.6)
+    assert tr.governor_reason == "stale_decay"
 
   @pytest.mark.parametrize("braking_location", ("current", "window"))
   def test_current_or_windowed_braking_vetoes_recovery(self, braking_location):
@@ -1358,7 +1435,9 @@ class TestClosingGovernorCalmRecovery:
       tr, now=self.NOW, drel_m=drel_m, raw_closing_mps=0.4,
     )
     assert tr.governor_calm_recovery_applied is expected_recovery
-    assert tr.governor_closing_mps == pytest.approx(0.4 if expected_recovery else 1.8)
+    assert tr.governor_closing_mps == pytest.approx(0.4 if expected_recovery else 1.6)
+    if not expected_recovery:
+      assert tr.governor_reason == "stale_decay"
     assert (tr.governor_recovery_vrel_floor_mps is not None) is expected_recovery
 
   @pytest.mark.parametrize(
@@ -1406,7 +1485,9 @@ class TestClosingGovernorCalmRecovery:
       tr, now=self.NOW, drel_m=self.DREL_M, raw_closing_mps=0.4,
     )
     assert tr.governor_calm_recovery_applied is expected_recovery
-    assert tr.governor_closing_mps == pytest.approx(position_closing_mps if expected_recovery else 1.8)
+    assert tr.governor_closing_mps == pytest.approx(position_closing_mps if expected_recovery else 1.6)
+    if not expected_recovery:
+      assert tr.governor_reason == "stale_decay"
 
   def test_first_braking_onset_vetoes_recovery_before_window_or_position_can_catch_up(self):
     tr = self._track()

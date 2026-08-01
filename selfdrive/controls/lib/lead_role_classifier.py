@@ -33,6 +33,12 @@ class ControlLead:
   fcw: bool = False
   # Producer-side veto on FCW/crash escalation (see cereal RadarState.LeadData).
   fcwSuppressed: bool = False
+  # Preserve RadarD threat provenance through role classification so later
+  # planner-private recovery cannot reinterpret a safety-qualified frame as a
+  # calm opening merely because the selected lead is copied into ControlLead.
+  closingGovernorRecovery: bool = False
+  steadyParityCurrentThreat: bool = False
+  accelCorrRawHardBraking: bool = False
   # Planner-private same-track threat restore classification. The wire producer
   # attestation is consumed before role classification; only this bounded flag
   # is propagated into the selected control lead.
@@ -57,6 +63,9 @@ class ControlLead:
       aLeadK=float(getattr(lead, "aLeadK", 0.0) or 0.0),
       fcw=bool(getattr(lead, "fcw", False)),
       fcwSuppressed=bool(getattr(lead, "fcwSuppressed", False)),
+      closingGovernorRecovery=bool(getattr(lead, "closingGovernorRecovery", False)),
+      steadyParityCurrentThreat=bool(getattr(lead, "steadyParityCurrentThreat", False)),
+      accelCorrRawHardBraking=bool(getattr(lead, "accelCorrRawHardBraking", False)),
       steadyParityThreatRestore=bool(getattr(lead, "steadyParityThreatRestore", False)),
       aLeadTau=float(getattr(lead, "aLeadTau", 1.5) or 1.5),
       modelProb=float(getattr(lead, "modelProb", 0.0) or 0.0),

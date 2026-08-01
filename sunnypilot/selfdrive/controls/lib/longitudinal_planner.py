@@ -39,6 +39,90 @@ from openpilot.sunnypilot.selfdrive.controls.lib.vibe_personality.vibe_personali
 DecState = custom.LongitudinalPlanSP.DynamicExperimentalControl.DynamicExperimentalControlState
 
 
+def _finite_diagnostic_float(value, default: float = 0.0) -> float:
+  try:
+    number = float(value)
+  except (TypeError, ValueError, OverflowError):
+    return float(default)
+  return number if math.isfinite(number) else float(default)
+
+
+def _diagnostic_int(value, default: int = 0) -> int:
+  try:
+    return int(value)
+  except (TypeError, ValueError, OverflowError):
+    return int(default)
+
+
+def _lead_state_diagnostic(payload) -> dict:
+  data = payload if isinstance(payload, dict) else {}
+  return {
+    "status": bool(data.get("status", False)),
+    "dRelM": _finite_diagnostic_float(data.get("dRel")),
+    "vRelMps": _finite_diagnostic_float(data.get("vRel")),
+    "aRelMps2": _finite_diagnostic_float(data.get("aRel")),
+    "vLeadMps": _finite_diagnostic_float(data.get("vLead")),
+    "vLeadKMps": _finite_diagnostic_float(data.get("vLeadK")),
+    "aLeadKMps2": _finite_diagnostic_float(data.get("aLeadK")),
+    "modelProb": _finite_diagnostic_float(data.get("modelProb")),
+    "radar": bool(data.get("radar", False)),
+    "radarTrackId": _diagnostic_int(data.get("radarTrackId", -1) or -1, -1),
+    "fcw": bool(data.get("fcw", False)),
+    "closingGovernorRecovery": bool(data.get("closingGovernorRecovery", False)),
+    "steadyParityCurrentThreat": bool(data.get("steadyParityCurrentThreat", False)),
+    "accelCorrRawHardBraking": bool(data.get("accelCorrRawHardBraking", False)),
+  }
+
+
+def build_lead_diagnostics_snapshot(planner) -> dict:
+  """Build the versioned logging payload without affecting planner behavior."""
+  mpc = getattr(planner, "mpc", None)
+  virtual_debug = getattr(mpc, "hyundai_virtual_lead_debug", {}) if mpc is not None else {}
+  virtual_debug = virtual_debug if isinstance(virtual_debug, dict) else {}
+  acc_debug = getattr(mpc, "acc_source_debug", {}) if mpc is not None else {}
+  acc_debug = acc_debug if isinstance(acc_debug, dict) else {}
+  opening = virtual_debug.get("opening_recovery", {})
+  opening = opening if isinstance(opening, dict) else {}
+  source = str(virtual_debug.get("source") or getattr(mpc, "source", "") or "")
+  slot = {"lead0": "slot0", "lead1": "slot1"}.get(source)
+  stability_debug = getattr(mpc, "lead_stability_debug", {}) if mpc is not None else {}
+  stability = stability_debug.get(slot, {}) if slot and isinstance(stability_debug, dict) else {}
+  stability = stability if isinstance(stability, dict) else {}
+  release = getattr(planner, "lead_brake_release_debug", {})
+  release = release if isinstance(release, dict) else {}
+  release_floor = release.get("floor_mps2")
+  slowdown_ceiling = getattr(mpc, "lead_slowdown_accel_ceiling", None) if mpc is not None else None
+  input_state = _lead_state_diagnostic(virtual_debug.get("input"))
+  virtual_state = _lead_state_diagnostic(virtual_debug.get("filtered"))
+  confirm_frames = max(0, min(65535, _diagnostic_int(opening.get("confirm_frames", 0) or 0)))
+  return {
+    "valid": bool(virtual_debug.get("active", False) and input_state["status"] and virtual_state["status"]),
+    "version": 1,
+    "source": source,
+    "reason": str(acc_debug.get("reason", virtual_debug.get("reset_reason") or "inactive")),
+    "input": input_state,
+    "virtual": virtual_state,
+    "inputObstacleM": _finite_diagnostic_float(acc_debug.get("best_lead_obstacle")),
+    "virtualObstacleM": _finite_diagnostic_float(acc_debug.get("filtered_lead_obstacle")),
+    "selectedObstacleM": _finite_diagnostic_float(getattr(mpc, "selected_obstacle_m", 0.0)),
+    "cruiseObstacleM": _finite_diagnostic_float(acc_debug.get("cruise_obstacle")),
+    "inputGapSurplusM": _finite_diagnostic_float(acc_debug.get("raw_gap_surplus_m")),
+    "virtualGapSurplusM": _finite_diagnostic_float(acc_debug.get("filtered_gap_surplus_m")),
+    "accelCorrClamped": bool(stability.get("accel_corr_clamped", False)),
+    "accelCorrAmplified": bool(stability.get("accel_corr_amplified", False)),
+    "slowdownCeilingValid": slowdown_ceiling is not None,
+    "slowdownCeilingMps2": _finite_diagnostic_float(slowdown_ceiling),
+    "releaseFloorValid": release_floor is not None,
+    "releaseFloorMps2": _finite_diagnostic_float(release_floor),
+    "releaseReason": str(release.get("reason", "inactive")),
+    "openingRecoveryActive": bool(opening.get("active", False)),
+    "openingRecoveryCandidate": bool(opening.get("candidate", False)),
+    "openingRecoveryConfirmFrames": confirm_frames,
+    "openingRecoveryTauS": _finite_diagnostic_float(opening.get("tau_s"), 1.0),
+    "openingRecoveryReason": str(opening.get("reason", "inactive")),
+  }
+
+
 class LongitudinalPlannerSP:
   def __init__(self, CP: structs.CarParams, mpc):
     self.CP = CP
@@ -231,6 +315,7 @@ class LongitudinalPlannerSP:
 
       longitudinalPlanSP = plan_sp_send.longitudinalPlanSP
       longitudinalPlanSP.events = self.events_sp.to_msg()
+      longitudinalPlanSP.leadDiagnostics = build_lead_diagnostics_snapshot(self)
 
       # Dynamic Experimental Control
       dec = longitudinalPlanSP.dec

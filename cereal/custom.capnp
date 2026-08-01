@@ -136,6 +136,54 @@ struct LongitudinalPlanSP @0xf35cc4560bbf6ec2 {
   accelPersonality @4 :AccelerationPersonality;
   objectHazardControl @5 :ObjectHazardControl;
   replayInputs @6 :ReplayInputs;
+  leadDiagnostics @7 :LeadDiagnostics;
+
+  # Logging-only provenance for the planner-private Hyundai lead. This makes
+  # the input RadarState lead, the filtered virtual lead, and the obstacle/floor
+  # decisions visible in the same serialized planner frame.
+  struct LeadDiagnostics {
+    valid @0 :Bool;
+    version @1 :UInt16;  # version 1 is the layout below
+    source @2 :Text;
+    reason @3 :Text;
+    input @4 :LeadState;
+    virtual @5 :LeadState;
+    inputObstacleM @6 :Float32;
+    virtualObstacleM @7 :Float32;
+    selectedObstacleM @8 :Float32;
+    cruiseObstacleM @9 :Float32;
+    inputGapSurplusM @10 :Float32;
+    virtualGapSurplusM @11 :Float32;
+    accelCorrClamped @12 :Bool;
+    accelCorrAmplified @13 :Bool;
+    slowdownCeilingValid @14 :Bool;
+    slowdownCeilingMps2 @15 :Float32;
+    releaseFloorValid @16 :Bool;
+    releaseFloorMps2 @17 :Float32;
+    releaseReason @18 :Text;
+    openingRecoveryActive @19 :Bool;
+    openingRecoveryCandidate @20 :Bool;
+    openingRecoveryConfirmFrames @21 :UInt16;
+    openingRecoveryTauS @22 :Float32;
+    openingRecoveryReason @23 :Text;
+
+    struct LeadState {
+      status @0 :Bool;
+      dRelM @1 :Float32;
+      vRelMps @2 :Float32;
+      aRelMps2 @3 :Float32;
+      vLeadMps @4 :Float32;
+      vLeadKMps @5 :Float32;
+      aLeadKMps2 @6 :Float32;
+      modelProb @7 :Float32;
+      radar @8 :Bool;
+      radarTrackId @9 :Int32 = -1;
+      fcw @10 :Bool;
+      closingGovernorRecovery @11 :Bool;
+      steadyParityCurrentThreat @12 :Bool;
+      accelCorrRawHardBraking @13 :Bool;
+    }
+  }
 
   # Versioned, logging-only snapshot of the exact message clocks and effective
   # cruise cap consumed by one planner update. Zero clocks mean that optional

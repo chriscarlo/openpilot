@@ -100,6 +100,85 @@ def _planner_test_setup():
 
 
 class TestHyundaiAiLeadStability:
+  @staticmethod
+  def _run_private_opening_sequence(*, recovery_tau_s: float):
+    mpc = _make_hyundai_mpc(v_ego=30.0)
+    mpc._live_tune_cfg = replace(
+      mpc._live_tune_cfg,
+      virtual_lead_opening_recovery_tau_s=recovery_tau_s,
+    )
+    track_id = -1032
+    mpc._update_hyundai_virtual_lead(
+      100.0, "lead0",
+      _make_lead(d_rel=48.0, v_rel=-2.0, v_lead=28.0, a_lead=0.0,
+                 radar=False, radar_track_id=track_id),
+    )
+    values = []
+    for frame in range(1, 4):
+      lead = _make_lead(
+        d_rel=48.0 + 0.1 * frame,
+        v_rel=1.0,
+        v_lead=31.0,
+        a_lead=0.0,
+        radar=False,
+        radar_track_id=track_id,
+      )
+      virtual = mpc._update_hyundai_virtual_lead(100.0 + 0.1 * frame, "lead0", lead)
+      values.append(float(virtual.vRel))
+    return mpc, values
+
+  def test_confirmed_opening_recovery_is_faster_and_one_second_is_exact_rollback(self):
+    recovered, recovered_values = self._run_private_opening_sequence(recovery_tau_s=0.30)
+    rollback, rollback_values = self._run_private_opening_sequence(recovery_tau_s=1.0)
+
+    # The first two frames retain the legacy recovery exactly. Only the third
+    # consecutive fresh opening frame earns the shorter time constant.
+    assert recovered_values[:2] == pytest.approx(rollback_values[:2])
+    assert recovered_values[2] > rollback_values[2] + 0.15
+    assert recovered.hyundai_virtual_lead_debug["opening_recovery"] == {
+      "active": True,
+      "candidate": True,
+      "confirm_frames": 3,
+      "required_frames": 3,
+      "tau_s": pytest.approx(0.30),
+      "reason": "confirmed_opening",
+    }
+
+    # 1.0 s is the historical kinematic recovery tau, so the rollback twin is
+    # the exact three-step legacy EMA from -2.0 toward +1.0.
+    expected = -2.0
+    alpha = 1.0 - np.exp(-0.1 / 1.0)
+    for _ in range(3):
+      expected += alpha * (1.0 - expected)
+    assert rollback_values[2] == pytest.approx(expected)
+    assert rollback.hyundai_virtual_lead_debug["opening_recovery"]["active"] is True
+
+  def test_opening_recovery_dwell_resets_on_current_threat(self):
+    mpc = _make_hyundai_mpc(v_ego=30.0)
+    track_id = -1051
+    mpc._update_hyundai_virtual_lead(
+      200.0, "lead0",
+      _make_lead(d_rel=30.0, v_rel=-1.5, v_lead=28.5, radar=False, radar_track_id=track_id),
+    )
+    for frame in range(1, 3):
+      mpc._update_hyundai_virtual_lead(
+        200.0 + 0.1 * frame, "lead0",
+        _make_lead(d_rel=30.0 + frame * 0.1, v_rel=0.5, v_lead=30.5,
+                   radar=False, radar_track_id=track_id),
+      )
+
+    threat = _make_lead(
+      d_rel=30.3, v_rel=0.5, v_lead=30.5, radar=False, radar_track_id=track_id,
+    )
+    threat.steadyParityCurrentThreat = True
+    mpc._update_hyundai_virtual_lead(200.3, "lead0", threat)
+
+    opening = mpc.hyundai_virtual_lead_debug["opening_recovery"]
+    assert opening["active"] is False
+    assert opening["candidate"] is False
+    assert opening["confirm_frames"] == 0
+    assert opening["reason"] == "steady_parity_threat"
+
   def test_steady_model_lead_reacquires_when_stop_sign_closing_before_gap_collapses(self):
     v_cruise_30mph = 48.0 / 3.6
     mpc = _make_hyundai_mpc(v_ego=13.0, a_ego=0.0, time_fn=_MonotonicStub(step=0.2))

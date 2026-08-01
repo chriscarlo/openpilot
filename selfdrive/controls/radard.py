@@ -89,6 +89,24 @@ CLOSING_GOVERNOR_RECOVERY_FLOOR_MIN_POSITION_SAMPLES = 16
 CLOSING_GOVERNOR_RECOVERY_MAX_SAMPLE_GAP_S = 0.075
 CLOSING_GOVERNOR_RECOVERY_MIN_PAIR_SPAN_S = 0.5
 CLOSING_GOVERNOR_RECOVERY_MIN_RAW_TTC_S = 12.0
+# Stale-clamp evidence decay (EV6 vision topology, gated like calm recovery):
+# while a CD9 hold is active but the dense window can no longer re-arm, the
+# published closing clamp follows the strongest CURRENT velocity evidence
+# downward at this bounded rate instead of freezing at its historical worst
+# for the full hold.  A sustained real closure re-arms every frame and never
+# decays; sparse windows early-return before this runs, so genuine evidence
+# dropouts still freeze the clamp exactly as before.  The captured 2026-07-16
+# false-closing episodes held a -2.9 m/s published closure for 0.6+ s while
+# raw vRel had already flipped positive; this bounds that seam to ~0.2-0.5 s.
+CLOSING_GOVERNOR_STALE_DECAY_MPS2 = 4.0
+# Position-only arming must clear the measured slope noise of its own window
+# (Z x standard error from the residual scatter around the fitted trend), not
+# only the fixed margin: +-1-1.5 m per-frame dRel jitter at 40+ m is 1.5-3 m/s
+# of pure endpoint-slope noise, several times the margin.  Clean windows keep
+# byte-identical legacy sensitivity (the margin still binds); corroborated
+# paths (sustained decel, short raw TTC, fast close, current braking) are
+# unaffected in both arming and authority.
+CLOSING_GOVERNOR_POSITION_NOISE_Z = 2.0
 MODEL_LEAD_CENTER_PATH_GATE_M = 2.6
 MODEL_LEAD_CUTIN_VLAT_MPS = 0.7
 LEAD_TRACK_PROB_DROPOUT_MIN_SPEED_MPS = 4.0
@@ -821,6 +839,35 @@ class ModelLeadTrack:
     self.missed = 0
     return self.get_RadarState(cfg)
 
+  def _decay_stale_governor_clamp(self, vrel_closing: float, raw_closing: float) -> None:
+    """Bleed an active-but-unrearmed CD9 clamp toward current velocity evidence.
+
+    Runs only from the dense-window paths where the governor evaluated the
+    evidence and could NOT re-arm (weak windowed closing, or a failed arm
+    check).  The clamp floor deliberately uses only velocity evidence
+    (windowed mean + current raw): position-only evidence that cannot pass the
+    significance-gated arm must not sustain a clamp either — that is the
+    phantom being removed.  Only the VALUE decays; the hold itself always
+    lives to its natural expiry so the same-frame threat-upgrade path stays
+    armed, and that path restores clamp authority from current raw closure.
+    """
+    evidence_closing = max(0.0, float(vrel_closing), float(raw_closing))
+    if float(self.governor_closing_mps) <= evidence_closing + 1e-9:
+      return
+    dt = 0.05
+    samples = self.closing_evidence
+    if len(samples) >= 2:
+      dt = min(0.25, max(1e-3, float(samples[-1][0]) - float(samples[-2][0])))
+    decayed = float(self.governor_closing_mps) - CLOSING_GOVERNOR_STALE_DECAY_MPS2 * dt
+    # Only the published clamp VALUE decays.  The hold itself (engagement
+    # state) always lives to its natural expiry: it is what makes same-frame
+    # threat upgrades (current braking / short TTC / fast close) possible, and
+    # a held state must never end up less urgent than the stateless rollback
+    # twin.  When a threat does land mid-hold, the upgrade branch restores
+    # clamp authority from the current raw evidence in the same frame.
+    self.governor_closing_mps = max(0.0, evidence_closing, decayed)
+    self.governor_reason = "stale_decay"
+
   def _update_closing_governor(self, now: float, raw_drel: float, raw_vrel: float,
                                raw_alead: float, cfg: LeadResponseTuningConfig, *,
                                raw_prob: float = 1.0, raw_dpath: float = 0.0,
@@ -936,6 +983,11 @@ class ModelLeadTrack:
     if active and (current_braking or current_short_ttc or fast_close_revokes_recovery):
       self.governor_threat_corroborated = True
       self.governor_calm_recovery_mode = False
+      # A same-frame threat restores clamp authority from the CURRENT raw
+      # closure: a stale-decayed (or small) clamp must not soften the hold's
+      # response to a corroborated threat, and raw closing is exactly the
+      # evidence the short-TTC/fast-close corroborations are derived from.
+      self.governor_closing_mps = max(float(self.governor_closing_mps), raw_closing)
       if current_braking:
         self.governor_reason = "current_braking"
       elif current_short_ttc:
@@ -1090,14 +1142,30 @@ class ModelLeadTrack:
     self.governor_calm_recovery_mode = False
 
     release_closing_max = 0.5 * min_closing
-    if vrel_closing <= release_closing_max and alead_mean >= -opening_alead_veto:
+    if (vrel_closing <= release_closing_max and alead_mean >= -opening_alead_veto and
+        not current_braking and not current_short_ttc and not current_fast_close):
       self.governor_hold_until_t = -1.0
       self.governor_closing_mps = 0.0
       self.governor_reason = "inactive"
       self.governor_threat_corroborated = False
       self.governor_calm_recovery_mode = False
       return False
+    # Decay applies only when the current frame and window carry NO active
+    # threat: a braking lead, a short raw TTC, a hard close, or a braking
+    # window mean each keep the clamp frozen exactly as before.  Like calm
+    # recovery, the braking boundary is clamped to the fixed 0.2 m/s^2 safety
+    # value — a permissive opening-governor tune must never weaken it.
+    stale_decay_alead_veto = min(max(0.0, opening_alead_veto), 0.2)
+    stale_decay_safe = bool(
+      allow_calm_recovery and
+      float(raw_alead) >= -stale_decay_alead_veto and
+      alead_mean >= -stale_decay_alead_veto and
+      not current_short_ttc and
+      not current_fast_close
+    )
     if vrel_closing <= min_closing:
+      if active and stale_decay_safe:
+        self._decay_stale_governor_clamp(vrel_closing, raw_closing)
       return active
 
     k = max(2, len(samples) // 4)
@@ -1111,12 +1179,37 @@ class ModelLeadTrack:
     pos_closing = -(d_last - d_first) / (t_last - t_first)
 
     published_closing = max(0.0, -float(self.vRel))
-    armed_position = pos_closing > published_closing + margin and pos_closing > min_closing
+    position_arm_margin = margin
+    if allow_calm_recovery:
+      # Significance gate: the endpoint-mean slope of a k-averaged window has
+      # noise SE = sqrt(2/k) * sigma_r / span, where sigma_r is the residual
+      # scatter of this window's own samples around the fitted trend.  A clean
+      # stream keeps SE << margin (legacy arming preserved); a jittery stream
+      # inflates the required excess so slope noise cannot arm the clamp.
+      slope = -pos_closing
+      d_fit0 = d_first - slope * t_first
+      residuals = [s[1] - (d_fit0 + slope * s[0]) for s in samples]
+      sigma_r = float(np.std(residuals))
+      pos_slope_noise = math.sqrt(2.0 / float(k)) * sigma_r / max(1e-3, (t_last - t_first))
+      position_arm_margin = max(margin, CLOSING_GOVERNOR_POSITION_NOISE_Z * pos_slope_noise)
+    armed_position = pos_closing > published_closing + position_arm_margin and pos_closing > min_closing
 
     accel_onset = float(getattr(cfg, 'closing_governor_accel_onset_mps2', 99.0))
     armed_decel = accel_onset < 99.0 and alead_mean < -accel_onset
 
-    if armed_position or armed_decel:
+    # A step threat arriving out of a calm window (cut-out reveal, sudden hard
+    # closure) used to arm through the noise-blind position slope in the same
+    # frame.  With the significance gate that first-frame path is no longer
+    # guaranteed, so a short TTC computed from the CURRENT raw velocity — the
+    # independently corroborated evidence the full-trust branch already relies
+    # on — arms directly.  EV6-scoped with the rest of the hardening.
+    armed_short_ttc = bool(
+      allow_calm_recovery and
+      raw_closing > min_closing and
+      raw_collision_ttc_s <= OPENING_GOVERNOR_MIN_PUBLISHED_TTC_S
+    )
+
+    if armed_position or armed_decel or armed_short_ttc:
       hold_s = float(getattr(cfg, 'closing_governor_hold_s', 1.0))
       self.governor_hold_until_t = float(now) + max(0.1, hold_s)
       # Corroborated closure for the publish clamp: the position stream may
@@ -1190,6 +1283,11 @@ class ModelLeadTrack:
       self.governor_reason = "inactive"
       self.governor_threat_corroborated = False
       self.governor_calm_recovery_mode = False
+    elif stale_decay_safe:
+      # Dense window, arm conditions no longer met, no active threat: the hold
+      # may bridge, but the clamp tracks current evidence instead of freezing
+      # at its worst.
+      self._decay_stale_governor_clamp(vrel_closing, raw_closing)
     return active
 
   def _update_opening_governor(self, now: float, closing_governor_active: bool,

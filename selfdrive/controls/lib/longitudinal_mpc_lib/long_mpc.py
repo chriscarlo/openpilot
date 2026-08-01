@@ -222,6 +222,7 @@ HYUNDAI_DUPLICATE_DREL_SWITCH_M = 0.75
 HYUNDAI_VIRTUAL_LEAD_FAST_TAU_S = 0.20
 HYUNDAI_VIRTUAL_LEAD_SLOW_TAU_S = 1.00
 HYUNDAI_VIRTUAL_LEAD_SIGN_TRANSITION_TAU_S = 0.30
+HYUNDAI_VIRTUAL_LEAD_OPENING_CONFIRM_FRAMES = 3
 HYUNDAI_VIRTUAL_LEAD_PATH_TAU_S = 0.45
 HYUNDAI_VIRTUAL_LEAD_MODEL_PROB_TAU_S = 0.60
 HYUNDAI_VIRTUAL_LEAD_RESET_DREL_M = 8.0
@@ -1642,6 +1643,7 @@ class LongitudinalMpc:
     self._hyundai_virtual_lead_stable_since_t = None
     self._hyundai_virtual_lead_last_drel_error_m = 1e9
     self._hyundai_virtual_lead_dropout_until_t = None
+    self._hyundai_virtual_lead_opening_frames = 0
     self._drel_filter = LeadDistanceFilter()
     self._drel_kalman = LeadKalmanFilter()
     self._use_kalman_drel = False
@@ -1680,6 +1682,7 @@ class LongitudinalMpc:
       'lead1': {"status": False, "dRel": None, "vLead": None},
     }
     self.acc_source_debug = {}
+    self.selected_obstacle_m = 0.0
     # timers
     self.solve_time = 0.0
     self.time_qp_solution = 0.0
@@ -1745,7 +1748,7 @@ class LongitudinalMpc:
     return float(getattr(lead, attr, default) or default)
 
   @staticmethod
-  def _lead_debug_payload(lead) -> dict[str, float | bool]:
+  def _lead_debug_payload(lead) -> dict[str, Any]:
     if lead is None:
       return {
         "status": False,
@@ -1754,7 +1757,17 @@ class LongitudinalMpc:
         "dPath": 0.0,
         "vLat": 0.0,
         "vRel": 0.0,
+        "aRel": 0.0,
+        "vLead": 0.0,
+        "vLeadK": 0.0,
+        "aLeadK": 0.0,
         "modelProb": 0.0,
+        "fcw": False,
+        "radar": False,
+        "radarTrackId": -1,
+        "closingGovernorRecovery": False,
+        "steadyParityCurrentThreat": False,
+        "accelCorrRawHardBraking": False,
       }
     return {
       "status": bool(getattr(lead, "status", False)),
@@ -1763,7 +1776,17 @@ class LongitudinalMpc:
       "dPath": LongitudinalMpc._lead_attr(lead, "dPath", LongitudinalMpc._lead_attr(lead, "yRel")),
       "vLat": LongitudinalMpc._lead_attr(lead, "vLat"),
       "vRel": LongitudinalMpc._lead_attr(lead, "vRel"),
+      "aRel": LongitudinalMpc._lead_attr(lead, "aRel"),
+      "vLead": LongitudinalMpc._lead_attr(lead, "vLead"),
+      "vLeadK": LongitudinalMpc._lead_attr(lead, "vLeadK"),
+      "aLeadK": LongitudinalMpc._lead_attr(lead, "aLeadK"),
       "modelProb": LongitudinalMpc._lead_attr(lead, "modelProb"),
+      "fcw": bool(getattr(lead, "fcw", False)),
+      "radar": bool(getattr(lead, "radar", False)),
+      "radarTrackId": _coerce_radar_track_id(getattr(lead, "radarTrackId", -1)),
+      "closingGovernorRecovery": bool(getattr(lead, "closingGovernorRecovery", False)),
+      "steadyParityCurrentThreat": bool(getattr(lead, "steadyParityCurrentThreat", False)),
+      "accelCorrRawHardBraking": bool(getattr(lead, "accelCorrRawHardBraking", False)),
     }
 
   def _update_lead_acquire_state(self, now: float) -> dict[str, dict[str, float | bool | str | None]]:
@@ -2475,6 +2498,7 @@ class LongitudinalMpc:
     self._hyundai_virtual_lead_reset_reason = reason
     self._hyundai_virtual_lead_stable_since_t = None
     self._hyundai_virtual_lead_last_drel_error_m = 1e9
+    self._hyundai_virtual_lead_opening_frames = 0
     self._clear_hyundai_virtual_lead_dropout_hold()
     self._drel_filter.reset()
     self._drel_kalman.reset()
@@ -2484,6 +2508,47 @@ class LongitudinalMpc:
       "active": False,
       "reset_reason": reason,
     }
+
+  def _update_hyundai_virtual_lead_opening_recovery(self, lead_source: str | None,
+                                                     raw_lead: ControlLead) -> tuple[bool, str]:
+    """Confirm safe recovery before shortening planner-private kinematic lag.
+
+    RadarD has already associated and stabilized this lead. This second-stage
+    recovery is deliberately narrower: fresh model identity, three consecutive
+    opening publications, and no producer or planner threat attestation. Any
+    failed gate resets the dwell; danger-direction changes remain immediate.
+    """
+    reason = "eligible"
+    slot_idx = {"lead0": 0, "lead1": 1}.get(str(lead_source))
+    track_id = _coerce_radar_track_id(getattr(raw_lead, "radarTrackId", -1))
+    previous_track_id = _coerce_radar_track_id(
+      getattr(self._hyundai_virtual_lead, "radarTrackId", -1),
+    )
+    if slot_idx is None or not bool(raw_lead.status):
+      reason = "invalid_lead"
+    elif bool(self._lead_stability_phantom_slots[slot_idx]):
+      reason = "phantom_hold"
+    elif bool(raw_lead.radar) or track_id > -1001:
+      reason = "non_model_identity"
+    elif track_id != previous_track_id:
+      reason = "identity_change"
+    elif float(raw_lead.vRel) <= 0.0:
+      reason = "not_opening"
+    elif float(raw_lead.aLeadK) < -LEAD_ACCEL_CORR_AMPLIFY_MODEL_DECEL_MIN_MPS2:
+      reason = "lead_braking"
+    elif bool(raw_lead.fcw) or bool(raw_lead.closingGovernorRecovery):
+      reason = "fcw_or_governor_recovery"
+    elif bool(raw_lead.steadyParityCurrentThreat) or bool(raw_lead.steadyParityThreatRestore):
+      reason = "steady_parity_threat"
+    elif bool(raw_lead.accelCorrRawHardBraking):
+      reason = "raw_hard_braking"
+
+    if reason == "eligible":
+      self._hyundai_virtual_lead_opening_frames += 1
+    else:
+      self._hyundai_virtual_lead_opening_frames = 0
+    active = self._hyundai_virtual_lead_opening_frames >= HYUNDAI_VIRTUAL_LEAD_OPENING_CONFIRM_FRAMES
+    return active, "confirmed_opening" if active else reason
 
   @staticmethod
   def _synthetic_model_track_id(lead) -> int | None:
@@ -2763,7 +2828,10 @@ class LongitudinalMpc:
       return None
 
     raw_lead = ControlLead.from_lead(lead) if lead is not None else ControlLead()
+    opening_recovery_active = False
+    opening_recovery_reason = "reset"
     if not raw_lead.status:
+      self._hyundai_virtual_lead_opening_frames = 0
       held_lead, dropout_hold_debug = self._maybe_hold_hyundai_virtual_lead_dropout(now)
       if held_lead is not None:
         metrics = self._lead_follow_metrics(float(self.x0[1]), self.current_t_follow, held_lead)
@@ -2772,12 +2840,21 @@ class LongitudinalMpc:
           "source": str(self._hyundai_virtual_lead_source),
           "identity_changed": False,
           "reset_reason": "dropout_hold",
+          "input": self._lead_debug_payload(raw_lead),
           "filtered": self._lead_debug_payload(held_lead),
           "metrics": metrics,
           "drel_consistency_m": float(self._hyundai_virtual_lead_last_drel_error_m),
           "filter": dict((self._drel_kalman if self._use_kalman_drel else self._drel_filter).last_debug),
           "drel_filter_type": "kalman" if self._use_kalman_drel else "ema",
           "dropout_hold": dropout_hold_debug,
+          "opening_recovery": {
+            "active": False,
+            "candidate": False,
+            "confirm_frames": 0,
+            "required_frames": HYUNDAI_VIRTUAL_LEAD_OPENING_CONFIRM_FRAMES,
+            "tau_s": float(self._live_tune_cfg.virtual_lead_opening_recovery_tau_s),
+            "reason": "dropout_hold",
+          },
         }
         return held_lead
     else:
@@ -2786,6 +2863,8 @@ class LongitudinalMpc:
     should_reset, reset_reason = self._should_reset_hyundai_virtual_lead(lead_source, lead)
 
     if should_reset:
+      self._hyundai_virtual_lead_opening_frames = 0
+      opening_recovery_reason = reset_reason or "reset"
       self._hyundai_virtual_lead = raw_lead
       self._hyundai_virtual_lead_source = lead_source if raw_lead.status else None
       self._hyundai_virtual_lead_last_t = now if raw_lead.status else None
@@ -2813,6 +2892,13 @@ class LongitudinalMpc:
       filtered = copy.deepcopy(prev)
       filtered.status = raw_lead.status
       cfg = self._live_tune_cfg
+      opening_recovery_active, opening_recovery_reason = self._update_hyundai_virtual_lead_opening_recovery(
+        lead_source, raw_lead,
+      )
+      kinematic_recovery_tau_s = (
+        float(cfg.virtual_lead_opening_recovery_tau_s)
+        if opening_recovery_active else HYUNDAI_VIRTUAL_LEAD_SLOW_TAU_S
+      )
       raw_vrel = float(getattr(raw_lead, 'vRel', 0.0) or 0.0)
       if self._use_kalman_drel:
         filtered.dRel = self._drel_kalman.update(raw_lead.dRel, raw_vrel, dt_s)
@@ -2826,12 +2912,16 @@ class LongitudinalMpc:
           open_slew_max_mps=getattr(cfg, 'drel_filter_open_slew_max_mps', DREL_FILTER_OPEN_SLEW_MAX_MPS),
         )
       filtered.yRel = self._filter_symmetric_metric(prev.yRel, raw_lead.yRel, dt_s, HYUNDAI_VIRTUAL_LEAD_PATH_TAU_S)
-      filtered.vRel = self._filter_metric(prev.vRel, raw_lead.vRel, dt_s, danger_if_lower=True)
-      filtered.aRel = self._filter_metric(prev.aRel, raw_lead.aRel, dt_s, danger_if_lower=True)
-      filtered.vLead = self._filter_metric(prev.vLead, raw_lead.vLead, dt_s, danger_if_lower=True)
+      filtered.vRel = self._filter_metric(prev.vRel, raw_lead.vRel, dt_s, danger_if_lower=True,
+                                          slow_tau_s=kinematic_recovery_tau_s)
+      filtered.aRel = self._filter_metric(prev.aRel, raw_lead.aRel, dt_s, danger_if_lower=True,
+                                          slow_tau_s=kinematic_recovery_tau_s)
+      filtered.vLead = self._filter_metric(prev.vLead, raw_lead.vLead, dt_s, danger_if_lower=True,
+                                           slow_tau_s=kinematic_recovery_tau_s)
       filtered.dPath = self._filter_symmetric_metric(prev.dPath, raw_lead.dPath, dt_s, HYUNDAI_VIRTUAL_LEAD_PATH_TAU_S)
       filtered.vLat = self._filter_symmetric_metric(prev.vLat, raw_lead.vLat, dt_s, HYUNDAI_VIRTUAL_LEAD_PATH_TAU_S)
-      filtered.vLeadK = self._filter_metric(prev.vLeadK, raw_lead.vLeadK, dt_s, danger_if_lower=True)
+      filtered.vLeadK = self._filter_metric(prev.vLeadK, raw_lead.vLeadK, dt_s, danger_if_lower=True,
+                                            slow_tau_s=kinematic_recovery_tau_s)
       filtered.aLeadK = self._filter_metric(prev.aLeadK, raw_lead.aLeadK, dt_s, danger_if_lower=True,
                                              slow_tau_s=cfg.virtual_lead_slow_tau_s,
                                              sign_transition_tau_s=HYUNDAI_VIRTUAL_LEAD_SIGN_TRANSITION_TAU_S)
@@ -2866,12 +2956,21 @@ class LongitudinalMpc:
       "source": str(self._hyundai_virtual_lead_source),
       "identity_changed": bool(self._hyundai_virtual_lead_identity_changed),
       "reset_reason": self._hyundai_virtual_lead_reset_reason,
+      "input": self._lead_debug_payload(raw_lead),
       "filtered": self._lead_debug_payload(self._hyundai_virtual_lead),
       "metrics": metrics,
       "drel_consistency_m": float(self._hyundai_virtual_lead_last_drel_error_m),
       "filter": dict((self._drel_kalman if self._use_kalman_drel else self._drel_filter).last_debug),
       "drel_filter_type": "kalman" if self._use_kalman_drel else "ema",
       "dropout_hold": dropout_hold_debug,
+      "opening_recovery": {
+        "active": bool(opening_recovery_active),
+        "candidate": bool(self._hyundai_virtual_lead_opening_frames > 0),
+        "confirm_frames": int(self._hyundai_virtual_lead_opening_frames),
+        "required_frames": HYUNDAI_VIRTUAL_LEAD_OPENING_CONFIRM_FRAMES,
+        "tau_s": float(self._live_tune_cfg.virtual_lead_opening_recovery_tau_s),
+        "reason": str(opening_recovery_reason),
+      },
     }
     return self._hyundai_virtual_lead
 
@@ -4619,10 +4718,12 @@ class LongitudinalMpc:
     self.solver.set(N, "yref", self.yref[N][:COST_E_DIM])
 
     if self.mode == 'acc':
+      self.selected_obstacle_m = float(active_obstacle[0])
       self.params[:,2] = active_obstacle
       speed_constraint_ub = np.full(CONSTR_DIM, 1e4)
       speed_constraint_ub[0] = max(float(v_cruise), float(v_ego)) + 0.05
     else:
+      self.selected_obstacle_m = float(np.min(x_obstacles, axis=1)[0])
       self.params[:,2] = np.min(x_obstacles, axis=1)
       speed_constraint_ub = np.full(CONSTR_DIM, 1e4)
     self.params[:,3] = np.copy(self.prev_a)

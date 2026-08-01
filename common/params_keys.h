@@ -403,6 +403,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"Longitudinal.LiveTune.CutInSettleMaxClosingSpeedMps", {PERSISTENT | BACKUP, FLOAT, "2.2"}},
     {"Longitudinal.LiveTune.CutInSettleAccelBiasMps2", {PERSISTENT | BACKUP, FLOAT, "0.12"}},
     {"Longitudinal.LiveTune.VirtualLeadSlowTauS", {PERSISTENT | BACKUP, FLOAT, "1.30"}},
+    {"Longitudinal.LiveTune.VirtualLeadOpeningRecoveryTauS", {PERSISTENT | BACKUP, FLOAT, "0.30"}},
     {"Longitudinal.LiveTune.UseKalmanDRelFilter", {PERSISTENT | BACKUP, BOOL, "1"}},
     {"Longitudinal.LiveTune.KalmanDRelQ", {PERSISTENT | BACKUP, FLOAT, "0.5"}},
     {"Longitudinal.LiveTune.KalmanDRelR", {PERSISTENT | BACKUP, FLOAT, "6.0"}},

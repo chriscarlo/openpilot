@@ -523,6 +523,18 @@ LEAD_RESPONSE_TUNE_SPECS = (
                 "Sign transitions (decel-to-accel) always use a faster fixed tau regardless of this value.",
   ),
   LeadResponseTuneSpec(
+    attr="virtual_lead_opening_recovery_tau_s",
+    key="Longitudinal.LiveTune.VirtualLeadOpeningRecoveryTauS",
+    cli_name="virtual-lead-opening-recovery-tau",
+    label="vl_open_tau",
+    default=0.30,
+    minimum=0.05,
+    maximum=1.0,
+    description="Recovery EMA time constant for vRel/aRel/vLead/vLeadK after three consecutive fresh, same-track, "
+                "non-threat opening frames from the EV6 vision lead. Danger-direction changes remain on the fixed fast "
+                "path. Rollback sentinel: 1.0 exactly restores the legacy kinematic recovery tau.",
+  ),
+  LeadResponseTuneSpec(
     attr="drel_filter_tau_close_s",
     key="Longitudinal.LiveTune.DRelFilterTauCloseS",
     cli_name="drel-filter-tau-close",
@@ -2006,6 +2018,7 @@ class LeadResponseTuningConfig:
   cutin_settle_max_closing_speed_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cutin_settle_max_closing_speed_mps"].default
   cutin_settle_accel_bias_mps2: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["cutin_settle_accel_bias_mps2"].default
   virtual_lead_slow_tau_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["virtual_lead_slow_tau_s"].default
+  virtual_lead_opening_recovery_tau_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["virtual_lead_opening_recovery_tau_s"].default
   drel_filter_tau_close_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["drel_filter_tau_close_s"].default
   drel_filter_tau_open_s: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["drel_filter_tau_open_s"].default
   drel_filter_open_slew_max_mps: float = LEAD_RESPONSE_TUNE_SPECS_BY_ATTR["drel_filter_open_slew_max_mps"].default
