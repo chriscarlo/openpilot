@@ -13,13 +13,53 @@
 
 ExitHandler do_exit;
 
+// How long after a bookmark/preserve trigger a newly-rotated-into segment still
+// counts as part of that incident. The onroad flag button advertises a +6.0 s
+// post window (kFlagRetroPostS, selfdrive/ui/sunnypilot/qt/onroad/buttons.h);
+// this is that window plus margin for UI->msgq->loggerd latency. A tap in the
+// last few seconds of a segment records its post window into segment N+1, and
+// N+1 does not exist yet at tap time -- so it cannot be xattr'd by
+// handle_preserve_segment(). Instead we arm a deadline and xattr the next
+// segment when we actually rotate into it. (deleter.py only ever expands a
+// preserved segment BACKWARDS: range(max(0, seg_num - 2), seg_num + 1), so
+// without this the post window sits in an unprotected, reapable segment.)
+//
+// Kept tight on purpose (6.0 s advertised + 2.0 s of margin, not 2x): every
+// extra xattr'd directory consumes one of deleter.py's PRESERVE_COUNT slots.
+constexpr double PRESERVE_POST_WINDOW_MS = 8000.0;
+
 struct LoggerdState {
   LoggerState logger;
   std::atomic<double> last_camera_seen_tms{0.0};
   std::atomic<int> ready_to_rotate{0};  // count of encoders ready to rotate
   int max_waiting = 0;
   double last_rotate_tms = 0.;      // last rotate time in ms
+  double preserve_until_tms = 0.;   // xattr any segment we rotate into before this time
+  int preserved_segment = -1;       // last segment already xattr'd, dedup only
 };
+
+// Mark the CURRENT segment as preserved. Idempotent per segment.
+void preserve_current_segment(LoggerdState *s) {
+  if (s->logger.segment() == s->preserved_segment) return;
+
+  LOGW("preserving %s", s->logger.segmentPath().c_str());
+
+#ifdef __APPLE__
+  int ret = setxattr(s->logger.segmentPath().c_str(), PRESERVE_ATTR_NAME, &PRESERVE_ATTR_VALUE, 1, 0, 0);
+#else
+  int ret = setxattr(s->logger.segmentPath().c_str(), PRESERVE_ATTR_NAME, &PRESERVE_ATTR_VALUE, 1, 0);
+#endif
+  if (ret) {
+    LOGE("setxattr %s failed for %s: %s", PRESERVE_ATTR_NAME, s->logger.segmentPath().c_str(), strerror(errno));
+  }
+
+  // mark route for uploading
+  Params params;
+  std::string routes = params.get("AthenadRecentlyViewedRoutes");
+  params.put("AthenadRecentlyViewedRoutes", routes + "," + s->logger.routeName());
+
+  s->preserved_segment = s->logger.segment();
+}
 
 void logger_rotate(LoggerdState *s) {
   bool ret =s->logger.next();
@@ -27,6 +67,12 @@ void logger_rotate(LoggerdState *s) {
   s->ready_to_rotate = 0;
   s->last_rotate_tms = millis_since_boot();
   LOGW((s->logger.segment() == 0) ? "logging to %s" : "rotated to %s", s->logger.segmentPath().c_str());
+
+  // Forward half of the preserve window: we just rotated into the segment that
+  // holds the tail of a recent bookmark's post window, so protect it too.
+  if (s->last_rotate_tms < s->preserve_until_tms) {
+    preserve_current_segment(s);
+  }
 }
 
 void rotate_if_needed(LoggerdState *s) {
@@ -195,26 +241,14 @@ int handle_encoder_msg(LoggerdState *s, Message *msg, std::string &name, struct 
 }
 
 void handle_preserve_segment(LoggerdState *s) {
-  static int prev_segment = -1;
-  if (s->logger.segment() == prev_segment) return;
-
-  LOGW("preserving %s", s->logger.segmentPath().c_str());
-
-#ifdef __APPLE__
-  int ret = setxattr(s->logger.segmentPath().c_str(), PRESERVE_ATTR_NAME, &PRESERVE_ATTR_VALUE, 1, 0, 0);
-#else
-  int ret = setxattr(s->logger.segmentPath().c_str(), PRESERVE_ATTR_NAME, &PRESERVE_ATTR_VALUE, 1, 0);
-#endif
-  if (ret) {
-    LOGE("setxattr %s failed for %s: %s", PRESERVE_ATTR_NAME, s->logger.segmentPath().c_str(), strerror(errno));
+  // Arm the forward window BEFORE the dedup return: a second tap late in a
+  // segment we already preserved must still extend protection into N+1.
+  const double deadline = millis_since_boot() + PRESERVE_POST_WINDOW_MS;
+  if (deadline > s->preserve_until_tms) {
+    s->preserve_until_tms = deadline;
   }
 
-  // mark route for uploading
-  Params params;
-  std::string routes = params.get("AthenadRecentlyViewedRoutes");
-  params.put("AthenadRecentlyViewedRoutes", routes + "," + s->logger.routeName());
-
-  prev_segment = s->logger.segment();
+  preserve_current_segment(s);
 }
 
 void loggerd_thread() {
@@ -246,7 +280,12 @@ void loggerd_thread() {
         .counter = 0,
         .freq = it.decimation,
         .encoder = encoder,
-        .preserve_segment = (it.name == "userBookmark") || (it.name == "audioFeedback"),
+        // "bookmarkButton" is the raw tap; "userBookmark" is feedbackd's echo of it.
+        // Preserving on the raw tap makes deletion-protection independent of feedbackd,
+        // which is registered only_onroad (system/manager/process_config.py) -- if it is
+        // down or crashes, the tap would otherwise be recorded into a segment that
+        // deleter is still free to reap.
+        .preserve_segment = (it.name == "userBookmark") || (it.name == "bookmarkButton") || (it.name == "audioFeedback"),
         .record_audio = record_audio,
       };
     }

@@ -15,7 +15,11 @@ DELETE_LAST = ['boot', 'crash']
 
 PRESERVE_ATTR_NAME = 'user.preserve'
 PRESERVE_ATTR_VALUE = b'1'
-PRESERVE_COUNT = 5
+# Match the longitudinal mark recorder's 50-sidecar retention. Preserved entries
+# are deletion priority, not an undeletable reserve: once only protected/locked
+# directories remain, the loop below still deletes the oldest unlocked one and
+# therefore continues making forward progress under disk pressure.
+PRESERVE_COUNT = 50
 
 
 def has_preserve_xattr(d: str) -> bool:

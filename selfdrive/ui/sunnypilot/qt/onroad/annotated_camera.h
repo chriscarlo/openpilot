@@ -7,6 +7,11 @@
 
 #pragma once
 
+// Must come before annotated_camera.h: that header defines
+// `ExperimentalButton -> ExperimentalButtonSP` (and friends) after its own
+// includes, and this header must be parsed with those macros inactive.
+#include "selfdrive/ui/sunnypilot/qt/onroad/buttons.h"
+
 #include "selfdrive/ui/qt/onroad/annotated_camera.h"
 #include "selfdrive/ui/sunnypilot/qt/onroad/hud.h"
 
@@ -20,4 +25,5 @@ public:
 
 private:
   HudRendererSP hud_sp;
+  LongitudinalFlagButtonSP *flag_btn = nullptr;
 };

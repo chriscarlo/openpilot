@@ -29,12 +29,19 @@ def main():
   ldw = LaneDepartureWarning()
   longitudinal_planner = LongitudinalPlanner(CP)
   pm = messaging.PubMaster(['longitudinalPlan', 'driverAssistance', 'longitudinalPlanSP'])
+  # SubMaster always conflates. A direct non-conflated socket is required here:
+  # after a >1 s model stall, two deliberate flag presses must reach the bounded
+  # recorder latch rather than collapsing to the newest envelope.
+  bookmark_sock = messaging.sub_sock("bookmarkButton", conflate=False)
   sm = messaging.SubMaster(['carControl', 'carState', 'controlsState', 'liveParameters', 'radarState', 'modelV2', 'selfdriveState',
                             'liveMapDataSP', 'carStateSP', 'rtiStateSP', 'objectHazardStateSP', gps_location_service],
                            poll='modelV2')
 
   while True:
     sm.update()
+    # Drain OUTSIDE the modelV2 gate or a press landing while modelV2 is late is
+    # discarded. The recorder bounds work per iteration and never raises.
+    longitudinal_planner.mark_recorder.drain_press_socket(bookmark_sock)
     if sm.updated['modelV2']:
       loop_t0 = time.monotonic()
       longitudinal_planner.planner_lag_debug.begin_cycle(frame=int(sm.frame), model_logmono_ns=int(sm.logMonoTime['modelV2']))
@@ -52,6 +59,8 @@ def main():
           pm.send('driverAssistance', msg)
         finally:
           end_span(driver_assist_span)
+        # Phase 2 driver-mark capture. Never blocks, never does I/O, never raises.
+        longitudinal_planner.mark_recorder.update(longitudinal_planner, sm)
       finally:
         loop_end_s = time.monotonic()
         longitudinal_planner.planner_lag_debug.finish_cycle(

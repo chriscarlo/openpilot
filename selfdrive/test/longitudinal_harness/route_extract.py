@@ -37,7 +37,7 @@ from .replay_contracts import (
 )
 
 
-EXTRACTOR_VERSION = "ev6_v11_radard_replay_v2"
+EXTRACTOR_VERSION = "ev6_v12_driver_mark"
 DEFAULT_ROUTE_ROOTS = (
   Path(".cache/commaCar"),
   Path(".cache/commaAdb"),
@@ -53,6 +53,9 @@ WINDOWS_BY_TYPE = {
   "handoff": (-2.0, 4.0),
   "dropout": (-2.0, 4.0),
   "false_closing": (-15.0, 5.0),
+  # A human press is a reaction, so the interesting build-up is already behind
+  # the driver by the time the thumb lands. The long pre-roll is deliberate.
+  "driver_mark": (-20.0, 6.0),
 }
 COOLDOWN_BY_TYPE_S = {
   "approach": 6.0,
@@ -69,8 +72,21 @@ SUPPRESSION_BY_TYPE_S = {
   "handoff": 6.0,
   "dropout": 6.0,
   "false_closing": 6.0,
+  # "driver_mark" is deliberately absent, like it is from COOLDOWN_BY_TYPE_S.
+  # A time radius here is measured on event_t_s, which for a driver mark is the
+  # ANCHOR FRAME's route clock, not the press clock -- see
+  # _should_suppress_candidate. Driver marks dedupe on press identity instead,
+  # and the only echo radius that exists is DRIVER_MARK_ECHO_WINDOW_S, applied by
+  # collapse_driver_mark_echoes on the exact press logMonoTime.
 }
 MAX_EXACT_REPLAY_FRAME_GAP_S = 0.075
+DRIVER_MARK_SERVICES = ("bookmarkButton", "userBookmark")
+# The only service a flag press is actually proven by; see is_driver_mark_press_group.
+DRIVER_MARK_PRESS_SERVICE = "bookmarkButton"
+DRIVER_MARK_ECHO_WINDOW_S = 0.5
+DRIVER_MARK_FRAME_TOLERANCE_S = 1.0
+DRIVER_MARK_PAYLOAD_WINDOW_S = 2.0
+LONGFLAG_PREFIX = "LONGFLAG "
 RADARD_DEPENDENCY_WARMUP_S = 15.0
 LONGITUDINAL_PLAN_SP_PAIR_MAX_NS = 20_000_000
 MPH_TO_MPS = 0.44704
@@ -240,6 +256,25 @@ class EpisodeFrame:
   param_updates: dict[str, str]
 
 
+@dataclass(frozen=True)
+class DriverMarkPress:
+  """One deliberate driver flag press, already collapsed across its service echo."""
+  route_key: str
+  seg_idx: int
+  press_log_mono_time_ns: int
+  t_s: float | None
+  services: tuple[str, ...]
+  payload: dict[str, Any] | None
+  frame_index: int | None
+  frame_log_mono_time_ns: int | None
+  frame_gap_s: float | None
+  status: str
+
+  @property
+  def mark_id(self) -> str:
+    return f"{self.route_key}--{self.seg_idx}--{self.press_log_mono_time_ns}"
+
+
 @dataclass
 class RouteScanResult:
   route_id: int
@@ -248,6 +283,8 @@ class RouteScanResult:
   frames: list[EpisodeFrame]
   service_join_diagnostics: dict[str, Any] = field(default_factory=dict)
   planner_route_start_provenance: dict[str, Any] = field(default_factory=dict)
+  driver_marks: list[DriverMarkPress] = field(default_factory=list)
+  longflag_payloads: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -265,12 +302,21 @@ class EpisodeCandidate:
   metrics: dict[str, Any]
   notes_json: dict[str, Any]
   frames: list[EpisodeFrame]
+  # Appended verbatim to episode_key. Heuristic detectors leave this None: their
+  # window bounds plus per-type overlap suppression already make the key unique.
+  # A driver mark cannot rely on either -- overlap suppression is exempted for
+  # it on purpose -- so it carries its press logMonoTime here. Without it, two
+  # presses whose windows clamp or run off the end of the recorded frames
+  # resolve to the same start/end frame and the second upsert_episode silently
+  # overwrites the first press's row.
+  key_discriminator: str | None = None
 
   @property
   def episode_key(self) -> str:
     start_ms = int(round(self.t_start_s * 1000.0))
     end_ms = int(round(self.t_end_s * 1000.0))
-    return f"route{self.route_id}:{self.route_key}:{self.episode_type}:{start_ms}:{end_ms}:{EXTRACTOR_VERSION}"
+    key = f"route{self.route_id}:{self.route_key}:{self.episode_type}:{start_ms}:{end_ms}:{EXTRACTOR_VERSION}"
+    return key if self.key_discriminator is None else f"{key}:{self.key_discriminator}"
 
 
 def index_ev6_routes(conn, roots: list[str | Path] | None = None) -> list[dict[str, Any]]:
@@ -1527,12 +1573,30 @@ def load_route_scan(conn, route_row, *, strict_service_joins: bool = False) -> R
   processed_radar_state_mono_times: set[int] = set()
   first_radar_time = None
   frames: list[EpisodeFrame] = []
+  raw_driver_mark_presses: list[dict[str, Any]] = []
+  longflag_payloads: list[dict[str, Any]] = []
 
   for segment_row in segment_rows:
     for msg in LogReader(segment_row["rlog_path"]):
       which = msg.which()
       if which == "initData":
         _merge_param_updates(observed_params, pending_param_updates, _extract_init_params(msg.initData))
+      elif which in DRIVER_MARK_SERVICES:
+        # A driver flag is human intent, never a heuristic. Keep every raw echo
+        # here; collapsing and frame anchoring happen once the scan is complete.
+        raw_driver_mark_presses.append({
+          "segIdx": int(segment_row["seg_idx"]),
+          "logMonoTimeNs": int(msg.logMonoTime),
+          "service": which,
+        })
+      elif which == "logMessage":
+        longflag = _parse_longflag(msg.logMessage)
+        if longflag is not None:
+          longflag_payloads.append({
+            "segIdx": int(segment_row["seg_idx"]),
+            "logMonoTimeNs": int(msg.logMonoTime),
+            "payload": longflag,
+          })
       elif which == "carControlSP":
         _merge_param_updates(
           observed_params,
@@ -1972,6 +2036,13 @@ def load_route_scan(conn, route_row, *, strict_service_joins: bool = False) -> R
       RuntimeWarning,
       stacklevel=2,
     )
+  driver_marks = _resolve_driver_marks(
+    raw_driver_mark_presses,
+    longflag_payloads,
+    frames,
+    route_key=metadata.route_key,
+    first_radar_time_ns=first_radar_time,
+  )
   return RouteScanResult(
     route_id=int(route_row["route_id"]),
     metadata=metadata,
@@ -1979,6 +2050,8 @@ def load_route_scan(conn, route_row, *, strict_service_joins: bool = False) -> R
     frames=frames,
     service_join_diagnostics=service_join_diagnostics,
     planner_route_start_provenance=dict(replay_index.planner_route_start_provenance),
+    driver_marks=driver_marks,
+    longflag_payloads=longflag_payloads,
   )
 
 
@@ -2003,11 +2076,39 @@ def extract_ev6_episodes(conn,
           **({"route_start_replay": True} if route_start_replay else {}),
         )
       except EpisodeNotReplayableError as exc:
+        if candidate.episode_type != "driver_mark":
+          recorded.append({
+            "routeId": scan.route_id,
+            "episodeKey": candidate.episode_key,
+            "episodeType": candidate.episode_type,
+            "status": "not_evaluated",
+            "reason": str(exc),
+            "confidence": candidate.confidence,
+          })
+          continue
+        # A human mark must never vanish because replay dependencies are
+        # incomplete. Catalog it without a bundle so the incident stays visible.
+        episode_id = upsert_episode(conn, EpisodeCatalogRecord(
+          route_id=scan.route_id,
+          episode_key=candidate.episode_key,
+          episode_type=candidate.episode_type,
+          seg_start=candidate.seg_start,
+          seg_end=candidate.seg_end,
+          t_start_s=candidate.t_start_s,
+          t_end_s=candidate.t_end_s,
+          confidence=candidate.confidence,
+          extractor_version=EXTRACTOR_VERSION,
+          source_event_count=int(candidate.metrics.get("sourceEventCount", 1)),
+          metrics_json=candidate.metrics,
+          bundle_path=None,
+          notes_json={**candidate.notes_json, "bundleUnavailableReason": str(exc)},
+        ))
         recorded.append({
           "routeId": scan.route_id,
+          "episodeId": episode_id,
           "episodeKey": candidate.episode_key,
           "episodeType": candidate.episode_type,
-          "status": "not_evaluated",
+          "status": "recorded_without_bundle",
           "reason": str(exc),
           "confidence": candidate.confidence,
         })
@@ -2038,6 +2139,43 @@ def extract_ev6_episodes(conn,
         "confidence": candidate.confidence,
         "status": "recorded",
       })
+    # A press that never anchored to a frame produces no candidate above, so it
+    # would otherwise leave no trace anywhere: no bundle, no catalog row, no
+    # report entry. The usual cause is a >1 s radarState gap at the press, i.e.
+    # a RadarD dropout -- one of the top reasons a human reaches for the flag in
+    # the first place. Catalog it bundle-less, carrying the press logMonoTime.
+    # getattr, not attribute access: test_catalog.py drives this function with a
+    # SimpleNamespace stand-in for RouteScanResult. A real scan always has the field.
+    for mark in getattr(scan, "driver_marks", ()) or ():
+      if mark.frame_index is not None:
+        continue
+      orphan = _orphan_driver_mark_candidate(scan, mark)
+      reason = _orphan_driver_mark_reason(mark)
+      episode_id = upsert_episode(conn, EpisodeCatalogRecord(
+        route_id=scan.route_id,
+        episode_key=orphan.episode_key,
+        episode_type=orphan.episode_type,
+        seg_start=orphan.seg_start,
+        seg_end=orphan.seg_end,
+        t_start_s=orphan.t_start_s,
+        t_end_s=orphan.t_end_s,
+        confidence=orphan.confidence,
+        extractor_version=EXTRACTOR_VERSION,
+        source_event_count=1,
+        metrics_json=orphan.metrics,
+        bundle_path=None,
+        notes_json={**orphan.notes_json, "bundleUnavailableReason": reason},
+      ))
+      recorded.append({
+        "routeId": scan.route_id,
+        "episodeId": episode_id,
+        "episodeKey": orphan.episode_key,
+        "episodeType": orphan.episode_type,
+        "status": "orphan_recorded_without_bundle",
+        "reason": reason,
+        "confidence": orphan.confidence,
+        "driverMarkPressLogMonoTime": mark.press_log_mono_time_ns,
+      })
   conn.commit()
   return recorded
 
@@ -2058,6 +2196,10 @@ def detect_episode_candidates(scan: RouteScanResult) -> list[EpisodeCandidate]:
     candidates.extend(_detect_dropout(run_scan))
     candidates.extend(_detect_pullaway(run_scan))
     candidates.extend(_detect_approach(run_scan))
+  # Deliberately outside the exact-replay run loop: a driver mark is human
+  # intent, and a RadarD dropout that splits the runs is itself a plausible
+  # cause of whatever was flagged. Detecting per-run would delete the evidence.
+  candidates.extend(_detect_driver_mark(scan))
   candidates = _dedupe_candidates(candidates)
   candidates.sort(key=lambda candidate: (candidate.t_start_s, candidate.episode_type))
   return candidates
@@ -2074,6 +2216,261 @@ def split_exact_replay_runs(frames: list[EpisodeFrame]) -> list[list[EpisodeFram
     else:
       runs.append([frame])
   return runs
+
+
+def _parse_longflag(record: Any) -> dict[str, Any] | None:
+  """Decode one ``LONGFLAG {...}`` swaglog line into its payload dict.
+
+  Returns None for anything that is not a well-formed LONGFLAG record. This is
+  fed every ``logMessage`` in a route, so the substring prefilter deliberately
+  runs before any JSON parsing, and no input may ever raise.
+  """
+  text = record if isinstance(record, str) else str(record)
+  if LONGFLAG_PREFIX not in text:
+    return None
+  try:
+    envelope = json.loads(text)
+  except (TypeError, ValueError):
+    return None
+  if not isinstance(envelope, dict):
+    return None
+  message = envelope.get("msg", "")
+  if not isinstance(message, str):
+    return None
+  marker = message.find(LONGFLAG_PREFIX)
+  if marker < 0:
+    return None
+  try:
+    payload = json.loads(message[marker + len(LONGFLAG_PREFIX):])
+  except (TypeError, ValueError):
+    return None
+  return payload if isinstance(payload, dict) else None
+
+
+def _nearest_sorted_index(sorted_values: list[float], target: float) -> int:
+  idx = bisect_left(sorted_values, target)
+  if idx <= 0:
+    return 0
+  if idx >= len(sorted_values):
+    return len(sorted_values) - 1
+  return idx if (sorted_values[idx] - target) < (target - sorted_values[idx - 1]) else idx - 1
+
+
+def _nearest_longflag_payload(longflag_payloads: list[dict[str, Any]], press_log_mono_time_ns: int) -> dict[str, Any] | None:
+  window_ns = int(DRIVER_MARK_PAYLOAD_WINDOW_S * 1e9)
+  best: tuple[int, dict[str, Any]] | None = None
+  for entry in longflag_payloads:
+    delta = abs(int(entry["logMonoTimeNs"]) - press_log_mono_time_ns)
+    if delta > window_ns:
+      continue
+    if best is None or delta < best[0]:
+      best = (delta, entry["payload"])
+  return None if best is None else best[1]
+
+
+def collapse_driver_mark_echoes(raw_presses: list[dict[str, Any]]) -> list[dict[str, Any]]:
+  """Fold the bookmarkButton/userBookmark echo of one press into a single group.
+
+  MEMBERSHIP is anchored on the first message of a group rather than chained, so
+  a long train of presses cannot be swallowed by repeated near-misses.
+
+  The group's reported ``logMonoTimeNs`` is a different question, and it is NOT
+  the first message's. ``feedbackd`` publishes bare ``userBookmark`` on paths that
+  have nothing to do with the flag button (see is_driver_mark_press_group), so a
+  stray echo landing shortly BEFORE a real tap would otherwise become the press
+  time of that tap. That time is the cross-tool join key: Phase 2's recorder
+  stamps ``pressLogMonoTime`` from ``sm.logMonoTime['bookmarkButton']``, so an
+  anchor taken off a ``userBookmark`` desynchronises the device sidecar from the
+  offline extraction and ``marks.find_mark_sidecar`` misses.
+
+  So the group reports the FIRST ``bookmarkButton`` in it when one is present --
+  that message is the authoritative press, published by both the sidebar button
+  and the onroad HUD flag button. Membership still keys off the first message, so
+  re-anchoring cannot widen the window and pull in a later, separate press.
+  """
+  groups: list[dict[str, Any]] = []
+  echo_window_ns = int(DRIVER_MARK_ECHO_WINDOW_S * 1e9)
+  for press in sorted(raw_presses, key=lambda item: int(item["logMonoTimeNs"])):
+    press_ns = int(press["logMonoTimeNs"])
+    service = str(press["service"])
+    if groups and press_ns - int(groups[-1]["_groupStartNs"]) <= echo_window_ns:
+      group = groups[-1]
+      if service not in group["services"]:
+        group["services"].append(service)
+      if service == DRIVER_MARK_PRESS_SERVICE and not group["_anchored"]:
+        group["_anchored"] = True
+        group["logMonoTimeNs"] = press_ns
+        group["segIdx"] = int(press["segIdx"])
+      continue
+    groups.append({
+      "segIdx": int(press["segIdx"]),
+      "logMonoTimeNs": press_ns,
+      "services": [service],
+      "_groupStartNs": press_ns,
+      "_anchored": service == DRIVER_MARK_PRESS_SERVICE,
+    })
+  # Bookkeeping only; the returned shape is the same three keys it always was.
+  for group in groups:
+    del group["_groupStartNs"]
+    del group["_anchored"]
+  return groups
+
+
+def is_driver_mark_press_group(group: dict[str, Any]) -> bool:
+  """True only when a collapsed group actually contains a flag-button press.
+
+  ``userBookmark`` alone is NOT a driver mark. ``selfdrive/ui/feedback/feedbackd.py``
+  publishes ``userBookmark`` on two paths that never involve the flag button:
+
+  * the LKAS steering-wheel button, when ``not sm['selfdriveStateSP'].mads.available``
+    and ``RecordAudioFeedback`` is off (``should_send_bookmark = True`` directly);
+  * roughly ``FEEDBACK_MAX_DURATION`` (10 s) AFTER an LKAS press, when
+    ``RecordAudioFeedback`` is on and the audio block budget runs out.
+
+  Both would otherwise become confidence-1.0 ``driver_mark`` episodes, the second
+  anchored ~10 s away from anything the driver reacted to. Every real press --
+  the onroad flag button and the sidebar bookmark button alike -- publishes
+  ``bookmarkButton``, which feedbackd then echoes, so requiring it costs nothing.
+  """
+  return DRIVER_MARK_PRESS_SERVICE in tuple(group.get("services", ()))
+
+
+def _resolve_driver_marks(raw_presses: list[dict[str, Any]],
+                          longflag_payloads: list[dict[str, Any]],
+                          frames: list[EpisodeFrame],
+                          *,
+                          route_key: str,
+                          first_radar_time_ns: int | None) -> list[DriverMarkPress]:
+  if not raw_presses:
+    return []
+  frame_times = [frame.t_s for frame in frames]
+  marks: list[DriverMarkPress] = []
+  for group in collapse_driver_mark_echoes(raw_presses):
+    if not is_driver_mark_press_group(group):
+      continue
+    press_ns = int(group["logMonoTimeNs"])
+    t_s = None if first_radar_time_ns is None else (press_ns - int(first_radar_time_ns)) / 1e9
+    payload = _nearest_longflag_payload(longflag_payloads, press_ns)
+    frame_index: int | None = None
+    frame_gap_s: float | None = None
+    frame_log_mono_time_ns: int | None = None
+    if t_s is not None and frame_times:
+      nearest = _nearest_sorted_index(frame_times, t_s)
+      frame_gap_s = abs(frame_times[nearest] - t_s)
+      if frame_gap_s <= DRIVER_MARK_FRAME_TOLERANCE_S:
+        frame_index = nearest
+        frame_log_mono_time_ns = frames[nearest].log_mono_time
+    # An unanchored press is still evidence that a human flagged something; it
+    # is reported as an orphan rather than dropped.
+    status = "orphan" if frame_index is None else ("ok" if payload is not None else "no_payload")
+    marks.append(DriverMarkPress(
+      route_key=route_key,
+      seg_idx=int(group["segIdx"]),
+      press_log_mono_time_ns=press_ns,
+      t_s=t_s,
+      services=tuple(group["services"]),
+      payload=payload,
+      frame_index=frame_index,
+      frame_log_mono_time_ns=frame_log_mono_time_ns,
+      frame_gap_s=frame_gap_s,
+      status=status,
+    ))
+  return marks
+
+
+def _driver_mark_notes(mark: DriverMarkPress) -> dict[str, Any]:
+  return {
+    "driverMarkId": mark.mark_id,
+    "driverMarkPressLogMonoTime": mark.press_log_mono_time_ns,
+    "driverMarkServices": list(mark.services),
+    "driverMarkStatus": mark.status,
+    "driverMarkPayload": mark.payload,
+  }
+
+
+def _driver_mark_key_discriminator(mark: DriverMarkPress) -> str:
+  """Per-press suffix for episode_key. See EpisodeCandidate.key_discriminator."""
+  return f"press{mark.press_log_mono_time_ns}"
+
+
+def _detect_driver_mark(scan: RouteScanResult) -> list[EpisodeCandidate]:
+  """Promote every anchored driver flag press to a full-confidence episode.
+
+  Presses that could not be anchored to a recorded frame produce no candidate --
+  there are no frames to bundle -- but they are NOT lost: ``extract_ev6_episodes``
+  catalogues them separately via ``_orphan_driver_mark_candidate``.
+  """
+  candidates: list[EpisodeCandidate] = []
+  for mark in scan.driver_marks:
+    if mark.frame_index is None:
+      continue
+    mark_notes = _driver_mark_notes(mark)
+    candidates.append(_make_candidate(
+      scan,
+      mark.frame_index,
+      "driver_mark",
+      1.0,
+      {
+        **mark_notes,
+        "driverMarkFrameGapS": mark.frame_gap_s,
+        "driverMarkSegIdx": mark.seg_idx,
+      },
+      rank_score=1000.0,
+      extra_notes=mark_notes,
+      key_discriminator=_driver_mark_key_discriminator(mark),
+    ))
+  return candidates
+
+
+def _orphan_driver_mark_candidate(scan: RouteScanResult, mark: DriverMarkPress) -> EpisodeCandidate:
+  """A press with no anchorable frame, shaped so it can still be catalogued.
+
+  ``frames`` is empty on purpose: this is never handed to ``write_episode_bundle``.
+  The window is derived from the press clock alone so a human can still find the
+  moment in the rlog, and the press logMonoTime is the join key for
+  ``marks.load_trace`` / the Phase 2 sidecar, neither of which needs a frame.
+  """
+  pre_s, post_s = WINDOWS_BY_TYPE["driver_mark"]
+  t_s = 0.0 if mark.t_s is None else float(mark.t_s)
+  # A press before the first recorded radarState has a negative route clock, so
+  # the end is floored against the start rather than left inverted in the DB.
+  t_start_s = max(0.0, t_s + pre_s)
+  t_end_s = max(t_start_s, t_s + post_s)
+  mark_notes = _driver_mark_notes(mark)
+  return EpisodeCandidate(
+    route_id=scan.route_id,
+    route_key=scan.metadata.route_key,
+    episode_type="driver_mark",
+    event_t_s=t_s,
+    seg_start=mark.seg_idx,
+    seg_end=mark.seg_idx,
+    t_start_s=t_start_s,
+    t_end_s=t_end_s,
+    confidence=1.0,
+    rank_score=1000.0,
+    metrics={
+      **mark_notes,
+      "sourceEventCount": 1,
+      "driverMarkOrphan": True,
+      "driverMarkFrameGapS": mark.frame_gap_s,
+      "driverMarkSegIdx": mark.seg_idx,
+      # Route-relative, matching DriverMarkPress.t_s -- NOT marks.DriverMark.t_seg_rel_s.
+      "driverMarkPressRouteTRelS": mark.t_s,
+    },
+    notes_json={"driverMarkOrphan": True, **mark_notes},
+    frames=[],
+    key_discriminator=_driver_mark_key_discriminator(mark),
+  )
+
+
+def _orphan_driver_mark_reason(mark: DriverMarkPress) -> str:
+  if mark.t_s is None:
+    return "driver mark press has no route clock: the route recorded no radarState at all"
+  gap = "unknown" if mark.frame_gap_s is None else f"{mark.frame_gap_s:.2f} s"
+  return (
+    f"driver mark press could not be anchored to a recorded radarState frame (nearest frame is {gap} away, " +
+    f"tolerance {DRIVER_MARK_FRAME_TOLERANCE_S:.1f} s); the press itself is preserved"
+  )
 
 
 def _detect_false_closing(scan: RouteScanResult) -> list[EpisodeCandidate]:
@@ -2722,7 +3119,9 @@ def _make_candidate(scan: RouteScanResult,
                     metrics: dict[str, Any],
                     *,
                     custom_end_idx: int | None = None,
-                    rank_score: float | None = None) -> EpisodeCandidate:
+                    rank_score: float | None = None,
+                    extra_notes: dict[str, Any] | None = None,
+                    key_discriminator: str | None = None) -> EpisodeCandidate:
   event_frame = scan.frames[event_idx]
   pre_s, post_s = WINDOWS_BY_TYPE[episode_type]
   start_t = max(0.0, event_frame.t_s + pre_s)
@@ -2754,8 +3153,9 @@ def _make_candidate(scan: RouteScanResult,
     confidence=confidence,
     rank_score=candidate_rank_score,
     metrics=summary,
-    notes_json={"eventLogMonoTime": event_frame.log_mono_time},
+    notes_json={"eventLogMonoTime": event_frame.log_mono_time, **(extra_notes or {})},
     frames=episode_frames,
+    key_discriminator=key_discriminator,
   )
 
 
@@ -2798,6 +3198,24 @@ def _dedupe_candidates(candidates: list[EpisodeCandidate]) -> list[EpisodeCandid
 def _should_suppress_candidate(candidate: EpisodeCandidate, existing: EpisodeCandidate) -> bool:
   if candidate.episode_type != existing.episode_type:
     return False
+  if candidate.episode_type == "driver_mark":
+    # A driver mark is suppressed ONLY when it is literally the same press.
+    #
+    # This branch is deliberately ahead of the event_t_s proximity test below.
+    # For a driver mark, event_t_s is not the press clock: it is the route time
+    # of the recorded radarState frame the press was ANCHORED to, chosen by
+    # nearest-neighbour within DRIVER_MARK_FRAME_TOLERANCE_S (1.0 s). Frames are
+    # 20 Hz and go missing whenever RadarD drops out, so two presses as much as
+    # 2.0 s apart can anchor to the same surviving frame and land on an identical
+    # event_t_s -- and the second deliberate press would then be dropped here,
+    # before it ever reached the catalog, no matter how distinct its episode_key.
+    #
+    # Echo collapse is the one and only authority on "same press", and it already
+    # ran upstream in collapse_driver_mark_echoes on the exact, boot-unique press
+    # logMonoTime (DRIVER_MARK_ECHO_WINDOW_S). Anything that arrives here with a
+    # different press time is a second human press: keep it.
+    discriminator = candidate.key_discriminator
+    return discriminator is not None and discriminator == existing.key_discriminator
   if abs(candidate.event_t_s - existing.event_t_s) <= SUPPRESSION_BY_TYPE_S[candidate.episode_type]:
     return True
   overlap_s = min(candidate.t_end_s, existing.t_end_s) - max(candidate.t_start_s, existing.t_start_s)

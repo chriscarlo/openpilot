@@ -67,6 +67,9 @@ protected:
   int net_strength = 0;
 
 private:
-  std::unique_ptr<PubMaster> pm;
+  // NOTE: no PubMaster member here on purpose. The flag button publishes through
+  // the process-wide sendBookmark() helper (selfdrive/ui/ui.h) because msgq kills
+  // the older publisher when a second PubMaster claims the same endpoint, and the
+  // onroad HUD flag button publishes "bookmarkButton" from the same process.
   Networking *networking = nullptr;
 };

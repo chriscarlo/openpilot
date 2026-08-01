@@ -38,8 +38,6 @@ Sidebar::Sidebar(QWidget *parent) : QFrame(parent), onroad(false), flag_pressed(
   setFixedWidth(300);
 
   QObject::connect(uiState(), &UIState::uiUpdate, this, &Sidebar::updateState);
-
-  pm = std::make_unique<PubMaster>(std::vector<const char*>{"bookmarkButton"});
 }
 
 void Sidebar::mousePressEvent(QMouseEvent *event) {
@@ -61,9 +59,11 @@ void Sidebar::mouseReleaseEvent(QMouseEvent *event) {
     update();
   }
   if (onroad && home_btn.contains(event->pos())) {
-    MessageBuilder msg;
-    msg.initEvent().initBookmarkButton();
-    pm->send("bookmarkButton", msg);
+    // Publish through the shared process-wide PubMaster. msgq evicts the older
+    // publisher of an endpoint when a second one binds it, and Sidebar is
+    // constructed (HomeWindow ctor) before OnroadWindow -- so a locally owned
+    // PubMaster here would be silently killed by the onroad HUD flag button.
+    sendBookmark();
   } else if (settings_btn.contains(event->pos())) {
     emit openSettings();
   } else if (recording_audio && mic_indicator_btn.contains(event->pos())) {

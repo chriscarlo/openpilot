@@ -38,8 +38,9 @@ _DISTRACTOR_EGO_SPEED_MPS = 41.0
 
 
 def test_radard_replay_v2_bumps_extractor_identity() -> None:
-  assert EXTRACTOR_VERSION == "ev6_v11_radard_replay_v2"
+  assert EXTRACTOR_VERSION == "ev6_v12_driver_mark"
   assert "v10" not in EXTRACTOR_VERSION
+  assert "v11" not in EXTRACTOR_VERSION
 
 
 def _make_car_params(*, radar_unavailable: bool = True):

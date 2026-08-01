@@ -97,7 +97,7 @@ class TestLoggerd:
 
     return sent_msgs
 
-  def _publish_camera_and_audio_messages(self, num_segs=1, segment_length=5):
+  def _publish_camera_and_audio_messages(self, num_segs=1, segment_length=5, bookmark_at_frame=None):
     d = DEVICE_CAMERAS[("tici", "ar0231")]
     streams = [
       (VisionStreamType.VISION_STREAM_ROAD, (d.fcam.width, d.fcam.height, 2048 * 2346, 2048, 2048 * 1216), "roadCameraState"),
@@ -105,7 +105,10 @@ class TestLoggerd:
       (VisionStreamType.VISION_STREAM_WIDE_ROAD, (d.ecam.width, d.ecam.height, 2048 * 2346, 2048, 2048 * 1216), "wideRoadCameraState"),
     ]
 
-    pm = messaging.PubMaster([s for _, _, s in streams] + ["rawAudioData"])
+    services = [s for _, _, s in streams] + ["rawAudioData"]
+    if bookmark_at_frame is not None:
+      services.append("bookmarkButton")
+    pm = messaging.PubMaster(services)
     vipc_server = VisionIpcServer("camerad")
     for stream_type, frame_spec, _ in streams:
       vipc_server.create_buffers_with_sizes(stream_type, 40, *(frame_spec))
@@ -116,6 +119,8 @@ class TestLoggerd:
     managed_processes["loggerd"].start()
     managed_processes["encoderd"].start()
     assert pm.wait_for_readers_to_update("roadCameraState", timeout=5)
+    if bookmark_at_frame is not None:
+      assert pm.wait_for_readers_to_update("bookmarkButton", timeout=5)
 
     fps = 20
     for n in range(1, int(num_segs * segment_length * fps) + 1):
@@ -134,6 +139,10 @@ class TestLoggerd:
       msg.rawAudioData.data = bytes(800 * 2) # 800 samples of int16
       msg.rawAudioData.sampleRate = 16000
       pm.send('rawAudioData', msg)
+
+      if n == bookmark_at_frame:
+        pm.send("bookmarkButton", messaging.new_message("bookmarkButton"))
+        assert pm.wait_for_readers_to_update("bookmarkButton", timeout=5)
 
       for _, _, state in streams:
         assert pm.wait_for_readers_to_update(state, timeout=5, dt=0.001)
@@ -289,8 +298,43 @@ class TestLoggerd:
     segment_dir = self._get_latest_log_dir()
     assert getxattr(segment_dir, PRESERVE_ATTR_NAME) == PRESERVE_ATTR_VALUE
 
+  def test_raw_bookmark_button_preserves_current_segment_without_feedbackd(self):
+    # feedbackd is deliberately not started by this helper. loggerd must protect
+    # the segment directly from the raw HUD publication, not its userBookmark echo.
+    self._publish_random_messages({"bookmarkButton"})
+
+    segment_dir = self._get_latest_log_dir()
+    assert getxattr(segment_dir, PRESERVE_ATTR_NAME) == PRESERVE_ATTR_VALUE
+
+  @pytest.mark.xdist_group("camera_encoder_tests")
+  def test_bookmark_near_rotation_preserves_the_next_segment(self):
+    # A 4 s segment with the tap at 2.5 s rotates inside the advertised +6 s
+    # post-window. Locate the raw event in rlog, then require its successor's
+    # xattr; this exercises the real loggerd/encoderd rotation path.
+    self._publish_camera_and_audio_messages(num_segs=2, segment_length=4, bookmark_at_frame=50)
+
+    latest = self._get_latest_log_dir()
+    route_prefix = str(latest).rsplit("--", 1)[0]
+    segment_dirs = sorted(latest.parent.glob(f"{Path(route_prefix).name}--*"))
+    marked_segments = []
+    for segment_dir in segment_dirs:
+      if any(msg.which() == "bookmarkButton" for msg in LogReader(str(segment_dir / "rlog.zst"))):
+        marked_segments.append(int(segment_dir.name.rsplit("--", 1)[1]))
+
+    assert len(marked_segments) == 1
+    marked = marked_segments[0]
+    current_dir = Path(f"{route_prefix}--{marked}")
+    next_dir = Path(f"{route_prefix}--{marked + 1}")
+    assert next_dir.is_dir(), "test did not rotate after the bookmark"
+    assert getxattr(current_dir, PRESERVE_ATTR_NAME) == PRESERVE_ATTR_VALUE
+    assert getxattr(next_dir, PRESERVE_ATTR_NAME) == PRESERVE_ATTR_VALUE
+
   def test_not_preserving_nonbookmarked_segments(self):
-    services = set(random.sample(CEREAL_SERVICES, random.randint(5, 10))) - {"userBookmark", "audioFeedback"}
+    # Every service loggerd preserves on must be excluded here, or this test flakes
+    # whenever random.sample happens to draw one. See the preserve_segment table in
+    # loggerd_thread() (system/loggerd/loggerd.cc): "bookmarkButton" is the raw flag
+    # tap, "userBookmark" is feedbackd's echo of it.
+    services = set(random.sample(CEREAL_SERVICES, random.randint(5, 10))) - {"bookmarkButton", "userBookmark", "audioFeedback"}
     self._publish_random_messages(services)
 
     segment_dir = self._get_latest_log_dir()

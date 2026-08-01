@@ -72,14 +72,18 @@ class TestDeleter(UploaderTestCase):
     ])
 
   def test_delete_many_preserved(self):
+    # The incident-mark recorder retains 50 sidecars. Exercise one older marked
+    # segment beyond the matching logger protection ceiling, then prove deleter
+    # still makes forward progress through every protected directory.
+    assert deleter.PRESERVE_COUNT == 50
     self.assertDeleteOrder([
       self.make_file_with_data(self.seg_format.format(0), self.f_type),
       self.make_file_with_data(self.seg_format.format(1), self.f_type, preserve_xattr=deleter.PRESERVE_ATTR_VALUE),
       self.make_file_with_data(self.seg_format.format(2), self.f_type),
     ] + [
       self.make_file_with_data(self.seg_format2.format(i), self.f_type, preserve_xattr=deleter.PRESERVE_ATTR_VALUE)
-      for i in range(5)
-    ])
+      for i in range(deleter.PRESERVE_COUNT)
+    ], timeout=15)
 
   def test_delete_last(self):
     self.assertDeleteOrder([

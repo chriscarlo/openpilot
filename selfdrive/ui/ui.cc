@@ -15,6 +15,38 @@
 #define BACKLIGHT_DT 0.05
 #define BACKLIGHT_TS 10.00
 
+// Shared, process-wide bookmarkButton publisher. See the comment on the
+// declarations in ui.h: msgq evicts the older publisher of an endpoint, so the
+// sidebar flag button and the onroad HUD flag button must not each own a
+// PubMaster. Defined outside every #ifndef SUNNYPILOT block so stock and
+// sunnypilot builds both get exactly one definition (ui.cc is in qt_src for
+// both, see selfdrive/ui/SConscript).
+namespace {
+
+// Function-local static rather than a namespace-scope global: exactly one
+// instance per process, but constructed on first call instead of during static
+// init, so it cannot race other translation units' global ctors. Construction
+// is forced from initBookmarkPublisher() at UI startup -- do NOT let
+// sendBookmark() be the first caller, that drops the press (see ui.h).
+// C++11 magic statics make the initialization thread-safe; both call sites are
+// on the Qt GUI thread regardless.
+PubMaster *bookmarkPubMaster() {
+  static PubMaster pm(std::vector<const char*>{"bookmarkButton"});
+  return &pm;
+}
+
+}  // namespace
+
+void initBookmarkPublisher() {
+  bookmarkPubMaster();
+}
+
+void sendBookmark() {
+  MessageBuilder msg;
+  msg.initEvent().initBookmarkButton();
+  bookmarkPubMaster()->send("bookmarkButton", msg);
+}
+
 void update_sockets(UIState *s) {
   // Skip socket updates if running locally
   if (getenv("OPENPILOT_UI_LOCAL")) {

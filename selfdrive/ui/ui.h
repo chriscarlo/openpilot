@@ -141,6 +141,30 @@ public slots:
 Device *device();
 #endif
 
+// Process-wide single publisher for "bookmarkButton".
+//
+// msgq kills the OLDER publisher when a second PubMaster claims the same
+// endpoint (msgq_repo/msgq/msgq.cc, msgq_new_queue/msgq_init_publisher).
+// The UI process has two independent bookmark sources -- the sidebar flag
+// button (Sidebar, constructed in HomeWindow before OnroadWindow) and the
+// onroad HUD flag button -- so each MUST route through this one shared
+// PubMaster instead of owning its own, or whichever was constructed first
+// silently stops publishing.
+//
+// initBookmarkPublisher() MUST be called once at UI startup, BEFORE any button
+// can be pressed. Binding a publisher is destructive to already-attached
+// subscribers: msgq_init_publisher() (msgq_repo/msgq/msgq.cc) sets
+// *num_readers = 0 and clears every read_valids[i]/read_uids[i], so loggerd /
+// feedbackd / plannerd are evicted at that instant. They re-attach lazily --
+// msgq_msg_ready()/msgq_msg_recv() notice read_uid_local != read_uids[id] and
+// call msgq_init_subscriber(), which resets the read pointer to the CURRENT
+// write pointer -- so anything published between the bind and their next poll
+// is dropped. Binding lazily inside sendBookmark() therefore loses the first
+// press of every UI session. Bind at startup and the ~1 s re-attach window has
+// long expired by the time a human can tap.
+void initBookmarkPublisher();
+void sendBookmark();
+
 void ui_update_params(UIState *s);
 void update_state(UIState *s);
 void update_sockets(UIState *s);

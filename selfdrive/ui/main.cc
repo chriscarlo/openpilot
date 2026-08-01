@@ -7,6 +7,7 @@
 #include "system/hardware/hw.h"
 #include "selfdrive/ui/qt/util.h"
 #include "selfdrive/ui/qt/window.h"
+#include "selfdrive/ui/ui.h"
 
 #ifdef SUNNYPILOT
 #include "selfdrive/ui/sunnypilot/qt/window.h"
@@ -20,6 +21,16 @@ int main(int argc, char *argv[]) {
 
   qInstallMessageHandler(swagLogMessageHandler);
   initApp(argc, argv);
+
+  // Bind the process-wide "bookmarkButton" publisher NOW, not on first press.
+  // msgq_init_publisher() evicts every attached subscriber (loggerd, feedbackd,
+  // plannerd), and they only re-attach on their next poll -- skipping straight
+  // to the current write pointer. Publishing on the same call that binds the
+  // endpoint therefore drops the message. See selfdrive/ui/ui.h. This is the
+  // same construction point the pre-refactor Sidebar ctor effectively had, and
+  // it covers both the stock and SUNNYPILOT builds (main.cc is in qt_src for
+  // both, see selfdrive/ui/SConscript).
+  initBookmarkPublisher();
 
   QTranslator translator;
   QString translation_file = QString::fromStdString(Params().get("LanguageSetting"));

@@ -21,6 +21,7 @@ from openpilot.sunnypilot.selfdrive.controls.lib.vision_turn_controller import V
 from openpilot.sunnypilot.selfdrive.controls.lib.rti_controller import RTIController
 from openpilot.sunnypilot.selfdrive.controls.lib.weather_controller import WeatherController
 from openpilot.sunnypilot.selfdrive.controls.lib.object_hazard_controller import ObjectHazardController
+from openpilot.sunnypilot.selfdrive.controls.lib.longitudinal_mark_recorder import MarkRecorder
 from openpilot.sunnypilot.selfdrive.controls.lib.planner_lag_debug import (
   PlannerLagRecorder,
   SPAN_PUBLISH_LONGITUDINAL_PLAN_SP,
@@ -51,6 +52,7 @@ class LongitudinalPlannerSP:
     self.weather = WeatherController()
     self.object_hazard = ObjectHazardController()
     self.planner_lag_debug = PlannerLagRecorder()
+    self.mark_recorder = MarkRecorder()
     model_bundle = get_active_bundle()
     self.generation = int(model_bundle.generation) if (model_bundle := get_active_bundle()) else None
 
