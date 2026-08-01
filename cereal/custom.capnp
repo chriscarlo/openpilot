@@ -182,6 +182,7 @@ struct LongitudinalPlanSP @0xf35cc4560bbf6ec2 {
       closingGovernorRecovery @11 :Bool;
       steadyParityCurrentThreat @12 :Bool;
       accelCorrRawHardBraking @13 :Bool;
+      steadyParityThreatRestore @14 :Bool;
     }
   }
 

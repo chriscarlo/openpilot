@@ -1768,6 +1768,7 @@ class LongitudinalMpc:
         "closingGovernorRecovery": False,
         "steadyParityCurrentThreat": False,
         "accelCorrRawHardBraking": False,
+        "steadyParityThreatRestore": False,
       }
     return {
       "status": bool(getattr(lead, "status", False)),
@@ -1787,6 +1788,7 @@ class LongitudinalMpc:
       "closingGovernorRecovery": bool(getattr(lead, "closingGovernorRecovery", False)),
       "steadyParityCurrentThreat": bool(getattr(lead, "steadyParityCurrentThreat", False)),
       "accelCorrRawHardBraking": bool(getattr(lead, "accelCorrRawHardBraking", False)),
+      "steadyParityThreatRestore": bool(getattr(lead, "steadyParityThreatRestore", False)),
     }
 
   def _update_lead_acquire_state(self, now: float) -> dict[str, dict[str, float | bool | str | None]]:

@@ -127,6 +127,7 @@ FRIENDLY_PARAM_NAMES = {
   "model_lead_fcw_corrob_tol_m": "Longitudinal.LiveTune.ModelLeadFcwCorrobTolM",
   "model_lead_fcw_corrob_min_agree": "Longitudinal.LiveTune.ModelLeadFcwCorrobMinAgree",
   "model_lead_fcw_corrob_window": "Longitudinal.LiveTune.ModelLeadFcwCorrobWindow",
+  "virtual_lead_opening_recovery_tau_s": "Longitudinal.LiveTune.VirtualLeadOpeningRecoveryTauS",
   "lead_accel_corr_margin_mps2": "Longitudinal.LiveTune.LeadAccelCorrMarginMps2",
   "lead_accel_corr_meas_tau_s": "Longitudinal.LiveTune.LeadAccelCorrMeasTauS",
   "lead_accel_corr_ttc_guard_s": "Longitudinal.LiveTune.LeadAccelCorrTtcGuardS",

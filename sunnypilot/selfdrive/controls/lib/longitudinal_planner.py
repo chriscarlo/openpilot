@@ -71,6 +71,7 @@ def _lead_state_diagnostic(payload) -> dict:
     "closingGovernorRecovery": bool(data.get("closingGovernorRecovery", False)),
     "steadyParityCurrentThreat": bool(data.get("steadyParityCurrentThreat", False)),
     "accelCorrRawHardBraking": bool(data.get("accelCorrRawHardBraking", False)),
+    "steadyParityThreatRestore": bool(data.get("steadyParityThreatRestore", False)),
   }
 
 

@@ -153,7 +153,16 @@ class TestHyundaiAiLeadStability:
     assert rollback_values[2] == pytest.approx(expected)
     assert rollback.hyundai_virtual_lead_debug["opening_recovery"]["active"] is True
 
-  def test_opening_recovery_dwell_resets_on_current_threat(self):
+  @pytest.mark.parametrize(("attribute", "value", "expected_reason"), (
+    ("vRel", -0.2, "not_opening"),
+    ("aLeadK", -0.2, "lead_braking"),
+    ("fcw", True, "fcw_or_governor_recovery"),
+    ("closingGovernorRecovery", True, "fcw_or_governor_recovery"),
+    ("steadyParityCurrentThreat", True, "steady_parity_threat"),
+    ("steadyParityThreatRestore", True, "steady_parity_threat"),
+    ("accelCorrRawHardBraking", True, "raw_hard_braking"),
+  ))
+  def test_opening_recovery_dwell_resets_on_current_threat(self, attribute, value, expected_reason):
     mpc = _make_hyundai_mpc(v_ego=30.0)
     track_id = -1051
     mpc._update_hyundai_virtual_lead(
@@ -170,14 +179,65 @@ class TestHyundaiAiLeadStability:
     threat = _make_lead(
       d_rel=30.3, v_rel=0.5, v_lead=30.5, radar=False, radar_track_id=track_id,
     )
-    threat.steadyParityCurrentThreat = True
+    setattr(threat, attribute, value)
     mpc._update_hyundai_virtual_lead(200.3, "lead0", threat)
 
     opening = mpc.hyundai_virtual_lead_debug["opening_recovery"]
     assert opening["active"] is False
     assert opening["candidate"] is False
     assert opening["confirm_frames"] == 0
-    assert opening["reason"] == "steady_parity_threat"
+    assert opening["reason"] == expected_reason
+
+  def test_recovered_opening_returns_to_fast_danger_path_on_route_closure_anchor(self):
+    recovered, _ = self._run_private_opening_sequence(recovery_tau_s=0.30)
+    rollback, _ = self._run_private_opening_sequence(recovery_tau_s=1.0)
+    track_id = -1032
+
+    # Extend the benign opening long enough to create a meaningful private-state
+    # delta, matching the opening phase before the July route's genuine closure.
+    for frame in range(4, 9):
+      opening = _make_lead(
+        d_rel=48.0 + 0.1 * frame,
+        v_rel=1.0,
+        v_lead=31.0,
+        a_lead=0.0,
+        radar=False,
+        radar_track_id=track_id,
+      )
+      recovered_lead = recovered._update_hyundai_virtual_lead(100.0 + 0.1 * frame, "lead0", opening)
+      rollback_lead = rollback._update_hyundai_virtual_lead(100.0 + 0.1 * frame, "lead0", opening)
+
+    assert recovered_lead.vRel > rollback_lead.vRel + 0.3
+
+    # The route safety anchor closes faster than 2.5 m/s. Recovery must drop
+    # immediately and the ordinary 0.20 s fast danger path must monotonically
+    # erase the earlier opening-state delta through the sustained closure.
+    closure = _make_lead(
+      d_rel=48.7,
+      v_rel=-3.0,
+      v_lead=27.0,
+      a_lead=-1.2,
+      radar=False,
+      radar_track_id=track_id,
+    )
+    closure.accelCorrRawHardBraking = True
+    recovered_close = recovered._update_hyundai_virtual_lead(100.9, "lead0", closure)
+    rollback_close = rollback._update_hyundai_virtual_lead(100.9, "lead0", closure)
+
+    assert recovered.hyundai_virtual_lead_debug["opening_recovery"]["active"] is False
+    assert recovered.hyundai_virtual_lead_debug["opening_recovery"]["reason"] == "not_opening"
+    assert recovered_close.vRel < recovered_lead.vRel
+    assert recovered_close.aLeadK < recovered_lead.aLeadK
+
+    for frame in range(10, 17):
+      previous_vrel = recovered_close.vRel
+      recovered_close = recovered._update_hyundai_virtual_lead(100.0 + 0.1 * frame, "lead0", closure)
+      rollback_close = rollback._update_hyundai_virtual_lead(100.0 + 0.1 * frame, "lead0", closure)
+      assert recovered_close.vRel < previous_vrel
+
+    assert recovered_close.vRel < -2.8
+    assert recovered_close.aLeadK < -1.1
+    assert abs(recovered_close.vRel - rollback_close.vRel) < 0.03
 
   def test_steady_model_lead_reacquires_when_stop_sign_closing_before_gap_collapses(self):
     v_cruise_30mph = 48.0 / 3.6

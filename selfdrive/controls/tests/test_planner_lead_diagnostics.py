@@ -22,6 +22,7 @@ def _lead_payload(*, v_rel: float, v_lead: float, track_id: int = -1032):
     "closingGovernorRecovery": False,
     "steadyParityCurrentThreat": False,
     "accelCorrRawHardBraking": False,
+    "steadyParityThreatRestore": True,
   }
 
 
@@ -81,6 +82,7 @@ def test_planner_private_lead_diagnostics_serialize_input_virtual_and_decisions(
   assert diagnostics.slowdownCeilingMps2 == pytest.approx(0.08)
   assert diagnostics.releaseFloorValid is True
   assert diagnostics.releaseFloorMps2 == pytest.approx(-0.05)
+  assert diagnostics.input.steadyParityThreatRestore is True
   assert diagnostics.openingRecoveryActive is True
   assert diagnostics.openingRecoveryConfirmFrames == 3
   assert diagnostics.openingRecoveryTauS == pytest.approx(0.30)
