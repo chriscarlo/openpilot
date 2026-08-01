@@ -855,7 +855,8 @@ def test_two_presses_anchored_to_one_frame_both_survive_dedupe(tmp_path: Path) -
     assert [c.notes_json["driverMarkPressLogMonoTime"] for c in candidates] == press_times
     assert len({c.episode_key for c in candidates}) == 2
 
-    recorded = extract_ev6_episodes(conn, bundle_root=tmp_path / "bundles")
+    with pytest.warns(RuntimeWarning, match=f"Dropped {len(_SAME_ANCHOR_DROPPED_FRAMES)}/"):
+      recorded = extract_ev6_episodes(conn, bundle_root=tmp_path / "bundles")
     marks = [entry for entry in recorded if entry["episodeType"] == "driver_mark"]
     assert len(marks) == 2
     rows = conn.execute(
