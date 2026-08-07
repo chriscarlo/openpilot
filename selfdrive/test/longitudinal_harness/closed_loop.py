@@ -608,10 +608,15 @@ def run_harness(*,
         )
       planner_radar_state = radar_state_cache[target_ns]
       planner_radar_input_ns = target_ns
-    elif scheduler_resolution == "missing" and step.planner_radar_state_log_mono_time_ns is not None:
-      raise ValueError(
-        f"explicit planner radar target {int(step.planner_radar_state_log_mono_time_ns)} is missing from the route"
-      )
+    elif scheduler_resolution == "missing":
+      # A capture can name the planner's consumed RadarD clock even when that
+      # predecessor is outside the pulled route. The row is explicitly
+      # unscorable, so advance diagnostic state with the current generated
+      # RadarState instead of aborting the entire batch. Fidelity remains
+      # fail-closed below because scheduler_scorable is false; this fallback
+      # can never manufacture an exact association.
+      planner_radar_state = radar_state
+      planner_radar_input_ns = recorded_radar_publish_ns
     elif scheduler_resolution not in (None, "legacy_ambiguous", "missing"):
       raise ValueError(f"unsupported planner radar resolution '{scheduler_resolution}'")
 

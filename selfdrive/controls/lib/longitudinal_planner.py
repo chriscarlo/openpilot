@@ -72,6 +72,26 @@ _COMFORT_UPWARD_MICRO_MAX_DELTA_MPS2 = 0.30
 # gap beyond this many nominal cycles falls back to the nominal step.
 _POSITIVE_RELEASE_STALE_CYCLES = 4.0
 
+# The lead-slowdown ceiling is calculated outside the MPC and applied after its
+# optimized trajectory. Keep that independent authority for real threats, but
+# do not let a far, calm moving-lead estimate replace ordinary MPC follow and
+# keep-up control. These are invariant arbitration boundaries, not feel knobs.
+LEAD_SLOWDOWN_OVERRIDE_MAX_COLLISION_TTC_S = 4.0
+LEAD_SLOWDOWN_OVERRIDE_MIN_LEAD_DECEL_MPS2 = 0.35
+LEAD_SLOWDOWN_OVERRIDE_MIN_KINEMATIC_DECEL_MPS2 = 0.35
+LEAD_SLOWDOWN_OVERRIDE_SLOW_LEAD_MPS = 5.0
+LEAD_SLOWDOWN_OVERRIDE_KEEPUP_ALEAD_MPS2 = 0.15
+LEAD_SLOWDOWN_OVERRIDE_KINEMATIC_MARGIN_M = 5.0
+LEAD_SLOWDOWN_FALSE_BRAKE_MAX_CEILING_MPS2 = -0.50
+LEAD_SLOWDOWN_FALSE_BRAKE_MIN_MPC_MPS2 = -0.60
+LEAD_SLOWDOWN_FALSE_BRAKE_MAX_MPC_MPS2 = 0.05
+LEAD_SLOWDOWN_FALSE_BRAKE_MIN_DISAGREEMENT_MPS2 = 0.15
+LEAD_SLOWDOWN_FALSE_BRAKE_MIN_MODEL_MPS2 = -0.08
+LEAD_SLOWDOWN_FALSE_BRAKE_MIN_TTC_S = 8.0
+LEAD_SLOWDOWN_FALSE_BRAKE_MAX_KINEMATIC_DECEL_MPS2 = 0.20
+LEAD_SLOWDOWN_FALSE_BRAKE_MIN_MOVING_LEAD_MPS = 28.0
+LEAD_SLOWDOWN_FALSE_BRAKE_MAX_ABS_ALEAD_MPS2 = 0.10
+
 # Increment whenever the non-deprecated LongitudinalPlanSP replay-input
 # contract changes incompatibly. Version zero remains the Cap'n Proto default
 # and therefore cannot be mistaken for telemetry emitted by this producer.
@@ -180,6 +200,110 @@ class _ReplayInputsPubMaster:
       for field, source_service in _REPLAY_INPUT_CLOCK_FIELDS:
         setattr(replay_inputs, field, _submaster_log_mono_time_ns(self._sm, source_service))
     self._pm.send(service, msg)
+
+
+def arbitrate_lead_slowdown_ceiling(*, v_ego: float, t_follow: float, lead,
+                                    mpc_accel: float, model_accel: float,
+                                    slowdown_ceiling: float | None):
+  """Return the post-MPC ceiling that has independent authority this frame."""
+  debug = {
+    "raw_ceiling_mps2": None if slowdown_ceiling is None else float(slowdown_ceiling),
+    "effective_ceiling_mps2": None,
+    "mpc_accel_mps2": float(mpc_accel),
+    "model_accel_mps2": float(model_accel),
+    "reason": "inactive",
+    "urgent": False,
+  }
+  if slowdown_ceiling is None:
+    return None, debug
+  if lead is None or not bool(getattr(lead, "status", False)):
+    # A release tail can legitimately outlive the selected lead source. This
+    # arbitration has no evidence to revoke it, so preserve legacy authority.
+    debug.update({
+      "effective_ceiling_mps2": float(slowdown_ceiling),
+      "reason": "legacy_no_control_lead",
+    })
+    return float(slowdown_ceiling), debug
+
+  ceiling = float(slowdown_ceiling)
+  v_ego = max(0.0, float(v_ego))
+  v_lead_value = getattr(lead, "vLead", v_ego)
+  v_lead_raw = v_ego if v_lead_value is None else float(v_lead_value)
+  v_lead = max(0.0, v_lead_raw)
+  v_rel = float(getattr(lead, "vRel", v_lead_raw - v_ego) or 0.0)
+  a_lead = float(getattr(lead, "aLeadK", 0.0) or 0.0)
+  d_rel = max(0.0, float(getattr(lead, "dRel", 0.0) or 0.0))
+  closing_speed = max(0.0, v_ego - v_lead, -v_rel)
+  pullaway_speed = max(0.0, v_lead - v_ego, v_rel)
+  collision_ttc = d_rel / max(closing_speed, 1e-3) if closing_speed > 0.0 else 1e6
+  kinematic_gap = max(0.05, d_rel - LEAD_SLOWDOWN_OVERRIDE_KINEMATIC_MARGIN_M)
+  required_kinematic_decel = (closing_speed ** 2) / (2.0 * kinematic_gap)
+  target_gap = get_headway_follow_distance(v_ego, float(t_follow))
+  gap_surplus = d_rel - target_gap
+
+  debug.update({
+    "a_lead_mps2": a_lead,
+    "closing_speed_mps": closing_speed,
+    "collision_ttc_s": collision_ttc,
+    "d_rel_m": d_rel,
+    "gap_surplus_m": gap_surplus,
+    "pullaway_speed_mps": pullaway_speed,
+    "required_kinematic_decel_mps2": required_kinematic_decel,
+    "v_lead_mps": v_lead_raw,
+  })
+
+  urgent_reason = None
+  if v_lead_raw < -2.5:
+    urgent_reason = "oncoming_lead"
+  elif a_lead <= -LEAD_SLOWDOWN_OVERRIDE_MIN_LEAD_DECEL_MPS2:
+    urgent_reason = "lead_deceleration"
+  elif v_lead <= LEAD_SLOWDOWN_OVERRIDE_SLOW_LEAD_MPS:
+    urgent_reason = "slow_or_stopped_lead"
+  elif required_kinematic_decel >= LEAD_SLOWDOWN_OVERRIDE_MIN_KINEMATIC_DECEL_MPS2:
+    urgent_reason = "kinematic_stopping_requirement"
+  elif collision_ttc <= LEAD_SLOWDOWN_OVERRIDE_MAX_COLLISION_TTC_S:
+    urgent_reason = "short_collision_ttc"
+
+  if urgent_reason is not None:
+    debug.update({
+      "effective_ceiling_mps2": ceiling,
+      "reason": urgent_reason,
+      "urgent": True,
+    })
+    return ceiling, debug
+
+  # Coherent positive acceleration evidence means the lead is departing; the
+  # MPC must be free to keep up, even if a lagged vRel still says closing.
+  if (a_lead >= LEAD_SLOWDOWN_OVERRIDE_KEEPUP_ALEAD_MPS2 and
+      float(mpc_accel) > 0.0 and float(model_accel) > 0.0):
+    debug["reason"] = "departing_lead_mpc_authority"
+    return None, debug
+
+  false_brake_signature = bool(
+    ceiling <= LEAD_SLOWDOWN_FALSE_BRAKE_MAX_CEILING_MPS2 and
+    LEAD_SLOWDOWN_FALSE_BRAKE_MIN_MPC_MPS2 <= float(mpc_accel) <= LEAD_SLOWDOWN_FALSE_BRAKE_MAX_MPC_MPS2 and
+    float(mpc_accel) - ceiling >= LEAD_SLOWDOWN_FALSE_BRAKE_MIN_DISAGREEMENT_MPS2 and
+    float(model_accel) >= LEAD_SLOWDOWN_FALSE_BRAKE_MIN_MODEL_MPS2 and
+    collision_ttc >= LEAD_SLOWDOWN_FALSE_BRAKE_MIN_TTC_S and
+    required_kinematic_decel <= LEAD_SLOWDOWN_FALSE_BRAKE_MAX_KINEMATIC_DECEL_MPS2 and
+    v_lead >= LEAD_SLOWDOWN_FALSE_BRAKE_MIN_MOVING_LEAD_MPS and
+    abs(a_lead) <= LEAD_SLOWDOWN_FALSE_BRAKE_MAX_ABS_ALEAD_MPS2
+  )
+  if false_brake_signature:
+    effective_ceiling = float(mpc_accel)
+    debug.update({
+      "effective_ceiling_mps2": effective_ceiling,
+      "reason": "uncorroborated_false_brake_mpc_authority",
+    })
+    return effective_ceiling, debug
+
+  # Outside the recorded false-brake signature the established ceiling keeps
+  # its exact authority and state history.
+  debug.update({
+    "effective_ceiling_mps2": ceiling,
+    "reason": "legacy_ceiling_authority",
+  })
+  return ceiling, debug
 
 
 def should_release_stop_for_lead_launch(CP, *, standstill: bool, v_ego: float,
@@ -909,6 +1033,7 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
     }
     self.lead_brake_release_accel_floor = 0.0
     self.lead_brake_release_debug = {"active": False, "reason": "init"}
+    self.lead_slowdown_arbitration_debug = {"reason": "init", "urgent": False}
     self.steady_parity_threat_debug = {
       "active": False,
       "pre_comfort_limiter_output_mps2": None,
@@ -1175,14 +1300,27 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
       if cutin_settle_floor >= output_a_target - 1e-9:
         comfort_upward_floor_owner = ""
 
-    lead_slowdown_ceiling = getattr(self.mpc, 'lead_slowdown_accel_ceiling', None)
+    lead_source = str(getattr(self.mpc, "source", ""))
+    control_leads = getattr(self.mpc, "control_leads", ())
+    lead_idx = {"lead0": 0, "lead1": 1}.get(lead_source)
+    authority_lead = control_leads[lead_idx] if lead_idx is not None and lead_idx < len(control_leads) else None
+    raw_lead_slowdown_ceiling = getattr(self.mpc, 'lead_slowdown_accel_ceiling', None)
+    lead_slowdown_ceiling, lead_slowdown_arbitration_debug = arbitrate_lead_slowdown_ceiling(
+      v_ego=v_ego,
+      t_follow=float(getattr(self.mpc, "current_t_follow", 1.6)),
+      lead=authority_lead,
+      mpc_accel=output_a_target_mpc,
+      model_accel=output_a_target_e2e,
+      slowdown_ceiling=raw_lead_slowdown_ceiling,
+    )
+    self.lead_slowdown_arbitration_debug = lead_slowdown_arbitration_debug
+    if isinstance(getattr(self.mpc, "acc_source_debug", None), dict):
+      self.mpc.acc_source_debug["lead_slowdown_arbitration"] = lead_slowdown_arbitration_debug
     if lead_slowdown_ceiling is not None:
       output_a_target = min(output_a_target, float(lead_slowdown_ceiling))
       if float(lead_slowdown_ceiling) <= output_a_target + 1e-9:
         comfort_upward_floor_owner = ""
 
-    lead_source = str(getattr(self.mpc, "source", ""))
-    control_leads = getattr(self.mpc, "control_leads", ())
     lead_brake_release_floor, lead_brake_release_debug = get_lead_brake_release_accel_floor(
       self.mpc,
       v_ego=v_ego,

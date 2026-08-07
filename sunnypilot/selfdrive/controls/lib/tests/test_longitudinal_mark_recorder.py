@@ -244,6 +244,14 @@ def _fake_planner(*, comfort: dict | None = None, release: dict | None = None) -
     cruise_reacquire_debug={"active": False, "frames_left": 0, "allowed_jerk_mps3": 0.0,
                             "slew_ceiling_mps2": 0.0, "clipped": False, "exit_cause": ""},
     lead_brake_release_accel_floor=-0.3,
+    lead_slowdown_arbitration_debug={
+      "reason": "uncorroborated_false_brake_mpc_authority",
+      "urgent": False,
+      "raw_ceiling_mps2": -1.0,
+      "effective_ceiling_mps2": -0.25,
+      "mpc_accel_mps2": -0.25,
+      "model_accel_mps2": 0.05,
+    },
     prev_accel_clip=[-3.5, 1.6],
     effective_v_cruise_mps=29.0,
     output_a_target=-0.31,
@@ -293,6 +301,19 @@ def test_columns_arity_matches_row(tmp_path):
   assert len(set(mr.COLUMNS)) == len(mr.COLUMNS)
   assert mr.COLUMNS[0] == "modelLogMonoTime"
   assert rec is not None
+
+
+def test_slowdown_arbitration_is_recorded_with_the_mark() -> None:
+  sm = _FakeSM()
+  sm.tick(10_000_000_000)
+  row = mr.MarkRecorder._build_row(_fake_planner(), sm)
+
+  assert row[mr.COLUMNS.index("slowdownArbitrationReason")] == "uncorroborated_false_brake_mpc_authority"
+  assert row[mr.COLUMNS.index("slowdownArbitrationUrgent")] is False
+  assert row[mr.COLUMNS.index("slowdownRawCeilingMps2")] == -1.0
+  assert row[mr.COLUMNS.index("slowdownEffectiveCeilingMps2")] == -0.25
+  assert row[mr.COLUMNS.index("slowdownMpcAccelMps2")] == -0.25
+  assert row[mr.COLUMNS.index("slowdownModelAccelMps2")] == 0.05
 
 
 def test_ring_is_bounded(tmp_path):

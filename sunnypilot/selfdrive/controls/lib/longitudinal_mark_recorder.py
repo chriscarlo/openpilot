@@ -189,6 +189,13 @@ COLUMNS: tuple[str, ...] = (
   "lead1Status",                    # 72
   "lead1DRelM",                     # 73
   "lead1VRelMps",                   # 74
+  # --- post-MPC slowdown arbitration ---------------------------------------
+  "slowdownArbitrationReason",       # 75
+  "slowdownArbitrationUrgent",       # 76
+  "slowdownRawCeilingMps2",          # 77
+  "slowdownEffectiveCeilingMps2",    # 78
+  "slowdownMpcAccelMps2",            # 79
+  "slowdownModelAccelMps2",          # 80
 )
 
 _EMPTY: dict[str, Any] = {}
@@ -542,6 +549,7 @@ class MarkRecorder:
     role_names = role.get("roles") or _EMPTY
     cutin = role.get("cutin_promoted") or _EMPTY
     acc_src = getattr(mpc, "acc_source_debug", None) or _EMPTY
+    slowdown_arbitration = getattr(planner, "lead_slowdown_arbitration_debug", None) or _EMPTY
     leads = getattr(mpc, "control_leads", None) or (None, None)
     lead0 = leads[0] if len(leads) > 0 else None
     lead1 = leads[1] if len(leads) > 1 else None
@@ -624,6 +632,12 @@ class MarkRecorder:
       getattr(lead1, "status", None),
       getattr(lead1, "dRel", None),
       getattr(lead1, "vRel", None),
+      slowdown_arbitration.get("reason"),
+      slowdown_arbitration.get("urgent"),
+      slowdown_arbitration.get("raw_ceiling_mps2"),
+      slowdown_arbitration.get("effective_ceiling_mps2"),
+      slowdown_arbitration.get("mpc_accel_mps2"),
+      slowdown_arbitration.get("model_accel_mps2"),
     )
 
   # ------------------------------------------------------ writer thread only

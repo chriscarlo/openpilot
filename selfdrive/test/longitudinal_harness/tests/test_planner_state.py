@@ -140,6 +140,36 @@ def test_run_harness_verifies_route_start_claim_before_advancing_state() -> None
   assert not any(row["planner_state_initialization_exact"] for row in result.trace)
 
 
+def test_missing_warmup_predecessor_remains_diagnostic_instead_of_aborting() -> None:
+  steps = [
+    StepInput(
+      t_s=0.0,
+      cruise_speed_mps=20.0,
+      recorded_radar_state_log_mono_time_ns=850,
+      planner_radar_state_log_mono_time_ns=800,
+      planner_radar_resolution="missing",
+      replay_warmup_status="warmup",
+      replay_warmup_reason="planner predecessor is outside the pulled route",
+      replay_reference={
+        "plannerRadarResolutionReason": "planner predecessor is outside the pulled route",
+      },
+    ),
+  ]
+
+  result = run_harness(
+    vehicle_config=_vehicle(),
+    scenario_name="missing_planner_warmup_predecessor",
+    steps=steps,
+    initial_speed_mps=0.0,
+    noise_profile="off",
+  )
+
+  assert result.trace
+  assert all(row["planner_scheduler_scorable"] is False for row in result.trace)
+  assert all(row["planner_fidelity_scorable"] is False for row in result.trace)
+  assert all(row["planner_reported_radar_resolution"] == "missing" for row in result.trace)
+
+
 def test_route_start_diagnostic_never_promotes_after_vehicle_config_drift() -> None:
   steps = _steps()
   vehicle = _vehicle()
